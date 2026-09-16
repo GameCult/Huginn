@@ -11,10 +11,12 @@ Upstream: `https://github.com/GameCult/Huginn.git`
 - An instance owns its mind; Huginn owns the state. Huginn is the single
   writer of an instance's memory documents. No other service, script, or agent
   writes them.
-- Memory documents are CultCache state. `huginn-mind`, the one live crate,
-  persists them through CultLib's Rust CultCache into a redb store at
-  `<state_root>/minds/<instance>/mind.redb`. Publishing them over CultNet is
-  `huginn-daemon`'s, and that crate is a stub: nothing here publishes yet.
+- Memory documents are CultCache state. `huginn-mind` persists them through
+  CultLib's Rust CultCache into a redb store at
+  `<state_root>/minds/<instance>/mind.redb`. `huginn-daemon` serves one such
+  mind over CultNet RUDP: admission and the read side ride
+  `cultnet.operation_request.v0` and `cultnet.operation_response.v0`, and the
+  two wire schemas answer a schema catalog request.
 - Retrieval is to depend on Qdrant directly, refusing loudly when Qdrant is
   unreachable rather than falling back to a second store or a second writer.
   No crate opens that connection yet.
@@ -30,8 +32,8 @@ A Cargo workspace of three crates:
 
 - `crates/huginn-mind`: storage, identity, admission, and queries and derived
   status over memory documents.
-- `crates/huginn-daemon`: a stub. It will carry the CultNet surface and serve
-  loop; today it holds neither.
+- `crates/huginn-daemon`: the CultNet surface. The socket, the sessions, the
+  process and the operation envelope, and no rule.
 - `crates/eureka-state`: a stub. It will carry typed state for the Eureka
   pipeline; today it holds none.
 
@@ -50,12 +52,23 @@ over one mind, a campaign's open work, and a subject's or a repo's history.
 Status is never stored, and the views derive it through the same rules
 admission does. Document shape and keys come from `epiphany-pipeline`; the
 store is CultLib's Rust CultCache.
-`huginn-daemon` and `eureka-state` are stubs; the
-campaign's cut map in `Epiphany/notes/eureka-pipeline-state-cut.md` owns what
-each crate must do next.
+
+`huginn-daemon` opens one mind, binds one UDP socket in that order, and
+answers every frame on the session it arrived on: one operation per `Mind`
+method plus `whoami`, whose payload is the mind's own types as named
+MessagePack. A refusal is an answer with a `rejected` status, never a
+transport error; an envelope that does not decode is answered with a typed
+failure and reaches no mind. The two schemas it publishes live in
+`schemas/cultnet/` and are pinned to their derivation by a test. There is no
+index yet.
+
+`eureka-state` is a stub; the campaign's cut map in
+`Epiphany/notes/eureka-pipeline-state-cut.md` owns what each crate must do
+next.
 
 ```powershell
 cargo check --workspace
+cargo run -p huginn-daemon -- --state-root <abs> --instance <slug> --bind 127.0.0.1:17872
 ```
 
 ## Persona

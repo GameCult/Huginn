@@ -16,13 +16,15 @@ Studio's job, not Huginn's.
   runtimes come from `F:\Projects\CultLib\packages`. `huginn-mind` is live:
   it persists, admits and reads back an instance's mind, queries and derived
   status included, over `cultcache-rs` and `epiphany-pipeline` pinned by git
-  rev. `huginn-daemon` and `eureka-state`
-  are stubs with no dependencies; nothing here publishes or connects yet.
+  rev. `huginn-daemon` serves one mind over CultNet RUDP through `cultnet-rs`
+  at the same rev, and reaches the leaf and the store type through
+  `huginn-mind` so one crate pins each revision. `eureka-state` is a stub.
 - Owned: an instance's memory documents, their admission and the read side
   that derives their status, in `huginn-mind`,
-  over a redb CultCache store at `<state_root>/minds/<instance>/mind.redb`.
-  Their CultNet publication is owned here and not built; `huginn-daemon` is a
-  stub.
+  over a redb CultCache store at `<state_root>/minds/<instance>/mind.redb`;
+  and their CultNet surface in `huginn-daemon`, which owns the socket, the
+  sessions, the process and the operation envelope, and no rule. The two wire
+  schemas are published from `schemas/cultnet/`. There is no index yet.
 - To depend on: Qdrant, directly, once retrieval exists. Unreachable Qdrant is
   to be a loud refusal, never a fallback store. No crate connects to it yet.
 - Forbidden: a second writer of mind state; mind state in version control;
