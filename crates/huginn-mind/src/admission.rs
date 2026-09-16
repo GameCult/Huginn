@@ -465,7 +465,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
     match &staged.document {
         D::Campaign(campaign) => {
             if campaign.repos.is_empty() {
-                return Err(PipelineRefusal::FieldBound { field: "campaign.repos".into(), limit: 1, actual: 0 }.into());
+                return Err(MindRefusal::EmptyRepos { campaign: key.into() });
             }
             for repo in &campaign.repos {
                 if docs.stewardship_of(mind, repo, None).is_none() {
@@ -644,6 +644,12 @@ fn outcome_name(outcome: &ResolutionOutcome) -> &'static str {
 
 /// The resolution matrix: which outcomes a subject kind admits, and of which
 /// kinds its referents must be. Admission's, never the leaf's.
+///
+/// A subject resolves at most once, and a resolution is not itself
+/// resolvable: `resolution` joins `campaign`, `cut_report`, `verdict`,
+/// `instance` and `hand_off` in admitting no outcome at all. The key grammar
+/// can still spell the resolution of a resolution; this is where it is
+/// refused. (Q17, Self's default ruling pending the operator.)
 fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
     use PipelineKind as K;
     use ResolutionOutcome as O;
@@ -663,7 +669,6 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::FollowUp, O::Withdrawn { .. }) => true,
         (K::Stewardship, O::Superseded { by }) => all(by, K::Stewardship),
         (K::Stewardship, O::Withdrawn { .. }) => true,
-        (K::Resolution, O::Withdrawn { .. }) => true,
         _ => false,
     };
     fits
@@ -1030,14 +1035,10 @@ mod tests {
         committed(admit(&mut world(), vec![resolution(finding_ref.clone(), ResolutionOutcome::Deferred { to: follow_up_ref.clone() })]));
         committed(admit(&mut world(), vec![resolution(follow_up_ref.clone(), fixed())]));
         committed(admit(&mut world(), vec![resolution(stewardship_ref.clone(), withdrawn())]));
-        let mut mind = world();
-        committed(admit(&mut mind, vec![resolution(question_ref.clone(), withdrawn())]));
-        let nested = r(K::Resolution, &id("resolution", "question.Q1"));
-        committed(admit(&mut mind, vec![resolution(nested.clone(), withdrawn())]));
 
         // Refused, one per kind, and every non-resolvable kind.
         assert_eq!(refusal(admit(&mut world(), vec![resolution(target_ref, withdrawn())])), incompatible(K::Target, "Withdrawn"));
-        assert_eq!(refusal(admit(&mut world(), vec![resolution(question_ref, fixed())])), incompatible(K::Question, "Fixed"));
+        assert_eq!(refusal(admit(&mut world(), vec![resolution(question_ref.clone(), fixed())])), incompatible(K::Question, "Fixed"));
         assert_eq!(refusal(admit(&mut world(), vec![resolution(ruling_ref, withdrawn())])), incompatible(K::Ruling, "Withdrawn"));
         assert_eq!(
             refusal(admit(&mut world(), vec![resolution(spec_ref.clone(), ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) })])),
@@ -1062,8 +1063,16 @@ mod tests {
             refusal(admit(&mut world(), vec![resolution(stewardship_ref, ResolutionOutcome::Recorded { reason: "no".into() })])),
             incompatible(K::Stewardship, "Recorded")
         );
+        // A resolution records that a subject resolved; it is not itself a
+        // subject. The nested key exists and is well formed, and admission
+        // refuses it anyway, whatever the outcome.
         let mut mind = world();
-        committed(admit(&mut mind, vec![resolution(r(K::Question, &id("question", "Q1")), withdrawn())]));
+        committed(admit(&mut mind, vec![resolution(question_ref.clone(), withdrawn())]));
+        let nested = r(K::Resolution, &id("resolution", "question.Q1"));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(nested.clone(), withdrawn())])),
+            incompatible(K::Resolution, "Withdrawn")
+        );
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution(nested.clone(), superseded(&[nested]))])),
             incompatible(K::Resolution, "Superseded")
@@ -1273,6 +1282,15 @@ mod tests {
             MindRefusal::RepoNotStewarded { repo: REPO.into() }
         );
         committed(admit(&mut mind, vec![instance(INSTANCE), stewardship(INSTANCE, REPO), campaign(&[REPO])]));
+        // A campaign of no repos is the organ's refusal, not a leaf bound:
+        // "every repo is stewarded" is vacuous and the campaign steers
+        // nothing.
+        let D::Campaign(mut empty) = campaign(&[]) else { panic!() };
+        empty.slug = slug("other");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Campaign(empty)])),
+            MindRefusal::EmptyRepos { campaign: "other:campaign:self".into() }
+        );
         let mut spec = cut_spec("1", 1);
         spec.repo = repo(OTHER_REPO);
         assert_eq!(refusal(admit(&mut mind, vec![D::CutSpec(spec)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });

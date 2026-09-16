@@ -185,20 +185,34 @@ fn refuse_foreign_types(raw: &[CultCacheEnvelope]) -> Result<(), MindRefusal> {
     Ok(())
 }
 
-/// Step 3: a non-empty store carries exactly one epoch record, at the epoch
-/// this binary writes.
+/// Step 3: a non-empty store carries exactly one epoch record, keyed by the
+/// epoch it names, at the epoch this binary writes. A store with no epoch
+/// record at all is `MissingIdentity`; every other defect is `ForeignEpoch`,
+/// whose `found` names the defect: the stored epoch when the value is
+/// foreign, the record's key when a record is keyed by anything else, and the
+/// record count rendered as `"<n> records"` when more than one is stored. The
+/// count is decided before any value is read, so a current record beside a
+/// foreign one refuses the same way whichever the store returns first.
 fn refuse_foreign_epoch(raw: &[CultCacheEnvelope]) -> Result<(), MindRefusal> {
     if raw.is_empty() {
         return Ok(());
     }
+    let foreign = |found: String| MindRefusal::ForeignEpoch { found, expected: PIPELINE_SCHEMA_EPOCH.into() };
     let mut records = raw.iter().filter(|envelope| envelope.r#type == HuginnMindEpoch::TYPE);
     let Some(record) = records.next() else {
         return Err(MindRefusal::MissingIdentity);
     };
+    let extra = records.count();
+    if extra > 0 {
+        return Err(foreign(format!("{} records", extra + 1)));
+    }
+    if record.key != PIPELINE_SCHEMA_EPOCH {
+        return Err(foreign(record.key.clone()));
+    }
     let record: HuginnMindEpoch = rmp_serde::from_slice(&record.payload)
         .map_err(|error| MindRefusal::Unavailable { detail: format!("epoch record does not decode: {error}") })?;
     if record.schema_epoch != PIPELINE_SCHEMA_EPOCH {
-        return Err(MindRefusal::ForeignEpoch { found: record.schema_epoch, expected: PIPELINE_SCHEMA_EPOCH.into() });
+        return Err(foreign(record.schema_epoch));
     }
     Ok(())
 }
@@ -260,10 +274,18 @@ mod tests {
         envelope
     }
 
-    fn foreign_epoch() -> CultCacheEnvelope {
+    const FOREIGN_EPOCH: &str = "epiphany.pipeline.epoch.v0";
+
+    /// An epoch record under an arbitrary key naming an arbitrary epoch, so a
+    /// key defect and a value defect can be planted apart.
+    fn epoch_record(key: &str, schema_epoch: &str) -> CultCacheEnvelope {
         let cache = schema_cache().unwrap();
-        let record = HuginnMindEpoch { schema_epoch: "epiphany.pipeline.epoch.v0".into() };
-        cache.prepare_entry_named("epiphany.pipeline.epoch.v0", &record).unwrap().0
+        let record = HuginnMindEpoch { schema_epoch: schema_epoch.into() };
+        cache.prepare_entry_named(key, &record).unwrap().0
+    }
+
+    fn foreign_epoch() -> CultCacheEnvelope {
+        epoch_record(FOREIGN_EPOCH, FOREIGN_EPOCH)
     }
 
     #[test]
@@ -276,12 +298,27 @@ mod tests {
                 MindRefusal::ForeignStore { r#type: "epiphany.runtime_spine.v47".into() },
             ),
             // Step 3 before step 4: a foreign epoch with no identity at all.
+            // Its key is foreign too, which is what refuses it here.
             (
                 vec![foreign_epoch()],
-                MindRefusal::ForeignEpoch {
-                    found: "epiphany.pipeline.epoch.v0".into(),
-                    expected: PIPELINE_SCHEMA_EPOCH.into(),
-                },
+                MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
+            ),
+            // Step 3: the value, under the one key the record may have.
+            (
+                vec![epoch_record(PIPELINE_SCHEMA_EPOCH, FOREIGN_EPOCH), prepare(&instance(INSTANCE))],
+                MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
+            ),
+            // Step 3: the current epoch under any other key is not the epoch
+            // record, whatever it says about itself.
+            (
+                vec![epoch_record("not-the-epoch", PIPELINE_SCHEMA_EPOCH), prepare(&instance(INSTANCE))],
+                MindRefusal::ForeignEpoch { found: "not-the-epoch".into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
+            ),
+            // Step 3: two records are no record, counted before either value
+            // is read.
+            (
+                vec![epoch(), epoch_record("second", PIPELINE_SCHEMA_EPOCH), prepare(&instance(INSTANCE))],
+                MindRefusal::ForeignEpoch { found: "2 records".into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
             ),
             // Step 3: an identity without an epoch record.
             (vec![prepare(&instance(INSTANCE))], MindRefusal::MissingIdentity),
@@ -300,6 +337,15 @@ mod tests {
             assert_eq!(refusal, expected);
             assert_eq!(store.pull_count(), 1, "{expected:?}: refused before attaching");
             assert_eq!(store.rows(), before, "{expected:?}: bytes unchanged");
+        }
+        // A current record beside a foreign one is refused on the count, not
+        // on whichever of the two the store happens to return first.
+        let pair = (epoch(), foreign_epoch());
+        for rows in [vec![pair.0.clone(), pair.1.clone()], vec![pair.1, pair.0]] {
+            assert_eq!(
+                refuse_foreign_epoch(&rows).err(),
+                Some(MindRefusal::ForeignEpoch { found: "2 records".into(), expected: PIPELINE_SCHEMA_EPOCH.into() })
+            );
         }
         // A store that passes every gate attaches, which is the second pull.
         let store = planted(vec![epoch(), prepare(&instance(INSTANCE))]);

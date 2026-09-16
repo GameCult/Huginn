@@ -11,11 +11,13 @@ Upstream: `https://github.com/GameCult/Huginn.git`
 - An instance owns its mind; Huginn owns the state. Huginn is the single
   writer of an instance's memory documents. No other service, script, or agent
   writes them.
-- Memory documents are CultCache `.cc` state. Huginn persists them through
-  CultLib's Rust runtime and publishes them as typed documents over CultNet.
-- Huginn depends on Qdrant directly for retrieval. When Qdrant is unreachable
-  Huginn refuses loudly; it does not fall back to a second store or a second
-  writer.
+- Memory documents are CultCache state. `huginn-mind`, the one live crate,
+  persists them through CultLib's Rust CultCache into a redb store at
+  `<state_root>/minds/<instance>/mind.redb`. Publishing them over CultNet is
+  `huginn-daemon`'s, and that crate is a stub: nothing here publishes yet.
+- Retrieval is to depend on Qdrant directly, refusing loudly when Qdrant is
+  unreachable rather than falling back to a second store or a second writer.
+  No crate opens that connection yet.
 - Mind state is not version-controlled. It lives in Huginn's store, not in
   any repository.
 

@@ -17,10 +17,12 @@ Studio's job, not Huginn's.
   it persists and admits an instance's mind, over `cultcache-rs` and
   `epiphany-pipeline` pinned by git rev. `huginn-daemon` and `eureka-state`
   are stubs with no dependencies; nothing here publishes or connects yet.
-- Owned: an instance's memory documents, their admission, and their CultNet
-  publication.
-- Depends on: Qdrant, directly. Unreachable Qdrant is a loud refusal, never a
-  fallback store.
+- Owned: an instance's memory documents and their admission, in `huginn-mind`,
+  over a redb CultCache store at `<state_root>/minds/<instance>/mind.redb`.
+  Their CultNet publication is owned here and not built; `huginn-daemon` is a
+  stub.
+- To depend on: Qdrant, directly, once retrieval exists. Unreachable Qdrant is
+  to be a loud refusal, never a fallback store. No crate connects to it yet.
 - Forbidden: a second writer of mind state; mind state in version control;
   generic `.cc` inspection, which is CultCache Studio's; renderer-owned truth.
 
