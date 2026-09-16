@@ -7,7 +7,14 @@
 # left: the sequences a replay re-derives (H52-H54), the withdrawal that would
 # re-raise an earlier record over a later one (H55-H56), the gap a sequence
 # rule must refuse (H57-H58), and three rules the suite could not tell apart
-# from weaker ones (H59-H61). Run through Epiphany's harness from this repo:
+# from weaker ones (H59-H61). H62-H67 are the second pass's own: the
+# assignment a replayed hand-off withdraws, picked by content rather than key
+# order (H62-H63), and four more rules the suite could not tell apart from
+# weaker ones (H64-H67). Run through Epiphany's harness from this repo:
+#
+# Soul's Y7 -- `later_than`'s resolution arm returning `false` -- has no entry
+# here and can have none: the arm is deleted. It was dead code behind the Q19
+# cap, so no test could reach it and no mutation of it could fail.
 #
 # H32 is re-anchored to the same follow-up: its A4 half is unreachable now
 # that a derived write takes the sequence after the batch's own records, so a
@@ -739,6 +746,70 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             New  = @'
                     let sequence = 1;
 '@
+        }
+        @{
+            Id   = 'H62'
+            Rule = 'stewardship_of: the assignment a hand-off withdraws is picked by key order, so a replay after ten transfers withdraws whichever sorts first.'
+            Test = 'admission::tests::a_source_side_replay_withdraws_the_assignment_it_withdrew'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+        let candidates = self.stewardships_of(mind, repo, hand_off_key);
+        hand_off_key
+            .and_then(|hand_off| {
+                candidates.iter().find(|(key, _)| {
+                    self.resolutions().any(|(_, resolution)| {
+                        resolution.subject.kind == PipelineKind::Stewardship
+                            && resolution.subject.id.0 == *key
+                            && matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == hand_off)
+                    })
+                })
+            })
+            .or_else(|| candidates.first())
+            .copied()
+'@
+            New  = @'
+        self.stewardships_of(mind, repo, hand_off_key).first().copied()
+'@
+        }
+        @{
+            Id   = 'H63'
+            Rule = 'stewardship_of: H62''s weaker half, any withdrawal of a candidate identifies it, whatever hand-off gave the reason.'
+            Test = 'admission::tests::a_source_side_replay_withdraws_the_assignment_it_withdrew'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '                            && matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == hand_off)'
+            New  = '                            && { let _ = hand_off; matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { .. }) }'
+        }
+        @{
+            Id   = 'H64'
+            Rule = 'derive: the ruling''s resolution matches any answer of the question, whichever ruling answered it.'
+            Test = 'admission::tests::a_ruling_answering_a_reopened_question_takes_the_next_sequence'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '                        matches!(outcome, ResolutionOutcome::Answered { by } if by.kind == K::Ruling && by.id.0 == staged.key)'
+            New  = '                        matches!(outcome, ResolutionOutcome::Answered { .. })'
+        }
+        @{
+            Id   = 'H65'
+            Rule = 'later_than: a cut spec is sequenced within its campaign, not within its cut.'
+            Test = 'admission::tests::a_reinstatement_reads_the_revisions_of_its_own_cut'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            other.campaign == base.campaign && other.cut == base.cut && other.revision > base.revision'
+            New  = '            other.campaign == base.campaign && other.revision > base.revision'
+        }
+        @{
+            Id   = 'H66'
+            Rule = 'later_in_force: a later record blocks a reinstatement whether or not it still stands.'
+            Test = 'admission::tests::a_withdrawn_later_assignment_does_not_block_a_reinstatement'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '        self.of_kind(kind).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)'
+            New  = '        self.of_kind(kind).find(|(key, other)| later_than(base, other)).map(|(key, _)| key)'
+        }
+        @{
+            Id   = 'H67'
+            Rule = 'later_in_force: the image only, so a later record landing in the same batch does not block.'
+            Test = 'admission::tests::a_reinstatement_is_blocked_by_an_assignment_in_its_own_batch'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '        self.of_kind(kind).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)'
+            New  = '        self.image.iter().filter(|held| held.kind == kind).map(|held| (held.key.as_str(), &held.document)).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)'
         }
     )
 }
