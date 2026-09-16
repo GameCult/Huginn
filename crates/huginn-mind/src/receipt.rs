@@ -259,9 +259,83 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
-    use crate::fixtures::{INSTANCE, instance, prepare};
-    use epiphany_pipeline::{PipelineDocument, PipelineRefusal};
+    use crate::fixtures::{INSTANCE, admit, committed, id, instance, opened, prepare, question, seed};
+    use crate::store::test_stores::MemoryStore;
+    use cultcache_rs::{CacheBackingStore, PushAllOptions};
+    use epiphany_pipeline::{PipelineDocument, PipelineKind, PipelineRefusal};
+
+    /// A memory store that keeps the replacement set of every swap it was
+    /// asked for, so a test can count the commit's calls as well as read
+    /// their contents.
+    #[derive(Clone)]
+    struct RecordingStore {
+        inner: MemoryStore,
+        calls: Arc<Mutex<Vec<Vec<CultCacheEnvelope>>>>,
+    }
+
+    impl RecordingStore {
+        fn new() -> Self {
+            Self { inner: MemoryStore::new(), calls: Arc::new(Mutex::new(Vec::new())) }
+        }
+
+        fn forget(&self) {
+            self.calls.lock().unwrap().clear();
+        }
+
+        fn calls(&self) -> Vec<Vec<CultCacheEnvelope>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl CacheBackingStore for RecordingStore {
+        fn pull_all(&self) -> anyhow::Result<Vec<CultCacheEnvelope>> {
+            self.inner.pull_all()
+        }
+
+        fn push(&mut self, entry: &CultCacheEnvelope) -> anyhow::Result<()> {
+            self.inner.push(entry)
+        }
+
+        fn delete(&mut self, entry: &CultCacheEnvelope) -> anyhow::Result<()> {
+            self.inner.delete(entry)
+        }
+
+        fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> anyhow::Result<()> {
+            self.inner.push_all(entries, options)
+        }
+    }
+
+    impl MindStore for RecordingStore {
+        fn compare_and_swap_batch(
+            &self,
+            expected: &[CultCacheEnvelope],
+            replacements: Vec<CultCacheEnvelope>,
+        ) -> anyhow::Result<bool> {
+            self.calls.lock().unwrap().push(replacements.clone());
+            self.inner.compare_and_swap_batch(expected, replacements)
+        }
+    }
+
+    /// The receipt is part of the batch's own swap, never a second one after
+    /// it: a receipt written separately could land while the documents did
+    /// not, or the reverse.
+    #[test]
+    fn a_commit_is_one_swap_carrying_the_documents_and_the_receipt_together() {
+        let store = RecordingStore::new();
+        let mut mind = opened(store.clone(), INSTANCE);
+        seed(&mut mind);
+        store.forget();
+        let (receipt_id, _) = committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        let calls = store.calls();
+        assert_eq!(calls.len(), 1, "one commit, one swap");
+        let landed = calls[0].iter().map(|entry| (entry.r#type.clone(), entry.key.clone())).collect::<Vec<_>>();
+        assert_eq!(landed.len(), 2, "{landed:?}");
+        assert!(landed.contains(&(PipelineKind::Question.type_id().to_string(), id("question", "Q1"))), "{landed:?}");
+        assert!(landed.contains(&(HuginnCommitReceipt::TYPE.to_string(), receipt_id)), "{landed:?}");
+    }
 
     /// S5 closed against the real type: the organ's own receipt in a mind's
     /// store is never decoded as a pipeline document.

@@ -1,4 +1,4 @@
-# Cut 8 mutations, H1-H20: each entry restores one permissiveness the cut
+# Cut 8 mutations, H1-H39: each entry restores one permissiveness the cut
 # closed and names the test that must fail while it is applied. Run through
 # Epiphany's harness from this repo:
 #
@@ -269,6 +269,222 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
 
 '@
             New  = ''
+        }
+        @{
+            Id   = 'H21'
+            Rule = 'Opener step 3: the epoch record is the record under the epoch''s own key; any other key is not it.'
+            Test = 'mind::tests::the_opener_refuses_foreign_epoch_missing_identity_and_foreign_type_before_attaching'
+            File = 'crates/huginn-mind/src/mind.rs'
+            Old  = @'
+    if record.key != PIPELINE_SCHEMA_EPOCH {
+        return Err(foreign(record.key.clone()));
+    }
+'@
+            New  = ''
+        }
+        @{
+            Id   = 'H22'
+            Rule = 'Opener step 3: exactly one epoch record, counted before any value is read, so the store''s order cannot decide the outcome.'
+            Test = 'mind::tests::the_opener_refuses_foreign_epoch_missing_identity_and_foreign_type_before_attaching'
+            File = 'crates/huginn-mind/src/mind.rs'
+            Old  = @'
+    let extra = records.count();
+    if extra > 0 {
+        return Err(foreign(format!("{} records", extra + 1)));
+    }
+'@
+            New  = ''
+        }
+        @{
+            Id   = 'H23'
+            Rule = 'campaign: a campaign of no repos is refused, and by the organ''s own refusal (EmptyRepos), not a minted leaf bound.'
+            Test = 'admission::tests::a_campaign_names_only_repos_this_mind_stewards'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+            if campaign.repos.is_empty() {
+                return Err(MindRefusal::EmptyRepos { campaign: key.into() });
+            }
+'@
+            New  = ''
+        }
+        @{
+            Id   = 'H24'
+            Rule = 'A11: the receipt lands inside the batch''s own compare-and-swap, never in a second one after it.'
+            Test = 'receipt::tests::a_commit_is_one_swap_carrying_the_documents_and_the_receipt_together'
+            File = 'crates/huginn-mind/src/receipt.rs'
+            Old  = @'
+    replacements.push(receipt_envelope);
+    let expected: &[CultCacheEnvelope] = &strong_reads;
+    let landed = MindStore::compare_and_swap_batch(mind.store(), expected, replacements).map_err(unavailable)?;
+'@
+            New  = @'
+    let expected: &[CultCacheEnvelope] = &strong_reads;
+    let landed = MindStore::compare_and_swap_batch(mind.store(), expected, replacements).map_err(unavailable)?;
+    let landed = landed && MindStore::compare_and_swap_batch(mind.store(), &[], vec![receipt_envelope]).map_err(unavailable)?;
+'@
+        }
+        @{
+            Id   = 'H25'
+            Rule = 'A7: every reference the image resolved is pinned as a strong read, not the first of them.'
+            Test = 'admission::tests::every_cited_image_document_is_a_strong_read'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+            .filter_map(|(type_id, key)| self.raw_envelope(type_id, key).cloned())
+            .collect::<Vec<_>>();
+'@
+            New  = @'
+            .filter_map(|(type_id, key)| self.raw_envelope(type_id, key).cloned())
+            .take(1)
+            .collect::<Vec<_>>();
+'@
+        }
+        @{
+            Id   = 'H26'
+            Rule = 'campaign: stewardship is looked for in image and batch, not in the batch alone.'
+            Test = 'admission::tests::a_campaign_names_only_repos_this_mind_stewards'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '                if docs.stewardship_of(mind, repo, None).is_none() {'
+            New  = '                if !docs.batch.iter().any(|staged| matches!(&staged.document, D::Stewardship(stewardship) if stewardship.repo == *repo)) {'
+        }
+        @{
+            Id   = 'H27'
+            Rule = 'cut_report: the report''s repo must equal its spec''s, not only its branch.'
+            Test = 'admission::tests::a_cut_report_cites_an_in_force_spec_and_agrees_with_it'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+            if report.repo != spec.repo {
+                return Err(MindRefusal::SpecMismatch { field: "repo".into() });
+            }
+'@
+            New  = ''
+        }
+        @{
+            Id   = 'H28'
+            Rule = 'Ruling A: a promise is measured by the claim naming that label, not by any claim naming any promise.'
+            Test = 'admission::tests::verdict_vocabulary_binds_claims_to_findings_promises_and_mutations'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '                let count = verdict.claims.iter().filter(|claim| claim.promise.as_ref() == Some(&promise.label)).count();'
+            New  = '                let count = verdict.claims.iter().filter(|claim| claim.promise.is_some()).count();'
+        }
+        @{
+            Id   = 'H29'
+            Rule = 'finding: the invariant vocabulary is the in-force target''s, not any target the campaign ever had.'
+            Test = 'admission::tests::a_finding_names_evidence_locations_and_known_invariants'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '                D::Target(target) if target.campaign == finding.campaign && docs.in_force(K::Target, target_key) => Some(target),'
+            New  = '                D::Target(target) if target.campaign == finding.campaign && (docs.in_force(K::Target, target_key) || true) => Some(target),'
+        }
+        @{
+            Id   = 'H30'
+            Rule = 'The matrix is one row per kind: a question is answered or withdrawn, never superseded.'
+            Test = 'admission::tests::the_resolution_matrix_is_admissions'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+        (K::Question, O::Withdrawn { .. }) => true,
+'@
+            New  = @'
+        (K::Question, O::Withdrawn { .. }) => true,
+        (K::Question, O::Superseded { by }) => all(by, K::Question),
+'@
+        }
+        @{
+            Id   = 'H31'
+            Rule = 'hand_off: the derived stewardship starts on the day the repo was handed over.'
+            Test = 'admission::tests::a_hand_off_derives_this_minds_side_only'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '                        assigned_on: hand_off.handed_on.clone(),'
+            New  = '                        assigned_on: epiphany_pipeline::Date("2026-01-01".into()),'
+        }
+        @{
+            Id   = 'H32'
+            Rule = 'Derived writes pass A3-A7 like any other; a derived identity the batch already holds is A4''s refusal, not a store error.'
+            Test = 'admission::tests::a_hand_off_derives_this_minds_side_only'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+        for document in derive(&docs, &mind) {
+            document.validate()?;
+            let envelope = document.prepare(self.cache()).map_err(unavailable)?;
+            docs.push(stage(envelope, &mind)?)?;
+        }
+        for staged in &docs.batch[originals..] {
+            resolve(&docs, staged, &mind, &mut strong)?;
+        }
+'@
+            New  = @'
+        for document in derive(&docs, &mind) {
+            let envelope = document.prepare(self.cache()).map_err(unavailable)?;
+            docs.batch.push(Staged { kind: document.kind(), key: envelope.key.clone(), document, envelope });
+        }
+        let _ = originals;
+'@
+        }
+        @{
+            Id   = 'H33'
+            Rule = 'A4: one identity, once, within a batch.'
+            Test = 'admission::tests::a_batch_is_one_to_sixty_four_documents_each_with_its_own_identity'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+        if self.batch.iter().any(|other| other.kind == staged.kind && other.key == staged.key) {
+            return Err(MindRefusal::IdentityCollision { kind: staged.kind, id: staged.key });
+        }
+'@
+            New  = ''
+        }
+        @{
+            Id   = 'H34'
+            Rule = 'A2: one to sixty-four envelopes, both ends checked.'
+            Test = 'admission::tests::a_batch_is_one_to_sixty_four_documents_each_with_its_own_identity'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '        if envelopes.is_empty() || envelopes.len() > BATCH_MAX {'
+            New  = '        if false {'
+        }
+        @{
+            Id   = 'H35'
+            Rule = 'question: a question offers a real choice, at least two options, one of them the recommendation.'
+            Test = 'admission::tests::a_question_offers_at_least_two_options_and_recommends_one_of_them'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+            if question.options.len() < 2 || !question.options.iter().any(|option| option.label == question.recommended) {
+                return Err(MindRefusal::InvalidOptions { question: key.into() });
+            }
+'@
+            New  = ''
+        }
+        @{
+            Id   = 'H36'
+            Rule = 'question: an option label names one option.'
+            Test = 'admission::tests::a_label_names_one_option_and_one_invariant'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            unique_labels("question.options", question.options.iter().map(|option| option.label.0.as_str()))'
+            New  = '            Ok(())'
+        }
+        @{
+            Id   = 'H37'
+            Rule = 'target: an invariant label names one invariant.'
+            Test = 'admission::tests::a_label_names_one_option_and_one_invariant'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            unique_labels("target.invariants", target.invariants.iter().map(|invariant| invariant.label.0.as_str()))'
+            New  = '            Ok(())'
+        }
+        @{
+            Id   = 'H38'
+            Rule = 'finding: a finding names where in the code it lives, not only that evidence exists.'
+            Test = 'admission::tests::a_finding_names_evidence_locations_and_known_invariants'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            if finding.evidence.is_empty() || finding.locations.is_empty() {'
+            New  = '            if finding.evidence.is_empty() {'
+        }
+        @{
+            Id   = 'H39'
+            Rule = 'resolution: an Answered names the ruling that answers this subject, not some other question''s ruling.'
+            Test = 'admission::tests::a_ruling_answering_a_question_derives_the_answered_resolution_atomically'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+            if ruling.answers.as_ref().map(|answers| answers.0.as_str()) != Some(subject_id) {
+                return Err(incompatible());
+            }
+'@
+            New  = '            let _ = (ruling, subject_id);'
         }
     )
 }

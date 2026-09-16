@@ -1043,9 +1043,23 @@ mod tests {
         committed(admit(&mut mind, vec![resolution(nested.clone(), withdrawn())]));
 
         // Refused, one per kind, and every non-resolvable kind.
-        assert_eq!(refusal(admit(&mut world(), vec![resolution(target_ref, withdrawn())])), incompatible(K::Target, "Withdrawn"));
-        assert_eq!(refusal(admit(&mut world(), vec![resolution(question_ref, fixed())])), incompatible(K::Question, "Fixed"));
-        assert_eq!(refusal(admit(&mut world(), vec![resolution(ruling_ref, withdrawn())])), incompatible(K::Ruling, "Withdrawn"));
+        assert_eq!(refusal(admit(&mut world(), vec![resolution(target_ref.clone(), withdrawn())])), incompatible(K::Target, "Withdrawn"));
+        assert_eq!(refusal(admit(&mut world(), vec![resolution(question_ref.clone(), fixed())])), incompatible(K::Question, "Fixed"));
+        assert_eq!(refusal(admit(&mut world(), vec![resolution(ruling_ref.clone(), withdrawn())])), incompatible(K::Ruling, "Withdrawn"));
+        // A kind admits the outcomes of its own row and no others: a question
+        // is answered or withdrawn, never superseded; a target is superseded,
+        // never answered.
+        assert_eq!(
+            refusal(admit(&mut world(), vec![
+                question("Q2", &["A", "B"], "A"),
+                resolution(question_ref, superseded(&[r(K::Question, &id("question", "Q2"))])),
+            ])),
+            incompatible(K::Question, "Superseded")
+        );
+        assert_eq!(
+            refusal(admit(&mut world(), vec![resolution(target_ref, ResolutionOutcome::Answered { by: ruling_ref })])),
+            incompatible(K::Target, "Answered")
+        );
         assert_eq!(
             refusal(admit(&mut world(), vec![resolution(spec_ref.clone(), ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) })])),
             incompatible(K::CutSpec, "Answered")
@@ -1124,6 +1138,84 @@ mod tests {
         again.answers = Some(s(&id("question", "Q1")));
         again.choice = Some(l("B"));
         assert_eq!(refusal(admit(&mut mind, vec![D::Ruling(again)])), MindRefusal::AlreadyResolved { subject: id("question", "Q1") });
+
+        // An explicit `Answered` must name the ruling that actually answers
+        // its subject: a ruling answering Q1 does not resolve Q2.
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A"), question("Q2", &["A", "B"], "A")]));
+        let mut answering = ruling("R1");
+        answering.answers = Some(s(&id("question", "Q1")));
+        answering.choice = Some(l("A"));
+        let wrong = resolution(r(K::Question, &id("question", "Q2")), ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) });
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Ruling(answering), wrong])),
+            MindRefusal::IncompatibleResolution { subject_kind: K::Question, outcome: "Answered".into() }
+        );
+    }
+
+    #[test]
+    fn a_batch_is_one_to_sixty_four_documents_each_with_its_own_identity() {
+        let mut mind = seeded();
+        // A2 at both ends, and at the boundary the batch is admitted whole.
+        assert_eq!(refusal(admit(&mut mind, vec![])), MindRefusal::BatchSize { actual: 0 });
+        let over = (0..65).map(|index| question(&format!("Q{index}"), &["A", "B"], "A")).collect::<Vec<_>>();
+        assert_eq!(refusal(admit(&mut mind, over)), MindRefusal::BatchSize { actual: 65 });
+        let full = (0..BATCH_MAX).map(|index| question(&format!("Q{index}"), &["A", "B"], "A")).collect::<Vec<_>>();
+        let (_, writes) = committed(admit(&mut mind, full));
+        assert_eq!(writes.len(), BATCH_MAX);
+        // A4: one identity, once, whatever the two documents say.
+        assert_eq!(
+            refusal(admit(&mut mind, vec![question("Z", &["A", "B"], "A"), question("Z", &["A", "B"], "B")])),
+            MindRefusal::IdentityCollision { kind: K::Question, id: id("question", "Z") }
+        );
+    }
+
+    #[test]
+    fn a_question_offers_at_least_two_options_and_recommends_one_of_them() {
+        let mut mind = seeded();
+        assert_eq!(
+            refusal(admit(&mut mind, vec![question("Q7", &["A"], "A")])),
+            MindRefusal::InvalidOptions { question: id("question", "Q7") }
+        );
+        assert_eq!(
+            refusal(admit(&mut mind, vec![question("Q8", &["A", "B"], "C")])),
+            MindRefusal::InvalidOptions { question: id("question", "Q8") }
+        );
+        committed(admit(&mut mind, vec![question("Q9", &["A", "B"], "B")]));
+    }
+
+    #[test]
+    fn a_label_names_one_option_and_one_invariant() {
+        let mut mind = seeded();
+        assert_eq!(
+            refusal(admit(&mut mind, vec![question("Q1", &["A", "A"], "A")])),
+            MindRefusal::DuplicateLabel { field: "question.options".into(), label: "A".into() }
+        );
+        assert_eq!(
+            refusal(admit(&mut mind, vec![
+                target(2, &["x", "x"]),
+                resolution(r(K::Target, &id("target", "r1")), superseded(&[r(K::Target, &id("target", "r2"))])),
+            ])),
+            MindRefusal::DuplicateLabel { field: "target.invariants".into(), label: "x".into() }
+        );
+    }
+
+    /// Every A7 reference the image resolved is pinned, not the first of
+    /// them, so a batch citing three documents cannot commit over a change to
+    /// the other two.
+    #[test]
+    fn every_cited_image_document_is_a_strong_read() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), D::Ruling(ruling("R2")), D::Ruling(ruling("R3"))]));
+        let cited = ["R1", "R2", "R3"].map(|label| mind.envelope(K::Ruling, &id("ruling", label)).unwrap().clone());
+        let mut spec = cut_spec("1", 1);
+        spec.rulings = cited.iter().map(|envelope| s(&envelope.key)).collect();
+        let (receipt_id, _) = committed(admit(&mut mind, vec![D::CutSpec(spec)]));
+        let receipt = mind.receipts().unwrap().into_iter().find(|receipt| receipt.receipt_id == receipt_id).unwrap();
+        assert_eq!(receipt.strong_reads.len(), 3);
+        for envelope in &cited {
+            assert!(receipt.strong_reads.contains(&DocumentVersion::from_envelope(envelope)), "{}", envelope.key);
+        }
     }
 
     #[test]
@@ -1170,6 +1262,9 @@ mod tests {
         report.branch = s("another-branch");
         assert_eq!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::SpecMismatch { field: "branch".into() });
         let mut report = cut_report("1", 1);
+        report.repo = repo(OTHER_REPO);
+        assert_eq!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::SpecMismatch { field: "repo".into() });
+        let mut report = cut_report("1", 1);
         report.range.head = epiphany_pipeline::Sha("abcdef0".into());
         assert_eq!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::RangeOutsideCommits { head: "abcdef0".into() });
         committed(admit(&mut mind, vec![resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), withdrawn())]));
@@ -1207,6 +1302,12 @@ mod tests {
             ])])),
             MindRefusal::PromiseWithoutVerdict { promise: "P1".into() }
         );
+        // A promise is measured by the claim that names it, not by any claim
+        // that names a promise: the report promises P1 and nothing else.
+        assert_eq!(
+            refusal(admit(&mut mind, vec![verdict("1", 1, vec![claim(ClaimOutcome::Holds, &[], Some("P2"), &[])])])),
+            MindRefusal::PromiseWithoutVerdict { promise: "P1".into() }
+        );
         assert_eq!(
             refusal(admit(&mut mind, vec![verdict("1", 1, vec![claim(ClaimOutcome::Holds, &[], Some("P1"), &["M9"])])])),
             MindRefusal::UnknownMutationLabel { label: "M9".into() }
@@ -1228,6 +1329,11 @@ mod tests {
         let mut bare = finding("1", 1, "F1", FindingConfidence::Plausible);
         bare.evidence = vec![];
         assert_eq!(refusal(admit(&mut mind, vec![D::Finding(bare)])), MindRefusal::FindingWithoutEvidence);
+        // Locations are evidence's other half: a finding that names no place
+        // in the code is refused the same way.
+        let mut placeless = finding("1", 1, "F1", FindingConfidence::Plausible);
+        placeless.locations = vec![];
+        assert_eq!(refusal(admit(&mut mind, vec![D::Finding(placeless)])), MindRefusal::FindingWithoutEvidence);
         let mut unknown = finding("1", 1, "F1", FindingConfidence::Plausible);
         unknown.invariants = vec![l("nope")];
         assert_eq!(refusal(admit(&mut mind, vec![D::Finding(unknown)])), MindRefusal::UnknownInvariant { label: "nope".into() });
@@ -1270,6 +1376,21 @@ mod tests {
         assert!(
             matches!(refusal(outcome), MindRefusal::Document(PipelineRefusal::InvalidFormat { field, .. }) if field == "payload")
         );
+
+        // The in-force target owns the invariant vocabulary. Supersede r1 with
+        // an r2 that drops its label, and the label is unknown again; r2's own
+        // label is what a finding may cite.
+        committed(admit(&mut mind, vec![
+            target(2, &["other"]),
+            resolution(r(K::Target, &id("target", "r1")), superseded(&[r(K::Target, &id("target", "r2"))])),
+        ]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Finding(finding("1", 1, "F2", FindingConfidence::Plausible))])),
+            MindRefusal::UnknownInvariant { label: INVARIANT.into() }
+        );
+        let mut current = finding("1", 1, "F3", FindingConfidence::Plausible);
+        current.invariants = vec![l("other")];
+        committed(admit(&mut mind, vec![D::Finding(current)]));
     }
 
     #[test]
@@ -1289,6 +1410,11 @@ mod tests {
             refusal(admit(&mut mind, vec![D::Campaign(empty)])),
             MindRefusal::EmptyRepos { campaign: "other:campaign:self".into() }
         );
+        // The stewardship may be held in the image: a later campaign over the
+        // same repo carries no stewardship of its own.
+        let D::Campaign(mut second) = campaign(&[REPO]) else { panic!() };
+        second.slug = slug("second");
+        committed(admit(&mut mind, vec![D::Campaign(second)]));
         let mut spec = cut_spec("1", 1);
         spec.repo = repo(OTHER_REPO);
         assert_eq!(refusal(admit(&mut mind, vec![D::CutSpec(spec)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });
@@ -1324,7 +1450,23 @@ mod tests {
         let Some(D::Stewardship(derived)) = receiving.get(K::Stewardship, &assigned).unwrap() else { panic!() };
         assert_eq!(derived.note, Line(key.clone()));
         assert_eq!(derived.instance, slug(OTHER_INSTANCE));
+        // The stewardship starts the day the repo was handed over, not on some
+        // clock of admission's own.
+        assert_eq!(derived.assigned_on, date());
         assert_eq!(source.envelope(K::HandOff, &key).map(|e| &e.payload), receiving.envelope(K::HandOff, &key).map(|e| &e.payload));
+
+        // A derived write passes A3-A7 like any other. A batch carrying its own
+        // stewardship of the repo collides with the derived one at A4, as a
+        // typed refusal, not as a duplicate identity the store complains about.
+        let mut colliding = opened(MemoryStore::new(), OTHER_INSTANCE);
+        committed(admit(&mut colliding, vec![instance(OTHER_INSTANCE)]));
+        assert_eq!(
+            refusal(admit(&mut colliding, vec![
+                hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[]),
+                stewardship(OTHER_INSTANCE, REPO),
+            ])),
+            MindRefusal::IdentityCollision { kind: K::Stewardship, id: assigned }
+        );
     }
 
     /// The key of the resolution of a stewardship: the subject's root, then
