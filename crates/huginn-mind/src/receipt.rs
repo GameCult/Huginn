@@ -1,6 +1,6 @@
 //! The commit receipt: what a batch read and what it wrote, byte for byte.
 //!
-//! This is the bounded duplicate of `epiphany-core`'s receipt (FU-3), smaller
+//! This is the bounded duplicate of Epiphany's Mind receipt (FU-3), smaller
 //! by design: no authority enum, no companion documents, no `invariant_owner`,
 //! no `store_id`. Provenance is a field on the receipt, not a companion, and
 //! the digest excludes it, so an exact replay across sessions and faculties

@@ -33,8 +33,14 @@ A Cargo workspace of three crates:
 `huginn-mind` is live: it opens one instance's store (an owned redb CultCache
 at `<state_root>/minds/<instance>/mind.redb`, locked for the mind's lifetime),
 and refuses a store whose `instance` document names another instance, whose
-epoch record is foreign, or whose types are not a mind's. Document shape and
-keys come from `epiphany-pipeline`; the store is CultLib's Rust CultCache.
+epoch record is foreign, or whose types are not a mind's. It admits batches
+of pipeline documents through one commit path: the leaf's bounds, formats and
+keys, then the organ's cross-document rules (references, in-force status,
+the resolution matrix, derived resolutions and stewardships), then one
+compare-and-swap that lands the batch whole with a receipt naming the exact
+bytes it read and wrote. An exact replay answers with the stored receipt.
+Document shape and keys come from `epiphany-pipeline`; the store is CultLib's
+Rust CultCache.
 `huginn-daemon` and `eureka-state` are stubs; the
 campaign's cut map in `Epiphany/notes/eureka-pipeline-state-cut.md` owns what
 each crate must do next.
