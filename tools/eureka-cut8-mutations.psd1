@@ -3,7 +3,11 @@
 # the Cut 6d follow-up's rules (the two sequences, the recursive in-force, the
 # single in-force stewardship, the Q19 cap, and the sequences `derive` sets);
 # H47-H51 close the gaps Soul found where the code was right and the suite
-# blind. Run through Epiphany's harness from this repo:
+# blind. H52-H61 are the follow-up's own fixes and the gaps Soul's second pass
+# left: the sequences a replay re-derives (H52-H54), the withdrawal that would
+# re-raise an earlier record over a later one (H55-H56), the gap a sequence
+# rule must refuse (H57-H58), and three rules the suite could not tell apart
+# from weaker ones (H59-H61). Run through Epiphany's harness from this repo:
 #
 # H32 is re-anchored to the same follow-up: its A4 half is unreachable now
 # that a derived write takes the sequence after the batch's own records, so a
@@ -633,6 +637,110 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             File = 'crates/huginn-mind/src/admission.rs'
             Old  = '            if report.branch != spec.branch {'
             New  = '            if !report.branch.0.eq_ignore_ascii_case(&spec.branch.0) {'
+        }
+        @{
+            Id   = 'H52'
+            Rule = 'derive: a ruling''s resolution takes the next sequence even when the image already holds the one this batch derived, so an exact replay never matches.'
+            Test = 'admission::tests::an_exact_replay_re_derives_the_rulings_resolution'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+                    let sequence = docs.derived_resolution_sequence(&subject, |outcome| {
+                        matches!(outcome, ResolutionOutcome::Answered { by } if by.kind == K::Ruling && by.id.0 == staged.key)
+                    });
+'@
+            New  = @'
+                    let sequence = docs.latest_resolution(&subject, None) + 1;
+'@
+        }
+        @{
+            Id   = 'H53'
+            Rule = 'derive: the hand-off''s withdrawal takes the next sequence even when the image holds the one this hand-off derived.'
+            Test = 'admission::tests::an_exact_replay_re_derives_both_sides_of_a_hand_off'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+                    let sequence = docs.derived_resolution_sequence(&subject, |outcome| {
+                        matches!(outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == staged.key)
+                    });
+'@
+            New  = @'
+                    let sequence = docs.latest_resolution(&subject, None) + 1;
+'@
+        }
+        @{
+            Id   = 'H54'
+            Rule = 'derive: the hand-off''s assignment takes the next sequence even when the image holds the one this hand-off derived.'
+            Test = 'admission::tests::an_exact_replay_re_derives_both_sides_of_a_hand_off'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '                        sequence: docs.derived_stewardship_sequence(mind, &hand_off.repo, &staged.key),'
+            New  = '                        sequence: docs.latest_stewardship(mind, &hand_off.repo, None) + 1,'
+        }
+        @{
+            Id   = 'H55'
+            Rule = 'Q19 A: a withdrawal may re-raise an earlier stewardship over a later one.'
+            Test = 'admission::tests::a_withdrawal_does_not_reinstate_a_stewardship_over_a_later_one'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '    if matches!(resolution.outcome, ResolutionOutcome::Withdrawn { .. })'
+            New  = '    if false'
+        }
+        @{
+            Id   = 'H56'
+            Rule = 'H55 against the revision case: an earlier revision re-raised over the one that superseded it.'
+            Test = 'admission::tests::a_withdrawal_does_not_reinstate_a_revision_over_a_later_one'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '    if matches!(resolution.outcome, ResolutionOutcome::Withdrawn { .. })'
+            New  = '    if false'
+        }
+        @{
+            Id   = 'H57'
+            Rule = 'resolution: the sequence rule accepts a gap (only a taken sequence refuses).'
+            Test = 'admission::tests::a_sequence_gap_refuses_on_both_sequenced_kinds'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '    if resolution.sequence != expected {'
+            New  = '    if resolution.sequence < expected {'
+        }
+        @{
+            Id   = 'H58'
+            Rule = 'stewardship: the sequence rule accepts a gap (only a taken sequence refuses).'
+            Test = 'admission::tests::a_sequence_gap_refuses_on_both_sequenced_kinds'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            if stewardship.sequence != expected {'
+            New  = '            if stewardship.sequence < expected {'
+        }
+        @{
+            Id   = 'H59'
+            Rule = 'Q19 cap: the subject resolution is looked for in the image only, so a chain landing in one batch is not capped.'
+            Test = 'admission::tests::the_cap_reads_a_chain_landing_in_one_batch'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '        && let Some(D::Resolution(subject)) = docs.find(K::Resolution, subject_id)'
+            New  = '        && let Some(D::Resolution(subject)) = docs.in_image(K::Resolution, subject_id)'
+        }
+        @{
+            Id   = 'H60'
+            Rule = 'latest_resolution reads the image only, not the batch.'
+            Test = 'admission::tests::the_latest_resolution_counts_the_batch'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+        self.resolutions()
+            .filter(|(_, resolution)| resolution.subject == *subject && own != Some(*resolution))
+'@
+            New  = @'
+        self.image.iter().filter(|held| held.kind == PipelineKind::Resolution).filter_map(|held| match &held.document { PipelineDocument::Resolution(resolution) => Some((held.key.as_str(), resolution)), _ => None })
+            .filter(|(_, resolution)| resolution.subject == *subject && own != Some(*resolution))
+'@
+        }
+        @{
+            Id   = 'H61'
+            Rule = 'derive: the hand-off''s withdrawal always takes sequence 1.'
+            Test = 'admission::tests::a_hand_offs_derived_withdrawal_takes_the_next_sequence'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+                    let sequence = docs.derived_resolution_sequence(&subject, |outcome| {
+                        matches!(outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == staged.key)
+                    });
+'@
+            New  = @'
+                    let sequence = 1;
+'@
         }
     )
 }
