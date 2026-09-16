@@ -1,4 +1,4 @@
-# Cut 10 mutations, D1-D19: the CultNet surface's rules. Each rule has a
+# Cut 10 mutations, D1-D22: the CultNet surface's rules. Each rule has a
 # revert, `Dn`, which removes the rule, and a loosening, `DnL`, which weakens
 # it rather than removing it, because a plain revert is the easy target. Every
 # entry names the test that must fail while it is applied. Run through
@@ -156,13 +156,9 @@
             Rule = 'A refusal is data in the response, never a transport failure the client must parse out of a failure envelope.'
             Test = 'serve::tests::a_malformed_envelope_is_answered_with_a_failure_and_touches_no_mind'
             File = 'crates/huginn-daemon/src/serve.rs'
-            Old  = @'
-                let response = daemon.handle(request, now);
-                match encode_response(&message_id, operation, &response, &runtime_id) {
-'@
+            Old  = '                let reply = encode_or_fail(&message_id, operation, &response, &runtime_id);'
             New  = @'
-                let response = daemon.handle(request, now);
-                if let huginn_mind::wire::HuginnMindResponse::Refused(refusal) = &response {
+                if let HuginnMindResponse::Refused(refusal) = &response {
                     return encode_failure(
                         &message_id,
                         operation,
@@ -173,7 +169,7 @@
                         &runtime_id,
                     );
                 }
-                match encode_response(&message_id, operation, &response, &runtime_id) {
+                let reply = encode_or_fail(&message_id, operation, &response, &runtime_id);
 '@
         }
         @{
@@ -236,6 +232,86 @@
             File = 'crates/huginn-daemon/src/envelope.rs'
             Old  = '    if operation != request.operation() {'
             New  = '    if operation.len() != request.operation().len() {'
+        }
+        @{
+            Id   = 'D20'
+            Rule = 'An answer larger than one send can carry is refused by name, not handed to a send that fails silently.'
+            Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = '    if encoded <= MAX_RESPONSE_BYTES {'
+            New  = '    if true {'
+        }
+        @{
+            Id   = 'D20L'
+            Rule = 'It is measured against the window the hub was configured with, not against a number chosen to admit it.'
+            Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = '    if encoded <= MAX_RESPONSE_BYTES {'
+            New  = '    if encoded <= MAX_RESPONSE_BYTES * 4 {'
+        }
+        @{
+            Id   = 'D20L2'
+            Rule = 'The refusal carries the answer''s own encoded size, so a caller can tell how far it overshot.'
+            Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = '        bytes: encoded,'
+            New  = '        bytes: MAX_RESPONSE_BYTES,'
+        }
+        @{
+            Id   = 'D20L3'
+            Rule = 'And it carries the limit itself, not the size again, so the two are not one number twice.'
+            Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = '        limit: MAX_RESPONSE_BYTES,'
+            New  = '        limit: encoded,'
+        }
+        @{
+            Id   = 'D21'
+            Rule = 'The refusal rides the response schema like every other refusal, not a failure envelope the client must parse apart.'
+            Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = @'
+    let refusal = HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge {
+        bytes: encoded,
+        limit: MAX_RESPONSE_BYTES,
+    });
+    encode_or_fail(message_id, operation, &refusal, runtime_id)
+'@
+            New  = @'
+    encode_failure(
+        message_id,
+        operation,
+        &crate::envelope::OperationFailure {
+            code: "response-too-large".into(),
+            message: format!("{encoded} bytes against a {MAX_RESPONSE_BYTES} limit"),
+        },
+        runtime_id,
+    )
+'@
+        }
+        @{
+            Id   = 'D22'
+            Rule = 'The window the gate measures against is the window the hub carries: a smaller one sends nothing and says nothing.'
+            Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = '    options.max_pending_reliable_packets = Some(MAX_PENDING_RELIABLE_PACKETS);'
+            New  = '    options.max_pending_reliable_packets = Some(MAX_PENDING_RELIABLE_PACKETS / 2);'
+        }
+        @{
+            Id   = 'D22L'
+            Rule = 'Not merely close to it: a window short by a few dozen packets still drops an answer the gate admitted.'
+            Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = '    options.max_pending_reliable_packets = Some(MAX_PENDING_RELIABLE_PACKETS);'
+            New  = '    options.max_pending_reliable_packets = Some(MAX_PENDING_RELIABLE_PACKETS - 64);'
+        }
+        @{
+            Id   = 'D22L2'
+            Rule = 'The fragment size is the window''s other half: a smaller one carries fewer bytes in the same packet count.'
+            Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = '    options.max_fragment_bytes = Some(MAX_FRAGMENT_BYTES);'
+            New  = '    options.max_fragment_bytes = Some(MAX_FRAGMENT_BYTES - 64);'
         }
         @{
             Id   = 'D17'

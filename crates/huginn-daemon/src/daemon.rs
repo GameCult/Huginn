@@ -104,8 +104,10 @@ pub(crate) mod tests {
     use super::*;
     use chrono::TimeZone;
     use huginn_mind::epiphany_pipeline::{
-        Date, OrgRepo, PipelineDocument, PipelineInstance, PipelineKind, PipelineQuestion, PipelineRuling,
-        QuestionOption, RulingAuthority, Short,
+        AuthorityMap, CodeLocation, CutDelete, CutVerification, Date, DocRef, FileChange, Line, NegativeCheck,
+        OrgRepo, PipelineCampaign, PipelineCutSpec, PipelineDocument, PipelineInstance, PipelineKind,
+        PipelineQuestion, PipelineRuling, PipelineStewardship, QuestionOption, RulingAuthority, Sha, Short,
+        StructuralDelta, VerificationTest,
     };
     use huginn_mind::wire::MindStatus;
     use huginn_mind::{
@@ -181,6 +183,134 @@ pub(crate) mod tests {
             authority: RulingAuthority::Operator,
         });
         (question, ruling)
+    }
+
+    pub(crate) const REPO: &str = "GameCult/Epiphany";
+
+    /// A `Line` and a `Short` at the leaf's own bound, so a document built out
+    /// of them is as wide as any writer may make it.
+    pub(crate) fn line(n: usize) -> Line {
+        Line(format!("{n:0>1000}"))
+    }
+
+    pub(crate) fn short(n: usize) -> Short {
+        Short(format!("{n:0>200}"))
+    }
+
+    fn sha() -> Sha {
+        Sha("5f98228d".into())
+    }
+
+    fn doc_ref() -> DocRef {
+        DocRef { path: Short("notes/target.md".into()), start_line: 1, end_line: 9, commit: sha() }
+    }
+
+    /// The three documents a cut spec needs before it may be admitted: the
+    /// mind's identity, its stewardship of the repo, and the campaign that
+    /// names the repo.
+    pub(crate) fn campaign_seed() -> Vec<PipelineDocument> {
+        vec![
+            identity(INSTANCE),
+            PipelineDocument::Stewardship(PipelineStewardship {
+                instance: slug(INSTANCE),
+                repo: OrgRepo(REPO.into()),
+                sequence: 1,
+                assigned_on: Date("2026-09-16".into()),
+                note: "assigned".into(),
+            }),
+            PipelineDocument::Campaign(PipelineCampaign {
+                slug: slug(CAMPAIGN),
+                title: Short("Eureka pipeline state".into()),
+                repos: vec![OrgRepo(REPO.into())],
+                working_branch: Short("codex/eureka-pipeline-state".into()),
+                target_doc: doc_ref(),
+            }),
+        ]
+    }
+
+    /// One cut spec with every list the leaf bounds filled to its maximum and
+    /// every text at its own: `file_changes` file changes, 64 deletes, keeps,
+    /// adds, builds, tests, negative checks and operator checks, a full
+    /// authority map and a full structural delta. At 256 file changes that is
+    /// roughly a megabyte of field content, which is what a real-sized answer
+    /// looks like at the leaf's bounds rather than at a fixture's convenience.
+    /// `depends_on`, `rulings` and `questions` stay empty because each is a
+    /// reference admission resolves.
+    pub(crate) fn cut_spec(cut: &str, file_changes: usize) -> PipelineDocument {
+        let lines = |count: usize| (0..count).map(line).collect::<Vec<_>>();
+        let shorts = |count: usize| (0..count).map(short).collect::<Vec<_>>();
+        let location = |n: usize| CodeLocation { path: short(n), line: 1, end_line: Some(9) };
+        PipelineDocument::CutSpec(PipelineCutSpec {
+            campaign: slug(CAMPAIGN),
+            cut: cut.into(),
+            revision: 1,
+            title: short(0),
+            repo: OrgRepo(REPO.into()),
+            branch: short(1),
+            base: sha(),
+            depends_on: vec![],
+            first: lines(16),
+            deletes: (0..64).map(|n| CutDelete { path: short(n), lines: 9, note: line(n) }).collect(),
+            keeps_moves: lines(64),
+            adds: lines(64),
+            file_changes: (0..file_changes).map(|n| FileChange { location: location(n), change: line(n) }).collect(),
+            authority_map: Some(AuthorityMap {
+                owner: line(0),
+                inputs: lines(16),
+                outputs: lines(16),
+                derived_state: lines(16),
+                forbidden_writers: lines(16),
+                shared_paths: lines(16),
+                deletion_line: line(1),
+            }),
+            verification: CutVerification {
+                builds: lines(64),
+                tests: (0..64).map(|n| VerificationTest { name: short(n), pins: line(n) }).collect(),
+                negative: (0..64).map(|n| NegativeCheck { pattern: short(n), scope: line(n) }).collect(),
+                operator: lines(64),
+            },
+            estimate: StructuralDelta {
+                lines_added: 0,
+                lines_removed: 0,
+                dependencies_added: shorts(64),
+                dependencies_removed: shorts(64),
+                formats_added: shorts(64),
+                formats_removed: shorts(64),
+                targets_added: shorts(64),
+                targets_removed: shorts(64),
+            },
+            rulings: vec![],
+            questions: vec![],
+        })
+    }
+
+    /// The cut spec at the leaf's own maximum, and one narrow enough that its
+    /// answer still fits a single send. `WIDE_CHANGES` is the leaf's bound;
+    /// `FITTING_CHANGES` is chosen so the view of that spec lands inside the
+    /// window with less than a packet-count's slack, which is what makes the
+    /// window's own value load-bearing rather than merely generous.
+    pub(crate) const WIDE_CUT: &str = "wide";
+    pub(crate) const WIDE_CHANGES: usize = 256;
+    pub(crate) const FITTING_CUT: &str = "fits";
+    pub(crate) const FITTING_CHANGES: usize = 180;
+
+    /// A daemon whose mind holds the campaign seed, one cut spec as wide as the
+    /// leaf permits, and one narrow enough to answer, so a read over it is a
+    /// real-sized answer either way.
+    pub(crate) fn seeded_wide() -> (TempDir, Daemon<OwnedRedbMessagePackBackingStore, NoIndex>) {
+        let root = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        for documents in [
+            campaign_seed(),
+            vec![cut_spec(WIDE_CUT, WIDE_CHANGES), cut_spec(FITTING_CUT, FITTING_CHANGES)],
+        ] {
+            let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), now());
+            assert!(
+                matches!(outcome, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })),
+                "{outcome:?}"
+            );
+        }
+        (root, daemon)
     }
 
     /// A daemon over a real redb mind in a temporary directory, with its

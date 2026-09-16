@@ -5,10 +5,35 @@
 //! Stated limits. A socket error and a hostile datagram are indistinguishable
 //! at `receive_event_once`, so both are logged and served past: a dead socket
 //! spins with logging rather than exiting, and Cut 14's health check is the
-//! observer. The reliable window is `max_pending_reliable_packets` times
-//! `max_fragment_bytes` per session, about 1.2 MB in flight; a page larger
-//! than that fails to send and the client times out rather than receiving a
-//! typed answer.
+//! observer.
+//!
+//! One answer may be `MAX_RESPONSE_BYTES` encoded, 1,228,800 today: the
+//! reliable window one session holds, `MAX_PENDING_RELIABLE_PACKETS` packets
+//! of `MAX_FRAGMENT_BYTES`. A larger answer is refused by name,
+//! `MindRefusal::ResponseTooLarge`, carrying the encoded size and the limit,
+//! and the caller narrows its own request. This is the current bound and not a
+//! design target: a single cut spec at the leaf's own bounds does not fit it,
+//! and what a list read should return is an open question, so a client author
+//! should expect the number to move.
+//!
+//! Four things this cut does not do, which a client has nowhere else to learn:
+//!
+//! - A session idle for `ServeOptions::session_timeout`, 30 seconds, is
+//!   removed here while the client still believes it is connected; its next
+//!   request is answered by nothing. A client that intends to stay must speak
+//!   inside that window or reconnect.
+//! - An envelope CultNet's own `validate_message` rejects is dropped by the
+//!   hub before this module sees it, so it is never answered.
+//! - Shutdown neither drains what is in flight nor disconnects its peers: the
+//!   loop stops and the sockets close under whatever was queued.
+//! - `response-not-encodable` is authored here and is unreachable in practice;
+//!   every response type encodes.
+//!
+//! Two reads pipelined on one session are not both answered: the window is
+//! per session and counts what is unacknowledged, so a second large reply sent
+//! before the first is acknowledged fails to send even when each passes the
+//! size gate on its own. The gate measures one answer against the window, not
+//! against what the session still has room for.
 
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, UdpSocket};
@@ -21,13 +46,14 @@ use chrono::{DateTime, Utc};
 use cultnet_rs::{
     CULTNET_OPERATION_CONNECTION_ID, CultNetMessage, CultNetRudpServerEvent, CultNetRudpServerHub,
     CultNetRudpServerHubOptions, CultNetSchemaKind, CultNetSchemaRegistration, CultNetSchemaRegistry,
-    CultNetWireContract, decode_cultnet_message_from_slice,
+    CultNetWireContract, decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
 };
 use huginn_mind::epiphany_pipeline::Slug;
 use huginn_mind::wire::{
-    MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA, MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID,
+    HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA,
+    MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID,
 };
-use huginn_mind::{MindStore, OwnedRedbMessagePackBackingStore};
+use huginn_mind::{MindRefusal, MindStore, OwnedRedbMessagePackBackingStore};
 
 use crate::daemon::{Daemon, IndexSink, NoIndex};
 use crate::envelope::{decode_request, encode_failure, encode_response};
@@ -87,14 +113,23 @@ pub fn startup(
     Ok((daemon, hub, schema_registry()?))
 }
 
+/// The bytes one reliable packet carries, and the packets one session may hold
+/// unacknowledged. Their product is the largest answer a single send can
+/// carry, and `answer` measures every reply against it rather than handing the
+/// hub a send it can already see will fail.
+pub const MAX_FRAGMENT_BYTES: u32 = 1200;
+pub const MAX_PENDING_RELIABLE_PACKETS: u32 = 1024;
+/// 1,228,800 bytes.
+pub const MAX_RESPONSE_BYTES: u64 = MAX_FRAGMENT_BYTES as u64 * MAX_PENDING_RELIABLE_PACKETS as u64;
+
 /// One non-blocking socket serving the operation connection id. The hub drops
 /// every datagram carrying another one.
 pub fn bind(addr: SocketAddr, runtime_id: &str) -> Result<CultNetRudpServerHub> {
     let socket = UdpSocket::bind(addr).with_context(|| format!("binding {addr}"))?;
     socket.set_nonblocking(true)?;
     let mut options = CultNetRudpServerHubOptions::new(runtime_id, socket, CULTNET_OPERATION_CONNECTION_ID);
-    options.max_fragment_bytes = Some(1200);
-    options.max_pending_reliable_packets = Some(1024);
+    options.max_fragment_bytes = Some(MAX_FRAGMENT_BYTES);
+    options.max_pending_reliable_packets = Some(MAX_PENDING_RELIABLE_PACKETS);
     options.max_peers = 256;
     CultNetRudpServerHub::new(options)
 }
@@ -133,18 +168,8 @@ pub fn answer<S: MindStore, I: IndexSink<S>>(
             Ok((message_id, request)) => {
                 let operation = request.operation();
                 let response = daemon.handle(request, now);
-                match encode_response(&message_id, operation, &response, &runtime_id) {
-                    Ok(message) => message,
-                    Err(error) => encode_failure(
-                        &message_id,
-                        operation,
-                        &crate::envelope::OperationFailure {
-                            code: "response-not-encodable".into(),
-                            message: format!("{error:#}"),
-                        },
-                        &runtime_id,
-                    ),
-                }
+                let reply = encode_or_fail(&message_id, operation, &response, &runtime_id);
+                within_window(reply, &message_id, operation, &runtime_id)
             }
             Err(failure) => encode_failure(message_id, operation, &failure, &runtime_id),
         },
@@ -158,6 +183,63 @@ pub fn answer<S: MindStore, I: IndexSink<S>>(
             ),
         },
     }
+}
+
+/// One response in its envelope, or the failure that says it did not encode.
+fn encode_or_fail(
+    message_id: &str,
+    operation: &str,
+    response: &HuginnMindResponse,
+    runtime_id: &str,
+) -> CultNetMessage {
+    match encode_response(message_id, operation, response, runtime_id) {
+        Ok(message) => message,
+        Err(error) => encode_failure(
+            message_id,
+            operation,
+            &crate::envelope::OperationFailure {
+                code: "response-not-encodable".into(),
+                message: format!("{error:#}"),
+            },
+            runtime_id,
+        ),
+    }
+}
+
+/// The reply, or a typed refusal saying it will not fit. The hub cuts a reply
+/// into `MAX_FRAGMENT_BYTES` packets and refuses a send needing more than
+/// `MAX_PENDING_RELIABLE_PACKETS` of them; that refusal is a transport error
+/// the client never sees, so it waits for an answer nothing will send. The
+/// size is therefore measured here, against the window this module configured,
+/// before a send that can already be seen to fail is attempted, and the client
+/// is told by name how large the answer was and how large one may be.
+///
+/// Nothing is truncated, paginated or retried: the caller narrows its own
+/// request. The refusal rides the response schema like every other refusal, so
+/// it is not a second thing for a client to parse.
+fn within_window(reply: CultNetMessage, message_id: &str, operation: &str, runtime_id: &str) -> CultNetMessage {
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => bytes.len() as u64,
+        Err(error) => {
+            return encode_failure(
+                message_id,
+                operation,
+                &crate::envelope::OperationFailure {
+                    code: "response-not-encodable".into(),
+                    message: format!("{error:#}"),
+                },
+                runtime_id,
+            );
+        }
+    };
+    if encoded <= MAX_RESPONSE_BYTES {
+        return reply;
+    }
+    let refusal = HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge {
+        bytes: encoded,
+        limit: MAX_RESPONSE_BYTES,
+    });
+    encode_or_fail(message_id, operation, &refusal, runtime_id)
 }
 
 /// Until `stopping`: expire what timed out, resend what was not acknowledged,
@@ -217,7 +299,11 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::tests::{INSTANCE, OTHER, batch, identity, now, slug};
+    use crate::daemon::tests::{
+        CAMPAIGN, FITTING_CHANGES, FITTING_CUT, INSTANCE, OTHER, WIDE_CHANGES, WIDE_CUT, batch, identity, now,
+        seeded_wide, slug,
+    };
+    use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef};
     use crate::envelope::{FAILURE_SCHEMA, decode_response, encode_request};
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
@@ -434,6 +520,147 @@ mod tests {
         let (result, mut daemon) = serving.join().unwrap();
         result.unwrap();
         assert_eq!(documents(&mut daemon), 1, "the admission that crossed the wire landed");
+    }
+
+    /// An answer larger than one send can carry is a refusal by name, not a
+    /// transport failure the client waits out. The wide document is one cut spec
+    /// with every list the leaf bounds filled: about a megabyte of field
+    /// content, which base64 in the operation envelope carries past the window
+    /// this module configures, so a single read of it is already over. The
+    /// fitting one is the same document narrowed until its answer lands inside
+    /// the window, and it is delivered whole.
+    ///
+    /// Both halves are load-bearing. Without the refused reads a daemon that
+    /// never measured would pass; without the delivered one a daemon that
+    /// refused everything, or configured a window smaller than the number it
+    /// measures against, would pass too. The delivered answer sits within one
+    /// packet-count's slack of the limit, so shrinking the configured window
+    /// breaks it.
+    #[test]
+    fn an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client() {
+        let (_root, mut daemon) = seeded_wide();
+        let registry = schema_registry().unwrap();
+
+        let sized = |daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, NoIndex>, id: PipelineRef| {
+            let view = daemon.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id }, now());
+            let message = encode_response("m-0", "view", &view, "huginn-yggdrasil").unwrap();
+            encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).unwrap().len() as u64
+        };
+        let wide = spec_ref(&mut daemon, WIDE_CUT);
+        let fitting = spec_ref(&mut daemon, FITTING_CUT);
+        let (over, under) = (sized(&mut daemon, wide.clone()), sized(&mut daemon, fitting.clone()));
+        eprintln!("a view of {WIDE_CHANGES} file changes encodes to {over} bytes, of {FITTING_CHANGES} to {under}");
+        assert!(over > MAX_RESPONSE_BYTES, "a cut spec at the leaf's bounds is {over} bytes, over {MAX_RESPONSE_BYTES}");
+        assert!(under <= MAX_RESPONSE_BYTES, "the narrowed spec is {under} bytes and must fit");
+        assert!(
+            MAX_RESPONSE_BYTES - under < 64 * MAX_FRAGMENT_BYTES as u64,
+            "the delivered answer must sit close enough to the limit that the window's value is load-bearing"
+        );
+
+        let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
+        let endpoint = format!("rudp://{}", hub.local_addr().unwrap());
+        let mut client = CultMesh::create_rudp_client_for_endpoint(
+            "eureka-state-wide".to_string(),
+            CULTNET_OPERATION_CONNECTION_ID,
+            &endpoint,
+            CultMeshRudpSocketOptions::default(),
+        )
+        .unwrap();
+        client.connect(Vec::new()).unwrap();
+        for _ in 0..200 {
+            while hub.receive_event_once().unwrap().is_some() {}
+            let _ = client.receive_once();
+            if client.connected() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(client.connected());
+
+        let reads = [
+            ("m-q", HuginnMindRequest::Query { instance: slug(INSTANCE), query: PipelineQuery::default() }),
+            ("m-v", HuginnMindRequest::View { instance: slug(INSTANCE), id: wide }),
+            ("m-o", HuginnMindRequest::OpenItems { instance: slug(INSTANCE), campaign: slug(CAMPAIGN) }),
+        ];
+        let stopping = Arc::new(AtomicBool::new(false));
+        let loop_stopping = Arc::clone(&stopping);
+        let serving = std::thread::spawn(move || {
+            let result = run(&mut daemon, &mut hub, &registry, &loop_stopping, &ServeOptions::default());
+            (result, daemon)
+        });
+
+        // One read at a time: the window is per session and counts what is
+        // still unacknowledged, so two large answers in flight together are a
+        // separate limit this gate does not measure.
+        for (message_id, request) in reads {
+            client.send_schema_message(&encode_request(message_id, &request, None).unwrap()).unwrap();
+            let mut reply = None;
+            for _ in 0..500 {
+                client.poll_resends().unwrap();
+                if let Some(message) = client.receive_schema_message_once().unwrap() {
+                    reply = Some(message);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let reply = reply.unwrap_or_else(|| panic!("{message_id} got no reply"));
+            let (correlation, answered) = decode_response(&reply).unwrap();
+            assert_eq!(&correlation, message_id);
+            let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
+                answered.expect("a refusal is an answer, not an envelope failure")
+            else {
+                panic!("{message_id} was not refused for its size");
+            };
+            assert_eq!(limit, MAX_RESPONSE_BYTES);
+            assert!(bytes > limit, "{message_id} answered {bytes} bytes against a {limit} limit");
+        }
+
+        // A real-sized answer that does fit is delivered whole, over the same
+        // session that was just refused twice: the gate measures the answer, and
+        // the window it measures against is one the hub actually carries.
+        let delivered = [
+            ("m-f", HuginnMindRequest::View { instance: slug(INSTANCE), id: fitting.clone() }),
+            ("m-w", HuginnMindRequest::Whoami),
+        ];
+        for (message_id, request) in delivered {
+            client.send_schema_message(&encode_request(message_id, &request, None).unwrap()).unwrap();
+            let mut reply = None;
+            for _ in 0..2000 {
+                client.poll_resends().unwrap();
+                if let Some(message) = client.receive_schema_message_once().unwrap() {
+                    reply = Some(message);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let reply = reply.unwrap_or_else(|| panic!("{message_id} got no reply"));
+            let (correlation, answered) = decode_response(&reply).unwrap();
+            assert_eq!(&correlation, message_id);
+            match answered.unwrap() {
+                HuginnMindResponse::View(Some(view)) => assert_eq!(view.id, fitting),
+                HuginnMindResponse::Whoami(status) => assert_eq!(status.documents, 5),
+                other => panic!("{message_id} got {other:?}"),
+            }
+        }
+
+        stopping.store(true, Ordering::Relaxed);
+        serving.join().unwrap().0.unwrap();
+    }
+
+    /// One cut spec's own reference, by its cut label.
+    fn spec_ref(daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, NoIndex>, cut: &str) -> PipelineRef {
+        let query = PipelineQuery {
+            kinds: vec![PipelineKind::CutSpec],
+            cut: Some(cut.into()),
+            ..PipelineQuery::default()
+        };
+        let HuginnMindResponse::Query(page) =
+            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), query }, now())
+        else {
+            panic!("expected a page");
+        };
+        assert_eq!(page.matched, 1, "one cut spec is labelled {cut}");
+        page.items[0].id.clone()
     }
 
     /// Ruling 15 as an order in the one place both happen. Both gates are shut

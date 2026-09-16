@@ -1202,6 +1202,35 @@
           ]
         },
         {
+          "description": "The one refusal a mind never raises: the answer does not fit the\ntransport that would have carried it. It lives here because a refusal\nrides the response schema and there is one of those, so a client reads\nit the way it reads every other refusal rather than parsing a second\nvocabulary. `bytes` is the encoded answer and `limit` is what one send\nmay carry, both so a caller can narrow its own request; nothing is\ntruncated or paginated on its behalf. The daemon owns it and the\ntransport's own bound decides it; no rule of the mind is involved.",
+          "type": "object",
+          "properties": {
+            "ResponseTooLarge": {
+              "type": "object",
+              "properties": {
+                "bytes": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "limit": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "bytes",
+                "limit"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ResponseTooLarge"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "Unavailable": {

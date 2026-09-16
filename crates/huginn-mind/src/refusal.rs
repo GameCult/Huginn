@@ -54,6 +54,15 @@ pub enum MindRefusal {
     FindingWithoutEvidence,
     UnknownInvariant { label: String },
     NotStewarded { repo: String },
+    /// The one refusal a mind never raises: the answer does not fit the
+    /// transport that would have carried it. It lives here because a refusal
+    /// rides the response schema and there is one of those, so a client reads
+    /// it the way it reads every other refusal rather than parsing a second
+    /// vocabulary. `bytes` is the encoded answer and `limit` is what one send
+    /// may carry, both so a caller can narrow its own request; nothing is
+    /// truncated or paginated on its behalf. The daemon owns it and the
+    /// transport's own bound decides it; no rule of the mind is involved.
+    ResponseTooLarge { bytes: u64, limit: u64 },
     Unavailable { detail: String },
 }
 
