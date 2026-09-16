@@ -91,6 +91,15 @@
             New     = '        if !declared.0.starts_with(&self.instance().0) {'
         }
         @{
+            Id      = 'D1L5'
+            Rule    = 'It compares the names as written: a slug may carry uppercase, so two names differing in case are two minds.'
+            Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if !declared.0.eq_ignore_ascii_case(&self.instance().0) {'
+        }
+        @{
             Id      = 'D1N'
             Rule    = 'The refusal names which mind refused, so an agent can act on the field rather than guess.'
             Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
@@ -125,6 +134,14 @@
             File = 'crates/huginn-mind/src/mind.rs'
             Old  = '        if declared != self.instance() {'
             New  = '        if declared.0.len() != self.instance().0.len() {'
+        }
+        @{
+            Id   = 'D1DL2'
+            Rule = 'And case, the daemon''s way: the daemon''s own fixtures carry a name differing from the mind''s in case alone.'
+            Test = 'daemon::tests::a_read_or_a_write_naming_another_instance_is_refused_by_the_mind_and_writes_nothing'
+            File = 'crates/huginn-mind/src/mind.rs'
+            Old  = '        if declared != self.instance() {'
+            New  = '        if !declared.0.eq_ignore_ascii_case(&self.instance().0) {'
         }
         @{
             Id   = 'D2'

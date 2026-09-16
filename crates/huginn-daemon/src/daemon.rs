@@ -123,6 +123,8 @@ pub(crate) mod tests {
     pub(crate) const NEAR: &str = "yggdrasix";
     /// `INSTANCE` whole, with more after it.
     pub(crate) const PREFIXED: &str = "yggdrasil-two";
+    /// `INSTANCE` in another case, which a slug label permits.
+    pub(crate) const CASED: &str = "Yggdrasil";
     pub(crate) const CAMPAIGN: &str = "eureka-state";
 
     pub(crate) fn slug(value: &str) -> Slug {
@@ -455,14 +457,17 @@ pub(crate) mod tests {
         let history = HuginnMindRequest::History { instance: slug(OTHER), scope };
         assert_eq!(daemon.handle(history, now()), HuginnMindResponse::Refused(foreign));
 
-        // Two names a comparison could mistake for this mind's. `NEAR` is
+        // Three names a comparison could mistake for this mind's. `NEAR` is
         // `INSTANCE`'s own length and differs in its last byte, so a check
         // reading lengths, first bytes, or running only when the declared name
         // is longer admits it; `PREFIXED` carries `INSTANCE` whole, so a prefix
-        // test admits it. Both are refused on the read side and the write side.
+        // test admits it; `CASED` is `INSTANCE` in another case, which a slug
+        // label permits, so a check folding case admits it. Each is refused on
+        // the read side and the write side.
         assert_eq!(NEAR.len(), INSTANCE.len());
         assert!(PREFIXED.starts_with(INSTANCE));
-        for declared in [NEAR, PREFIXED] {
+        assert_eq!(CASED.to_ascii_lowercase(), INSTANCE);
+        for declared in [NEAR, PREFIXED, CASED] {
             let refusal = MindRefusal::ForeignInstance { declared: declared.into(), mind: INSTANCE.into() };
             let query = HuginnMindRequest::Query { instance: slug(declared), query: PipelineQuery::default() };
             assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(refusal.clone()), "{declared}");

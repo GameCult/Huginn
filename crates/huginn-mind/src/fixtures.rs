@@ -30,6 +30,11 @@ pub(crate) const NEAR_INSTANCE: &str = "yggdrasix";
 /// A foreign instance carrying `INSTANCE` whole as its prefix, so a prefix
 /// test admits it.
 pub(crate) const PREFIXED_INSTANCE: &str = "yggdrasil-two";
+/// A foreign instance differing from `INSTANCE` in case alone. A slug label is
+/// `[A-Za-z0-9_-]{1,64}`, so this is a name a client may declare and a mind
+/// may hold: two minds whose names differ only in case are two minds, and a
+/// comparison that folds case answers one of them for the other.
+pub(crate) const CASED_INSTANCE: &str = "Yggdrasil";
 pub(crate) const CAMPAIGN: &str = "eureka-state";
 pub(crate) const REPO: &str = "GameCult/Epiphany";
 pub(crate) const OTHER_REPO: &str = "GameCult/Huginn";

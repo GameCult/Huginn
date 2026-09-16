@@ -411,10 +411,14 @@ mod tests {
     /// its last byte, so a check reading only the lengths, only the first byte,
     /// or running only when the declared name is longer lets it through;
     /// `PREFIXED_INSTANCE` has the mind's whole name as its prefix, so a check
-    /// asking whether one starts with the other lets that one through.
+    /// asking whether one starts with the other lets that one through; and
+    /// `CASED_INSTANCE` differs in case alone, which a slug label permits, so a
+    /// check folding case answers for a mind that is not this one.
     #[test]
     fn require_instance_is_the_one_check_admission_and_the_daemon_share() {
-        use crate::fixtures::{NEAR_INSTANCE, OTHER_INSTANCE, PREFIXED_INSTANCE, now, provenance, seeded};
+        use crate::fixtures::{
+            CASED_INSTANCE, NEAR_INSTANCE, OTHER_INSTANCE, PREFIXED_INSTANCE, now, provenance, seeded,
+        };
         use crate::receipt::Faculty;
 
         let mut mind = seeded();
@@ -425,7 +429,9 @@ mod tests {
         assert_eq!(NEAR_INSTANCE.len(), INSTANCE.len(), "the near name is the mind's own length");
         assert_eq!(NEAR_INSTANCE[..INSTANCE.len() - 1], INSTANCE[..INSTANCE.len() - 1], "and differs in one byte");
         assert!(PREFIXED_INSTANCE.starts_with(INSTANCE), "the prefixed name carries the mind's whole name");
-        for declared in [NEAR_INSTANCE, PREFIXED_INSTANCE] {
+        assert_eq!(CASED_INSTANCE.to_ascii_lowercase(), INSTANCE, "the cased name differs in case alone");
+        assert_ne!(CASED_INSTANCE, INSTANCE);
+        for declared in [NEAR_INSTANCE, PREFIXED_INSTANCE, CASED_INSTANCE] {
             assert_eq!(
                 mind.require_instance(&slug(declared)).err(),
                 Some(MindRefusal::ForeignInstance { declared: declared.into(), mind: INSTANCE.into() }),
