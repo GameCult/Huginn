@@ -1,74 +1,47 @@
 # Huginn
 
-Huginn reads CultCache `.cc` state and emits Eve DSL for inspectable witness
-surfaces.
-
-CultLib owns the CultCache implementation: document registration, MessagePack
-payloads, schema catalogs, backing stores, and the canonical
-`cultcache.store.v1` snapshot parser/writer. Huginn consumes CultLib's
-`cultcache-ts/inspection` surface and projects inspection results into UI
-documents that Eve-capable runtimes can lower.
+Huginn is the GameCult memory organ. It owns each agent instance's mind as
+typed state: what an instance remembers, which of that memory is admitted to
+steer its next action, and the provenance of every admitted claim.
 
 Upstream: `https://github.com/GameCult/Huginn.git`
 
 ## Authority
 
-- Owner: Huginn owns `.cc` inspection projection, not `.cc` persistence.
-- Input: `.cc`, `.msgpack`, or `.mpack` bytes readable by CultLib.
-- Output: Eve DSL for `cultcache.huginn.inspector`.
-- Renderers: browser, native, overlay, TUI, or future rooms lower the emitted
-  DSL without becoming state owners.
+- An instance owns its mind; Huginn owns the state. Huginn is the single
+  writer of an instance's memory documents. No other service, script, or agent
+  writes them.
+- Memory documents are CultCache `.cc` state. Huginn persists them through
+  CultLib's Rust runtime and publishes them as typed documents over CultNet.
+- Huginn depends on Qdrant directly for retrieval. When Qdrant is unreachable
+  Huginn refuses loudly; it does not fall back to a second store or a second
+  writer.
+- Mind state is not version-controlled. It lives in Huginn's store, not in
+  any repository.
 
-There is no Electron app, Vite dashboard, React renderer, or Norn-owned
-presentation path in this repo. If a runtime wants to display Huginn, it should
-consume the emitted Eve DSL.
+Generic `.cc` inspection is not Huginn's job. CultCache Studio inspects and
+edits `.cc` state. Huginn reads and writes minds.
 
-## Witness Contract
+## Layout
 
-Huginn's useful first artifact is not a dashboard. It is a read-only specimen
-tray for typed state:
+A Cargo workspace of three crates:
 
-- which file was inspected
-- which CultCache format decoded
-- which schema/catalog entry owns each record
-- what payload preview survived decoding
-- which failure state stayed visible instead of being polished away
+- `crates/huginn-mind`: storage, identity, and admission of memory documents.
+- `crates/huginn-daemon`: the CultNet surface and serve loop.
+- `crates/eureka-state`: typed state for the Eureka pipeline.
 
-The inspector may make evidence easier to read. It must not mutate canonical
-bytes, bless missing schemas, or let a renderer become the source of truth.
-
-## CLI
-
-```sh
-npm install
-npm run build
-npx huginn path/to/state.cc > huginn.eve
-```
-
-The CLI writes Eve DSL to stdout and errors to stderr.
-
-## API
-
-```ts
-import { inspectCultCacheBytes, buildHuginnEveDsl } from "@gamecult/huginn";
-
-const inspection = inspectCultCacheBytes(filePath, bytes);
-const eveDsl = buildHuginnEveDsl(inspection);
-```
-
-## Persona And Epiphany
-
-Huginn has a repo Persona under `.voidbot/voice`. The Persona's current
-jurisdiction is this repository body, `E:\Projects\Huginn`, and its useful
-pressure is simple: return from the world with evidence, not vibes.
-
-Epiphany wiring has been smoke-tested through the repo front doors:
+The crates are stubs. Each cut of the Eureka pipeline-state campaign fills one
+in; the campaign's cut map in `Epiphany/notes/eureka-pipeline-state-cut.md`
+owns what each crate must do next.
 
 ```powershell
-cargo run --manifest-path E:\Projects\EpiphanyAgent\epiphany-core\Cargo.toml --bin epiphany-repo -- init --workspace E:\Projects\Huginn
-cargo run --manifest-path E:\Projects\EpiphanyAgent\epiphany-core\Cargo.toml --bin epiphany-swarm -- online --workspace E:\Projects\Huginn
+cargo check --workspace
 ```
 
-Live fire should happen on an `epiphany/*` or `codex/*` workbench branch.
-Publication to `main` remains a maintainer/Bifrost decision, not something the
-inspection projection owns.
+## Persona
+
+Huginn's legacy repo Persona lives under `.voidbot/`. Its `state/huginn.cc`
+holds legacy `void.*` documents and its `voice/identity.json` names the
+Persona. The two disagree about jurisdiction; that migration belongs to the
+portable-Persona work, not to this workspace, and nothing here reads or writes
+`.voidbot/`.
