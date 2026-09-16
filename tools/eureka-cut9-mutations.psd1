@@ -15,19 +15,23 @@
 # breaks it for the views. V1L is H41's own edit, listed here as well as in
 # `eureka-cut8-mutations.psd1` -- one mutant, two suites, one owner.
 #
-# Three weakenings the spec names have no entry because they change no
-# behaviour this Body can reach, and a mutation that cannot fail is not a
-# proof:
+# One weakening the spec names has no entry because it changes no behaviour
+# this Body can reach, and a mutation that cannot fail is not a proof:
 #
-# - The `semantic` check moved below the filters. It still refuses every query
-#   that carries one; only the work done before the refusal changes.
-# - `resolutions_of` comparing a subject by `id` and ignoring `kind`. A
-#   pipeline id carries its own kind segment and the leaf refuses a
-#   `PipelineRef` whose kind and id disagree, so no two subjects of different
-#   kinds can share an id.
 # - `assignments_of` comparing the repo and ignoring the instance. A5 refuses
 #   a stewardship naming another instance, so every stewardship a mind holds
-#   already names that mind.
+#   already names that mind, and every other caller is a sequence this mind
+#   derives over its own scope.
+#
+# The two listed beside it in the spec are failable and have entries. The
+# `semantic` check below `Reader::new` changes the answer for a store the
+# reader refuses -- a doubled receipt, a row that does not decode -- from the
+# semantic refusal to the integrity one, and `V8L` is that move. And
+# `resolutions_of` comparing a subject by `id` alone is reachable because the
+# read side never validates the `PipelineRef` it is handed: the leaf's
+# validator is not public at the pinned rev, so `history(Subject(ref))` and
+# `view(ref)` take a ref whose kind and id disagree and answer over it. `V10L`
+# is that comparison.
 @{
     Mutations = @(
         @{
@@ -182,6 +186,28 @@
 '@
         }
         @{
+            Id   = 'V8L'
+            Rule = 'The semantic refusal is decided before the image and the receipts are read, so a store the reader refuses still answers the question the caller asked.'
+            Test = 'query::tests::semantic_query_refuses_typed_until_wired'
+            File = 'crates/huginn-mind/src/query.rs'
+            Old  = @'
+        if query.semantic.is_some() {
+            return Err(MindRefusal::Unavailable {
+                detail: "semantic query: the index is not wired (Cut 11)".into(),
+            });
+        }
+        let reader = Reader::new(self)?;
+'@
+            New  = @'
+        let reader = Reader::new(self)?;
+        if query.semantic.is_some() {
+            return Err(MindRefusal::Unavailable {
+                detail: "semantic query: the index is not wired (Cut 11)".into(),
+            });
+        }
+'@
+        }
+        @{
             Id   = 'V9'
             Rule = 'History is in the scope''s own sequence order, not the image''s key order.'
             Test = 'query::tests::a_subjects_history_lists_every_resolution_with_its_status_and_receipt'
@@ -202,6 +228,14 @@
                     .resolutions()
                     .map(|(key, resolution)| { let _ = subject; (resolution.sequence, key.to_string()) })
 '@
+        }
+        @{
+            Id   = 'V10L'
+            Rule = 'A subject is selected by the whole ref, kind included: the read side validates no ref it is handed, so a kind that disagrees with its id selects nothing rather than that id''s records.'
+            Test = 'query::tests::a_subjects_history_lists_every_resolution_with_its_status_and_receipt'
+            File = 'crates/huginn-mind/src/docs.rs'
+            Old  = '        self.resolutions().filter(move |(_, resolution)| resolution.subject == *subject)'
+            New  = '        self.resolutions().filter(move |(_, resolution)| resolution.subject.id == subject.id)'
         }
         @{
             Id   = 'V11'
@@ -232,6 +266,14 @@
             File = 'crates/huginn-mind/src/query.rs'
             Old  = '            specs_without_report: in_force(PipelineKind::CutSpec)'
             New  = '            specs_without_report: of_kind(PipelineKind::CutSpec).cloned().collect::<Vec<_>>()'
+        }
+        @{
+            Id   = 'V13L'
+            Rule = 'A spec is reported by a report naming its exact id, not by any report of its cut: a report of the revision this one superseded is not this revision''s report.'
+            Test = 'query::tests::open_items_are_derived_from_in_force_and_citation'
+            File = 'crates/huginn-mind/src/query.rs'
+            Old  = '                .filter(|view| !reported.contains(&view.id.id.0.as_str()))'
+            New  = '                .filter(|view| !reported.iter().any(|cited| root_and_local(cited).1.split(''.'').next() == root_and_local(&view.id.id.0).1.split(''.'').next()))'
         }
         @{
             Id   = 'V14'

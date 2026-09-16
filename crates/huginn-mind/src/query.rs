@@ -552,6 +552,14 @@ mod tests {
             id("resolution", "resolution.question.Q1.n1.n1")
         ]);
 
+        // The scope is the whole ref, kind included: a subject whose kind
+        // disagrees with its id is a subject this mind has no resolution of,
+        // even though the id names one with ten. The read side does not
+        // validate the ref it is handed -- the leaf's validator is not public
+        // at the pinned rev -- so a malformed scope is an empty history rather
+        // than a typed refusal.
+        assert!(mind.history(&HistoryScope::Subject(r(K::Ruling, &q1))).unwrap().is_empty());
+
         // History lands one record per batch (Cut 12's import constraint), so
         // ten records carry ten receipts.
         let receipts = history.iter().map(|entry| entry.admission.receipt_id.clone()).collect::<BTreeSet<_>>();
@@ -882,11 +890,21 @@ mod tests {
         committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A"), question("Q2", &["A", "B"], "A")]));
         committed(admit(&mut mind, vec![answering("R1", &q2)]));
 
-        // cut-9: a superseded r1 and an r2 with no report.
+        // cut-9: a superseded r1 with a report of its own, and an r2 with none.
+        // The citation is the exact spec and not its cut, so r2 is open work
+        // while the cut it belongs to has been reported.
         committed(admit(&mut mind, vec![D::CutSpec(cut_spec("9", 1))]));
+        committed(admit(&mut mind, vec![D::CutReport(cut_report("9", 1))]));
         committed(admit(&mut mind, vec![
             D::CutSpec(cut_spec("9", 2)),
             resolution(r(K::CutSpec, &id("cut_spec", "cut-9.r1")), superseded(&[r(K::CutSpec, &id("cut_spec", "cut-9.r2"))])),
+        ]));
+        // cut-12: a superseded r1 and an r2, neither reported, so standing is
+        // still what decides which of the two is open work.
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("12", 1))]));
+        committed(admit(&mut mind, vec![
+            D::CutSpec(cut_spec("12", 2)),
+            resolution(r(K::CutSpec, &id("cut_spec", "cut-12.r1")), superseded(&[r(K::CutSpec, &id("cut_spec", "cut-12.r2"))])),
         ]));
         // cut-10: a spec with a report, and that report with no verdict.
         committed(admit(&mut mind, vec![D::CutSpec(cut_spec("10", 1))]));
@@ -916,21 +934,29 @@ mod tests {
         assert_eq!(ids(&open.follow_ups), vec![id("follow_up", "FU-1")]);
         assert_eq!(
             ids(&open.specs_without_report),
-            vec![id("cut_spec", "cut-9.r2")],
-            "a superseded revision is not open, and a spec with a report is not either"
+            vec![id("cut_spec", "cut-12.r2"), id("cut_spec", "cut-9.r2")],
+            "a superseded revision is not open, a spec with a report is not either, and the report of the \
+             revision it superseded is not this revision's"
         );
         assert_eq!(
             ids(&open.reports_without_verdict),
-            vec![id("cut_report", "cut-10.h1"), id("cut_report", "cut-11.h2")],
+            vec![id("cut_report", "cut-10.h1"), id("cut_report", "cut-11.h2"), id("cut_report", "cut-9.h1")],
             "a report is not resolvable, so only the verdict that names it, exactly, closes it"
         );
     }
 
-    /// D5: `semantic` is refused typed, before any filter runs, and never
-    /// answered with an empty page that reads like "nothing matched".
+    /// D5: `semantic` is refused typed, before the image or the receipts are
+    /// read, and never answered with an empty page that reads like "nothing
+    /// matched". Where the check sits is the rule: below the reader, a store
+    /// the reader refuses would answer the integrity fault instead, which is
+    /// not what the caller asked about.
     #[test]
     fn semantic_query_refuses_typed_until_wired() {
-        let mind = seeded();
+        let store = MemoryStore::new();
+        let mut mind = opened(store.clone(), INSTANCE);
+        seed(&mut mind);
+        let q1 = id("question", "Q1");
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
         let query = PipelineQuery {
             campaign: Some(slug(CAMPAIGN)),
             repo: Some(repo(REPO)),
@@ -943,11 +969,35 @@ mod tests {
             limit: Some(10),
             semantic: Some(SemanticQuery { text: "what did we rule about keys".into(), top_k: 5 }),
         };
+        let unwired = MindRefusal::Unavailable { detail: "semantic query: the index is not wired (Cut 11)".into() };
+        assert_eq!(mind.query(&query).err(), Some(unwired.clone()));
+        assert!(mind.query(&PipelineQuery { semantic: None, ..query.clone() }).is_ok());
+
+        // Two receipts naming one write is a store the reader refuses to build
+        // over at all. The semantic refusal still lands, because it is decided
+        // before the image and the receipts are read.
+        let doubled = MemoryStore::new();
+        for row in store.rows() {
+            doubled.plant(row);
+        }
+        let forged = crate::receipt::candidate(
+            &slug(INSTANCE),
+            provenance(Faculty::Soul),
+            &[],
+            &[prepare(&question("Q1", &["A", "B"], "A")), prepare(&question("Q8", &["A", "B"], "A"))],
+            now(),
+        )
+        .unwrap();
+        doubled.plant(schema_cache().unwrap().prepare_entry_named(&forged.receipt_id, &forged).unwrap().0);
+        let unreadable = opened(doubled, INSTANCE);
         assert_eq!(
-            mind.query(&query).err(),
-            Some(MindRefusal::Unavailable { detail: "semantic query: the index is not wired (Cut 11)".into() })
+            unreadable.query(&PipelineQuery::default()).err(),
+            Some(MindRefusal::Unavailable {
+                detail: format!("document {}/{q1} is written by two receipts", K::Question.type_id()),
+            }),
+            "the reader refuses this store"
         );
-        assert!(mind.query(&PipelineQuery { semantic: None, ..query }).is_ok());
+        assert_eq!(unreadable.query(&query).err(), Some(unwired), "and the semantic refusal precedes reading it");
     }
 
     /// D4 and D8: `view` is the typed one-document read with its facts, and an
