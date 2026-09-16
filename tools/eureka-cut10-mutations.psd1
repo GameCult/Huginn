@@ -290,6 +290,14 @@
 '@
         }
         @{
+            Id   = 'D21L'
+            Rule = 'It echoes the client''s own correlation key, so a refusal can be matched to the request that earned it.'
+            Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = '    encode_or_fail(message_id, operation, &refusal, runtime_id)'
+            New  = '    encode_or_fail("response-too-large", operation, &refusal, runtime_id)'
+        }
+        @{
             Id   = 'D22'
             Rule = 'The window the gate measures against is the window the hub carries: a smaller one sends nothing and says nothing.'
             Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
