@@ -330,8 +330,35 @@ pub(crate) fn opened<S: MindStore>(store: S, instance: &str) -> Mind<S> {
 
 /// Admits as Hands at the fixed clock.
 pub(crate) fn admit<S: MindStore>(mind: &mut Mind<S>, documents: Vec<PipelineDocument>) -> PipelineAdmissionOutcome {
+    admit_at(mind, documents, now())
+}
+
+/// Admits as Hands at the clock the caller names: the views order by the
+/// receipt's `committed_at`, which is this `now`.
+pub(crate) fn admit_at<S: MindStore>(
+    mind: &mut Mind<S>,
+    documents: Vec<PipelineDocument>,
+    now: DateTime<Utc>,
+) -> PipelineAdmissionOutcome {
     let batch = PipelineAdmissionBatch { instance: mind.instance().clone(), provenance: provenance(Faculty::Hands), documents };
+    mind.admit(batch, now)
+}
+
+/// Admits as another faculty at the fixed clock: attribution the views filter
+/// on and no rule reads (ruling 18).
+pub(crate) fn admit_as<S: MindStore>(
+    mind: &mut Mind<S>,
+    faculty: Faculty,
+    documents: Vec<PipelineDocument>,
+) -> PipelineAdmissionOutcome {
+    let batch = PipelineAdmissionBatch { instance: mind.instance().clone(), provenance: provenance(faculty), documents };
     mind.admit(batch, now())
+}
+
+/// The `n`th plain question, for the tests that need more of them than they
+/// need to tell apart.
+pub(crate) fn question_n(n: u32) -> PipelineDocument {
+    question(&format!("Q{n}"), &["A", "B"], "A")
 }
 
 /// The first write into a fresh yggdrasil mind: its identity, stewardship of

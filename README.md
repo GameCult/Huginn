@@ -28,7 +28,8 @@ edits `.cc` state. Huginn reads and writes minds.
 
 A Cargo workspace of three crates:
 
-- `crates/huginn-mind`: storage, identity, and admission of memory documents.
+- `crates/huginn-mind`: storage, identity, admission, and queries and derived
+  status over memory documents.
 - `crates/huginn-daemon`: a stub. It will carry the CultNet surface and serve
   loop; today it holds neither.
 - `crates/eureka-state`: a stub. It will carry typed state for the Eureka
@@ -43,8 +44,12 @@ keys, then the organ's cross-document rules (references, in-force status,
 the resolution matrix, derived resolutions and stewardships), then one
 compare-and-swap that lands the batch whole with a receipt naming the exact
 bytes it read and wrote. An exact replay answers with the stored receipt.
-Document shape and keys come from `epiphany-pipeline`; the store is CultLib's
-Rust CultCache.
+It reads them back the same way: a document with the facts of its admission
+joined from that receipt and its status derived at read time, typed queries
+over one mind, a campaign's open work, and a subject's or a repo's history.
+Status is never stored, and the views derive it through the same rules
+admission does. Document shape and keys come from `epiphany-pipeline`; the
+store is CultLib's Rust CultCache.
 `huginn-daemon` and `eureka-state` are stubs; the
 campaign's cut map in `Epiphany/notes/eureka-pipeline-state-cut.md` owns what
 each crate must do next.

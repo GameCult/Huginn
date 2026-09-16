@@ -10,6 +10,9 @@
 //! cross-document rule, every derived write, and the replay check, in one
 //! ordered path that `admit`, the daemon's sink and the hand-off all share.
 //!
+//! The read side derives status, joins the receipts and answers typed queries
+//! through the same `docs` the rules use; nothing is stored for it.
+//!
 //! Document shape, bounds, formats and keys are `epiphany-pipeline`'s; the
 //! organ registers, prepares, decodes and validates through the leaf's four
 //! doors and never re-derives a key. The store is CultLib's owned redb
@@ -20,6 +23,7 @@
 pub mod admission;
 mod docs;
 pub mod mind;
+pub mod query;
 pub mod receipt;
 pub mod refusal;
 pub mod store;
@@ -29,6 +33,10 @@ pub(crate) mod fixtures;
 
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
 pub use mind::{HuginnMindEpoch, Mind};
+pub use query::{
+    AdmissionFacts, HistoryScope, PipelineDocumentView, PipelineOpenItems, PipelineQuery, PipelineQueryPage,
+    PipelineStatus, QUERY_LIMIT_MAX, SemanticQuery,
+};
 pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
 pub use refusal::MindRefusal;
 pub use store::MindStore;

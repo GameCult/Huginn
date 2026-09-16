@@ -14,10 +14,12 @@ Studio's job, not Huginn's.
 - Body: a Rust workspace of `huginn-mind`, `huginn-daemon`, and
   `eureka-state` under `crates/`. Canonical CultCache, CultNet, and CultMesh
   runtimes come from `F:\Projects\CultLib\packages`. `huginn-mind` is live:
-  it persists and admits an instance's mind, over `cultcache-rs` and
-  `epiphany-pipeline` pinned by git rev. `huginn-daemon` and `eureka-state`
+  it persists, admits and reads back an instance's mind, queries and derived
+  status included, over `cultcache-rs` and `epiphany-pipeline` pinned by git
+  rev. `huginn-daemon` and `eureka-state`
   are stubs with no dependencies; nothing here publishes or connects yet.
-- Owned: an instance's memory documents and their admission, in `huginn-mind`,
+- Owned: an instance's memory documents, their admission and the read side
+  that derives their status, in `huginn-mind`,
   over a redb CultCache store at `<state_root>/minds/<instance>/mind.redb`.
   Their CultNet publication is owned here and not built; `huginn-daemon` is a
   stub.

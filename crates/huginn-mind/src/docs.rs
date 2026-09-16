@@ -181,6 +181,12 @@ impl Docs {
         })
     }
 
+    /// The resolution that closes the document, if any: the views' status,
+    /// derived where admission derives whether there is one at all.
+    pub(crate) fn closing_resolution(&self, kind: PipelineKind, id: &str) -> Option<(&str, &PipelineResolution)> {
+        self.closing_resolution_unless(kind, id, |_| false)
+    }
+
     /// Every in-force stewardship of `(mind, repo)`, ignoring the withdrawal
     /// `hand_off_key` derives. The stewardship row holds one in force at a
     /// time, but that exclusion can put a second back in the list: the one a
