@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 /// formats, key identity, foreign type); the rest are the organ's: store
 /// identity, epoch, ownership, batch shape, references, and every cross-field
 /// and cross-document rule of admission.
+///
+/// The two sequenced kinds refuse in the same pair of shapes: an
+/// `OutOfSequence` when the writer's `sequence` is not the previous plus one,
+/// and `AlreadyResolved`/`AlreadyStewarded` when a record of that scope is
+/// still in force.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum MindRefusal {
     Document(
@@ -26,6 +31,9 @@ pub enum MindRefusal {
     IdentityCollision { kind: PipelineKind, id: String },
     MissingReference { kind: PipelineKind, id: String },
     AlreadyResolved { subject: String },
+    ResolutionOutOfSequence { subject: String, expected: u32, actual: u32 },
+    AlreadyStewarded { repo: String },
+    StewardshipOutOfSequence { repo: String, expected: u32, actual: u32 },
     IncompatibleResolution { subject_kind: PipelineKind, outcome: String },
     CitesResolvedDocument { kind: PipelineKind, id: String },
     EmptySupersession,

@@ -22,8 +22,9 @@
 //!
 //! Every cross-field and cross-document rule lives here and nowhere else:
 //! the leaf never gains one, the daemon and the client never re-derive one.
-//! "In force" means no resolution names the document in image or batch; it
-//! is computed at rule time and never stored.
+//! "In force" is recursive: a document is in force when no resolution that is
+//! itself in force names it, so a withdrawn resolution stops closing its
+//! subject. It is computed at rule time over image and batch, never stored.
 
 use std::collections::BTreeSet;
 
@@ -245,42 +246,80 @@ impl Docs {
         batch.chain(image)
     }
 
-    fn resolutions(&self) -> impl Iterator<Item = &PipelineResolution> {
-        self.of_kind(PipelineKind::Resolution).filter_map(|(_, document)| match document {
-            PipelineDocument::Resolution(resolution) => Some(resolution),
+    fn resolutions(&self) -> impl Iterator<Item = (&str, &PipelineResolution)> {
+        self.of_kind(PipelineKind::Resolution).filter_map(|(key, document)| match document {
+            PipelineDocument::Resolution(resolution) => Some((key, resolution)),
             _ => None,
         })
     }
 
-    /// No resolution in image or batch names the document.
+    fn stewardships(&self) -> impl Iterator<Item = (&str, &PipelineStewardship)> {
+        self.of_kind(PipelineKind::Stewardship).filter_map(|(key, document)| match document {
+            PipelineDocument::Stewardship(stewardship) => Some((key, stewardship)),
+            _ => None,
+        })
+    }
+
+    /// The greatest sequence among a subject's resolutions in image or batch,
+    /// `0` when it has none, so the next is `latest + 1`. `own` is the
+    /// document being checked, excluded by content identity so that an exact
+    /// replay measures the same `latest` the first admission did.
+    fn latest_resolution(&self, subject: &PipelineRef, own: Option<&PipelineResolution>) -> u32 {
+        self.resolutions()
+            .filter(|(_, resolution)| resolution.subject == *subject && own != Some(*resolution))
+            .map(|(_, resolution)| resolution.sequence)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The same for a repo's assignments to one mind.
+    fn latest_stewardship(&self, mind: &Slug, repo: &OrgRepo, own: Option<&PipelineStewardship>) -> u32 {
+        self.stewardships()
+            .filter(|(_, stewardship)| stewardship.instance == *mind && stewardship.repo == *repo && own != Some(*stewardship))
+            .map(|(_, stewardship)| stewardship.sequence)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// No resolution that is itself in force names the document. The
+    /// recursion is the whole rule: a withdrawn resolution stops counting, so
+    /// its subject is open again. `key(R)` is strictly longer than the id it
+    /// resolves, so the chain is bounded and this terminates.
     fn in_force(&self, kind: PipelineKind, id: &str) -> bool {
         self.in_force_unless(kind, id, |_| false)
     }
 
-    /// In force, ignoring a resolution the caller's own document derives:
-    /// the ruling that answers a question is what resolves it, and the
-    /// hand-off that withdraws a stewardship is what resolves that.
-    fn in_force_unless(&self, kind: PipelineKind, id: &str, own: impl Fn(&ResolutionOutcome) -> bool) -> bool {
-        !self
-            .resolutions()
-            .any(|resolution| resolution.subject.kind == kind && resolution.subject.id.0 == id && !own(&resolution.outcome))
+    /// In force, ignoring a resolution the caller's own document is or
+    /// derives: the ruling that answers a question is what resolves it, the
+    /// hand-off that withdraws a stewardship is what resolves that, and a
+    /// resolution does not resolve its own subject out from under itself.
+    fn in_force_unless(&self, kind: PipelineKind, id: &str, own: impl Fn(&PipelineResolution) -> bool) -> bool {
+        !self.resolutions().any(|(key, resolution)| {
+            resolution.subject.kind == kind
+                && resolution.subject.id.0 == id
+                && !own(resolution)
+                && self.in_force(PipelineKind::Resolution, key)
+        })
     }
 
-    /// The in-force stewardship of `(mind, repo)`, if any, ignoring the
-    /// withdrawal `hand_off_key` derives.
-    fn stewardship_of(&self, mind: &Slug, repo: &OrgRepo, hand_off_key: Option<&str>) -> Option<(&str, &PipelineStewardship)> {
-        self.of_kind(PipelineKind::Stewardship).find_map(|(key, document)| match document {
-            PipelineDocument::Stewardship(stewardship)
-                if stewardship.instance == *mind
+    /// Every in-force stewardship of `(mind, repo)`, ignoring the withdrawal
+    /// `hand_off_key` derives. At most one is in force once the stewardship
+    /// row holds, which is why `stewardship_of` needs no tie-break.
+    fn stewardships_of(&self, mind: &Slug, repo: &OrgRepo, hand_off_key: Option<&str>) -> Vec<(&str, &PipelineStewardship)> {
+        self.stewardships()
+            .filter(|(key, stewardship)| {
+                stewardship.instance == *mind
                     && stewardship.repo == *repo
-                    && self.in_force_unless(PipelineKind::Stewardship, key, |outcome| {
-                        matches!(outcome, ResolutionOutcome::Withdrawn { reason } if Some(reason.0.as_str()) == hand_off_key)
-                    }) =>
-            {
-                Some((key, stewardship))
-            }
-            _ => None,
-        })
+                    && self.in_force_unless(PipelineKind::Stewardship, key, |resolution| {
+                        matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { reason } if Some(reason.0.as_str()) == hand_off_key)
+                    })
+            })
+            .collect()
+    }
+
+    /// The in-force stewardship of `(mind, repo)`, if any.
+    fn stewardship_of(&self, mind: &Slug, repo: &OrgRepo, hand_off_key: Option<&str>) -> Option<(&str, &PipelineStewardship)> {
+        self.stewardships_of(mind, repo, hand_off_key).first().copied()
     }
 }
 
@@ -422,8 +461,10 @@ fn derive(docs: &Docs, mind: &Slug) -> Vec<PipelineDocument> {
         match &staged.document {
             D::Ruling(ruling) => {
                 if let Some(question) = &ruling.answers {
+                    let subject = PipelineRef { kind: K::Question, id: question.clone() };
                     derived.push(D::Resolution(PipelineResolution {
-                        subject: PipelineRef { kind: K::Question, id: question.clone() },
+                        sequence: docs.latest_resolution(&subject, None) + 1,
+                        subject,
                         outcome: ResolutionOutcome::Answered { by: PipelineRef { kind: K::Ruling, id: Short(staged.key.clone()) } },
                         rationale: ruling.ruling.clone(),
                         resolved_on: ruling.ruled_on.clone(),
@@ -434,8 +475,10 @@ fn derive(docs: &Docs, mind: &Slug) -> Vec<PipelineDocument> {
                 if hand_off.from_instance == *mind
                     && let Some((stewardship_key, _)) = docs.stewardship_of(mind, &hand_off.repo, Some(&staged.key))
                 {
+                    let subject = PipelineRef { kind: K::Stewardship, id: Short(stewardship_key.to_string()) };
                     derived.push(D::Resolution(PipelineResolution {
-                        subject: PipelineRef { kind: K::Stewardship, id: Short(stewardship_key.to_string()) },
+                        sequence: docs.latest_resolution(&subject, None) + 1,
+                        subject,
                         outcome: ResolutionOutcome::Withdrawn { reason: Line(staged.key.clone()) },
                         rationale: hand_off.reason.clone(),
                         resolved_on: hand_off.handed_on.clone(),
@@ -444,6 +487,7 @@ fn derive(docs: &Docs, mind: &Slug) -> Vec<PipelineDocument> {
                 if hand_off.to_instance == *mind {
                     derived.push(D::Stewardship(PipelineStewardship {
                         instance: mind.clone(),
+                        sequence: docs.latest_stewardship(mind, &hand_off.repo, None) + 1,
                         repo: hand_off.repo.clone(),
                         assigned_on: hand_off.handed_on.clone(),
                         note: Line(staged.key.clone()),
@@ -493,8 +537,8 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             let Some(D::Question(question)) = docs.find(K::Question, &question_id.0) else {
                 return Err(MindRefusal::MissingReference { kind: K::Question, id: question_id.0.clone() });
             };
-            let own = |outcome: &ResolutionOutcome| {
-                matches!(outcome, ResolutionOutcome::Answered { by } if by.kind == K::Ruling && by.id.0 == key)
+            let own = |resolution: &PipelineResolution| {
+                matches!(&resolution.outcome, ResolutionOutcome::Answered { by } if by.kind == K::Ruling && by.id.0 == key)
             };
             if !docs.in_force_unless(K::Question, &question_id.0, own) {
                 return Err(MindRefusal::AlreadyResolved { subject: question_id.0.clone() });
@@ -589,13 +633,27 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             Ok(())
         }
         D::Resolution(resolution) => resolution_rule(docs, resolution),
+        D::Stewardship(stewardship) => {
+            let expected = docs.latest_stewardship(&stewardship.instance, &stewardship.repo, Some(stewardship)) + 1;
+            if stewardship.sequence != expected {
+                return Err(MindRefusal::StewardshipOutOfSequence {
+                    repo: stewardship.repo.0.clone(),
+                    expected,
+                    actual: stewardship.sequence,
+                });
+            }
+            if docs.stewardships_of(mind, &stewardship.repo, None).iter().any(|(other, _)| *other != key) {
+                return Err(MindRefusal::AlreadyStewarded { repo: stewardship.repo.0.clone() });
+            }
+            Ok(())
+        }
         D::HandOff(hand_off) => {
             if hand_off.from_instance == *mind && docs.stewardship_of(mind, &hand_off.repo, Some(key)).is_none() {
                 return Err(MindRefusal::NotStewarded { repo: hand_off.repo.0.clone() });
             }
             Ok(())
         }
-        D::FollowUp(_) | D::Instance(_) | D::Stewardship(_) => Ok(()),
+        D::FollowUp(_) | D::Instance(_) => Ok(()),
     }
 }
 
@@ -648,9 +706,10 @@ fn outcome_name(outcome: &ResolutionOutcome) -> &'static str {
 /// A resolution is itself resolvable, by withdrawal alone: the operator's
 /// ruling on Q17 keeps a withdrawn resolution attached to its subject rather
 /// than erasing it, and a subject whose resolution is withdrawn may be
-/// resolved again. The second resolution needs a key the first does not
-/// already hold, which is a sequence in the leaf's resolution key and is
-/// mapped separately.
+/// resolved again at the next sequence, which the leaf's key now carries. The
+/// chain stops there: Q19 A caps it at depth two, in `resolution_rule`, since
+/// a withdrawal that could itself be withdrawn would leave two closures
+/// standing over one subject.
 fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
     use PipelineKind as K;
     use ResolutionOutcome as O;
@@ -676,9 +735,10 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
     fits
 }
 
-/// The resolution row: the matrix, a non-empty supersession, every referent
-/// in force, and the two coherence rules (an `Answered` ruling answers this
-/// question; a cut spec is superseded within its cut).
+/// The resolution row: the sequence, the in-force subject, the matrix, the
+/// Q19 cap, a non-empty supersession, every referent in force, and the two
+/// coherence rules (an `Answered` ruling answers this question; a cut spec is
+/// superseded within its cut).
 fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), MindRefusal> {
     use PipelineDocument as D;
     use PipelineKind as K;
@@ -687,8 +747,32 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
     if let ResolutionOutcome::Superseded { by } = &resolution.outcome && by.is_empty() {
         return Err(MindRefusal::EmptySupersession);
     }
+    // The sequence is the writer's and is checked against the image, as a
+    // revision is: the previous plus one, counting every record of this
+    // subject other than this document itself.
+    let expected = docs.latest_resolution(&resolution.subject, Some(resolution)) + 1;
+    if resolution.sequence != expected {
+        return Err(MindRefusal::ResolutionOutOfSequence {
+            subject: subject_id.into(),
+            expected,
+            actual: resolution.sequence,
+        });
+    }
+    // A8: a subject with a resolution still in force is closed. A withdrawn
+    // one is not in force, so the subject is open and this is its next record.
+    if !docs.in_force_unless(subject_kind, subject_id, |other| other == resolution) {
+        return Err(MindRefusal::AlreadyResolved { subject: subject_id.into() });
+    }
     let incompatible = || MindRefusal::IncompatibleResolution { subject_kind, outcome: outcome_name(&resolution.outcome).into() };
     if !matrix(subject_kind, &resolution.outcome) {
+        return Err(incompatible());
+    }
+    // Q19 A: the chain stops at depth two. A withdrawal cannot be withdrawn;
+    // to reinstate a closure, resolve the subject again at the next sequence.
+    if subject_kind == K::Resolution
+        && let Some(D::Resolution(subject)) = docs.find(K::Resolution, subject_id)
+        && subject.subject.kind == K::Resolution
+    {
         return Err(incompatible());
     }
     for referent in outcome_references(&resolution.outcome) {
@@ -718,16 +802,13 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
     Ok(())
 }
 
-/// A10: a write whose identity the image already holds. A resolution's key
-/// is outcome-invariant, so its collision means the subject is already
-/// resolved.
+/// A10: a write whose identity the image already holds. Every kind answers
+/// the same way now that a resolution key carries a sequence: the identity is
+/// taken. Whether a subject is closed is A8's question, not this one's.
 fn refuse_collisions(docs: &Docs) -> Result<(), MindRefusal> {
     for staged in &docs.batch {
         if docs.in_image(staged.kind, &staged.key).is_some() {
-            return Err(match &staged.document {
-                PipelineDocument::Resolution(resolution) => MindRefusal::AlreadyResolved { subject: resolution.subject.id.0.clone() },
-                _ => MindRefusal::IdentityCollision { kind: staged.kind, id: staged.key.clone() },
-            });
+            return Err(MindRefusal::IdentityCollision { kind: staged.kind, id: staged.key.clone() });
         }
     }
     Ok(())
@@ -797,7 +878,7 @@ mod tests {
         assert_ne!(Mind::path_for(root.path(), &slug(INSTANCE)), Mind::path_for(root.path(), &slug(OTHER_INSTANCE)));
         committed(admit(&mut yggdrasil, vec![instance(INSTANCE), stewardship(INSTANCE, REPO)]));
         committed(admit(&mut thought_cage, vec![instance(OTHER_INSTANCE)]));
-        let key = format!("{INSTANCE}:stewardship:GameCult_-Epiphany");
+        let key = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1");
         assert!(yggdrasil.envelope(K::Stewardship, &key).is_some());
         assert!(thought_cage.envelope(K::Stewardship, &key).is_none());
         assert_eq!(yggdrasil.envelopes().len(), 4);
@@ -973,15 +1054,24 @@ mod tests {
         assert_eq!(mind.get(K::Ruling, &id("ruling", "R8")).unwrap(), Some(D::Ruling(ruling("R8"))));
     }
 
+    /// A8: one resolution of a subject is in force at a time, and the next
+    /// record of that subject is the next sequence. The two rules are
+    /// separate refusals: a second closure at the right sequence is refused
+    /// because the first still stands, and one at a taken sequence is refused
+    /// before the question of standing arises.
     #[test]
-    fn subject_resolves_at_most_once() {
+    fn a_subject_with_a_resolution_in_force_refuses_another() {
         let mut mind = seeded();
         committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
         let subject = r(K::Question, &id("question", "Q1"));
         committed(admit(&mut mind, vec![resolution(subject.clone(), withdrawn())]));
         assert_eq!(
-            refusal(admit(&mut mind, vec![resolution(subject.clone(), ResolutionOutcome::Withdrawn { reason: "again".into() })])),
+            refusal(admit(&mut mind, vec![resolution_n(subject.clone(), 2, ResolutionOutcome::Withdrawn { reason: "again".into() })])),
             MindRefusal::AlreadyResolved { subject: id("question", "Q1") }
+        );
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(subject.clone(), ResolutionOutcome::Withdrawn { reason: "again".into() })])),
+            MindRefusal::ResolutionOutOfSequence { subject: id("question", "Q1"), expected: 2, actual: 1 }
         );
         let mut answering = ruling("R1");
         answering.answers = Some(s(&id("question", "Q1")));
@@ -1021,7 +1111,7 @@ mod tests {
         let spec_ref = r(K::CutSpec, &id("cut_spec", "cut-1.r1"));
         let finding_ref = r(K::Finding, &id("finding", "cut-1.s1.F1"));
         let follow_up_ref = r(K::FollowUp, &id("follow_up", "FU-1"));
-        let stewardship_ref = r(K::Stewardship, &format!("{INSTANCE}:stewardship:GameCult_-Epiphany"));
+        let stewardship_ref = r(K::Stewardship, &format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1"));
         let campaign_ref = r(K::Campaign, &id("campaign", "self"));
         let report_ref = r(K::CutReport, &id("cut_report", "cut-1.h1"));
         let verdict_ref = r(K::Verdict, &id("verdict", "cut-1.s1"));
@@ -1039,7 +1129,7 @@ mod tests {
         committed(admit(&mut world(), vec![resolution(stewardship_ref.clone(), withdrawn())]));
         let mut mind = world();
         committed(admit(&mut mind, vec![resolution(question_ref.clone(), withdrawn())]));
-        let nested = r(K::Resolution, &id("resolution", "question.Q1"));
+        let nested = r(K::Resolution, &id("resolution", "question.Q1.n1"));
         committed(admit(&mut mind, vec![resolution(nested.clone(), withdrawn())]));
 
         // Refused, one per kind, and every non-resolvable kind.
@@ -1129,10 +1219,10 @@ mod tests {
         );
         answering.choice = Some(l("A"));
         let (receipt_id, writes) = committed(admit(&mut mind, vec![D::Ruling(answering)]));
-        assert_eq!(writes, vec![r(K::Ruling, &id("ruling", "R1")), r(K::Resolution, &id("resolution", "question.Q1"))]);
+        assert_eq!(writes, vec![r(K::Ruling, &id("ruling", "R1")), r(K::Resolution, &id("resolution", "question.Q1.n1"))]);
         let receipt = mind.receipts().unwrap().into_iter().find(|receipt| receipt.receipt_id == receipt_id).unwrap();
         assert_eq!(receipt.writes.len(), 2);
-        let Some(D::Resolution(derived)) = mind.get(K::Resolution, &id("resolution", "question.Q1")).unwrap() else { panic!() };
+        let Some(D::Resolution(derived)) = mind.get(K::Resolution, &id("resolution", "question.Q1.n1")).unwrap() else { panic!() };
         assert_eq!(derived.outcome, ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) });
         let mut again = ruling("R2");
         again.answers = Some(s(&id("question", "Q1")));
@@ -1424,7 +1514,7 @@ mod tests {
     fn a_hand_off_derives_this_minds_side_only() {
         let key = format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.GameCult_-Epiphany.2026-09-16");
         let campaign_key = id("campaign", "self");
-        let stewardship_key = format!("{INSTANCE}:stewardship:GameCult_-Epiphany");
+        let stewardship_key = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1");
 
         let mut source = seeded();
         assert_eq!(
@@ -1445,7 +1535,7 @@ mod tests {
         let mut receiving = opened(MemoryStore::new(), OTHER_INSTANCE);
         committed(admit(&mut receiving, vec![instance(OTHER_INSTANCE)]));
         let (_, writes) = committed(admit(&mut receiving, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[&campaign_key])]));
-        let assigned = format!("{OTHER_INSTANCE}:stewardship:GameCult_-Epiphany");
+        let assigned = format!("{OTHER_INSTANCE}:stewardship:GameCult_-Epiphany.n1");
         assert_eq!(writes, vec![r(K::HandOff, &key), r(K::Stewardship, &assigned)]);
         let Some(D::Stewardship(derived)) = receiving.get(K::Stewardship, &assigned).unwrap() else { panic!() };
         assert_eq!(derived.note, Line(key.clone()));
@@ -1455,9 +1545,12 @@ mod tests {
         assert_eq!(derived.assigned_on, date());
         assert_eq!(source.envelope(K::HandOff, &key).map(|e| &e.payload), receiving.envelope(K::HandOff, &key).map(|e| &e.payload));
 
-        // A derived write passes A3-A7 like any other. A batch carrying its own
-        // stewardship of the repo collides with the derived one at A4, as a
-        // typed refusal, not as a duplicate identity the store complains about.
+        // A derived write passes A3-A7 and A8 like any other, and it counts as
+        // a record of its scope. A batch carrying its own assignment of the
+        // repo beside the hand-off is two assignments: the derived one takes
+        // the sequence after the batch's, and the batch's own is then out of
+        // sequence -- a typed refusal, not a duplicate identity the store
+        // complains about.
         let mut colliding = opened(MemoryStore::new(), OTHER_INSTANCE);
         committed(admit(&mut colliding, vec![instance(OTHER_INSTANCE)]));
         assert_eq!(
@@ -1465,15 +1558,16 @@ mod tests {
                 hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[]),
                 stewardship(OTHER_INSTANCE, REPO),
             ])),
-            MindRefusal::IdentityCollision { kind: K::Stewardship, id: assigned }
+            MindRefusal::StewardshipOutOfSequence { repo: REPO.into(), expected: 3, actual: 1 }
         );
     }
 
-    /// The key of the resolution of a stewardship: the subject's root, then
-    /// its kind and local.
+    /// The key of the first resolution of a stewardship: the subject's root,
+    /// then its kind and local -- the subject's own sequence included -- then
+    /// this resolution's own sequence.
     fn id_of(stewardship_key: &str) -> String {
         let (root, rest) = stewardship_key.split_once(':').unwrap();
-        format!("{root}:resolution:{}", rest.replace(':', "."))
+        format!("{root}:resolution:{}.n1", rest.replace(':', "."))
     }
 
     /// The second construction site of a receipt, deliberately: a receipt

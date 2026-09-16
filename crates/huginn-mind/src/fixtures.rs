@@ -98,9 +98,17 @@ pub(crate) fn instance(name: &str) -> PipelineDocument {
 }
 
 pub(crate) fn stewardship(instance: &str, repo_name: &str) -> PipelineDocument {
+    stewardship_n(instance, repo_name, 1)
+}
+
+/// A repo's `n`th assignment to a mind. The sequence is per `(instance,
+/// repo)` and the leaf keys it last, so `n2` is the record of a repo
+/// transferred away and taken back.
+pub(crate) fn stewardship_n(instance: &str, repo_name: &str, sequence: u32) -> PipelineDocument {
     PipelineDocument::Stewardship(PipelineStewardship {
         instance: slug(instance),
         repo: repo(repo_name),
+        sequence,
         assigned_on: date(),
         note: "assigned".into(),
     })
@@ -261,8 +269,16 @@ pub(crate) fn follow_up(label: &str, source: PipelineRef) -> PipelineDocument {
 }
 
 pub(crate) fn resolution(subject: PipelineRef, outcome: ResolutionOutcome) -> PipelineDocument {
+    resolution_n(subject, 1, outcome)
+}
+
+/// A subject's `n`th resolution. The sequence is per subject and the leaf
+/// keys it last, so a withdrawn closure stays under its subject and the next
+/// one is nameable.
+pub(crate) fn resolution_n(subject: PipelineRef, sequence: u32, outcome: ResolutionOutcome) -> PipelineDocument {
     PipelineDocument::Resolution(PipelineResolution {
         subject,
+        sequence,
         outcome,
         rationale: "Resolved.".into(),
         resolved_on: date(),
