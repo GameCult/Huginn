@@ -13,12 +13,16 @@
 //! payload bytes and their SHA-256. `committed_at` and `provenance` are not
 //! digested.
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use cultcache_rs::{CultCacheEnvelope, DatabaseEntry};
+use epiphany_pipeline::{PipelineKind, PipelineRef, Short, Slug};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::mind::{Mind, unavailable};
 use crate::refusal::MindRefusal;
+use crate::store::MindStore;
 
 pub const RECEIPT_SCHEMA_VERSION: &str = "huginn.mind_commit_receipt.v1";
 
@@ -136,6 +140,108 @@ impl HuginnCommitReceipt {
         }
         Ok(())
     }
+}
+
+/// How a commit ended. An exact replay is decided by admission before the
+/// commit is attempted, so it is not an exit of the primitive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CommitOutcome {
+    /// The batch and its receipt landed whole.
+    Committed(HuginnCommitReceipt),
+    /// The swap lost: a strong read changed underneath, or a write's identity
+    /// already existed. Named where the kind is a pipeline kind.
+    Conflict(Vec<PipelineRef>),
+}
+
+/// The receipt a batch would land with: its id is the digest of the exact
+/// bytes read and written, computed before anything is stored so admission
+/// can look up an exact replay. This is the one construction site of a
+/// receipt.
+pub(crate) fn candidate(
+    instance: &Slug,
+    provenance: PipelineProvenance,
+    strong_reads: &[CultCacheEnvelope],
+    writes: &[CultCacheEnvelope],
+    now: DateTime<Utc>,
+) -> Result<HuginnCommitReceipt, MindRefusal> {
+    let mut receipt = HuginnCommitReceipt {
+        schema_version: RECEIPT_SCHEMA_VERSION.to_string(),
+        receipt_id: String::new(),
+        instance: instance.0.clone(),
+        provenance,
+        strong_reads: versions(strong_reads),
+        writes: versions(writes),
+        committed_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
+    };
+    receipt.receipt_id = receipt.digest()?;
+    Ok(receipt)
+}
+
+/// The versions of a set of envelopes in identity order, so the digest does
+/// not depend on the order a batch was assembled in.
+fn versions(envelopes: &[CultCacheEnvelope]) -> Vec<DocumentVersion> {
+    let mut versions = envelopes.iter().map(DocumentVersion::from_envelope).collect::<Vec<_>>();
+    versions.sort_by(|left, right| left.identity().cmp(&right.identity()));
+    versions
+}
+
+/// The stored receipt with the candidate's id, if the batch already landed:
+/// its reads and writes must equal the candidate's, or the store holds a
+/// receipt this binary cannot vouch for.
+pub(crate) fn replay<S: MindStore>(
+    mind: &Mind<S>,
+    candidate: &HuginnCommitReceipt,
+) -> Result<Option<HuginnCommitReceipt>, MindRefusal> {
+    let Some(envelope) = mind.raw_envelope(HuginnCommitReceipt::TYPE, &candidate.receipt_id) else {
+        return Ok(None);
+    };
+    let existing: HuginnCommitReceipt = rmp_serde::from_slice(&envelope.payload)
+        .map_err(|error| integrity(&format!("receipt {} does not decode: {error}", candidate.receipt_id)))?;
+    existing.validate()?;
+    if existing.strong_reads != candidate.strong_reads || existing.writes != candidate.writes {
+        return Err(integrity(&format!("receipt {} is stored with other content", candidate.receipt_id)));
+    }
+    Ok(Some(existing))
+}
+
+/// Lands a batch whole, or not at all: one compare-and-swap with the strong
+/// reads as its expectation and the writes plus the receipt as its
+/// replacements. The image is re-pulled either way; a lost swap is diffed
+/// against the fresh image and typed `Conflict`.
+pub(crate) fn commit<S: MindStore>(
+    mind: &mut Mind<S>,
+    receipt: HuginnCommitReceipt,
+    strong_reads: Vec<CultCacheEnvelope>,
+    writes: Vec<CultCacheEnvelope>,
+) -> Result<CommitOutcome, MindRefusal> {
+    receipt.validate()?;
+    let receipt_envelope = mind
+        .cache()
+        .prepare_entry_named(&receipt.receipt_id, &receipt)
+        .map(|(envelope, _)| envelope)
+        .map_err(unavailable)?;
+    // The store requires every expected identity to be replaced, so each
+    // strong read is re-inserted unchanged beside the writes.
+    let mut replacements = writes.clone();
+    replacements.extend(strong_reads.iter().cloned());
+    replacements.push(receipt_envelope);
+    let expected: &[CultCacheEnvelope] = &strong_reads;
+    let landed = MindStore::compare_and_swap_batch(mind.store(), expected, replacements).map_err(unavailable)?;
+    mind.refresh()?;
+    if !landed {
+        let changed = strong_reads
+            .iter()
+            .filter(|read| mind.raw_envelope(&read.r#type, &read.key) != Some(read))
+            .chain(writes.iter().filter(|write| mind.raw_envelope(&write.r#type, &write.key).is_some()));
+        let identities = changed
+            .filter_map(|envelope| {
+                let kind = PipelineKind::ALL.iter().find(|kind| kind.type_id() == envelope.r#type)?;
+                Some(PipelineRef { kind: *kind, id: Short(envelope.key.clone()) })
+            })
+            .collect();
+        return Ok(CommitOutcome::Conflict(identities));
+    }
+    Ok(CommitOutcome::Committed(receipt))
 }
 
 fn unique_identities(versions: &[DocumentVersion]) -> bool {

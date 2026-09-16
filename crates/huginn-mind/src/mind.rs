@@ -11,9 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cultcache_rs::{
-    CacheBackingStore, CultCache, CultCacheEnvelope, DatabaseEntry, OwnedRedbMessagePackBackingStore,
-};
+use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, OwnedRedbMessagePackBackingStore};
 use epiphany_pipeline::{
     PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineKind, Slug, register_pipeline_document_types,
 };
@@ -246,6 +244,7 @@ mod tests {
     use super::*;
     use crate::fixtures::{INSTANCE, epoch, instance, prepare, slug};
     use crate::store::test_stores::MemoryStore;
+    use cultcache_rs::CacheBackingStore;
 
     fn planted(rows: Vec<CultCacheEnvelope>) -> MemoryStore {
         let store = MemoryStore::new();
