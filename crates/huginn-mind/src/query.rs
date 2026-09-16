@@ -425,6 +425,7 @@ mod tests {
 
     use super::*;
     use crate::fixtures::*;
+    use crate::mind::schema_cache;
     use crate::store::test_stores::MemoryStore;
     use chrono::{TimeZone, Utc};
     use epiphany_pipeline::{
@@ -635,6 +636,29 @@ mod tests {
             Some(MindRefusal::Unavailable { detail: detail.clone() })
         );
         assert_eq!(orphaned.query(&PipelineQuery::default()).err(), Some(MindRefusal::Unavailable { detail }));
+
+        // The other half of the same rule: A10 admits one write per identity,
+        // so two receipts naming one document is a store this organ cannot
+        // read, not a choice of which receipt to believe.
+        let doubled = MemoryStore::new();
+        for row in store.rows() {
+            doubled.plant(row);
+        }
+        let forged = crate::receipt::candidate(
+            &slug(INSTANCE),
+            provenance(Faculty::Soul),
+            &[],
+            &[prepare(&question("Q1", &["A", "B"], "A")), prepare(&question("Q8", &["A", "B"], "A"))],
+            now(),
+        )
+        .unwrap();
+        doubled.plant(schema_cache().unwrap().prepare_entry_named(&forged.receipt_id, &forged).unwrap().0);
+        assert_eq!(
+            opened(doubled, INSTANCE).query(&PipelineQuery::default()).err(),
+            Some(MindRefusal::Unavailable {
+                detail: format!("document {}/{q1} is written by two receipts", K::Question.type_id()),
+            })
+        );
     }
 
     /// R-C: `stored_at` is the store's stamp and no derivation reads it.
@@ -680,6 +704,7 @@ mod tests {
         committed(admit(&mut mind, vec![
             question("Q1", &["A", "B"], "A"),
             D::Ruling(ruling("R1")),
+            D::CutSpec(cut_spec("1", 1)),
             D::CutSpec(cut_spec("9", 1)),
             D::CutSpec(cut_spec("10", 1)),
             follow_up("FU-1", r(K::Question, &id("question", "Q1"))),
@@ -693,6 +718,14 @@ mod tests {
             D::CutSpec(cut_spec("9", 2)),
             resolution(r(K::CutSpec, &id("cut_spec", "cut-9.r1")), superseded(&[r(K::CutSpec, &id("cut_spec", "cut-9.r2"))])),
         ]));
+        // A resolution of a resolution, so a filter reading through the base
+        // has two steps to walk: the cut-10 spec is withdrawn and its
+        // withdrawal is itself withdrawn, which puts the spec back in force.
+        committed(admit(&mut mind, vec![resolution(r(K::CutSpec, &id("cut_spec", "cut-10.r1")), withdrawn())]));
+        committed(admit(&mut mind, vec![resolution(
+            r(K::Resolution, &id("resolution", "cut_spec.cut-10.r1.n1")),
+            withdrawn(),
+        )]));
         committed(admit_as(&mut mind, Faculty::Soul, vec![D::Ruling(ruling("R2"))]));
         // One batch at a later clock, so the window filters have a boundary.
         let later = Utc.with_ymd_and_hms(2026, 9, 17, 12, 0, 0).unwrap();
@@ -745,7 +778,12 @@ mod tests {
         assert_eq!(matching(PipelineQuery { cut: Some(l("10")), ..Default::default() }), vec![
             id("cut_report", "cut-10.h1"),
             id("cut_spec", "cut-10.r1"),
+            id("resolution", "cut_spec.cut-10.r1.n1"),
+            id("resolution", "resolution.cut_spec.cut-10.r1.n1.n1"),
         ]);
+        // The prefix ends at the dot, so cut-1 is not every cut that starts
+        // with its label.
+        assert_eq!(matching(PipelineQuery { cut: Some(l("1")), ..Default::default() }), vec![id("cut_spec", "cut-1.r1")]);
 
         // `kinds`, empty for every kind.
         assert_eq!(matching(PipelineQuery { kinds: vec![K::Question], ..Default::default() }), vec![
@@ -756,7 +794,10 @@ mod tests {
 
         // `in_force`, both ways: the superseded revision is the one thing this
         // mind has closed.
-        assert_eq!(matching(PipelineQuery { in_force: Some(false), ..Default::default() }), vec![id("cut_spec", "cut-9.r1")]);
+        assert_eq!(matching(PipelineQuery { in_force: Some(false), ..Default::default() }), vec![
+            id("cut_spec", "cut-9.r1"),
+            id("resolution", "cut_spec.cut-10.r1.n1"),
+        ]);
         let standing = matching(PipelineQuery { in_force: Some(true), ..Default::default() });
         assert!(!standing.contains(&id("cut_spec", "cut-9.r1")));
         assert!(standing.contains(&id("cut_spec", "cut-9.r2")));
@@ -807,7 +848,7 @@ mod tests {
         let questions = PipelineQuery { kinds: vec![K::Question], ..Default::default() };
         let page = mind.query(&PipelineQuery { limit: Some(500), ..questions.clone() }).unwrap();
         assert_eq!(page.matched, 201);
-        assert_eq!(page.items.len(), QUERY_LIMIT_MAX);
+        assert_eq!(page.items.len(), 200, "the cap, spelled out rather than read from the constant under test");
         assert_eq!(page.items[0].admission.admitted_at, "2026-09-17T12:00:00Z", "the earliest batch first");
         assert_eq!(page.items[0].id.id.0, id("question", "Q10"), "and inside it, key order");
         assert_ne!(page.items[0].id.id.0, id("question", "Q1"), "Q1 sorts first by id and is admitted last");
@@ -824,7 +865,7 @@ mod tests {
         );
         assert_eq!(page.matched as usize - page.items.len(), 1);
 
-        for (limit, expected) in [(None, QUERY_LIMIT_MAX), (Some(500), QUERY_LIMIT_MAX), (Some(0), 1), (Some(5), 5)] {
+        for (limit, expected) in [(None, 200), (Some(500), 200), (Some(0), 1), (Some(5), 5)] {
             let page = mind.query(&PipelineQuery { limit, ..questions.clone() }).unwrap();
             assert_eq!(page.items.len(), expected, "limit {limit:?}");
             assert_eq!(page.matched, 201, "the count is taken before the cap");
@@ -853,7 +894,9 @@ mod tests {
         // cut-11: a spec with a report, that report with a verdict, and two
         // findings, one of which is then fixed.
         committed(admit(&mut mind, vec![D::CutSpec(cut_spec("11", 1))]));
-        committed(admit(&mut mind, vec![D::CutReport(cut_report("11", 1))]));
+        // Two reports of one cut, one of them judged, so "this cut has a
+        // verdict" is not the same answer as "this report has one".
+        committed(admit(&mut mind, vec![D::CutReport(cut_report("11", 1)), D::CutReport(cut_report("11", 2))]));
         let f1 = id("finding", "cut-11.s1.F1");
         let f2 = id("finding", "cut-11.s1.F2");
         committed(admit(&mut mind, vec![
@@ -878,8 +921,8 @@ mod tests {
         );
         assert_eq!(
             ids(&open.reports_without_verdict),
-            vec![id("cut_report", "cut-10.h1")],
-            "a report is not resolvable, so only the verdict that names it closes it"
+            vec![id("cut_report", "cut-10.h1"), id("cut_report", "cut-11.h2")],
+            "a report is not resolvable, so only the verdict that names it, exactly, closes it"
         );
     }
 
