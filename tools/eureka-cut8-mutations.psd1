@@ -562,14 +562,12 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Test = 'admission::tests::a_withdrawn_resolution_reopens_its_subject_and_stays_readable'
             File = 'crates/huginn-mind/src/admission.rs'
             Old  = @'
-                        sequence: docs.latest_resolution(&subject, None) + 1,
-                        subject,
-                        outcome: ResolutionOutcome::Answered
+                    let sequence = docs.derived_resolution_sequence(&subject, |outcome| {
+                        matches!(outcome, ResolutionOutcome::Answered { by } if by.kind == K::Ruling && by.id.0 == staged.key)
+                    });
 '@
             New  = @'
-                        sequence: 1,
-                        subject,
-                        outcome: ResolutionOutcome::Answered
+                    let sequence = 1;
 '@
         }
         @{
@@ -577,7 +575,7 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Rule = 'derive: H45''s other half, a derived stewardship takes the repo''s next sequence on this mind.'
             Test = 'admission::tests::a_repo_is_stewarded_once_at_a_time_and_again_after_a_transfer'
             File = 'crates/huginn-mind/src/admission.rs'
-            Old  = '                        sequence: docs.latest_stewardship(mind, &hand_off.repo, None) + 1,'
+            Old  = '                        sequence: docs.derived_stewardship_sequence(mind, &hand_off.repo, &staged.key),'
             New  = '                        sequence: 1,'
         }
         @{
