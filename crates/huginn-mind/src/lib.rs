@@ -18,6 +18,7 @@
 //! `now` is passed in.
 
 pub mod admission;
+mod docs;
 pub mod mind;
 pub mod receipt;
 pub mod refusal;

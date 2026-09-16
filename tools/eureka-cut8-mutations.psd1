@@ -25,11 +25,17 @@
 #   $env:CARGO_TARGET_DIR = 'C:\Users\Meta\.cargo-target-codex'
 #   powershell -File F:\Projects\Epiphany\tools\eureka-mutations.ps1 -Repo F:\Projects\Huginn `
 #       -Entries tools/eureka-cut8-mutations.psd1 `
-#       -Target crates/huginn-mind/src/mind.rs,crates/huginn-mind/src/receipt.rs,crates/huginn-mind/src/admission.rs,crates/huginn-mind/src/store.rs `
+#       -Target crates/huginn-mind/src/mind.rs,crates/huginn-mind/src/receipt.rs,crates/huginn-mind/src/admission.rs,crates/huginn-mind/src/docs.rs,crates/huginn-mind/src/store.rs `
 #       -Test 'cargo test -p huginn-mind --lib'
 #
 # `store.rs` is a target only for H5, whose mutant needs a `MindStore` impl
 # for the transient redb store that the live crate deliberately lacks.
+#
+# Cut 9 moved `Docs`, its derivations and `later_than` into `docs.rs`, so the
+# nine entries that anchor them name that file: H33, H41, H62, H63, H65, H66
+# and H67 by file alone, and H47 and H60 re-anchored on the scope selectors
+# `assignments_of` and `resolutions_of` the move extracted. Their rules are
+# unchanged.
 @{
     Mutations = @(
         @{
@@ -442,7 +448,7 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Id   = 'H33'
             Rule = 'A4: one identity, once, within a batch.'
             Test = 'admission::tests::a_batch_is_one_to_sixty_four_documents_each_with_its_own_identity'
-            File = 'crates/huginn-mind/src/admission.rs'
+            File = 'crates/huginn-mind/src/docs.rs'
             Old  = @'
         if self.batch.iter().any(|other| other.kind == staged.kind && other.key == staged.key) {
             return Err(MindRefusal::IdentityCollision { kind: staged.kind, id: staged.key });
@@ -518,7 +524,7 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Id   = 'H41'
             Rule = 'In force is recursive: a withdrawn resolution no longer closes its subject.'
             Test = 'admission::tests::a_withdrawn_resolution_reopens_its_subject_and_stays_readable'
-            File = 'crates/huginn-mind/src/admission.rs'
+            File = 'crates/huginn-mind/src/docs.rs'
             Old  = @'
                 && !own(resolution)
                 && self.in_force(PipelineKind::Resolution, key)
@@ -587,22 +593,22 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
         }
         @{
             Id   = 'H47'
-            Rule = 'stewardship_of: only an in-force assignment counts, so a handed-away repo is not stewarded.'
+            Rule = 'stewardships_of: only an in-force assignment counts, so a handed-away repo is not stewarded.'
             Test = 'admission::tests::a_repo_is_stewarded_once_at_a_time_and_again_after_a_transfer'
-            File = 'crates/huginn-mind/src/admission.rs'
+            File = 'crates/huginn-mind/src/docs.rs'
             Old  = @'
-            .filter(|(key, stewardship)| {
-                stewardship.instance == *mind
-                    && stewardship.repo == *repo
-                    && self.in_force_unless(PipelineKind::Stewardship, key, |resolution| {
-                        matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { reason } if Some(reason.0.as_str()) == hand_off_key)
-                    })
+        self.assignments_of(mind, repo)
+            .filter(|(key, _)| {
+                self.in_force_unless(PipelineKind::Stewardship, key, |resolution| {
+                    matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { reason } if Some(reason.0.as_str()) == hand_off_key)
+                })
             })
 '@
             New  = @'
-            .filter(|(_key, stewardship)| {
+        self.assignments_of(mind, repo)
+            .filter(|_| {
                 let _ = hand_off_key;
-                stewardship.instance == *mind && stewardship.repo == *repo
+                true
             })
 '@
         }
@@ -723,10 +729,10 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Id   = 'H60'
             Rule = 'latest_resolution reads the image only, not the batch.'
             Test = 'admission::tests::the_latest_resolution_counts_the_batch'
-            File = 'crates/huginn-mind/src/admission.rs'
+            File = 'crates/huginn-mind/src/docs.rs'
             Old  = @'
-        self.resolutions()
-            .filter(|(_, resolution)| resolution.subject == *subject && own != Some(*resolution))
+        self.resolutions_of(subject)
+            .filter(|(_, resolution)| own != Some(*resolution))
 '@
             New  = @'
         self.image.iter().filter(|held| held.kind == PipelineKind::Resolution).filter_map(|held| match &held.document { PipelineDocument::Resolution(resolution) => Some((held.key.as_str(), resolution)), _ => None })
@@ -751,7 +757,7 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Id   = 'H62'
             Rule = 'stewardship_of: the assignment a hand-off withdraws is picked by key order, so a replay after ten transfers withdraws whichever sorts first.'
             Test = 'admission::tests::a_source_side_replay_withdraws_the_assignment_it_withdrew'
-            File = 'crates/huginn-mind/src/admission.rs'
+            File = 'crates/huginn-mind/src/docs.rs'
             Old  = @'
         let candidates = self.stewardships_of(mind, repo, hand_off_key);
         hand_off_key
@@ -775,7 +781,7 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Id   = 'H63'
             Rule = 'stewardship_of: H62''s weaker half, any withdrawal of a candidate identifies it, whatever hand-off gave the reason.'
             Test = 'admission::tests::a_source_side_replay_withdraws_the_assignment_it_withdrew'
-            File = 'crates/huginn-mind/src/admission.rs'
+            File = 'crates/huginn-mind/src/docs.rs'
             Old  = '                            && matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == hand_off)'
             New  = '                            && { let _ = hand_off; matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { .. }) }'
         }
@@ -791,7 +797,7 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Id   = 'H65'
             Rule = 'later_than: a cut spec is sequenced within its campaign, not within its cut.'
             Test = 'admission::tests::a_reinstatement_reads_the_revisions_of_its_own_cut'
-            File = 'crates/huginn-mind/src/admission.rs'
+            File = 'crates/huginn-mind/src/docs.rs'
             Old  = '            other.campaign == base.campaign && other.cut == base.cut && other.revision > base.revision'
             New  = '            other.campaign == base.campaign && other.revision > base.revision'
         }
@@ -799,7 +805,7 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Id   = 'H66'
             Rule = 'later_in_force: a later record blocks a reinstatement whether or not it still stands.'
             Test = 'admission::tests::a_withdrawn_later_assignment_does_not_block_a_reinstatement'
-            File = 'crates/huginn-mind/src/admission.rs'
+            File = 'crates/huginn-mind/src/docs.rs'
             Old  = '        self.of_kind(kind).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)'
             New  = '        self.of_kind(kind).find(|(key, other)| later_than(base, other)).map(|(key, _)| key)'
         }
@@ -807,7 +813,7 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             Id   = 'H67'
             Rule = 'later_in_force: the image only, so a later record landing in the same batch does not block.'
             Test = 'admission::tests::a_reinstatement_is_blocked_by_an_assignment_in_its_own_batch'
-            File = 'crates/huginn-mind/src/admission.rs'
+            File = 'crates/huginn-mind/src/docs.rs'
             Old  = '        self.of_kind(kind).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)'
             New  = '        self.image.iter().filter(|held| held.kind == kind).map(|held| (held.key.as_str(), &held.document)).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)'
         }
