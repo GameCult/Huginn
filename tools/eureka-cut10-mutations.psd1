@@ -264,6 +264,31 @@
             New  = '        limit: encoded,'
         }
         @{
+            Id   = 'D20L4'
+            Rule = 'The limit itself is deliverable: the comparison admits an answer of exactly the window''s size, as the transport does.'
+            Test = 'serve::tests::the_gates_boundary_is_the_transports_boundary_byte_for_byte'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = '    if encoded <= MAX_RESPONSE_BYTES {'
+            New  = '    if encoded < MAX_RESPONSE_BYTES {'
+        }
+        @{
+            Id   = 'D20L5'
+            Rule = 'What is measured is the encoded envelope the hub fragments, not the payload string inside it.'
+            Test = 'serve::tests::the_gates_boundary_is_the_transports_boundary_byte_for_byte'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => bytes.len() as u64,
+'@
+            New  = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => match &reply {
+            CultNetMessage::OperationResponse { payload, .. } => payload.len() as u64,
+            _ => bytes.len() as u64,
+        },
+'@
+        }
+        @{
             Id   = 'D21'
             Rule = 'The refusal rides the response schema like every other refusal, not a failure envelope the client must parse apart.'
             Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'

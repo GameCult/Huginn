@@ -34,6 +34,14 @@
 //! before the first is acknowledged fails to send even when each passes the
 //! size gate on its own. The gate measures one answer against the window, not
 //! against what the session still has room for.
+//!
+//! The same counting makes the window one packet short until a session has
+//! settled: the hub's own accept is unacknowledged reliable traffic, so a
+//! session that has just connected holds 1023 packets rather than 1024 until
+//! the client's acknowledgement arrives. On loopback that happens before the
+//! first request, and a lost acknowledgement leaves the hole open one resend
+//! longer. Nothing here depends on it; a test that measures the boundary
+//! exactly does, and settles the session first.
 
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, UdpSocket};
@@ -645,6 +653,126 @@ mod tests {
 
         stopping.store(true, Ordering::Relaxed);
         serving.join().unwrap().0.unwrap();
+    }
+
+    fn encoded_len(message: &CultNetMessage) -> u64 {
+        encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap().len() as u64
+    }
+
+    /// A reply carrying `payload_len` bytes of payload: the envelope a view
+    /// answer travels in, with the document replaced by filler, so a size can
+    /// be chosen instead of found.
+    fn synthetic(payload_len: usize) -> CultNetMessage {
+        CultNetMessage::OperationResponse {
+            message_id: "m-0".into(),
+            service_id: MIND_SERVICE_ID.into(),
+            operation: "view".into(),
+            status: "accepted".into(),
+            payload_schema: MIND_RESPONSE_SCHEMA.into(),
+            payload_encoding: "messagepack-base64".into(),
+            payload: "A".repeat(payload_len),
+            diagnostics: vec![],
+            source_runtime_id: Some("huginn-yggdrasil".into()),
+        }
+    }
+
+    /// One whose encoded envelope is exactly `target` bytes. The envelope's
+    /// own overhead is measured rather than assumed: the length prefix is the
+    /// same width on either side of a megabyte, so one probe fixes it.
+    fn sized_exactly(target: u64) -> CultNetMessage {
+        let probe = 1_200_000_usize;
+        let at_probe = encoded_len(&synthetic(probe));
+        let message = synthetic((probe as i64 + (target as i64 - at_probe as i64)) as usize);
+        assert_eq!(encoded_len(&message), target);
+        message
+    }
+
+    /// A connected session whose accept has been acknowledged, so its window
+    /// holds `MAX_PENDING_RELIABLE_PACKETS` and not one less. See the module
+    /// documentation: a test that measures the window exactly and does not
+    /// settle first measures 1023.
+    fn settled_session(
+        hub: &mut CultNetRudpServerHub,
+    ) -> (cultnet_rs::CultNetRudpSocketTransportConnection, cultnet_rs::CultNetRudpServerSessionContext) {
+        let endpoint = format!("rudp://{}", hub.local_addr().unwrap());
+        let mut client = CultMesh::create_rudp_client_for_endpoint(
+            "eureka-state-boundary".to_string(),
+            CULTNET_OPERATION_CONNECTION_ID,
+            &endpoint,
+            CultMeshRudpSocketOptions::default(),
+        )
+        .unwrap();
+        client.connect(Vec::new()).unwrap();
+        let mut session = None;
+        for _ in 0..500 {
+            while let Some(event) = hub.receive_event_once().unwrap() {
+                if let CultNetRudpServerEvent::Connected { session: connected } = event {
+                    session = Some(connected);
+                }
+            }
+            let _ = client.receive_once();
+            if client.connected() && session.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(client.connected());
+        for _ in 0..100 {
+            hub.poll_resends().unwrap();
+            while hub.receive_event_once().unwrap().is_some() {}
+            client.poll_resends().unwrap();
+            while client.receive_once().unwrap().is_some() {}
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        (client, session.unwrap())
+    }
+
+    /// The gate's boundary is the transport's, byte for byte. The test above
+    /// proves the two agree at the sizes real documents reach, which leaves
+    /// the width of a whole document between the largest answer it delivers
+    /// and the smallest it refuses; this one leaves nothing. A reply whose
+    /// encoded envelope is exactly `MAX_RESPONSE_BYTES` passes the gate
+    /// unchanged and is accepted by a hub `bind` configured; one byte more is
+    /// refused by both.
+    ///
+    /// So the gate measures the encoded envelope, which is what the hub
+    /// fragments, and not the payload string inside it, which is 231 bytes
+    /// smaller; and it admits the limit rather than stopping one short of it.
+    /// Neither is visible to a test whose answers sit tens of thousands of
+    /// bytes from the boundary.
+    ///
+    /// The refusal is measured on the same scale: it is one packet, so the
+    /// answer that says an answer did not fit always fits itself. And the
+    /// accepted reply is shown to have filled the window it was measured
+    /// against, because a one-byte reply after it is refused.
+    #[test]
+    fn the_gates_boundary_is_the_transports_boundary_byte_for_byte() {
+        let at = sized_exactly(MAX_RESPONSE_BYTES);
+        let over = sized_exactly(MAX_RESPONSE_BYTES + 1);
+        assert_eq!(within_window(at.clone(), "m-0", "view", "huginn-yggdrasil"), at, "exactly the limit passes");
+
+        let refused = within_window(over.clone(), "m-0", "view", "huginn-yggdrasil");
+        let (correlation, answered) = decode_response(&refused).unwrap();
+        assert_eq!(correlation, "m-0");
+        let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
+            answered.expect("a refusal is an answer, not an envelope failure")
+        else {
+            panic!("one byte over the limit was not refused: {refused:?}");
+        };
+        assert_eq!((bytes, limit), (MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES));
+        let refusal_bytes = encoded_len(&refused);
+        assert!(
+            refusal_bytes <= MAX_FRAGMENT_BYTES as u64,
+            "the refusal is {refusal_bytes} bytes and must fit one packet"
+        );
+
+        let mut hub = bind("127.0.0.1:0".parse().unwrap(), "huginn-yggdrasil").unwrap();
+        let (_client, session) = settled_session(&mut hub);
+        let error = hub.send_schema_message(&session, &over).unwrap_err();
+        assert!(format!("{error:#}").contains("queue is full"), "limit + 1 was accepted: {error:#}");
+        hub.send_schema_message(&session, &at).expect("exactly the limit is accepted on an empty window");
+        hub.send_schema_message(&session, &synthetic(1))
+            .expect_err("the accepted answer filled the window, so nothing follows it");
     }
 
     /// One cut spec's own reference, by its cut label.
