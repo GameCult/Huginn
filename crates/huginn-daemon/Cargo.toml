@@ -5,4 +5,28 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# The organ's CultNet surface: the socket, the sessions, the process lifetime
+# and the operation envelope, and no rule. Every rule, the instance check, the
+# receipt, the status and the wire vocabulary are `huginn-mind`'s, and the leaf
+# and the store type are reached through it so one crate pins one revision.
+[lib]
+name = "huginn_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "huginn-daemon"
+path = "src/main.rs"
+
 [dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = "0.4.44"
+cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "a0813c6eed24d30bf88073ef615b633c77ebfcd6", package = "cultnet-rs" }
+huginn-mind = { path = "../huginn-mind" }
+rmp-serde = "1"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+signal-hook = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
