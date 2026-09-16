@@ -110,6 +110,7 @@ pub(crate) mod tests {
     use huginn_mind::wire::MindStatus;
     use huginn_mind::{
         Faculty, HistoryScope, PipelineAdmissionBatch, PipelineProvenance, PipelineQuery, PipelineStatus,
+        SemanticQuery,
     };
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
@@ -346,6 +347,60 @@ pub(crate) mod tests {
         }
 
         assert_eq!(status(&mut daemon).documents, 1, "nothing landed");
+    }
+
+    /// A refusal a read method raised is the answer the dispatch returns, whole.
+    /// The instance check refuses before the method runs and is pinned above;
+    /// these are the refusals the methods themselves raise, so nothing here is
+    /// the daemon's own. Each must arrive as the mind spelled it: not rewrapped
+    /// as `Unavailable`, not rewrapped as another read's refusal, and not
+    /// swallowed into an empty answer, which would read as "no such document"
+    /// rather than "that is not a reference".
+    ///
+    /// `open_items` has no refusal of its own: its only failing paths are store
+    /// integrity inside the reader, which the daemon's surface cannot drive
+    /// without a corrupt store. So the daemon's `OpenItems` rewrap is not
+    /// pinned here and carries no mutation entry.
+    #[test]
+    fn a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole() {
+        let (_root, mut daemon) = seeded();
+
+        // A reference whose kind and id disagree names no document any writer
+        // could have composed; the leaf's own refusal says so.
+        let invalid = PipelineRef { kind: PipelineKind::Question, id: "not a reference".into() };
+        let malformed = MindRefusal::Document(huginn_mind::epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            field: "ref.id".into(),
+            value: "not a reference".into(),
+        });
+        let view = HuginnMindRequest::View { instance: slug(INSTANCE), id: invalid.clone() };
+        assert_eq!(daemon.handle(view, now()), HuginnMindResponse::Refused(malformed.clone()));
+
+        let history = HuginnMindRequest::History { instance: slug(INSTANCE), scope: HistoryScope::Subject(invalid) };
+        assert_eq!(daemon.handle(history, now()), HuginnMindResponse::Refused(malformed));
+
+        // A semantic query is unavailable until Cut 11 wires an index, and the
+        // detail is the mind's own sentence.
+        let query = PipelineQuery {
+            semantic: Some(SemanticQuery { text: "who owns the state".into(), top_k: 4 }),
+            ..PipelineQuery::default()
+        };
+        let unwired =
+            MindRefusal::Unavailable { detail: "semantic query: the index is not wired (Cut 11)".into() };
+        assert_eq!(
+            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), query }, now()),
+            HuginnMindResponse::Refused(unwired)
+        );
+
+        // And the same reads answer rather than refuse when they are asked
+        // something answerable, so the arms above are refusing on the mind's
+        // word and not on their own shape.
+        let absent =
+            PipelineRef { kind: PipelineKind::Question, id: Short(format!("{CAMPAIGN}:question:Q1")) };
+        let present = HuginnMindRequest::View { instance: slug(INSTANCE), id: absent };
+        assert_eq!(daemon.handle(present, now()), HuginnMindResponse::View(None));
+        let plain = HuginnMindRequest::Query { instance: slug(INSTANCE), query: PipelineQuery::default() };
+        let HuginnMindResponse::Query(page) = daemon.handle(plain, now()) else { panic!("expected a page") };
+        assert_eq!(page.matched, 1);
     }
 
     /// Cut 11's seam: the index is handed every landed write, derived ones

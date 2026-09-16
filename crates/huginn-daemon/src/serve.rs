@@ -288,7 +288,11 @@ mod tests {
                 request("m-4", MIND_SERVICE_ID, "admit", MIND_REQUEST_SCHEMA, STANDARD.encode([0xc1_u8, 0xc1])),
                 "payload-not-a-request",
             ),
-            ("m-5", request("m-5", MIND_SERVICE_ID, "query", MIND_REQUEST_SCHEMA, admit), "operation-mismatch"),
+            ("m-5", request("m-5", MIND_SERVICE_ID, "query", MIND_REQUEST_SCHEMA, admit.clone()), "operation-mismatch"),
+            // The same operation under another casing is another name, not this
+            // one: the comparison is of bytes, so `Admit` is no more `admit`
+            // than `query` is.
+            ("m-5b", request("m-5b", MIND_SERVICE_ID, "Admit", MIND_REQUEST_SCHEMA, admit), "operation-mismatch"),
         ];
         for (id, message, code) in cases {
             let reply = answer(&mut daemon, &registry, message, now());

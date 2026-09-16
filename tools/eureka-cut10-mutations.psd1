@@ -1,4 +1,4 @@
-# Cut 10 mutations, D1-D16: the CultNet surface's rules. Each rule has a
+# Cut 10 mutations, D1-D19: the CultNet surface's rules. Each rule has a
 # revert, `Dn`, which removes the rule, and a loosening, `DnL`, which weakens
 # it rather than removing it, because a plain revert is the easy target. Every
 # entry names the test that must fail while it is applied. Run through
@@ -26,6 +26,14 @@
 # - `D12`'s order, weakened as far as it goes by `D12L`: a hub bound before the
 #   mind is opened and then dropped when the mind refuses. Any weaker form is
 #   the correct order again.
+#
+# One rule is deliberately not pinned and carries no entry rather than a weak
+# one: the dispatch's `OpenItems` arm passes a refusal through like its three
+# siblings, but `Mind::open_items` has no refusal of its own. Its only failing
+# paths are store integrity inside the reader, which nothing on the daemon's
+# surface can drive without a corrupt store, so a mutant that rewrapped or
+# swallowed that arm's refusal could not fail any test here. `D17`-`D19` pin
+# the three arms that can be driven.
 @{
     Mutations = @(
         @{
@@ -228,6 +236,118 @@
             File = 'crates/huginn-daemon/src/envelope.rs'
             Old  = '    if operation != request.operation() {'
             New  = '    if operation.len() != request.operation().len() {'
+        }
+        @{
+            Id   = 'D17'
+            Rule = 'A refusal `view` raised crosses the dispatch as itself, not rewrapped as unavailable.'
+            Test = 'daemon::tests::a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole'
+            File = 'crates/huginn-daemon/src/daemon.rs'
+            Old  = @'
+            HuginnMindRequest::View { id, .. } => match self.mind.view(&id) {
+                Ok(view) => HuginnMindResponse::View(view),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
+'@
+            New  = @'
+            HuginnMindRequest::View { id, .. } => match self.mind.view(&id) {
+                Ok(view) => HuginnMindResponse::View(view),
+                Err(refusal) => HuginnMindResponse::Refused(huginn_mind::MindRefusal::Unavailable {
+                    detail: format!("{refusal}"),
+                }),
+            },
+'@
+        }
+        @{
+            Id   = 'D17L'
+            Rule = 'It is not swallowed into an empty answer either: a malformed reference is not an absent document.'
+            Test = 'daemon::tests::a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole'
+            File = 'crates/huginn-daemon/src/daemon.rs'
+            Old  = @'
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
+            HuginnMindRequest::Query { query, .. } => match self.mind.query(&query) {
+'@
+            New  = @'
+                Err(_) => HuginnMindResponse::View(None),
+            },
+            HuginnMindRequest::Query { query, .. } => match self.mind.query(&query) {
+'@
+        }
+        @{
+            Id   = 'D18'
+            Rule = 'A refusal `query` raised crosses the dispatch as itself, with the mind''s own detail.'
+            Test = 'daemon::tests::a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole'
+            File = 'crates/huginn-daemon/src/daemon.rs'
+            Old  = @'
+            HuginnMindRequest::Query { query, .. } => match self.mind.query(&query) {
+                Ok(page) => HuginnMindResponse::Query(page),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
+'@
+            New  = @'
+            HuginnMindRequest::Query { query, .. } => match self.mind.query(&query) {
+                Ok(page) => HuginnMindResponse::Query(page),
+                Err(refusal) => HuginnMindResponse::Refused(huginn_mind::MindRefusal::Unavailable {
+                    detail: format!("a query was refused: {refusal}"),
+                }),
+            },
+'@
+        }
+        @{
+            Id   = 'D18L'
+            Rule = 'Nor is it flattened into an empty page, which would read as a mind holding nothing.'
+            Test = 'daemon::tests::a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole'
+            File = 'crates/huginn-daemon/src/daemon.rs'
+            Old  = @'
+                Ok(page) => HuginnMindResponse::Query(page),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+'@
+            New  = @'
+                Ok(page) => HuginnMindResponse::Query(page),
+                Err(_) => HuginnMindResponse::Query(huginn_mind::PipelineQueryPage { items: vec![], matched: 0 }),
+'@
+        }
+        @{
+            Id   = 'D19'
+            Rule = 'A refusal `history` raised crosses the dispatch as itself, not as another read''s refusal.'
+            Test = 'daemon::tests::a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole'
+            File = 'crates/huginn-daemon/src/daemon.rs'
+            Old  = @'
+            HuginnMindRequest::History { scope, .. } => match self.mind.history(&scope) {
+                Ok(views) => HuginnMindResponse::History(views),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
+'@
+            New  = @'
+            HuginnMindRequest::History { scope, .. } => match self.mind.history(&scope) {
+                Ok(views) => HuginnMindResponse::History(views),
+                Err(_) => HuginnMindResponse::Refused(huginn_mind::MindRefusal::Unavailable {
+                    detail: "semantic query: the index is not wired (Cut 11)".into(),
+                }),
+            },
+'@
+        }
+        @{
+            Id   = 'D19L'
+            Rule = 'Nor is a history refusal swallowed into an empty history, which is the answer for a subject with no records.'
+            Test = 'daemon::tests::a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole'
+            File = 'crates/huginn-daemon/src/daemon.rs'
+            Old  = @'
+                Ok(views) => HuginnMindResponse::History(views),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+'@
+            New  = @'
+                Ok(views) => HuginnMindResponse::History(views),
+                Err(_) => HuginnMindResponse::History(vec![]),
+'@
+        }
+        @{
+            Id   = 'D5L2'
+            Rule = 'The operation is compared as bytes: another casing of the name is another name.'
+            Test = 'serve::tests::a_malformed_envelope_is_answered_with_a_failure_and_touches_no_mind'
+            File = 'crates/huginn-daemon/src/envelope.rs'
+            Old  = '    if operation != request.operation() {'
+            New  = '    if !operation.eq_ignore_ascii_case(request.operation()) {'
         }
         @{
             Id   = 'D6'
