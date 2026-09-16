@@ -30,9 +30,14 @@ A Cargo workspace of three crates:
 - `crates/huginn-daemon`: the CultNet surface and serve loop.
 - `crates/eureka-state`: typed state for the Eureka pipeline.
 
-The crates are stubs. Each cut of the Eureka pipeline-state campaign fills one
-in; the campaign's cut map in `Epiphany/notes/eureka-pipeline-state-cut.md`
-owns what each crate must do next.
+`huginn-mind` is live: it opens one instance's store (an owned redb CultCache
+at `<state_root>/minds/<instance>/mind.redb`, locked for the mind's lifetime),
+and refuses a store whose `instance` document names another instance, whose
+epoch record is foreign, or whose types are not a mind's. Document shape and
+keys come from `epiphany-pipeline`; the store is CultLib's Rust CultCache.
+`huginn-daemon` and `eureka-state` are stubs; the
+campaign's cut map in `Epiphany/notes/eureka-pipeline-state-cut.md` owns what
+each crate must do next.
 
 ```powershell
 cargo check --workspace

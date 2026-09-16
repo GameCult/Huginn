@@ -1,0 +1,29 @@
+//! `huginn-mind`: one instance's mind as typed CultCache state.
+//!
+//! The crate owns three decisions and nothing else. `Mind::open_with` owns
+//! "may this store be this instance's mind": the opener refuses a foreign
+//! type, a foreign epoch, a missing identity or a foreign identity before it
+//! attaches anything. `receipt::commit` owns "did a batch enter, whole, with a
+//! receipt": one compare-and-swap over the store, a receipt naming the exact
+//! bytes read and written, and a typed conflict when the swap loses. The
+//! admission path (Cut 8's third commit) owns "may this batch enter".
+//!
+//! Document shape, bounds, formats and keys are `epiphany-pipeline`'s; the
+//! organ registers, prepares, decodes and validates through the leaf's four
+//! doors and never re-derives a key. The store is CultLib's owned redb
+//! CultCache, whose lifetime-long exclusive lock is the single-writer
+//! invariant's mechanism. No function here reads a clock or the environment:
+//! `now` is passed in.
+
+pub mod mind;
+pub mod receipt;
+pub mod refusal;
+pub mod store;
+
+#[cfg(test)]
+pub(crate) mod fixtures;
+
+pub use mind::{HuginnMindEpoch, Mind};
+pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
+pub use refusal::MindRefusal;
+pub use store::MindStore;

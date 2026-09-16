@@ -13,10 +13,10 @@ Studio's job, not Huginn's.
 - Upstream: `https://github.com/GameCult/Huginn.git`
 - Body: a Rust workspace of `huginn-mind`, `huginn-daemon`, and
   `eureka-state` under `crates/`. Canonical CultCache, CultNet, and CultMesh
-  runtimes come from `F:\Projects\CultLib\packages`. The crates are stubs
-  with no dependencies; each named cut of the Eureka pipeline-state campaign
-  fills one in. Until then nothing here persists, admits, publishes, or
-  connects.
+  runtimes come from `F:\Projects\CultLib\packages`. `huginn-mind` is live:
+  it persists and admits an instance's mind, over `cultcache-rs` and
+  `epiphany-pipeline` pinned by git rev. `huginn-daemon` and `eureka-state`
+  are stubs with no dependencies; nothing here publishes or connects yet.
 - Owned: an instance's memory documents, their admission, and their CultNet
   publication.
 - Depends on: Qdrant, directly. Unreachable Qdrant is a loud refusal, never a
