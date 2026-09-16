@@ -27,13 +27,11 @@
 #   mind is opened and then dropped when the mind refuses. Any weaker form is
 #   the correct order again.
 #
-# One rule is deliberately not pinned and carries no entry rather than a weak
-# one: the dispatch's `OpenItems` arm passes a refusal through like its three
-# siblings, but `Mind::open_items` has no refusal of its own. Its only failing
-# paths are store integrity inside the reader, which nothing on the daemon's
-# surface can drive without a corrupt store, so a mutant that rewrapped or
-# swallowed that arm's refusal could not fail any test here. `D17`-`D19` pin
-# the three arms that can be driven.
+# `D17`-`D19` pin three of the dispatch's four read arms and `D23` the fourth.
+# The fourth was once recorded here as unpinnable, on the grounds that
+# `Mind::open_items` raises no refusal of its own; the refusal it carries comes
+# from the reader beneath it over a store whose receipt is gone, and such a
+# store is reachable from this crate's surface, so the entry exists.
 @{
     Mutations = @(
         @{
@@ -423,6 +421,46 @@
             New  = @'
                 Ok(views) => HuginnMindResponse::History(views),
                 Err(_) => HuginnMindResponse::History(vec![]),
+'@
+        }
+        @{
+            Id   = 'D23'
+            Rule = 'A refusal `open_items` carries out of the reader crosses the dispatch as itself, not rewrapped as unavailable.'
+            Test = 'daemon::tests::a_refusal_open_items_raised_is_the_answer_the_dispatch_returns_whole'
+            File = 'crates/huginn-daemon/src/daemon.rs'
+            Old  = @'
+            HuginnMindRequest::OpenItems { campaign, .. } => match self.mind.open_items(&campaign) {
+                Ok(items) => HuginnMindResponse::OpenItems(items),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
+'@
+            New  = @'
+            HuginnMindRequest::OpenItems { campaign, .. } => match self.mind.open_items(&campaign) {
+                Ok(items) => HuginnMindResponse::OpenItems(items),
+                Err(refusal) => HuginnMindResponse::Refused(huginn_mind::MindRefusal::Unavailable {
+                    detail: format!("{refusal}"),
+                }),
+            },
+'@
+        }
+        @{
+            Id   = 'D23L'
+            Rule = 'Nor is it swallowed into an empty open set, which is what a healthy campaign with nothing open answers.'
+            Test = 'daemon::tests::a_refusal_open_items_raised_is_the_answer_the_dispatch_returns_whole'
+            File = 'crates/huginn-daemon/src/daemon.rs'
+            Old  = @'
+                Ok(items) => HuginnMindResponse::OpenItems(items),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+'@
+            New  = @'
+                Ok(items) => HuginnMindResponse::OpenItems(items),
+                Err(_) => HuginnMindResponse::OpenItems(huginn_mind::PipelineOpenItems {
+                    questions: vec![],
+                    findings: vec![],
+                    follow_ups: vec![],
+                    specs_without_report: vec![],
+                    reports_without_verdict: vec![],
+                }),
 '@
         }
         @{

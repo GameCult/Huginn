@@ -5,12 +5,19 @@
 //! atomicity test. Nothing else is abstracted.
 
 use anyhow::Result;
-use cultcache_rs::{CacheBackingStore, CultCacheEnvelope};
+use cultcache_rs::CultCacheEnvelope;
 
 /// The one store a daemon opens. Re-exported so the crate that serves a mind
 /// names the store type without declaring `cultcache-rs` a second time: one
 /// dependency entry, one rev, one place to move it.
 pub use cultcache_rs::OwnedRedbMessagePackBackingStore;
+
+/// CultCache's own row traits, re-exported for the same reason and used for
+/// one thing: the daemon's store-integrity test reaches past this crate to
+/// break a store's rows, so that a read over the broken store raises the
+/// refusal its dispatch arm must carry. No non-test code outside this crate
+/// touches a row directly, and nothing here abstracts them.
+pub use cultcache_rs::{CacheBackingStore, DatabaseEntry};
 
 /// A store a mind can be opened over. `Clone` shares ownership of the same
 /// store (the owned redb store's clones share its lock and handle), which is

@@ -487,10 +487,9 @@ pub(crate) mod tests {
     /// swallowed into an empty answer, which would read as "no such document"
     /// rather than "that is not a reference".
     ///
-    /// `open_items` has no refusal of its own: its only failing paths are store
-    /// integrity inside the reader, which the daemon's surface cannot drive
-    /// without a corrupt store. So the daemon's `OpenItems` rewrap is not
-    /// pinned here and carries no mutation entry.
+    /// The fourth arm, `open_items`, is pinned by the test below rather than
+    /// here, because the refusal it must carry needs a store to be broken
+    /// first.
     #[test]
     fn a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole() {
         let (_root, mut daemon) = seeded();
@@ -531,6 +530,48 @@ pub(crate) mod tests {
         let plain = HuginnMindRequest::Query { instance: slug(INSTANCE), query: PipelineQuery::default() };
         let HuginnMindResponse::Query(page) = daemon.handle(plain, now()) else { panic!("expected a page") };
         assert_eq!(page.matched, 1);
+    }
+
+    /// The fourth read arm, pinned the same way. `open_items` raises no refusal
+    /// of its own, so the refusal it must carry comes from the reader beneath
+    /// it: a mind whose commit receipt has been deleted still opens, because
+    /// the opener reads the store's types, epoch and identity and not its
+    /// receipts, and then a read that joins a document to its receipt refuses
+    /// by name over the orphan. The arm must return that sentence whole, like
+    /// its three siblings: rewrapped it says the mind is unavailable for some
+    /// unstated reason, and swallowed it says the campaign has nothing open,
+    /// which is what a healthy mind says.
+    ///
+    /// The store is broken through `huginn-mind`'s own re-export of CultCache's
+    /// row traits, so this crate still names one revision through one
+    /// dependency. Hands had recorded this arm as impossible to pin; the
+    /// swallow and the rewrap both survived the suite until this landed.
+    #[test]
+    fn a_refusal_open_items_raised_is_the_answer_the_dispatch_returns_whole() {
+        use huginn_mind::HuginnCommitReceipt;
+        use huginn_mind::store::{CacheBackingStore, DatabaseEntry};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = Mind::<OwnedRedbMessagePackBackingStore>::path_for(root.path(), &slug(INSTANCE));
+        {
+            let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+            let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
+            assert!(matches!(outcome, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })));
+        }
+        {
+            let mut store = OwnedRedbMessagePackBackingStore::new(&path).unwrap();
+            let rows = store.pull_all().unwrap();
+            let receipt =
+                rows.iter().find(|row| row.r#type == HuginnCommitReceipt::TYPE).expect("one receipt").clone();
+            store.delete(&receipt).unwrap();
+        }
+
+        let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).expect("an orphaned image still opens");
+        let orphaned = MindRefusal::Unavailable {
+            detail: format!("document epiphany.pipeline.instance.v1/{INSTANCE}:instance:self has no commit receipt"),
+        };
+        let items = HuginnMindRequest::OpenItems { instance: slug(INSTANCE), campaign: slug(CAMPAIGN) };
+        assert_eq!(daemon.handle(items, now()), HuginnMindResponse::Refused(orphaned));
     }
 
     /// Cut 11's seam: the index is handed every landed write, derived ones
