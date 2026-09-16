@@ -4,8 +4,8 @@
 
 Huginn is the memory organ. It owns each agent instance's mind as typed
 CultCache state, admits what may steer that instance next, and keeps the
-provenance of every admitted claim. It does not inspect arbitrary `.cc` files,
-render dashboards, or hold repository truth.
+provenance of every admitted claim. Generic `.cc` inspection is CultCache
+Studio's job, not Huginn's.
 
 ## Body And Authority
 
@@ -13,7 +13,10 @@ render dashboards, or hold repository truth.
 - Upstream: `https://github.com/GameCult/Huginn.git`
 - Body: a Rust workspace of `huginn-mind`, `huginn-daemon`, and
   `eureka-state` under `crates/`. Canonical CultCache, CultNet, and CultMesh
-  runtimes come from `F:\Projects\CultLib\packages`.
+  runtimes come from `F:\Projects\CultLib\packages`. The crates are stubs
+  with no dependencies; each named cut of the Eureka pipeline-state campaign
+  fills one in. Until then nothing here persists, admits, publishes, or
+  connects.
 - Owned: an instance's memory documents, their admission, and their CultNet
   publication.
 - Depends on: Qdrant, directly. Unreachable Qdrant is a loud refusal, never a
