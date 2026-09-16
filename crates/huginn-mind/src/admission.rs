@@ -272,6 +272,24 @@ impl Docs {
             .unwrap_or(0)
     }
 
+    /// The sequence a derivation takes: the one the record it already derived
+    /// carries, when image or batch holds that record, so an exact replay
+    /// re-derives the same document and A9 answers with the stored receipt;
+    /// otherwise the next. A derivation is recognised by what it writes into
+    /// its record: a resolution by its outcome, an assignment by its note.
+    fn derived_resolution_sequence(&self, subject: &PipelineRef, derived: impl Fn(&ResolutionOutcome) -> bool) -> u32 {
+        self.resolutions()
+            .find(|(_, resolution)| resolution.subject == *subject && derived(&resolution.outcome))
+            .map_or_else(|| self.latest_resolution(subject, None) + 1, |(_, resolution)| resolution.sequence)
+    }
+
+    /// The same for the assignment a hand-off derives, which notes its key.
+    fn derived_stewardship_sequence(&self, mind: &Slug, repo: &OrgRepo, note: &str) -> u32 {
+        self.stewardships()
+            .find(|(_, stewardship)| stewardship.instance == *mind && stewardship.repo == *repo && stewardship.note.0 == note)
+            .map_or_else(|| self.latest_stewardship(mind, repo, None) + 1, |(_, stewardship)| stewardship.sequence)
+    }
+
     /// The same for a repo's assignments to one mind.
     fn latest_stewardship(&self, mind: &Slug, repo: &OrgRepo, own: Option<&PipelineStewardship>) -> u32 {
         self.stewardships()
@@ -315,6 +333,14 @@ impl Docs {
                     })
             })
             .collect()
+    }
+
+    /// The in-force record that stands later than `base` in the scope `base`
+    /// is sequenced in, if any: what a withdrawal that put `base` back in
+    /// force would leave standing beside it.
+    fn later_in_force(&self, base: &PipelineDocument) -> Option<&str> {
+        let kind = base.kind();
+        self.of_kind(kind).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)
     }
 
     /// The in-force stewardship of `(mind, repo)`, if any.
@@ -462,8 +488,11 @@ fn derive(docs: &Docs, mind: &Slug) -> Vec<PipelineDocument> {
             D::Ruling(ruling) => {
                 if let Some(question) = &ruling.answers {
                     let subject = PipelineRef { kind: K::Question, id: question.clone() };
+                    let sequence = docs.derived_resolution_sequence(&subject, |outcome| {
+                        matches!(outcome, ResolutionOutcome::Answered { by } if by.kind == K::Ruling && by.id.0 == staged.key)
+                    });
                     derived.push(D::Resolution(PipelineResolution {
-                        sequence: docs.latest_resolution(&subject, None) + 1,
+                        sequence,
                         subject,
                         outcome: ResolutionOutcome::Answered { by: PipelineRef { kind: K::Ruling, id: Short(staged.key.clone()) } },
                         rationale: ruling.ruling.clone(),
@@ -476,8 +505,11 @@ fn derive(docs: &Docs, mind: &Slug) -> Vec<PipelineDocument> {
                     && let Some((stewardship_key, _)) = docs.stewardship_of(mind, &hand_off.repo, Some(&staged.key))
                 {
                     let subject = PipelineRef { kind: K::Stewardship, id: Short(stewardship_key.to_string()) };
+                    let sequence = docs.derived_resolution_sequence(&subject, |outcome| {
+                        matches!(outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == staged.key)
+                    });
                     derived.push(D::Resolution(PipelineResolution {
-                        sequence: docs.latest_resolution(&subject, None) + 1,
+                        sequence,
                         subject,
                         outcome: ResolutionOutcome::Withdrawn { reason: Line(staged.key.clone()) },
                         rationale: hand_off.reason.clone(),
@@ -487,7 +519,7 @@ fn derive(docs: &Docs, mind: &Slug) -> Vec<PipelineDocument> {
                 if hand_off.to_instance == *mind {
                     derived.push(D::Stewardship(PipelineStewardship {
                         instance: mind.clone(),
-                        sequence: docs.latest_stewardship(mind, &hand_off.repo, None) + 1,
+                        sequence: docs.derived_stewardship_sequence(mind, &hand_off.repo, &staged.key),
                         repo: hand_off.repo.clone(),
                         assigned_on: hand_off.handed_on.clone(),
                         note: Line(staged.key.clone()),
@@ -735,8 +767,28 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
     fits
 }
 
+/// Whether `other` is a later record than `base` in the scope `base` is
+/// sequenced in: `(instance, repo)` for a stewardship, the subject for a
+/// resolution, the campaign for a target and the cut for a cut spec. Kinds
+/// that carry no sequence have no scope and no order.
+fn later_than(base: &PipelineDocument, other: &PipelineDocument) -> bool {
+    use PipelineDocument as D;
+    match (base, other) {
+        (D::Stewardship(base), D::Stewardship(other)) => {
+            other.instance == base.instance && other.repo == base.repo && other.sequence > base.sequence
+        }
+        (D::Resolution(base), D::Resolution(other)) => other.subject == base.subject && other.sequence > base.sequence,
+        (D::Target(base), D::Target(other)) => other.campaign == base.campaign && other.revision > base.revision,
+        (D::CutSpec(base), D::CutSpec(other)) => {
+            other.campaign == base.campaign && other.cut == base.cut && other.revision > base.revision
+        }
+        _ => false,
+    }
+}
+
 /// The resolution row: the sequence, the in-force subject, the matrix, the
-/// Q19 cap, a non-empty supersession, every referent in force, and the two
+/// Q19 cap and the reinstatement rule it rests on, a non-empty supersession,
+/// every referent in force, and the two
 /// coherence rules (an `Answered` ruling answers this question; a cut spec is
 /// superseded within its cut).
 fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), MindRefusal> {
@@ -774,6 +826,22 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         && subject.subject.kind == K::Resolution
     {
         return Err(incompatible());
+    }
+    // Q19 A's rationale one step out from the cap: a withdrawal never
+    // re-raises an earlier record over a later one. Withdrawing a resolution
+    // puts its subject back in force, so refuse while a later record of that
+    // subject's own scope stands -- a repo's next assignment, a subject's next
+    // resolution, a document's next revision.
+    if matches!(resolution.outcome, ResolutionOutcome::Withdrawn { .. })
+        && subject_kind == K::Resolution
+        && let Some(D::Resolution(reinstating)) = docs.find(K::Resolution, subject_id)
+        && let Some(base) = docs.find(reinstating.subject.kind, &reinstating.subject.id.0)
+        && let Some(later) = docs.later_in_force(base)
+    {
+        return Err(MindRefusal::WouldReinstateOverLater {
+            subject: reinstating.subject.id.0.clone(),
+            later: later.into(),
+        });
     }
     for referent in outcome_references(&resolution.outcome) {
         if !docs.in_force(referent.kind, &referent.id) {
@@ -985,6 +1053,46 @@ mod tests {
         assert_eq!(receipt_count(&mind), receipts + 1);
     }
 
+    /// A batch that derives a write replays like any other: the second
+    /// admission re-derives the record the first one landed, sequence and
+    /// all, so A9 recognises the digest and answers with the first receipt
+    /// instead of the derived write colliding with itself.
+    #[test]
+    fn an_exact_replay_re_derives_the_rulings_resolution() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        let mut answering = ruling("R1");
+        answering.answers = Some(s(&id("question", "Q1")));
+        answering.choice = Some(l("A"));
+        let (receipt_id, writes) = committed(admit(&mut mind, vec![D::Ruling(answering.clone())]));
+        assert!(writes.contains(&r(K::Resolution, &id("resolution", "question.Q1.n1"))));
+        let receipts = receipt_count(&mind);
+        assert_eq!(
+            admit(&mut mind, vec![D::Ruling(answering)]),
+            PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id }
+        );
+        assert_eq!(receipt_count(&mind), receipts, "a replay writes no second receipt");
+    }
+
+    /// The same on both sides of a hand-off: the source re-derives the
+    /// withdrawal it landed, the receiving mind the assignment.
+    #[test]
+    fn an_exact_replay_re_derives_both_sides_of_a_hand_off() {
+        let away = hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[]);
+        let mut source = seeded();
+        let (receipt_id, _) = committed(admit(&mut source, vec![away.clone()]));
+        let receipts = receipt_count(&source);
+        assert_eq!(admit(&mut source, vec![away.clone()]), PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id });
+        assert_eq!(receipt_count(&source), receipts);
+
+        let mut receiving = opened(MemoryStore::new(), OTHER_INSTANCE);
+        committed(admit(&mut receiving, vec![instance(OTHER_INSTANCE)]));
+        let (receipt_id, _) = committed(admit(&mut receiving, vec![away.clone()]));
+        let receipts = receipt_count(&receiving);
+        assert_eq!(admit(&mut receiving, vec![away]), PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id });
+        assert_eq!(receipt_count(&receiving), receipts);
+    }
+
     #[test]
     fn a_refused_batch_is_not_answered_from_a_stored_receipt() {
         let mut mind = seeded();
@@ -1134,6 +1242,67 @@ mod tests {
         ]);
     }
 
+    /// The sequence is exactly the previous plus one: a gap refuses as loudly
+    /// as a taken sequence, on both sequenced kinds, and before the question
+    /// of what still stands arises.
+    #[test]
+    fn a_sequence_gap_refuses_on_both_sequenced_kinds() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        let subject = r(K::Question, &id("question", "Q1"));
+        committed(admit(&mut mind, vec![resolution(subject.clone(), withdrawn())]));
+        committed(admit(&mut mind, vec![resolution(r(K::Resolution, &id("resolution", "question.Q1.n1")), withdrawn())]));
+        committed(admit(&mut mind, vec![resolution_n(subject.clone(), 2, withdrawn())]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution_n(subject, 4, withdrawn())])),
+            MindRefusal::ResolutionOutOfSequence { subject: id("question", "Q1"), expected: 3, actual: 4 }
+        );
+
+        let mut steward = seeded();
+        committed(admit(&mut steward, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
+        let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
+        back.handed_on = epiphany_pipeline::Date("2026-09-17".into());
+        committed(admit(&mut steward, vec![D::HandOff(back)]));
+        assert_eq!(
+            refusal(admit(&mut steward, vec![stewardship_n(INSTANCE, REPO, 4)])),
+            MindRefusal::StewardshipOutOfSequence { repo: REPO.into(), expected: 3, actual: 4 }
+        );
+    }
+
+    /// The sequence counts the batch as well as the image: two records of one
+    /// subject landing together are the second and the third, never two
+    /// firsts, and the first of them is refused for the sequence rather than
+    /// for what the other closes.
+    #[test]
+    fn the_latest_resolution_counts_the_batch() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        let subject = r(K::Question, &id("question", "Q1"));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![
+                resolution_n(subject.clone(), 1, withdrawn()),
+                resolution_n(subject, 2, ResolutionOutcome::Withdrawn { reason: "again".into() }),
+            ])),
+            MindRefusal::ResolutionOutOfSequence { subject: id("question", "Q1"), expected: 3, actual: 1 }
+        );
+    }
+
+    /// The Q19 cap reads the batch too: a chain three deep landing in one
+    /// batch is capped exactly as one landing over three admissions.
+    #[test]
+    fn the_cap_reads_a_chain_landing_in_one_batch() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        committed(admit(&mut mind, vec![resolution(r(K::Question, &id("question", "Q1")), withdrawn())]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![
+                resolution(r(K::Resolution, &id("resolution", "question.Q1.n1")), withdrawn()),
+                resolution(r(K::Resolution, &id("resolution", "resolution.question.Q1.n1.n1")), withdrawn()),
+            ])),
+            MindRefusal::IncompatibleResolution { subject_kind: K::Resolution, outcome: "Withdrawn".into() }
+        );
+    }
+
     /// Q18 A and Q20 A at admission: a repo is stewarded by one record at a
     /// time on a mind, and a repo handed away and handed back is a second
     /// record rather than a collision or an overwrite.
@@ -1192,6 +1361,69 @@ mod tests {
         assert_eq!(taken.sequence, 2);
         assert_eq!(taken.assigned_on, epiphany_pipeline::Date("2026-09-17".into()));
         assert!(mind.envelope(K::Stewardship, &first).is_some(), "the first assignment is still readable by key");
+    }
+
+    /// Q19 A's rationale, which the cap alone does not carry: a withdrawal
+    /// never re-raises an earlier record over a later one. The repo went away
+    /// and came back, so withdrawing the hand-off's withdrawal would put the
+    /// first assignment back in force beside the second.
+    #[test]
+    fn a_withdrawal_does_not_reinstate_a_stewardship_over_a_later_one() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
+        let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
+        back.handed_on = epiphany_pipeline::Date("2026-09-17".into());
+        committed(admit(&mut mind, vec![D::HandOff(back)]));
+        let first = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1");
+        let again = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n2");
+        let withdrawal = format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n1");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())])),
+            MindRefusal::WouldReinstateOverLater { subject: first, later: again.clone() }
+        );
+        let docs = Docs::from_image(mind.envelopes()).unwrap();
+        let in_force = docs.stewardships_of(&slug(INSTANCE), &repo(REPO), None).iter().map(|(key, _)| *key).collect::<Vec<_>>();
+        assert_eq!(in_force, vec![again.as_str()], "one assignment stands, and it is the later one");
+    }
+
+    /// The same rule one kind over: withdrawing a supersession while the
+    /// revision that superseded stands would leave two revisions in force.
+    #[test]
+    fn a_withdrawal_does_not_reinstate_a_revision_over_a_later_one() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![
+            target(2, &[INVARIANT]),
+            resolution(r(K::Target, &id("target", "r1")), superseded(&[r(K::Target, &id("target", "r2"))])),
+        ]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &id("resolution", "target.r1.n1")), withdrawn())])),
+            MindRefusal::WouldReinstateOverLater { subject: id("target", "r1"), later: id("target", "r2") }
+        );
+        assert!(docs_of(&mind).in_force(K::Target, &id("target", "r2")));
+        assert!(!docs_of(&mind).in_force(K::Target, &id("target", "r1")));
+    }
+
+    fn docs_of<S: MindStore>(mind: &Mind<S>) -> Docs {
+        Docs::from_image(mind.envelopes()).unwrap()
+    }
+
+    /// The withdrawal a hand-off derives is a record of its subject like any
+    /// other: the second time the repo leaves, it takes the next sequence.
+    #[test]
+    fn a_hand_offs_derived_withdrawal_takes_the_next_sequence() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
+        // Nothing later stands over the first assignment, so withdrawing the
+        // withdrawal puts it back in force and the repo is this mind's again.
+        let withdrawal = format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n1");
+        committed(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())]));
+        let D::HandOff(mut again) = hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[]) else { panic!() };
+        again.handed_on = epiphany_pipeline::Date("2026-09-17".into());
+        let (_, writes) = committed(admit(&mut mind, vec![D::HandOff(again)]));
+        assert_eq!(writes, vec![
+            r(K::HandOff, &format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.GameCult_-Epiphany.2026-09-17")),
+            r(K::Resolution, &format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n2")),
+        ]);
     }
 
     /// A seeded mind with one document of every resolvable kind, and the

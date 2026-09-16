@@ -35,6 +35,7 @@ pub enum MindRefusal {
     AlreadyStewarded { repo: String },
     StewardshipOutOfSequence { repo: String, expected: u32, actual: u32 },
     IncompatibleResolution { subject_kind: PipelineKind, outcome: String },
+    WouldReinstateOverLater { subject: String, later: String },
     CitesResolvedDocument { kind: PipelineKind, id: String },
     EmptySupersession,
     UnknownSupersessor { id: String },
