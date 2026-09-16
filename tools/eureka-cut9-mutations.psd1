@@ -15,23 +15,26 @@
 # breaks it for the views. V1L is H41's own edit, listed here as well as in
 # `eureka-cut8-mutations.psd1` -- one mutant, two suites, one owner.
 #
-# One weakening the spec names has no entry because it changes no behaviour
+# Two weakenings the spec names have no entry because they change no behaviour
 # this Body can reach, and a mutation that cannot fail is not a proof:
 #
 # - `assignments_of` comparing the repo and ignoring the instance. A5 refuses
 #   a stewardship naming another instance, so every stewardship a mind holds
 #   already names that mind, and every other caller is a sequence this mind
 #   derives over its own scope.
+# - `resolutions_of` comparing a subject by `id` alone, which was `V10L` until
+#   the leaf opened `PipelineRef::validate_ref` and `view` and `history` began
+#   asking it. A ref that reaches the comparison now has a kind its id's kind
+#   segment agrees with, and every stored subject was held to the same grammar
+#   at admission, so on both sides the kind is a function of the id and
+#   comparing the whole ref and comparing the id alone cannot differ. The rule
+#   is still the rule; it is the reachable weakening that went, and what
+#   defends it is `V24`/`V24L` at the doors instead.
 #
-# The two listed beside it in the spec are failable and have entries. The
+# The one listed beside them in the spec is failable and has an entry: the
 # `semantic` check below `Reader::new` changes the answer for a store the
 # reader refuses -- a doubled receipt, a row that does not decode -- from the
-# semantic refusal to the integrity one, and `V8L` is that move. And
-# `resolutions_of` comparing a subject by `id` alone is reachable because the
-# read side never validates the `PipelineRef` it is handed: the leaf's
-# validator is not public at the pinned rev, so `history(Subject(ref))` and
-# `view(ref)` take a ref whose kind and id disagree and answer over it. `V10L`
-# is that comparison.
+# semantic refusal to the integrity one, and `V8L` is that move.
 @{
     Mutations = @(
         @{
@@ -228,14 +231,6 @@
                     .resolutions()
                     .map(|(key, resolution)| { let _ = subject; (resolution.sequence, key.to_string()) })
 '@
-        }
-        @{
-            Id   = 'V10L'
-            Rule = 'A subject is selected by the whole ref, kind included: the read side validates no ref it is handed, so a kind that disagrees with its id selects nothing rather than that id''s records.'
-            Test = 'query::tests::a_subjects_history_lists_every_resolution_with_its_status_and_receipt'
-            File = 'crates/huginn-mind/src/docs.rs'
-            Old  = '        self.resolutions().filter(move |(_, resolution)| resolution.subject == *subject)'
-            New  = '        self.resolutions().filter(move |(_, resolution)| resolution.subject.id == subject.id)'
         }
         @{
             Id   = 'V11'
@@ -479,6 +474,52 @@
             File = 'crates/huginn-mind/src/query.rs'
             Old  = '        D::Campaign(campaign) => campaign.repos.contains(repo),'
             New  = '        D::Campaign(_) => false,'
+        }
+        @{
+            Id   = 'V24'
+            Rule = 'Every door that takes a ref asks the leaf''s grammar first: a ref whose kind and id disagree is refused, never answered over as an absent document or an empty history.'
+            Test = 'query::tests::a_ref_whose_kind_and_id_disagree_is_refused_by_both_doors'
+            Edits = @(
+                @{
+                    File = 'crates/huginn-mind/src/query.rs'
+                    Old  = @'
+        id.validate_ref()?;
+        let reader = Reader::new(self)?;
+'@
+                    New  = @'
+        let reader = Reader::new(self)?;
+'@
+                }
+                @{
+                    File = 'crates/huginn-mind/src/query.rs'
+                    Old  = @'
+        if let HistoryScope::Subject(subject) = scope {
+            subject.validate_ref()?;
+        }
+'@
+                    New  = @'
+        if let HistoryScope::Subject(subject) = scope {
+            let _ = subject;
+        }
+'@
+                }
+            )
+        }
+        @{
+            Id   = 'V24L'
+            Rule = 'Both doors ask, not one: a mind that validates the ref it views and not the subject it takes a history of still answers an empty history over a ref that is no ref.'
+            Test = 'query::tests::a_ref_whose_kind_and_id_disagree_is_refused_by_both_doors'
+            File = 'crates/huginn-mind/src/query.rs'
+            Old  = @'
+        if let HistoryScope::Subject(subject) = scope {
+            subject.validate_ref()?;
+        }
+'@
+            New  = @'
+        if let HistoryScope::Subject(subject) = scope {
+            let _ = subject;
+        }
+'@
         }
     )
 }

@@ -146,7 +146,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "epiphany-pipeline"
 version = "0.1.0"
-source = "git+https://github.com/GameCult/Epiphany.git?rev=d5a36c2a291b910539072717d42d61a9aa7485d1#d5a36c2a291b910539072717d42d61a9aa7485d1"
+source = "git+https://github.com/GameCult/Epiphany.git?rev=5cda0886bd937b9df18309de7f505029d0e41f4d#5cda0886bd937b9df18309de7f505029d0e41f4d"
 dependencies = [
  "anyhow",
  "chrono",

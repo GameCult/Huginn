@@ -313,7 +313,15 @@ fn ordered(views: &mut [PipelineDocumentView]) {
 impl<S: MindStore> Mind<S> {
     /// One document with its admission facts and its derived status, or
     /// `None` when the mind does not hold it.
+    ///
+    /// The ref is validated first, through the leaf's own door: a kind and an
+    /// id that disagree name no document any writer could have composed, and
+    /// answering `None` over one would report a malformed reference as an
+    /// absent document. The refusal is the leaf's, wrapped: this crate owns no
+    /// grammar, and a second name for `InvalidFormat` would be a second
+    /// vocabulary for one rule.
     pub fn view(&self, id: &PipelineRef) -> Result<Option<PipelineDocumentView>, MindRefusal> {
+        id.validate_ref()?;
         let reader = Reader::new(self)?;
         reader.held(id.kind, &id.id.0).map(|held| reader.view_of(held)).transpose()
     }
@@ -385,7 +393,15 @@ impl<S: MindStore> Mind<S> {
     /// Every record of one scope, withdrawn ones included with their status
     /// and their reasons, in the scope's own sequence order. Uncapped: a
     /// scope's history is bounded by the scope.
+    ///
+    /// A subject scope is validated as `view`'s id is, and for the same
+    /// reason: an empty history is the answer for a subject with no records,
+    /// not for a ref that is no ref. A repo scope is an `OrgRepo`, which the
+    /// type already holds to its own format.
     pub fn history(&self, scope: &HistoryScope) -> Result<Vec<PipelineDocumentView>, MindRefusal> {
+        if let HistoryScope::Subject(subject) = scope {
+            subject.validate_ref()?;
+        }
         let reader = Reader::new(self)?;
         let (kind, mut records) = match scope {
             HistoryScope::Subject(subject) => (
@@ -429,7 +445,8 @@ mod tests {
     use crate::store::test_stores::MemoryStore;
     use chrono::{TimeZone, Utc};
     use epiphany_pipeline::{
-        ClaimOutcome, Date, FindingConfidence, PipelineDocument as D, PipelineKind as K, ResolutionOutcome,
+        ClaimOutcome, Date, FindingConfidence, PipelineDocument as D, PipelineKind as K, PipelineRefusal,
+        ResolutionOutcome,
     };
 
     fn view(mind: &Mind<MemoryStore>, kind: K, key: &str) -> PipelineDocumentView {
@@ -438,6 +455,12 @@ mod tests {
 
     fn ids(views: &[PipelineDocumentView]) -> Vec<String> {
         views.iter().map(|view| view.id.id.0.clone()).collect()
+    }
+
+    /// The refusal a door answers for a ref whose kind is not its id's: the
+    /// leaf's own `InvalidFormat`, at the field the leaf names it, wrapped.
+    fn malformed(id: &str) -> MindRefusal {
+        MindRefusal::Document(PipelineRefusal::InvalidFormat { field: "ref.id".into(), value: id.into() })
     }
 
     /// A ruling that answers a question, which is what derives its
@@ -510,6 +533,38 @@ mod tests {
         assert_eq!(view(&mind, K::Verdict, &id("verdict", "cut-1.s1")).status, PipelineStatus::InForce);
     }
 
+    /// Ruling 1's read half: the grammar lives in the leaf, and both doors
+    /// that take a ref ask it before they look. A ref that is no ref is
+    /// refused; a ref that is well formed and names nothing is still the
+    /// empty answer, so the door refuses malformation and not absence.
+    #[test]
+    fn a_ref_whose_kind_and_id_disagree_is_refused_by_both_doors() {
+        let mut mind = seeded();
+        let q1 = id("question", "Q1");
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        committed(admit(&mut mind, vec![answering("R1", &q1)]));
+
+        // The id names a question this mind holds and a resolution it derived;
+        // read as a ruling it names neither, and is not a reference at all.
+        let disagreeing = r(K::Ruling, &q1);
+        assert_eq!(mind.view(&disagreeing), Err(malformed(&q1)));
+        assert_eq!(mind.history(&HistoryScope::Subject(disagreeing)), Err(malformed(&q1)));
+
+        // A local no writer composes is the same refusal, so the door is the
+        // whole grammar and not the kind segment alone. The refusal's `value`
+        // is the failing part, here the empty part after the trailing dot,
+        // and not the whole id.
+        let dotted = r(K::Question, &format!("{q1}."));
+        assert_eq!(mind.view(&dotted), Err(malformed("")));
+        assert_eq!(mind.history(&HistoryScope::Subject(dotted)), Err(malformed("")));
+
+        // Absence is not malformation: a well-formed id of a kind this mind
+        // does not hold answers as it always did.
+        let absent = id("question", "Q9");
+        assert_eq!(mind.view(&r(K::Question, &absent)), Ok(None));
+        assert_eq!(mind.history(&HistoryScope::Subject(r(K::Question, &absent))), Ok(Vec::new()));
+    }
+
     /// R-B and D7: a subject's resolutions are a first-class view, withdrawn
     /// ones included with their status and their reasons, in sequence order.
     #[test]
@@ -552,13 +607,15 @@ mod tests {
             id("resolution", "resolution.question.Q1.n1.n1")
         ]);
 
-        // The scope is the whole ref, kind included: a subject whose kind
-        // disagrees with its id is a subject this mind has no resolution of,
-        // even though the id names one with ten. The read side does not
-        // validate the ref it is handed -- the leaf's validator is not public
-        // at the pinned rev -- so a malformed scope is an empty history rather
-        // than a typed refusal.
-        assert!(mind.history(&HistoryScope::Subject(r(K::Ruling, &q1))).unwrap().is_empty());
+        // A subject whose kind disagrees with its id is no subject at all, and
+        // the door says so: the id names ten resolutions, and a mind that
+        // answered an empty history over it would report a malformed reference
+        // as a subject with no records.
+        assert_eq!(
+            mind.history(&HistoryScope::Subject(r(K::Ruling, &q1))),
+            Err(malformed(&q1)),
+            "a malformed scope is refused, not answered over"
+        );
 
         // History lands one record per batch (Cut 12's import constraint), so
         // ten records carry ten receipts.
