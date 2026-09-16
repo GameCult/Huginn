@@ -1,0 +1,2030 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HuginnMindRequest",
+  "description": "Every operation a mind answers. `Admit` carries the batch whole because the\nbatch already names the instance and the asker; a second `instance` beside\nit would be two declarations. Every read names the instance because ruling\n14 refuses another mind's identity whatever the transport, and a read of\nthe wrong mind is that same collision on the read side. `Whoami` names\nnone: it is how a client learns which mind it reached.",
+  "oneOf": [
+    {
+      "type": "string",
+      "enum": [
+        "Whoami"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Admit": {
+          "$ref": "#/$defs/PipelineAdmissionBatch"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Admit"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "View": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/PipelineRef"
+            },
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            }
+          },
+          "required": [
+            "instance",
+            "id"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "View"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Query": {
+          "type": "object",
+          "properties": {
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            },
+            "query": {
+              "$ref": "#/$defs/PipelineQuery"
+            }
+          },
+          "required": [
+            "instance",
+            "query"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Query"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "OpenItems": {
+          "type": "object",
+          "properties": {
+            "campaign": {
+              "$ref": "#/$defs/Slug"
+            },
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            }
+          },
+          "required": [
+            "instance",
+            "campaign"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "OpenItems"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "History": {
+          "type": "object",
+          "properties": {
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            },
+            "scope": {
+              "$ref": "#/$defs/HistoryScope"
+            }
+          },
+          "required": [
+            "instance",
+            "scope"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "History"
+      ]
+    }
+  ],
+  "$defs": {
+    "AuthorityMap": {
+      "type": "object",
+      "properties": {
+        "deletion_line": {
+          "$ref": "#/$defs/Line"
+        },
+        "derived_state": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16
+        },
+        "forbidden_writers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16
+        },
+        "owner": {
+          "$ref": "#/$defs/Line"
+        },
+        "shared_paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16
+        }
+      },
+      "required": [
+        "owner",
+        "inputs",
+        "outputs",
+        "derived_state",
+        "forbidden_writers",
+        "shared_paths",
+        "deletion_line"
+      ]
+    },
+    "ClaimOutcome": {
+      "type": "string",
+      "enum": [
+        "Holds",
+        "Falsified",
+        "Unproven"
+      ]
+    },
+    "CodeLocation": {
+      "type": "object",
+      "properties": {
+        "end_line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "path",
+        "line"
+      ]
+    },
+    "CommitRange": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/Sha"
+        },
+        "head": {
+          "$ref": "#/$defs/Sha"
+        }
+      },
+      "required": [
+        "base",
+        "head"
+      ]
+    },
+    "CutDelete": {
+      "type": "object",
+      "properties": {
+        "lines": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "note": {
+          "$ref": "#/$defs/Line"
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "path",
+        "lines",
+        "note"
+      ]
+    },
+    "CutVerification": {
+      "type": "object",
+      "properties": {
+        "builds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 64
+        },
+        "negative": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NegativeCheck"
+          },
+          "maxItems": 64
+        },
+        "operator": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 64
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VerificationTest"
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "builds",
+        "tests",
+        "negative",
+        "operator"
+      ]
+    },
+    "Date": {
+      "description": "A calendar date, `YYYY-MM-DD`.",
+      "type": "string",
+      "maxLength": 10
+    },
+    "Deviation": {
+      "type": "object",
+      "properties": {
+        "what": {
+          "$ref": "#/$defs/Line"
+        },
+        "why": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "what",
+        "why"
+      ]
+    },
+    "DocRef": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/Sha"
+        },
+        "end_line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        },
+        "start_line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line",
+        "commit"
+      ]
+    },
+    "Evidence": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EvidenceKind"
+        },
+        "locator": {
+          "$ref": "#/$defs/Line"
+        },
+        "result": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "kind",
+        "locator",
+        "result"
+      ]
+    },
+    "EvidenceKind": {
+      "type": "string",
+      "enum": [
+        "Command",
+        "Test",
+        "Mutation",
+        "Probe",
+        "SourceRead",
+        "Capture"
+      ]
+    },
+    "Faculty": {
+      "description": "Which faculty a batch was admitted as. Attribution, not authority\n(ruling 18): no admission rule trusts it, and Cut 9's views read it back\nfrom the receipt.",
+      "type": "string",
+      "enum": [
+        "SelfFaculty",
+        "Imagination",
+        "Hands",
+        "Soul",
+        "MindSteward",
+        "Eyes",
+        "Operator"
+      ]
+    },
+    "FileChange": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/Line"
+        },
+        "location": {
+          "$ref": "#/$defs/CodeLocation"
+        }
+      },
+      "required": [
+        "location",
+        "change"
+      ]
+    },
+    "FindingConfidence": {
+      "type": "string",
+      "enum": [
+        "Confirmed",
+        "Plausible"
+      ]
+    },
+    "FindingOrigin": {
+      "type": "string",
+      "enum": [
+        "Introduced",
+        "PreExisting"
+      ]
+    },
+    "FindingSeverity": {
+      "type": "string",
+      "enum": [
+        "Blocker",
+        "High",
+        "Medium",
+        "Low"
+      ]
+    },
+    "ForeignRef": {
+      "description": "A citation of a document in another repo's pipeline store (D6).",
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/FullSha"
+        },
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        }
+      },
+      "required": [
+        "repo",
+        "commit",
+        "kind",
+        "id",
+        "payload_sha256"
+      ]
+    },
+    "FullSha": {
+      "description": "A full git commit id: exactly 40 lowercase hex characters.",
+      "type": "string",
+      "maxLength": 40
+    },
+    "HistoryScope": {
+      "description": "What a history is a history of: every resolution one subject ever had, or\nevery assignment of one repo to this mind.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Subject": {
+              "$ref": "#/$defs/PipelineRef"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Subject"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Repo": {
+              "$ref": "#/$defs/OrgRepo"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Repo"
+          ]
+        }
+      ]
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "type": "string",
+      "maxLength": 64
+    },
+    "LandedName": {
+      "description": "A name the cut landed, and where it lives.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/Short"
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ]
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "type": "string",
+      "maxLength": 1000
+    },
+    "MutationRecord": {
+      "description": "One mutation a report ran: a key-safe label a verdict claim can name,\nthe exact edit, and the tree it was applied to.",
+      "type": "object",
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/Line"
+        },
+        "before": {
+          "$ref": "#/$defs/Line"
+        },
+        "commit": {
+          "$ref": "#/$defs/Sha"
+        },
+        "failed_as_expected": {
+          "type": "boolean"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "location": {
+          "$ref": "#/$defs/CodeLocation"
+        },
+        "rule": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "label",
+        "rule",
+        "location",
+        "before",
+        "after",
+        "commit",
+        "failed_as_expected"
+      ]
+    },
+    "NegativeCheck": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "$ref": "#/$defs/Short"
+        },
+        "scope": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "pattern",
+        "scope"
+      ]
+    },
+    "OrgRepo": {
+      "description": "A GitHub repository as `Org/Repo`.",
+      "type": "string",
+      "maxLength": 200
+    },
+    "Para": {
+      "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
+      "type": "string",
+      "maxLength": 4000
+    },
+    "PipelineAdmissionBatch": {
+      "description": "One admission request: the mind it is for, who asks, and the documents.\nRides the wire whole (`wire::HuginnMindRequest::Admit`).",
+      "type": "object",
+      "properties": {
+        "documents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineDocument"
+          }
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "provenance": {
+          "$ref": "#/$defs/PipelineProvenance"
+        }
+      },
+      "required": [
+        "instance",
+        "provenance",
+        "documents"
+      ]
+    },
+    "PipelineCampaign": {
+      "type": "object",
+      "properties": {
+        "repos": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrgRepo"
+          },
+          "maxItems": 8
+        },
+        "slug": {
+          "$ref": "#/$defs/Slug"
+        },
+        "target_doc": {
+          "$ref": "#/$defs/DocRef"
+        },
+        "title": {
+          "$ref": "#/$defs/Short"
+        },
+        "working_branch": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "slug",
+        "title",
+        "repos",
+        "working_branch",
+        "target_doc"
+      ]
+    },
+    "PipelineCutReport": {
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "branch": {
+          "$ref": "#/$defs/Short"
+        },
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "commits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReportCommit"
+          },
+          "maxItems": 128
+        },
+        "cut_spec": {
+          "$ref": "#/$defs/Short"
+        },
+        "deviations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Deviation"
+          },
+          "maxItems": 32
+        },
+        "forks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 8
+        },
+        "landed_names": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LandedName"
+          },
+          "maxItems": 128
+        },
+        "mutations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MutationRecord"
+          },
+          "maxItems": 64
+        },
+        "promises": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Promise"
+          },
+          "maxItems": 64
+        },
+        "range": {
+          "$ref": "#/$defs/CommitRange"
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "structural_delta": {
+          "$ref": "#/$defs/StructuralDelta"
+        },
+        "undone": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 32
+        },
+        "verification": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "campaign",
+        "cut_spec",
+        "attempt",
+        "repo",
+        "branch",
+        "commits",
+        "range",
+        "verification",
+        "mutations",
+        "deviations",
+        "forks",
+        "structural_delta",
+        "landed_names",
+        "undone",
+        "promises"
+      ]
+    },
+    "PipelineCutSpec": {
+      "type": "object",
+      "properties": {
+        "adds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 64
+        },
+        "authority_map": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorityMap"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "base": {
+          "$ref": "#/$defs/Sha"
+        },
+        "branch": {
+          "$ref": "#/$defs/Short"
+        },
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "cut": {
+          "$ref": "#/$defs/Label"
+        },
+        "deletes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CutDelete"
+          },
+          "maxItems": 64
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 8
+        },
+        "estimate": {
+          "$ref": "#/$defs/StructuralDelta"
+        },
+        "file_changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileChange"
+          },
+          "maxItems": 256
+        },
+        "first": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16
+        },
+        "keeps_moves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 64
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 16
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "rulings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 32
+        },
+        "title": {
+          "$ref": "#/$defs/Short"
+        },
+        "verification": {
+          "$ref": "#/$defs/CutVerification"
+        }
+      },
+      "required": [
+        "campaign",
+        "cut",
+        "revision",
+        "title",
+        "repo",
+        "branch",
+        "base",
+        "depends_on",
+        "first",
+        "deletes",
+        "keeps_moves",
+        "adds",
+        "file_changes",
+        "verification",
+        "estimate",
+        "rulings",
+        "questions"
+      ]
+    },
+    "PipelineDocument": {
+      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\nthirteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "campaign"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineCampaign"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "target"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineTarget"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "question"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineQuestion"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "ruling"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineRuling"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cut_spec"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineCutSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cut_report"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineCutReport"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "verdict"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineVerdict"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "finding"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineFinding"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "follow_up"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineFollowUp"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resolution"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineResolution"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "instance"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineInstance"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stewardship"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineStewardship"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "hand_off"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineHandOff"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
+    },
+    "PipelineFinding": {
+      "type": "object",
+      "properties": {
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "claim": {
+          "$ref": "#/$defs/Line"
+        },
+        "confidence": {
+          "$ref": "#/$defs/FindingConfidence"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 16
+        },
+        "failure_scenario": {
+          "$ref": "#/$defs/Para"
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Label"
+          },
+          "maxItems": 8
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "locations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CodeLocation"
+          },
+          "maxItems": 16
+        },
+        "origin": {
+          "$ref": "#/$defs/FindingOrigin"
+        },
+        "precedents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ForeignRef"
+          },
+          "maxItems": 8
+        },
+        "range": {
+          "$ref": "#/$defs/CommitRange"
+        },
+        "severity": {
+          "$ref": "#/$defs/FindingSeverity"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "campaign",
+        "verdict",
+        "label",
+        "range",
+        "confidence",
+        "severity",
+        "claim",
+        "invariants",
+        "locations",
+        "failure_scenario",
+        "evidence",
+        "precedents",
+        "origin"
+      ]
+    },
+    "PipelineFollowUp": {
+      "type": "object",
+      "properties": {
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "item": {
+          "$ref": "#/$defs/Line"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "locations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CodeLocation"
+          },
+          "maxItems": 16
+        },
+        "owner": {
+          "$ref": "#/$defs/Short"
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "source": {
+          "$ref": "#/$defs/PipelineRef"
+        },
+        "why_it_can_wait": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "campaign",
+        "label",
+        "source",
+        "repo",
+        "locations",
+        "item",
+        "why_it_can_wait",
+        "owner"
+      ]
+    },
+    "PipelineHandOff": {
+      "description": "A reassignment of stewardship, recorded in both minds. `documents` names\nwhat travels with it.",
+      "type": "object",
+      "properties": {
+        "documents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 256
+        },
+        "from_instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "handed_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "reason": {
+          "$ref": "#/$defs/Para"
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "to_instance": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "from_instance",
+        "to_instance",
+        "repo",
+        "documents",
+        "reason",
+        "handed_on"
+      ]
+    },
+    "PipelineInstance": {
+      "description": "A mind's identity document. A store is canonical to exactly one\ninstance, and this says which; identity lives in the state, not in a\npath.",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "$ref": "#/$defs/Date"
+        },
+        "display_name": {
+          "$ref": "#/$defs/Short"
+        },
+        "host": {
+          "$ref": "#/$defs/Short"
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "instance",
+        "display_name",
+        "created_at",
+        "host"
+      ]
+    },
+    "PipelineKind": {
+      "type": "string",
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff"
+      ]
+    },
+    "PipelineProvenance": {
+      "description": "Who admitted a batch: the faculty, the agent, its session and the tool.\nA field on the receipt and nothing else; the digest excludes it.",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/Short"
+        },
+        "faculty": {
+          "$ref": "#/$defs/Faculty"
+        },
+        "session": {
+          "$ref": "#/$defs/Short"
+        },
+        "tool": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "faculty",
+        "agent",
+        "session",
+        "tool"
+      ]
+    },
+    "PipelineQuery": {
+      "description": "The filters over one mind. Each is one rule, and an unset filter matches\neverything. The mind is the instance, so there is no `instance` field: the\ndaemon picks the mind before it calls here.",
+      "type": "object",
+      "properties": {
+        "admitted_after": {
+          "description": "Exclusive, compared as a string against `admitted_at`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Short"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "admitted_before": {
+          "description": "Exclusive, compared as a string against `admitted_at`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Short"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "campaign": {
+          "description": "The key's root segment: a campaign slug, or an instance for\nstewardships, hand-offs and the identity document.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Slug"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cut": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Label"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "faculty": {
+          "description": "Attribution, ruling 18: it filters, it grants nothing.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Faculty"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "in_force": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "kinds": {
+          "description": "Empty matches every kind.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineKind"
+          }
+        },
+        "limit": {
+          "description": "`None` is `QUERY_LIMIT_MAX`; anything else is clamped into\n`1..=QUERY_LIMIT_MAX`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrgRepo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "semantic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SemanticQuery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kinds"
+      ]
+    },
+    "PipelineQuestion": {
+      "type": "object",
+      "properties": {
+        "asked_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "depends": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 8
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionOption"
+          },
+          "maxItems": 8
+        },
+        "question": {
+          "$ref": "#/$defs/Para"
+        },
+        "raised_in": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PipelineRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recommended": {
+          "$ref": "#/$defs/Label"
+        }
+      },
+      "required": [
+        "campaign",
+        "label",
+        "question",
+        "options",
+        "recommended",
+        "depends",
+        "asked_on"
+      ]
+    },
+    "PipelineRef": {
+      "description": "A reference to another document. The id is parsed as a full pipeline id of\nthe declared `kind`, so the kind and the id's kind segment cannot disagree.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "PipelineResolution": {
+      "description": "The record of how a subject was closed and by what. `sequence` is per\nsubject and set by the writer, `1` for the first, and it is the last\npart of the key, so a subject's resolutions share a prefix and a\nwithdrawn one is kept under its subject rather than overwritten.\nWhether a sequence is the previous plus one, and whether an earlier\nresolution still stands, are admission's rules: this crate refuses\nneither `0` nor a gap, exactly as it refuses neither `revision: 0` nor\na `revision` with no predecessor.",
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/ResolutionOutcome"
+        },
+        "rationale": {
+          "$ref": "#/$defs/Para"
+        },
+        "resolved_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "sequence": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "subject": {
+          "$ref": "#/$defs/PipelineRef"
+        }
+      },
+      "required": [
+        "subject",
+        "sequence",
+        "outcome",
+        "rationale",
+        "resolved_on"
+      ]
+    },
+    "PipelineRuling": {
+      "type": "object",
+      "properties": {
+        "answers": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Short"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "authority": {
+          "$ref": "#/$defs/RulingAuthority"
+        },
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "choice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Label"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "operator_quote": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Para"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precedents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ForeignRef"
+          },
+          "maxItems": 8
+        },
+        "ruled_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "ruling": {
+          "$ref": "#/$defs/Para"
+        }
+      },
+      "required": [
+        "campaign",
+        "label",
+        "ruling",
+        "ruled_on",
+        "precedents",
+        "authority"
+      ]
+    },
+    "PipelineStewardship": {
+      "description": "Stewardship over a repo, as an assignment recorded in a mind. One\ninstance may steward several repos, so the repo is part of the key.\n`sequence` is per `(instance, repo)`, set by the writer, `1` for the\nfirst, so a repo transferred away and back is two records under one\nprefix rather than one document overwriting the other. `assigned_on`\nis a field, not a key part. As on a resolution, whether the sequence\nis the previous plus one, and which assignment is in force, are\nadmission's rules and not this crate's.",
+      "type": "object",
+      "properties": {
+        "assigned_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "note": {
+          "$ref": "#/$defs/Line"
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "sequence": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "instance",
+        "repo",
+        "sequence",
+        "assigned_on",
+        "note"
+      ]
+    },
+    "PipelineTarget": {
+      "type": "object",
+      "properties": {
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "canonical_implementations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16
+        },
+        "doc": {
+          "$ref": "#/$defs/DocRef"
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TargetInvariant"
+          },
+          "maxItems": 32
+        },
+        "not_in_scope": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 32
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "campaign",
+        "revision",
+        "invariants",
+        "not_in_scope",
+        "canonical_implementations",
+        "doc"
+      ]
+    },
+    "PipelineVerdict": {
+      "type": "object",
+      "properties": {
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VerdictClaim"
+          },
+          "maxItems": 64
+        },
+        "cut_report": {
+          "$ref": "#/$defs/Short"
+        },
+        "pass": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "range": {
+          "$ref": "#/$defs/CommitRange"
+        }
+      },
+      "required": [
+        "campaign",
+        "cut_report",
+        "pass",
+        "range",
+        "claims"
+      ]
+    },
+    "Promise": {
+      "description": "A promise a report makes about what it landed. Not a document and not\nresolvable: it is identified by its report's id and its label, as a\n`TargetInvariant` is by its target's. Soul measures every one (ruling\nA), and the rule that every one is measured is admission's.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "text": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "label",
+        "text"
+      ]
+    },
+    "QuestionOption": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "text": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "label",
+        "text"
+      ]
+    },
+    "ReportCommit": {
+      "type": "object",
+      "properties": {
+        "builds": {
+          "type": "boolean"
+        },
+        "sha": {
+          "$ref": "#/$defs/Sha"
+        },
+        "subject": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "sha",
+        "subject",
+        "builds"
+      ]
+    },
+    "ResolutionOutcome": {
+      "description": "How a subject was resolved. Every referent is a parsed `PipelineRef`, so a\nresolution names its records by ids of the kinds they declare, validated\nwhere every other referent is; a `Fixed` commit is a `Sha` whose referent\nis outside the document set (ruling B). Whether a named document exists,\nand how many may supersede one subject, are admission's rules.",
+      "oneOf": [
+        {
+          "description": "Overturned, in whole or in part, by later records. The list is bounded\nhere because the enum is outside `value_types!`, the only place a list\nmaximum is emitted automatically.",
+          "type": "object",
+          "properties": {
+            "Superseded": {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/PipelineRef"
+                  },
+                  "maxItems": 8
+                }
+              },
+              "required": [
+                "by"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Superseded"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Answered": {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "by"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Answered"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Fixed": {
+              "type": "object",
+              "properties": {
+                "by": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PipelineRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "commit": {
+                  "$ref": "#/$defs/Sha"
+                }
+              },
+              "required": [
+                "commit"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Fixed"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Deferred": {
+              "type": "object",
+              "properties": {
+                "to": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "to"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Deferred"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Recorded": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/Line"
+                }
+              },
+              "required": [
+                "reason"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Recorded"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Withdrawn": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/Line"
+                }
+              },
+              "required": [
+                "reason"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Withdrawn"
+          ]
+        }
+      ]
+    },
+    "RulingAuthority": {
+      "type": "string",
+      "enum": [
+        "Operator",
+        "Standing",
+        "Defaulted"
+      ]
+    },
+    "SemanticQuery": {
+      "description": "A semantic query, accepted by the type and refused until Cut 11 owns the\nindex. Cut 11 also owns which fields of each kind are text, so no substring\nfilter lives here to become a second answer to that question.",
+      "type": "object",
+      "properties": {
+        "text": {
+          "$ref": "#/$defs/Line"
+        },
+        "top_k": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "text",
+        "top_k"
+      ]
+    },
+    "Sha": {
+      "description": "A git commit id: 7-40 lowercase hex characters.",
+      "type": "string",
+      "maxLength": 40
+    },
+    "Sha256Hex": {
+      "description": "A SHA-256 digest: exactly 64 lowercase hex characters.",
+      "type": "string",
+      "maxLength": 64
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "type": "string",
+      "maxLength": 200
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "type": "string",
+      "maxLength": 64
+    },
+    "StructuralDelta": {
+      "type": "object",
+      "properties": {
+        "dependencies_added": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64
+        },
+        "dependencies_removed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64
+        },
+        "formats_added": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64
+        },
+        "formats_removed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64
+        },
+        "lines_added": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lines_removed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "targets_added": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64
+        },
+        "targets_removed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "lines_added",
+        "lines_removed",
+        "dependencies_added",
+        "dependencies_removed",
+        "formats_added",
+        "formats_removed",
+        "targets_added",
+        "targets_removed"
+      ]
+    },
+    "TargetInvariant": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "statement": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "label",
+        "statement"
+      ]
+    },
+    "VerdictClaim": {
+      "description": "The promise this claim measured, and the report's mutations it ran. An\n`Unproven` claim with a promise is one Soul could not reach.",
+      "type": "object",
+      "properties": {
+        "claim": {
+          "$ref": "#/$defs/Line"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 8
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 16
+        },
+        "mutations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Label"
+          },
+          "maxItems": 8
+        },
+        "outcome": {
+          "$ref": "#/$defs/ClaimOutcome"
+        },
+        "promise": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Label"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "claim",
+        "outcome",
+        "evidence",
+        "findings",
+        "mutations"
+      ]
+    },
+    "VerificationTest": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/Short"
+        },
+        "pins": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "name",
+        "pins"
+      ]
+    }
+  }
+}

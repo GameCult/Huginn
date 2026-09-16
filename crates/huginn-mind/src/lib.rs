@@ -13,6 +13,9 @@
 //! The read side derives status, joins the receipts and answers typed queries
 //! through the same `docs` the rules use; nothing is stored for it.
 //!
+//! The wire vocabulary is here too, so the daemon and the client share one set
+//! of types.
+//!
 //! Document shape, bounds, formats and keys are `epiphany-pipeline`'s; the
 //! organ registers, prepares, decodes and validates through the leaf's four
 //! doors and never re-derives a key. The store is CultLib's owned redb
@@ -27,6 +30,7 @@ pub mod query;
 pub mod receipt;
 pub mod refusal;
 pub mod store;
+pub mod wire;
 
 #[cfg(test)]
 pub(crate) mod fixtures;
@@ -40,6 +44,10 @@ pub use query::{
 pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
 pub use refusal::MindRefusal;
 pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
+pub use wire::{
+    HuginnMindRequest, HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA,
+    MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus,
+};
 
 /// The leaf, whole, through the one crate that pins its rev: the daemon and
 /// the client name `Slug`, `PipelineRef` and the document types from here, so
