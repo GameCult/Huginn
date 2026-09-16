@@ -29,8 +29,10 @@ edits `.cc` state. Huginn reads and writes minds.
 A Cargo workspace of three crates:
 
 - `crates/huginn-mind`: storage, identity, and admission of memory documents.
-- `crates/huginn-daemon`: the CultNet surface and serve loop.
-- `crates/eureka-state`: typed state for the Eureka pipeline.
+- `crates/huginn-daemon`: a stub. It will carry the CultNet surface and serve
+  loop; today it holds neither.
+- `crates/eureka-state`: a stub. It will carry typed state for the Eureka
+  pipeline; today it holds none.
 
 `huginn-mind` is live: it opens one instance's store (an owned redb CultCache
 at `<state_root>/minds/<instance>/mind.redb`, locked for the mind's lifetime),

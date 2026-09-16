@@ -1,6 +1,15 @@
-# Cut 8 mutations, H1-H39: each entry restores one permissiveness the cut
-# closed and names the test that must fail while it is applied. Run through
-# Epiphany's harness from this repo:
+# Cut 8 mutations, H1-H51: each entry restores one permissiveness the cut
+# closed and names the test that must fail while it is applied. H40-H46 are
+# the Cut 6d follow-up's rules (the two sequences, the recursive in-force, the
+# single in-force stewardship, the Q19 cap, and the sequences `derive` sets);
+# H47-H51 close the gaps Soul found where the code was right and the suite
+# blind. Run through Epiphany's harness from this repo:
+#
+# H32 is re-anchored to the same follow-up: its A4 half is unreachable now
+# that a derived write takes the sequence after the batch's own records, so a
+# derived identity can no longer collide with one the batch holds. What it
+# still pins is that derived writes are validated, staged and resolved like
+# any other, which the transfer test's strong read shows.
 #
 #   $env:CARGO_TARGET_DIR = 'C:\Users\Meta\.cargo-target-codex'
 #   powershell -File F:\Projects\Epiphany\tools\eureka-mutations.ps1 -Repo F:\Projects\Huginn `
@@ -397,8 +406,8 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
         }
         @{
             Id   = 'H32'
-            Rule = 'Derived writes pass A3-A7 like any other; a derived identity the batch already holds is A4''s refusal, not a store error.'
-            Test = 'admission::tests::a_hand_off_derives_this_minds_side_only'
+            Rule = 'Derived writes go through validation, A4 and A7 like any other: what a derived write cites in the image is pinned.'
+            Test = 'admission::tests::a_repo_is_stewarded_once_at_a_time_and_again_after_a_transfer'
             File = 'crates/huginn-mind/src/admission.rs'
             Old  = @'
         for document in derive(&docs, &mind) {
@@ -485,6 +494,145 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
             }
 '@
             New  = '            let _ = (ruling, subject_id);'
+        }
+        @{
+            Id   = 'H40'
+            Rule = 'resolution: the sequence is the previous plus one over image and batch (Q17 B).'
+            Test = 'admission::tests::a_subject_with_a_resolution_in_force_refuses_another'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '    if resolution.sequence != expected {'
+            New  = '    if false {'
+        }
+        @{
+            Id   = 'H41'
+            Rule = 'In force is recursive: a withdrawn resolution no longer closes its subject.'
+            Test = 'admission::tests::a_withdrawn_resolution_reopens_its_subject_and_stays_readable'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+                && !own(resolution)
+                && self.in_force(PipelineKind::Resolution, key)
+'@
+            New  = @'
+                && !own(resolution)
+                && { let _ = key; true }
+'@
+        }
+        @{
+            Id   = 'H42'
+            Rule = 'stewardship: the sequence is the previous plus one, as a resolution''s is (Q18 A, Q20 A).'
+            Test = 'admission::tests::a_repo_is_stewarded_once_at_a_time_and_again_after_a_transfer'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            if stewardship.sequence != expected {'
+            New  = '            if false {'
+        }
+        @{
+            Id   = 'H43'
+            Rule = 'stewardship: at most one assignment of a repo is in force on a mind.'
+            Test = 'admission::tests::a_repo_is_stewarded_once_at_a_time_and_again_after_a_transfer'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+            if docs.stewardships_of(mind, &stewardship.repo, None).iter().any(|(other, _)| *other != key) {
+                return Err(MindRefusal::AlreadyStewarded { repo: stewardship.repo.0.clone() });
+            }
+'@
+            New  = ''
+        }
+        @{
+            Id   = 'H44'
+            Rule = 'Q19 A: a withdrawal cannot be withdrawn; the chain stops at depth two.'
+            Test = 'admission::tests::a_withdrawn_resolution_reopens_its_subject_and_stays_readable'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+    if subject_kind == K::Resolution
+        && let Some(D::Resolution(subject)) = docs.find(K::Resolution, subject_id)
+        && subject.subject.kind == K::Resolution
+    {
+        return Err(incompatible());
+    }
+'@
+            New  = ''
+        }
+        @{
+            Id   = 'H45'
+            Rule = 'derive: a derived resolution takes the subject''s next sequence, not always the first.'
+            Test = 'admission::tests::a_withdrawn_resolution_reopens_its_subject_and_stays_readable'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+                        sequence: docs.latest_resolution(&subject, None) + 1,
+                        subject,
+                        outcome: ResolutionOutcome::Answered
+'@
+            New  = @'
+                        sequence: 1,
+                        subject,
+                        outcome: ResolutionOutcome::Answered
+'@
+        }
+        @{
+            Id   = 'H46'
+            Rule = 'derive: H45''s other half, a derived stewardship takes the repo''s next sequence on this mind.'
+            Test = 'admission::tests::a_repo_is_stewarded_once_at_a_time_and_again_after_a_transfer'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '                        sequence: docs.latest_stewardship(mind, &hand_off.repo, None) + 1,'
+            New  = '                        sequence: 1,'
+        }
+        @{
+            Id   = 'H47'
+            Rule = 'stewardship_of: only an in-force assignment counts, so a handed-away repo is not stewarded.'
+            Test = 'admission::tests::a_repo_is_stewarded_once_at_a_time_and_again_after_a_transfer'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = @'
+            .filter(|(key, stewardship)| {
+                stewardship.instance == *mind
+                    && stewardship.repo == *repo
+                    && self.in_force_unless(PipelineKind::Stewardship, key, |resolution| {
+                        matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { reason } if Some(reason.0.as_str()) == hand_off_key)
+                    })
+            })
+'@
+            New  = @'
+            .filter(|(_key, stewardship)| {
+                let _ = hand_off_key;
+                stewardship.instance == *mind && stewardship.repo == *repo
+            })
+'@
+        }
+        @{
+            Id   = 'H48'
+            Rule = 'A7: a document two batch documents cite is pinned once, not cancelled by the second citation.'
+            Test = 'admission::tests::every_cited_image_document_is_a_strong_read'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            strong.insert((reference.kind.type_id().to_string(), reference.id));'
+            New  = @'
+            let pin = (reference.kind.type_id().to_string(), reference.id);
+            if !strong.insert(pin.clone()) {
+                strong.remove(&pin);
+            }
+'@
+        }
+        @{
+            Id   = 'H49'
+            Rule = 'finding: the in-force target is looked for in image and batch, not the image alone.'
+            Test = 'admission::tests::a_finding_names_evidence_locations_and_known_invariants'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            let target = docs.of_kind(K::Target).find_map(|(target_key, document)| match document {'
+            New  = '            let target = docs.image.iter().map(|held| (held.key.as_str(), &held.document)).find_map(|(target_key, document)| match document {'
+        }
+        @{
+            Id   = 'H50'
+            Rule = 'resolution: the Answered coherence check reads the ruling wherever it is, batch or image.'
+            Test = 'admission::tests::a_ruling_answering_a_question_derives_the_answered_resolution_atomically'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            let Some(D::Ruling(ruling)) = docs.find(K::Ruling, &by.id.0) else { return Ok(()) };'
+            New  = '            let Some(D::Ruling(ruling)) = docs.in_batch(K::Ruling, &by.id.0) else { return Ok(()) };'
+        }
+        @{
+            Id   = 'H51'
+            Rule = 'cut_report: the branch is compared as written; git''s refs are case-sensitive.'
+            Test = 'admission::tests::a_cut_report_cites_an_in_force_spec_and_agrees_with_it'
+            File = 'crates/huginn-mind/src/admission.rs'
+            Old  = '            if report.branch != spec.branch {'
+            New  = '            if !report.branch.0.eq_ignore_ascii_case(&spec.branch.0) {'
         }
     )
 }

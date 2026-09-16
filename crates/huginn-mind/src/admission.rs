@@ -1082,6 +1082,118 @@ mod tests {
         );
     }
 
+    /// Q17 B and Q19 A together: withdrawing a resolution reopens its subject
+    /// without erasing the record. The withdrawn closure is still readable by
+    /// key, the subject takes its next resolution at the next sequence, and
+    /// the chain stops at depth two -- a withdrawal cannot be withdrawn.
+    #[test]
+    fn a_withdrawn_resolution_reopens_its_subject_and_stays_readable() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        let subject = r(K::Question, &id("question", "Q1"));
+        let first = id("resolution", "question.Q1.n1");
+        committed(admit(&mut mind, vec![resolution(subject.clone(), withdrawn())]));
+
+        // The withdrawal of that closure: one nesting out, under the
+        // resolution it withdraws.
+        committed(admit(&mut mind, vec![resolution(r(K::Resolution, &first), withdrawn())]));
+        let withdrawal = id("resolution", "resolution.question.Q1.n1.n1");
+        assert!(mind.get(K::Resolution, &withdrawal).unwrap().is_some());
+
+        // The subject is open again, and its next record is `n2`. The first
+        // one is still there, outcome and all: this is a log, not an erasure.
+        committed(admit(&mut mind, vec![resolution_n(subject.clone(), 2, withdrawn())]));
+        let Some(D::Resolution(kept)) = mind.get(K::Resolution, &first).unwrap() else { panic!() };
+        assert_eq!(kept.outcome, withdrawn());
+        assert_eq!(kept.sequence, 1);
+
+        // `n2` stands, so a third is refused, and the withdrawal cannot
+        // itself be withdrawn to re-raise `n1` over it (Q19 A).
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution_n(subject, 3, withdrawn())])),
+            MindRefusal::AlreadyResolved { subject: id("question", "Q1") }
+        );
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())])),
+            MindRefusal::IncompatibleResolution { subject_kind: K::Resolution, outcome: "Withdrawn".into() }
+        );
+
+        // And a ruling may answer a question whose first closure was
+        // withdrawn: the derived resolution takes the next sequence.
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        committed(admit(&mut mind, vec![resolution(r(K::Question, &id("question", "Q1")), withdrawn())]));
+        committed(admit(&mut mind, vec![resolution(r(K::Resolution, &first), withdrawn())]));
+        let mut answering = ruling("R1");
+        answering.answers = Some(s(&id("question", "Q1")));
+        answering.choice = Some(l("A"));
+        let (_, writes) = committed(admit(&mut mind, vec![D::Ruling(answering)]));
+        assert_eq!(writes, vec![
+            r(K::Ruling, &id("ruling", "R1")),
+            r(K::Resolution, &id("resolution", "question.Q1.n2")),
+        ]);
+    }
+
+    /// Q18 A and Q20 A at admission: a repo is stewarded by one record at a
+    /// time on a mind, and a repo handed away and handed back is a second
+    /// record rather than a collision or an overwrite.
+    #[test]
+    fn a_repo_is_stewarded_once_at_a_time_and_again_after_a_transfer() {
+        let mut mind = seeded();
+        let first = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![stewardship_n(INSTANCE, REPO, 2)])),
+            MindRefusal::AlreadyStewarded { repo: REPO.into() }
+        );
+        let D::Stewardship(mut retaken) = stewardship(INSTANCE, REPO) else { panic!() };
+        retaken.note = "assigned again".into();
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Stewardship(retaken)])),
+            MindRefusal::StewardshipOutOfSequence { repo: REPO.into(), expected: 2, actual: 1 }
+        );
+
+        // Handing the repo away withdraws the assignment, and the withdrawal
+        // is a resolution of that record, sequence and all. The stewardship it
+        // reads to derive that is an image document, so it is pinned.
+        let (receipt_id, writes) = committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
+        let away = format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.GameCult_-Epiphany.{}", date().0);
+        assert_eq!(writes, vec![
+            r(K::HandOff, &away),
+            r(K::Resolution, &format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n1")),
+        ]);
+        let receipt = mind.receipts().unwrap().into_iter().find(|receipt| receipt.receipt_id == receipt_id).unwrap();
+        let stewardship_envelope = mind.envelope(K::Stewardship, &first).unwrap().clone();
+        assert!(
+            receipt.strong_reads.contains(&DocumentVersion::from_envelope(&stewardship_envelope)),
+            "the derived withdrawal's own citation is pinned: {:?}",
+            receipt.strong_reads
+        );
+
+        // Nothing stewards the repo now, and `stewardship_of` says so: a new
+        // campaign over it is refused.
+        let D::Campaign(mut second) = campaign(&[REPO]) else { panic!() };
+        second.slug = slug("second");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Campaign(second)])),
+            MindRefusal::RepoNotStewarded { repo: REPO.into() }
+        );
+
+        // Handed back, the mind stewards it again, as `n2`. No field names a
+        // return: this is the same hand-off shape with the instances swapped.
+        let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
+        back.handed_on = epiphany_pipeline::Date("2026-09-17".into());
+        let (_, writes) = committed(admit(&mut mind, vec![D::HandOff(back)]));
+        let again = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n2");
+        assert_eq!(writes, vec![
+            r(K::HandOff, &format!("{OTHER_INSTANCE}:hand_off:{INSTANCE}.GameCult_-Epiphany.2026-09-17")),
+            r(K::Stewardship, &again),
+        ]);
+        let Some(D::Stewardship(taken)) = mind.get(K::Stewardship, &again).unwrap() else { panic!() };
+        assert_eq!(taken.sequence, 2);
+        assert_eq!(taken.assigned_on, epiphany_pipeline::Date("2026-09-17".into()));
+        assert!(mind.envelope(K::Stewardship, &first).is_some(), "the first assignment is still readable by key");
+    }
+
     /// A seeded mind with one document of every resolvable kind, and the
     /// non-resolvable ones beside them.
     fn world() -> Mind<MemoryStore> {
@@ -1238,7 +1350,15 @@ mod tests {
         answering.choice = Some(l("A"));
         let wrong = resolution(r(K::Question, &id("question", "Q2")), ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) });
         assert_eq!(
-            refusal(admit(&mut mind, vec![D::Ruling(answering), wrong])),
+            refusal(admit(&mut mind, vec![D::Ruling(answering.clone()), wrong.clone()])),
+            MindRefusal::IncompatibleResolution { subject_kind: K::Question, outcome: "Answered".into() }
+        );
+        // The coherence is checked whether the ruling is in the batch or in
+        // the image: a later batch citing the stored R1 is refused the same
+        // way, and the derived resolution of Q1 is not what saves it.
+        committed(admit(&mut mind, vec![D::Ruling(answering)]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![wrong])),
             MindRefusal::IncompatibleResolution { subject_kind: K::Question, outcome: "Answered".into() }
         );
     }
@@ -1306,6 +1426,17 @@ mod tests {
         for envelope in &cited {
             assert!(receipt.strong_reads.contains(&DocumentVersion::from_envelope(envelope)), "{}", envelope.key);
         }
+
+        // Two batch documents citing one image document pin it once: the pins
+        // are a set, so a second citation neither duplicates the pin nor
+        // cancels it.
+        let mut twice = cut_spec("2", 1);
+        twice.rulings = vec![s(&id("ruling", "R1"))];
+        let D::Question(mut raised) = question("Q1", &["A", "B"], "A") else { panic!() };
+        raised.raised_in = Some(r(K::Ruling, &id("ruling", "R1")));
+        let (receipt_id, _) = committed(admit(&mut mind, vec![D::CutSpec(twice), D::Question(raised)]));
+        let receipt = mind.receipts().unwrap().into_iter().find(|receipt| receipt.receipt_id == receipt_id).unwrap();
+        assert_eq!(receipt.strong_reads, vec![DocumentVersion::from_envelope(&cited[0])], "cited twice, pinned once");
     }
 
     #[test]
@@ -1350,6 +1481,11 @@ mod tests {
         committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1))]));
         let mut report = cut_report("1", 1);
         report.branch = s("another-branch");
+        assert_eq!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::SpecMismatch { field: "branch".into() });
+        // A branch is compared as written. Git's refs are case-sensitive, and
+        // a report of `Codex/...` is a report of another branch or of none.
+        let mut report = cut_report("1", 1);
+        report.branch = s("CODEX/eureka-pipeline-state");
         assert_eq!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::SpecMismatch { field: "branch".into() });
         let mut report = cut_report("1", 1);
         report.repo = repo(OTHER_REPO);
@@ -1428,6 +1564,7 @@ mod tests {
         unknown.invariants = vec![l("nope")];
         assert_eq!(refusal(admit(&mut mind, vec![D::Finding(unknown)])), MindRefusal::UnknownInvariant { label: "nope".into() });
 
+
         // A raw envelope without `range` cannot be built from the type, and
         // it is the leaf's decode that refuses it, before any organ rule.
         #[derive(serde::Serialize)]
@@ -1469,10 +1606,20 @@ mod tests {
 
         // The in-force target owns the invariant vocabulary. Supersede r1 with
         // an r2 that drops its label, and the label is unknown again; r2's own
-        // label is what a finding may cite.
+        // label is what a finding may cite. The target is looked for in image
+        // and batch, like every other citation, so a finding may cite the
+        // vocabulary of the revision landing beside it: `other` is admitted in
+        // r2's own batch, before r2 is anywhere but here.
+        let mut fresh = finding("1", 1, "F4", FindingConfidence::Plausible);
+        fresh.invariants = vec![l("other")];
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Finding(fresh.clone())])),
+            MindRefusal::UnknownInvariant { label: "other".into() }
+        );
         committed(admit(&mut mind, vec![
             target(2, &["other"]),
             resolution(r(K::Target, &id("target", "r1")), superseded(&[r(K::Target, &id("target", "r2"))])),
+            D::Finding(fresh),
         ]));
         assert_eq!(
             refusal(admit(&mut mind, vec![D::Finding(finding("1", 1, "F2", FindingConfidence::Plausible))])),
