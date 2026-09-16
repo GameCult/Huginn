@@ -217,13 +217,13 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::tests::{INSTANCE, batch, identity, now, slug};
+    use crate::daemon::tests::{INSTANCE, OTHER, batch, identity, now, slug};
     use crate::envelope::{FAILURE_SCHEMA, decode_response, encode_request};
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use cultnet_rs::{CultMesh, CultMeshRudpSocketOptions};
     use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, MindStatus};
-    use huginn_mind::{PipelineAdmissionOutcome, PipelineQuery};
+    use huginn_mind::{MindRefusal, PipelineAdmissionOutcome, PipelineQuery};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -306,6 +306,21 @@ mod tests {
         );
 
         assert_eq!(documents(&mut daemon), 0, "no malformed envelope reached the mind");
+
+        // A mind's refusal is an answer on the response schema, not a failure
+        // of the envelope: the client decodes it as the typed refusal it is.
+        let read = HuginnMindRequest::Query { instance: slug(OTHER), query: PipelineQuery::default() };
+        let reply = answer(&mut daemon, &registry, encode_request("m-r", &read, None).unwrap(), now());
+        let CultNetMessage::OperationResponse { status, payload_schema, .. } = &reply else {
+            panic!("expected an operation response, got {reply:?}");
+        };
+        assert_eq!((status.as_str(), payload_schema.as_str()), ("rejected", MIND_RESPONSE_SCHEMA));
+        let (correlation, answered) = decode_response(&reply).unwrap();
+        assert_eq!(correlation, "m-r");
+        assert_eq!(
+            answered.unwrap(),
+            HuginnMindResponse::Refused(MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() })
+        );
 
         let catalog = CultNetMessage::SchemaCatalogRequest {
             message_id: "m-6".into(),
@@ -417,22 +432,30 @@ mod tests {
         assert_eq!(documents(&mut daemon), 1, "the admission that crossed the wire landed");
     }
 
-    /// Ruling 15 as an order in the one place both happen: a mind that will not
-    /// open leaves the port free, so the socket cannot precede the refusal.
+    /// Ruling 15 as an order in the one place both happen. Both gates are shut
+    /// at once: the mind is held and the port is held. A startup that opens
+    /// first says why the mind refused; one that binds first can only say the
+    /// port was taken, and never reaches the refusal that matters.
     #[test]
     fn startup_opens_the_mind_before_it_binds_anything() {
         let root = tempfile::tempdir().unwrap();
         let held = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
-        let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let port = probe.local_addr().unwrap();
-        drop(probe);
+        let occupied = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = occupied.local_addr().unwrap();
 
         let options = Options { state_root: root.path().to_path_buf(), instance: slug(INSTANCE), bind: port };
-        let error = startup(&options).err().expect("a held mind refuses");
-        assert!(format!("{error:#}").contains("MindAlreadyOwned"), "{error:#}");
+        let error = format!("{:#}", startup(&options).err().expect("a held mind refuses"));
+        assert!(error.contains("MindAlreadyOwned"), "the refusal is the mind's, not the socket's: {error}");
+        assert!(!error.contains("binding"), "the socket was never reached: {error}");
+
+        // With the mind free and the port still held, the socket is the only
+        // gate left, and startup reports it.
         drop(held);
-        // Nothing bound the port, so the test can.
-        UdpSocket::bind(port).expect("startup bound nothing before the mind refused");
+        let error = format!("{:#}", startup(&options).err().expect("a held port refuses"));
+        assert!(error.contains("binding"), "{error}");
+        drop(occupied);
+        let (_daemon, hub, _registry) = startup(&options).expect("both gates open");
+        assert_eq!(hub.local_addr().unwrap(), port);
     }
 
     #[test]

@@ -299,6 +299,17 @@ pub(crate) mod tests {
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(foreign.clone()))
         );
 
+        // The declared instance travels to the mind as the client sent it. A
+        // batch whose documents name no instance at all is still refused on
+        // the declaration alone, so nothing between the wire and A1 may
+        // rewrite it into the mind's own.
+        let (question, _) = question_and_ruling();
+        let admit = HuginnMindRequest::Admit(batch(OTHER, vec![question]));
+        assert_eq!(
+            daemon.handle(admit, now()),
+            HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(foreign.clone()))
+        );
+
         let view = HuginnMindRequest::View { instance: slug(OTHER), id: writes[0].clone() };
         assert_eq!(daemon.handle(view, now()), HuginnMindResponse::Refused(foreign.clone()));
 
