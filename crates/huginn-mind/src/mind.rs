@@ -405,15 +405,33 @@ mod tests {
     /// One check, one owner: the value admission refuses a foreign instance
     /// with is the value `require_instance` returns, so the daemon asking it
     /// for a read and `admit_steps` asking it for a write cannot disagree.
+    ///
+    /// The foreign names are chosen so the check cannot pass by resembling a
+    /// comparison. `NEAR_INSTANCE` is the mind's own length and shares all but
+    /// its last byte, so a check reading only the lengths, only the first byte,
+    /// or running only when the declared name is longer lets it through;
+    /// `PREFIXED_INSTANCE` has the mind's whole name as its prefix, so a check
+    /// asking whether one starts with the other lets that one through.
     #[test]
     fn require_instance_is_the_one_check_admission_and_the_daemon_share() {
-        use crate::fixtures::{OTHER_INSTANCE, now, provenance, seeded};
+        use crate::fixtures::{NEAR_INSTANCE, OTHER_INSTANCE, PREFIXED_INSTANCE, now, provenance, seeded};
         use crate::receipt::Faculty;
 
         let mut mind = seeded();
         let foreign = MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() };
         assert_eq!(mind.require_instance(&slug(OTHER_INSTANCE)).err(), Some(foreign.clone()));
         assert_eq!(mind.require_instance(&slug(INSTANCE)), Ok(()));
+
+        assert_eq!(NEAR_INSTANCE.len(), INSTANCE.len(), "the near name is the mind's own length");
+        assert_eq!(NEAR_INSTANCE[..INSTANCE.len() - 1], INSTANCE[..INSTANCE.len() - 1], "and differs in one byte");
+        assert!(PREFIXED_INSTANCE.starts_with(INSTANCE), "the prefixed name carries the mind's whole name");
+        for declared in [NEAR_INSTANCE, PREFIXED_INSTANCE] {
+            assert_eq!(
+                mind.require_instance(&slug(declared)).err(),
+                Some(MindRefusal::ForeignInstance { declared: declared.into(), mind: INSTANCE.into() }),
+                "{declared} is not {INSTANCE}"
+            );
+        }
 
         let batch = crate::admission::PipelineAdmissionBatch {
             instance: slug(OTHER_INSTANCE),

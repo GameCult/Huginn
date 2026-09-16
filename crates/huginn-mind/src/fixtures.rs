@@ -22,6 +22,14 @@ use crate::store::test_stores::MemoryStore;
 
 pub(crate) const INSTANCE: &str = "yggdrasil";
 pub(crate) const OTHER_INSTANCE: &str = "thought-cage";
+/// A foreign instance of `INSTANCE`'s own length, differing in its last byte
+/// alone: a comparison of lengths, of first bytes, or one gated on the
+/// declared name being the longer admits it, and a comparison of values does
+/// not.
+pub(crate) const NEAR_INSTANCE: &str = "yggdrasix";
+/// A foreign instance carrying `INSTANCE` whole as its prefix, so a prefix
+/// test admits it.
+pub(crate) const PREFIXED_INSTANCE: &str = "yggdrasil-two";
 pub(crate) const CAMPAIGN: &str = "eureka-state";
 pub(crate) const REPO: &str = "GameCult/Epiphany";
 pub(crate) const OTHER_REPO: &str = "GameCult/Huginn";

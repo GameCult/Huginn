@@ -116,6 +116,10 @@ pub(crate) mod tests {
 
     pub(crate) const INSTANCE: &str = "yggdrasil";
     pub(crate) const OTHER: &str = "thought-cage";
+    /// `INSTANCE`'s own length, differing in its last byte alone.
+    pub(crate) const NEAR: &str = "yggdrasix";
+    /// `INSTANCE` whole, with more after it.
+    pub(crate) const PREFIXED: &str = "yggdrasil-two";
     pub(crate) const CAMPAIGN: &str = "eureka-state";
 
     pub(crate) fn slug(value: &str) -> Slug {
@@ -319,6 +323,27 @@ pub(crate) mod tests {
         let scope = HistoryScope::Repo(OrgRepo("GameCult/Huginn".into()));
         let history = HuginnMindRequest::History { instance: slug(OTHER), scope };
         assert_eq!(daemon.handle(history, now()), HuginnMindResponse::Refused(foreign));
+
+        // Two names a comparison could mistake for this mind's. `NEAR` is
+        // `INSTANCE`'s own length and differs in its last byte, so a check
+        // reading lengths, first bytes, or running only when the declared name
+        // is longer admits it; `PREFIXED` carries `INSTANCE` whole, so a prefix
+        // test admits it. Both are refused on the read side and the write side.
+        assert_eq!(NEAR.len(), INSTANCE.len());
+        assert!(PREFIXED.starts_with(INSTANCE));
+        for declared in [NEAR, PREFIXED] {
+            let refusal = MindRefusal::ForeignInstance { declared: declared.into(), mind: INSTANCE.into() };
+            let query = HuginnMindRequest::Query { instance: slug(declared), query: PipelineQuery::default() };
+            assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(refusal.clone()), "{declared}");
+            let view = HuginnMindRequest::View { instance: slug(declared), id: writes[0].clone() };
+            assert_eq!(daemon.handle(view, now()), HuginnMindResponse::Refused(refusal.clone()), "{declared}");
+            let admit = HuginnMindRequest::Admit(batch(declared, vec![identity(declared)]));
+            assert_eq!(
+                daemon.handle(admit, now()),
+                HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(refusal)),
+                "{declared}"
+            );
+        }
 
         assert_eq!(status(&mut daemon).documents, 1, "nothing landed");
     }

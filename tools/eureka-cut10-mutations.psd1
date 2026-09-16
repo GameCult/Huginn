@@ -50,6 +50,42 @@
         }
         @{
             Id      = 'D1L'
+            Rule    = 'The instance check compares the names, not their lengths.'
+            Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if declared.0.len() != self.instance().0.len() {'
+        }
+        @{
+            Id      = 'D1L2'
+            Rule    = 'It compares the names whole, not their first byte.'
+            Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if declared.0.as_bytes().first() != self.instance().0.as_bytes().first() {'
+        }
+        @{
+            Id      = 'D1L3'
+            Rule    = 'It runs on every declared name, not only on one long enough to look suspicious.'
+            Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if declared.0.len() > self.instance().0.len() && declared != self.instance() {'
+        }
+        @{
+            Id      = 'D1L4'
+            Rule    = 'It compares the names, not whether one begins with the other.'
+            Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if !declared.0.starts_with(&self.instance().0) {'
+        }
+        @{
+            Id      = 'D1N'
             Rule    = 'The refusal names which mind refused, so an agent can act on the field rather than guess.'
             Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
             Command = 'cargo test -p huginn-mind --lib'
@@ -75,6 +111,14 @@
         let _ = declared;
         Ok(())
 '@
+        }
+        @{
+            Id   = 'D1DL'
+            Rule = 'The same comparison, reached the daemon''s way: a read naming a name of the mind''s own length is refused too.'
+            Test = 'daemon::tests::a_read_or_a_write_naming_another_instance_is_refused_by_the_mind_and_writes_nothing'
+            File = 'crates/huginn-mind/src/mind.rs'
+            Old  = '        if declared != self.instance() {'
+            New  = '        if declared.0.len() != self.instance().0.len() {'
         }
         @{
             Id   = 'D2'
