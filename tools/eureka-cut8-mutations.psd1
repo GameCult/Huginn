@@ -36,14 +36,18 @@
 # and H67 by file alone, and H47 and H60 re-anchored on the scope selectors
 # `assignments_of` and `resolutions_of` the move extracted. Their rules are
 # unchanged.
+#
+# Cut 10 moved A1's comparison into `Mind::require_instance`, which admission
+# and the daemon's reads now share, so H1 anchors on `mind.rs`. One mutant,
+# two suites, one owner: the same edit is `D1` in `eureka-cut10-mutations.psd1`.
 @{
     Mutations = @(
         @{
             Id   = 'H1'
             Rule = 'Ruling 14: admission refuses another instance''s identity (A1).'
             Test = 'admission::tests::admission_refuses_a_foreign_instance_whatever_the_transport'
-            File = 'crates/huginn-mind/src/admission.rs'
-            Old  = '        if instance != self.instance() {'
+            File = 'crates/huginn-mind/src/mind.rs'
+            Old  = '        if declared != self.instance() {'
             New  = '        if false {'
         }
         @{

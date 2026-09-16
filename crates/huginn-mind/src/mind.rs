@@ -121,6 +121,20 @@ impl<S: MindStore> Mind<S> {
         &self.instance
     }
 
+    /// Ruling 14 across every transport: the declared instance is this mind's,
+    /// else `ForeignInstance { declared, mind }`. A1 for admission; the daemon
+    /// asks it for every read that names an instance, and compares nothing
+    /// itself.
+    pub fn require_instance(&self, declared: &Slug) -> Result<(), MindRefusal> {
+        if declared != self.instance() {
+            return Err(MindRefusal::ForeignInstance {
+                declared: declared.0.clone(),
+                mind: self.instance().0.clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// The image: every envelope the store held at the last pull, in
     /// identity order. Cut 10's snapshot source reads this.
     pub fn envelopes(&self) -> &[CultCacheEnvelope] {
@@ -386,6 +400,27 @@ mod tests {
         let mind = Mind::open_with(store, &slug(INSTANCE)).unwrap();
         assert_eq!(mind.instance(), &slug(INSTANCE));
         assert_eq!(mind.envelopes().len(), 2);
+    }
+
+    /// One check, one owner: the value admission refuses a foreign instance
+    /// with is the value `require_instance` returns, so the daemon asking it
+    /// for a read and `admit_steps` asking it for a write cannot disagree.
+    #[test]
+    fn require_instance_is_the_one_check_admission_and_the_daemon_share() {
+        use crate::fixtures::{OTHER_INSTANCE, now, provenance, seeded};
+        use crate::receipt::Faculty;
+
+        let mut mind = seeded();
+        let foreign = MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() };
+        assert_eq!(mind.require_instance(&slug(OTHER_INSTANCE)).err(), Some(foreign.clone()));
+        assert_eq!(mind.require_instance(&slug(INSTANCE)), Ok(()));
+
+        let batch = crate::admission::PipelineAdmissionBatch {
+            instance: slug(OTHER_INSTANCE),
+            provenance: provenance(Faculty::Hands),
+            documents: vec![instance(OTHER_INSTANCE)],
+        };
+        assert_eq!(mind.admit(batch, now()), crate::admission::PipelineAdmissionOutcome::Refused(foreign));
     }
 
     #[test]

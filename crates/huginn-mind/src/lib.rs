@@ -39,4 +39,9 @@ pub use query::{
 };
 pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
 pub use refusal::MindRefusal;
-pub use store::MindStore;
+pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
+
+/// The leaf, whole, through the one crate that pins its rev: the daemon and
+/// the client name `Slug`, `PipelineRef` and the document types from here, so
+/// one `[dependencies]` entry decides which revision the workspace speaks.
+pub use epiphany_pipeline;

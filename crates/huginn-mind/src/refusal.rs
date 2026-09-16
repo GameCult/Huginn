@@ -17,11 +17,7 @@ use serde::{Deserialize, Serialize};
 /// still in force.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum MindRefusal {
-    Document(
-        #[serde(with = "DocumentRefusal")]
-        #[schemars(with = "DocumentRefusal")]
-        PipelineRefusal,
-    ),
+    Document(PipelineRefusal),
     ForeignInstance { declared: String, mind: String },
     MissingIdentity,
     ForeignEpoch { found: String, expected: String },
@@ -59,23 +55,6 @@ pub enum MindRefusal {
     UnknownInvariant { label: String },
     NotStewarded { repo: String },
     Unavailable { detail: String },
-}
-
-/// The leaf's `PipelineRefusal` at the pinned rev derives neither `Serialize`
-/// nor `JsonSchema`. This is serde's remote definition of it: the same four
-/// variants, field for field, compiled against the leaf's type, so a leaf
-/// change that renames or adds a field stops this crate building rather than
-/// drifting. It is a projection for the wire, not a second vocabulary; the
-/// refusal itself is still the leaf's value. When the leaf derives the two
-/// traits this goes.
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(remote = "PipelineRefusal")]
-#[allow(dead_code)]
-enum DocumentRefusal {
-    FieldBound { field: String, limit: u32, actual: u32 },
-    InvalidFormat { field: String, value: String },
-    InvalidIdentity { kind: PipelineKind, key: String, expected: String },
-    ForeignStore { r#type: String },
 }
 
 impl std::fmt::Display for MindRefusal {

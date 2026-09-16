@@ -47,10 +47,8 @@ use crate::store::MindStore;
 pub const BATCH_MAX: usize = 64;
 
 /// One admission request: the mind it is for, who asks, and the documents.
-/// The leaf's `PipelineDocument` derives neither `Serialize` nor
-/// `JsonSchema` at the pinned rev, so this type cannot either; the wire
-/// shape is Cut 10's.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Rides the wire whole (`wire::HuginnMindRequest::Admit`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PipelineAdmissionBatch {
     pub instance: Slug,
     pub provenance: PipelineProvenance,
@@ -108,9 +106,7 @@ impl<S: MindStore> Mind<S> {
         now: DateTime<Utc>,
     ) -> Result<PipelineAdmissionOutcome, MindRefusal> {
         // A1
-        if instance != self.instance() {
-            return Err(MindRefusal::ForeignInstance { declared: instance.0.clone(), mind: self.instance().0.clone() });
-        }
+        self.require_instance(instance)?;
         // A2
         if envelopes.is_empty() || envelopes.len() > BATCH_MAX {
             return Err(MindRefusal::BatchSize { actual: envelopes.len() as u32 });

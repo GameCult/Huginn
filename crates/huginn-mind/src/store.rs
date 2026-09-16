@@ -5,7 +5,12 @@
 //! atomicity test. Nothing else is abstracted.
 
 use anyhow::Result;
-use cultcache_rs::{CacheBackingStore, CultCacheEnvelope, OwnedRedbMessagePackBackingStore};
+use cultcache_rs::{CacheBackingStore, CultCacheEnvelope};
+
+/// The one store a daemon opens. Re-exported so the crate that serves a mind
+/// names the store type without declaring `cultcache-rs` a second time: one
+/// dependency entry, one rev, one place to move it.
+pub use cultcache_rs::OwnedRedbMessagePackBackingStore;
 
 /// A store a mind can be opened over. `Clone` shares ownership of the same
 /// store (the owned redb store's clones share its lock and handle), which is
