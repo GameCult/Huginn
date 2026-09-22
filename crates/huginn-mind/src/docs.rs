@@ -93,14 +93,13 @@ impl Docs {
     }
 
     /// Every resolution of one subject, in image and batch: the scope a
-    /// subject's sequence counts in and the scope its history is read from.
+    /// subject's sequence counts in.
     pub(crate) fn resolutions_of(&self, subject: &PipelineRef) -> impl Iterator<Item = (&str, &PipelineResolution)> {
         self.resolutions().filter(move |(_, resolution)| resolution.subject == *subject)
     }
 
     /// Every assignment of one repo to one mind, in image and batch, in force
-    /// or not: the scope a stewardship's sequence counts in and the scope its
-    /// history is read from.
+    /// or not: the scope a stewardship's sequence counts in.
     pub(crate) fn assignments_of(&self, mind: &Slug, repo: &OrgRepo) -> impl Iterator<Item = (&str, &PipelineStewardship)> {
         self.stewardships().filter(move |(_, stewardship)| stewardship.instance == *mind && stewardship.repo == *repo)
     }

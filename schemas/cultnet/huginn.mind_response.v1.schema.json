@@ -82,7 +82,7 @@
         "ordinal": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 0
+          "minimum": 1
         },
         "provenance": {
           "$ref": "#/$defs/PipelineProvenance"

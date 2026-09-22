@@ -1,9 +1,9 @@
 //! `huginn-mind`: one instance's mind as typed CultCache state.
 //!
-//! The crate owns three decisions and nothing else. `Mind::open_with` owns
-//! "may this store be this instance's mind": the opener refuses a foreign
-//! type, a foreign epoch, a missing identity or a foreign identity before it
-//! attaches anything. `receipt::commit` owns "did a batch enter, whole, with a
+//! The crate owns three decisions and nothing else. `Mind::open` owns "may
+//! this store be this instance's mind": the opener refuses a foreign type, a
+//! foreign epoch, a missing identity or a foreign identity before it attaches
+//! anything, and takes the store's per-path lock first. `receipt::commit` owns "did a batch enter, whole, with a
 //! receipt": one compare-and-swap over the store, a receipt naming the exact
 //! bytes read and written, and a typed conflict when the swap loses.
 //! `Mind::admit_prepared` owns "may this batch enter": every cross-field and

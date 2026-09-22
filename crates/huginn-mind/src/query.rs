@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::docs::{Docs, Held};
 use crate::mind::Mind;
-use crate::receipt::{Faculty, PipelineProvenance};
+use crate::receipt::{self, Faculty, PipelineProvenance};
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
 
@@ -40,6 +40,7 @@ pub struct AdmissionFacts {
     pub receipt_id: String,
     pub admitted_at: String,
     pub provenance: PipelineProvenance,
+    #[schemars(range(min = 1))]
     pub ordinal: u64,
 }
 
@@ -111,6 +112,11 @@ pub(crate) struct AdmissionIndex(BTreeMap<(String, String), AdmissionFacts>);
 
 impl AdmissionIndex {
     pub(crate) fn build<S: MindStore>(mind: &Mind<S>) -> Result<Self, MindRefusal> {
+        // Every reader of the ordinal asks the same density check admission
+        // does, through `head`: a chain that is not exactly `{1..=N}` refuses
+        // here before a single ordinal is copied out, not only when admission
+        // happens to be the caller.
+        receipt::head(mind)?;
         let mut facts = BTreeMap::new();
         for receipt in mind.receipts()? {
             for write in receipt.writes.iter() {
@@ -403,12 +409,12 @@ mod tests {
         assert_eq!(view(&mind, K::Verdict, &id("verdict", "cut-1.s1")).status, PipelineStatus::InForce);
     }
 
-    /// Ruling 1's read half: the grammar lives in the leaf, and both doors
-    /// that take a ref ask it before they look. A ref that is no ref is
-    /// refused; a ref that is well formed and names nothing is still the
-    /// empty answer, so the door refuses malformation and not absence.
+    /// Ruling 1's read half: the grammar lives in the leaf, and `view`, the
+    /// one door that takes a ref, asks it before it looks. A ref that is no
+    /// ref is refused; a ref that is well formed and names nothing is still
+    /// the empty answer, so the door refuses malformation and not absence.
     #[test]
-    fn a_ref_whose_kind_and_id_disagree_is_refused_by_both_doors() {
+    fn a_ref_whose_kind_and_id_disagree_is_refused_by_view() {
         let mut mind = seeded();
         let q1 = id("question", "Q1");
         committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
@@ -430,6 +436,59 @@ mod tests {
         // does not hold answers as it always did.
         let absent = id("question", "Q9");
         assert_eq!(mind.view(&r(K::Question, &absent)), Ok(None));
+    }
+
+    /// F1 (RS fix batch): the read side never got to answer over an
+    /// undense ordinal chain, because `AdmissionIndex::build` copied
+    /// `receipt.ordinal` straight off the receipts without asking `head`.
+    /// `query` and `view` now go through the same density check admission
+    /// does, so a store planted directly (bypassing admission entirely) with
+    /// a duplicate, a gap, a zero, or an ordinal above `N` refuses both doors
+    /// alike, never answering as though the chain were dense.
+    #[test]
+    fn query_and_view_refuse_a_receipt_chain_that_is_not_dense() {
+        let base = MemoryStore::new();
+        let mut mind = opened(base.clone(), INSTANCE);
+        seed(&mut mind);
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        // The seed and Q1's batch: two receipts, ordinals {1, 2}.
+
+        let cache = schema_cache().unwrap();
+        let plant_at = |ordinal: u64, label: &str| {
+            let broken = MemoryStore::new();
+            for row in base.rows() {
+                broken.plant(row);
+            }
+            let extra = receipt::candidate(
+                &slug(INSTANCE),
+                provenance(Faculty::Hands),
+                &[],
+                &[prepare(&question(label, &["A", "B"], "A"))],
+                ordinal,
+                now(),
+            )
+            .unwrap();
+            broken.plant(cache.prepare_entry_named(&extra.receipt_id, &extra).unwrap().0);
+            broken
+        };
+
+        let q1 = id("question", "Q1");
+        let refuses = |store: MemoryStore, label: &str| {
+            let broken_mind = opened(store, INSTANCE);
+            assert!(
+                matches!(broken_mind.query(&PipelineQuery::default()), Err(MindRefusal::Unavailable { .. })),
+                "{label}: query must refuse an undense chain"
+            );
+            assert!(
+                matches!(broken_mind.view(&r(K::Question, &q1)), Err(MindRefusal::Unavailable { .. })),
+                "{label}: view must refuse an undense chain"
+            );
+        };
+
+        refuses(plant_at(2, "Q2"), "duplicate [1,2,2]");
+        refuses(plant_at(4, "Q2"), "gap [1,2,4]");
+        refuses(plant_at(0, "Q2"), "zero [0,1,2]");
+        refuses(plant_at(99, "Q2"), "above N [1,2,99]");
     }
 
     /// D3: the facts come from the one receipt that wrote the document, from
@@ -487,7 +546,7 @@ mod tests {
             provenance(Faculty::Soul),
             &[],
             &[prepare(&question("Q1", &["A", "B"], "A")), prepare(&question("Q8", &["A", "B"], "A"))],
-            999,
+            4, // head + 1: dense, so this plants only the duplicate identity, not an F1 density fault too.
             now(),
         )
         .unwrap();
@@ -737,7 +796,7 @@ mod tests {
             provenance(Faculty::Soul),
             &[],
             &[prepare(&question("Q1", &["A", "B"], "A")), prepare(&question("Q8", &["A", "B"], "A"))],
-            999,
+            3, // head + 1: dense, so this plants only the duplicate identity, not an F1 density fault too.
             now(),
         )
         .unwrap();

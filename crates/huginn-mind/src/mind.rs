@@ -136,11 +136,24 @@ impl Mind<OwnedRedbMessagePackBackingStore> {
                 unavailable(error)
             }
         })?;
-        Self::open_with(store, instance)
+        Self::open_checked(store, instance)
     }
 }
 
 impl<S: MindStore> Mind<S> {
+    /// Test-only door onto the same fail-closed sequence `open` runs, for a
+    /// store already in hand (planted directly, or opened by a test through
+    /// `store_path_for`). Gated exactly like `store_path_for`: it compiles
+    /// only under `cfg(test)` in this crate or for a dependent's own tests
+    /// via the `test-support` feature, never into a release binary. A second
+    /// in-process owner of one store is not yet sealed for every `MindStore`
+    /// impl (F2's recorded follow-up); production reaches this sequence only
+    /// through `Mind::open`, which takes the per-path redb lock first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_with(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
+        Self::open_checked(store, instance)
+    }
+
     /// Fail-closed, in this order, nothing attached until every step passes:
     /// pull the raw envelopes; if anything is stored, exactly one epoch
     /// record at the current epoch; every type is one of the fifteen; and
@@ -149,8 +162,10 @@ impl<S: MindStore> Mind<S> {
     /// written at a foreign epoch is refused as `ForeignEpoch`, never as
     /// `ForeignStore`: a real epoch bump always moves every type id, so the
     /// type gate would otherwise fire first and the epoch gate would never
-    /// be reached for the one case it exists for (F5).
-    pub fn open_with(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
+    /// be reached for the one case it exists for (F5). This is the one
+    /// construction site of a `Mind`; `open` and the test-only `open_with`
+    /// both call it and neither reimplements it.
+    fn open_checked(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
         require_grammatical_slug("instance", instance)?;
         let raw = store.pull_all().map_err(unavailable)?;
         refuse_foreign_epoch(&raw)?;
@@ -234,7 +249,7 @@ impl<S: MindStore> Mind<S> {
     }
 }
 
-/// Step 2: a runtime store, a Mind store or any other file passed by mistake
+/// Step 3: a runtime store, a Mind store or any other file passed by mistake
 /// dies on its first foreign type.
 fn refuse_foreign_types(raw: &[CultCacheEnvelope]) -> Result<(), MindRefusal> {
     if let Some(foreign) = raw.iter().find(|envelope| !is_known_type(&envelope.r#type)) {
@@ -243,7 +258,7 @@ fn refuse_foreign_types(raw: &[CultCacheEnvelope]) -> Result<(), MindRefusal> {
     Ok(())
 }
 
-/// Step 3: a non-empty store carries exactly one epoch record, keyed by the
+/// Step 2: a non-empty store carries exactly one epoch record, keyed by the
 /// epoch it names, at the epoch this binary writes. A store with no epoch
 /// record at all is `MissingIdentity`; every other defect is `ForeignEpoch`,
 /// whose `found` names the defect: the stored epoch when the value is
@@ -350,35 +365,36 @@ mod tests {
     fn the_opener_refuses_foreign_epoch_missing_identity_and_foreign_type_before_attaching() {
         let yggdrasil = slug(INSTANCE);
         let cases: Vec<(Vec<CultCacheEnvelope>, MindRefusal)> = vec![
-            // Step 2 before everything: a runtime store passed by mistake.
+            // Step 3, reached because the epoch record here is current: a
+            // runtime store passed by mistake.
             (
                 vec![foreign("epiphany.runtime_spine.v47"), epoch(), prepare(&instance(INSTANCE))],
                 MindRefusal::ForeignStore { r#type: "epiphany.runtime_spine.v47".into() },
             ),
-            // Step 3 before step 4: a foreign epoch with no identity at all.
+            // Step 2 before step 4: a foreign epoch with no identity at all.
             // Its key is foreign too, which is what refuses it here.
             (
                 vec![foreign_epoch()],
                 MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
             ),
-            // Step 3: the value, under the one key the record may have.
+            // Step 2: the value, under the one key the record may have.
             (
                 vec![epoch_record(PIPELINE_SCHEMA_EPOCH, FOREIGN_EPOCH), prepare(&instance(INSTANCE))],
                 MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
             ),
-            // Step 3: the current epoch under any other key is not the epoch
+            // Step 2: the current epoch under any other key is not the epoch
             // record, whatever it says about itself.
             (
                 vec![epoch_record("not-the-epoch", PIPELINE_SCHEMA_EPOCH), prepare(&instance(INSTANCE))],
                 MindRefusal::ForeignEpoch { found: "not-the-epoch".into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
             ),
-            // Step 3: two records are no record, counted before either value
+            // Step 2: two records are no record, counted before either value
             // is read.
             (
                 vec![epoch(), epoch_record("second", PIPELINE_SCHEMA_EPOCH), prepare(&instance(INSTANCE))],
                 MindRefusal::ForeignEpoch { found: "2 records".into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
             ),
-            // Step 3: an identity without an epoch record.
+            // Step 2: an identity without an epoch record.
             (vec![prepare(&instance(INSTANCE))], MindRefusal::MissingIdentity),
             // Step 4: an epoch record without an identity.
             (vec![epoch()], MindRefusal::MissingIdentity),
@@ -440,6 +456,34 @@ mod tests {
         let raw = vec![foreign_epoch(), foreign("epiphany.pipeline.campaign.v0")];
         assert_eq!(
             Mind::open_with(planted(raw), &slug(INSTANCE)).err(),
+            Some(MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() })
+        );
+    }
+
+    /// F3 (RS fix batch), R5b: a foreign store with no epoch record at all
+    /// still refuses `MissingIdentity`, the epoch-first order's own answer
+    /// (F5, read-side cut) -- not `ForeignStore`, which is what a mutant that
+    /// only reorders the gates when there *is* some epoch record present
+    /// would answer, by running the type gate first over a store that has
+    /// no epoch record to look at.
+    #[test]
+    fn a_foreign_type_with_no_epoch_record_is_missing_identity_not_foreign_store() {
+        let store = planted(vec![foreign("epiphany.pipeline.campaign.v1")]);
+        assert_eq!(Mind::open_with(store, &slug(INSTANCE)).err(), Some(MindRefusal::MissingIdentity));
+    }
+
+    /// F3 (RS fix batch), R5c: an epoch record at the current key, but a
+    /// foreign value, beside a foreign type, still refuses `ForeignEpoch` --
+    /// the epoch gate reads the record's *value* before the type gate ever
+    /// runs, not only when the record's *key* is itself foreign. A mutant
+    /// that reorders the gates only on a foreign key would answer
+    /// `ForeignStore` here instead, since this record sits at the correct
+    /// key.
+    #[test]
+    fn a_foreign_epoch_value_at_the_current_key_beside_a_foreign_type_is_foreign_epoch() {
+        let store = planted(vec![epoch_record(PIPELINE_SCHEMA_EPOCH, FOREIGN_EPOCH), foreign("epiphany.pipeline.campaign.v1")]);
+        assert_eq!(
+            Mind::open_with(store, &slug(INSTANCE)).err(),
             Some(MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() })
         );
     }

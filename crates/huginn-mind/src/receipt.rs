@@ -191,8 +191,11 @@ pub(crate) fn candidate(
 /// This mind's admission order: `N`, the count of receipts, when their
 /// ordinals are exactly `{1..=N}`. Every reader of the ordinal asks here,
 /// never by counting receipts itself: admission takes `head(self)? + 1` for
-/// the next one, and a read takes `head` as its current `asOf`. A chain that
-/// is not dense refuses rather than guessing, on both sides alike.
+/// the next one, and `AdmissionIndex::build` (`query.rs`) calls it too, so
+/// `query` and `view` carry the same density check rather than trusting a
+/// stored ordinal unchecked. `ordinal` stays display-only on the read side
+/// until RS-3 makes it the order. A chain that is not dense refuses rather
+/// than guessing, on both sides alike.
 pub(crate) fn head<S: MindStore>(mind: &Mind<S>) -> Result<u64, MindRefusal> {
     let mut ordinals = mind.receipts()?.into_iter().map(|receipt| receipt.ordinal).collect::<Vec<_>>();
     ordinals.sort_unstable();
@@ -365,12 +368,14 @@ mod tests {
         assert!(landed.contains(&(HuginnCommitReceipt::TYPE.to_string(), receipt_id)), "{landed:?}");
     }
 
-    /// RS-1: `head` requires the stored ordinals to be exactly `{1..=N}`, and
-    /// both admission and a read ask it. A duplicate and a gap are planted
-    /// directly, bypassing the commit path, and both `head` itself and a
-    /// fresh admission over the same store must refuse.
+    /// RS-1: `head` requires the stored ordinals to be exactly `{1..=N}`.
+    /// A duplicate and a gap are planted directly, bypassing the commit path,
+    /// and both `head` itself and a fresh admission over the same store must
+    /// refuse. `query.rs`'s
+    /// `query_and_view_refuse_a_receipt_chain_that_is_not_dense` pins the
+    /// same check on the read side.
     #[test]
-    fn a_chain_that_is_not_dense_refuses_admission_and_reads_alike() {
+    fn a_chain_that_is_not_dense_refuses_head_and_admission() {
         let base = MemoryStore::new();
         let mut mind = opened(base.clone(), INSTANCE);
         seed(&mut mind);
