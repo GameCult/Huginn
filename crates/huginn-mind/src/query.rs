@@ -32,12 +32,15 @@ use crate::store::MindStore;
 pub const QUERY_LIMIT_MAX: usize = 200;
 
 /// What admission recorded about a document when it landed: the receipt that
-/// wrote it, the `now` that receipt was taken at, and who asked.
+/// wrote it, the `now` that receipt was taken at, who asked, and the
+/// receipt's ordinal. `ordinal` is display-only here until RS-3 makes it the
+/// read side's order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AdmissionFacts {
     pub receipt_id: String,
     pub admitted_at: String,
     pub provenance: PipelineProvenance,
+    pub ordinal: u64,
 }
 
 /// Whether a document still stands, and if not, what closed it. Derived at
@@ -116,6 +119,7 @@ impl AdmissionIndex {
                     receipt_id: receipt.receipt_id.clone(),
                     admitted_at: receipt.committed_at.clone(),
                     provenance: receipt.provenance.clone(),
+                    ordinal: receipt.ordinal,
                 };
                 if facts.insert(identity, landed).is_some() {
                     return Err(integrity(&write.document_type, &write.document_key, "is written by two receipts"));
@@ -483,6 +487,7 @@ mod tests {
             provenance(Faculty::Soul),
             &[],
             &[prepare(&question("Q1", &["A", "B"], "A")), prepare(&question("Q8", &["A", "B"], "A"))],
+            999,
             now(),
         )
         .unwrap();
@@ -732,6 +737,7 @@ mod tests {
             provenance(Faculty::Soul),
             &[],
             &[prepare(&question("Q1", &["A", "B"], "A")), prepare(&question("Q8", &["A", "B"], "A"))],
+            999,
             now(),
         )
         .unwrap();

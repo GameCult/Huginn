@@ -125,19 +125,19 @@ impl MindStore for OwnedRedbMessagePackBackingStore {
         }
         @{
             Id   = 'H6'
-            Rule = 'Ruling 20: the opener attaches nothing until every gate passes.'
+            Rule = 'Ruling 20: the opener attaches nothing until every gate passes. Re-anchored by RS-1, which swapped the epoch and type gates'' order; the rule -- every gate before attach -- is unchanged.'
             Test = 'mind::tests::the_opener_refuses_foreign_epoch_missing_identity_and_foreign_type_before_attaching'
             File = 'crates/huginn-mind/src/mind.rs'
             Old  = @'
-        refuse_foreign_types(&raw)?;
         refuse_foreign_epoch(&raw)?;
+        refuse_foreign_types(&raw)?;
         refuse_foreign_identity(&raw, instance)?;
         let (cache, image) = attach(store.clone())?;
 '@
             New  = @'
         let (cache, image) = attach(store.clone())?;
-        refuse_foreign_types(&raw)?;
         refuse_foreign_epoch(&raw)?;
+        refuse_foreign_types(&raw)?;
         refuse_foreign_identity(&raw, instance)?;
 '@
         }

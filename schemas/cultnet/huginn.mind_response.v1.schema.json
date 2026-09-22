@@ -73,11 +73,16 @@
   ],
   "$defs": {
     "AdmissionFacts": {
-      "description": "What admission recorded about a document when it landed: the receipt that\nwrote it, the `now` that receipt was taken at, and who asked.",
+      "description": "What admission recorded about a document when it landed: the receipt that\nwrote it, the `now` that receipt was taken at, who asked, and the\nreceipt's ordinal. `ordinal` is display-only here until RS-3 makes it the\nread side's order.",
       "type": "object",
       "properties": {
         "admitted_at": {
           "type": "string"
+        },
+        "ordinal": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "provenance": {
           "$ref": "#/$defs/PipelineProvenance"
@@ -89,7 +94,8 @@
       "required": [
         "receipt_id",
         "admitted_at",
-        "provenance"
+        "provenance",
+        "ordinal"
       ]
     },
     "AuthorityMap": {

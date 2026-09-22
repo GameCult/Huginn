@@ -146,7 +146,7 @@ impl<S: MindStore> Mind<S> {
         if carries_instance {
             writes.push(HuginnMindEpoch::envelope(self.cache())?);
         }
-        let candidate = receipt::candidate(&mind, provenance, &strong_reads, &writes, now)?;
+        let candidate = receipt::candidate(&mind, provenance, &strong_reads, &writes, receipt::head(self)? + 1, now)?;
         // A8
         for staged in &docs.batch {
             check(&docs, staged, &mind)?;
@@ -863,6 +863,60 @@ mod tests {
         };
         assert!(matches!(mind.admit(seed_batch, later), PipelineAdmissionOutcome::AlreadyAdmitted { .. }));
         assert_eq!(receipt_count(&mind), receipts + 1);
+    }
+
+    /// RS-1: the ordinal is `head + 1` at admission, not a rank derived from
+    /// the clock or the receipt id. Three batches land at one `now`, so a
+    /// mutant that ranked by `(committed_at, receipt_id)` would fall back to
+    /// id order among them; the ids are checked not to already sort in
+    /// admission order, so that fallback provably disagrees with the truth.
+    #[test]
+    fn ordinals_are_admission_order_not_clock_or_id_order() {
+        let mut mind = seeded();
+        assert_eq!(receipt::head(&mind).unwrap(), 1, "the seed batch is ordinal 1");
+        let same_time = now();
+        let (id1, _) = committed(admit_at(&mut mind, vec![question_n(1)], same_time));
+        let (id2, _) = committed(admit_at(&mut mind, vec![question_n(2)], same_time));
+        let (id3, _) = committed(admit_at(&mut mind, vec![question_n(3)], same_time));
+
+        let mut by_id = [id1.clone(), id2.clone(), id3.clone()];
+        by_id.sort();
+        assert_ne!(
+            by_id,
+            [id1.clone(), id2.clone(), id3.clone()],
+            "the fixture needs receipt ids that do not already sort in admission order"
+        );
+
+        let receipts = mind.receipts().unwrap();
+        let ordinal_of = |id: &str| receipts.iter().find(|receipt| receipt.receipt_id == id).unwrap().ordinal;
+        assert_eq!(ordinal_of(&id1), 2);
+        assert_eq!(ordinal_of(&id2), 3);
+        assert_eq!(ordinal_of(&id3), 4);
+        assert_eq!(receipt::head(&mind).unwrap(), 4);
+    }
+
+    /// RS-1, A9: the ordinal is not digested, so an exact replay finds the
+    /// receipt it first landed with and keeps that receipt's ordinal, even
+    /// when the head has moved since and a fresh candidate would be assigned
+    /// a different one.
+    #[test]
+    fn an_exact_replay_keeps_its_ordinal() {
+        let mut mind = seeded();
+        let (first_id, _) = committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        let first_ordinal =
+            mind.receipts().unwrap().into_iter().find(|receipt| receipt.receipt_id == first_id).unwrap().ordinal;
+
+        // Move the head, so a replay's own candidate would carry a different
+        // ordinal than the one already on the stored receipt.
+        committed(admit(&mut mind, vec![question("Q2", &["A", "B"], "A")]));
+
+        let outcome = admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]);
+        assert_eq!(outcome, PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: first_id.clone() });
+
+        let receipts = mind.receipts().unwrap();
+        assert_eq!(receipts.iter().filter(|receipt| receipt.receipt_id == first_id).count(), 1, "no second receipt lands");
+        let stored = receipts.iter().find(|receipt| receipt.receipt_id == first_id).unwrap();
+        assert_eq!(stored.ordinal, first_ordinal, "the replay does not overwrite the ordinal");
     }
 
     /// A batch that derives a write replays like any other: the second
@@ -1912,7 +1966,9 @@ mod tests {
         let mut mind = opened(store.clone(), INSTANCE);
         seed(&mut mind);
         let envelopes = vec![prepare(&question("Q1", &["A", "B"], "A"))];
-        let candidate = receipt::candidate(&slug(INSTANCE), provenance(Faculty::Hands), &[], &envelopes, now()).unwrap();
+        let ordinal = receipt::head(&mind).unwrap() + 1;
+        let candidate =
+            receipt::candidate(&slug(INSTANCE), provenance(Faculty::Hands), &[], &envelopes, ordinal, now()).unwrap();
         let mut planted = HuginnCommitReceipt { writes: vec![], ..candidate.clone() };
         planted.writes = candidate.strong_reads.clone();
         planted.receipt_id = candidate.receipt_id.clone();

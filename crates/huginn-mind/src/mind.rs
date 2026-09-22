@@ -142,15 +142,19 @@ impl Mind<OwnedRedbMessagePackBackingStore> {
 
 impl<S: MindStore> Mind<S> {
     /// Fail-closed, in this order, nothing attached until every step passes:
-    /// pull the raw envelopes; every type is one of the fifteen; if anything
-    /// is stored, exactly one epoch record at the current epoch and exactly
-    /// one `instance` document naming the declared instance; then register,
-    /// attach and pull.
+    /// pull the raw envelopes; if anything is stored, exactly one epoch
+    /// record at the current epoch; every type is one of the fifteen; and
+    /// exactly one `instance` document naming the declared instance; then
+    /// register, attach and pull. The epoch gate runs first so a store
+    /// written at a foreign epoch is refused as `ForeignEpoch`, never as
+    /// `ForeignStore`: a real epoch bump always moves every type id, so the
+    /// type gate would otherwise fire first and the epoch gate would never
+    /// be reached for the one case it exists for (F5).
     pub fn open_with(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
         require_grammatical_slug("instance", instance)?;
         let raw = store.pull_all().map_err(unavailable)?;
-        refuse_foreign_types(&raw)?;
         refuse_foreign_epoch(&raw)?;
+        refuse_foreign_types(&raw)?;
         refuse_foreign_identity(&raw, instance)?;
         let (cache, image) = attach(store.clone())?;
         Ok(Self { instance: instance.clone(), store, cache, image })
@@ -409,6 +413,35 @@ mod tests {
         assert!(!mind.is_empty());
         let empty = MemoryStore::new();
         assert!(Mind::open_with(empty, &yggdrasil).unwrap().is_empty());
+    }
+
+    /// RS-1: receipt v2 is a new type id, so a store carrying an old,
+    /// v1-shaped receipt is refused at the type gate, before anything tries
+    /// to decode its 7-slot payload as the 8-slot v2 shape (F3: with
+    /// `#[serde(default)]` that decode would succeed and silently misread
+    /// every old receipt's ordinal as 0).
+    #[test]
+    fn a_v1_receipt_store_is_refused_at_open() {
+        let store =
+            planted(vec![epoch(), prepare(&instance(INSTANCE)), foreign("huginn.mind_commit_receipt.v1")]);
+        assert_eq!(
+            Mind::open_with(store, &slug(INSTANCE)).err(),
+            Some(MindRefusal::ForeignStore { r#type: "huginn.mind_commit_receipt.v1".into() })
+        );
+    }
+
+    /// RS-1, F5: a real epoch bump always moves every type id (F4), so a
+    /// store written at a foreign epoch also carries at least one foreign
+    /// type. The epoch gate must run first, or the type gate fires instead
+    /// and the epoch gate is never reached for the one case it exists for.
+    /// The eight cases of the opener test above are unchanged by the swap.
+    #[test]
+    fn a_store_written_at_the_previous_epoch_is_refused_by_the_epoch_gate() {
+        let raw = vec![foreign_epoch(), foreign("epiphany.pipeline.campaign.v0")];
+        assert_eq!(
+            Mind::open_with(planted(raw), &slug(INSTANCE)).err(),
+            Some(MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() })
+        );
     }
 
     #[test]

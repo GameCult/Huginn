@@ -10,8 +10,9 @@
 //! Digest: `receipt_id = "mind-commit-" + hex(sha256(msgpack_named((instance,
 //! strong_reads, writes))))`, where each list is `DocumentVersion`s in
 //! `(document_type, document_key)` order and a version carries the exact
-//! payload bytes and their SHA-256. `committed_at` and `provenance` are not
-//! digested.
+//! payload bytes and their SHA-256. `committed_at`, `provenance` and
+//! `ordinal` are not digested: an exact replay keeps the ordinal its first
+//! admission assigned.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use cultcache_rs::{CultCacheEnvelope, DatabaseEntry};
@@ -24,7 +25,7 @@ use crate::mind::{Mind, unavailable};
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
 
-pub const RECEIPT_SCHEMA_VERSION: &str = "huginn.mind_commit_receipt.v1";
+pub const RECEIPT_SCHEMA_VERSION: &str = "huginn.mind_commit_receipt.v2";
 
 /// Which faculty a batch was admitted as. Attribution, not authority
 /// (ruling 18): no admission rule trusts it, and Cut 9's views read it back
@@ -92,7 +93,7 @@ impl DocumentVersion {
 /// The receipt of one admitted batch, stored beside the documents it names
 /// and keyed by its id.
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "huginn.mind_commit_receipt.v1", schema = "HuginnCommitReceipt")]
+#[cultcache(type = "huginn.mind_commit_receipt.v2", schema = "HuginnCommitReceipt")]
 pub struct HuginnCommitReceipt {
     #[cultcache(key = 0)]
     pub schema_version: String,
@@ -108,6 +109,11 @@ pub struct HuginnCommitReceipt {
     pub writes: Vec<DocumentVersion>,
     #[cultcache(key = 6)]
     pub committed_at: String,
+    /// This mind's admission order: dense from 1, never reused, never
+    /// digested. `head` reads it back; `candidate` is the one place it is
+    /// assigned, as `head + 1`.
+    #[cultcache(key = 7)]
+    pub ordinal: u64,
 }
 
 impl HuginnCommitReceipt {
@@ -134,6 +140,9 @@ impl HuginnCommitReceipt {
         }
         if !unique_identities(&self.strong_reads) || !unique_identities(&self.writes) {
             return Err(integrity("receipt names an identity twice"));
+        }
+        if self.ordinal == 0 {
+            return Err(integrity("receipt ordinal is 0"));
         }
         if self.receipt_id != self.digest()? {
             return Err(integrity(&format!("receipt {} does not match its digest", self.receipt_id)));
@@ -162,6 +171,7 @@ pub(crate) fn candidate(
     provenance: PipelineProvenance,
     strong_reads: &[CultCacheEnvelope],
     writes: &[CultCacheEnvelope],
+    ordinal: u64,
     now: DateTime<Utc>,
 ) -> Result<HuginnCommitReceipt, MindRefusal> {
     let mut receipt = HuginnCommitReceipt {
@@ -172,9 +182,26 @@ pub(crate) fn candidate(
         strong_reads: versions(strong_reads),
         writes: versions(writes),
         committed_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
+        ordinal,
     };
     receipt.receipt_id = receipt.digest()?;
     Ok(receipt)
+}
+
+/// This mind's admission order: `N`, the count of receipts, when their
+/// ordinals are exactly `{1..=N}`. Every reader of the ordinal asks here,
+/// never by counting receipts itself: admission takes `head(self)? + 1` for
+/// the next one, and a read takes `head` as its current `asOf`. A chain that
+/// is not dense refuses rather than guessing, on both sides alike.
+pub(crate) fn head<S: MindStore>(mind: &Mind<S>) -> Result<u64, MindRefusal> {
+    let mut ordinals = mind.receipts()?.into_iter().map(|receipt| receipt.ordinal).collect::<Vec<_>>();
+    ordinals.sort_unstable();
+    let n = ordinals.len() as u64;
+    if ordinals.into_iter().eq(1..=n) {
+        Ok(n)
+    } else {
+        Err(MindRefusal::Unavailable { detail: "receipt ordinals are not 1..=N: found a duplicate or a gap".into() })
+    }
 }
 
 /// The versions of a set of envelopes in identity order, so the digest does
@@ -262,7 +289,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::fixtures::{INSTANCE, admit, committed, id, instance, opened, prepare, question, seed};
+    use crate::fixtures::{INSTANCE, admit, committed, id, instance, now, opened, prepare, provenance, question, refusal, seed, slug};
+    use crate::mind::schema_cache;
     use crate::store::test_stores::MemoryStore;
     use cultcache_rs::{CacheBackingStore, PushAllOptions};
     use epiphany_pipeline::{PipelineDocument, PipelineKind, PipelineRefusal};
@@ -337,6 +365,57 @@ mod tests {
         assert!(landed.contains(&(HuginnCommitReceipt::TYPE.to_string(), receipt_id)), "{landed:?}");
     }
 
+    /// RS-1: `head` requires the stored ordinals to be exactly `{1..=N}`, and
+    /// both admission and a read ask it. A duplicate and a gap are planted
+    /// directly, bypassing the commit path, and both `head` itself and a
+    /// fresh admission over the same store must refuse.
+    #[test]
+    fn a_chain_that_is_not_dense_refuses_admission_and_reads_alike() {
+        let base = MemoryStore::new();
+        let mut mind = opened(base.clone(), INSTANCE);
+        seed(&mut mind);
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+        assert_eq!(head(&mind).unwrap(), 2, "the seed and Q1's batch");
+
+        let cache = schema_cache().unwrap();
+        let plant_at = |ordinal: u64, label: &str| {
+            let broken = MemoryStore::new();
+            for row in base.rows() {
+                broken.plant(row);
+            }
+            let extra = candidate(
+                &slug(INSTANCE),
+                provenance(Faculty::Hands),
+                &[],
+                &[prepare(&question(label, &["A", "B"], "A"))],
+                ordinal,
+                now(),
+            )
+            .unwrap();
+            broken.plant(cache.prepare_entry_named(&extra.receipt_id, &extra).unwrap().0);
+            broken
+        };
+
+        // A duplicate: a third receipt at ordinal 2, which the store already
+        // carries.
+        let duplicated = plant_at(2, "Q2");
+        assert!(matches!(head(&opened(duplicated.clone(), INSTANCE)), Err(MindRefusal::Unavailable { .. })));
+        let mut duplicated_mind = opened(duplicated, INSTANCE);
+        assert!(matches!(
+            refusal(admit(&mut duplicated_mind, vec![question("Q3", &["A", "B"], "A")])),
+            MindRefusal::Unavailable { .. }
+        ));
+
+        // A gap: a third receipt at ordinal 4, skipping 3.
+        let gapped = plant_at(4, "Q2");
+        assert!(matches!(head(&opened(gapped.clone(), INSTANCE)), Err(MindRefusal::Unavailable { .. })));
+        let mut gapped_mind = opened(gapped, INSTANCE);
+        assert!(matches!(
+            refusal(admit(&mut gapped_mind, vec![question("Q3", &["A", "B"], "A")])),
+            MindRefusal::Unavailable { .. }
+        ));
+    }
+
     /// S5 closed against the real type: the organ's own receipt in a mind's
     /// store is never decoded as a pipeline document.
     #[test]
@@ -345,7 +424,7 @@ mod tests {
         envelope.r#type = HuginnCommitReceipt::TYPE.into();
         assert_eq!(
             PipelineDocument::decode(&envelope),
-            Err(PipelineRefusal::ForeignStore { r#type: "huginn.mind_commit_receipt.v1".into() })
+            Err(PipelineRefusal::ForeignStore { r#type: "huginn.mind_commit_receipt.v2".into() })
         );
     }
 }
