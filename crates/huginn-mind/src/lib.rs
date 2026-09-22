@@ -38,8 +38,8 @@ pub(crate) mod fixtures;
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
 pub use mind::{HuginnMindEpoch, Mind};
 pub use query::{
-    AdmissionFacts, HistoryScope, PipelineDocumentView, PipelineOpenItems, PipelineQuery, PipelineQueryPage,
-    PipelineStatus, QUERY_LIMIT_MAX, SemanticQuery,
+    AdmissionFacts, PipelineDocumentView, PipelineQuery, PipelineQueryPage, PipelineStatus, QUERY_LIMIT_MAX,
+    SemanticQuery,
 };
 pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
 pub use refusal::MindRefusal;

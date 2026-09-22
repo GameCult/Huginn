@@ -27,11 +27,11 @@
 #   mind is opened and then dropped when the mind refuses. Any weaker form is
 #   the correct order again.
 #
-# `D17`-`D19` pin three of the dispatch's four read arms and `D23` the fourth.
-# The fourth was once recorded here as unpinnable, on the grounds that
-# `Mind::open_items` raises no refusal of its own; the refusal it carries comes
-# from the reader beneath it over a store whose receipt is gone, and such a
-# store is reachable from this crate's surface, so the entry exists.
+# `D17`-`D18` pin the dispatch's two read arms, `view` and `query`. RS-2
+# deleted `open_items` and `history` along with `D19`, `D19L`, `D23` and
+# `D23L`, the entries that pinned their arms; `D13` and `D13L` are re-anchored
+# on the surviving `view`/`query` arms rather than deleted, since the rule
+# they pin (one operation name per method) still holds over what remains.
 @{
     Mutations = @(
         @{
@@ -710,141 +710,6 @@ fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefu
 '@
         }
         @{
-            Id   = 'D19'
-            Rule = 'A refusal `history` raised crosses the dispatch as itself, not as another read''s refusal.'
-            Test = 'daemon::tests::a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole'
-            File = 'crates/huginn-daemon/src/daemon.rs'
-            Old  = @'
-            HuginnMindRequest::History { scope, .. } => match self.mind.history(&scope) {
-                Ok(views) => HuginnMindResponse::History(views),
-                Err(refusal) => HuginnMindResponse::Refused(refusal),
-            },
-'@
-            New  = @'
-            HuginnMindRequest::History { scope, .. } => match self.mind.history(&scope) {
-                Ok(views) => HuginnMindResponse::History(views),
-                Err(_) => HuginnMindResponse::Refused(huginn_mind::MindRefusal::Unavailable {
-                    detail: "semantic query: the index is not wired (Cut 11)".into(),
-                }),
-            },
-'@
-        }
-        @{
-            Id   = 'D19L'
-            Rule = 'Nor is a history refusal swallowed into an empty history, which is the answer for a subject with no records.'
-            Test = 'daemon::tests::a_refusal_a_read_raised_is_the_answer_the_dispatch_returns_whole'
-            File = 'crates/huginn-daemon/src/daemon.rs'
-            Old  = @'
-                Ok(views) => HuginnMindResponse::History(views),
-                Err(refusal) => HuginnMindResponse::Refused(refusal),
-'@
-            New  = @'
-                Ok(views) => HuginnMindResponse::History(views),
-                Err(_) => HuginnMindResponse::History(vec![]),
-'@
-        }
-        @{
-            Id   = 'D23'
-            Rule = 'A refusal `open_items` carries out of the reader crosses the dispatch as itself, not rewrapped as unavailable.'
-            Test = 'daemon::tests::a_refusal_open_items_raised_is_the_answer_the_dispatch_returns_whole'
-            File = 'crates/huginn-daemon/src/daemon.rs'
-            Old  = @'
-            HuginnMindRequest::OpenItems { campaign, .. } => match self.mind.open_items(&campaign) {
-                Ok(items) => HuginnMindResponse::OpenItems(items),
-                Err(refusal) => HuginnMindResponse::Refused(refusal),
-            },
-'@
-            New  = @'
-            HuginnMindRequest::OpenItems { campaign, .. } => match self.mind.open_items(&campaign) {
-                Ok(items) => HuginnMindResponse::OpenItems(items),
-                Err(refusal) => HuginnMindResponse::Refused(huginn_mind::MindRefusal::Unavailable {
-                    detail: format!("{refusal}"),
-                }),
-            },
-'@
-        }
-        @{
-            Id   = 'D23L'
-            Rule = 'Nor is it swallowed into an empty open set, which is what a healthy campaign with nothing open answers.'
-            Test = 'daemon::tests::a_refusal_open_items_raised_is_the_answer_the_dispatch_returns_whole'
-            File = 'crates/huginn-daemon/src/daemon.rs'
-            Old  = @'
-                Ok(items) => HuginnMindResponse::OpenItems(items),
-                Err(refusal) => HuginnMindResponse::Refused(refusal),
-'@
-            New  = @'
-                Ok(items) => HuginnMindResponse::OpenItems(items),
-                Err(_) => HuginnMindResponse::OpenItems(huginn_mind::PipelineOpenItems {
-                    questions: vec![],
-                    findings: vec![],
-                    follow_ups: vec![],
-                    specs_without_report: vec![],
-                    reports_without_verdict: vec![],
-                }),
-'@
-        }
-        # S1 and S1d's fixture, `open_items_refuses_on_a_fault_inside_the_requested_campaign`,
-        # runs three faults in one test body: an orphan receipt, an undecodable
-        # document, and a document two receipts claim. N5, correcting an
-        # earlier claim here: neither mutant "dies on all three". S1d's own
-        # `New` exempts any detail containing "has no commit receipt" by
-        # construction, so the orphan block never fails under it; the test
-        # panics at the very next block, the undecodable document, and never
-        # reaches the third. S1 has no such exemption and is killed by the
-        # same first block its own widened check reaches, the orphan. Each
-        # mutant dies on the fault its own body actually mangles, not on all
-        # three the fixture happens to carry.
-        @{
-            Id      = 'S1'
-            Rule    = 'open_items refuses on a fault anywhere in the image it must read, not only on one outside the requested campaign.'
-            Test    = 'daemon::tests::open_items_refuses_on_a_fault_inside_the_requested_campaign'
-            Command = 'cargo test -p huginn-daemon --lib'
-            File    = 'crates/huginn-mind/src/query.rs'
-            Old     = @'
-        let reader = Reader::new(self)?;
-        let views = reader
-            .views()?
-            .into_iter()
-            .filter(|view| root_and_local(&view.id.id.0).0 == campaign.0)
-            .collect::<Vec<_>>();
-'@
-            New     = @'
-        let views = match Reader::new(self).and_then(|reader| reader.views()) {
-            Ok(views) => views,
-            Err(MindRefusal::Unavailable { detail }) if detail.contains(campaign.0.as_str()) => Vec::new(),
-            Err(other) => return Err(other),
-        }
-            .into_iter()
-            .filter(|view| root_and_local(&view.id.id.0).0 == campaign.0)
-            .collect::<Vec<_>>();
-'@
-        }
-        @{
-            Id      = 'S1d'
-            Rule    = 'It refuses on every kind of fault a document can carry, not only a missing receipt.'
-            Test    = 'daemon::tests::open_items_refuses_on_a_fault_inside_the_requested_campaign'
-            Command = 'cargo test -p huginn-daemon --lib'
-            File    = 'crates/huginn-mind/src/query.rs'
-            Old     = @'
-        let reader = Reader::new(self)?;
-        let views = reader
-            .views()?
-            .into_iter()
-            .filter(|view| root_and_local(&view.id.id.0).0 == campaign.0)
-            .collect::<Vec<_>>();
-'@
-            New     = @'
-        let views = match Reader::new(self).and_then(|reader| reader.views()) {
-            Ok(views) => views,
-            Err(MindRefusal::Unavailable { detail }) if !detail.contains("has no commit receipt") => Vec::new(),
-            Err(other) => return Err(other),
-        }
-            .into_iter()
-            .filter(|view| root_and_local(&view.id.id.0).0 == campaign.0)
-            .collect::<Vec<_>>();
-'@
-        }
-        @{
             Id   = 'D5L2'
             Rule = 'The operation is compared as bytes: another casing of the name is another name.'
             Test = 'serve::tests::a_malformed_envelope_is_answered_with_a_failure_and_touches_no_mind'
@@ -1035,21 +900,21 @@ fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefu
         }
         @{
             Id      = 'D13'
-            Rule    = 'The wire vocabulary is the mind''s methods: one operation name per method, and it is that method''s name.'
+            Rule    = 'The wire vocabulary is the mind''s methods: one operation name per method, and it is that method''s name. Re-anchored on `view` after RS-2 deleted `History`: `View`''s own name, duplicated onto `Query`''s spelling, breaks the one-name-per-method rule the same way.'
             Test    = 'wire::tests::the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response'
             Command = 'cargo test -p huginn-mind --lib'
             File    = 'crates/huginn-mind/src/wire.rs'
-            Old     = '            Self::History { .. } => "history",'
-            New     = '            Self::History { .. } => "query",'
+            Old     = '            Self::View { .. } => "view",'
+            New     = '            Self::View { .. } => "query",'
         }
         @{
             Id      = 'D13L'
-            Rule    = 'The operation name is the method''s spelling, so a client reading `Mind`''s surface can address it without a translation table.'
+            Rule    = 'The operation name is the method''s exact spelling, so a client reading `Mind`''s surface can address it without a translation table. Re-anchored on `query` after RS-2 deleted `OpenItems`: PowerShell''s default `-eq` is case-insensitive, so a pure-casing mutant (`"query"` -> `"Query"`) reads as no change to the harness''s own "replacement changes nothing" guard; this loosening instead adds a plausible near-miss spelling.'
             Test    = 'wire::tests::the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response'
             Command = 'cargo test -p huginn-mind --lib'
             File    = 'crates/huginn-mind/src/wire.rs'
-            Old     = '            Self::OpenItems { .. } => "open_items",'
-            New     = '            Self::OpenItems { .. } => "openItems",'
+            Old     = '            Self::Query { .. } => "query",'
+            New     = '            Self::Query { .. } => "queries",'
         }
         @{
             Id      = 'D14'

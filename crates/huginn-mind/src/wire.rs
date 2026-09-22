@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admission::{PipelineAdmissionBatch, PipelineAdmissionOutcome};
 use crate::mind::Mind;
-use crate::query::{
-    HistoryScope, PipelineDocumentView, PipelineOpenItems, PipelineQuery, PipelineQueryPage,
-};
+use crate::query::{PipelineDocumentView, PipelineQuery, PipelineQueryPage};
 use crate::receipt::HuginnCommitReceipt;
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
@@ -45,8 +43,6 @@ pub enum HuginnMindRequest {
     Admit(PipelineAdmissionBatch),
     View { instance: Slug, id: PipelineRef },
     Query { instance: Slug, query: PipelineQuery },
-    OpenItems { instance: Slug, campaign: Slug },
-    History { instance: Slug, scope: HistoryScope },
 }
 
 impl HuginnMindRequest {
@@ -57,8 +53,6 @@ impl HuginnMindRequest {
             Self::Admit(_) => "admit",
             Self::View { .. } => "view",
             Self::Query { .. } => "query",
-            Self::OpenItems { .. } => "open_items",
-            Self::History { .. } => "history",
         }
     }
 
@@ -67,10 +61,7 @@ impl HuginnMindRequest {
         match self {
             Self::Whoami => None,
             Self::Admit(batch) => Some(&batch.instance),
-            Self::View { instance, .. }
-            | Self::Query { instance, .. }
-            | Self::OpenItems { instance, .. }
-            | Self::History { instance, .. } => Some(instance),
+            Self::View { instance, .. } | Self::Query { instance, .. } => Some(instance),
         }
     }
 }
@@ -84,8 +75,6 @@ pub enum HuginnMindResponse {
     Admit(PipelineAdmissionOutcome),
     View(Option<PipelineDocumentView>),
     Query(PipelineQueryPage),
-    OpenItems(PipelineOpenItems),
-    History(Vec<PipelineDocumentView>),
     Refused(MindRefusal),
 }
 
@@ -138,7 +127,7 @@ impl<S: MindStore> Mind<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{CAMPAIGN, INSTANCE, OTHER_INSTANCE, instance, provenance, r, repo, seeded, slug};
+    use crate::fixtures::{CAMPAIGN, INSTANCE, OTHER_INSTANCE, instance, provenance, r, seeded, slug};
     use crate::receipt::Faculty;
 
     fn requests() -> Vec<HuginnMindRequest> {
@@ -151,12 +140,7 @@ mod tests {
             HuginnMindRequest::Whoami,
             HuginnMindRequest::Admit(batch),
             HuginnMindRequest::View { instance: slug(INSTANCE), id: r(PipelineKind::Campaign, CAMPAIGN) },
-            HuginnMindRequest::Query { instance: slug(INSTANCE), query: PipelineQuery::default() },
-            HuginnMindRequest::OpenItems { instance: slug(INSTANCE), campaign: slug(CAMPAIGN) },
-            HuginnMindRequest::History {
-                instance: slug(OTHER_INSTANCE),
-                scope: HistoryScope::Repo(repo("GameCult/Huginn")),
-            },
+            HuginnMindRequest::Query { instance: slug(OTHER_INSTANCE), query: PipelineQuery::default() },
         ]
     }
 
@@ -169,8 +153,6 @@ mod tests {
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(refusal.clone())),
             HuginnMindResponse::View(None),
             HuginnMindResponse::Query(PipelineQueryPage { items: vec![], matched: 0 }),
-            HuginnMindResponse::OpenItems(seeded().open_items(&slug(CAMPAIGN)).unwrap()),
-            HuginnMindResponse::History(vec![]),
             HuginnMindResponse::Refused(refusal),
         ]
     }
@@ -181,7 +163,7 @@ mod tests {
     #[test]
     fn the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response() {
         let names: Vec<&str> = requests().iter().map(|request| request.operation()).collect();
-        assert_eq!(names, ["whoami", "admit", "view", "query", "open_items", "history"]);
+        assert_eq!(names, ["whoami", "admit", "view", "query"]);
         for request in requests() {
             let declared = request.instance().is_none();
             assert_eq!(declared, matches!(request, HuginnMindRequest::Whoami), "{request:?}");
@@ -189,7 +171,7 @@ mod tests {
             assert_eq!(rmp_serde::from_slice::<HuginnMindRequest>(&bytes).unwrap(), request);
         }
         assert_eq!(
-            requests()[5].instance(),
+            requests()[3].instance(),
             Some(&slug(OTHER_INSTANCE)),
             "the request's instance is the one it declares, not the mind's"
         );

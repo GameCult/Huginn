@@ -68,54 +68,6 @@
       "required": [
         "Query"
       ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "OpenItems": {
-          "type": "object",
-          "properties": {
-            "campaign": {
-              "$ref": "#/$defs/Slug"
-            },
-            "instance": {
-              "$ref": "#/$defs/Slug"
-            }
-          },
-          "required": [
-            "instance",
-            "campaign"
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "OpenItems"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "History": {
-          "type": "object",
-          "properties": {
-            "instance": {
-              "$ref": "#/$defs/Slug"
-            },
-            "scope": {
-              "$ref": "#/$defs/HistoryScope"
-            }
-          },
-          "required": [
-            "instance",
-            "scope"
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "History"
-      ]
     }
   ],
   "$defs": {
@@ -442,35 +394,6 @@
       "description": "A full git commit id: exactly 40 lowercase hex characters.",
       "type": "string",
       "maxLength": 40
-    },
-    "HistoryScope": {
-      "description": "What a history is a history of: every resolution one subject ever had, or\nevery assignment of one repo to this mind.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "Subject": {
-              "$ref": "#/$defs/PipelineRef"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "Subject"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "Repo": {
-              "$ref": "#/$defs/OrgRepo"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "Repo"
-          ]
-        }
-      ]
     },
     "Label": {
       "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
@@ -1270,28 +1193,6 @@
       "description": "The filters over one mind. Each is one rule, and an unset filter matches\neverything. The mind is the instance, so there is no `instance` field: the\ndaemon picks the mind before it calls here.",
       "type": "object",
       "properties": {
-        "admitted_after": {
-          "description": "Exclusive, compared as a string against `admitted_at`.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Short"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "admitted_before": {
-          "description": "Exclusive, compared as a string against `admitted_at`.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Short"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "campaign": {
           "description": "The key's root segment: a campaign slug, or an instance for\nstewardships, hand-offs and the identity document.",
           "anyOf": [

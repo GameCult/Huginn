@@ -308,8 +308,7 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
 mod tests {
     use super::*;
     use crate::daemon::tests::{
-        CAMPAIGN, FITTING_CHANGES, FITTING_CUT, INSTANCE, OTHER, WIDE_CHANGES, WIDE_CUT, batch, identity, now,
-        seeded_wide, slug,
+        FITTING_CHANGES, FITTING_CUT, INSTANCE, OTHER, WIDE_CHANGES, WIDE_CUT, batch, identity, now, seeded_wide, slug,
     };
     use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef};
     use crate::envelope::{FAILURE_SCHEMA, decode_response, encode_request};
@@ -588,7 +587,6 @@ mod tests {
         let reads = [
             ("m-q", HuginnMindRequest::Query { instance: slug(INSTANCE), query: PipelineQuery::default() }),
             ("m-v", HuginnMindRequest::View { instance: slug(INSTANCE), id: wide }),
-            ("m-o", HuginnMindRequest::OpenItems { instance: slug(INSTANCE), campaign: slug(CAMPAIGN) }),
         ];
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
@@ -847,12 +845,12 @@ mod tests {
     /// `m-0`'s three bytes and the other fixture's forty -- has no way to be
     /// wrong there and every way to be wrong once the operation or the
     /// runtime id it never looked at changes length too. This holds the
-    /// boundary at `open_items` (ten bytes, not `view`'s four) over a second
+    /// boundary at `whoami` (six bytes, not `view`'s four) over a second
     /// runtime id, so such a formula is measured somewhere it was never
     /// fitted.
     #[test]
     fn the_gates_boundary_holds_across_operation_and_runtime_id() {
-        for (operation, runtime_id) in [("view", "huginn-yggdrasil"), ("open_items", "huginn-thought-cage")] {
+        for (operation, runtime_id) in [("view", "huginn-yggdrasil"), ("whoami", "huginn-thought-cage")] {
             let at = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES);
             let over = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES + 1);
             assert_eq!(
@@ -875,7 +873,7 @@ mod tests {
 
     /// Residue S1: every fixture up to this one, including the pair above,
     /// moves `operation` and the runtime id together -- both short (`view`,
-    /// 4 bytes / `huginn-yggdrasil`, 16) or both long (`open_items`, 10 /
+    /// 4 bytes / `huginn-yggdrasil`, 16) or both long (`whoami`, 6 /
     /// `huginn-thought-cage`, 19) -- so a formula that tracks only one of the
     /// two and ignores the other still lands on the right answer at both
     /// points by coincidence. This pins a point where they move apart: a long
@@ -883,7 +881,7 @@ mod tests {
     /// long one, so a gate that dropped either term is wrong at one of them.
     #[test]
     fn the_gates_boundary_holds_when_operation_and_runtime_id_vary_independently() {
-        for (operation, runtime_id) in [("open_items", "huginn-yggdrasil"), ("view", "huginn-thought-cage")] {
+        for (operation, runtime_id) in [("whoami", "huginn-yggdrasil"), ("view", "huginn-thought-cage")] {
             let at = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES);
             let over = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES + 1);
             assert_eq!(

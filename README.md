@@ -47,11 +47,10 @@ the resolution matrix, derived resolutions and stewardships), then one
 compare-and-swap that lands the batch whole with a receipt naming the exact
 bytes it read and wrote. An exact replay answers with the stored receipt.
 It reads them back the same way: a document with the facts of its admission
-joined from that receipt and its status derived at read time, typed queries
-over one mind, a campaign's open work, and a subject's or a repo's history.
-Status is never stored, and the views derive it through the same rules
-admission does. Document shape and keys come from `epiphany-pipeline`; the
-store is CultLib's Rust CultCache.
+joined from that receipt and its status derived at read time, and typed
+queries over one mind. Status is never stored, and the views derive it
+through the same rules admission does. Document shape and keys come from
+`epiphany-pipeline`; the store is CultLib's Rust CultCache.
 
 `huginn-daemon` opens one mind, binds one UDP socket in that order, and
 answers every frame on the session it arrived on: one operation per `Mind`

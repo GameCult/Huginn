@@ -61,33 +61,6 @@
     {
       "type": "object",
       "properties": {
-        "OpenItems": {
-          "$ref": "#/$defs/PipelineOpenItems"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "OpenItems"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
-        "History": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PipelineDocumentView"
-          }
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "History"
-      ]
-    },
-    {
-      "type": "object",
-      "properties": {
         "Refused": {
           "$ref": "#/$defs/MindRefusal"
         }
@@ -2115,49 +2088,6 @@
         "Instance",
         "Stewardship",
         "HandOff"
-      ]
-    },
-    "PipelineOpenItems": {
-      "description": "One campaign's open work, derived from what is in force and what cites\nwhat. Uncapped: the open set of a campaign is bounded by the campaign, and\ntruncating it would hide work.",
-      "type": "object",
-      "properties": {
-        "findings": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PipelineDocumentView"
-          }
-        },
-        "follow_ups": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PipelineDocumentView"
-          }
-        },
-        "questions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PipelineDocumentView"
-          }
-        },
-        "reports_without_verdict": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PipelineDocumentView"
-          }
-        },
-        "specs_without_report": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PipelineDocumentView"
-          }
-        }
-      },
-      "required": [
-        "questions",
-        "findings",
-        "follow_ups",
-        "specs_without_report",
-        "reports_without_verdict"
       ]
     },
     "PipelineProvenance": {

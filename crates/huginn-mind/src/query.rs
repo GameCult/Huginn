@@ -86,10 +86,6 @@ pub struct PipelineQuery {
     pub in_force: Option<bool>,
     /// Attribution, ruling 18: it filters, it grants nothing.
     pub faculty: Option<Faculty>,
-    /// Exclusive, compared as a string against `admitted_at`.
-    pub admitted_after: Option<Short>,
-    /// Exclusive, compared as a string against `admitted_at`.
-    pub admitted_before: Option<Short>,
     /// `None` is `QUERY_LIMIT_MAX`; anything else is clamped into
     /// `1..=QUERY_LIMIT_MAX`.
     pub limit: Option<u32>,
@@ -102,26 +98,6 @@ pub struct PipelineQuery {
 pub struct PipelineQueryPage {
     pub items: Vec<PipelineDocumentView>,
     pub matched: u32,
-}
-
-/// One campaign's open work, derived from what is in force and what cites
-/// what. Uncapped: the open set of a campaign is bounded by the campaign, and
-/// truncating it would hide work.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct PipelineOpenItems {
-    pub questions: Vec<PipelineDocumentView>,
-    pub findings: Vec<PipelineDocumentView>,
-    pub follow_ups: Vec<PipelineDocumentView>,
-    pub specs_without_report: Vec<PipelineDocumentView>,
-    pub reports_without_verdict: Vec<PipelineDocumentView>,
-}
-
-/// What a history is a history of: every resolution one subject ever had, or
-/// every assignment of one repo to this mind.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum HistoryScope {
-    Subject(PipelineRef),
-    Repo(OrgRepo),
 }
 
 /// The admission facts of every stored document, built once per read call from
@@ -194,18 +170,17 @@ fn repo_matches(document: &PipelineDocument, repo: &OrgRepo) -> bool {
     }
 }
 
-/// One read call's working set: the decoded image, the facts, and the mind the
-/// two came from. Built once per call and thrown away with it; nothing here
-/// outlives the answer.
-struct Reader<'a, S: MindStore> {
+/// One read call's working set: the decoded image and the facts it was built
+/// from. Built once per call and thrown away with it; nothing here outlives
+/// the answer.
+struct Reader {
     docs: Docs,
     facts: AdmissionIndex,
-    mind: &'a Mind<S>,
 }
 
-impl<'a, S: MindStore> Reader<'a, S> {
-    fn new(mind: &'a Mind<S>) -> Result<Self, MindRefusal> {
-        Ok(Self { docs: Docs::from_image(mind.envelopes())?, facts: AdmissionIndex::build(mind)?, mind })
+impl Reader {
+    fn new<S: MindStore>(mind: &Mind<S>) -> Result<Self, MindRefusal> {
+        Ok(Self { docs: Docs::from_image(mind.envelopes())?, facts: AdmissionIndex::build(mind)? })
     }
 
     fn held(&self, kind: PipelineKind, key: &str) -> Option<&Held> {
@@ -276,28 +251,7 @@ impl<'a, S: MindStore> Reader<'a, S> {
         {
             return false;
         }
-        if let Some(after) = &query.admitted_after
-            && view.admission.admitted_at <= after.0
-        {
-            return false;
-        }
-        if let Some(before) = &query.admitted_before
-            && view.admission.admitted_at >= before.0
-        {
-            return false;
-        }
         true
-    }
-
-    /// Every view of the image, in order, refusing rather than skipping a
-    /// document the receipts do not account for.
-    fn views(&self) -> Result<Vec<PipelineDocumentView>, MindRefusal> {
-        let mut views = Vec::with_capacity(self.docs.image.len());
-        for held in &self.docs.image {
-            views.push(self.view_of(held)?);
-        }
-        ordered(&mut views);
-        Ok(views)
     }
 }
 
@@ -348,105 +302,17 @@ impl<S: MindStore> Mind<S> {
         items.truncate(limit);
         Ok(PipelineQueryPage { items, matched })
     }
-
-    /// One campaign's open work: the questions, findings and follow-ups still
-    /// in force, the in-force cut specs no report names, and the cut reports no
-    /// verdict names.
-    pub fn open_items(&self, campaign: &Slug) -> Result<PipelineOpenItems, MindRefusal> {
-        let reader = Reader::new(self)?;
-        let views = reader
-            .views()?
-            .into_iter()
-            .filter(|view| root_and_local(&view.id.id.0).0 == campaign.0)
-            .collect::<Vec<_>>();
-        let of_kind = |kind: PipelineKind| views.iter().filter(move |view| view.id.kind == kind);
-        let in_force = |kind: PipelineKind| {
-            of_kind(kind).filter(|view| view.status == PipelineStatus::InForce).cloned().collect::<Vec<_>>()
-        };
-        let cited = |referent: fn(&PipelineDocument) -> Option<&str>| {
-            views.iter().filter_map(|view| referent(&view.document)).collect::<Vec<_>>()
-        };
-        let reported = cited(|document| match document {
-            PipelineDocument::CutReport(report) => Some(report.cut_spec.0.as_str()),
-            _ => None,
-        });
-        let judged = cited(|document| match document {
-            PipelineDocument::Verdict(verdict) => Some(verdict.cut_report.0.as_str()),
-            _ => None,
-        });
-        Ok(PipelineOpenItems {
-            questions: in_force(PipelineKind::Question),
-            findings: in_force(PipelineKind::Finding),
-            follow_ups: in_force(PipelineKind::FollowUp),
-            specs_without_report: in_force(PipelineKind::CutSpec)
-                .into_iter()
-                .filter(|view| !reported.contains(&view.id.id.0.as_str()))
-                .collect(),
-            // A report is not resolvable, so standing is not a condition here.
-            reports_without_verdict: of_kind(PipelineKind::CutReport)
-                .filter(|view| !judged.contains(&view.id.id.0.as_str()))
-                .cloned()
-                .collect(),
-        })
-    }
-
-    /// Every record of one scope, withdrawn ones included with their status
-    /// and their reasons, in the scope's own sequence order. Uncapped: a
-    /// scope's history is bounded by the scope.
-    ///
-    /// A subject scope is validated as `view`'s id is, and for the same
-    /// reason: an empty history is the answer for a subject with no records,
-    /// not for a ref that is no ref. A repo scope is an `OrgRepo`, which the
-    /// type already holds to its own format.
-    pub fn history(&self, scope: &HistoryScope) -> Result<Vec<PipelineDocumentView>, MindRefusal> {
-        if let HistoryScope::Subject(subject) = scope {
-            subject.validate_ref()?;
-        }
-        let reader = Reader::new(self)?;
-        let (kind, mut records) = match scope {
-            HistoryScope::Subject(subject) => (
-                PipelineKind::Resolution,
-                reader
-                    .docs
-                    .resolutions_of(subject)
-                    .map(|(key, resolution)| (resolution.sequence, key.to_string()))
-                    .collect::<Vec<_>>(),
-            ),
-            HistoryScope::Repo(repo) => (
-                PipelineKind::Stewardship,
-                reader
-                    .docs
-                    .assignments_of(reader.mind.instance(), repo)
-                    .map(|(key, stewardship)| (stewardship.sequence, key.to_string()))
-                    .collect::<Vec<_>>(),
-            ),
-        };
-        // The sequence owns history order. `admitted_at` coincides in a mind
-        // written in order, but it is not the rule.
-        records.sort_by_key(|(sequence, _)| *sequence);
-        let mut views = Vec::with_capacity(records.len());
-        for (_, key) in records {
-            let held = reader
-                .held(kind, &key)
-                .ok_or_else(|| integrity(kind.type_id(), &key, "is derived over the image but not held in it"))?;
-            views.push(reader.view_of(held)?);
-        }
-        Ok(views)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
     use crate::fixtures::*;
     use crate::mind::schema_cache;
     use crate::store::test_stores::MemoryStore;
     use chrono::{TimeZone, Utc};
     use epiphany_pipeline::{
-        ClaimOutcome, Date, FindingConfidence, PipelineDocument as D, PipelineKind as K, PipelineRefusal,
-        ResolutionOutcome,
+        ClaimOutcome, FindingConfidence, PipelineDocument as D, PipelineKind as K, PipelineRefusal, ResolutionOutcome,
     };
 
     fn view(mind: &Mind<MemoryStore>, kind: K, key: &str) -> PipelineDocumentView {
@@ -548,7 +414,6 @@ mod tests {
         // read as a ruling it names neither, and is not a reference at all.
         let disagreeing = r(K::Ruling, &q1);
         assert_eq!(mind.view(&disagreeing), Err(malformed(&q1)));
-        assert_eq!(mind.history(&HistoryScope::Subject(disagreeing)), Err(malformed(&q1)));
 
         // A local no writer composes is the same refusal, so the door is the
         // whole grammar and not the kind segment alone. The refusal's `value`
@@ -556,107 +421,11 @@ mod tests {
         // and not the whole id.
         let dotted = r(K::Question, &format!("{q1}."));
         assert_eq!(mind.view(&dotted), Err(malformed("")));
-        assert_eq!(mind.history(&HistoryScope::Subject(dotted)), Err(malformed("")));
 
         // Absence is not malformation: a well-formed id of a kind this mind
         // does not hold answers as it always did.
         let absent = id("question", "Q9");
         assert_eq!(mind.view(&r(K::Question, &absent)), Ok(None));
-        assert_eq!(mind.history(&HistoryScope::Subject(r(K::Question, &absent))), Ok(Vec::new()));
-    }
-
-    /// R-B and D7: a subject's resolutions are a first-class view, withdrawn
-    /// ones included with their status and their reasons, in sequence order.
-    #[test]
-    fn a_subjects_history_lists_every_resolution_with_its_status_and_receipt() {
-        let mut mind = seeded();
-        let q1 = id("question", "Q1");
-        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
-        // Ten reopen cycles: each ruling answers, each withdrawal but the last
-        // reopens.
-        for cycle in 1..=10u32 {
-            committed(admit(&mut mind, vec![answering(&format!("R{cycle}"), &q1)]));
-            if cycle < 10 {
-                let closed = id("resolution", &format!("question.Q1.n{cycle}"));
-                committed(admit(&mut mind, vec![resolution(r(K::Resolution, &closed), withdrawn())]));
-            }
-        }
-
-        let history = mind.history(&HistoryScope::Subject(r(K::Question, &q1))).unwrap();
-        assert_eq!(
-            ids(&history),
-            (1..=10).map(|n| id("resolution", &format!("question.Q1.n{n}"))).collect::<Vec<_>>(),
-            "sequence order, so n10 lands after n9 and not after n1 as the key string would have it"
-        );
-        for (index, entry) in history.iter().enumerate() {
-            let sequence = index as u32 + 1;
-            if sequence == 10 {
-                assert_eq!(entry.status, PipelineStatus::InForce, "the standing closure");
-                continue;
-            }
-            let PipelineStatus::Resolved { resolution, record } = &entry.status else { panic!("n{sequence}") };
-            let withdrawal = id("resolution", &format!("resolution.question.Q1.n{sequence}.n1"));
-            assert_eq!(*resolution, r(K::Resolution, &withdrawal));
-            assert!(matches!(&record.outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == "moot"));
-        }
-
-        // A withdrawal's subject is the resolution, not the question, so it is
-        // in the resolution's history and not the question's.
-        let n1 = id("resolution", "question.Q1.n1");
-        assert_eq!(ids(&mind.history(&HistoryScope::Subject(r(K::Resolution, &n1))).unwrap()), vec![
-            id("resolution", "resolution.question.Q1.n1.n1")
-        ]);
-
-        // A subject whose kind disagrees with its id is no subject at all, and
-        // the door says so: the id names ten resolutions, and a mind that
-        // answered an empty history over it would report a malformed reference
-        // as a subject with no records.
-        assert_eq!(
-            mind.history(&HistoryScope::Subject(r(K::Ruling, &q1))),
-            Err(malformed(&q1)),
-            "a malformed scope is refused, not answered over"
-        );
-
-        // History lands one record per batch (Cut 12's import constraint), so
-        // ten records carry ten receipts.
-        let receipts = history.iter().map(|entry| entry.admission.receipt_id.clone()).collect::<BTreeSet<_>>();
-        assert_eq!(receipts.len(), 10);
-    }
-
-    /// D7's other scope: every assignment of one repo to this mind, the
-    /// withdrawn ones with the hand-off that withdrew them.
-    #[test]
-    fn a_repos_stewardship_history_on_a_mind_lists_every_assignment() {
-        let mut mind = seeded();
-        committed(admit(&mut mind, vec![stewardship(INSTANCE, OTHER_REPO)]));
-        let away = format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.GameCult_-Epiphany.2026-09-16");
-        committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
-        let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
-        back.handed_on = Date("2026-09-17".into());
-        committed(admit(&mut mind, vec![D::HandOff(back)]));
-
-        let history = mind.history(&HistoryScope::Repo(repo(REPO))).unwrap();
-        assert_eq!(ids(&history), vec![
-            format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1"),
-            format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n2"),
-        ]);
-        let PipelineStatus::Resolved { record, .. } = &history[0].status else { panic!("handed away") };
-        assert!(
-            matches!(&record.outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == away),
-            "the withdrawal names the hand-off that caused it"
-        );
-        assert_eq!(history[1].status, PipelineStatus::InForce);
-        let (D::Stewardship(first), D::Stewardship(second)) = (&history[0].document, &history[1].document) else {
-            panic!()
-        };
-        assert_eq!(first.assigned_on, date());
-        assert_eq!(second.assigned_on, Date("2026-09-17".into()), "the assignment carries the hand-off's day");
-
-        // Another repo's assignments are another history; the scope is
-        // `(this mind, this repo)` and nothing else.
-        assert_eq!(ids(&mind.history(&HistoryScope::Repo(repo(OTHER_REPO))).unwrap()), vec![
-            format!("{INSTANCE}:stewardship:GameCult_-Huginn.n1")
-        ]);
     }
 
     /// D3: the facts come from the one receipt that wrote the document, from
@@ -751,13 +520,11 @@ mod tests {
             }
             opened(copy, INSTANCE)
         };
-        let scope = HistoryScope::Subject(r(K::Question, &q1));
-        let expected = (mind.query(&PipelineQuery::default()).unwrap(), mind.history(&scope).unwrap());
+        let expected = mind.query(&PipelineQuery::default()).unwrap();
         let constant = vec!["2000-01-01T00:00:00Z".to_string(); rows.len()];
         let reversed = rows.iter().rev().map(|row| row.stored_at.clone()).collect::<Vec<_>>();
         for other in [reopened(constant), reopened(reversed)] {
-            assert_eq!(other.query(&PipelineQuery::default()).unwrap(), expected.0);
-            assert_eq!(other.history(&scope).unwrap(), expected.1);
+            assert_eq!(other.query(&PipelineQuery::default()).unwrap(), expected);
         }
     }
 
@@ -792,7 +559,7 @@ mod tests {
             withdrawn(),
         )]));
         committed(admit_as(&mut mind, Faculty::Soul, vec![D::Ruling(ruling("R2"))]));
-        // One batch at a later clock, so the window filters have a boundary.
+        // One batch at a later clock, so a second question exists for `kinds`.
         let later = Utc.with_ymd_and_hms(2026, 9, 17, 12, 0, 0).unwrap();
         committed(admit_at(&mut mind, vec![question_n(2)], later));
 
@@ -870,16 +637,6 @@ mod tests {
         // `faculty`: attribution filters, and grants nothing (ruling 18).
         assert_eq!(matching(PipelineQuery { faculty: Some(Faculty::Soul), ..Default::default() }), vec![id("ruling", "R2")]);
         assert!(!matching(PipelineQuery { faculty: Some(Faculty::Hands), ..Default::default() }).contains(&id("ruling", "R2")));
-
-        // The window, exclusive at the exact boundary on both sides.
-        let boundary = s("2026-09-17T12:00:00Z");
-        let opened_at = s("2026-09-16T12:00:00Z");
-        assert_eq!(matching(PipelineQuery { admitted_after: Some(opened_at.clone()), ..Default::default() }), vec![
-            id("question", "Q2")
-        ]);
-        assert!(matching(PipelineQuery { admitted_after: Some(boundary.clone()), ..Default::default() }).is_empty());
-        assert!(matching(PipelineQuery { admitted_before: Some(opened_at), ..Default::default() }).is_empty());
-        assert!(!matching(PipelineQuery { admitted_before: Some(boundary), ..Default::default() }).contains(&id("question", "Q2")));
     }
 
     /// D5's order and cap: `(admitted_at, id)` ascending, at most 200, and the
@@ -937,71 +694,6 @@ mod tests {
         }
     }
 
-    /// D6: open work is derived from what is in force and what cites what,
-    /// never maintained.
-    #[test]
-    fn open_items_are_derived_from_in_force_and_citation() {
-        let mut mind = seeded();
-        let q1 = id("question", "Q1");
-        let q2 = id("question", "Q2");
-        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A"), question("Q2", &["A", "B"], "A")]));
-        committed(admit(&mut mind, vec![answering("R1", &q2)]));
-
-        // cut-9: a superseded r1 with a report of its own, and an r2 with none.
-        // The citation is the exact spec and not its cut, so r2 is open work
-        // while the cut it belongs to has been reported.
-        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("9", 1))]));
-        committed(admit(&mut mind, vec![D::CutReport(cut_report("9", 1))]));
-        committed(admit(&mut mind, vec![
-            D::CutSpec(cut_spec("9", 2)),
-            resolution(r(K::CutSpec, &id("cut_spec", "cut-9.r1")), superseded(&[r(K::CutSpec, &id("cut_spec", "cut-9.r2"))])),
-        ]));
-        // cut-12: a superseded r1 and an r2, neither reported, so standing is
-        // still what decides which of the two is open work.
-        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("12", 1))]));
-        committed(admit(&mut mind, vec![
-            D::CutSpec(cut_spec("12", 2)),
-            resolution(r(K::CutSpec, &id("cut_spec", "cut-12.r1")), superseded(&[r(K::CutSpec, &id("cut_spec", "cut-12.r2"))])),
-        ]));
-        // cut-10: a spec with a report, and that report with no verdict.
-        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("10", 1))]));
-        committed(admit(&mut mind, vec![D::CutReport(cut_report("10", 1))]));
-        // cut-11: a spec with a report, that report with a verdict, and two
-        // findings, one of which is then fixed.
-        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("11", 1))]));
-        // Two reports of one cut, one of them judged, so "this cut has a
-        // verdict" is not the same answer as "this report has one".
-        committed(admit(&mut mind, vec![D::CutReport(cut_report("11", 1)), D::CutReport(cut_report("11", 2))]));
-        let f1 = id("finding", "cut-11.s1.F1");
-        let f2 = id("finding", "cut-11.s1.F2");
-        committed(admit(&mut mind, vec![
-            verdict("11", 1, vec![claim(ClaimOutcome::Unproven, &[&f1, &f2], Some("P1"), &["M1"])]),
-            D::Finding(finding("11", 1, "F1", FindingConfidence::Plausible)),
-            D::Finding(finding("11", 1, "F2", FindingConfidence::Plausible)),
-        ]));
-        committed(admit(&mut mind, vec![
-            follow_up("FU-1", r(K::Finding, &f1)),
-            resolution(r(K::Finding, &f2), ResolutionOutcome::Fixed { commit: sha(), by: None }),
-        ]));
-        committed(admit(&mut mind, elsewhere("Q3")));
-
-        let open = mind.open_items(&slug(CAMPAIGN)).unwrap();
-        assert_eq!(ids(&open.questions), vec![q1], "the answered one is closed, another campaign's is not ours");
-        assert_eq!(ids(&open.findings), vec![f1], "the fixed one is closed");
-        assert_eq!(ids(&open.follow_ups), vec![id("follow_up", "FU-1")]);
-        assert_eq!(
-            ids(&open.specs_without_report),
-            vec![id("cut_spec", "cut-12.r2"), id("cut_spec", "cut-9.r2")],
-            "a superseded revision is not open, a spec with a report is not either, and the report of the \
-             revision it superseded is not this revision's"
-        );
-        assert_eq!(
-            ids(&open.reports_without_verdict),
-            vec![id("cut_report", "cut-10.h1"), id("cut_report", "cut-11.h2"), id("cut_report", "cut-9.h1")],
-            "a report is not resolvable, so only the verdict that names it, exactly, closes it"
-        );
-    }
-
     /// D5: `semantic` is refused typed, before the image or the receipts are
     /// read, and never answered with an empty page that reads like "nothing
     /// matched". Where the check sits is the rule: below the reader, a store
@@ -1021,8 +713,6 @@ mod tests {
             kinds: vec![K::Question],
             in_force: Some(true),
             faculty: Some(Faculty::Hands),
-            admitted_after: Some(s("2026-01-01")),
-            admitted_before: Some(s("2027-01-01")),
             limit: Some(10),
             semantic: Some(SemanticQuery { text: "what did we rule about keys".into(), top_k: 5 }),
         };
