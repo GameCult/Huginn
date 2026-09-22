@@ -193,9 +193,12 @@ pub(crate) fn candidate(
 /// never by counting receipts itself: admission takes `head(self)? + 1` for
 /// the next one, and `AdmissionIndex::build` (`query.rs`) calls it too, so
 /// `query` and `view` carry the same density check rather than trusting a
-/// stored ordinal unchecked. `ordinal` stays display-only on the read side
-/// until RS-3 makes it the order. A chain that is not dense refuses rather
-/// than guessing, on both sides alike.
+/// stored ordinal unchecked. `Mind::receipts` is `pub(crate)`, so this crate
+/// is the only place raw ordinals can be read at all; that keeps this the
+/// one door, rather than something a doc comment merely asks callers to
+/// respect. `ordinal` stays display-only on the read side until RS-3 makes
+/// it the order. A chain that is not dense refuses rather than guessing, on
+/// both sides alike.
 pub(crate) fn head<S: MindStore>(mind: &Mind<S>) -> Result<u64, MindRefusal> {
     let mut ordinals = mind.receipts()?.into_iter().map(|receipt| receipt.ordinal).collect::<Vec<_>>();
     ordinals.sort_unstable();

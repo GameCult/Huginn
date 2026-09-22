@@ -217,7 +217,7 @@ impl<S: MindStore> Mind<S> {
     }
 
     /// Every commit receipt in the image, in receipt-id order.
-    pub fn receipts(&self) -> Result<Vec<HuginnCommitReceipt>, MindRefusal> {
+    pub(crate) fn receipts(&self) -> Result<Vec<HuginnCommitReceipt>, MindRefusal> {
         self.image
             .iter()
             .filter(|envelope| envelope.r#type == HuginnCommitReceipt::TYPE)
