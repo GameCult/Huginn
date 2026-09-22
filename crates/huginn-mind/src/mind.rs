@@ -703,11 +703,12 @@ mod tests {
         assert!(!inner.join("minds").exists(), "no store was created under the state root either");
     }
 
-    /// `open_with` is the door `open` shares with every store already in
-    /// hand (planted directly, or opened by a test through `store_path_for`),
-    /// so it must run `require_grammatical_slug` too, not only `open`'s own
-    /// path-joining caller. A store need not hold anything for this to
-    /// refuse: the declared name is checked before the store is even pulled.
+    /// `open_with` calls `open_checked`, the one construction site `open`
+    /// shares with every store already in hand (planted directly, or opened
+    /// by a test through `store_path_for`), so it must run
+    /// `require_grammatical_slug` too, not only `open`'s own path-joining
+    /// caller. A store need not hold anything for this to refuse: the
+    /// declared name is checked before the store is even pulled.
     #[test]
     fn open_with_refuses_a_declared_instance_outside_the_grammar() {
         let store = MemoryStore::new();
