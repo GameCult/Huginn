@@ -10,7 +10,7 @@
 # from weaker ones (H59-H61). H62-H67 are the second pass's own: the
 # assignment a replayed hand-off withdraws, picked by content rather than key
 # order (H62-H63), and four more rules the suite could not tell apart from
-# weaker ones (H64-H67). Run through Epiphany's harness from this repo:
+# weaker ones (H64-H67). Run through the Eureka skill's harness from this repo:
 #
 # Soul's Y7 -- `later_than`'s resolution arm returning `false` -- has no entry
 # here and can have none: the arm is deleted. It was dead code behind the Q19
@@ -23,7 +23,7 @@
 # any other, which the transfer test's strong read shows.
 #
 #   $env:CARGO_TARGET_DIR = 'C:\Users\Meta\.cargo-target-codex'
-#   powershell -File F:\Projects\Epiphany\tools\eureka-mutations.ps1 -Repo F:\Projects\Huginn `
+#   powershell -File C:\Users\Meta\.claude\skills\eureka\tools\eureka-mutations.ps1 -Repo F:\Projects\Huginn `
 #       -Entries tools/eureka-cut8-mutations.psd1 `
 #       -Target crates/huginn-mind/src/mind.rs,crates/huginn-mind/src/receipt.rs,crates/huginn-mind/src/admission.rs,crates/huginn-mind/src/docs.rs,crates/huginn-mind/src/store.rs `
 #       -Test 'cargo test -p huginn-mind --lib'

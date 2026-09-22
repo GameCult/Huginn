@@ -2,10 +2,10 @@
 # permissiveness the cut closed and naming the test that must fail while it is
 # applied. A rule with two weakenings has two entries: `Vn` is the revert, the
 # rule simply absent, and `VnL` is the loosening, the rule weakened rather than
-# removed. Run through Epiphany's harness from this repo:
+# removed. Run through the Eureka skill's harness from this repo:
 #
 #   $env:CARGO_TARGET_DIR = 'C:\Users\Meta\.cargo-target-codex'
-#   powershell -File F:\Projects\Epiphany\tools\eureka-mutations.ps1 -Repo F:\Projects\Huginn `
+#   powershell -File C:\Users\Meta\.claude\skills\eureka\tools\eureka-mutations.ps1 -Repo F:\Projects\Huginn `
 #       -Entries tools/eureka-cut9-mutations.psd1 `
 #       -Target crates/huginn-mind/src/docs.rs,crates/huginn-mind/src/query.rs `
 #       -Test 'cargo test -p huginn-mind --lib'
