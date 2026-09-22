@@ -659,12 +659,15 @@ mod tests {
         encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap().len() as u64
     }
 
-    /// A reply carrying `payload_len` bytes of payload: the envelope a view
-    /// answer travels in, with the document replaced by filler, so a size can
-    /// be chosen instead of found.
-    fn synthetic(payload_len: usize) -> CultNetMessage {
+    /// A reply carrying `payload_len` bytes of payload under a chosen
+    /// `message_id`: the envelope a view answer travels in, with the document
+    /// replaced by filler, so a size can be chosen instead of found. The
+    /// `message_id` is part of the encoded envelope too, so pinning the gate
+    /// against one length alone (every other fixture uses `m-0`) hides a gate
+    /// that hard-codes that length's contribution instead of measuring it.
+    fn synthetic_with_id(message_id: &str, payload_len: usize) -> CultNetMessage {
         CultNetMessage::OperationResponse {
-            message_id: "m-0".into(),
+            message_id: message_id.into(),
             service_id: MIND_SERVICE_ID.into(),
             operation: "view".into(),
             status: "accepted".into(),
@@ -676,15 +679,24 @@ mod tests {
         }
     }
 
-    /// One whose encoded envelope is exactly `target` bytes. The envelope's
-    /// own overhead is measured rather than assumed: the length prefix is the
-    /// same width on either side of a megabyte, so one probe fixes it.
-    fn sized_exactly(target: u64) -> CultNetMessage {
+    fn synthetic(payload_len: usize) -> CultNetMessage {
+        synthetic_with_id("m-0", payload_len)
+    }
+
+    /// One whose encoded envelope is exactly `target` bytes, under a chosen
+    /// `message_id`. The envelope's own overhead is measured rather than
+    /// assumed: the length prefix is the same width on either side of a
+    /// megabyte, so one probe fixes it.
+    fn sized_exactly_with_id(message_id: &str, target: u64) -> CultNetMessage {
         let probe = 1_200_000_usize;
-        let at_probe = encoded_len(&synthetic(probe));
-        let message = synthetic((probe as i64 + (target as i64 - at_probe as i64)) as usize);
+        let at_probe = encoded_len(&synthetic_with_id(message_id, probe));
+        let message = synthetic_with_id(message_id, (probe as i64 + (target as i64 - at_probe as i64)) as usize);
         assert_eq!(encoded_len(&message), target);
         message
+    }
+
+    fn sized_exactly(target: u64) -> CultNetMessage {
+        sized_exactly_with_id("m-0", target)
     }
 
     /// A connected session whose accept has been acknowledged, so its window
@@ -773,6 +785,39 @@ mod tests {
         hub.send_schema_message(&session, &at).expect("exactly the limit is accepted on an empty window");
         hub.send_schema_message(&session, &synthetic(1))
             .expect_err("the accepted answer filled the window, so nothing follows it");
+    }
+
+    /// The boundary above is pinned for one envelope shape: every reply in it
+    /// carries `message_id` `m-0`, three bytes, so a gate that measures
+    /// `payload.len() + 231` — exactly the encoded envelope's overhead for
+    /// that one id — passes it unnoticed. The reply echoes the client's own
+    /// `message_id`, so that overhead is under the client's control: at a
+    /// longer id, such a gate is wrong, and wrong on the side that lets an
+    /// oversize answer through the size check to a send that then fails
+    /// silently. Forty bytes is used because it is far from `m-0`'s length in
+    /// either direction, not chosen to sit near some other boundary.
+    #[test]
+    fn the_gates_boundary_holds_for_a_second_message_id_length() {
+        let long_id = format!("m-{}", "0".repeat(38));
+        assert_eq!(long_id.len(), 40, "a message_id far from m-0's own length");
+
+        let at = sized_exactly_with_id(&long_id, MAX_RESPONSE_BYTES);
+        let over = sized_exactly_with_id(&long_id, MAX_RESPONSE_BYTES + 1);
+        assert_eq!(
+            within_window(at.clone(), &long_id, "view", "huginn-yggdrasil"),
+            at,
+            "exactly the limit passes at this id's length too"
+        );
+
+        let refused = within_window(over.clone(), &long_id, "view", "huginn-yggdrasil");
+        let (correlation, answered) = decode_response(&refused).unwrap();
+        assert_eq!(correlation, long_id);
+        let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
+            answered.expect("a refusal is an answer, not an envelope failure")
+        else {
+            panic!("one byte over the limit was not refused: {refused:?}");
+        };
+        assert_eq!((bytes, limit), (MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES));
     }
 
     /// One cut spec's own reference, by its cut label.

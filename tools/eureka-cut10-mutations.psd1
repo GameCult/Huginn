@@ -361,6 +361,23 @@ pub fn require_grammatical_instance(declared: &Slug) -> Result<(), MindRefusal> 
 '@
         }
         @{
+            Id   = 'D20L6'
+            Rule = 'What is measured holds for more than one envelope shape: a longer `message_id` changes the encoded envelope, so a formula that hard-codes one length''s overhead is wrong at another.'
+            Test = 'serve::tests::the_gates_boundary_holds_for_a_second_message_id_length'
+            File = 'crates/huginn-daemon/src/serve.rs'
+            Old  = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => bytes.len() as u64,
+'@
+            New  = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => match &reply {
+            CultNetMessage::OperationResponse { payload, .. } => payload.len() as u64 + 231,
+            _ => bytes.len() as u64,
+        },
+'@
+        }
+        @{
             Id   = 'D21'
             Rule = 'The refusal rides the response schema like every other refusal, not a failure envelope the client must parse apart.'
             Test = 'serve::tests::an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client'
