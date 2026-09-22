@@ -100,6 +100,24 @@
             New     = '        if !declared.0.eq_ignore_ascii_case(&self.instance().0) {'
         }
         @{
+            Id      = 'D1L6'
+            Rule    = 'It compares the names as written: `_` and `-` are both legal inside a label, so folding one into the other answers a different mind''s name for this one.'
+            Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if declared.0.replace(''_'', "-") != self.instance().0.replace(''_'', "-") {'
+        }
+        @{
+            Id      = 'D1L7'
+            Rule    = 'It compares the names as written: `.` joins labels and `-` sits inside one, so folding the join into the separator answers a different mind''s name for this one.'
+            Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if declared.0.replace(''.'', "-") != self.instance().0.replace(''.'', "-") {'
+        }
+        @{
             Id      = 'D1N'
             Rule    = 'The refusal names which mind refused, so an agent can act on the field rather than guess.'
             Test    = 'mind::tests::require_instance_is_the_one_check_admission_and_the_daemon_share'
