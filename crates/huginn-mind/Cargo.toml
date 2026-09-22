@@ -14,7 +14,7 @@ publish.workspace = true
 anyhow = "1"
 chrono = "0.4.44"
 cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "a0813c6eed24d30bf88073ef615b633c77ebfcd6", package = "cultcache-rs" }
-epiphany-pipeline = { git = "https://github.com/GameCult/Epiphany.git", rev = "5cda0886bd937b9df18309de7f505029d0e41f4d", package = "epiphany-pipeline" }
+epiphany-pipeline = { git = "https://github.com/GameCult/Epiphany.git", rev = "9d3a3efd56b34893f8c124d3eeb2526326bac646", package = "epiphany-pipeline" }
 rmp-serde = "1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

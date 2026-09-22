@@ -1,4 +1,4 @@
-# Cut 9 mutations, V1-V23: the read side's rules, each entry restoring one
+# Cut 9 mutations, V1-V24L: the read side's rules, each entry restoring one
 # permissiveness the cut closed and naming the test that must fail while it is
 # applied. A rule with two weakenings has two entries: `Vn` is the revert, the
 # rule simply absent, and `VnL` is the loosening, the rule weakened rather than
@@ -16,14 +16,12 @@
 # `eureka-cut8-mutations.psd1` -- one mutant, two suites, one owner.
 #
 # Two weakenings the spec names have no entry, not because they are
-# unreachable but because nothing on this Body's own public surface reaches
-# them today, which is a narrower claim than the one this header used to make.
-# "No behaviour this Body can reach" rested on admission being the only write
-# path, and that premise is false: `MindStore::compare_and_swap_batch` is
-# `pub`, and `store.rs`'s own re-export of `CacheBackingStore` already lets
-# code outside this crate push a row that skips A5 (and every other admission
-# rule) entirely, the same door the cut9 header's line 18-24 claim rested on.
-# Recorded as not yet reached, not as unreachable:
+# unreachable but because nothing in this suite exercises the path that would
+# reach them. `MindStore::compare_and_swap_batch` is `pub`, and `store.rs`'s
+# own re-export of `CacheBackingStore` already lets code outside this crate
+# push a row that skips A5 (and every other admission rule) entirely -- the
+# door named at `store.rs:18-19`. Recorded as not yet reached, not as
+# unreachable:
 #
 # - `assignments_of` comparing the repo and ignoring the instance. A5 refuses
 #   a stewardship naming another instance for every row admission writes, so

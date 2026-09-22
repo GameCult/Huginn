@@ -12,10 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, OwnedRedbMessagePackBackingStore};
-use epiphany_pipeline::{
-    Date, PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineInstance, PipelineKind, Short, Slug,
-    register_pipeline_document_types,
-};
+use epiphany_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineKind, Slug, register_pipeline_document_types};
 
 use crate::receipt::HuginnCommitReceipt;
 use crate::refusal::MindRefusal;
@@ -49,29 +46,28 @@ pub(crate) fn unavailable(error: anyhow::Error) -> MindRefusal {
     MindRefusal::Unavailable { detail: format!("{error:#}") }
 }
 
-/// A declared instance's grammar, checked before its bytes are compared to
-/// anything. `Slug` is `epiphany_pipeline`'s, dot-joined ASCII labels, and the
-/// leaf validates one only as a document field: its grammar check is a
-/// crate-private trait, so a bare `Slug` cannot be asked directly and the only
-/// public door is a real document. This wraps the declared name in a
-/// throwaway `PipelineInstance` and reads the answer back through the leaf's
-/// own public `PipelineDocument::validate`, so the grammar is the leaf's,
-/// never re-derived here: a fold that widens what counts as ASCII (a
-/// fullwidth character folded to its plain form, say) has nothing local to
-/// weaken, because nothing local decides the grammar.
+/// A declared name's grammar, checked before its bytes are compared to
+/// anything or reach the filesystem. `Slug` is `epiphany_pipeline`'s,
+/// dot-joined ASCII labels, and the leaf now opens a public door onto its own
+/// check, `Slug::validate_slug`, on the pattern of `PipelineRef::validate_ref`
+/// (Self's ruling on the F6 fork): the grammar is the leaf's, never
+/// re-derived here, so a fold that widens what counts as ASCII (a fullwidth
+/// character folded to its plain form, say) has nothing local to weaken.
 ///
-/// Read-path callers ask this before `Mind::require_instance`, so a name
-/// outside the grammar is refused by its own name — the leaf's
-/// `InvalidFormat` — rather than reaching the identity comparison and being
-/// read as merely a foreign mind.
-pub fn require_grammatical_instance(declared: &Slug) -> Result<(), MindRefusal> {
-    let probe = PipelineDocument::Instance(PipelineInstance {
-        instance: declared.clone(),
-        display_name: Short("grammar-probe".into()),
-        created_at: Date("2026-01-01".into()),
-        host: Short("grammar-probe".into()),
-    });
-    probe.validate().map_err(MindRefusal::Document)
+/// The leaf's own refusal names its own field, `slug`, and for a dotted name
+/// the one label that failed rather than the whole declared name; a caller
+/// here reports neither, since both would misname what the caller actually
+/// sent. This instead names the field the declared name was held under and
+/// the whole declared name, so `require_instance` and `Mind::open` each
+/// refuse by the name a client can recognise, not `instance.instance` (the
+/// old wrapper's field, a client never sent) and not a label fragment.
+fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefusal> {
+    declared.validate_slug().map_err(|_| {
+        MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            field: field.into(),
+            value: declared.0.clone(),
+        })
+    })
 }
 
 /// A cache that knows the fifteen types a mind's store may hold: the leaf's
@@ -114,6 +110,7 @@ impl Mind<OwnedRedbMessagePackBackingStore> {
     /// path, in this process or another, is `MindAlreadyOwned`. An empty
     /// store is a valid open; only the first admission may write into it.
     pub fn open(state_root: &Path, instance: &Slug) -> Result<Self, MindRefusal> {
+        require_grammatical_slug("instance", instance)?;
         let path = Self::path_for(state_root, instance);
         let store = OwnedRedbMessagePackBackingStore::new(&path).map_err(|error| {
             // The store reports a held lock as an error like any other; its
@@ -135,6 +132,7 @@ impl<S: MindStore> Mind<S> {
     /// one `instance` document naming the declared instance; then register,
     /// attach and pull.
     pub fn open_with(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
+        require_grammatical_slug("instance", instance)?;
         let raw = store.pull_all().map_err(unavailable)?;
         refuse_foreign_types(&raw)?;
         refuse_foreign_epoch(&raw)?;
@@ -152,6 +150,7 @@ impl<S: MindStore> Mind<S> {
     /// asks it for every read that names an instance, and compares nothing
     /// itself.
     pub fn require_instance(&self, declared: &Slug) -> Result<(), MindRefusal> {
+        require_grammatical_slug("declared", declared)?;
         if declared != self.instance() {
             return Err(MindRefusal::ForeignInstance {
                 declared: declared.0.clone(),
@@ -507,5 +506,32 @@ mod tests {
         let second = Mind::open(root.path(), &yggdrasil).unwrap();
         assert!(second.is_empty());
         assert_eq!(Mind::path_for(root.path(), &yggdrasil), root.path().join("minds").join(INSTANCE).join("mind.redb"));
+    }
+
+    /// N1, Soul's probe: `Mind::open(outer/inner, Slug("..\..\escaped"))` used
+    /// to return `Ok` and create `outer/escaped/mind.redb`, a store outside
+    /// the state root nothing beneath `outer/inner` names. `path_for` joins a
+    /// declared name as written and never validated it, so a `Slug` carrying
+    /// `..` and a path separator escaped through the one door that touches the
+    /// filesystem. `require_grammatical_slug` now runs before `path_for` is
+    /// even called, so the store is never created and the refusal is the
+    /// leaf's own grammar, not a filesystem error surfacing later.
+    #[test]
+    fn a_slug_outside_the_grammar_cannot_escape_the_state_root() {
+        let outer = tempfile::tempdir().unwrap();
+        let inner = outer.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+
+        let escaping = Slug("..\\..\\escaped".into());
+        assert_eq!(
+            Mind::open(&inner, &escaping).err(),
+            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+                field: "instance".into(),
+                value: escaping.0.clone(),
+            }))
+        );
+
+        assert!(!outer.path().join("escaped").join("mind.redb").exists(), "no store escaped the state root");
+        assert!(!inner.join("minds").exists(), "no store was created under the state root either");
     }
 }

@@ -306,7 +306,7 @@ dependencies = [
 [[package]]
 name = "epiphany-pipeline"
 version = "0.1.0"
-source = "git+https://github.com/GameCult/Epiphany.git?rev=5cda0886bd937b9df18309de7f505029d0e41f4d#5cda0886bd937b9df18309de7f505029d0e41f4d"
+source = "git+https://github.com/GameCult/Epiphany.git?rev=9d3a3efd56b34893f8c124d3eeb2526326bac646#9d3a3efd56b34893f8c124d3eeb2526326bac646"
 dependencies = [
  "anyhow",
  "chrono",

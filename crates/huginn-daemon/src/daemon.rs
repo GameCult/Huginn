@@ -58,20 +58,16 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
 
     /// One request, one answer. `Admit` goes to the mind whole, because the
     /// batch declares its own instance and admission's A1 is the check. Every
-    /// other request names an instance: the read path asks the leaf whether
-    /// that name is even grammatical before asking the mind whether it is its
-    /// own, so a name outside the grammar (a fullwidth fold, say) is refused
-    /// by name rather than read as merely a foreign mind.
+    /// other request names an instance: `require_instance` now applies the
+    /// leaf's own grammar before it compares identity, so a name outside the
+    /// grammar (a fullwidth fold, say) is refused by name rather than read as
+    /// merely a foreign mind, and the daemon asks nothing twice.
     pub fn handle(&mut self, request: HuginnMindRequest, now: DateTime<Utc>) -> HuginnMindResponse {
         if let Some(declared) = request.instance()
             && !matches!(request, HuginnMindRequest::Admit(_))
+            && let Err(refusal) = self.mind.require_instance(declared)
         {
-            if let Err(refusal) = huginn_mind::require_grammatical_instance(declared) {
-                return HuginnMindResponse::Refused(refusal);
-            }
-            if let Err(refusal) = self.mind.require_instance(declared) {
-                return HuginnMindResponse::Refused(refusal);
-            }
+            return HuginnMindResponse::Refused(refusal);
         }
         match request {
             HuginnMindRequest::Whoami => HuginnMindResponse::Whoami(self.mind.status()),
@@ -506,7 +502,7 @@ pub(crate) mod tests {
         assert!(!fullwidth.is_ascii(), "outside the grammar: a Slug is dot-joined ASCII labels");
 
         let expected = MindRefusal::Document(huginn_mind::epiphany_pipeline::PipelineRefusal::InvalidFormat {
-            field: "instance.instance".into(),
+            field: "declared".into(),
             value: fullwidth.into(),
         });
 
@@ -525,6 +521,36 @@ pub(crate) mod tests {
         let scope = HistoryScope::Repo(OrgRepo("GameCult/Huginn".into()));
         let history = HuginnMindRequest::History { instance: slug(fullwidth), scope };
         assert_eq!(daemon.handle(history, now()), HuginnMindResponse::Refused(expected));
+    }
+
+    /// `Admit` is excluded from the daemon's own pre-check (its batch is not a
+    /// read naming an instance the mind is asked about first), but it reaches
+    /// the identical `require_instance` from inside `admit_steps`'s A1, so a
+    /// fullwidth *declared batch instance* is `InvalidFormat` there too,
+    /// named and valued the same as the read path's. One door,
+    /// `Mind::require_instance`, decides both. The batch's one document names
+    /// the mind's own real instance, `INSTANCE`, so it clears `admit`'s own
+    /// per-document `Bounded` check and the only fullwidth text anywhere in
+    /// the request is the batch's declared instance, the thing this test
+    /// pins.
+    #[test]
+    fn a_fullwidth_instance_is_refused_the_same_way_by_admit_and_by_query() {
+        let (_root, mut daemon) = seeded();
+        let fullwidth = "\u{FF59}ggdrasil";
+
+        let expected = MindRefusal::Document(huginn_mind::epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            field: "declared".into(),
+            value: fullwidth.into(),
+        });
+
+        let admit = HuginnMindRequest::Admit(batch(fullwidth, vec![identity(INSTANCE)]));
+        assert_eq!(
+            daemon.handle(admit, now()),
+            HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(expected.clone()))
+        );
+
+        let query = HuginnMindRequest::Query { instance: slug(fullwidth), query: PipelineQuery::default() };
+        assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(expected));
     }
 
     /// A refusal a read method raised is the answer the dispatch returns, whole.

@@ -163,38 +163,38 @@
         }
         @{
             Id      = 'S3wide'
-            Rule    = 'The grammar check runs on the declared bytes as given: nothing folds a fullwidth character to its plain ASCII form before asking the leaf whether the name is grammatical.'
+            Rule    = 'The grammar check runs on the declared bytes as given: nothing folds a fullwidth character to its plain ASCII form before asking the leaf''s Slug::validate_slug whether the name is grammatical.'
             Test    = 'daemon::tests::a_declared_instance_outside_the_grammar_is_refused_by_name_before_the_identity_check'
             Command = 'cargo test -p huginn-daemon --lib'
             File    = 'crates/huginn-mind/src/mind.rs'
             Old     = @'
-pub fn require_grammatical_instance(declared: &Slug) -> Result<(), MindRefusal> {
-    let probe = PipelineDocument::Instance(PipelineInstance {
-        instance: declared.clone(),
-        display_name: Short("grammar-probe".into()),
-        created_at: Date("2026-01-01".into()),
-        host: Short("grammar-probe".into()),
-    });
-    probe.validate().map_err(MindRefusal::Document)
+fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefusal> {
+    declared.validate_slug().map_err(|_| {
+        MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            field: field.into(),
+            value: declared.0.clone(),
+        })
+    })
 }
 '@
             New     = @'
-pub fn require_grammatical_instance(declared: &Slug) -> Result<(), MindRefusal> {
-    let folded: String = declared
-        .0
-        .chars()
-        .map(|c| match c as u32 {
-            0xFF01..=0xFF5E => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
-            _ => c,
+fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefusal> {
+    let folded = Slug(
+        declared
+            .0
+            .chars()
+            .map(|c| match c as u32 {
+                0xFF01..=0xFF5E => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+                _ => c,
+            })
+            .collect(),
+    );
+    folded.validate_slug().map_err(|_| {
+        MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            field: field.into(),
+            value: declared.0.clone(),
         })
-        .collect();
-    let probe = PipelineDocument::Instance(PipelineInstance {
-        instance: Slug(folded),
-        display_name: Short("grammar-probe".into()),
-        created_at: Date("2026-01-01".into()),
-        host: Short("grammar-probe".into()),
-    });
-    probe.validate().map_err(MindRefusal::Document)
+    })
 }
 '@
         }
@@ -577,6 +577,17 @@ pub fn require_grammatical_instance(declared: &Slug) -> Result<(), MindRefusal> 
                 }),
 '@
         }
+        # S1 and S1d's fixture, `open_items_refuses_on_a_fault_inside_the_requested_campaign`,
+        # runs three faults in one test body: an orphan receipt, an undecodable
+        # document, and a document two receipts claim. N5, correcting an
+        # earlier claim here: neither mutant "dies on all three". S1d's own
+        # `New` exempts any detail containing "has no commit receipt" by
+        # construction, so the orphan block never fails under it; the test
+        # panics at the very next block, the undecodable document, and never
+        # reaches the third. S1 has no such exemption and is killed by the
+        # same first block its own widened check reaches, the orphan. Each
+        # mutant dies on the fault its own body actually mangles, not on all
+        # three the fixture happens to carry.
         @{
             Id      = 'S1'
             Rule    = 'open_items refuses on a fault anywhere in the image it must read, not only on one outside the requested campaign.'
