@@ -349,6 +349,16 @@ mod tests {
 
     const FOREIGN_EPOCH: &str = "epiphany.pipeline.epoch.v0";
 
+    /// A type id that is foreign under every epoch, unlike
+    /// `"epiphany.pipeline.campaign.v1"`: that string names the pinned
+    /// leaf's real, currently-registered campaign kind, so `is_known_type`
+    /// accepts it and a gate-order mutant that runs the type gate first
+    /// still passes these fixtures by accident. `_never_a_kind_` cannot
+    /// collide with any real `PipelineKind` id at any epoch this leaf pin
+    /// will ever carry, so these fixtures actually exercise the epoch-first
+    /// order rather than getting lucky on a real id.
+    const NEVER_A_KNOWN_TYPE: &str = "epiphany.pipeline._never_a_kind_.v1";
+
     /// An epoch record under an arbitrary key naming an arbitrary epoch, so a
     /// key defect and a value defect can be planted apart.
     fn epoch_record(key: &str, schema_epoch: &str) -> CultCacheEnvelope {
@@ -468,7 +478,7 @@ mod tests {
     /// Pinned by this test.
     #[test]
     fn a_foreign_type_with_no_epoch_record_is_missing_identity_not_foreign_store() {
-        let store = planted(vec![foreign("epiphany.pipeline.campaign.v1")]);
+        let store = planted(vec![foreign(NEVER_A_KNOWN_TYPE)]);
         assert_eq!(Mind::open_with(store, &slug(INSTANCE)).err(), Some(MindRefusal::MissingIdentity));
     }
 
@@ -481,7 +491,7 @@ mod tests {
     /// key.
     #[test]
     fn a_foreign_epoch_value_at_the_current_key_beside_a_foreign_type_is_foreign_epoch() {
-        let store = planted(vec![epoch_record(PIPELINE_SCHEMA_EPOCH, FOREIGN_EPOCH), foreign("epiphany.pipeline.campaign.v1")]);
+        let store = planted(vec![epoch_record(PIPELINE_SCHEMA_EPOCH, FOREIGN_EPOCH), foreign(NEVER_A_KNOWN_TYPE)]);
         assert_eq!(
             Mind::open_with(store, &slug(INSTANCE)).err(),
             Some(MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() })
