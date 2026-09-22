@@ -666,16 +666,26 @@ mod tests {
     /// against one length alone (every other fixture uses `m-0`) hides a gate
     /// that hard-codes that length's contribution instead of measuring it.
     fn synthetic_with_id(message_id: &str, payload_len: usize) -> CultNetMessage {
+        synthetic_full(message_id, "view", "huginn-yggdrasil", payload_len)
+    }
+
+    /// N4: `operation` and `source_runtime_id` are in the encoded envelope
+    /// too, exactly as `message_id` is, so a boundary fixture that only ever
+    /// varies `message_id` cannot tell a gate that genuinely measures the
+    /// encoded bytes from one that hard-codes a formula shaped to fit that
+    /// one dimension. `synthetic_with_id` is this with the operation and
+    /// runtime id `the_gates_boundary_*` tests were pinned to before N4.
+    fn synthetic_full(message_id: &str, operation: &str, runtime_id: &str, payload_len: usize) -> CultNetMessage {
         CultNetMessage::OperationResponse {
             message_id: message_id.into(),
             service_id: MIND_SERVICE_ID.into(),
-            operation: "view".into(),
+            operation: operation.into(),
             status: "accepted".into(),
             payload_schema: MIND_RESPONSE_SCHEMA.into(),
             payload_encoding: "messagepack-base64".into(),
             payload: "A".repeat(payload_len),
             diagnostics: vec![],
-            source_runtime_id: Some("huginn-yggdrasil".into()),
+            source_runtime_id: Some(runtime_id.into()),
         }
     }
 
@@ -688,9 +698,18 @@ mod tests {
     /// assumed: the length prefix is the same width on either side of a
     /// megabyte, so one probe fixes it.
     fn sized_exactly_with_id(message_id: &str, target: u64) -> CultNetMessage {
+        sized_exactly_full(message_id, "view", "huginn-yggdrasil", target)
+    }
+
+    /// N4's own probe: `sized_exactly_with_id` generalised over the
+    /// operation and the runtime id as well as the message id, so a fixture
+    /// can pin the gate's boundary at a combination a formula shaped to fit
+    /// `view`/`huginn-yggdrasil` alone was never measured against.
+    fn sized_exactly_full(message_id: &str, operation: &str, runtime_id: &str, target: u64) -> CultNetMessage {
         let probe = 1_200_000_usize;
-        let at_probe = encoded_len(&synthetic_with_id(message_id, probe));
-        let message = synthetic_with_id(message_id, (probe as i64 + (target as i64 - at_probe as i64)) as usize);
+        let at_probe = encoded_len(&synthetic_full(message_id, operation, runtime_id, probe));
+        let message =
+            synthetic_full(message_id, operation, runtime_id, (probe as i64 + (target as i64 - at_probe as i64)) as usize);
         assert_eq!(encoded_len(&message), target);
         message
     }
@@ -818,6 +837,40 @@ mod tests {
             panic!("one byte over the limit was not refused: {refused:?}");
         };
         assert_eq!((bytes, limit), (MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES));
+    }
+
+    /// N4: the boundary above is pinned at one `message_id` length, but
+    /// `operation` and `source_runtime_id` are in the encoded envelope the
+    /// same way `message_id` is, and every fixture before this one held both
+    /// fixed at `"view"` and `"huginn-yggdrasil"`. A gate whose measurement is
+    /// a formula of `message_id`'s length alone -- shaped to pass at exactly
+    /// `m-0`'s three bytes and the other fixture's forty -- has no way to be
+    /// wrong there and every way to be wrong once the operation or the
+    /// runtime id it never looked at changes length too. This holds the
+    /// boundary at `open_items` (ten bytes, not `view`'s four) over a second
+    /// runtime id, so such a formula is measured somewhere it was never
+    /// fitted.
+    #[test]
+    fn the_gates_boundary_holds_across_operation_and_runtime_id() {
+        for (operation, runtime_id) in [("view", "huginn-yggdrasil"), ("open_items", "huginn-thought-cage")] {
+            let at = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES);
+            let over = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES + 1);
+            assert_eq!(
+                within_window(at.clone(), "m-g", operation, runtime_id),
+                at,
+                "{operation}/{runtime_id}: exactly the limit passes"
+            );
+
+            let refused = within_window(over.clone(), "m-g", operation, runtime_id);
+            let (correlation, answered) = decode_response(&refused).unwrap();
+            assert_eq!(correlation, "m-g");
+            let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
+                answered.expect("a refusal is an answer, not an envelope failure")
+            else {
+                panic!("{operation}/{runtime_id}: one byte over the limit was not refused: {refused:?}");
+            };
+            assert_eq!((bytes, limit), (MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES), "{operation}/{runtime_id}");
+        }
     }
 
     /// One cut spec's own reference, by its cut label.

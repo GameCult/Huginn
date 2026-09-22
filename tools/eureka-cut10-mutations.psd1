@@ -162,6 +162,42 @@
             New  = '        if !declared.0.eq_ignore_ascii_case(&self.instance().0) {'
         }
         @{
+            Id      = 'N3a'
+            Rule    = 'N3: the comparison folds nothing; `_` and `.` stay distinct on both sides.'
+            Test    = 'mind::tests::every_separator_variant_of_a_declared_name_is_foreign_not_the_mind'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if declared.0.replace(''_'', ".") != self.instance().0.replace(''_'', ".") {'
+        }
+        @{
+            Id      = 'N3b'
+            Rule    = 'N3: the comparison folds nothing on the mind''s own side alone; `_` and `-` stay distinct there too.'
+            Test    = 'mind::tests::every_separator_variant_of_a_declared_name_is_foreign_not_the_mind'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if declared.0 != self.instance().0.replace(''_'', "-") {'
+        }
+        @{
+            Id      = 'N3c'
+            Rule    = 'N3: a leading or trailing `-` is part of the name, not padding `trim_matches` may strip before comparing.'
+            Test    = 'mind::tests::every_separator_variant_of_a_declared_name_is_foreign_not_the_mind'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if declared.0.trim_matches(''-'') != self.instance().0.trim_matches(''-'') {'
+        }
+        @{
+            Id      = 'N3d'
+            Rule    = 'N3: a run of `--` is two hyphens, not one collapsed by the comparison before it runs.'
+            Test    = 'mind::tests::every_separator_variant_of_a_declared_name_is_foreign_not_the_mind'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = '        if declared != self.instance() {'
+            New     = '        if declared.0.replace("--", "-") != self.instance().0.replace("--", "-") {'
+        }
+        @{
             Id      = 'S3wide'
             Rule    = 'The grammar check runs on the declared bytes as given: nothing folds a fullwidth character to its plain ASCII form before asking the leaf''s Slug::validate_slug whether the name is grammatical.'
             Test    = 'daemon::tests::a_declared_instance_outside_the_grammar_is_refused_by_name_before_the_identity_check'
@@ -373,6 +409,46 @@ fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefu
     let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
         Ok(bytes) => match &reply {
             CultNetMessage::OperationResponse { payload, .. } => payload.len() as u64 + 231,
+            _ => bytes.len() as u64,
+        },
+'@
+        }
+        @{
+            Id      = 'N4a'
+            Rule    = 'N4: what is measured holds for more than `message_id`''s length; `operation` and the runtime id are in the encoded envelope too, so a formula of `message_id.len()` alone -- even one shaped to survive a longer id, `+228+id.len()+(id.len()>31)` -- is wrong once the operation or runtime id it never looked at changes length.'
+            Test    = 'serve::tests::the_gates_boundary_holds_across_operation_and_runtime_id'
+            Command = 'cargo test -p huginn-daemon --lib'
+            File    = 'crates/huginn-daemon/src/serve.rs'
+            Old     = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => bytes.len() as u64,
+'@
+            New     = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => match &reply {
+            CultNetMessage::OperationResponse { payload, .. } => {
+                payload.len() as u64 + 228 + message_id.len() as u64 + (message_id.len() > 31) as u64
+            }
+            _ => bytes.len() as u64,
+        },
+'@
+        }
+        @{
+            Id      = 'N4b'
+            Rule    = 'N4: a coincidence caught the same way -- `228+id.len()*38/37` fits both of the suite''s `message_id` lengths (three and forty bytes) by the ratio between them, not by measuring the envelope, so it is wrong once the operation or the runtime id changes the envelope''s size at either length.'
+            Test    = 'serve::tests::the_gates_boundary_holds_across_operation_and_runtime_id'
+            Command = 'cargo test -p huginn-daemon --lib'
+            File    = 'crates/huginn-daemon/src/serve.rs'
+            Old     = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => bytes.len() as u64,
+'@
+            New     = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => match &reply {
+            CultNetMessage::OperationResponse { payload, .. } => {
+                payload.len() as u64 + 228 + (message_id.len() as u64 * 38 / 37)
+            }
             _ => bytes.len() as u64,
         },
 '@

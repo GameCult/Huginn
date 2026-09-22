@@ -491,6 +491,64 @@ mod tests {
         }
     }
 
+    /// N3: one generated test in place of more fixture pairs. The base name
+    /// carries all three separator bytes a `Slug` permits -- `_`, `.` and `-`
+    /// -- at three non-adjacent positions, so every combination of swapping
+    /// one separator for another at a fixed position is itself a grammatical,
+    /// distinct `Slug`. The cartesian product over the three positions (26
+    /// variants, the all-unchanged combination excepted) covers every
+    /// same-position permutation, including a fold that unifies two distinct
+    /// separators (`_` and `.` folded to one canonical byte) and a fold
+    /// applied to only one side of the comparison (the mind's own name
+    /// folded, the declared name left as written, or the reverse). Three more
+    /// variants pad the base with a leading dash, a trailing dash, and a
+    /// doubled interior dash -- all still grammatical, since a label's
+    /// hyphens carry no position or run restriction -- to reach `trim_matches`
+    /// and run-collapsing folds a same-position swap cannot produce. Every
+    /// one of the 30 variants must be refused as `ForeignInstance`, never
+    /// silently admitted as the mind's own name.
+    #[test]
+    fn every_separator_variant_of_a_declared_name_is_foreign_not_the_mind() {
+        const BASE: &str = "ab_cd.ef-gh";
+        let separators: Vec<(usize, char)> =
+            BASE.char_indices().filter(|(_, c)| matches!(c, '_' | '.' | '-')).collect();
+        assert_eq!(separators.len(), 3, "the base carries exactly one of each separator");
+
+        let mut variants: Vec<String> = Vec::new();
+        for a in ['_', '.', '-'] {
+            for b in ['_', '.', '-'] {
+                for c in ['_', '.', '-'] {
+                    let mut bytes: Vec<char> = BASE.chars().collect();
+                    bytes[separators[0].0] = a;
+                    bytes[separators[1].0] = b;
+                    bytes[separators[2].0] = c;
+                    variants.push(bytes.into_iter().collect());
+                }
+            }
+        }
+        variants.retain(|variant| variant != BASE);
+        assert_eq!(variants.len(), 26, "3^3 combinations, less the one that reproduces BASE");
+
+        variants.push(format!("-{BASE}"));
+        variants.push(format!("{BASE}-"));
+        variants.push(format!("-{BASE}-"));
+        variants.push(BASE.replacen('-', "--", 1));
+
+        let mut seen = std::collections::BTreeSet::new();
+        variants.retain(|variant| seen.insert(variant.clone()));
+        assert_eq!(variants.len(), 30, "26 same-length separator permutations plus 4 padded variants, none colliding");
+
+        let mind = crate::fixtures::opened(MemoryStore::new(), BASE);
+        for declared in &variants {
+            assert!(declared.split('.').all(|label| !label.is_empty()), "{declared}: still grammatical");
+            assert_eq!(
+                mind.require_instance(&slug(declared)).err(),
+                Some(MindRefusal::ForeignInstance { declared: declared.clone(), mind: BASE.into() }),
+                "{declared} must be refused as foreign, not folded into {BASE}"
+            );
+        }
+    }
+
     #[test]
     fn a_mind_has_one_owner_at_a_time() {
         let root = tempfile::tempdir().unwrap();
