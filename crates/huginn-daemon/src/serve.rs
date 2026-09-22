@@ -873,6 +873,37 @@ mod tests {
         }
     }
 
+    /// Residue S1: every fixture up to this one, including the pair above,
+    /// moves `operation` and the runtime id together -- both short (`view`,
+    /// 4 bytes / `huginn-yggdrasil`, 16) or both long (`open_items`, 10 /
+    /// `huginn-thought-cage`, 19) -- so a formula that tracks only one of the
+    /// two and ignores the other still lands on the right answer at both
+    /// points by coincidence. This pins a point where they move apart: a long
+    /// operation with the short runtime id, and a short operation with the
+    /// long one, so a gate that dropped either term is wrong at one of them.
+    #[test]
+    fn the_gates_boundary_holds_when_operation_and_runtime_id_vary_independently() {
+        for (operation, runtime_id) in [("open_items", "huginn-yggdrasil"), ("view", "huginn-thought-cage")] {
+            let at = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES);
+            let over = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES + 1);
+            assert_eq!(
+                within_window(at.clone(), "m-g", operation, runtime_id),
+                at,
+                "{operation}/{runtime_id}: exactly the limit passes"
+            );
+
+            let refused = within_window(over.clone(), "m-g", operation, runtime_id);
+            let (correlation, answered) = decode_response(&refused).unwrap();
+            assert_eq!(correlation, "m-g");
+            let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
+                answered.expect("a refusal is an answer, not an envelope failure")
+            else {
+                panic!("{operation}/{runtime_id}: one byte over the limit was not refused: {refused:?}");
+            };
+            assert_eq!((bytes, limit), (MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES), "{operation}/{runtime_id}");
+        }
+    }
+
     /// One cut spec's own reference, by its cut label.
     fn spec_ref(daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, NoIndex>, cut: &str) -> PipelineRef {
         let query = PipelineQuery {

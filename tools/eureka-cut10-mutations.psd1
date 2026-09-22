@@ -234,6 +234,88 @@ fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefu
 }
 '@
         }
+        # Residue S2: N1's door, `require_grammatical_slug`, had no mutation
+        # entry for two of its three callers. `open`'s deletion is covered by
+        # N1's own escape test; `open_with`'s survived all 81 tests before
+        # this batch added one that names it; `require_instance`'s is covered
+        # the same way, since neither caller's test constructs an ungrammatical
+        # name the other way.
+        @{
+            Id      = 'N1open'
+            Rule    = 'N1: `open` checks the declared name''s grammar before it ever joins a path from it.'
+            Test    = 'mind::tests::a_slug_outside_the_grammar_cannot_escape_the_state_root'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = @'
+    pub fn open(state_root: &Path, instance: &Slug) -> Result<Self, MindRefusal> {
+        require_grammatical_slug("instance", instance)?;
+        let path = Self::path_for(state_root, instance);
+'@
+            New     = @'
+    pub fn open(state_root: &Path, instance: &Slug) -> Result<Self, MindRefusal> {
+        let path = Self::path_for(state_root, instance);
+'@
+        }
+        @{
+            Id      = 'N1openwith'
+            Rule    = 'N1: `open_with` checks the declared name''s grammar too, for every store already in hand and not only for one `open` derived a path for.'
+            Test    = 'mind::tests::open_with_refuses_a_declared_instance_outside_the_grammar'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = @'
+    pub fn open_with(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
+        require_grammatical_slug("instance", instance)?;
+        let raw = store.pull_all().map_err(unavailable)?;
+'@
+            New     = @'
+    pub fn open_with(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
+        let raw = store.pull_all().map_err(unavailable)?;
+'@
+        }
+        @{
+            Id      = 'N1requireinstance'
+            Rule    = 'N1: `require_instance` checks the declared name''s grammar before comparing it to the mind''s own, so an ungrammatical name is refused by name rather than merely being foreign.'
+            Test    = 'mind::tests::require_instance_refuses_a_declared_name_outside_the_grammar'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = @'
+    pub fn require_instance(&self, declared: &Slug) -> Result<(), MindRefusal> {
+        require_grammatical_slug("declared", declared)?;
+        if declared != self.instance() {
+'@
+            New     = @'
+    pub fn require_instance(&self, declared: &Slug) -> Result<(), MindRefusal> {
+        if declared != self.instance() {
+'@
+        }
+        @{
+            Id      = 'S4fold'
+            Rule    = 'Residue S4: the grammar check runs on the declared bytes as given: nothing folds a Unicode hyphen (U+2010) to plain ASCII `-` before asking Slug::validate_slug whether the name is grammatical.'
+            Test    = 'mind::tests::a_unicode_hyphen_is_not_folded_before_the_grammar_check'
+            Command = 'cargo test -p huginn-mind --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = @'
+fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefusal> {
+    declared.validate_slug().map_err(|_| {
+        MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            field: field.into(),
+            value: declared.0.clone(),
+        })
+    })
+}
+'@
+            New     = @'
+fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefusal> {
+    let folded = Slug(declared.0.chars().map(|c| if c == '\u{2010}' { '-' } else { c }).collect());
+    folded.validate_slug().map_err(|_| {
+        MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            field: field.into(),
+            value: declared.0.clone(),
+        })
+    })
+}
+'@
+        }
         @{
             Id   = 'D2'
             Rule = 'Rulings 14 and 18 on the wire: the daemon passes the declared instance to the mind as the client sent it.'
@@ -448,6 +530,54 @@ fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefu
         Ok(bytes) => match &reply {
             CultNetMessage::OperationResponse { payload, .. } => {
                 payload.len() as u64 + 228 + (message_id.len() as u64 * 38 / 37)
+            }
+            _ => bytes.len() as u64,
+        },
+'@
+        }
+        @{
+            Id      = 'N4c'
+            Rule    = 'Residue S1: what is measured holds for the operation and the runtime id independently, not merely for the two moving together as N4a and N4b probed them; a formula that adds a term for the operation''s length but drops the runtime id -- `228+id+(id>31)+(op.len()-4)*3/2` -- is wrong once a fixture holds the operation long and the runtime id short.'
+            Test    = 'serve::tests::the_gates_boundary_holds_when_operation_and_runtime_id_vary_independently'
+            Command = 'cargo test -p huginn-daemon --lib'
+            File    = 'crates/huginn-daemon/src/serve.rs'
+            Old     = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => bytes.len() as u64,
+'@
+            New     = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => match &reply {
+            CultNetMessage::OperationResponse { payload, .. } => {
+                payload.len() as u64
+                    + 228
+                    + message_id.len() as u64
+                    + (message_id.len() > 31) as u64
+                    + (operation.len() as u64).saturating_sub(4) * 3 / 2
+            }
+            _ => bytes.len() as u64,
+        },
+'@
+        }
+        @{
+            Id      = 'N4d'
+            Rule    = 'Residue S1: the same, the other way round; a formula that adds a term for the runtime id but drops the operation -- `228+id+(id>31)+3*(rt.len()-16)` -- is wrong once a fixture holds the runtime id long and the operation short.'
+            Test    = 'serve::tests::the_gates_boundary_holds_when_operation_and_runtime_id_vary_independently'
+            Command = 'cargo test -p huginn-daemon --lib'
+            File    = 'crates/huginn-daemon/src/serve.rs'
+            Old     = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => bytes.len() as u64,
+'@
+            New     = @'
+    let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) => match &reply {
+            CultNetMessage::OperationResponse { payload, .. } => {
+                payload.len() as u64
+                    + 228
+                    + message_id.len() as u64
+                    + (message_id.len() > 31) as u64
+                    + 3 * (runtime_id.len() as u64).saturating_sub(16)
             }
             _ => bytes.len() as u64,
         },

@@ -100,9 +100,24 @@ pub struct Mind<S: MindStore> {
 
 impl Mind<OwnedRedbMessagePackBackingStore> {
     /// `<state_root>/minds/<instance>/mind.redb`. Derived for convenience;
-    /// the `instance` document inside is the identity.
-    pub fn path_for(state_root: &Path, instance: &Slug) -> PathBuf {
+    /// the `instance` document inside is the identity. Private: every caller
+    /// that can reach a raw path must go through the grammar door first, so
+    /// this is never exposed on its own. `open` calls it only after
+    /// `require_grammatical_slug` has already passed.
+    fn path_for(state_root: &Path, instance: &Slug) -> PathBuf {
         state_root.join("minds").join(&instance.0).join("mind.redb")
+    }
+
+    /// Test-only door onto the same path: validates through
+    /// `require_grammatical_slug` first, exactly as `open` does, so a test
+    /// that must reach the raw store directly (to break a row on purpose)
+    /// cannot bypass the grammar the way the old public `path_for` did. Built
+    /// only for `cfg(test)` in this crate and for `huginn-daemon`'s own tests
+    /// via the `test-support` feature; never compiled into a release binary.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn store_path_for(state_root: &Path, instance: &Slug) -> Result<PathBuf, MindRefusal> {
+        require_grammatical_slug("instance", instance)?;
+        Ok(Self::path_for(state_root, instance))
     }
 
     /// Opens the instance's mind under the state root, taking the store's
@@ -591,5 +606,60 @@ mod tests {
 
         assert!(!outer.path().join("escaped").join("mind.redb").exists(), "no store escaped the state root");
         assert!(!inner.join("minds").exists(), "no store was created under the state root either");
+    }
+
+    /// S2: `open_with` is the door `open` shares with every store already in
+    /// hand (planted directly, or opened by a test through `store_path_for`),
+    /// so it must run `require_grammatical_slug` too, not only `open`'s own
+    /// path-joining caller. A store need not hold anything for this to
+    /// refuse: the declared name is checked before the store is even pulled.
+    #[test]
+    fn open_with_refuses_a_declared_instance_outside_the_grammar() {
+        let store = MemoryStore::new();
+        let bad = Slug("not a slug!".into());
+        assert_eq!(
+            Mind::open_with(store.clone(), &bad).err(),
+            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+                field: "instance".into(),
+                value: bad.0.clone(),
+            }))
+        );
+        assert_eq!(store.pull_count(), 0, "refused before the store was ever pulled");
+    }
+
+    /// S2: `require_instance` is A1 for admission and the daemon's reads
+    /// alike, and it runs the same grammar door on the *declared* name before
+    /// comparing it to the mind's own. A declared name outside the grammar is
+    /// `InvalidFormat { field: "declared" }`, never folded into a comparison
+    /// or silently treated as merely foreign.
+    #[test]
+    fn require_instance_refuses_a_declared_name_outside_the_grammar() {
+        let mind = crate::fixtures::seeded();
+        let bad = Slug("not a slug!".into());
+        assert_eq!(
+            mind.require_instance(&bad).err(),
+            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+                field: "declared".into(),
+                value: bad.0.clone(),
+            }))
+        );
+    }
+
+    /// S4: a Unicode hyphen (U+2010) is not ASCII `-`, so a grammatical
+    /// `Slug` never contains one and a name carrying it is refused by the
+    /// leaf's own grammar as written -- nothing here may fold it to plain
+    /// `-` before asking `Slug::validate_slug`, the way `S3wide`'s fullwidth
+    /// mutant folds a fullwidth letter to its ASCII form.
+    #[test]
+    fn a_unicode_hyphen_is_not_folded_before_the_grammar_check() {
+        let declared = Slug(format!("ab{}cd", '\u{2010}'));
+        assert!(!declared.0.is_ascii(), "U+2010 is not ASCII, unlike plain '-'");
+        assert_eq!(
+            Mind::open_with(MemoryStore::new(), &declared).err(),
+            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+                field: "instance".into(),
+                value: declared.0.clone(),
+            }))
+        );
     }
 }

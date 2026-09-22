@@ -626,7 +626,7 @@ pub(crate) mod tests {
         use huginn_mind::store::{CacheBackingStore, DatabaseEntry};
 
         let root = tempfile::tempdir().unwrap();
-        let path = Mind::<OwnedRedbMessagePackBackingStore>::path_for(root.path(), &slug(INSTANCE));
+        let path = Mind::<OwnedRedbMessagePackBackingStore>::store_path_for(root.path(), &slug(INSTANCE)).unwrap();
         {
             let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
             let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
@@ -678,7 +678,7 @@ pub(crate) mod tests {
             assert_eq!(writes.len(), 1, "a cut spec alone derives nothing");
             let cut_spec_id = writes[0].id.0.clone();
             drop(daemon);
-            (cut_spec_id, OwnedRedbMessagePackBackingStore::new(&Mind::<OwnedRedbMessagePackBackingStore>::path_for(root, &slug(INSTANCE))).unwrap())
+            (cut_spec_id, OwnedRedbMessagePackBackingStore::new(&Mind::<OwnedRedbMessagePackBackingStore>::store_path_for(root, &slug(INSTANCE)).unwrap()).unwrap())
         }
 
         let cut_spec_type = PipelineKind::CutSpec.type_id();
@@ -812,7 +812,7 @@ pub(crate) mod tests {
     fn the_daemon_refuses_loudly_when_it_cannot_open_the_mind_and_binds_nothing() {
         let root = tempfile::tempdir().unwrap();
         let held = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
-        let path = Mind::<OwnedRedbMessagePackBackingStore>::path_for(root.path(), &slug(INSTANCE));
+        let path = Mind::<OwnedRedbMessagePackBackingStore>::store_path_for(root.path(), &slug(INSTANCE)).unwrap();
         assert_eq!(
             Daemon::open(root.path(), &slug(INSTANCE)).err(),
             Some(MindRefusal::MindAlreadyOwned { path: path.display().to_string() })
@@ -822,7 +822,7 @@ pub(crate) mod tests {
         let mut planted = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
         planted.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
         drop(planted);
-        let moved = Mind::<OwnedRedbMessagePackBackingStore>::path_for(root.path(), &slug(OTHER));
+        let moved = Mind::<OwnedRedbMessagePackBackingStore>::store_path_for(root.path(), &slug(OTHER)).unwrap();
         std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
         std::fs::copy(&path, &moved).unwrap();
         assert_eq!(

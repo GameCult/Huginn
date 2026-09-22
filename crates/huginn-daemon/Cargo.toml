@@ -30,3 +30,9 @@ signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Test-only: `Mind::store_path_for`, the grammar-checked door onto a raw
+# store's path. The daemon's own store-integrity tests reach a store directly
+# (to break a row on purpose) and must go through the same door `open` does
+# rather than reconstructing the path by hand (S3, residue batch).
+huginn-mind = { path = "../huginn-mind", features = ["test-support"] }

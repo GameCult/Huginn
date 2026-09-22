@@ -23,3 +23,11 @@ sha2 = "0.10"
 [dev-dependencies]
 serde_json = "1"
 tempfile = "3"
+
+# `test-support` exposes `Mind::store_path_for`, a grammar-checked path
+# accessor tests in other crates need to reach a raw store directly. It buys
+# no runtime surface: gated `#[cfg(any(test, feature = "test-support"))]`, so
+# it compiles only under `cargo test` in this crate or when a dependent's own
+# dev-dependencies enable it (see huginn-daemon/Cargo.toml).
+[features]
+test-support = []

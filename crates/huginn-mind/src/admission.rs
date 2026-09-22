@@ -752,7 +752,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut yggdrasil = Mind::open(root.path(), &slug(INSTANCE)).unwrap();
         let mut thought_cage = Mind::open(root.path(), &slug(OTHER_INSTANCE)).unwrap();
-        assert_ne!(Mind::path_for(root.path(), &slug(INSTANCE)), Mind::path_for(root.path(), &slug(OTHER_INSTANCE)));
+        assert_ne!(
+            Mind::store_path_for(root.path(), &slug(INSTANCE)).unwrap(),
+            Mind::store_path_for(root.path(), &slug(OTHER_INSTANCE)).unwrap()
+        );
         committed(admit(&mut yggdrasil, vec![instance(INSTANCE), stewardship(INSTANCE, REPO)]));
         committed(admit(&mut thought_cage, vec![instance(OTHER_INSTANCE)]));
         let key = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1");
