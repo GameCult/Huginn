@@ -622,6 +622,126 @@ pub(crate) mod tests {
         assert_eq!(daemon.handle(items, now()), HuginnMindResponse::Refused(orphaned));
     }
 
+    /// The fault the test above drives sits outside the campaign asked about:
+    /// the orphan is the mind's own identity document, rooted at the instance,
+    /// not at `CAMPAIGN`. A loosening that only refuses a fault *outside* the
+    /// requested campaign, and one that swallows every fault except a missing
+    /// receipt, both survive it. This drives the same arm with a fault on a
+    /// document rooted inside the requested campaign, of each kind Soul named:
+    /// a missing receipt, a document that does not decode, and a document two
+    /// receipts both claim to have written.
+    #[test]
+    fn open_items_refuses_on_a_fault_inside_the_requested_campaign() {
+        use huginn_mind::HuginnCommitReceipt;
+        use huginn_mind::store::{CacheBackingStore, DatabaseEntry};
+
+        // A campaign-rooted document (a cut spec) admitted alone, so its own
+        // receipt writes nothing else and can be found and broken without
+        // touching the identity or stewardship receipt from the seed batch.
+        fn campaign_rooted_cut_spec(
+            root: &std::path::Path,
+            cut: &str,
+        ) -> (String, OwnedRedbMessagePackBackingStore) {
+            let mut daemon = Daemon::open(root, &slug(INSTANCE)).unwrap();
+            let seeded = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, campaign_seed())), now());
+            assert!(matches!(seeded, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })));
+            let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![cut_spec(cut, 1)])), now());
+            let HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { writes, .. }) = outcome else {
+                panic!("expected a commit");
+            };
+            assert_eq!(writes.len(), 1, "a cut spec alone derives nothing");
+            let cut_spec_id = writes[0].id.0.clone();
+            drop(daemon);
+            (cut_spec_id, OwnedRedbMessagePackBackingStore::new(&Mind::<OwnedRedbMessagePackBackingStore>::path_for(root, &slug(INSTANCE))).unwrap())
+        }
+
+        let cut_spec_type = PipelineKind::CutSpec.type_id();
+
+        // A missing receipt, this time on a document rooted in `CAMPAIGN`.
+        {
+            let root = tempfile::tempdir().unwrap();
+            let (cut_spec_id, mut store) = campaign_rooted_cut_spec(root.path(), "orphan-in-campaign");
+            let rows = store.pull_all().unwrap();
+            let receipt_row = rows
+                .iter()
+                .find(|row| {
+                    row.r#type == HuginnCommitReceipt::TYPE
+                        && rmp_serde::from_slice::<HuginnCommitReceipt>(&row.payload)
+                            .map(|receipt| receipt.writes.iter().any(|write| write.document_key == cut_spec_id))
+                            .unwrap_or(false)
+                })
+                .expect("the cut spec's own receipt")
+                .clone();
+            store.delete(&receipt_row).unwrap();
+            drop(store);
+
+            let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).expect("an orphaned image still opens");
+            let expected = MindRefusal::Unavailable {
+                detail: format!("document {cut_spec_type}/{cut_spec_id} has no commit receipt"),
+            };
+            let items = HuginnMindRequest::OpenItems { instance: slug(INSTANCE), campaign: slug(CAMPAIGN) };
+            assert_eq!(daemon.handle(items, now()), HuginnMindResponse::Refused(expected));
+        }
+
+        // An undecodable stored document, rooted in `CAMPAIGN`.
+        {
+            let root = tempfile::tempdir().unwrap();
+            let (cut_spec_id, mut store) = campaign_rooted_cut_spec(root.path(), "garbled-in-campaign");
+            let rows = store.pull_all().unwrap();
+            let mut doc_row =
+                rows.iter().find(|row| row.r#type == cut_spec_type && row.key == cut_spec_id).unwrap().clone();
+            store.delete(&doc_row).unwrap();
+            doc_row.payload = b"not messagepack".to_vec();
+            store.push(&doc_row).unwrap();
+            drop(store);
+
+            let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).expect("a garbled document still opens");
+            let items = HuginnMindRequest::OpenItems { instance: slug(INSTANCE), campaign: slug(CAMPAIGN) };
+            let HuginnMindResponse::Refused(MindRefusal::Unavailable { detail }) = daemon.handle(items, now())
+            else {
+                panic!("a document that does not decode must refuse, not answer");
+            };
+            assert!(
+                detail.starts_with(&format!("stored document {cut_spec_id} does not decode")),
+                "unexpected detail: {detail}"
+            );
+        }
+
+        // A document two receipts both claim to have written, rooted in
+        // `CAMPAIGN`: the cut spec's own receipt, cloned under a new key and
+        // id, so the same identity is now landed twice.
+        {
+            let root = tempfile::tempdir().unwrap();
+            let (cut_spec_id, mut store) = campaign_rooted_cut_spec(root.path(), "doubled-in-campaign");
+            let rows = store.pull_all().unwrap();
+            let receipt_row = rows
+                .iter()
+                .find(|row| {
+                    row.r#type == HuginnCommitReceipt::TYPE
+                        && rmp_serde::from_slice::<HuginnCommitReceipt>(&row.payload)
+                            .map(|receipt| receipt.writes.iter().any(|write| write.document_key == cut_spec_id))
+                            .unwrap_or(false)
+                })
+                .expect("the cut spec's own receipt")
+                .clone();
+            let mut receipt: HuginnCommitReceipt = rmp_serde::from_slice(&receipt_row.payload).unwrap();
+            receipt.receipt_id = format!("{}-forged", receipt.receipt_id);
+            let mut forged_row = receipt_row.clone();
+            forged_row.key = receipt.receipt_id.clone();
+            forged_row.payload = rmp_serde::to_vec_named(&receipt).unwrap();
+            store.push(&forged_row).unwrap();
+            drop(store);
+
+            let mut daemon =
+                Daemon::open(root.path(), &slug(INSTANCE)).expect("two receipts for one document still opens");
+            let expected = MindRefusal::Unavailable {
+                detail: format!("document {cut_spec_type}/{cut_spec_id} is written by two receipts"),
+            };
+            let items = HuginnMindRequest::OpenItems { instance: slug(INSTANCE), campaign: slug(CAMPAIGN) };
+            assert_eq!(daemon.handle(items, now()), HuginnMindResponse::Refused(expected));
+        }
+    }
+
     /// Cut 11's seam: the index is handed every landed write, derived ones
     /// included, and can read each; an index that fails changes nothing.
     #[test]

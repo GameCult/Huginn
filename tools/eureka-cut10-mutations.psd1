@@ -1,13 +1,13 @@
 # Cut 10 mutations, D1-D22: the CultNet surface's rules. Each rule has a
 # revert, `Dn`, which removes the rule, and a loosening, `DnL`, which weakens
 # it rather than removing it, because a plain revert is the easy target. Every
-# entry names the test that must fail while it is applied. Run through
-# Epiphany's harness from this repo:
+# entry names the test that must fail while it is applied. Run through the
+# Eureka skill's harness from this repo:
 #
 #   $env:CARGO_TARGET_DIR = 'C:\Users\Meta\.cargo-target-codex'
-#   powershell -File F:\Projects\Epiphany\tools\eureka-mutations.ps1 -Repo F:\Projects\Huginn `
+#   powershell -File C:\Users\Meta\.claude\skills\eureka\tools\eureka-mutations.ps1 -Repo F:\Projects\Huginn `
 #       -Entries tools/eureka-cut10-mutations.psd1 `
-#       -Target crates/huginn-mind/src/mind.rs,crates/huginn-mind/src/wire.rs,crates/huginn-daemon/src/daemon.rs,crates/huginn-daemon/src/envelope.rs,crates/huginn-daemon/src/serve.rs,schemas/cultnet/huginn.mind_request.v1.schema.json,schemas/cultnet/huginn.mind_response.v1.schema.json `
+#       -Target crates/huginn-mind/src/mind.rs,crates/huginn-mind/src/query.rs,crates/huginn-mind/src/wire.rs,crates/huginn-daemon/src/daemon.rs,crates/huginn-daemon/src/envelope.rs,crates/huginn-daemon/src/serve.rs,schemas/cultnet/huginn.mind_request.v1.schema.json,schemas/cultnet/huginn.mind_response.v1.schema.json `
 #       -Test 'cargo test -p huginn-daemon --lib'
 #
 # Entries whose test lives in `huginn-mind` carry their own `Command`. `D1` and
@@ -540,6 +540,56 @@ pub fn require_grammatical_instance(declared: &Slug) -> Result<(), MindRefusal> 
                     specs_without_report: vec![],
                     reports_without_verdict: vec![],
                 }),
+'@
+        }
+        @{
+            Id      = 'S1'
+            Rule    = 'open_items refuses on a fault anywhere in the image it must read, not only on one outside the requested campaign.'
+            Test    = 'daemon::tests::open_items_refuses_on_a_fault_inside_the_requested_campaign'
+            Command = 'cargo test -p huginn-daemon --lib'
+            File    = 'crates/huginn-mind/src/query.rs'
+            Old     = @'
+        let reader = Reader::new(self)?;
+        let views = reader
+            .views()?
+            .into_iter()
+            .filter(|view| root_and_local(&view.id.id.0).0 == campaign.0)
+            .collect::<Vec<_>>();
+'@
+            New     = @'
+        let views = match Reader::new(self).and_then(|reader| reader.views()) {
+            Ok(views) => views,
+            Err(MindRefusal::Unavailable { detail }) if detail.contains(campaign.0.as_str()) => Vec::new(),
+            Err(other) => return Err(other),
+        }
+            .into_iter()
+            .filter(|view| root_and_local(&view.id.id.0).0 == campaign.0)
+            .collect::<Vec<_>>();
+'@
+        }
+        @{
+            Id      = 'S1d'
+            Rule    = 'It refuses on every kind of fault a document can carry, not only a missing receipt.'
+            Test    = 'daemon::tests::open_items_refuses_on_a_fault_inside_the_requested_campaign'
+            Command = 'cargo test -p huginn-daemon --lib'
+            File    = 'crates/huginn-mind/src/query.rs'
+            Old     = @'
+        let reader = Reader::new(self)?;
+        let views = reader
+            .views()?
+            .into_iter()
+            .filter(|view| root_and_local(&view.id.id.0).0 == campaign.0)
+            .collect::<Vec<_>>();
+'@
+            New     = @'
+        let views = match Reader::new(self).and_then(|reader| reader.views()) {
+            Ok(views) => views,
+            Err(MindRefusal::Unavailable { detail }) if !detail.contains("has no commit receipt") => Vec::new(),
+            Err(other) => return Err(other),
+        }
+            .into_iter()
+            .filter(|view| root_and_local(&view.id.id.0).0 == campaign.0)
+            .collect::<Vec<_>>();
 '@
         }
         @{
