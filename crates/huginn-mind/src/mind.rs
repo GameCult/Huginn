@@ -145,10 +145,18 @@ impl<S: MindStore> Mind<S> {
     /// store already in hand (planted directly, or opened by a test through
     /// `store_path_for`). Gated exactly like `store_path_for`: it compiles
     /// only under `cfg(test)` in this crate or for a dependent's own tests
-    /// via the `test-support` feature, never into a release binary. A second
-    /// in-process owner of one store is not yet sealed for every `MindStore`
-    /// impl (F2's recorded follow-up); production reaches this sequence only
-    /// through `Mind::open`, which takes the per-path redb lock first.
+    /// via the `test-support` feature. `huginn-daemon` enables that feature
+    /// only in `[dev-dependencies]`, so a plain `cargo build --release -p
+    /// huginn-daemon` never pulls it into the shipped binary; but
+    /// `--all-targets` (and `cargo test`) unifies dev-dependency features
+    /// across the whole invocation, and that build's `huginn-daemon` binary
+    /// does carry `open_with`. As of this writing no Idunn deploy recipe for
+    /// Huginn exists to pin which of those commands is the actual shipped
+    /// build, so treat this as the open question rather than a settled
+    /// release-only guarantee. A second in-process owner of one store is not
+    /// yet sealed for every `MindStore` impl (F2's recorded follow-up);
+    /// production reaches this sequence only through `Mind::open`, which
+    /// takes the per-path redb lock first.
     #[cfg(any(test, feature = "test-support"))]
     pub fn open_with(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
         Self::open_checked(store, instance)
