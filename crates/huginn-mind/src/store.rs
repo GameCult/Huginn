@@ -12,11 +12,19 @@ use cultcache_rs::CultCacheEnvelope;
 /// dependency entry, one rev, one place to move it.
 pub use cultcache_rs::OwnedRedbMessagePackBackingStore;
 
-/// CultCache's own row traits, re-exported for the same reason and used for
-/// one thing: the daemon's store-integrity test reaches past this crate to
-/// break a store's rows, so that a read over the broken store raises the
-/// refusal its dispatch arm must carry. No non-test code outside this crate
-/// touches a row directly, and nothing here abstracts them.
+/// CultCache's own row traits, re-exported for the same reason: the crate
+/// that serves a mind reaches a store's rows through here rather than
+/// declaring `cultcache-rs` a second time. The daemon's store-integrity tests
+/// use it to break a row on purpose, over a real store, so a read over the
+/// broken store raises the refusal its dispatch arm must carry — but that is
+/// not the only door a row already has: `MindStore`'s own supertrait is
+/// `CacheBackingStore`, and its public `compare_and_swap_batch` already lets
+/// non-test code outside this crate write a row directly. Sealing the store
+/// so admission is its only write path is a follow-up, its own cut; this
+/// re-export does not widen anything that door does not already reach. It
+/// carries two traits, `CacheBackingStore` and `DatabaseEntry`, plus
+/// `DatabaseEntry`'s own derive macro, which shares its name in a different
+/// namespace and rides along unnamed.
 pub use cultcache_rs::{CacheBackingStore, DatabaseEntry};
 
 /// A store a mind can be opened over. `Clone` shares ownership of the same

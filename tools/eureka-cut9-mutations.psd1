@@ -15,21 +15,32 @@
 # breaks it for the views. V1L is H41's own edit, listed here as well as in
 # `eureka-cut8-mutations.psd1` -- one mutant, two suites, one owner.
 #
-# Two weakenings the spec names have no entry because they change no behaviour
-# this Body can reach, and a mutation that cannot fail is not a proof:
+# Two weakenings the spec names have no entry, not because they are
+# unreachable but because nothing on this Body's own public surface reaches
+# them today, which is a narrower claim than the one this header used to make.
+# "No behaviour this Body can reach" rested on admission being the only write
+# path, and that premise is false: `MindStore::compare_and_swap_batch` is
+# `pub`, and `store.rs`'s own re-export of `CacheBackingStore` already lets
+# code outside this crate push a row that skips A5 (and every other admission
+# rule) entirely, the same door the cut9 header's line 18-24 claim rested on.
+# Recorded as not yet reached, not as unreachable:
 #
 # - `assignments_of` comparing the repo and ignoring the instance. A5 refuses
-#   a stewardship naming another instance, so every stewardship a mind holds
-#   already names that mind, and every other caller is a sequence this mind
-#   derives over its own scope.
+#   a stewardship naming another instance for every row admission writes, so
+#   every stewardship admission ever lands already names the mind that holds
+#   it, and every caller reachable through admission is a sequence this mind
+#   derives over its own scope. A row planted through the store port directly,
+#   naming another instance, is not yet reached by anything in this suite.
 # - `resolutions_of` comparing a subject by `id` alone, which was `V10L` until
 #   the leaf opened `PipelineRef::validate_ref` and `view` and `history` began
-#   asking it. A ref that reaches the comparison now has a kind its id's kind
-#   segment agrees with, and every stored subject was held to the same grammar
-#   at admission, so on both sides the kind is a function of the id and
-#   comparing the whole ref and comparing the id alone cannot differ. The rule
-#   is still the rule; it is the reachable weakening that went, and what
-#   defends it is `V24`/`V24L` at the doors instead.
+#   asking it. A ref that reaches the comparison through admission has a kind
+#   its id's kind segment agrees with, and every stored subject admission
+#   writes was held to the same grammar, so on both sides the kind is a
+#   function of the id and comparing the whole ref and comparing the id alone
+#   cannot differ for anything admission wrote. The rule is still the rule; it
+#   is the reachable weakening that went, and what defends it is `V24`/`V24L`
+#   at the doors instead. A row planted through the store port directly, with
+#   a subject whose kind disagrees with its id, is not yet reached either.
 #
 # The one listed beside them in the spec is failable and has an entry: the
 # `semantic` check below `Reader::new` changes the answer for a store the
