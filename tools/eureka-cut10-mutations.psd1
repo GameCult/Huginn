@@ -144,6 +144,43 @@
             New  = '        if !declared.0.eq_ignore_ascii_case(&self.instance().0) {'
         }
         @{
+            Id      = 'S3wide'
+            Rule    = 'The grammar check runs on the declared bytes as given: nothing folds a fullwidth character to its plain ASCII form before asking the leaf whether the name is grammatical.'
+            Test    = 'daemon::tests::a_declared_instance_outside_the_grammar_is_refused_by_name_before_the_identity_check'
+            Command = 'cargo test -p huginn-daemon --lib'
+            File    = 'crates/huginn-mind/src/mind.rs'
+            Old     = @'
+pub fn require_grammatical_instance(declared: &Slug) -> Result<(), MindRefusal> {
+    let probe = PipelineDocument::Instance(PipelineInstance {
+        instance: declared.clone(),
+        display_name: Short("grammar-probe".into()),
+        created_at: Date("2026-01-01".into()),
+        host: Short("grammar-probe".into()),
+    });
+    probe.validate().map_err(MindRefusal::Document)
+}
+'@
+            New     = @'
+pub fn require_grammatical_instance(declared: &Slug) -> Result<(), MindRefusal> {
+    let folded: String = declared
+        .0
+        .chars()
+        .map(|c| match c as u32 {
+            0xFF01..=0xFF5E => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            _ => c,
+        })
+        .collect();
+    let probe = PipelineDocument::Instance(PipelineInstance {
+        instance: Slug(folded),
+        display_name: Short("grammar-probe".into()),
+        created_at: Date("2026-01-01".into()),
+        host: Short("grammar-probe".into()),
+    });
+    probe.validate().map_err(MindRefusal::Document)
+}
+'@
+        }
+        @{
             Id   = 'D2'
             Rule = 'Rulings 14 and 18 on the wire: the daemon passes the declared instance to the mind as the client sent it.'
             Test = 'daemon::tests::a_read_or_a_write_naming_another_instance_is_refused_by_the_mind_and_writes_nothing'

@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, OwnedRedbMessagePackBackingStore};
 use epiphany_pipeline::{
-    PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineKind, Slug, register_pipeline_document_types,
+    Date, PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineInstance, PipelineKind, Short, Slug,
+    register_pipeline_document_types,
 };
 
 use crate::receipt::HuginnCommitReceipt;
@@ -46,6 +47,31 @@ impl HuginnMindEpoch {
 /// A store or cache error, carried as data.
 pub(crate) fn unavailable(error: anyhow::Error) -> MindRefusal {
     MindRefusal::Unavailable { detail: format!("{error:#}") }
+}
+
+/// A declared instance's grammar, checked before its bytes are compared to
+/// anything. `Slug` is `epiphany_pipeline`'s, dot-joined ASCII labels, and the
+/// leaf validates one only as a document field: its grammar check is a
+/// crate-private trait, so a bare `Slug` cannot be asked directly and the only
+/// public door is a real document. This wraps the declared name in a
+/// throwaway `PipelineInstance` and reads the answer back through the leaf's
+/// own public `PipelineDocument::validate`, so the grammar is the leaf's,
+/// never re-derived here: a fold that widens what counts as ASCII (a
+/// fullwidth character folded to its plain form, say) has nothing local to
+/// weaken, because nothing local decides the grammar.
+///
+/// Read-path callers ask this before `Mind::require_instance`, so a name
+/// outside the grammar is refused by its own name — the leaf's
+/// `InvalidFormat` — rather than reaching the identity comparison and being
+/// read as merely a foreign mind.
+pub fn require_grammatical_instance(declared: &Slug) -> Result<(), MindRefusal> {
+    let probe = PipelineDocument::Instance(PipelineInstance {
+        instance: declared.clone(),
+        display_name: Short("grammar-probe".into()),
+        created_at: Date("2026-01-01".into()),
+        host: Short("grammar-probe".into()),
+    });
+    probe.validate().map_err(MindRefusal::Document)
 }
 
 /// A cache that knows the fifteen types a mind's store may hold: the leaf's

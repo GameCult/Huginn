@@ -58,14 +58,20 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
 
     /// One request, one answer. `Admit` goes to the mind whole, because the
     /// batch declares its own instance and admission's A1 is the check. Every
-    /// other request names an instance, and the mind is asked whether that is
-    /// its own before the method runs.
+    /// other request names an instance: the read path asks the leaf whether
+    /// that name is even grammatical before asking the mind whether it is its
+    /// own, so a name outside the grammar (a fullwidth fold, say) is refused
+    /// by name rather than read as merely a foreign mind.
     pub fn handle(&mut self, request: HuginnMindRequest, now: DateTime<Utc>) -> HuginnMindResponse {
         if let Some(declared) = request.instance()
             && !matches!(request, HuginnMindRequest::Admit(_))
-            && let Err(refusal) = self.mind.require_instance(declared)
         {
-            return HuginnMindResponse::Refused(refusal);
+            if let Err(refusal) = huginn_mind::require_grammatical_instance(declared) {
+                return HuginnMindResponse::Refused(refusal);
+            }
+            if let Err(refusal) = self.mind.require_instance(declared) {
+                return HuginnMindResponse::Refused(refusal);
+            }
         }
         match request {
             HuginnMindRequest::Whoami => HuginnMindResponse::Whoami(self.mind.status()),
@@ -482,6 +488,43 @@ pub(crate) mod tests {
         }
 
         assert_eq!(status(&mut daemon).documents, 1, "nothing landed");
+    }
+
+    /// A declared instance outside `Slug`'s grammar is refused by its own
+    /// name, `InvalidFormat`, on the read path, before the identity
+    /// comparison ever runs: it is not merely a foreign mind, it names no
+    /// mind a client could compose. A fullwidth Latin small letter y is used
+    /// because it is the shape Soul named: a check that folds it to plain
+    /// ASCII `y` before validating would let this probe pass as grammatical
+    /// and reach `require_instance`, which would then answer `ForeignInstance`
+    /// instead — the wrong refusal, reached the wrong way.
+    #[test]
+    fn a_declared_instance_outside_the_grammar_is_refused_by_name_before_the_identity_check() {
+        let (_root, mut daemon) = seeded();
+        let fullwidth = "\u{FF59}ggdrasil";
+        assert_ne!(fullwidth, INSTANCE, "not the mind's own bytes");
+        assert!(!fullwidth.is_ascii(), "outside the grammar: a Slug is dot-joined ASCII labels");
+
+        let expected = MindRefusal::Document(huginn_mind::epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            field: "instance.instance".into(),
+            value: fullwidth.into(),
+        });
+
+        let query = HuginnMindRequest::Query { instance: slug(fullwidth), query: PipelineQuery::default() };
+        assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(expected.clone()));
+
+        let view = HuginnMindRequest::View {
+            instance: slug(fullwidth),
+            id: PipelineRef { kind: PipelineKind::Question, id: Short("not-reached".into()) },
+        };
+        assert_eq!(daemon.handle(view, now()), HuginnMindResponse::Refused(expected.clone()));
+
+        let items = HuginnMindRequest::OpenItems { instance: slug(fullwidth), campaign: slug(CAMPAIGN) };
+        assert_eq!(daemon.handle(items, now()), HuginnMindResponse::Refused(expected.clone()));
+
+        let scope = HistoryScope::Repo(OrgRepo("GameCult/Huginn".into()));
+        let history = HuginnMindRequest::History { instance: slug(fullwidth), scope };
+        assert_eq!(daemon.handle(history, now()), HuginnMindResponse::Refused(expected));
     }
 
     /// A refusal a read method raised is the answer the dispatch returns, whole.
