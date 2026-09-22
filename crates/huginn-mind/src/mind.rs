@@ -417,7 +417,8 @@ mod tests {
     #[test]
     fn require_instance_is_the_one_check_admission_and_the_daemon_share() {
         use crate::fixtures::{
-            CASED_INSTANCE, NEAR_INSTANCE, OTHER_INSTANCE, PREFIXED_INSTANCE, now, provenance, seeded,
+            CASED_INSTANCE, DOTTED_INSTANCE, NEAR_INSTANCE, OTHER_INSTANCE, PREFIXED_INSTANCE, UNDERSCORE_INSTANCE,
+            now, opened, provenance, seeded,
         };
         use crate::receipt::Faculty;
 
@@ -445,6 +446,24 @@ mod tests {
             documents: vec![instance(OTHER_INSTANCE)],
         };
         assert_eq!(mind.admit(batch, now()), crate::admission::PipelineAdmissionOutcome::Refused(foreign));
+
+        // `INSTANCE` ("yggdrasil") carries no separator, so no fold of `_` or
+        // `.` into `-` can ever equate a declared name with it; a mind whose
+        // own name carries one is required to tell the fold apart. Opened as
+        // `OTHER_INSTANCE` ("thought-cage"), a declared name that folds to the
+        // same string under such a comparison must still be refused.
+        let separated = opened(MemoryStore::new(), OTHER_INSTANCE);
+        assert_eq!(UNDERSCORE_INSTANCE.replace('_', "-"), OTHER_INSTANCE, "differs from OTHER_INSTANCE by `_` alone");
+        assert_eq!(DOTTED_INSTANCE.replace('.', "-"), OTHER_INSTANCE, "differs from OTHER_INSTANCE by `.` alone");
+        assert_ne!(UNDERSCORE_INSTANCE, OTHER_INSTANCE);
+        assert_ne!(DOTTED_INSTANCE, OTHER_INSTANCE);
+        for declared in [UNDERSCORE_INSTANCE, DOTTED_INSTANCE] {
+            assert_eq!(
+                separated.require_instance(&slug(declared)).err(),
+                Some(MindRefusal::ForeignInstance { declared: declared.into(), mind: OTHER_INSTANCE.into() }),
+                "{declared} is not {OTHER_INSTANCE}"
+            );
+        }
     }
 
     #[test]
