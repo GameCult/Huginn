@@ -871,7 +871,7 @@ mod tests {
         }
     }
 
-    /// Residue S1: every fixture up to this one, including the pair above,
+    /// Every fixture up to this one, including the pair above,
     /// moves `operation` and the runtime id together -- both short (`view`,
     /// 4 bytes / `huginn-yggdrasil`, 16) or both long (`whoami`, 6 /
     /// `huginn-thought-cage`, 19) -- so a formula that tracks only one of the

@@ -460,19 +460,19 @@ mod tests {
         );
     }
 
-    /// F3 (RS fix batch), R5b: a foreign store with no epoch record at all
-    /// still refuses `MissingIdentity`, the epoch-first order's own answer
-    /// (F5, read-side cut) -- not `ForeignStore`, which is what a mutant that
-    /// only reorders the gates when there *is* some epoch record present
-    /// would answer, by running the type gate first over a store that has
-    /// no epoch record to look at.
+    /// A foreign store with no epoch record at all still refuses
+    /// `MissingIdentity`, the epoch-first order's own answer -- not
+    /// `ForeignStore`, which is what a mutant that only reorders the gates
+    /// when there *is* some epoch record present would answer, by running
+    /// the type gate first over a store that has no epoch record to look at.
+    /// Pinned by this test.
     #[test]
     fn a_foreign_type_with_no_epoch_record_is_missing_identity_not_foreign_store() {
         let store = planted(vec![foreign("epiphany.pipeline.campaign.v1")]);
         assert_eq!(Mind::open_with(store, &slug(INSTANCE)).err(), Some(MindRefusal::MissingIdentity));
     }
 
-    /// F3 (RS fix batch), R5c: an epoch record at the current key, but a
+    /// F3 (RS fix batch): an epoch record at the current key, but a
     /// foreign value, beside a foreign type, still refuses `ForeignEpoch` --
     /// the epoch gate reads the record's *value* before the type gate ever
     /// runs, not only when the record's *key* is itself foreign. A mutant
@@ -583,7 +583,7 @@ mod tests {
         }
     }
 
-    /// N3: one generated test in place of more fixture pairs. The base name
+    /// One generated test in place of more fixture pairs. The base name
     /// carries all three separator bytes a `Slug` permits -- `_`, `.` and `-`
     /// -- at three non-adjacent positions, so every combination of swapping
     /// one separator for another at a fixed position is itself a grammatical,
@@ -685,7 +685,7 @@ mod tests {
         assert!(!inner.join("minds").exists(), "no store was created under the state root either");
     }
 
-    /// S2: `open_with` is the door `open` shares with every store already in
+    /// `open_with` is the door `open` shares with every store already in
     /// hand (planted directly, or opened by a test through `store_path_for`),
     /// so it must run `require_grammatical_slug` too, not only `open`'s own
     /// path-joining caller. A store need not hold anything for this to
@@ -704,7 +704,7 @@ mod tests {
         assert_eq!(store.pull_count(), 0, "refused before the store was ever pulled");
     }
 
-    /// S2: `require_instance` is A1 for admission and the daemon's reads
+    /// `require_instance` is A1 for admission and the daemon's reads
     /// alike, and it runs the same grammar door on the *declared* name before
     /// comparing it to the mind's own. A declared name outside the grammar is
     /// `InvalidFormat { field: "declared" }`, never folded into a comparison
@@ -722,11 +722,13 @@ mod tests {
         );
     }
 
-    /// S4: a Unicode hyphen (U+2010) is not ASCII `-`, so a grammatical
+    /// A Unicode hyphen (U+2010) is not ASCII `-`, so a grammatical
     /// `Slug` never contains one and a name carrying it is refused by the
     /// leaf's own grammar as written -- nothing here may fold it to plain
-    /// `-` before asking `Slug::validate_slug`, the way `S3wide`'s fullwidth
-    /// mutant folds a fullwidth letter to its ASCII form.
+    /// `-` before asking `Slug::validate_slug`, the way a fullwidth mutant
+    /// pinned by
+    /// `daemon::tests::a_declared_instance_outside_the_grammar_is_refused_by_name_before_the_identity_check`
+    /// folds a fullwidth letter to its ASCII form.
     #[test]
     fn a_unicode_hyphen_is_not_folded_before_the_grammar_check() {
         let declared = Slug(format!("ab{}cd", '\u{2010}'));
