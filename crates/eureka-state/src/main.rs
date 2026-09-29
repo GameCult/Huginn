@@ -138,6 +138,7 @@ fn client(instance: Option<&str>, endpoint: Option<&str>) -> Result<HuginnClient
 #[derive(Clone)]
 struct EurekaState {
     settings: Arc<Settings>,
+    #[expect(dead_code, reason = "the tool_handler macro reads this router field")]
     tool_router: ToolRouter<Self>,
 }
 

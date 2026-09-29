@@ -3,30 +3,23 @@
 //! made to misbehave.
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::JoinHandle;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use cultnet_rs::{
-    CultNetMessage, CultNetRudpServerEvent, CultNetWireContract, Selection, answer_content_chunk_request,
-    decode_cultnet_message_from_slice, encode_cultnet_message_to_vec, pack_content,
+    CultNetMessage, CultNetWireContract, Selection, answer_content_chunk_request, encode_cultnet_message_to_vec,
+    pack_content,
 };
 use eureka_state::{ClientError, HuginnClient};
-use huginn_daemon::serve::{MAX_RESPONSE_BYTES, bind, run, schema_registry};
-use huginn_daemon::{Daemon, Handled, Hits, IndexSink, SearchTicket, ServeOptions};
+use huginn_daemon::serve::MAX_RESPONSE_BYTES;
 use huginn_mind::envelope::{OperationFailure, encode_failure, encode_response};
 use huginn_mind::epiphany_pipeline::{
-    AuthorityMap, CodeLocation, CutDelete, CutVerification, Date, DocRef, FileChange, Line, NegativeCheck, OrgRepo,
-    PipelineCampaign, PipelineCutSpec, PipelineDocument, PipelineInstance, PipelineKind, PipelineRef,
-    PipelineStewardship, Sha, Short, Slug, StructuralDelta, Title, VerificationTest,
+    AuthorityMap, CodeLocation, CutDelete, CutVerification, Date, FileChange, Line, NegativeCheck, OrgRepo,
+    PipelineCutSpec, PipelineDocument, PipelineKind, PipelineRef, PipelineStewardship, Short, StructuralDelta, Title,
+    VerificationTest,
 };
-use huginn_mind::{
-    DeferredAnswer, Faculty, HuginnMindRequest, HuginnMindResponse, IndexStatus, Mind, MindRefusal, MindStore,
-    OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineProvenance,
-};
-use tempfile::TempDir;
+use huginn_mind::{DeferredAnswer, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionOutcome};
 
 mod common;
 use common::*;
