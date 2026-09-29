@@ -24,6 +24,8 @@ struct Mcp {
     stdin: ChildStdin,
     lines: Receiver<String>,
     next: u64,
+    /// The server's answer to `initialize`.
+    init: Value,
 }
 
 impl Drop for Mcp {
@@ -53,12 +55,13 @@ impl Mcp {
                 let _ = sender.send(line);
             }
         });
-        let mut mcp = Self { child, stdin, lines, next: 1 };
+        let mut mcp = Self { child, stdin, lines, next: 1, init: Value::Null };
         let init = mcp.rpc(
             "initialize",
             json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "0" } }),
         );
         assert!(init.get("result").is_some(), "{init}");
+        mcp.init = init["result"].clone();
         mcp.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
         mcp
     }
@@ -369,4 +372,11 @@ fn malformed_input_is_refused_before_any_call() {
 fn absent() -> Value {
     serde_json::to_value(PipelineRef { kind: PipelineKind::CutSpec, id: Short("eureka-state:cut_spec:cut-99.r1".into()) })
         .unwrap()
+}
+
+/// A client only lists tools from a server that says it has them.
+#[test]
+fn initialize_advertises_tools() {
+    let mcp = Mcp::at(INSTANCE, closed_port());
+    assert!(mcp.init["capabilities"]["tools"].is_object(), "{}", mcp.init);
 }
