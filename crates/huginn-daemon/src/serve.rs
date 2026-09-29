@@ -519,7 +519,8 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
 }
 
 /// What the index has finished, then what has waited too long: the latter as
-/// an `Unavailable` detail. A search that finishes after its deadline finds
+/// an `Unavailable` detail, and abandoned, so the index does not start a search
+/// nobody is waiting for. A search that finishes after its deadline finds
 /// nothing waiting for it and is dropped.
 fn collect_searches<S: MindStore, I: IndexSink<S>>(
     daemon: &mut Daemon<S, I>,
@@ -530,6 +531,7 @@ fn collect_searches<S: MindStore, I: IndexSink<S>>(
     let now = Instant::now();
     for (ticket, asked) in waiting {
         if asked.until <= now {
+            daemon.abandon(*ticket);
             collected.push((*ticket, Err(format!("the semantic search did not finish within {:?}", options.search_timeout))));
         }
     }

@@ -28,6 +28,10 @@ pub trait IndexSink<S: MindStore> {
     /// Every search that finished since the last call, by ticket: its
     /// candidates and scores, or why it failed.
     fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)>;
+    /// The asker has stopped waiting for `ticket`. A search not yet started is
+    /// dropped, so a queue of searches nobody wants cannot hold the index's
+    /// writes off.
+    fn abandon(&mut self, ticket: SearchTicket);
 }
 
 /// Names one search the index was asked, so the loop can match the answer to
@@ -159,6 +163,11 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
     /// Searches the index has finished since this was last called.
     pub fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
         self.index.searched()
+    }
+
+    /// The client has stopped waiting for `ticket`.
+    pub fn abandon(&mut self, ticket: SearchTicket) {
+        self.index.abandon(ticket);
     }
 
     /// The answer to a search: the index's candidates ranked through the mind
@@ -438,6 +447,8 @@ pub(crate) mod tests {
         fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
             Vec::new()
         }
+
+        fn abandon(&mut self, _ticket: SearchTicket) {}
     }
 
     /// A daemon over the instance's mind under `state_root`, with no index.
@@ -472,6 +483,8 @@ pub(crate) mod tests {
         fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
             Vec::new()
         }
+
+        fn abandon(&mut self, _ticket: SearchTicket) {}
     }
 
     struct FailingIndex;
@@ -492,6 +505,8 @@ pub(crate) mod tests {
         fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
             Vec::new()
         }
+
+        fn abandon(&mut self, _ticket: SearchTicket) {}
     }
 
     fn status(daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, impl IndexSink<OwnedRedbMessagePackBackingStore>>) -> MindStatus {

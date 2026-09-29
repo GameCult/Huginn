@@ -297,10 +297,10 @@ fn a_semantic_query_returns_only_documents_the_mind_holds_and_the_selection_admi
     assert!(searches.iter().all(|(name, _, limit)| *name == collection_name(&slug(INSTANCE)) && *limit == 20), "{searches:?}");
 }
 
-/// A cursor cannot resume a ranked answer: it is refused by name, and nothing
-/// is embedded or searched for it.
+/// A cursor cannot resume a ranked answer and a ranked answer has no order to
+/// reverse: each is refused by name, and nothing is embedded or searched for it.
 #[test]
-fn a_cursor_with_a_semantic_query_is_refused_and_asks_the_index_nothing() {
+fn a_cursor_or_a_reversal_with_a_semantic_query_is_refused_and_asks_the_index_nothing() {
     let harness = healthy();
     let mut client = harness.client();
     until_index(&mut client, "Current", |status| *status == IndexStatus::Current);
@@ -310,6 +310,15 @@ fn a_cursor_with_a_semantic_query_is_refused_and_asks_the_index_nothing() {
     let refusal = ask(&mut client, "m-1", &semantic(with_cursor, 5));
     assert!(
         matches!(&refusal, HuginnMindResponse::Refused(MindRefusal::SelectionInvalid { field, .. }) if field == "cursor"),
+        "{refusal:?}"
+    );
+    assert_eq!(harness.embedder.texts().len(), embedded);
+    assert!(harness.index.state.lock().unwrap().searches.is_empty());
+
+    let reversed = Selection { descending: true, ..standing() };
+    let refusal = ask(&mut client, "m-2", &semantic(reversed, 5));
+    assert!(
+        matches!(&refusal, HuginnMindResponse::Refused(MindRefusal::SelectionInvalid { field, .. }) if field == "descending"),
         "{refusal:?}"
     );
     assert_eq!(harness.embedder.texts().len(), embedded);
@@ -411,4 +420,60 @@ fn an_index_that_cannot_answer_is_unavailable_and_plain_queries_still_work() {
     let detail = unavailable(ask(&mut client, "m-refused", &semantic(standing(), 5)));
     assert!(detail.contains("refused") && detail.contains("no Huginn metadata"), "{detail}");
     assert_eq!(documents(&mut client, "m-plain-3"), held);
+}
+
+/// A search the client has stopped waiting for is not started. The embedder is
+/// held with the first search inside it; a second search queues behind it and
+/// times out, and when the embedder is released the worker embeds the first,
+/// skips the second and embeds a third: the index is never asked for an answer
+/// nobody is waiting for.
+#[test]
+fn a_search_that_timed_out_while_queued_is_never_embedded() {
+    let gate = Gate::shut();
+    gate.open();
+    let embedder = FakeEmbedder::new("d1").behind(&gate);
+    let harness = Harness::start(shelf(), embedder, FakeIndex::default(), Duration::from_millis(300));
+    let mut first = harness.client();
+    let mut second = harness.client();
+    let mut third = harness.client();
+    until_index(&mut third, "Current", |status| *status == IndexStatus::Current);
+    let queries = |harness: &Harness| harness.embedder.texts().iter().filter(|text| text.starts_with("Instruct: ")).count();
+
+    gate.shut_again();
+    send(&mut first, "m-first", &semantic(standing(), 5));
+    gate.wait_arrived(1);
+    send(&mut second, "m-second", &semantic(standing(), 5));
+    let timed_out = receive(&mut second, "m-second", 3000).expect("the second search is answered at its deadline");
+    assert!(matches!(&timed_out, HuginnMindResponse::Refused(MindRefusal::Unavailable { detail }) if detail.contains("did not finish")), "{timed_out:?}");
+
+    gate.open();
+    send(&mut third, "m-third", &semantic(standing(), 5));
+    let answered = receive(&mut third, "m-third", 3000).expect("the third search is answered");
+    assert!(matches!(answered, HuginnMindResponse::Query(_)), "{answered:?}");
+    assert_eq!(queries(&harness), 2, "the first and the third were embedded; the second was taken back before it started");
+}
+
+/// While the index is rebuilding, a semantic query is refused with an
+/// `Unavailable` that names the state and how many documents are pending, and
+/// the embedder is not asked for it. When the index has caught up the same
+/// query is answered.
+#[test]
+fn a_search_while_the_index_is_being_rebuilt_is_refused_and_asks_the_embedder_nothing() {
+    let gate = Gate::shut();
+    let embedder = FakeEmbedder::new("d1").behind(&gate);
+    let harness = Harness::start(shelf(), embedder, FakeIndex::default(), Duration::from_secs(30));
+    gate.wait_arrived(1);
+    let mut client = harness.client();
+    let IndexStatus::Behind { pending } = index_status(&mut client, "m-status") else { panic!("the worker is inside its first batch") };
+    assert!(pending > 0);
+
+    let refused = ask(&mut client, "m-behind", &semantic(standing(), 5));
+    let HuginnMindResponse::Refused(MindRefusal::Unavailable { detail }) = &refused else { panic!("{refused:?}") };
+    assert!(detail.contains("being rebuilt") && detail.contains(&format!("pending: {pending}")), "{detail}");
+    assert!(harness.embedder.texts().is_empty(), "nothing was embedded, not even the documents, for a refused search");
+
+    gate.open();
+    until_index(&mut client, "Current", |status| *status == IndexStatus::Current);
+    harness.index.state.lock().unwrap().hits = vec![hit("ruling", id("ruling", "R4"), 0.5)];
+    assert_eq!(ids(&ask(&mut client, "m-current", &semantic(standing(), 5))), vec![id("ruling", "R4")]);
 }

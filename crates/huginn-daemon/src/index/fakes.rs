@@ -24,9 +24,12 @@ impl Gate {
 
     /// Blocks until `count` calls to `embed` have arrived at the gate.
     pub(crate) fn wait_arrived(&self, count: u32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut state = self.0.0.lock().unwrap();
         while state.0 < count {
-            state = self.0.1.wait(state).unwrap();
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!left.is_zero(), "{count} calls never arrived at the gate; {} did", state.0);
+            state = self.0.1.wait_timeout(state, left).unwrap().0;
         }
     }
 
@@ -121,6 +124,10 @@ pub(crate) struct IndexState {
     pub(crate) hits: Vec<Hit>,
     /// The collection, vector length and limit of every search, in order.
     pub(crate) searches: Vec<(String, usize, u32)>,
+    /// How many times every point id was listed: only a reconciliation does.
+    pub(crate) listed: u32,
+    /// Whether a search fails at the vector store, the rest of it working.
+    pub(crate) fail_search: bool,
 }
 
 #[derive(Clone, Default)]
@@ -162,10 +169,11 @@ impl VectorIndex for FakeIndex {
     }
 
     fn ids(&mut self, collection: &str) -> Result<BTreeSet<String>> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if state.down {
             bail!("the vector store is down");
         }
+        state.listed += 1;
         Ok(state.collections.get(collection).map(|stored| stored.points.keys().cloned().collect()).unwrap_or_default())
     }
 
@@ -188,6 +196,7 @@ impl VectorIndex for FakeIndex {
             bail!("the vector store is down");
         }
         state.searches.push((collection.into(), vector.len(), limit));
+        ensure!(!state.fail_search, "the vector store failed the search");
         ensure!(state.collections.contains_key(collection), "no collection {collection}");
         Ok(state.hits.clone())
     }
