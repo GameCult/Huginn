@@ -53,6 +53,7 @@ fn the_adapters_embed_write_query_and_clean_up_a_scratch_collection() {
     let meta = CollectionMeta {
         managed_by: MANAGED_BY.into(),
         instance: "smoke".into(),
+        mind: "mind-commit-smoke".into(),
         model: identity.name.clone(),
         model_digest: identity.digest.clone(),
         dimensions: identity.dimensions,
