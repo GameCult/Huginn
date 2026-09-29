@@ -100,7 +100,7 @@ impl Default for ServeOptions {
             session_timeout: Duration::from_secs(30),
             idle_sleep: Duration::from_millis(2),
             deferred_ttl: Duration::from_secs(60),
-            search_timeout: Duration::from_secs(30),
+            search_timeout: crate::index::SEARCH_DEADLINE,
         }
     }
 }

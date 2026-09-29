@@ -235,8 +235,8 @@ fn a_collection_owned_by_another_instance_is_never_recreated() {
     }
 }
 
-/// A vector of the wrong length is refused before anything is written, and the
-/// documents stay wanted.
+/// The vector's length is checked against the collection's, so a flush that
+/// the model did not change is still refused when the embedder answers wrongly.
 #[test]
 fn a_vector_of_the_wrong_length_is_refused_and_nothing_is_dropped() {
     let (_root, mind) = mind_with_documents();
@@ -245,13 +245,111 @@ fn a_vector_of_the_wrong_length_is_refused_and_nothing_is_dropped() {
     let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
     projector.want(entries.iter().cloned());
     projector.reconcile().unwrap();
-    embedder.state.lock().unwrap().identity.dimensions = 8;
+    embedder.state.lock().unwrap().vector_length = Some(8);
     let error = projector.flush_batch().expect_err("a longer vector is refused");
     assert!(matches!(error, StepError::Unavailable(_)), "{error}");
     assert_eq!(projector.pending(), 4);
     assert!(index.state.lock().unwrap().upserts.is_empty());
 }
 
+/// A flush embeds through the same check as a search: a model that changed
+/// before the embed is never asked, a model that changed during it has its
+/// vectors dropped, and a collection that is no longer this mind's is refused.
+/// In each case nothing is written, the documents stay wanted, and the
+/// reconciliation is forgotten.
+#[test]
+fn a_flush_is_refused_as_a_search_is_when_the_model_or_the_collection_changed() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let reconciled = || {
+        let (embedder, index) = pair();
+        let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
+        projector.want(entries.iter().cloned());
+        projector.reconcile().unwrap();
+        (embedder, index, projector)
+    };
+
+    let (embedder, index, mut projector) = reconciled();
+    embedder.state.lock().unwrap().identity.digest = "d2".into();
+    projector.flush_batch().expect("a changed model is not a failure");
+    assert!(embedder.texts().is_empty(), "before: the texts were not embedded under the new model");
+    assert!(index.state.lock().unwrap().upserts.is_empty());
+    assert_eq!((projector.pending(), projector.stale()), (4, true), "before");
+
+    let (embedder, index, mut projector) = reconciled();
+    change_label(&index, |meta| meta.mind = "mind-commit-another".into());
+    let error = projector.flush_batch().expect_err("another mind's label is refused");
+    assert!(error.to_string().contains("no longer the one this mind's index was built as"), "{error}");
+    assert!(embedder.texts().is_empty(), "label: nothing was embedded");
+    assert!(index.state.lock().unwrap().upserts.is_empty());
+    assert_eq!((projector.pending(), projector.stale()), (4, true), "label");
+
+    let gate = Gate::shut();
+    let embedder = FakeEmbedder::new("d1").behind(&gate);
+    let index = FakeIndex::default();
+    let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
+    projector.want(entries.iter().cloned());
+    projector.reconcile().unwrap();
+    let flushing = std::thread::spawn(move || {
+        let flushed = projector.flush_batch();
+        (projector, flushed)
+    });
+    gate.wait_arrived(1);
+    embedder.state.lock().unwrap().identity.digest = "d2".into();
+    gate.open();
+    let (projector, flushed) = flushing.join().unwrap();
+    flushed.expect("a changed model is not a failure");
+    assert!(index.state.lock().unwrap().upserts.is_empty(), "during: the vectors were not written");
+    assert_eq!((projector.pending(), projector.stale()), (4, true), "during");
+}
+
+fn change_label(index: &FakeIndex, change: impl FnOnce(&mut CollectionMeta)) {
+    let mut state = index.state.lock().unwrap();
+    let Described::Labelled(meta) = &mut state.collections.get_mut(&collection()).unwrap().label else { panic!() };
+    change(meta);
+}
+
+/// The query embed is bounded by the search's deadline, one constant behind
+/// both, so a query embed that cannot be recalled cannot hold the writes off
+/// past the moment nobody is waiting for it. A bulk flush keeps its own bound.
+#[test]
+fn the_query_embed_is_bounded_by_the_search_deadline_and_the_flush_by_its_own() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut projector = projected(&embedder, &index, &entries);
+    assert!(!embedder.state.lock().unwrap().bounds.is_empty());
+    assert!(embedder.state.lock().unwrap().bounds.iter().all(|bound| *bound == BULK_EMBED_TIMEOUT), "the flushes");
+    projector.search("anything", 3).unwrap();
+    let bounds = embedder.state.lock().unwrap().bounds.clone();
+    assert_eq!(bounds.last(), Some(&QUERY_EMBED_TIMEOUT), "the query");
+    let served = crate::serve::ServeOptions::default().search_timeout;
+    assert_eq!(served, SEARCH_DEADLINE);
+    assert!(QUERY_EMBED_TIMEOUT <= served);
+    assert!(QUERY_EMBED_TIMEOUT < BULK_EMBED_TIMEOUT);
+}
+
+/// The Ollama adapter enforces the bound it is given: an embed that is never
+/// answered fails at the bound, not at the adapter's default.
+#[test]
+fn an_ollama_embed_that_is_never_answered_fails_at_its_bound() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let held = std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().take(1) {
+            held.push(stream.unwrap());
+            std::thread::sleep(Duration::from_secs(8));
+        }
+    });
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut embedder = OllamaEmbedder::new(&url, "m:1");
+        sent.send(embedder.embed(&["a".into()], Duration::from_millis(300)).is_err()).ok();
+    });
+    assert_eq!(received.recv_timeout(Duration::from_secs(5)), Ok(true), "the embed did not fail at its bound");
+    drop(held);
+}
 fn whoami_index(daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, WorkerSink>) -> IndexStatus {
     match daemon.handle(HuginnMindRequest::Whoami, now()).answered() {
         HuginnMindResponse::Whoami(status) => status.index,
@@ -446,7 +544,7 @@ fn ollama_identity_is_the_listed_digest_and_the_models_embedding_length() {
     let ollama = stub(&[("GET /api/tags", 200, TAGS), ("POST /api/show", 200, SHOW), ("POST /api/embed", 200, EMBED)]);
     let mut embedder = OllamaEmbedder::new(&ollama.url, "m:1");
     assert_eq!(embedder.model_identity().unwrap(), ModelIdentity { name: "m:1".into(), digest: "ac6d".into(), dimensions: 4 });
-    let vectors = embedder.embed(&["a".into(), "b".into(), "c".into(), "d".into()]).unwrap();
+    let vectors = embedder.embed(&["a".into(), "b".into(), "c".into(), "d".into()], Duration::from_secs(5)).unwrap();
     assert_eq!(vectors.len(), 4);
     assert_eq!(vectors[0], vec![0.5, 1.0, 2.0, 3.0]);
     let seen = ollama.seen.lock().unwrap();
@@ -464,7 +562,7 @@ fn ollama_identity_is_the_listed_digest_and_the_models_embedding_length() {
     let mut absent = OllamaEmbedder::new(&ollama.url, "not-pulled:1");
     assert!(format!("{:#}", absent.model_identity().unwrap_err()).contains("does not list the model"));
     let refusing = stub(&[("POST /api/embed", 500, r#"{"error":"boom"}"#)]);
-    assert!(OllamaEmbedder::new(&refusing.url, "m:1").embed(&["a".into()]).is_err());
+    assert!(OllamaEmbedder::new(&refusing.url, "m:1").embed(&["a".into()], Duration::from_secs(5)).is_err());
 }
 
 /// Compatibility never reads the address: the same model at another address
@@ -1188,7 +1286,7 @@ fn a_model_that_changes_while_the_query_is_embedded_is_refused() {
     gate.open();
     let (projector, found) = searching.join().unwrap();
     let refusal = format!("{:#}", found.unwrap_err());
-    assert!(refusal.contains("while the query was embedded"), "{refusal}");
+    assert!(refusal.contains("while the texts were embedded"), "{refusal}");
     assert!(index.state.lock().unwrap().searches.is_empty(), "the vector was not used");
     assert!(projector.stale());
 }

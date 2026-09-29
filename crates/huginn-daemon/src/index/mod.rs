@@ -65,7 +65,8 @@
 //!   (`ServeOptions::search_timeout` bounds the wait), and takes back a search
 //!   it has stopped waiting for. At most `SEARCHES_QUEUED_MAX` wait; one more is
 //!   refused. A search whose embed is already running cannot be recalled, so it
-//!   can hold the writes off for as long as Ollama's own timeout.
+//!   can hold the writes off for as long as its bound, `QUERY_EMBED_TIMEOUT`,
+//!   which is `SEARCH_DEADLINE`, the deadline the serve loop gives the search.
 //! - Only a current index answers a search. While the worker is `Reconciling`
 //!   or `Behind` (a re-pulled model, a lost collection, entries not yet
 //!   written), `Failing` or `Refused`, a search is refused at once with an
@@ -98,6 +99,22 @@ pub const MANAGED_BY: &str = "huginn";
 
 /// Documents embedded and written per call.
 pub const BATCH: usize = 32;
+
+/// How long a search may take, queue wait included: the serve loop's default
+/// `ServeOptions::search_timeout`. It is the one number the query embed's
+/// bound derives from, so the two cannot drift apart.
+pub const SEARCH_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The bound on one query embed. A running embed cannot be recalled, so it
+/// holds the index's writes off for as long as it lasts; it is held to the
+/// search's own deadline, after which nobody is waiting for its vector.
+pub const QUERY_EMBED_TIMEOUT: Duration = SEARCH_DEADLINE;
+
+/// The bound on a bulk index-flush embed, and on the embedder's identity
+/// reads. A cold model takes seconds to load. It does not block serving: the
+/// serve loop never waits on the worker, and a search queued behind a flush is
+/// answered by its own deadline.
+pub const BULK_EMBED_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The most candidates one search asks the index for.
 pub const OVERSAMPLE_MAX: u32 = 200;
@@ -163,8 +180,8 @@ pub struct Hit {
 
 pub trait Embedder {
     fn model_identity(&mut self) -> Result<ModelIdentity>;
-    /// One vector per text, in order.
-    fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    /// One vector per text, in order, or an error once `within` has passed.
+    fn embed(&mut self, texts: &[String], within: Duration) -> Result<Vec<Vec<f32>>>;
 }
 
 pub trait VectorIndex {
@@ -319,9 +336,6 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         if self.wanted.is_empty() {
             return Ok(Advance::Idle);
         }
-        if !self.model_unchanged()? {
-            return Ok(Advance::Progressed);
-        }
         self.flush_batch()?;
         Ok(Advance::Progressed)
     }
@@ -408,7 +422,9 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
             return Ok(());
         }
         let texts: Vec<String> = batch.iter().map(|entry| entry.text.clone()).collect();
-        let vectors = self.embedder.embed(&texts).context("embedding")?;
+        // A model that changed leaves nothing written and the reconciliation
+        // forgotten: the next step reconciles and rebuilds.
+        let Ok(vectors) = self.embed_verified(&texts, BULK_EMBED_TIMEOUT)? else { return Ok(()) };
         ensure!(vectors.len() == batch.len(), "the embedder returned {} vectors for {} texts", vectors.len(), batch.len());
         let mut points = Vec::with_capacity(batch.len());
         for (entry, vector) in batch.iter().zip(vectors) {
@@ -435,6 +451,33 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
             self.wanted.remove(&entry.id.id.0);
         }
         Ok(())
+    }
+
+    /// The one check-then-embed: reads the model's identity and the
+    /// collection's label, embeds, reads the identity again, and gives the
+    /// vectors back only if the model is still the one the collection was
+    /// reconciled under. A model that changed forgets the reconciliation and
+    /// answers `Err(when)`; a collection that is no longer this mind's, built
+    /// as reconciled, is an error and forgets it too. Search and flush both
+    /// embed through here, so neither compares or writes vectors made by a
+    /// model the collection cannot mix.
+    fn embed_verified(&mut self, texts: &[String], within: Duration) -> Result<Result<Vec<Vec<f32>>, &'static str>> {
+        let (Some(mind), Some(reconciled)) = (self.mind.clone(), self.reconciled.clone()) else {
+            bail!("the mind has no identity yet, so it has no index");
+        };
+        if !self.model_unchanged().map_err(|error| anyhow::anyhow!("{error}"))? {
+            return Ok(Err("since the collection was built"));
+        }
+        let described = self.index.describe(&self.collection).context("describing the collection")?;
+        if described != Described::Labelled(self.collection_meta(&mind, &reconciled)) {
+            self.reconciled = None;
+            bail!("collection {} is no longer the one this mind's index was built as: {described:?}", self.collection);
+        }
+        let vectors = self.embedder.embed(texts, within).context("embedding")?;
+        if !self.model_unchanged().map_err(|error| anyhow::anyhow!("{error}"))? {
+            return Ok(Err("while the texts were embedded"));
+        }
+        Ok(Ok(vectors))
     }
 
     /// The candidates a query text finds: the text is embedded with the model's
@@ -465,31 +508,17 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     }
 
     fn nearest(&mut self, text: &str, top_k: u32) -> Result<Hits> {
-        let (Some(mind), Some(reconciled)) = (self.mind.clone(), self.reconciled.clone()) else {
+        let Some(reconciled) = self.reconciled.clone() else {
             bail!("the mind has no identity yet, so it has no index");
         };
         let dimensions = reconciled.dimensions as usize;
-        ensure!(
-            self.model_unchanged().map_err(|error| anyhow::anyhow!("{error}"))?,
-            "the embedding model changed since the collection was built; the index is being rebuilt for it"
-        );
-        let described = self.index.describe(&self.collection).context("describing the collection")?;
-        ensure!(
-            described == Described::Labelled(self.collection_meta(&mind, &reconciled)),
-            "collection {} is no longer the one this mind's index was built as: {described:?}",
-            self.collection
-        );
         let query = format!("Instruct: {QUERY_INSTRUCTION}\nQuery: {text}");
-        let mut vectors = self.embedder.embed(&[query]).context("embedding the query")?;
+        let mut vectors = match self.embed_verified(&[query], QUERY_EMBED_TIMEOUT)? {
+            Ok(vectors) => vectors,
+            Err(when) => bail!("the embedding model changed {when}; the index is being rebuilt for it"),
+        };
         ensure!(vectors.len() == 1, "the embedder returned {} vectors for one query", vectors.len());
         let vector = vectors.remove(0);
-        // The model is read again after the query was embedded: only a vector
-        // made between two reads of the same model is compared with the
-        // collection.
-        ensure!(
-            self.model_unchanged().map_err(|error| anyhow::anyhow!("{error}"))?,
-            "the embedding model changed while the query was embedded; the index is being rebuilt for it"
-        );
         ensure!(vector.len() == dimensions, "the embedder returned a query vector of {} where the collection holds {dimensions}", vector.len());
         let found = self.index.search(&self.collection, &vector, top_k.saturating_mul(4).min(OVERSAMPLE_MAX))?;
         let mut hits = Vec::with_capacity(found.len());

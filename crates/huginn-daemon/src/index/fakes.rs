@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use anyhow::{Result, bail, ensure};
 
@@ -60,6 +61,11 @@ pub(crate) struct EmbedderState {
     pub(crate) down: bool,
     /// The texts of every completed call, in order.
     pub(crate) embedded: Vec<Vec<String>>,
+    /// The bound each completed call was given, in order.
+    pub(crate) bounds: Vec<Duration>,
+    /// The length of the vectors it answers with, where that is not the
+    /// identity's.
+    pub(crate) vector_length: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -70,7 +76,7 @@ pub(crate) struct FakeEmbedder {
 
 impl FakeEmbedder {
     pub(crate) fn new(digest: &str) -> Self {
-        let state = EmbedderState { identity: identity(digest), down: false, embedded: Vec::new() };
+        let state = EmbedderState { identity: identity(digest), down: false, embedded: Vec::new(), bounds: Vec::new(), vector_length: None };
         Self { state: Arc::new(Mutex::new(state)), gate: None }
     }
 
@@ -93,7 +99,7 @@ impl Embedder for FakeEmbedder {
         Ok(state.identity.clone())
     }
 
-    fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed(&mut self, texts: &[String], within: Duration) -> Result<Vec<Vec<f32>>> {
         if let Some(gate) = &self.gate {
             gate.pass();
         }
@@ -102,7 +108,8 @@ impl Embedder for FakeEmbedder {
             bail!("the embedder is down");
         }
         state.embedded.push(texts.to_vec());
-        let dimensions = state.identity.dimensions as usize;
+        state.bounds.push(within);
+        let dimensions = state.vector_length.unwrap_or(state.identity.dimensions as usize);
         Ok(texts.iter().map(|text| (0..dimensions).map(|at| (text.len() + at) as f32).collect()).collect())
     }
 }
