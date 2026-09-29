@@ -24,8 +24,12 @@ Upstream: `https://github.com/GameCult/Huginn.git`
   restart compares the mind with the collection and writes what is missing. An
   unreachable Qdrant or Ollama shows in `whoami` as the index's status and is
   retried; admission never waits on it. The daemon requires `--qdrant-url`,
-  `--ollama-url` and `--embedding-model`. The semantic read side is not wired
-  yet.
+  `--ollama-url` and `--embedding-model`. A `query` carrying `semantic` is
+  answered through the same selection as any other: the index supplies
+  candidate ids and scores, and the mind keeps only the documents it holds and
+  the selection admits (ask for `in_force` to exclude resolved ones), ordered by
+  score. It takes no cursor, and it is refused `Unavailable` while the index is
+  failing or refused.
 - Mind state is not version-controlled. It lives in Huginn's store, not in
   any repository.
 

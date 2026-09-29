@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
@@ -64,7 +64,7 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use cultnet_rs::{
     CULTNET_OPERATION_CONNECTION_ID, CultNetMessage, CultNetRudpServerEvent, CultNetRudpServerHub,
-    CultNetRudpServerHubOptions, CultNetSchemaKind, CultNetSchemaRegistration, CultNetSchemaRegistry,
+    CultNetRudpServerHubOptions, CultNetRudpServerSessionContext, CultNetSchemaKind, CultNetSchemaRegistration, CultNetSchemaRegistry,
     CultNetWireContract, answer_content_chunk_request, decode_cultnet_message_from_slice,
     encode_cultnet_message_to_vec, pack_content,
 };
@@ -78,7 +78,7 @@ use huginn_mind::{Mind, MindRefusal, MindStore, OwnedRedbMessagePackBackingStore
 use crate::bodies::{
     DEFERRED_BUDGET_BYTES, DEFERRED_CHUNK_BYTES, DeferredBodies, MAX_DEFERRED_BODY_BYTES,
 };
-use crate::daemon::{Daemon, IndexSink, runtime_id};
+use crate::daemon::{Daemon, Handled, IndexSink, Search, SearchTicket, runtime_id};
 use crate::envelope::{OperationFailure, decode_request, encode_failure, encode_response};
 use crate::index::{Backoff, Embedder, VectorIndex, WorkerSink};
 
@@ -88,6 +88,10 @@ pub struct ServeOptions {
     pub session_timeout: Duration,
     pub idle_sleep: Duration,
     pub deferred_ttl: Duration,
+    /// How long a semantic query may wait for the index before it is answered
+    /// `Unavailable`. The worker's own calls time out on their own; this is
+    /// what the client is promised.
+    pub search_timeout: Duration,
 }
 
 impl Default for ServeOptions {
@@ -96,6 +100,7 @@ impl Default for ServeOptions {
             session_timeout: Duration::from_secs(30),
             idle_sleep: Duration::from_millis(2),
             deferred_ttl: Duration::from_secs(60),
+            search_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -250,33 +255,54 @@ fn overlong_echo(message: &CultNetMessage) -> Option<&'static str> {
     echoed.into_iter().find(|(_, value)| value.len() > MAX_ECHOED_FIELD_BYTES).map(|(name, _)| name)
 }
 
-/// One message in, one message out. Nothing here reaches a mind except through
-/// `Daemon::handle`, and an envelope that does not decode never gets that far.
-/// A chunk request is answered from `bodies` alone, on the session it came in
-/// on; every operation's reply leaves through `deliver`.
+/// What one message came to: a message to send back now, or a semantic query
+/// the index has yet to answer, which the loop holds against the session it
+/// came in on.
+pub enum Routed {
+    Reply(CultNetMessage),
+    Search { message_id: String, operation: &'static str, search: Search },
+}
+
+impl Routed {
+    /// The reply, for a message that cannot be a search.
+    #[cfg(test)]
+    pub(crate) fn reply(self) -> CultNetMessage {
+        match self {
+            Self::Reply(reply) => reply,
+            Self::Search { .. } => panic!("expected a reply, got a search"),
+        }
+    }
+}
+
+/// One message in, one message out, or a search to wait for. Nothing here
+/// reaches a mind except through `Daemon::handle`, and an envelope that does
+/// not decode never gets that far. A chunk request is answered from `bodies`
+/// alone, on the session it came in on; every operation's reply leaves through
+/// `respond`.
 pub fn answer<S: MindStore, I: IndexSink<S>>(
     daemon: &mut Daemon<S, I>,
     registry: &CultNetSchemaRegistry,
     bodies: &mut DeferredBodies,
     message: CultNetMessage,
     now: DateTime<Utc>,
-) -> CultNetMessage {
+) -> Routed {
     let runtime_id = daemon.runtime_id();
     bodies.expire(now);
     if let Some(field) = overlong_echo(&message) {
-        return CultNetMessage::Error {
+        return Routed::Reply(CultNetMessage::Error {
             error: format!("{MIND_SERVICE_ID} refuses a {field} over {MAX_ECHOED_FIELD_BYTES} bytes"),
             code: None,
             details: None,
-        };
+        });
     }
-    match &message {
+    Routed::Reply(match &message {
         CultNetMessage::OperationRequest { message_id, operation, .. } => match decode_request(&message) {
             Ok((message_id, request)) => {
                 let operation = request.operation();
-                let response = daemon.handle(request, now);
-                let reply = encode_or_fail(&message_id, operation, &response, &runtime_id);
-                deliver(reply, &message_id, operation, &runtime_id, bodies, now)
+                match daemon.handle(request, now) {
+                    Handled::Answered(response) => respond(&response, &message_id, operation, &runtime_id, bodies, now),
+                    Handled::Searching(search) => return Routed::Search { message_id, operation, search },
+                }
             }
             Err(failure) => encode_failure(message_id, operation, &failure, &runtime_id),
         },
@@ -295,7 +321,21 @@ pub fn answer<S: MindStore, I: IndexSink<S>>(
             code: None,
             details: None,
         },
-    }
+    })
+}
+
+/// One answer as the message that carries it: encoded, then delivered whole,
+/// deferred or refused by `deliver`.
+fn respond(
+    response: &HuginnMindResponse,
+    message_id: &str,
+    operation: &str,
+    runtime_id: &str,
+    bodies: &mut DeferredBodies,
+    now: DateTime<Utc>,
+) -> CultNetMessage {
+    let reply = encode_or_fail(message_id, operation, response, runtime_id);
+    deliver(reply, message_id, operation, runtime_id, bodies, now)
 }
 
 /// One response in its envelope, or the failure that says it did not encode.
@@ -397,10 +437,24 @@ fn deliver(
     deferred
 }
 
+/// A semantic query on its way through the index: who asked, what to call the
+/// answer, the search to finish, and when the client stops being promised one.
+struct Waiting {
+    session: CultNetRudpServerSessionContext,
+    message_id: String,
+    operation: &'static str,
+    search: Search,
+    until: Instant,
+}
+
 /// Until `stopping`: expire what timed out, resend what was not acknowledged,
-/// then answer every frame waiting on the socket. A hostile datagram and a
-/// departed session are logged and served past, never fatal. This is the
-/// crate's only clock read, once per frame.
+/// answer every frame waiting on the socket, then answer every semantic query
+/// the index has finished or that has waited out `search_timeout`. A semantic
+/// query is never answered inline: `answer` hands back a `Search`, the loop
+/// holds it beside its session and goes on serving, and the embedder and the
+/// vector store are the worker's to wait on. A hostile datagram and a departed
+/// session are logged and served past, never fatal. The clock is read once per
+/// frame, and once per pass for the searches' deadlines.
 pub fn run<S: MindStore, I: IndexSink<S>>(
     daemon: &mut Daemon<S, I>,
     hub: &mut CultNetRudpServerHub,
@@ -410,6 +464,7 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
 ) -> Result<()> {
     let timeout_ms = options.session_timeout.as_millis() as u64;
     let mut bodies = DeferredBodies::new(DEFERRED_BUDGET_BYTES, options.deferred_ttl);
+    let mut waiting: BTreeMap<SearchTicket, Waiting> = BTreeMap::new();
     while !stopping.load(Ordering::Relaxed) {
         hub.remove_timed_out_sessions(timeout_ms);
         if let Err(error) = hub.poll_resends() {
@@ -439,17 +494,52 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
                     continue;
                 }
             };
-            let reply = answer(daemon, registry, &mut bodies, message, Utc::now());
-            if let Err(error) = hub.send_schema_message(&session, &reply) {
-                eprintln!("huginn: {} did not receive its reply: {error:#}", session.remote_addr);
+            match answer(daemon, registry, &mut bodies, message, Utc::now()) {
+                Routed::Reply(reply) => send(hub, &session, &reply),
+                Routed::Search { message_id, operation, search } => {
+                    let until = Instant::now() + options.search_timeout;
+                    waiting.insert(search.ticket, Waiting { session, message_id, operation, search, until });
+                }
             }
             served += 1;
         }
-        if served == 0 {
+        let finished = collect_searches(daemon, &waiting, options);
+        let answered = !finished.is_empty();
+        for (ticket, found) in finished {
+            let Some(asked) = waiting.remove(&ticket) else { continue };
+            let response = daemon.finish(asked.search, found);
+            let reply = respond(&response, &asked.message_id, asked.operation, &daemon.runtime_id(), &mut bodies, Utc::now());
+            send(hub, &asked.session, &reply);
+        }
+        if served == 0 && !answered {
             std::thread::sleep(options.idle_sleep);
         }
     }
     Ok(())
+}
+
+/// What the index has finished, then what has waited too long: the latter as
+/// an `Unavailable` detail. A search that finishes after its deadline finds
+/// nothing waiting for it and is dropped.
+fn collect_searches<S: MindStore, I: IndexSink<S>>(
+    daemon: &mut Daemon<S, I>,
+    waiting: &BTreeMap<SearchTicket, Waiting>,
+    options: &ServeOptions,
+) -> Vec<(SearchTicket, Result<crate::daemon::Hits, String>)> {
+    let mut collected = daemon.searched();
+    let now = Instant::now();
+    for (ticket, asked) in waiting {
+        if asked.until <= now {
+            collected.push((*ticket, Err(format!("the semantic search did not finish within {:?}", options.search_timeout))));
+        }
+    }
+    collected
+}
+
+fn send(hub: &mut CultNetRudpServerHub, session: &CultNetRudpServerSessionContext, reply: &CultNetMessage) {
+    if let Err(error) = hub.send_schema_message(session, reply) {
+        eprintln!("huginn: {} did not receive its reply: {error:#}", session.remote_addr);
+    }
 }
 
 #[cfg(test)]
@@ -472,7 +562,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     fn documents(daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, NoIndex>) -> u32 {
-        match daemon.handle(HuginnMindRequest::Whoami, now()) {
+        match daemon.handle(HuginnMindRequest::Whoami, now()).answered() {
             HuginnMindResponse::Whoami(MindStatus { documents, .. }) => documents,
             other => panic!("expected a status, got {other:?}"),
         }
@@ -539,14 +629,14 @@ mod tests {
             ("m-5b", request("m-5b", MIND_SERVICE_ID, "Admit", MIND_REQUEST_SCHEMA, admit), "operation-mismatch"),
         ];
         for (id, message, code) in cases {
-            let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), message, now());
+            let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), message, now()).reply();
             assert_eq!(rejected(&reply).0, id, "the client's own correlation key is echoed");
             assert_eq!(rejected(&reply).1, code);
         }
         // The sixth code, `not-an-operation-request`, is the codec's and is
         // pinned in `envelope::tests`: `answer` never produces it, because a
         // message of another family is answered with `Error` instead.
-        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), CultNetMessage::Error { error: "hello".into(), code: None, details: None }, now());
+        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), CultNetMessage::Error { error: "hello".into(), code: None, details: None }, now()).reply();
         let CultNetMessage::Error { error, .. } = &reply else { panic!("expected an error, got {reply:?}") };
         assert!(
             !error.is_empty() && error.contains("cultnet.operation_request.v0") && error.contains("cultnet.schema_catalog_request.v0"),
@@ -558,7 +648,7 @@ mod tests {
         // A mind's refusal is an answer on the response schema, not a failure
         // of the envelope: the client decodes it as the typed refusal it is.
         let read = HuginnMindRequest::Query { instance: slug(OTHER), selection: Selection::default(), semantic: None };
-        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), encode_request("m-r", &read, None).unwrap(), now());
+        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), encode_request("m-r", &read, None).unwrap(), now()).reply();
         let CultNetMessage::OperationResponse { status, payload_schema, .. } = &reply else {
             panic!("expected an operation response, got {reply:?}");
         };
@@ -576,7 +666,7 @@ mod tests {
             schema_ids: None,
             kinds: None,
         };
-        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), catalog, now());
+        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), catalog, now()).reply();
         let CultNetMessage::SchemaCatalogResponse { message_id, schemas } = reply else {
             panic!("expected a catalog response");
         };
@@ -749,7 +839,7 @@ mod tests {
         at: DateTime<Utc>,
     ) -> CultMeshCdnArtifactManifest {
         let registry = schema_registry().unwrap();
-        deferred_manifest(&answer(daemon, &registry, bodies, encode_request(message_id, read, None).unwrap(), at))
+        deferred_manifest(&answer(daemon, &registry, bodies, encode_request(message_id, read, None).unwrap(), at).reply())
     }
 
     /// Whether the first chunk of a manifest is still served at an injected time.
@@ -760,7 +850,7 @@ mod tests {
         at: DateTime<Utc>,
     ) -> bool {
         let registry = schema_registry().unwrap();
-        found(&answer(daemon, &registry, bodies, chunk_request(manifest, 0), at))
+        found(&answer(daemon, &registry, bodies, chunk_request(manifest, 0), at).reply())
     }
 
     /// An answer larger than one send can carry is deferred to the body plane
@@ -780,7 +870,7 @@ mod tests {
         let registry = schema_registry().unwrap();
 
         let sized = |daemon: &mut BodyDaemon, id: PipelineRef| {
-            let view = daemon.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id }, now());
+            let view = daemon.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id }, now()).answered();
             let message = encode_response("m-0", "view", &view, "huginn-yggdrasil").unwrap();
             encoded_len(&message)
         };
@@ -800,7 +890,7 @@ mod tests {
             ("m-v", HuginnMindRequest::View { instance: slug(INSTANCE), id: wide }),
         ];
         let expected: Vec<HuginnMindResponse> =
-            reads.iter().map(|(_, read)| daemon.handle(read.clone(), now())).collect();
+            reads.iter().map(|(_, read)| daemon.handle(read.clone(), now()).answered()).collect();
 
         let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
         let endpoint = format!("rudp://{}", hub.local_addr().unwrap());
@@ -1065,7 +1155,7 @@ mod tests {
         let registry = schema_registry().unwrap();
         let wide = spec_ref(&mut daemon, WIDE_CUT);
         let read = HuginnMindRequest::View { instance: slug(INSTANCE), id: wide };
-        let expected = rmp_serde::to_vec_named(&daemon.handle(read.clone(), now())).unwrap();
+        let expected = rmp_serde::to_vec_named(&daemon.handle(read.clone(), now()).answered()).unwrap();
         let t0 = now();
         let after = |seconds: i64| t0 + chrono::Duration::seconds(seconds);
         let mut bodies = fresh_bodies();
@@ -1073,7 +1163,7 @@ mod tests {
         let manifest = ask_deferred(&mut daemon, &mut bodies, "m-v", &read, t0);
         assert!(manifest.chunks.len() >= 2, "the fixture needs a second chunk to serve");
         let mut chunk = |index: usize, at: i64| {
-            answer(&mut daemon, &registry, &mut bodies, chunk_request(&manifest, index), after(at))
+            answer(&mut daemon, &registry, &mut bodies, chunk_request(&manifest, index), after(at)).reply()
         };
         assert!(found(&chunk(0, 59)), "inside the TTL");
         assert!(found(&chunk(1, 118)), "serving a chunk slid the expiry past the first TTL");
@@ -1086,7 +1176,7 @@ mod tests {
         let again = ask_deferred(&mut daemon, &mut bodies, "m-v2", &read, after(179));
         assert_eq!(again.content_hash, manifest.content_hash, "the same answer is the same body");
         let bytes = fetch_content(&again, MAX_DEFERRED_BODY_BYTES, |request| {
-            Ok(answer(&mut daemon, &registry, &mut bodies, request, after(180)))
+            Ok(answer(&mut daemon, &registry, &mut bodies, request, after(180)).reply())
         })
         .unwrap();
         assert_eq!(bytes, expected);
@@ -1102,7 +1192,7 @@ mod tests {
         let view = HuginnMindRequest::View { instance: slug(INSTANCE), id: wide };
         let query = document_query();
         let size = |daemon: &mut BodyDaemon, read: &HuginnMindRequest| {
-            rmp_serde::to_vec_named(&daemon.handle(read.clone(), now())).unwrap().len() as u64
+            rmp_serde::to_vec_named(&daemon.handle(read.clone(), now()).answered()).unwrap().len() as u64
         };
         let (view_bytes, query_bytes) = (size(&mut daemon, &view), size(&mut daemon, &query));
         // Room for the larger body alone, and not for both.
@@ -1186,7 +1276,7 @@ mod tests {
             ("record_key", chunk("m", "abc", &huge)),
         ];
         for (case, message) in refused {
-            let reply = answer(&mut daemon, &registry, &mut bodies, message, now());
+            let reply = answer(&mut daemon, &registry, &mut bodies, message, now()).reply();
             let CultNetMessage::Error { error, .. } = &reply else {
                 panic!("{case}: expected a transport error, got {reply:?}");
             };
@@ -1195,9 +1285,9 @@ mod tests {
         }
         assert_eq!(documents(&mut daemon), 0);
 
-        let reply = answer(&mut daemon, &registry, &mut bodies, whoami(&at, MIND_SERVICE_ID, "whoami", MIND_REQUEST_SCHEMA), now());
+        let reply = answer(&mut daemon, &registry, &mut bodies, whoami(&at, MIND_SERVICE_ID, "whoami", MIND_REQUEST_SCHEMA), now()).reply();
         assert_eq!(decode_response(&reply).unwrap().0, at, "a field of exactly the bound is served");
-        let reply = answer(&mut daemon, &registry, &mut bodies, chunk(&at, &at, &at), now());
+        let reply = answer(&mut daemon, &registry, &mut bodies, chunk(&at, &at, &at), now()).reply();
         assert!(!found(&reply), "an unknown chunk is answered found: false, not refused at the door");
     }
 
@@ -1233,7 +1323,7 @@ mod tests {
             ..Selection::default()
         };
         let HuginnMindResponse::Query(page) =
-            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection, semantic: None }, now())
+            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection, semantic: None }, now()).answered()
         else {
             panic!("expected a page");
         };

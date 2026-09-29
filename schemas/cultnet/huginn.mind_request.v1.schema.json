@@ -1678,7 +1678,7 @@
       ]
     },
     "SemanticQuery": {
-      "description": "A semantic query, accepted by the type and refused until Cut 11 owns the\nindex. Cut 11 also owns which fields of each kind are text, so no substring\nfilter lives here to become a second answer to that question.",
+      "description": "A semantic query: the text to find documents near, and how many. The index\nowns which fields of each kind are text (`index_text`), so no substring\nfilter lives here to become a second answer to that question.",
       "type": "object",
       "properties": {
         "text": {

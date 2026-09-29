@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use huginn_daemon::index::ollama::OllamaEmbedder;
+use huginn_daemon::index::ollama::{OllamaEmbedder, QUERY_INSTRUCTION};
 use huginn_daemon::index::qdrant::QdrantIndex;
 use huginn_daemon::index::{
     CollectionMeta, Described, Embedder, MANAGED_BY, Point, PointPayload, VectorIndex, point_id,
@@ -90,7 +90,17 @@ fn the_adapters_embed_write_query_and_clean_up_a_scratch_collection() {
             let (status, answer) = raw("POST", &format!("{qdrant}/collections/{name}/points/search"), Some(&query));
             assert_eq!(status, 200, "{answer}");
             assert!(answer.contains(&points[0].id), "{answer}");
-            println!("{name}: described, created, upserted {} points, queried", points.len());
+            // The read side: a paraphrase that shares no exact words with the
+            // first document finds it, through the adapter, with the query
+            // instruction the worker uses.
+            let asked = format!("Instruct: {QUERY_INSTRUCTION}
+Query: Who is responsible for keeping the memory?");
+            let query = embedder.embed(&[asked]).expect("the query embeds").remove(0);
+            let hits = store.search(name, &query, 2).unwrap();
+            assert_eq!(hits.len(), 2, "{hits:?}");
+            assert_eq!((hits[0].doc_id.as_str(), hits[0].kind.as_str()), ("smoke:doc:0", "question"), "{hits:?}");
+            assert!(hits[0].score > hits[1].score, "{hits:?}");
+            println!("{name}: described, created, upserted {} points, queried, searched: {hits:?}", points.len());
         }
     }));
     for name in [&plain, &dotted] {

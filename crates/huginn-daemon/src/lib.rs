@@ -21,6 +21,9 @@ pub mod envelope;
 pub mod index;
 pub mod serve;
 
-pub use daemon::{Daemon, IndexSink, runtime_id};
+#[cfg(test)]
+mod semantic_tests;
+
+pub use daemon::{Daemon, Handled, Hits, IndexSink, Search, SearchTicket, runtime_id};
 pub use envelope::{FAILURE_SCHEMA, OperationFailure};
 pub use serve::{Options, ServeOptions, parse_options, run, startup};

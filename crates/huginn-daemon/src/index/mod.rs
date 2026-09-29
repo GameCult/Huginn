@@ -21,7 +21,17 @@
 //! Reconciliation is not a startup event. After any failed step the worker
 //! reconciles again before it writes anything else: a collection lost while the
 //! daemon runs is recreated and refilled, and a model re-pulled with other
-//! dimensions rebuilds the collection, all without a restart. Refilling needs
+//! dimensions rebuilds the collection, all without a restart. Two checks keep
+//! that true without a failure to announce it. Before every flush the worker
+//! re-reads the model's identity (name, digest, dimensions; about 0.3 s against
+//! Ollama) and, if it is not the one the collection was reconciled under,
+//! forgets the reconciliation instead of writing: a model re-pulled under the
+//! same dimensions never mixes its vectors with the old model's. An idle
+//! worker forgets the reconciliation every `Backoff::recheck` (60 s by
+//! default), which re-reads the model, describes the collection and lists its
+//! points: a collection lost while nothing was being written is found within
+//! that interval, and until then `Current` is what the worker last verified.
+//! There is one judge either way: `reconcile`. Refilling needs
 //! the text, so the projector keeps every entry it was given (`known`) beside
 //! the ids it still owes (`wanted`): the whole indexable mind's text is held in
 //! memory for the process's life.
@@ -45,10 +55,14 @@
 //!   fail the whole batch forever on one dense document, so it is not set.
 //!   There is no chunking.
 //! - Points are never deleted. Withdrawn and superseded documents are indexed
-//!   on purpose and the payload carries no status. Cut 11b's semantic read must
-//!   therefore join every hit back through the mind: drop ids the mind does not
-//!   hold, and filter by resolution using RS-3's in-force derivation through
-//!   selection, never by anything in the payload.
+//!   on purpose and the payload carries no status. The semantic read therefore
+//!   takes only candidate ids and scores from a search: `Daemon::finish` joins
+//!   them back through `Mind::rank`, which drops ids the mind does not hold and
+//!   lets the selection decide the rest, in-force derivation included.
+//! - A search runs on the worker between batches, so it waits for the batch in
+//!   flight. The serve loop never waits: it holds the reply and answers when
+//!   the worker has (`ServeOptions::search_timeout` bounds the wait). A search
+//!   is refused at once while the worker is `Failing` or `Refused`.
 
 pub mod ollama;
 pub mod qdrant;
@@ -56,23 +70,27 @@ pub mod qdrant;
 #[cfg(test)]
 pub(crate) mod fakes;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, ensure};
-use huginn_mind::epiphany_pipeline::{PipelineRef, Slug};
+use anyhow::{Context, Result, bail, ensure};
+use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef, Short, Slug};
 use huginn_mind::wire::IndexStatus;
 use huginn_mind::{INDEX_TEXT_VERSION, IndexEntry, Mind, MindStore};
 use sha2::{Digest, Sha256};
 
-use crate::daemon::IndexSink;
+use crate::daemon::{Hits, IndexSink, SearchTicket};
+use ollama::QUERY_INSTRUCTION;
 
 /// The `managed_by` a collection carries when this organ made it.
 pub const MANAGED_BY: &str = "huginn";
 
 /// Documents embedded and written per call.
 pub const BATCH: usize = 32;
+
+/// The most candidates one search asks the index for.
+pub const OVERSAMPLE_MAX: u32 = 200;
 
 /// What an embedder is: the model by name and by digest, and the length of the
 /// vectors it returns. Compatibility of a collection is decided on this and
@@ -123,6 +141,16 @@ pub struct Point {
     pub payload: PointPayload,
 }
 
+/// One candidate a vector search returned: the document it names, by the id and
+/// kind the payload carries, and how near it scored. Nothing else about the
+/// document is the index's to say.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    pub doc_id: String,
+    pub kind: String,
+    pub score: f32,
+}
+
 pub trait Embedder {
     fn model_identity(&mut self) -> Result<ModelIdentity>;
     /// One vector per text, in order.
@@ -137,6 +165,9 @@ pub trait VectorIndex {
     /// Every point id the collection holds.
     fn ids(&mut self, collection: &str) -> Result<BTreeSet<String>>;
     fn upsert(&mut self, collection: &str, points: &[Point]) -> Result<()>;
+    /// The `limit` nearest points to `vector`, best first, with no filter: which
+    /// documents may be shown is the mind's to decide.
+    fn search(&mut self, collection: &str, vector: &[f32], limit: u32) -> Result<Vec<Hit>>;
 }
 
 /// The mind's collection: one per instance.
@@ -201,7 +232,9 @@ pub struct Projector<E: Embedder, V: VectorIndex> {
     known: BTreeMap<String, IndexEntry>,
     /// The ids in `known` whose points the collection may lack.
     wanted: BTreeSet<String>,
-    dimensions: Option<u32>,
+    /// The model the collection was reconciled under; `None` until it is, and
+    /// again whenever that reconciliation is forgotten.
+    reconciled: Option<ModelIdentity>,
 }
 
 impl<E: Embedder, V: VectorIndex> Projector<E, V> {
@@ -214,7 +247,7 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
             collection: collection_name(instance),
             known: BTreeMap::new(),
             wanted: BTreeSet::new(),
-            dimensions: None,
+            reconciled: None,
         }
     }
 
@@ -246,24 +279,54 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     pub fn advance(&mut self) -> Result<Advance, StepError> {
         let stepped = self.step();
         if stepped.is_err() {
-            self.dimensions = None;
+            self.reconciled = None;
         }
         stepped
+    }
+
+    /// `advance` after forgetting the reconciliation on purpose: the idle
+    /// worker's periodic look at whether the model and the collection are still
+    /// what it last verified.
+    pub fn recheck(&mut self) -> Result<Advance, StepError> {
+        self.reconciled = None;
+        self.advance()
+    }
+
+    /// Whether the mind has an identity and the collection has not been
+    /// reconciled under the model: `advance` has reconciling to do.
+    pub fn stale(&self) -> bool {
+        self.mind.is_some() && self.reconciled.is_none()
     }
 
     fn step(&mut self) -> Result<Advance, StepError> {
         if self.mind.is_none() {
             return Ok(Advance::Idle);
         }
-        if self.dimensions.is_none() {
+        if self.reconciled.is_none() {
             self.reconcile()?;
             return Ok(Advance::Progressed);
         }
         if self.wanted.is_empty() {
             return Ok(Advance::Idle);
         }
+        if !self.model_unchanged()? {
+            return Ok(Advance::Progressed);
+        }
         self.flush_batch()?;
         Ok(Advance::Progressed)
+    }
+
+    /// Re-reads the model's identity and compares it with the one the
+    /// collection was reconciled under. A different model, digest or length
+    /// forgets the reconciliation, so the next step reconciles (and rebuilds)
+    /// instead of writing or searching with vectors the collection cannot mix.
+    fn model_unchanged(&mut self) -> Result<bool, StepError> {
+        let now = self.embedder.model_identity().context("re-reading the embedding model's identity")?;
+        if self.reconciled.as_ref() == Some(&now) {
+            return Ok(true);
+        }
+        self.reconciled = None;
+        Ok(false)
     }
 
     /// The only place a point is judged missing. Reads the model identity,
@@ -306,7 +369,7 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         }
         let present = self.index.ids(&self.collection).context("listing the collection's points")?;
         self.wanted = self.known.keys().filter(|document_id| !present.contains(&point_id(document_id))).cloned().collect();
-        self.dimensions = Some(identity.dimensions);
+        self.reconciled = Some(identity);
         Ok(())
     }
 
@@ -322,7 +385,7 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     }
 
     fn flush(&mut self) -> Result<()> {
-        let dimensions = self.dimensions.context("flush before reconcile")? as usize;
+        let dimensions = self.reconciled.as_ref().context("flush before reconcile")?.dimensions as usize;
         let batch: Vec<IndexEntry> =
             self.wanted.iter().take(BATCH).filter_map(|document_id| self.known.get(document_id)).cloned().collect();
         if batch.is_empty() {
@@ -358,9 +421,40 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         Ok(())
     }
 
+    /// The candidates a query text finds: the text is embedded with the model's
+    /// query instruction and the collection is searched, with no filter and an
+    /// oversample of `min(top_k * 4, 200)`, because the mind will drop most of
+    /// what the index cannot know is not in force. A model that has changed
+    /// since the reconciliation refuses the search rather than compare vectors
+    /// of two models. A hit naming a kind this organ has no name for is logged
+    /// and left out.
+    pub fn search(&mut self, text: &str, top_k: u32) -> Result<Hits> {
+        let Some(dimensions) = self.reconciled.as_ref().map(|model| model.dimensions as usize) else {
+            bail!("the index has not been reconciled with the model and the collection");
+        };
+        ensure!(
+            self.model_unchanged().map_err(|error| anyhow::anyhow!("{error}"))?,
+            "the embedding model changed since the collection was built; the index is being rebuilt for it"
+        );
+        let query = format!("Instruct: {QUERY_INSTRUCTION}\nQuery: {text}");
+        let mut vectors = self.embedder.embed(&[query]).context("embedding the query")?;
+        ensure!(vectors.len() == 1, "the embedder returned {} vectors for one query", vectors.len());
+        let vector = vectors.remove(0);
+        ensure!(vector.len() == dimensions, "the embedder returned a query vector of {} where the collection holds {dimensions}", vector.len());
+        let found = self.index.search(&self.collection, &vector, top_k.saturating_mul(4).min(OVERSAMPLE_MAX))?;
+        let mut hits = Vec::with_capacity(found.len());
+        for hit in found {
+            match PipelineKind::ALL.into_iter().find(|kind| kind.name() == hit.kind) {
+                Some(kind) => hits.push((PipelineRef { kind: *kind, id: Short(hit.doc_id) }, hit.score)),
+                None => eprintln!("huginn: the index returned {} under the unknown kind {:?}; it is left out", hit.doc_id, hit.kind),
+            }
+        }
+        Ok(hits)
+    }
+
     /// The health after a step that did not fail.
     pub fn progress_status(&self) -> IndexStatus {
-        match (self.dimensions, self.pending()) {
+        match (&self.reconciled, self.pending()) {
             (None, 0) if self.mind.is_none() => IndexStatus::Current,
             (None, pending) => IndexStatus::Reconciling { pending },
             (Some(_), 0) => IndexStatus::Current,
@@ -379,17 +473,19 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     }
 }
 
-/// The retry delay: it starts at `initial`, doubles per consecutive failure and
-/// stops at `max`.
+/// The worker's clock: the retry delay starts at `initial`, doubles per
+/// consecutive failure and stops at `max`; an idle worker verifies the model
+/// and the collection again every `recheck`.
 #[derive(Clone, Copy, Debug)]
 pub struct Backoff {
     pub initial: Duration,
     pub max: Duration,
+    pub recheck: Duration,
 }
 
 impl Default for Backoff {
     fn default() -> Self {
-        Self { initial: Duration::from_secs(30), max: Duration::from_secs(600) }
+        Self { initial: Duration::from_secs(30), max: Duration::from_secs(600), recheck: Duration::from_secs(60) }
     }
 }
 
@@ -405,6 +501,11 @@ struct Shared {
     mind: Option<String>,
     status: IndexStatus,
     closed: bool,
+    /// Searches started and not yet taken by the worker.
+    searches: VecDeque<(SearchTicket, String, u32)>,
+    /// Searches the worker finished and the serve loop has not collected.
+    found: Vec<(SearchTicket, Result<Hits, String>)>,
+    next_ticket: u64,
 }
 
 type Lock = Arc<(Mutex<Shared>, Condvar)>;
@@ -413,27 +514,36 @@ fn lock(shared: &Lock) -> MutexGuard<'_, Shared> {
     shared.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// With no timeout, blocks until the inbox holds something, the mind reveals
-/// its identity, or the sink is closed. With one, sleeps out the backoff whatever arrives: a failing index
-/// is retried on its schedule, not once per admission.
-fn wait_for_work(shared: &Lock, timeout: Option<Duration>) {
+/// How long the worker waits, and what ends the wait early.
+enum Wait {
+    /// Idle: until something arrives (an entry, the mind's identity, a search)
+    /// or `recheck` passes.
+    Work { recheck: Duration },
+    /// Backing off from a failure: the whole delay, whatever arrives. A failing
+    /// index is retried on its schedule, not once per admission.
+    Backoff(Duration),
+}
+
+/// Whether the wait ended because the recheck interval passed.
+fn wait_for_work(shared: &Lock, wait: Wait) -> bool {
+    let (timeout, wakes_on_work) = match wait {
+        Wait::Work { recheck } => (recheck, true),
+        Wait::Backoff(delay) => (delay, false),
+    };
+    let deadline = Instant::now() + timeout;
     let mut guard = lock(shared);
-    match timeout {
-        None => {
-            while guard.inbox.is_empty() && guard.mind.is_none() && !guard.closed {
-                guard = shared.1.wait(guard).unwrap_or_else(|poisoned| poisoned.into_inner());
-            }
+    loop {
+        if guard.closed {
+            return false;
         }
-        Some(timeout) => {
-            let deadline = Instant::now() + timeout;
-            while !guard.closed {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    return;
-                }
-                guard = shared.1.wait_timeout(guard, left).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
-            }
+        if wakes_on_work && (!guard.inbox.is_empty() || guard.mind.is_some() || !guard.searches.is_empty()) {
+            return false;
         }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return wakes_on_work;
+        }
+        guard = shared.1.wait_timeout(guard, left).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
     }
 }
 
@@ -460,37 +570,72 @@ fn including(status: &IndexStatus, queued: u32) -> IndexStatus {
     }
 }
 
+/// Runs every search the serve loop has queued, one at a time, and leaves each
+/// answer for the loop to collect. Between batches, never inside one.
+fn serve_searches<E: Embedder, V: VectorIndex>(projector: &mut Projector<E, V>, shared: &Lock) {
+    loop {
+        let Some((ticket, text, top_k)) = lock(shared).searches.pop_front() else { return };
+        let found = projector.search(&text, top_k).map_err(|error| format!("{error:#}"));
+        lock(shared).found.push((ticket, found));
+    }
+}
+
+/// Answers every queued search with why the index cannot: they were accepted
+/// while it was healthy and it has failed since.
+fn refuse_searches(shared: &Lock, why: &str) {
+    let mut guard = lock(shared);
+    while let Some((ticket, ..)) = guard.searches.pop_front() {
+        guard.found.push((ticket, Err(why.to_owned())));
+    }
+}
+
 fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Lock, backoff: Backoff) {
     let mut failures = 0_u32;
     let mut delay = backoff.initial;
+    let mut recheck = false;
     loop {
-        let (mind, inbox) = {
+        // The inbox is taken, absorbed and its effect published under one
+        // lock: between taking entries out of the inbox and publishing them
+        // as wanted, `status` would otherwise read a stale `Current` with
+        // nothing queued, and a reader would see the mind caught up while
+        // entries were in the worker's hands.
+        {
             let mut guard = lock(&shared);
             if guard.closed {
                 return;
             }
-            (guard.mind.take(), std::mem::take(&mut guard.inbox))
-        };
-        if let Some(mind) = mind {
-            projector.identify(mind);
+            let mind = guard.mind.take();
+            let inbox = std::mem::take(&mut guard.inbox);
+            if let Some(mind) = mind {
+                projector.identify(mind);
+            }
+            projector.want(inbox);
+            // While a failure is being reported, the report stands until an
+            // attempt succeeds: publishing progress between retries would
+            // flicker.
+            if failures == 0 {
+                guard.status = projector.progress_status();
+            }
         }
-        projector.want(inbox);
-        // While a failure is being reported, the report stands until an
-        // attempt succeeds: publishing progress between retries would flicker.
-        if failures == 0 {
-            publish(&shared, projector.progress_status());
-        }
-        match projector.advance() {
+        shared.1.notify_all();
+        let stepped = if std::mem::take(&mut recheck) { projector.recheck() } else { projector.advance() };
+        match stepped {
             Ok(Advance::Progressed) => {
                 failures = 0;
                 delay = backoff.initial;
                 publish(&shared, projector.progress_status());
+                serve_searches(&mut projector, &shared);
             }
             Ok(Advance::Idle) => {
                 failures = 0;
                 delay = backoff.initial;
                 publish(&shared, projector.progress_status());
-                wait_for_work(&shared, None);
+                serve_searches(&mut projector, &shared);
+                // A search that found the model changed has left the
+                // reconciliation to redo: do it now, not at the next wake.
+                if !projector.stale() {
+                    recheck = wait_for_work(&shared, Wait::Work { recheck: backoff.recheck });
+                }
             }
             Err(error) => {
                 failures = failures.saturating_add(1);
@@ -500,7 +645,8 @@ fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Loc
                     delay
                 );
                 publish(&shared, projector.failure_status(&error, failures));
-                wait_for_work(&shared, Some(delay));
+                refuse_searches(&shared, &format!("the index could not advance: {error}"));
+                wait_for_work(&shared, Wait::Backoff(delay));
                 delay = backoff.after(delay);
             }
         }
@@ -538,7 +684,15 @@ impl WorkerSink {
         let mut projector = Projector::new(embedder, index, instance, mind);
         projector.want(startup);
         let shared: Lock = Arc::new((
-            Mutex::new(Shared { inbox: Vec::new(), mind: None, status: projector.progress_status(), closed: false }),
+            Mutex::new(Shared {
+                inbox: Vec::new(),
+                mind: None,
+                status: projector.progress_status(),
+                closed: false,
+                searches: VecDeque::new(),
+                found: Vec::new(),
+                next_ticket: 0,
+            }),
             Condvar::new(),
         ));
         let worker = Arc::clone(&shared);
@@ -595,6 +749,27 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
     fn status(&self) -> IndexStatus {
         let guard = lock(&self.shared);
         including(&guard.status, u32::try_from(guard.inbox.len()).unwrap_or(u32::MAX))
+    }
+
+    /// Queues the search for the worker and returns its ticket. A worker that
+    /// is failing or refused is not asked: its own report is the refusal.
+    fn search(&mut self, text: &str, top_k: u32) -> Result<SearchTicket, String> {
+        let mut guard = lock(&self.shared);
+        match &guard.status {
+            IndexStatus::Failing { error, .. } => return Err(format!("the semantic index is failing: {error}")),
+            IndexStatus::Refused { reason, .. } => return Err(format!("the semantic index is refused: {reason}")),
+            _ => {}
+        }
+        let ticket = SearchTicket(guard.next_ticket);
+        guard.next_ticket += 1;
+        guard.searches.push_back((ticket, text.to_owned(), top_k));
+        drop(guard);
+        self.shared.1.notify_all();
+        Ok(ticket)
+    }
+
+    fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
+        std::mem::take(&mut lock(&self.shared).found)
     }
 }
 
