@@ -532,7 +532,7 @@ impl<S: MindStore> Mind<S> {
         let mut evaluation = if keys.is_empty() {
             Evaluation { rows: Vec::new(), matched: 0, edges: Vec::new(), next_cursor: None }
         } else {
-            let narrowed = Selection { keys: Some(keys), limit: Some(LIMIT_MAX), cursor: None, ..selection.clone() };
+            let narrowed = Selection { keys: Some(keys), limit: Some(LIMIT_MAX), ..selection.clone() };
             select(&Vocabulary, &rows, &narrowed, head, self.cursor_key())?
         };
         let score = |row: &SelectionRow| scores.get(row.key.as_str()).copied().unwrap_or(f32::NEG_INFINITY);
