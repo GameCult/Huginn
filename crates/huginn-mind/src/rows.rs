@@ -334,3 +334,79 @@ pub(crate) fn refuse_values(selection: &Selection) -> Result<Selection, MindRefu
     }
     Ok(canonical)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use PipelineKind as K;
+
+    fn sorted(mut names: Vec<String>) -> Vec<String> {
+        names.sort();
+        names
+    }
+
+    fn strings(names: &[&str]) -> Vec<String> {
+        sorted(names.iter().map(|name| name.to_string()).collect())
+    }
+
+    /// The vocabulary's tables, read back through the substrate's trait: every
+    /// kind declares the three universal aliases and exactly the ones its
+    /// documents carry, and no alias is numeric, so a comparison is always
+    /// refused at the substrate's door.
+    #[test]
+    fn each_kind_declares_exactly_its_aliases_and_none_is_numeric() {
+        let table: [(K, &[&str]); 13] = [
+            (K::Campaign, &["repo"]),
+            (K::Target, &[]),
+            (K::Question, &[]),
+            (K::Ruling, &["authority"]),
+            (K::CutSpec, &["repo", "cut"]),
+            (K::CutReport, &["repo", "cut"]),
+            (K::Verdict, &["cut", "claim_outcome"]),
+            (K::Finding, &["cut", "severity", "confidence", "origin"]),
+            (K::FollowUp, &["repo"]),
+            (K::Resolution, &["repo", "cut", "outcome"]),
+            (K::Instance, &[]),
+            (K::Stewardship, &["repo"]),
+            (K::HandOff, &["repo"]),
+        ];
+        for (kind, extra) in table {
+            let want = [&["root", "in_force", "faculty"][..], extra].concat();
+            assert_eq!(sorted(Vocabulary.declared_indexes(kind.type_id())), strings(&want), "{kind:?}");
+            for alias in Alias::ALL {
+                assert!(!Vocabulary.is_numeric(kind.type_id(), alias.name()), "{kind:?}/{}", alias.name());
+            }
+        }
+    }
+
+    /// Each role is declared by the one kind whose field carries it, and its
+    /// targets are the kinds that field is typed to, "any" spelled as all
+    /// thirteen.
+    #[test]
+    fn each_kind_declares_the_roles_it_carries_and_their_targets() {
+        let table: [(K, &[&str]); 13] = [
+            (K::Campaign, &[]),
+            (K::Target, &[]),
+            (K::Question, &["raised_in"]),
+            (K::Ruling, &["answers"]),
+            (K::CutSpec, &["rulings", "questions"]),
+            (K::CutReport, &["cut_spec", "forks"]),
+            (K::Verdict, &["cut_report", "findings"]),
+            (K::Finding, &["verdict"]),
+            (K::FollowUp, &["source"]),
+            (K::Resolution, &["subject", "superseded_by", "resolved_by", "deferred_to"]),
+            (K::Instance, &[]),
+            (K::Stewardship, &[]),
+            (K::HandOff, &["documents"]),
+        ];
+        for (kind, roles) in table {
+            assert_eq!(sorted(Vocabulary.declared_roles(kind.type_id())), strings(roles), "{kind:?}");
+        }
+        assert_eq!(Vocabulary.target_leaves("answers"), vec![K::Question.type_id().to_string()]);
+        assert_eq!(Vocabulary.target_leaves("rulings"), vec![K::Ruling.type_id().to_string()]);
+        assert_eq!(Vocabulary.target_leaves("subject").len(), 13);
+        assert!(Vocabulary.target_leaves("nonsense").is_empty());
+        assert_eq!(Vocabulary.schema_name(K::Question.type_id()), Some(K::Question.type_id().to_string()));
+        assert_eq!(Vocabulary.schema_name("epiphany.pipeline.nonsense.v2"), None);
+    }
+}
