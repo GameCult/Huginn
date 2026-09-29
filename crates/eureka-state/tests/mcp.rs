@@ -173,7 +173,8 @@ fn selection_schema_matches_cultlib() {
         .expect("cultnet-rs is a dependency")["manifest_path"]
         .as_str()
         .unwrap();
-    let published = std::path::Path::new(manifest).join("../../../contracts/cultnet/cultnet.selection.schema.json");
+    let crate_dir = std::path::Path::new(manifest).parent().unwrap();
+    let published = crate_dir.join("../../contracts/cultnet/cultnet.selection.schema.json");
     let theirs: Value = serde_json::from_str(&std::fs::read_to_string(published).unwrap()).unwrap();
     let ours: Value = serde_json::from_str(
         &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/schemas/cultnet.selection.schema.json")).unwrap(),
@@ -185,7 +186,7 @@ fn selection_schema_matches_cultlib() {
 /// Every tool against a live daemon, and what each returns.
 #[test]
 fn every_tool_round_trips_against_a_live_daemon() {
-    let (root, daemon) = mind(vec![]);
+    let (root, daemon) = mind(vec![vec![stewardship()]]);
     let server = serve(root, daemon);
     let mut mcp = Mcp::at(INSTANCE, server.addr);
 
@@ -195,7 +196,7 @@ fn every_tool_round_trips_against_a_live_daemon() {
     assert_eq!(whoami["endpoint"], json!(format!("rudp://{}", server.addr)));
     assert_eq!(whoami["reachable"], json!(true));
     assert_eq!(whoami["status"]["instance"], json!(INSTANCE));
-    assert_eq!(whoami["status"]["documents"], json!(1));
+    assert_eq!(whoami["status"]["documents"], json!(2));
     assert!(whoami.get("error").is_none(), "{whoami}");
 
     let (error, admitted) = mcp.call("admit", faculty_args(vec![campaign_json()]));
@@ -214,11 +215,11 @@ fn every_tool_round_trips_against_a_live_daemon() {
 
     let (error, page) = mcp.call("query", json!({ "selection": { "projection": "document" } }));
     assert!(!error);
-    assert_eq!(page["matched"], json!(2), "{page}");
-    assert_eq!(page["items"]["Documents"].as_array().unwrap().len(), 2);
+    assert_eq!(page["matched"], json!(3), "{page}");
+    assert_eq!(page["items"]["Documents"].as_array().unwrap().len(), 3);
 
     let (_, counted) = mcp.call("whoami", json!({}));
-    assert_eq!(counted["status"]["receipts"], json!(2));
+    assert_eq!(counted["status"]["receipts"], json!(3));
 }
 
 /// Declared identity is configuration, not a per-call argument. Input that
@@ -226,7 +227,7 @@ fn every_tool_round_trips_against_a_live_daemon() {
 /// admitted for the configured instance, and the receipt says `eureka-state`.
 #[test]
 fn admit_ignores_any_instance_in_input() {
-    let (root, daemon) = mind(vec![]);
+    let (root, daemon) = mind(vec![vec![stewardship()]]);
     let server = serve(root, daemon);
     let mut mcp = Mcp::at(INSTANCE, server.addr);
 
@@ -250,7 +251,7 @@ fn admit_ignores_any_instance_in_input() {
 /// refusal. Here the configured instance is not the daemon's.
 #[test]
 fn a_refusal_is_a_successful_result() {
-    let (root, daemon) = mind(vec![]);
+    let (root, daemon) = mind(vec![vec![stewardship()]]);
     let server = serve(root, daemon);
     let mut mcp = Mcp::at("thought-cage", server.addr);
 
@@ -348,13 +349,18 @@ fn bad_configuration_is_served_and_reported() {
     }
 }
 
-/// Input that does not fit the tool's schema is `invalid_params`, a protocol
-/// error, and the server keeps serving.
+/// Input that does not fit the tool's schema is refused before any call is
+/// made. rmcp 2.2 reports it as a tool result with `isError`, not as a
+/// JSON-RPC `invalid_params`, so the model sees what to correct. The server
+/// keeps serving.
 #[test]
-fn malformed_input_is_invalid_params() {
-    let mut mcp = Mcp::at(INSTANCE, closed_port());
+fn malformed_input_is_refused_before_any_call() {
+    let server = answering(encode_response("eureka-state-call", "admit", &HuginnMindResponse::View(None), "scripted").unwrap());
+    let mut mcp = Mcp::at(INSTANCE, server.addr);
     let response = mcp.rpc("tools/call", json!({ "name": "admit", "arguments": { "faculty": "Hands" } }));
-    assert_eq!(response["error"]["code"], json!(-32602), "{response}");
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(response["result"]["isError"], json!(true));
+    assert!(response["result"]["content"][0]["text"].as_str().unwrap().contains("missing field"), "{response}");
     let (error, _) = mcp.call("whoami", json!({}));
     assert!(!error);
 }

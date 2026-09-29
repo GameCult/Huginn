@@ -15,8 +15,8 @@ use eureka_state::{ClientError, HuginnClient};
 use huginn_daemon::serve::MAX_RESPONSE_BYTES;
 use huginn_mind::envelope::{OperationFailure, encode_failure, encode_response};
 use huginn_mind::epiphany_pipeline::{
-    AuthorityMap, CodeLocation, CutDelete, CutVerification, Date, FileChange, Line, NegativeCheck, OrgRepo,
-    PipelineCutSpec, PipelineDocument, PipelineKind, PipelineRef, PipelineStewardship, Short, StructuralDelta, Title,
+    AuthorityMap, CodeLocation, CutDelete, CutVerification, FileChange, Line, NegativeCheck, OrgRepo,
+    PipelineCutSpec, PipelineDocument, PipelineKind, PipelineRef, Short, StructuralDelta, Title,
     VerificationTest,
 };
 use huginn_mind::{DeferredAnswer, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionOutcome};
@@ -26,16 +26,6 @@ use common::*;
 
 const OTHER: &str = "thought-cage";
 const TIMEOUT: Duration = Duration::from_secs(20);
-
-fn stewardship() -> PipelineDocument {
-    PipelineDocument::Stewardship(PipelineStewardship {
-        instance: slug(INSTANCE),
-        repo: OrgRepo(REPO.into()),
-        sequence: 1,
-        assigned_on: Date("2026-09-29".into()),
-        note: "assigned".into(),
-    })
-}
 
 /// A `Line` and a `Short` at the leaf's own bound.
 fn line(n: usize) -> Line {

@@ -14,7 +14,7 @@ use cultnet_rs::{CultNetMessage, CultNetRudpServerEvent, CultNetWireContract, de
 use huginn_daemon::serve::{bind, run, schema_registry};
 use huginn_daemon::{Daemon, Handled, Hits, IndexSink, SearchTicket, ServeOptions};
 use huginn_mind::epiphany_pipeline::{
-    Date, DocRef, OrgRepo, PipelineCampaign, PipelineDocument, PipelineInstance, PipelineRef, Sha, Short, Slug,
+    Date, DocRef, OrgRepo, PipelineCampaign, PipelineDocument, PipelineInstance, PipelineRef, PipelineStewardship, Sha, Short, Slug,
     Title,
 };
 use huginn_mind::{
@@ -171,5 +171,15 @@ pub fn campaign() -> PipelineDocument {
         repos: vec![OrgRepo(REPO.into())],
         working_branch: Short("hands/cut13a".into()),
         target_doc: DocRef { path: Short("notes/target.md".into()), start_line: 1, end_line: 9, commit: sha() },
+    })
+}
+
+pub fn stewardship() -> PipelineDocument {
+    PipelineDocument::Stewardship(PipelineStewardship {
+        instance: slug(INSTANCE),
+        repo: OrgRepo(REPO.into()),
+        sequence: 1,
+        assigned_on: Date("2026-09-29".into()),
+        note: "assigned".into(),
     })
 }
