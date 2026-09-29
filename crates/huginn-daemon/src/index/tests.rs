@@ -380,7 +380,7 @@ fn every_call_on_the_search_path_is_bounded_by_the_searchs_time_and_the_flush_by
 /// identity read never answers, and the search is answered, and the worker
 /// free, when the search's own time has passed. A search that waited past its
 /// time in the queue is answered without asking the embedder anything. A
-/// ticket's time is `SEARCH_DEADLINE` from the moment it was asked.
+/// ticket's time is stamped by the sink (see `the_sink_owns_the_searchs_deadline_and_tells_the_loop`).
 #[test]
 fn a_hung_embedder_holds_the_worker_no_longer_than_the_search_that_asked() {
     let (_root, mind) = mind_with_documents();
@@ -389,10 +389,7 @@ fn a_hung_embedder_holds_the_worker_no_longer_than_the_search_that_asked() {
     let mut sink = WorkerSink::spawn(embedder.clone(), index, &slug(INSTANCE), Some(MIND.into()), entries, quick());
     sink.wait_status(|status| *status == IndexStatus::Current);
 
-    let asked = Instant::now();
     ask_sink(&mut sink, "the ticket's time", 3).unwrap();
-    let due = lock(&sink.shared).searches.back().expect("the search is queued").due;
-    assert!(due >= asked + SEARCH_DEADLINE && due <= Instant::now() + SEARCH_DEADLINE, "due is SEARCH_DEADLINE after it was asked");
     answers(&mut sink, 1);
 
     embedder.state.lock().unwrap().hang_identity = true;
