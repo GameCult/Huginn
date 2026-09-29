@@ -412,23 +412,3 @@ fn an_index_that_cannot_answer_is_unavailable_and_plain_queries_still_work() {
     assert!(detail.contains("refused") && detail.contains("no Huginn metadata"), "{detail}");
     assert_eq!(documents(&mut client, "m-plain-3"), held);
 }
-
-/// The ids a daemon reports as unheld are exactly the hits its mind has no
-/// document for: an absent id, and an id under a kind it is not.
-#[test]
-fn a_hit_the_mind_holds_no_document_for_is_named_unheld() {
-    let root = tempfile::tempdir().unwrap();
-    let mut daemon = crate::daemon::tests::open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
-    let identity = crate::daemon::tests::identity(INSTANCE);
-    let HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { writes, .. }) =
-        daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity])), now()).answered()
-    else {
-        panic!("the identity was not admitted")
-    };
-    let held = writes[0].clone();
-    let absent = PipelineRef { kind: held.kind, id: Short(id("instance", "nobody")) };
-    let mis_kinded = PipelineRef { kind: PipelineKind::Question, id: held.id.clone() };
-    let hits = vec![(held.clone(), 0.9), (absent.clone(), 0.8), (mis_kinded.clone(), 0.7)];
-    assert_eq!(daemon.unheld(&hits), vec![absent.id.0.as_str(), mis_kinded.id.0.as_str()]);
-    assert!(daemon.unheld(&vec![(held, 0.9)]).is_empty());
-}

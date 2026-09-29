@@ -161,13 +161,6 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         self.index.searched()
     }
 
-    /// The ids among `hits` that the mind holds no document for: the index
-    /// keeps points the mind no longer has (a restored mind, a second store),
-    /// and a hit is never shown on the index's word alone.
-    pub(crate) fn unheld<'a>(&self, hits: &'a Hits) -> Vec<&'a str> {
-        hits.iter().filter(|(id, _)| !matches!(self.mind.view(id), Ok(Some(_)))).map(|(id, _)| id.id.0.as_str()).collect()
-    }
-
     /// The answer to a search: the index's candidates ranked through the mind
     /// (`Mind::rank` drops what the mind does not hold and lets the selection
     /// decide the rest), or, when the index could not answer, a typed
@@ -177,11 +170,18 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
             Ok(hits) => hits,
             Err(detail) => return HuginnMindResponse::Refused(MindRefusal::Unavailable { detail }),
         };
-        for id in self.unheld(&hits) {
-            eprintln!("huginn: the index returned {id}, which this mind does not hold; it is left out");
-        }
         match self.mind.rank(&search.selection, &search.semantic, &hits) {
-            Ok(page) => HuginnMindResponse::Query(page),
+            Ok(ranked) => {
+                if !ranked.dropped.is_empty() {
+                    let named: Vec<&str> = ranked.dropped.iter().take(5).map(|hit| hit.id.0.as_str()).collect();
+                    eprintln!(
+                        "huginn: the index returned {} ids this mind does not hold (first {:?}); they are left out",
+                        ranked.dropped.len(),
+                        named
+                    );
+                }
+                HuginnMindResponse::Query(ranked.page)
+            }
             Err(refusal) => HuginnMindResponse::Refused(refusal),
         }
     }

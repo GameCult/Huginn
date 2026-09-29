@@ -275,6 +275,15 @@ pub struct PipelineSelectionPage {
     pub edges: Option<Vec<PipelineEdge>>,
 }
 
+/// A ranked semantic answer: the page, and the hits the index named that the
+/// mind holds no document for (a restored mind, a second store). Local to the
+/// process; it is never on the wire.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ranked {
+    pub page: PipelineSelectionPage,
+    pub dropped: Vec<PipelineRef>,
+}
+
 /// The admission facts of every stored document, built once per read call from
 /// the receipts. `writes` only: a document a later batch cited as a strong read
 /// keeps the receipt that wrote it. A10 admits one write per identity, so two
@@ -455,8 +464,9 @@ impl<S: MindStore> Mind<S> {
     }
 
     /// What a semantic query must satisfy before anything is embedded: the
-    /// selection passes the same two doors `query` does, carries no cursor
-    /// (a ranked answer is not pageable), and asks for between one and
+    /// selection passes the same two doors `query` does, carries no cursor and
+    /// no `descending` (a ranked answer is neither pageable nor reversible),
+    /// and asks for between one and
     /// `LIMIT_MAX` hits over text that says something. Returns the selection
     /// as the door leaves it.
     fn semantic_selection(selection: &Selection, semantic: &SemanticQuery) -> Result<Selection, MindRefusal> {
@@ -467,6 +477,9 @@ impl<S: MindStore> Mind<S> {
         };
         if selection.cursor.as_deref().is_some_and(|cursor| !cursor.is_empty()) {
             return Err(refused("cursor", None, "a semantic answer is ranked, not paged: it carries no cursor"));
+        }
+        if selection.descending {
+            return Err(refused("descending", Some("true".into()), "a semantic answer is ordered by score: it has no order to reverse"));
         }
         if semantic.text.0.trim().is_empty() {
             return Err(refused("semantic.text", None, "a semantic query needs text"));
@@ -488,7 +501,8 @@ impl<S: MindStore> Mind<S> {
         Self::semantic_selection(selection, semantic).map(drop)
     }
 
-    /// The page a semantic query answers, from the candidates the index gave.
+    /// The page a semantic query answers, from the candidates the index gave,
+    /// with the hits the mind holds no document for.
     ///
     /// The index supplies ids and scores and nothing else. A hit is a
     /// candidate: it is dropped unless the mind holds a document of that kind
@@ -499,29 +513,43 @@ impl<S: MindStore> Mind<S> {
     /// mean in `query`. Nothing about a document's standing is read from the
     /// index; `in_force` is the caller's to ask for and the mind's to derive.
     ///
+    /// This is the one place the mind judges whether it holds a hit, in the
+    /// one read of its rows that ranking needs: `Ranked::dropped` returns the
+    /// hits it found no document for, for the caller to report.
+    ///
     /// The order is the one thing the substrate cannot know: score, highest
     /// first, ties by ordinal. The page holds at most the selection's limit
     /// and at most `top_k` documents, `matched` counts every candidate the
-    /// selection passed, and `next` is never set. Only the best
-    /// `LIMIT_MAX` candidates are considered.
+    /// selection passed, and `next` is never set. The substrate answers at
+    /// most `LIMIT_MAX` rows and cuts by ordinal, so the candidates are cut
+    /// to the best `LIMIT_MAX` by score first, among the documents the mind
+    /// holds: an id the mind does not hold never takes the place of one it
+    /// does.
     pub fn rank(
         &self,
         selection: &Selection,
         semantic: &SemanticQuery,
         hits: &[(PipelineRef, f32)],
-    ) -> Result<PipelineSelectionPage, MindRefusal> {
+    ) -> Result<Ranked, MindRefusal> {
         let selection = Self::semantic_selection(selection, semantic)?;
         let head = receipt::head(self)?;
         let rows = Reader::at(self, head)?.rows()?;
 
-        let mut best: Vec<&(PipelineRef, f32)> = hits.iter().collect();
-        best.sort_by(|a, b| b.1.total_cmp(&a.1));
-        best.truncate(LIMIT_MAX as usize);
-        let mut scores: BTreeMap<&str, f32> = BTreeMap::new();
-        for row in &rows {
-            if let Some((_, score)) = best.iter().find(|(hit, _)| hit.kind == row.kind && hit.id.0 == row.key) {
-                scores.insert(row.key.as_str(), *score);
+        let held: BTreeMap<(PipelineKind, &str), i64> =
+            rows.iter().map(|row| ((row.kind, row.key.as_str()), row.ordinal())).collect();
+        let mut candidates: Vec<(&str, f32, i64)> = Vec::new();
+        let mut dropped = Vec::new();
+        for (hit, score) in hits {
+            match held.get(&(hit.kind, hit.id.0.as_str())) {
+                Some(&ordinal) => candidates.push((hit.id.0.as_str(), *score, ordinal)),
+                None => dropped.push(hit.clone()),
             }
+        }
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.2.cmp(&b.2)));
+        candidates.truncate(LIMIT_MAX as usize);
+        let mut scores: BTreeMap<&str, f32> = BTreeMap::new();
+        for (key, score, _) in &candidates {
+            scores.entry(key).or_insert(*score);
         }
         let mut keys: Vec<String> = scores.keys().map(|key| key.to_string()).collect();
         if let Some(allowed) = &selection.keys {
@@ -553,7 +581,7 @@ impl<S: MindStore> Mind<S> {
             .collect();
         kept.sort_by_key(|(at, _)| *at);
         evaluation.edges = kept.into_iter().map(|(_, edge)| edge).collect();
-        Self::page(&selection, evaluation, head)
+        Ok(Ranked { page: Self::page(&selection, evaluation, head)?, dropped })
     }
 
     /// The projection of an evaluation: a header or a whole view per row, and
@@ -1517,19 +1545,47 @@ mod tests {
             hit(K::Ruling, &shelf.r4, 0.5),
             hit(K::Question, &shelf.q2, 0.4),
         ];
-        let everything = shelf.mind.rank(&Selection::default(), &asking(10), &hits).unwrap();
+        let ranked = shelf.mind.rank(&Selection::default(), &asking(10), &hits).unwrap();
+        assert_eq!(
+            ranked.dropped,
+            vec![r(K::Question, &id("question", "Q99")), r(K::Question, &shelf.r4)],
+            "the ids the mind holds nothing for come back, in the order the index gave them, and no held id does"
+        );
+        let everything = ranked.page;
         assert_eq!(ids(&everything), vec![shelf.q1.clone(), shelf.withdrawn_resolution.clone(), shelf.r3.clone(), shelf.r4.clone(), shelf.q2.clone()],
             "without in_force the selection has not asked about standing, and the unheld and mis-kinded hits are gone");
         assert_eq!(everything.matched, 5);
 
-        let page = shelf.mind.rank(&standing(Selection::default()), &asking(10), &hits).unwrap();
+        let page = shelf.mind.rank(&standing(Selection::default()), &asking(10), &hits).unwrap().page;
         assert_eq!(ids(&page), vec![shelf.r4.clone(), shelf.q2.clone()]);
         assert_eq!((page.matched, page.next), (2, None));
         assert_eq!(page.as_of, receipt::head(&shelf.mind).unwrap());
 
-        let none = shelf.mind.rank(&standing(Selection::default()), &asking(10), &[hit(K::Question, &id("question", "Q99"), 1.0)]).unwrap();
+        let none = shelf.mind.rank(&standing(Selection::default()), &asking(10), &[hit(K::Question, &id("question", "Q99"), 1.0)]).unwrap().page;
         assert_eq!((none.matched, ids(&none)), (0, Vec::<String>::new()), "an empty candidate set is an empty page, not a refusal");
-        assert_eq!(shelf.mind.rank(&standing(Selection::default()), &asking(10), &[]).unwrap().matched, 0);
+        assert_eq!(shelf.mind.rank(&standing(Selection::default()), &asking(10), &[]).unwrap().page.matched, 0);
+    }
+
+    /// The substrate answers 200 rows and cuts by ordinal, so 250 candidates
+    /// must be cut by score first: the 200 best are answered, and the 50 lowest
+    /// scores are the ones that fall away, whichever of them was admitted first.
+    /// An id the mind does not hold does not take a place among the 200.
+    #[test]
+    fn more_candidates_than_the_substrate_answers_are_cut_by_score_not_by_ordinal() {
+        let mut mind = seeded();
+        for start in (0..250).step_by(crate::admission::BATCH_MAX) {
+            committed(admit(&mut mind, (start..(start + crate::admission::BATCH_MAX as u32).min(250)).map(question_n).collect()));
+        }
+        let key = |n: u32| id("question", &format!("Q{n}"));
+        // Question n scores n, so the later a question was admitted the better it ranks.
+        let mut hits: Vec<(PipelineRef, f32)> = (0..250).map(|n| hit(K::Question, &key(n), n as f32)).collect();
+        // Twenty ids the mind holds nothing for, above every real score.
+        hits.extend((0..20).map(|n| hit(K::Question, &id("question", &format!("Gone{n}")), 1000.0 + n as f32)));
+        let ranked = mind.rank(&Selection::default(), &asking(200), &hits).unwrap();
+        let expected: Vec<String> = (50..250).rev().map(key).collect();
+        assert_eq!(ids(&ranked.page), expected, "the 200 best, best first");
+        assert_eq!(ranked.page.matched, 200);
+        assert_eq!(ranked.dropped.len(), 20);
     }
 
     /// The order is the score's, highest first, and ordinal only settles a
@@ -1539,16 +1595,16 @@ mod tests {
     fn ranked_results_are_ordered_by_score_then_ordinal_and_cut_to_the_limit() {
         let shelf = shelf();
         let by_ordinal = [hit(K::Question, &shelf.q2, 0.4), hit(K::Ruling, &shelf.r4, 0.5)];
-        assert_eq!(ids(&shelf.mind.rank(&standing(Selection::default()), &asking(10), &by_ordinal).unwrap()), vec![shelf.r4.clone(), shelf.q2.clone()],
+        assert_eq!(ids(&shelf.mind.rank(&standing(Selection::default()), &asking(10), &by_ordinal).unwrap().page), vec![shelf.r4.clone(), shelf.q2.clone()],
             "Q2 was admitted first, and the better score still comes first");
         let tied = [hit(K::Ruling, &shelf.r4, 0.5), hit(K::Question, &shelf.q2, 0.5)];
-        assert_eq!(ids(&shelf.mind.rank(&standing(Selection::default()), &asking(10), &tied).unwrap()), vec![shelf.q2.clone(), shelf.r4.clone()],
+        assert_eq!(ids(&shelf.mind.rank(&standing(Selection::default()), &asking(10), &tied).unwrap().page), vec![shelf.q2.clone(), shelf.r4.clone()],
             "a tie falls to the earlier ordinal");
 
         let limited = Selection { limit: Some(1), ..standing(Selection::default()) };
-        let page = shelf.mind.rank(&limited, &asking(10), &by_ordinal).unwrap();
+        let page = shelf.mind.rank(&limited, &asking(10), &by_ordinal).unwrap().page;
         assert_eq!((ids(&page), page.matched, page.next), (vec![shelf.r4.clone()], 2, None), "the limit keeps the best, not the earliest");
-        let page = shelf.mind.rank(&standing(Selection::default()), &asking(1), &by_ordinal).unwrap();
+        let page = shelf.mind.rank(&standing(Selection::default()), &asking(1), &by_ordinal).unwrap().page;
         assert_eq!((ids(&page), page.matched), (vec![shelf.r4.clone()], 2), "top_k bounds the page too");
     }
 
@@ -1560,16 +1616,16 @@ mod tests {
     fn the_selections_own_predicates_decide_which_candidates_stay() {
         let shelf = shelf();
         let hits = [hit(K::Question, &shelf.q2, 0.4), hit(K::Ruling, &shelf.r4, 0.5)];
-        assert_eq!(ids(&shelf.mind.rank(&of_kinds(&[K::Ruling]), &asking(10), &hits).unwrap()), vec![shelf.r4.clone()]);
+        assert_eq!(ids(&shelf.mind.rank(&of_kinds(&[K::Ruling]), &asking(10), &hits).unwrap().page), vec![shelf.r4.clone()]);
         let keyed = Selection { keys: Some(vec![shelf.q2.clone(), shelf.q1.clone()]), ..Selection::default() };
-        assert_eq!(ids(&shelf.mind.rank(&keyed, &asking(10), &hits).unwrap()), vec![shelf.q2.clone()], "keys intersect the candidates");
+        assert_eq!(ids(&shelf.mind.rank(&keyed, &asking(10), &hits).unwrap().page), vec![shelf.q2.clone()], "keys intersect the candidates");
         let disjoint = Selection { keys: Some(vec![shelf.q1.clone()]), ..Selection::default() };
-        assert_eq!(shelf.mind.rank(&disjoint, &asking(10), &hits).unwrap().matched, 0);
+        assert_eq!(shelf.mind.rank(&disjoint, &asking(10), &hits).unwrap().page.matched, 0);
         let unnamed = Selection { cited: Some(Incoming { role: "subject".into(), exists: false }), ..Selection::default() };
         let plain = ids(&shelf.mind.query(&Selection { keys: Some(vec![shelf.q2.clone(), shelf.r4.clone()]), ..unnamed.clone() }).unwrap());
         assert_eq!(plain, vec![shelf.r4.clone()], "no resolution names R4 as its subject, and one names Q2");
-        assert_eq!(ids(&shelf.mind.rank(&unnamed, &asking(10), &hits).unwrap()), plain, "the same answer as the plain query over the same rows");
-        assert_eq!(ids(&shelf.mind.rank(&Selection { projection: "document".into(), ..of_kinds(&[K::Ruling]) }, &asking(10), &hits).unwrap()), vec![shelf.r4.clone()]);
+        assert_eq!(ids(&shelf.mind.rank(&unnamed, &asking(10), &hits).unwrap().page), plain, "the same answer as the plain query over the same rows");
+        assert_eq!(ids(&shelf.mind.rank(&Selection { projection: "document".into(), ..of_kinds(&[K::Ruling]) }, &asking(10), &hits).unwrap().page), vec![shelf.r4.clone()]);
     }
 
     /// A citation hop is answered over the whole mind, and its edges follow the
@@ -1581,14 +1637,14 @@ mod tests {
         let shelf = shelf();
         let named = Selection { cited: Some(Incoming { role: "subject".into(), exists: true }), ..of_kinds(&[K::Question]) };
         let hits = [hit(K::Question, &shelf.q2, 0.9), hit(K::Question, &shelf.q1, 0.4)];
-        let both = shelf.mind.rank(&named, &asking(10), &hits).unwrap();
+        let both = shelf.mind.rank(&named, &asking(10), &hits).unwrap().page;
         assert_eq!(ids(&both), vec![shelf.q2.clone(), shelf.q1.clone()], "Q1 was admitted first and scored lower");
         let edges = both.edges.expect("a hop carries its edges");
         let targets: Vec<&str> = edges.iter().map(|edge| edge.to.id.0.as_str()).collect();
         assert_eq!(targets, [shelf.q2.as_str(), shelf.q1.as_str()], "the edges follow the page order");
         assert!(edges.iter().all(|edge| edge.from.kind == K::Resolution && edge.role == CitationRole::Subject));
 
-        let limited = shelf.mind.rank(&Selection { limit: Some(1), ..named.clone() }, &asking(10), &hits).unwrap();
+        let limited = shelf.mind.rank(&Selection { limit: Some(1), ..named.clone() }, &asking(10), &hits).unwrap().page;
         assert_eq!(ids(&limited), vec![shelf.q2.clone()]);
         let kept = limited.edges.unwrap();
         assert_eq!(kept.len(), 1, "the dropped row's edge is dropped with it");
@@ -1596,7 +1652,7 @@ mod tests {
         assert_eq!(kept[0].from.id.0, id("resolution", "question.Q2.n1"));
 
         let empty_cursor = Selection { cursor: Some(String::new()), ..standing(Selection::default()) };
-        let with = shelf.mind.rank(&empty_cursor, &asking(10), &[hit(K::Ruling, &shelf.r4, 0.5)]).unwrap();
+        let with = shelf.mind.rank(&empty_cursor, &asking(10), &[hit(K::Ruling, &shelf.r4, 0.5)]).unwrap().page;
         assert_eq!(ids(&with), vec![shelf.r4.clone()]);
     }
 
@@ -1616,6 +1672,13 @@ mod tests {
             shelf.mind.check_semantic(&with_cursor, &asking(10)).unwrap_err(),
         ] {
             assert!(on("cursor", &refusal), "{refusal:?}");
+        }
+        let reversed = Selection { descending: true, ..Selection::default() };
+        for refusal in [
+            shelf.mind.rank(&reversed, &asking(10), &hits).unwrap_err(),
+            shelf.mind.check_semantic(&reversed, &asking(10)).unwrap_err(),
+        ] {
+            assert!(on("descending", &refusal), "a ranked answer has no order to reverse: {refusal:?}");
         }
         assert!(on("semantic.top_k", &shelf.mind.rank(&Selection::default(), &asking(0), &hits).unwrap_err()));
         assert!(on("semantic.top_k", &shelf.mind.rank(&Selection::default(), &asking(201), &hits).unwrap_err()));
