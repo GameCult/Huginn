@@ -335,6 +335,15 @@ dependencies = [
 [[package]]
 name = "eureka-state"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cultnet-rs",
+ "huginn-daemon",
+ "huginn-mind",
+ "rmp-serde",
+ "tempfile",
+]
 
 [[package]]
 name = "fastrand"

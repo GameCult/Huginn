@@ -18,12 +18,14 @@ Studio's job, not Huginn's.
   status included, over `cultcache-rs` and `epiphany-pipeline` pinned by git
   rev. `huginn-daemon` serves one mind over CultNet RUDP through `cultnet-rs`
   at the same rev, and reaches the leaf and the store type through
-  `huginn-mind` so one crate pins each revision. `eureka-state` is a stub.
+  `huginn-mind` so one crate pins each revision. `eureka-state` is the client
+  core: one call to a daemon over CultNet, holding no state.
 - Owned: an instance's memory documents, their admission and the read side
   that derives their status, in `huginn-mind`,
   over a redb CultCache store at `<state_root>/minds/<instance>/mind.redb`;
   and their CultNet surface in `huginn-daemon`, which owns the socket, the
-  sessions, the process and the operation envelope, and no rule. The two wire
+  sessions and the process, and no rule; the operation envelope is
+  `huginn-mind`'s. The two wire
   schemas are published from `schemas/cultnet/`. There is no index yet.
 - To depend on: Qdrant, directly, once retrieval exists. Unreachable Qdrant is
   to be a loud refusal, never a fallback store. No crate connects to it yet.

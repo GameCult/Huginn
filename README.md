@@ -42,10 +42,11 @@ A Cargo workspace of three crates:
 
 - `crates/huginn-mind`: storage, identity, admission, and queries and derived
   status over memory documents.
-- `crates/huginn-daemon`: the CultNet surface. The socket, the sessions, the
-  process and the operation envelope, and no rule.
-- `crates/eureka-state`: a stub. It will carry typed state for the Eureka
-  pipeline; today it holds none.
+- `crates/huginn-daemon`: the CultNet surface. The socket, the sessions and
+  the process, and no rule. The operation envelope both sides speak is
+  `huginn-mind`'s.
+- `crates/eureka-state`: the client core, `HuginnClient::call`: one request to a
+  daemon over CultNet RUDP, a deferred answer resolved, and no state.
 
 `huginn-mind` is live: it opens one instance's store (an owned redb CultCache
 at `<state_root>/minds/<instance>/mind.redb`, locked for the mind's lifetime),
@@ -71,7 +72,7 @@ failure and reaches no mind. The two schemas it publishes live in
 `schemas/cultnet/` and are pinned to their derivation by a test. There is no
 index yet.
 
-`eureka-state` is a stub; the campaign's cut map in
+`eureka-state` has no MCP surface yet; the campaign's cut map in
 `Epiphany/notes/eureka-pipeline-state-cut.md` owns what each crate must do
 next.
 
