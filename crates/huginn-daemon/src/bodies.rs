@@ -156,6 +156,16 @@ mod tests {
     use super::*;
     use cultnet_rs::pack_content;
 
+    /// The three numbers a client author is told, spelled out: a chunk of
+    /// 256 KiB, a largest deferred body of 64 MiB, a budget of 256 MiB that
+    /// holds at least one whole body.
+    #[test]
+    fn the_deferral_constants_are_the_documented_numbers() {
+        assert_eq!(DEFERRED_CHUNK_BYTES, 262_144);
+        assert_eq!(MAX_DEFERRED_BODY_BYTES, 67_108_864);
+        assert_eq!(DEFERRED_BUDGET_BYTES, 268_435_456);
+    }
+
     fn at(seconds: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_800_000_000 + seconds, 0).unwrap()
     }
