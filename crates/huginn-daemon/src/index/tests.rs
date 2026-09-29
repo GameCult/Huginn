@@ -732,6 +732,8 @@ fn a_mind_without_an_identity_makes_no_collection_until_its_first_admission() {
     let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), None);
     assert_eq!(projector.progress_status(), IndexStatus::Current);
     assert_eq!(projector.advance().unwrap(), Advance::Idle);
+    let identified = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
+    assert_eq!(identified.progress_status(), IndexStatus::Reconciling { pending: 0 }, "an identified mind has yet to reconcile");
     assert!(index.state.lock().unwrap().collections.is_empty());
 
     let sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), None, Vec::new(), quick());
