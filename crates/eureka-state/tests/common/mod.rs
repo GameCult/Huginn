@@ -14,7 +14,8 @@ use cultnet_rs::{CultNetMessage, CultNetRudpServerEvent, CultNetWireContract, de
 use huginn_daemon::serve::{bind, run, schema_registry};
 use huginn_daemon::{Daemon, Handled, Hits, IndexSink, SearchTicket, ServeOptions};
 use huginn_mind::epiphany_pipeline::{
-    Date, DocRef, OrgRepo, PipelineCampaign, PipelineDocument, PipelineInstance, Sha, Short, Slug, Title,
+    Date, DocRef, OrgRepo, PipelineCampaign, PipelineDocument, PipelineInstance, PipelineRef, Sha, Short, Slug,
+    Title,
 };
 use huginn_mind::{
     Faculty, HuginnMindRequest, HuginnMindResponse, IndexStatus, Mind, MindStore, OwnedRedbMessagePackBackingStore,
