@@ -110,10 +110,14 @@ fn standing() -> Selection {
 }
 
 fn semantic(selection: Selection, top_k: u32) -> HuginnMindRequest {
+    semantic_of("who owns the state", selection, top_k)
+}
+
+fn semantic_of(text: &str, selection: Selection, top_k: u32) -> HuginnMindRequest {
     HuginnMindRequest::Query {
         instance: slug(INSTANCE),
         selection,
-        semantic: Some(SemanticQuery { text: "who owns the state".into(), top_k }),
+        semantic: Some(SemanticQuery { text: text.into(), top_k }),
     }
 }
 
@@ -437,20 +441,24 @@ fn a_search_that_timed_out_while_queued_is_never_embedded() {
     let mut second = harness.client();
     let mut third = harness.client();
     until_index(&mut third, "Current", |status| *status == IndexStatus::Current);
-    let queries = |harness: &Harness| harness.embedder.texts().iter().filter(|text| text.starts_with("Instruct: ")).count();
+    let queries = |harness: &Harness| -> Vec<String> {
+        harness.embedder.texts().into_iter().filter(|text| text.starts_with("Instruct: ")).collect()
+    };
 
     gate.shut_again();
-    send(&mut first, "m-first", &semantic(standing(), 5));
+    send(&mut first, "m-first", &semantic_of("first", standing(), 5));
     gate.wait_arrived(1);
-    send(&mut second, "m-second", &semantic(standing(), 5));
+    send(&mut second, "m-second", &semantic_of("second", standing(), 5));
     let timed_out = receive(&mut second, "m-second", 3000).expect("the second search is answered at its deadline");
     assert!(matches!(&timed_out, HuginnMindResponse::Refused(MindRefusal::Unavailable { detail }) if detail.contains("did not finish")), "{timed_out:?}");
 
     gate.open();
-    send(&mut third, "m-third", &semantic(standing(), 5));
+    send(&mut third, "m-third", &semantic_of("third", standing(), 5));
     let answered = receive(&mut third, "m-third", 3000).expect("the third search is answered");
     assert!(matches!(answered, HuginnMindResponse::Query(_)), "{answered:?}");
-    assert_eq!(queries(&harness), 2, "the first and the third were embedded; the second was taken back before it started");
+    let embedded = queries(&harness);
+    assert_eq!(embedded.len(), 2, "the first and the third were embedded; the second was taken back before it started: {embedded:?}");
+    assert!(embedded[0].ends_with("Query: first") && embedded[1].ends_with("Query: third"), "{embedded:?}");
 }
 
 /// While the index is rebuilding, a semantic query is refused with an
