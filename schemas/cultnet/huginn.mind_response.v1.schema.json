@@ -443,6 +443,128 @@
       "type": "string",
       "maxLength": 40
     },
+    "IndexStatus": {
+      "description": "How far the semantic index has caught up with the mind. The mind decides\nnone of it: the daemon's index worker reports it, in memory, and a restart\nrecomputes it. `pending` counts documents not yet known to be in the index.",
+      "oneOf": [
+        {
+          "description": "The worker has not yet compared the mind with the collection.",
+          "type": "object",
+          "properties": {
+            "Reconciling": {
+              "type": "object",
+              "properties": {
+                "pending": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "pending"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Reconciling"
+          ]
+        },
+        {
+          "description": "Every indexable document is in the collection.",
+          "type": "string",
+          "const": "Current"
+        },
+        {
+          "description": "Reconciled, and indexing what is still pending.",
+          "type": "object",
+          "properties": {
+            "Behind": {
+              "type": "object",
+              "properties": {
+                "pending": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "pending"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Behind"
+          ]
+        },
+        {
+          "description": "The last attempt failed (the embedder or the vector store is\nunreachable, or refused); it is retried with a backoff and nothing is\ndropped. `attempts` counts consecutive failures.",
+          "type": "object",
+          "properties": {
+            "Failing": {
+              "type": "object",
+              "properties": {
+                "attempts": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "error": {
+                  "type": "string"
+                },
+                "pending": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "pending",
+                "attempts",
+                "error"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Failing"
+          ]
+        },
+        {
+          "description": "The collection belongs to another writer. The worker never recreates\nit; it re-reads it on the same backoff.",
+          "type": "object",
+          "properties": {
+            "Refused": {
+              "type": "object",
+              "properties": {
+                "attempts": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "pending": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "pending",
+                "attempts",
+                "reason"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Refused"
+          ]
+        }
+      ]
+    },
     "Label": {
       "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
       "type": "string",
@@ -1314,6 +1436,9 @@
           "format": "uint32",
           "minimum": 0
         },
+        "index": {
+          "$ref": "#/$defs/IndexStatus"
+        },
         "instance": {
           "$ref": "#/$defs/Slug"
         },
@@ -1330,7 +1455,8 @@
         "instance",
         "schema_epoch",
         "documents",
-        "receipts"
+        "receipts",
+        "index"
       ]
     },
     "MutationRecord": {

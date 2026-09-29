@@ -26,6 +26,7 @@
 
 pub mod admission;
 mod docs;
+pub mod index;
 pub mod mind;
 mod rows;
 pub mod query;
@@ -38,6 +39,7 @@ pub mod wire;
 pub(crate) mod fixtures;
 
 pub use docs::CitationRole;
+pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
 pub use mind::{HuginnMindEpoch, Mind};
 pub use query::{
@@ -49,7 +51,7 @@ pub use refusal::MindRefusal;
 pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{
     HuginnMindRequest, HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA,
-    MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus,
+    MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, IndexStatus, MindStatus,
 };
 
 /// The leaf, whole, through the one crate that pins its rev: the daemon and

@@ -61,9 +61,10 @@ use huginn_mind::wire::{
     HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA,
     MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID,
 };
-use huginn_mind::{MindRefusal, MindStore, OwnedRedbMessagePackBackingStore};
+use huginn_mind::{Mind, MindRefusal, MindStore, OwnedRedbMessagePackBackingStore};
 
-use crate::daemon::{Daemon, IndexSink, NoIndex};
+use crate::daemon::{Daemon, IndexSink, runtime_id};
+use crate::index::{Backoff, Embedder, VectorIndex, WorkerSink};
 use crate::envelope::{decode_request, encode_failure, encode_response};
 
 /// What the loop does when nothing is waiting.
@@ -78,22 +79,32 @@ impl Default for ServeOptions {
     }
 }
 
-/// The three things the operator supplies. Nothing here reads the environment:
-/// how Idunn supplies `--bind` is Cut 14's.
+/// The six things the operator supplies. Nothing here reads the environment:
+/// how Idunn supplies `--bind` is Cut 14's. The index has no off switch: an
+/// unreachable Qdrant or Ollama is a degraded projection, reported by
+/// `whoami`, not a configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     pub state_root: PathBuf,
     pub instance: Slug,
     pub bind: SocketAddr,
+    pub qdrant_url: String,
+    pub ollama_url: String,
+    pub embedding_model: String,
 }
 
-/// Exactly `--state-root`, `--instance` and `--bind`, each required, each once.
+/// Exactly `--state-root`, `--instance`, `--bind`, `--qdrant-url`,
+/// `--ollama-url` and `--embedding-model`, each required, each once. The two
+/// URLs are plain `http://`: this build carries no TLS.
 pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     let mut args = args;
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     while let Some(name) = args.next() {
         let name = name.strip_prefix("--").with_context(|| format!("expected --option, got {name:?}"))?;
-        ensure!(matches!(name, "state-root" | "instance" | "bind"), "unsupported Huginn option --{name}");
+        ensure!(
+            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "embedding-model"),
+            "unsupported Huginn option --{name}"
+        );
         let value = args.next().with_context(|| format!("missing value for --{name}"))?;
         ensure!(values.insert(name.to_owned(), value).is_none(), "duplicate Huginn option --{name}");
     }
@@ -103,22 +114,44 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     let state_root = PathBuf::from(take("state-root")?);
     ensure!(state_root.is_absolute(), "--state-root must be an absolute path");
     let bind = take("bind")?;
+    let url = |name: &str| -> Result<String> {
+        let value = take(name)?;
+        ensure!(value.starts_with("http://"), "--{name} must be a plain http:// address, got {value:?}");
+        Ok(value)
+    };
+    let embedding_model = take("embedding-model")?;
+    ensure!(!embedding_model.is_empty(), "--embedding-model must name a model");
     Ok(Options {
         state_root,
         instance: Slug(take("instance")?),
         bind: bind.parse().with_context(|| format!("--bind must be an ip:port, got {bind:?}"))?,
+        qdrant_url: url("qdrant-url")?,
+        ollama_url: url("ollama-url")?,
+        embedding_model,
     })
 }
 
 /// Ruling 15, as an order: the mind opens first, and only a mind that opened
-/// gets a socket. This is the one place both happen, so nothing can bind ahead
-/// of the refusal.
-pub fn startup(
+/// gets a socket, and only a daemon that is going to serve gets an index
+/// worker. This is the one place all three happen, so nothing can bind ahead
+/// of the refusal and nothing reaches the vector store for a process that
+/// never listens. The worker's first act is to reconcile the collection
+/// against every indexable document the mind holds now.
+pub fn startup<E, V>(
     options: &Options,
-) -> Result<(Daemon<OwnedRedbMessagePackBackingStore, NoIndex>, CultNetRudpServerHub, CultNetSchemaRegistry)> {
-    let daemon = Daemon::open(&options.state_root, &options.instance)?;
-    let hub = bind(options.bind, &daemon.runtime_id())?;
-    Ok((daemon, hub, schema_registry()?))
+    embedder: E,
+    index: V,
+    backoff: Backoff,
+) -> Result<(Daemon<OwnedRedbMessagePackBackingStore, WorkerSink>, CultNetRudpServerHub, CultNetSchemaRegistry)>
+where
+    E: Embedder + Send + 'static,
+    V: VectorIndex + Send + 'static,
+{
+    let mind = Mind::open(&options.state_root, &options.instance)?;
+    let hub = bind(options.bind, &runtime_id(&options.instance))?;
+    let startup_entries = mind.index_entries(None)?;
+    let sink = WorkerSink::spawn(embedder, index, &options.instance, startup_entries, backoff);
+    Ok((Daemon::new(mind, sink), hub, schema_registry()?))
 }
 
 /// The bytes one reliable packet carries, and the packets one session may hold
@@ -310,10 +343,12 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
 mod tests {
     use super::*;
     use crate::daemon::tests::{
-        FITTING_CHANGES, FITTING_CUT, INSTANCE, OTHER, WIDE_CHANGES, WIDE_CUT, batch, identity, now, seeded_wide, slug,
+        FITTING_CHANGES, FITTING_CUT, INSTANCE, NoIndex, OTHER, WIDE_CHANGES, WIDE_CUT, batch, identity, now,
+        open_unindexed, seeded_wide, slug,
     };
     use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef};
     use crate::envelope::{FAILURE_SCHEMA, decode_response, encode_request};
+    use crate::index::Backoff;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use cultnet_rs::{CultMesh, CultMeshRudpSocketOptions};
@@ -365,7 +400,7 @@ mod tests {
     #[test]
     fn a_malformed_envelope_is_answered_with_a_failure_and_touches_no_mind() {
         let root = tempfile::tempdir().unwrap();
-        let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
         let registry = schema_registry().unwrap();
         let admit = STANDARD.encode(
             rmp_serde::to_vec_named(&HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)]))).unwrap(),
@@ -446,7 +481,7 @@ mod tests {
     #[test]
     fn two_clients_get_their_own_replies_over_loopback() {
         let root = tempfile::tempdir().unwrap();
-        let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
         let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
         let endpoint = format!("rudp://{}", hub.local_addr().unwrap());
         let registry = schema_registry().unwrap();
@@ -944,46 +979,76 @@ mod tests {
     #[test]
     fn startup_opens_the_mind_before_it_binds_anything() {
         let root = tempfile::tempdir().unwrap();
-        let held = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let held = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
         let occupied = UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = occupied.local_addr().unwrap();
 
-        let options = Options { state_root: root.path().to_path_buf(), instance: slug(INSTANCE), bind: port };
-        let error = format!("{:#}", startup(&options).err().expect("a held mind refuses"));
+        let options = Options {
+            state_root: root.path().to_path_buf(),
+            instance: slug(INSTANCE),
+            bind: port,
+            qdrant_url: "http://127.0.0.1:1".into(),
+            ollama_url: "http://127.0.0.1:1".into(),
+            embedding_model: "a-model".into(),
+        };
+        let started = |options: &Options| {
+            let (embedder, index) = crate::index::fakes::pair();
+            startup(options, embedder, index, Backoff::default())
+        };
+        let error = format!("{:#}", started(&options).err().expect("a held mind refuses"));
         assert!(error.contains("MindAlreadyOwned"), "the refusal is the mind's, not the socket's: {error}");
         assert!(!error.contains("binding"), "the socket was never reached: {error}");
 
         // With the mind free and the port still held, the socket is the only
         // gate left, and startup reports it.
         drop(held);
-        let error = format!("{:#}", startup(&options).err().expect("a held port refuses"));
+        let error = format!("{:#}", started(&options).err().expect("a held port refuses"));
         assert!(error.contains("binding"), "{error}");
         drop(occupied);
-        let (_daemon, hub, _registry) = startup(&options).expect("both gates open");
+        let (_daemon, hub, _registry) = started(&options).expect("both gates open");
         assert_eq!(hub.local_addr().unwrap(), port);
     }
 
     #[test]
-    fn options_are_exactly_state_root_instance_and_bind() {
+    fn options_are_exactly_the_six_the_operator_supplies() {
         let root = if cfg!(windows) { r"C:\state" } else { "/state" };
         let args = |values: &[&str]| values.iter().map(|value| value.to_string()).collect::<Vec<_>>().into_iter();
+        let good = [
+            "--state-root", root, "--instance", "yggdrasil", "--bind", "127.0.0.1:17872", "--qdrant-url",
+            "http://127.0.0.1:6333", "--ollama-url", "http://10.77.0.4:11434", "--embedding-model", "qwen3-embedding:0.6b",
+        ];
         assert_eq!(
-            parse_options(args(&["--state-root", root, "--instance", "yggdrasil", "--bind", "127.0.0.1:17872"]))
-                .unwrap(),
+            parse_options(args(&good)).unwrap(),
             Options {
                 state_root: PathBuf::from(root),
                 instance: slug("yggdrasil"),
                 bind: "127.0.0.1:17872".parse().unwrap(),
+                qdrant_url: "http://127.0.0.1:6333".into(),
+                ollama_url: "http://10.77.0.4:11434".into(),
+                embedding_model: "qwen3-embedding:0.6b".into(),
             }
         );
+        // Each of the six is required: there is no index-less mode.
+        for name in ["--state-root", "--instance", "--bind", "--qdrant-url", "--ollama-url", "--embedding-model"] {
+            let at = good.iter().position(|value| *value == name).unwrap();
+            let mut without = good.to_vec();
+            without.drain(at..at + 2);
+            assert!(parse_options(args(&without)).is_err(), "{name} is required");
+        }
+        fn with<'a>(good: &[&'a str], name: &str, value: &'a str) -> Vec<&'a str> {
+            let at = good.iter().position(|option| *option == name).unwrap();
+            let mut changed = good.to_vec();
+            changed[at + 1] = value;
+            changed
+        }
         for bad in [
-            vec!["--state-root", root, "--instance", "yggdrasil"],
-            vec!["--state-root", root, "--bind", "127.0.0.1:1"],
-            vec!["--instance", "yggdrasil", "--bind", "127.0.0.1:1"],
-            vec!["--state-root", root, "--instance", "yggdrasil", "--bind", "127.0.0.1:1", "--bind", "127.0.0.1:2"],
-            vec!["--state-root", root, "--instance", "yggdrasil", "--bind", "not-an-address"],
-            vec!["--state-root", "relative", "--instance", "yggdrasil", "--bind", "127.0.0.1:1"],
-            vec!["--state-root", root, "--instance", "yggdrasil", "--bind", "127.0.0.1:1", "--idunn-anchor", "x"],
+            [good.to_vec(), vec!["--bind", "127.0.0.1:2"]].concat(),
+            with(&good, "--bind", "not-an-address"),
+            with(&good, "--state-root", "relative"),
+            with(&good, "--qdrant-url", "https://127.0.0.1:6333"),
+            with(&good, "--ollama-url", "10.77.0.4:11434"),
+            with(&good, "--embedding-model", ""),
+            [good.to_vec(), vec!["--idunn-anchor", "x"]].concat(),
         ] {
             assert!(parse_options(args(&bad)).is_err(), "{bad:?}");
         }

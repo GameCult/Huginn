@@ -183,6 +183,7 @@ mod tests {
                     schema_epoch: "epiphany.pipeline.epoch.v2".into(),
                     documents: 0,
                     receipts: 0,
+                    index: huginn_mind::wire::IndexStatus::Current,
                 }),
                 "accepted",
             ),

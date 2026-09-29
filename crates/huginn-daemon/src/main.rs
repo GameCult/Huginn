@@ -6,11 +6,16 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
+use huginn_daemon::index::Backoff;
+use huginn_daemon::index::ollama::OllamaEmbedder;
+use huginn_daemon::index::qdrant::QdrantIndex;
 use huginn_daemon::serve::{ServeOptions, parse_options, run, startup};
 
 fn main() -> Result<()> {
     let options = parse_options(std::env::args().skip(1))?;
-    let (mut daemon, mut hub, registry) = match startup(&options) {
+    let embedder = OllamaEmbedder::new(&options.ollama_url, &options.embedding_model);
+    let index = QdrantIndex::new(&options.qdrant_url);
+    let (mut daemon, mut hub, registry) = match startup(&options, embedder, index, Backoff::default()) {
         Ok(started) => started,
         Err(error) => {
             eprintln!("huginn-daemon refuses to serve {}: {error:#}", options.instance.0);

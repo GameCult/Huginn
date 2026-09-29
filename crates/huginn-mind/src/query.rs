@@ -16,8 +16,8 @@
 //! over the documents admitted at or before the page's `asOf`), the
 //! projection to a header or a whole view, and the typing of the edges.
 //!
-//! `semantic` is accepted by the type and refused typed until Cut 11 wires the
-//! index. No clock, no store handle, no network.
+//! `semantic` is accepted by the type and refused typed until Cut 11b wires the
+//! read side of the index. No clock, no store handle, no network.
 
 use std::collections::BTreeMap;
 
@@ -304,11 +304,21 @@ impl AdmissionIndex {
     }
 
     fn of(&self, held: &Held) -> Result<AdmissionFacts, MindRefusal> {
-        let type_id = held.kind.type_id();
+        self.facts_of(held.kind, &held.key)
+    }
+
+    fn facts_of(&self, kind: PipelineKind, key: &str) -> Result<AdmissionFacts, MindRefusal> {
+        let type_id = kind.type_id();
         self.0
-            .get(&(type_id.to_string(), held.key.clone()))
+            .get(&(type_id.to_string(), key.to_string()))
             .cloned()
-            .ok_or_else(|| integrity(type_id, &held.key, "has no commit receipt"))
+            .ok_or_else(|| integrity(type_id, key, "has no commit receipt"))
+    }
+
+    /// The ordinal of the receipt that wrote a document: the projection's
+    /// position for it.
+    pub(crate) fn ordinal_of(&self, kind: PipelineKind, key: &str) -> Result<u64, MindRefusal> {
+        self.facts_of(kind, key).map(|facts| facts.ordinal)
     }
 }
 
