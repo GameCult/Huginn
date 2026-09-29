@@ -66,6 +66,13 @@ pub(crate) struct EmbedderState {
     /// The length of the vectors it answers with, where that is not the
     /// identity's.
     pub(crate) vector_length: Option<usize>,
+    /// The bound each identity read was given, in order.
+    pub(crate) identity_bounds: Vec<Duration>,
+    /// Whether an identity read is never answered: it fails when its bound
+    /// has passed, as an adapter that honours its bound does.
+    pub(crate) hang_identity: bool,
+    /// How long an identity read takes to answer, when it answers.
+    pub(crate) identity_delay: Duration,
 }
 
 #[derive(Clone)]
@@ -76,7 +83,7 @@ pub(crate) struct FakeEmbedder {
 
 impl FakeEmbedder {
     pub(crate) fn new(digest: &str) -> Self {
-        let state = EmbedderState { identity: identity(digest), down: false, embedded: Vec::new(), bounds: Vec::new(), vector_length: None };
+        let state = EmbedderState { identity: identity(digest), down: false, embedded: Vec::new(), bounds: Vec::new(), vector_length: None, identity_bounds: Vec::new(), hang_identity: false, identity_delay: Duration::ZERO };
         Self { state: Arc::new(Mutex::new(state)), gate: None }
     }
 
@@ -91,12 +98,21 @@ impl FakeEmbedder {
 }
 
 impl Embedder for FakeEmbedder {
-    fn model_identity(&mut self) -> Result<ModelIdentity> {
-        let state = self.state.lock().unwrap();
+    fn model_identity(&mut self, within: Duration) -> Result<ModelIdentity> {
+        let mut state = self.state.lock().unwrap();
+        state.identity_bounds.push(within);
+        if state.hang_identity {
+            drop(state);
+            std::thread::sleep(within);
+            bail!("the embedder did not answer within {within:?}");
+        }
         if state.down {
             bail!("the embedder is down");
         }
-        Ok(state.identity.clone())
+        let (identity, delay) = (state.identity.clone(), state.identity_delay);
+        drop(state);
+        std::thread::sleep(delay);
+        Ok(identity)
     }
 
     fn embed(&mut self, texts: &[String], within: Duration) -> Result<Vec<Vec<f32>>> {
@@ -135,6 +151,10 @@ pub(crate) struct IndexState {
     pub(crate) listed: u32,
     /// Whether a search fails at the vector store, the rest of it working.
     pub(crate) fail_search: bool,
+    /// The bound each describe and each search was given, in order, by call.
+    pub(crate) bounds: Vec<(&'static str, Duration)>,
+    /// How many points the collection held when each search reached it.
+    pub(crate) held_when_searched: Vec<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -155,8 +175,9 @@ impl FakeIndex {
 }
 
 impl VectorIndex for FakeIndex {
-    fn describe(&mut self, collection: &str) -> Result<Described> {
-        let state = self.state.lock().unwrap();
+    fn describe(&mut self, collection: &str, within: Duration) -> Result<Described> {
+        let mut state = self.state.lock().unwrap();
+        state.bounds.push(("describe", within));
         if state.down {
             bail!("the vector store is down");
         }
@@ -197,14 +218,17 @@ impl VectorIndex for FakeIndex {
         Ok(())
     }
 
-    fn search(&mut self, collection: &str, vector: &[f32], limit: u32) -> Result<Vec<Hit>> {
+    fn search(&mut self, collection: &str, vector: &[f32], limit: u32, within: Duration) -> Result<Vec<Hit>> {
         let mut state = self.state.lock().unwrap();
+        state.bounds.push(("search", within));
         if state.down {
             bail!("the vector store is down");
         }
         state.searches.push((collection.into(), vector.len(), limit));
         ensure!(!state.fail_search, "the vector store failed the search");
         ensure!(state.collections.contains_key(collection), "no collection {collection}");
+        let held = state.collections[collection].points.len();
+        state.held_when_searched.push(held);
         Ok(state.hits.clone())
     }
 }

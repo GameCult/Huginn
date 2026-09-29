@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
-use super::{BULK_EMBED_TIMEOUT, Embedder, Http, Method, ModelIdentity};
+use super::{Embedder, Http, Method, ModelIdentity};
 
 /// The instruction Qwen3 embedding models take in front of a query (never in
 /// front of a document). Cut 11b's semantic read prepends it as
@@ -14,18 +14,15 @@ use super::{BULK_EMBED_TIMEOUT, Embedder, Http, Method, ModelIdentity};
 pub const QUERY_INSTRUCTION: &str =
     "Given a question about a project's pipeline state, retrieve the documents that answer it";
 
-/// One model on one Ollama. A cold model takes seconds to load, so the
-/// identity reads get `BULK_EMBED_TIMEOUT`; the worker owns the schedule
-/// around it. Each embed call carries its own bound.
+/// One model on one Ollama. Every call carries its own bound.
 pub struct OllamaEmbedder {
-    http: Http,
     base_url: String,
     model: String,
 }
 
 impl OllamaEmbedder {
     pub fn new(base_url: &str, model: &str) -> Self {
-        Self { http: Http::new(base_url, BULK_EMBED_TIMEOUT), base_url: base_url.to_owned(), model: model.to_owned() }
+        Self { base_url: base_url.to_owned(), model: model.to_owned() }
     }
 
     fn ask(&self, http: &Http, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
@@ -39,8 +36,9 @@ impl OllamaEmbedder {
 impl Embedder for OllamaEmbedder {
     /// The configured name, the digest Ollama lists for it, and the model's
     /// embedding length. The address is not part of the identity.
-    fn model_identity(&mut self) -> Result<ModelIdentity> {
-        let tags = self.ask(&self.http, Method::Get, "/api/tags", None)?;
+    fn model_identity(&mut self, within: Duration) -> Result<ModelIdentity> {
+        let http = Http::new(&self.base_url, within);
+        let tags = self.ask(&http, Method::Get, "/api/tags", None)?;
         let listed = tags["models"].as_array().context("Ollama's tag list has no models")?;
         let digest = listed
             .iter()
@@ -48,7 +46,7 @@ impl Embedder for OllamaEmbedder {
             .and_then(|entry| entry["digest"].as_str())
             .with_context(|| format!("Ollama does not list the model {}", self.model))?
             .to_owned();
-        let shown = self.ask(&self.http, Method::Post, "/api/show", Some(&json!({ "model": self.model })))?;
+        let shown = self.ask(&http, Method::Post, "/api/show", Some(&json!({ "model": self.model })))?;
         let info = shown["model_info"].as_object().context("Ollama's model description has no model_info")?;
         let Some(length) = info.iter().find(|(key, _)| key.ends_with(".embedding_length")).and_then(|(_, value)| value.as_u64())
         else {

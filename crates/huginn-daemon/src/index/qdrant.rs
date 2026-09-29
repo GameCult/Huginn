@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
-use super::{CollectionMeta, Described, Hit, Http, Method, Point, VectorIndex};
+use super::{CollectionMeta, INDEX_CALL_TIMEOUT, Described, Hit, Http, Method, Point, VectorIndex};
 
 /// One Qdrant. Every path names a collection this organ was told to own; it
 /// never lists or touches another.
@@ -20,12 +20,16 @@ const SCROLL_PAGE: u64 = 1000;
 
 impl QdrantIndex {
     pub fn new(base_url: &str) -> Self {
-        Self { http: Http::new(base_url, Duration::from_secs(60)) }
+        Self { http: Http::new(base_url, INDEX_CALL_TIMEOUT) }
     }
 
     fn ask(&self, method: Method, path: &str, body: Option<&Value>, ok: &[u16]) -> Result<(u16, Value)> {
+        self.ask_with(&self.http, method, path, body, ok)
+    }
+
+    fn ask_with(&self, http: &Http, method: Method, path: &str, body: Option<&Value>, ok: &[u16]) -> Result<(u16, Value)> {
         let text = body.map(Value::to_string);
-        let (status, answer) = self.http.request(method, path, text.as_deref())?;
+        let (status, answer) = http.request(method, path, text.as_deref())?;
         ensure!(ok.contains(&status), "Qdrant answered {status} to {path}: {}", answer.chars().take(300).collect::<String>());
         let parsed = if answer.is_empty() { Value::Null } else { serde_json::from_str(&answer).unwrap_or(Value::Null) };
         Ok((status, parsed))
@@ -67,8 +71,9 @@ fn described(metadata: &Value) -> Described {
 }
 
 impl VectorIndex for QdrantIndex {
-    fn describe(&mut self, collection: &str) -> Result<Described> {
-        let (status, answer) = self.ask(Method::Get, &format!("/collections/{collection}"), None, &[200, 404])?;
+    fn describe(&mut self, collection: &str, within: Duration) -> Result<Described> {
+        let http = self.http.bounded(within);
+        let (status, answer) = self.ask_with(&http, Method::Get, &format!("/collections/{collection}"), None, &[200, 404])?;
         if status == 404 {
             return Ok(Described::Absent);
         }
@@ -133,9 +138,11 @@ impl VectorIndex for QdrantIndex {
         Ok(())
     }
 
-    fn search(&mut self, collection: &str, vector: &[f32], limit: u32) -> Result<Vec<Hit>> {
+    fn search(&mut self, collection: &str, vector: &[f32], limit: u32, within: Duration) -> Result<Vec<Hit>> {
+        let http = self.http.bounded(within);
         let body = json!({ "vector": vector, "limit": limit, "with_payload": ["doc_id", "kind"], "with_vector": false });
-        let (_, answer) = self.ask(Method::Post, &format!("/collections/{collection}/points/search"), Some(&body), &[200])?;
+        let (_, answer) =
+            self.ask_with(&http, Method::Post, &format!("/collections/{collection}/points/search"), Some(&body), &[200])?;
         let found = answer["result"].as_array().context("Qdrant's search has no result")?;
         found
             .iter()

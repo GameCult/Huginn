@@ -44,7 +44,7 @@ fn the_adapters_embed_write_query_and_clean_up_a_scratch_collection() {
     let dotted = format!("{plain}.dotted");
 
     let mut embedder = OllamaEmbedder::new(&ollama, &model);
-    let identity = embedder.model_identity().expect("the model is listed");
+    let identity = embedder.model_identity(Duration::from_secs(60)).expect("the model is listed");
     println!("identity: {identity:?}");
     let texts = ["The organ owns the mind.".to_string(), "A recipe for lentil soup.".to_string()];
     let vectors = embedder.embed(&texts, Duration::from_secs(60)).expect("two texts embed");
@@ -63,9 +63,9 @@ fn the_adapters_embed_write_query_and_clean_up_a_scratch_collection() {
     let mut store = QdrantIndex::new(&qdrant);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for name in [&plain, &dotted] {
-            assert_eq!(store.describe(name).unwrap(), Described::Absent);
+            assert_eq!(store.describe(name, Duration::from_secs(60)).unwrap(), Described::Absent);
             store.recreate(name, &meta).unwrap();
-            assert_eq!(store.describe(name).unwrap(), Described::Labelled(meta.clone()));
+            assert_eq!(store.describe(name, Duration::from_secs(60)).unwrap(), Described::Labelled(meta.clone()));
             assert!(store.ids(name).unwrap().is_empty());
             let points: Vec<Point> = texts
                 .iter()
@@ -97,7 +97,7 @@ fn the_adapters_embed_write_query_and_clean_up_a_scratch_collection() {
             let asked = format!("Instruct: {QUERY_INSTRUCTION}
 Query: Who is responsible for keeping the memory?");
             let query = embedder.embed(&[asked], Duration::from_secs(60)).expect("the query embeds").remove(0);
-            let hits = store.search(name, &query, 2).unwrap();
+            let hits = store.search(name, &query, 2, Duration::from_secs(60)).unwrap();
             assert_eq!(hits.len(), 2, "{hits:?}");
             assert_eq!((hits[0].doc_id.as_str(), hits[0].kind.as_str()), ("smoke:doc:0", "question"), "{hits:?}");
             assert!(hits[0].score > hits[1].score, "{hits:?}");
