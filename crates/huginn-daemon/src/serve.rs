@@ -79,7 +79,7 @@ use crate::bodies::{
     DEFERRED_BUDGET_BYTES, DEFERRED_CHUNK_BYTES, DeferredBodies, MAX_DEFERRED_BODY_BYTES,
 };
 use crate::daemon::{Daemon, Handled, IndexSink, Search, SearchTicket, runtime_id};
-use crate::envelope::{OperationFailure, decode_request, encode_failure, encode_response};
+use huginn_mind::envelope::{OperationFailure, decode_request, encode_failure, encode_response};
 use crate::index::{Backoff, Embedder, VectorIndex, WorkerSink};
 
 /// What the loop does when nothing is waiting. A deferred body untouched for
@@ -345,7 +345,7 @@ fn encode_or_fail(
         Err(error) => encode_failure(
             message_id,
             operation,
-            &crate::envelope::OperationFailure {
+            &OperationFailure {
                 code: "response-not-encodable".into(),
                 message: format!("{error:#}"),
             },
@@ -548,7 +548,7 @@ mod tests {
         open_unindexed, seeded_wide, slug,
     };
     use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef};
-    use crate::envelope::{FAILURE_SCHEMA, decode_response, encode_request};
+    use huginn_mind::envelope::{FAILURE_SCHEMA, decode_response, encode_request};
     use crate::index::Backoff;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
@@ -632,7 +632,7 @@ mod tests {
             assert_eq!(rejected(&reply).1, code);
         }
         // The sixth code, `not-an-operation-request`, is the codec's and is
-        // pinned in `envelope::tests`: `answer` never produces it, because a
+        // pinned in `huginn_mind::envelope::tests`: `answer` never produces it, because a
         // message of another family is answered with `Error` instead.
         let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), CultNetMessage::Error { error: "hello".into(), code: None, details: None }, now()).reply();
         let CultNetMessage::Error { error, .. } = &reply else { panic!("expected an error, got {reply:?}") };

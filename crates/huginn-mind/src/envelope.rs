@@ -14,7 +14,7 @@ use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use cultnet_rs::CultNetMessage;
-use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_RESPONSE_SCHEMA, MIND_SERVICE_ID};
+use crate::wire::{HuginnMindRequest, HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_RESPONSE_SCHEMA, MIND_SERVICE_ID};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -151,9 +151,9 @@ pub fn decode_response(message: &CultNetMessage) -> Result<(String, Result<Hugin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::tests::{INSTANCE, OTHER, batch, identity, slug};
-    use huginn_mind::wire::MindStatus;
-    use huginn_mind::{MindRefusal, PipelineAdmissionOutcome};
+    use crate::fixtures::{INSTANCE, OTHER_INSTANCE as OTHER, instance, provenance, slug};
+    use crate::wire::MindStatus;
+    use crate::{Faculty, MindRefusal, PipelineAdmissionBatch, PipelineAdmissionOutcome};
 
     fn refusal() -> MindRefusal {
         MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() }
@@ -183,7 +183,7 @@ mod tests {
                     schema_epoch: "epiphany.pipeline.epoch.v2".into(),
                     documents: 0,
                     receipts: 0,
-                    index: huginn_mind::wire::IndexStatus::Current,
+                    index: crate::wire::IndexStatus::Current,
                 }),
                 "accepted",
             ),
@@ -214,7 +214,11 @@ mod tests {
     /// `Error` instead.
     #[test]
     fn a_request_round_trips_and_a_foreign_message_is_not_a_request() {
-        let request = HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)]));
+        let request = HuginnMindRequest::Admit(PipelineAdmissionBatch {
+            instance: slug(INSTANCE),
+            provenance: provenance(Faculty::Hands),
+            documents: vec![instance(INSTANCE)],
+        });
         let message = encode_request("m-3", &request, Some("eureka-state".into())).unwrap();
         assert_eq!(decode_request(&message).unwrap(), ("m-3".into(), request));
 
