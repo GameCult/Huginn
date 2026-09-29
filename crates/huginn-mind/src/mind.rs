@@ -245,6 +245,16 @@ impl<S: MindStore> Mind<S> {
             .collect()
     }
 
+    /// The mind's own identity: the receipt id of its first admission
+    /// (ordinal 1), which admission never rewrites and which digests the
+    /// instance and the first batch's bytes. `None` for a mind that has not
+    /// been written yet. The instance name is only a label, since two stores
+    /// on two hosts may share it; this tells them apart unless their first
+    /// batches were byte-identical.
+    pub fn genesis_receipt_id(&self) -> Result<Option<String>, MindRefusal> {
+        Ok(self.receipts()?.into_iter().find(|receipt| receipt.ordinal == 1).map(|receipt| receipt.receipt_id))
+    }
+
     pub(crate) fn raw_envelope(&self, type_id: &str, key: &str) -> Option<&CultCacheEnvelope> {
         self.image.iter().find(|envelope| envelope.r#type == type_id && envelope.key == key)
     }

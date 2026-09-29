@@ -17,9 +17,15 @@ Upstream: `https://github.com/GameCult/Huginn.git`
   mind over CultNet RUDP: admission and the read side ride
   `cultnet.operation_request.v0` and `cultnet.operation_response.v0`, and the
   two wire schemas answer a schema catalog request.
-- Retrieval is to depend on Qdrant directly, refusing loudly when Qdrant is
-  unreachable rather than falling back to a second store or a second writer.
-  No crate opens that connection yet.
+- Retrieval depends on Qdrant directly, with no second store and no second
+  writer. `huginn-daemon` keeps one collection per mind, `huginn_mind_<instance>`,
+  as a projection of the mind: one worker thread embeds each indexable
+  document through Ollama and writes its point, off the serving path, and a
+  restart compares the mind with the collection and writes what is missing. An
+  unreachable Qdrant or Ollama shows in `whoami` as the index's status and is
+  retried; admission never waits on it. The daemon requires `--qdrant-url`,
+  `--ollama-url` and `--embedding-model`. The semantic read side is not wired
+  yet.
 - Mind state is not version-controlled. It lives in Huginn's store, not in
   any repository.
 

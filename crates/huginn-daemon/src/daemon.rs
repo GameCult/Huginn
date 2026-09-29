@@ -2,28 +2,25 @@
 //! rule. `now` is the caller's, so a test pins it and the loop is the only
 //! thing that reads a wall clock.
 
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
 use huginn_mind::epiphany_pipeline::{PipelineRef, Slug};
-use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse};
-use huginn_mind::{Mind, MindRefusal, MindStore, OwnedRedbMessagePackBackingStore, PipelineAdmissionOutcome};
+use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, IndexStatus};
+use huginn_mind::{Mind, MindStore, PipelineAdmissionOutcome};
 
-/// Where Cut 11's index attaches. Called after a batch commits, with the refs
-/// the batch landed, derived writes included; the sink may read each through
+/// Where the index attaches. Called after a batch commits, with the refs the
+/// batch landed, derived writes included; the sink may read each through
 /// `mind.view`. Its error is logged and never reaches the caller: the index
-/// does not decide whether a batch was admitted.
+/// does not decide whether a batch was admitted, and the call must not wait on
+/// the index's transport. `status` is what `whoami` reports of it.
 pub trait IndexSink<S: MindStore> {
     fn committed(&mut self, mind: &Mind<S>, writes: &[PipelineRef]) -> anyhow::Result<()>;
+    fn status(&self) -> IndexStatus;
 }
 
-/// This cut's index: there is none.
-pub struct NoIndex;
-
-impl<S: MindStore> IndexSink<S> for NoIndex {
-    fn committed(&mut self, _mind: &Mind<S>, _writes: &[PipelineRef]) -> anyhow::Result<()> {
-        Ok(())
-    }
+/// The envelope's `source_runtime_id` on every response a daemon serving this
+/// instance sends. Also what the socket is bound under, before a daemon exists.
+pub fn runtime_id(instance: &Slug) -> String {
+    format!("huginn-{}", instance.0)
 }
 
 /// One mind and whatever indexes what lands in it.
@@ -32,17 +29,14 @@ pub struct Daemon<S: MindStore, I: IndexSink<S>> {
     index: I,
 }
 
-impl Daemon<OwnedRedbMessagePackBackingStore, NoIndex> {
-    /// Opens the instance's mind, taking the store's exclusive lock for the
-    /// daemon's lifetime. Ruling 15: a mind that will not open is a refusal
-    /// here, before any socket exists; this function takes no address and
-    /// cannot bind one.
-    pub fn open(state_root: &Path, instance: &Slug) -> Result<Self, MindRefusal> {
-        Ok(Self { mind: Mind::open(state_root, instance)?, index: NoIndex })
-    }
-}
-
 impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
+    /// A daemon over a mind that is already open. `Mind::open` takes the
+    /// store's exclusive lock for the daemon's lifetime, and ruling 15 has it
+    /// refuse before any socket exists: the caller opens the mind first.
+    pub fn new(mind: Mind<S>, index: I) -> Self {
+        Self { mind, index }
+    }
+
     pub fn with_index<J: IndexSink<S>>(self, index: J) -> Daemon<S, J> {
         Daemon { mind: self.mind, index }
     }
@@ -51,9 +45,13 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         &self.mind
     }
 
+    pub fn index(&self) -> &I {
+        &self.index
+    }
+
     /// The envelope's `source_runtime_id` on every response this daemon sends.
     pub fn runtime_id(&self) -> String {
-        format!("huginn-{}", self.mind.instance().0)
+        runtime_id(self.mind.instance())
     }
 
     /// One request, one answer. `Admit` goes to the mind whole, because the
@@ -70,7 +68,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
             return HuginnMindResponse::Refused(refusal);
         }
         match request {
-            HuginnMindRequest::Whoami => HuginnMindResponse::Whoami(self.mind.status()),
+            HuginnMindRequest::Whoami => HuginnMindResponse::Whoami(self.mind.status(self.index.status())),
             HuginnMindRequest::Admit(batch) => {
                 let outcome = self.mind.admit(batch, now);
                 if let PipelineAdmissionOutcome::Committed { writes, .. } = &outcome
@@ -104,6 +102,8 @@ pub(crate) mod tests {
         StructuralDelta, Title, VerificationTest,
     };
     use huginn_mind::wire::MindStatus;
+    use huginn_mind::{MindRefusal, OwnedRedbMessagePackBackingStore};
+    use std::path::Path;
     use cultnet_rs::Selection;
     use huginn_mind::{Faculty, PipelineAdmissionBatch, PipelineProvenance, PipelinePageItems, PipelineStatus, SemanticQuery};
     use std::sync::{Arc, Mutex};
@@ -295,7 +295,7 @@ pub(crate) mod tests {
     /// real-sized answer either way.
     pub(crate) fn seeded_wide() -> (TempDir, Daemon<OwnedRedbMessagePackBackingStore, NoIndex>) {
         let root = tempfile::tempdir().unwrap();
-        let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
         for documents in [
             campaign_seed(),
             vec![cut_spec(WIDE_CUT, WIDE_CHANGES), cut_spec(FITTING_CUT, FITTING_CHANGES)],
@@ -314,13 +314,34 @@ pub(crate) mod tests {
     /// removes the store.
     pub(crate) fn seeded() -> (TempDir, Daemon<OwnedRedbMessagePackBackingStore, NoIndex>) {
         let root = tempfile::tempdir().unwrap();
-        let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
         let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
         assert!(
             matches!(outcome, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })),
             "{outcome:?}"
         );
         (root, daemon)
+    }
+
+    /// No index: for the tests whose subject is not the projection.
+    pub(crate) struct NoIndex;
+
+    impl<S: MindStore> IndexSink<S> for NoIndex {
+        fn committed(&mut self, _mind: &Mind<S>, _writes: &[PipelineRef]) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn status(&self) -> IndexStatus {
+            IndexStatus::Current
+        }
+    }
+
+    /// A daemon over the instance's mind under `state_root`, with no index.
+    pub(crate) fn open_unindexed(
+        state_root: &Path,
+        instance: &Slug,
+    ) -> Result<Daemon<OwnedRedbMessagePackBackingStore, NoIndex>, MindRefusal> {
+        Ok(Daemon::new(Mind::open(state_root, instance)?, NoIndex))
     }
 
     #[derive(Clone, Default)]
@@ -335,6 +356,10 @@ pub(crate) mod tests {
             self.seen.lock().unwrap().push((ids, readable));
             Ok(())
         }
+
+        fn status(&self) -> IndexStatus {
+            IndexStatus::Current
+        }
     }
 
     struct FailingIndex;
@@ -342,6 +367,10 @@ pub(crate) mod tests {
     impl<S: MindStore> IndexSink<S> for FailingIndex {
         fn committed(&mut self, _mind: &Mind<S>, _writes: &[PipelineRef]) -> anyhow::Result<()> {
             Err(anyhow::anyhow!("the index is not there"))
+        }
+
+        fn status(&self) -> IndexStatus {
+            IndexStatus::Current
         }
     }
 
@@ -357,7 +386,7 @@ pub(crate) mod tests {
     #[test]
     fn a_batch_round_trips_typed_through_handle_without_a_socket() {
         let root = tempfile::tempdir().unwrap();
-        let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
         let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
         let HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { writes, .. }) = outcome else {
             panic!("expected a commit");
@@ -372,6 +401,7 @@ pub(crate) mod tests {
                 schema_epoch: "epiphany.pipeline.epoch.v2".into(),
                 documents: 1,
                 receipts: 1,
+                index: IndexStatus::Current,
             }
         );
         assert_eq!(daemon.runtime_id(), "huginn-yggdrasil");
@@ -406,7 +436,7 @@ pub(crate) mod tests {
     #[test]
     fn a_read_or_a_write_naming_another_instance_is_refused_by_the_mind_and_writes_nothing() {
         let root = tempfile::tempdir().unwrap();
-        let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
         let landed = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
         let HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { writes, .. }) = landed else {
             panic!("expected a commit");
@@ -626,7 +656,7 @@ pub(crate) mod tests {
         let (question, ruling) = question_and_ruling();
         let mut daemon = daemon.with_index(FailingIndex);
         let root = tempfile::tempdir().unwrap();
-        let mut fresh = Daemon::open(root.path(), &slug(INSTANCE)).unwrap().with_index(FailingIndex);
+        let mut fresh = open_unindexed(root.path(), &slug(INSTANCE)).unwrap().with_index(FailingIndex);
         fresh.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
         let outcome = fresh.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![question, ruling])), now());
         let HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { writes, .. }) = outcome else {
@@ -639,28 +669,28 @@ pub(crate) mod tests {
         assert_eq!(status(&mut daemon).documents, 4, "identity, question, ruling and the derived resolution");
     }
 
-    /// Ruling 15: a mind that will not open is refused, and `Daemon::open`
-    /// takes no address, so no socket can precede it. `startup`'s order is
+    /// Ruling 15: a mind that will not open is refused, and opening it takes
+    /// no address, so no socket can precede it. `startup`'s order is
     /// pinned in `serve::tests`.
     #[test]
     fn the_daemon_refuses_loudly_when_it_cannot_open_the_mind_and_binds_nothing() {
         let root = tempfile::tempdir().unwrap();
-        let held = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let held = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
         let path = Mind::<OwnedRedbMessagePackBackingStore>::store_path_for(root.path(), &slug(INSTANCE)).unwrap();
         assert_eq!(
-            Daemon::open(root.path(), &slug(INSTANCE)).err(),
+            open_unindexed(root.path(), &slug(INSTANCE)).err(),
             Some(MindRefusal::MindAlreadyOwned { path: path.display().to_string() })
         );
         drop(held);
 
-        let mut planted = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let mut planted = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
         planted.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
         drop(planted);
         let moved = Mind::<OwnedRedbMessagePackBackingStore>::store_path_for(root.path(), &slug(OTHER)).unwrap();
         std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
         std::fs::copy(&path, &moved).unwrap();
         assert_eq!(
-            Daemon::open(root.path(), &slug(OTHER)).err(),
+            open_unindexed(root.path(), &slug(OTHER)).err(),
             Some(MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() })
         );
     }

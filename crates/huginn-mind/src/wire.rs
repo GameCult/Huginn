@@ -135,6 +135,26 @@ impl HuginnMindResponse {
     }
 }
 
+/// How far the semantic index has caught up with the mind. The mind decides
+/// none of it: the daemon's index worker reports it, in memory, and a restart
+/// recomputes it. `pending` counts documents not yet known to be in the index.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum IndexStatus {
+    /// The worker has not yet compared the mind with the collection.
+    Reconciling { pending: u32 },
+    /// Every indexable document is in the collection.
+    Current,
+    /// Reconciled, and indexing what is still pending.
+    Behind { pending: u32 },
+    /// The last attempt failed (the embedder or the vector store is
+    /// unreachable, or refused); it is retried with a backoff and nothing is
+    /// dropped. `attempts` counts consecutive failures.
+    Failing { pending: u32, attempts: u32, error: String },
+    /// The collection belongs to another writer. The worker never recreates
+    /// it; it re-reads it on the same backoff.
+    Refused { pending: u32, attempts: u32, reason: String },
+}
+
 /// What a mind says about itself: the typed state a dashboard projects.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MindStatus {
@@ -144,12 +164,13 @@ pub struct MindStatus {
     /// not documents and are not counted here.
     pub documents: u32,
     pub receipts: u32,
+    pub index: IndexStatus,
 }
 
 impl<S: MindStore> Mind<S> {
-    /// `whoami`, derived from the image every time it is asked. Nothing stores
-    /// a status and no configuration supplies one.
-    pub fn status(&self) -> MindStatus {
+    /// `whoami`, derived from the image every time it is asked, and from the
+    /// index status the caller holds: the mind stores neither.
+    pub fn status(&self, index: IndexStatus) -> MindStatus {
         let mut documents = 0_u32;
         let mut receipts = 0_u32;
         for envelope in self.envelopes() {
@@ -164,6 +185,7 @@ impl<S: MindStore> Mind<S> {
             schema_epoch: PIPELINE_SCHEMA_EPOCH.to_string(),
             documents,
             receipts,
+            index,
         }
     }
 }
@@ -192,7 +214,7 @@ mod tests {
     fn responses() -> Vec<HuginnMindResponse> {
         let refusal = MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() };
         vec![
-            HuginnMindResponse::Whoami(seeded().status()),
+            HuginnMindResponse::Whoami(seeded().status(IndexStatus::Current)),
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: "r1".into() }),
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Conflict { identities: vec![] }),
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(refusal.clone())),

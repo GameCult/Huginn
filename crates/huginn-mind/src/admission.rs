@@ -680,6 +680,19 @@ mod tests {
         assert!(Mind::open_with(store, &slug(OTHER_INSTANCE)).is_err());
     }
 
+    /// The identity the index labels its collection with: none before the
+    /// first write, then the first receipt's id and never a later one.
+    #[test]
+    fn the_genesis_receipt_id_is_the_first_admissions_and_stays_put() {
+        let mut mind = opened(MemoryStore::new(), INSTANCE);
+        assert_eq!(mind.genesis_receipt_id().unwrap(), None);
+        let (first, _) = committed(admit(&mut mind, vec![instance(INSTANCE), stewardship(INSTANCE, REPO)]));
+        assert_eq!(mind.genesis_receipt_id().unwrap(), Some(first.clone()));
+        let (second, _) = committed(admit(&mut mind, vec![campaign(&[REPO])]));
+        assert_ne!(first, second);
+        assert_eq!(mind.genesis_receipt_id().unwrap(), Some(first));
+    }
+
     #[test]
     fn admission_refuses_a_foreign_instance_whatever_the_transport() {
         let store = MemoryStore::new();
