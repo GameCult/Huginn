@@ -1832,6 +1832,10 @@ fn a_minds_first_build_is_lag_whoever_looks_first() {
     partial.want(entries.iter().cloned());
     partial.advance().unwrap();
     assert_eq!(partial.progress_status(), IndexStatus::Behind { pending: 1 }, "an index found whole at start-up only lags");
+    drain(&mut partial);
+    index.state.lock().unwrap().collections.remove(&collection());
+    assert_eq!(partial.recheck().unwrap(), Advance::Progressed);
+    assert_eq!(partial.progress_status(), IndexStatus::Reconciling { pending: 4 }, "an index found at start-up was built: losing it is a rebuild");
 
     embedder.state.lock().unwrap().identity.digest = "d2".into();
     let mut replaced = Projector::new(embedder, index, &slug(INSTANCE), Some(MIND.into()));
