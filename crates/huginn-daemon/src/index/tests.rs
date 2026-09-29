@@ -1557,6 +1557,47 @@ fn the_worker_absorbs_admissions_before_a_search_and_waits_for_lag_but_not_for_a
     assert!(refusal.contains("being rebuilt") && refusal.contains("pending: 4"), "{refusal}");
 }
 
+/// A collection made again with nothing to refill owes nothing, so the rebuild
+/// ends inside `reconcile`: the next entry is lag, and a search waits for it
+/// rather than being refused as a rebuild.
+#[test]
+fn a_rebuild_that_owes_nothing_settles_when_it_is_made() {
+    let (embedder, index) = pair();
+    let mut projector = Projector::new(embedder.clone(), index, &slug(INSTANCE), Some(MIND.into()));
+    drain(&mut projector);
+    embedder.state.lock().unwrap().identity.digest = "d2".into();
+    assert_eq!(projector.recheck().unwrap(), Advance::Progressed, "the collection is made again under the new digest");
+    assert_eq!(projector.pending(), 0);
+
+    projector.want(entries_of(1));
+    assert_eq!(projector.progress_status(), IndexStatus::Behind { pending: 1 }, "nothing was owed, so nothing is being rebuilt");
+    let shared = shared_with(Vec::new(), None, vec![queued(1, "a")], false);
+    serve_search(&mut projector, &shared);
+    let guard = lock(&shared);
+    assert_eq!(guard.searches.len(), 1, "the search waits for the write");
+    assert!(guard.found.is_empty(), "and is not refused: {:?}", guard.found);
+}
+
+/// An identified mind with nothing owed has still to reconcile once: a search
+/// waits for that, and is not taken to fail against an index not yet built.
+#[test]
+fn a_search_waits_for_the_first_reconcile_of_an_identified_mind_owing_nothing() {
+    let (embedder, index) = pair();
+    let mut projector = Projector::new(embedder, index, &slug(INSTANCE), Some(MIND.into()));
+    assert_eq!(projector.pending(), 0);
+    assert!(projector.stale());
+    let shared = shared_with(Vec::new(), None, vec![queued(1, "a")], false);
+    serve_search(&mut projector, &shared);
+    {
+        let guard = lock(&shared);
+        assert_eq!(guard.searches.len(), 1, "the search waits for the reconcile");
+        assert!(guard.found.is_empty(), "{:?}", guard.found);
+    }
+    drain(&mut projector);
+    serve_search(&mut projector, &shared);
+    assert!(matches!(lock(&shared).found.as_slice(), [(SearchTicket(1), Ok(_))]));
+}
+
 /// A search that was queued when the worker failed is answered with why, by
 /// the worker's own failure path.
 #[test]
