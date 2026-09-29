@@ -11,7 +11,15 @@
 //! again and serving any of its chunks both touch it. When the stored bytes
 //! exceed the budget the body touched longest ago is evicted first. A chunk
 //! that two bodies share is stored once and lives until the last of them goes.
-//! Time is an argument, so nothing here reads a clock.
+//! Time is an argument, so nothing here reads a clock; expiry therefore runs
+//! only when a frame arrives, and an idle daemon holds an expired body until
+//! the next one.
+//!
+//! Limit: there is no per-session or per-peer budget, so any client can evict
+//! another client's body mid-fetch: four 64 MiB reads flush the 256 MiB store,
+//! and the loser's next chunk is answered `found: false`. That is acceptable
+//! for the organ's trusted WireGuard clients, where an instance identity is
+//! declared attribution and not authentication.
 
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};

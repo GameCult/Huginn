@@ -183,6 +183,40 @@ pub fn schema_registry() -> Result<CultNetSchemaRegistry> {
     Ok(registry)
 }
 
+/// The longest client-supplied string a reply may echo, in bytes. A reply
+/// echoes the request's `message_id` (and, on a failure, its `service_id`,
+/// `operation` and `payload_schema`; on a chunk answer, its `chunk_hash`), so an
+/// unbounded field would make the reply unbounded, and the hub would refuse a
+/// send the client then waits on forever. Every echoed field is refused past
+/// this at the door, with a transport `Error` that carries none of them. With
+/// it, every reply is within the window: the largest, a deferred answer or a
+/// refusal, is one 256-byte id, a real operation name, the daemon's own runtime
+/// id and, for a deferred answer, a manifest of at most
+/// `MAX_DEFERRED_BODY_BYTES / DEFERRED_CHUNK_BYTES` chunk references. Real ids
+/// are UUID-sized.
+pub const MAX_ECHOED_FIELD_BYTES: usize = 256;
+
+/// The first field of a request that a reply would echo and that is over
+/// `MAX_ECHOED_FIELD_BYTES`.
+fn overlong_echo(message: &CultNetMessage) -> Option<&'static str> {
+    let echoed: Vec<(&'static str, &str)> = match message {
+        CultNetMessage::OperationRequest { message_id, service_id, operation, payload_schema, .. } => {
+            vec![
+                ("message_id", message_id),
+                ("service_id", service_id),
+                ("operation", operation),
+                ("payload_schema", payload_schema),
+            ]
+        }
+        CultNetMessage::SchemaCatalogRequest { message_id, .. } => vec![("message_id", message_id)],
+        CultNetMessage::ContentChunkRequest { message_id, chunk_hash, record_key, .. } => {
+            vec![("message_id", message_id), ("chunk_hash", chunk_hash), ("record_key", record_key)]
+        }
+        _ => return None,
+    };
+    echoed.into_iter().find(|(_, value)| value.len() > MAX_ECHOED_FIELD_BYTES).map(|(name, _)| name)
+}
+
 /// One message in, one message out. Nothing here reaches a mind except through
 /// `Daemon::handle`, and an envelope that does not decode never gets that far.
 /// A chunk request is answered from `bodies` alone, on the session it came in
@@ -196,6 +230,13 @@ pub fn answer<S: MindStore, I: IndexSink<S>>(
 ) -> CultNetMessage {
     let runtime_id = daemon.runtime_id();
     bodies.expire(now);
+    if let Some(field) = overlong_echo(&message) {
+        return CultNetMessage::Error {
+            error: format!("{MIND_SERVICE_ID} refuses a {field} over {MAX_ECHOED_FIELD_BYTES} bytes"),
+            code: None,
+            details: None,
+        };
+    }
     match &message {
         CultNetMessage::OperationRequest { message_id, operation, .. } => match decode_request(&message) {
             Ok((message_id, request)) => {
@@ -256,8 +297,12 @@ fn encode_or_fail(
 /// A reply that fits is returned as it is. A larger one whose payload, the
 /// named MessagePack of the response, is at most `MAX_DEFERRED_BODY_BYTES` is
 /// packed by CultNet's content plane, retained in `bodies`, and answered with
-/// `Deferred` and the manifest. That answer is a small fixed-shape envelope and
-/// is never itself measured or deferred. A larger payload is refused by name
+/// `Deferred` and the manifest. That answer is bounded, not fixed-shape: the id
+/// it echoes is at most `MAX_ECHOED_FIELD_BYTES` and its manifest at most 256
+/// references, so it always fits one send and is never itself measured or
+/// deferred. Its envelope status is the deferred answer's own, read from the
+/// reply before deferral, so routing on status is the same whole or deferred. A
+/// larger payload is refused by name
 /// with its own size and the deferral bound: nothing is truncated or paginated,
 /// and the caller narrows its own request. Both answers ride the response
 /// schema like every other, so a client parses no second vocabulary.
@@ -284,8 +329,8 @@ fn deliver(
     if encoded <= MAX_RESPONSE_BYTES {
         return reply;
     }
-    let payload = match &reply {
-        CultNetMessage::OperationResponse { payload, .. } => STANDARD.decode(payload),
+    let (payload, answer_status) = match &reply {
+        CultNetMessage::OperationResponse { payload, status, .. } => (STANDARD.decode(payload), status.clone()),
         _ => return not_encodable("only an operation response is deferred".into()),
     };
     let payload = match payload {
@@ -311,7 +356,12 @@ fn deliver(
     )
     .expect("the deferral constants are a valid pack");
     bodies.retain(&manifest, chunks, now);
-    encode_or_fail(message_id, operation, &HuginnMindResponse::Deferred(DeferredAnswer { manifest }), runtime_id)
+    let mut deferred =
+        encode_or_fail(message_id, operation, &HuginnMindResponse::Deferred(DeferredAnswer { manifest }), runtime_id);
+    if let CultNetMessage::OperationResponse { status, .. } = &mut deferred {
+        *status = answer_status;
+    }
+    deferred
 }
 
 /// Until `stopping`: expire what timed out, resend what was not acknowledged,
@@ -924,9 +974,12 @@ mod tests {
     fn an_answer_over_the_deferral_bound_is_refused_by_name() {
         let payload_of = |len: u64| STANDARD.encode(vec![0_u8; len as usize]);
         let mut bodies = fresh_bodies();
+        // The longest id a request may carry: the reply echoes it, so the
+        // largest deferred answer and the largest refusal are measured at it.
+        let id = "m".repeat(MAX_ECHOED_FIELD_BYTES);
 
-        let at = reply_with_payload("m-b", "view", "huginn-yggdrasil", payload_of(MAX_DEFERRED_BODY_BYTES));
-        let deferred = deliver(at, "m-b", "view", "huginn-yggdrasil", &mut bodies, now());
+        let at = reply_with_payload(&id, "view", "huginn-yggdrasil", payload_of(MAX_DEFERRED_BODY_BYTES));
+        let deferred = deliver(at, &id, "view", "huginn-yggdrasil", &mut bodies, now());
         let manifest = deferred_manifest(&deferred);
         assert_eq!(manifest.size_bytes as u64, MAX_DEFERRED_BODY_BYTES);
         assert_eq!(manifest.chunks.len() as u64, MAX_DEFERRED_BODY_BYTES / DEFERRED_CHUNK_BYTES as u64);
@@ -934,18 +987,18 @@ mod tests {
         assert_eq!(bodies.body_count(), 1);
         drop(bodies);
 
-        let over = reply_with_payload("m-b", "view", "huginn-yggdrasil", payload_of(MAX_DEFERRED_BODY_BYTES + 1));
+        let over = reply_with_payload(&id, "view", "huginn-yggdrasil", payload_of(MAX_DEFERRED_BODY_BYTES + 1));
         let mut empty = fresh_bodies();
-        let refused = deliver(over, "m-b", "view", "huginn-yggdrasil", &mut empty, now());
+        let refused = deliver(over, &id, "view", "huginn-yggdrasil", &mut empty, now());
         let (correlation, answered) = decode_response(&refused).unwrap();
-        assert_eq!(correlation, "m-b");
+        assert_eq!(correlation, id);
         let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
             answered.expect("a refusal is an answer, not an envelope failure")
         else {
             panic!("one byte over the deferral bound was not refused: {refused:?}");
         };
         assert_eq!((bytes, limit), (MAX_DEFERRED_BODY_BYTES + 1, MAX_DEFERRED_BODY_BYTES));
-        assert!(encoded_len(&refused) <= MAX_FRAGMENT_BYTES as u64, "the refusal is one packet");
+        assert!(encoded_len(&refused) <= MAX_RESPONSE_BYTES, "the refusal fits one send at the longest id");
         assert_eq!(empty.body_count(), 0, "a refused answer retains nothing");
     }
 
@@ -1038,6 +1091,96 @@ mod tests {
             !first_chunk_found(&mut daemon, &mut bodies, &second, after(5)),
             "the client's re-ask evicted the one touched longest ago"
         );
+    }
+
+    /// Every field a reply echoes is bounded at the door, so no reply can
+    /// outgrow the window: a request whose `message_id`, `service_id`,
+    /// `operation`, `payload_schema` or `chunk_hash` is over the bound is
+    /// answered with a transport `Error` that fits and carries none of them,
+    /// and touches no mind; a field of exactly the bound is served as usual.
+    /// The 1.3 MB id is the one that made a `Whoami` answer echo past the
+    /// window, deferred it, and left the client waiting on a send the hub
+    /// refused.
+    #[test]
+    fn an_overlong_echoed_field_is_refused_at_the_door_with_an_answer_that_fits() {
+        let root = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::open(root.path(), &slug(INSTANCE)).unwrap();
+        let registry = schema_registry().unwrap();
+        let mut bodies = fresh_bodies();
+        let huge = "x".repeat(1_300_000);
+        let over = "x".repeat(MAX_ECHOED_FIELD_BYTES + 1);
+        let at = "x".repeat(MAX_ECHOED_FIELD_BYTES);
+        let whoami = |message_id: &str, service_id: &str, operation: &str, payload_schema: &str| {
+            let payload = STANDARD.encode(rmp_serde::to_vec_named(&HuginnMindRequest::Whoami).unwrap());
+            CultNetMessage::OperationRequest {
+                message_id: message_id.into(),
+                service_id: service_id.into(),
+                operation: operation.into(),
+                payload_schema: payload_schema.into(),
+                payload_encoding: "messagepack-base64".into(),
+                payload,
+                source_runtime_id: None,
+                target_runtime_id: None,
+            }
+        };
+        let chunk = |message_id: &str, chunk_hash: &str, record_key: &str| CultNetMessage::ContentChunkRequest {
+            message_id: message_id.into(),
+            chunk_hash: chunk_hash.into(),
+            record_key: record_key.into(),
+            expected_size_bytes: 1,
+        };
+        let refused = [
+            ("huge message_id", whoami(&huge, MIND_SERVICE_ID, "whoami", MIND_REQUEST_SCHEMA)),
+            ("message_id", whoami(&over, MIND_SERVICE_ID, "whoami", MIND_REQUEST_SCHEMA)),
+            ("service_id", whoami("m", &huge, "whoami", MIND_REQUEST_SCHEMA)),
+            ("operation", whoami("m", MIND_SERVICE_ID, &huge, MIND_REQUEST_SCHEMA)),
+            ("payload_schema", whoami("m", MIND_SERVICE_ID, "whoami", &huge)),
+            (
+                "catalog message_id",
+                CultNetMessage::SchemaCatalogRequest {
+                    message_id: huge.clone(),
+                    include_schema_json: Some(true),
+                    schema_ids: None,
+                    kinds: None,
+                },
+            ),
+            ("chunk message_id", chunk(&huge, "abc", "")),
+            ("chunk_hash", chunk("m", &huge, "")),
+            ("record_key", chunk("m", "abc", &huge)),
+        ];
+        for (case, message) in refused {
+            let reply = answer(&mut daemon, &registry, &mut bodies, message, now());
+            let CultNetMessage::Error { error, .. } = &reply else {
+                panic!("{case}: expected a transport error, got {reply:?}");
+            };
+            assert!(error.contains("over 256 bytes"), "{case}: {error}");
+            assert!(encoded_len(&reply) <= MAX_FRAGMENT_BYTES as u64, "{case}: the refusal is one packet");
+        }
+        assert_eq!(documents(&mut daemon), 0);
+
+        let reply = answer(&mut daemon, &registry, &mut bodies, whoami(&at, MIND_SERVICE_ID, "whoami", MIND_REQUEST_SCHEMA), now());
+        assert_eq!(decode_response(&reply).unwrap().0, at, "a field of exactly the bound is served");
+        let reply = answer(&mut daemon, &registry, &mut bodies, chunk(&at, &at, &at), now());
+        assert!(!found(&reply), "an unknown chunk is answered found: false, not refused at the door");
+    }
+
+    /// The envelope's status is the answer's own whether it is sent whole or
+    /// deferred, so a client that routes on status routes the same way.
+    #[test]
+    fn a_deferred_answer_keeps_the_status_of_the_answer_it_stands_for() {
+        for status in ["rejected", "accepted"] {
+            let payload = STANDARD.encode(vec![0_u8; MAX_RESPONSE_BYTES as usize]);
+            let mut reply = reply_with_payload("m-s", "view", "huginn-yggdrasil", payload);
+            let CultNetMessage::OperationResponse { status: carried, .. } = &mut reply else { unreachable!() };
+            *carried = status.into();
+            let mut bodies = fresh_bodies();
+            let deferred = deliver(reply, "m-s", "view", "huginn-yggdrasil", &mut bodies, now());
+            let CultNetMessage::OperationResponse { status: envelope, .. } = &deferred else {
+                panic!("expected an operation response, got {deferred:?}");
+            };
+            assert_eq!(envelope, status);
+            deferred_manifest(&deferred);
+        }
     }
 
     /// One cut spec's own reference, by its cut label.

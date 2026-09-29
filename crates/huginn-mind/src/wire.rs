@@ -125,7 +125,8 @@ impl HuginnMindResponse {
     /// The envelope's `status`, in the C# reference's vocabulary: `rejected`
     /// exactly for a refusal, `accepted` otherwise. `Conflict` and
     /// `AlreadyAdmitted` are answers about the mind, not refusals of the
-    /// request.
+    /// request. A `Deferred` is nominally `accepted`; the daemon sets the
+    /// envelope of a deferred answer to the status of the answer it stands for.
     pub fn status(&self) -> &'static str {
         match self {
             Self::Refused(_) | Self::Admit(PipelineAdmissionOutcome::Refused(_)) => "rejected",
