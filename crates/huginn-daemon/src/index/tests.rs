@@ -428,6 +428,13 @@ fn ollama_identity_is_the_listed_digest_and_the_models_embedding_length() {
     assert!(body.contains("\"model\":\"m:1\"") && body.contains("\"input\":[\"a\",\"b\",\"c\",\"d\"]"), "{body}");
     drop(seen);
 
+    // A listing entry that carries only `name` is still the model.
+    let bare = stub(&[
+        ("GET /api/tags", 200, r#"{"models":[{"name":"m:1","digest":"ac6d"}]}"#),
+        ("POST /api/show", 200, SHOW),
+    ]);
+    assert_eq!(OllamaEmbedder::new(&bare.url, "m:1").model_identity().unwrap().digest, "ac6d");
+
     let mut absent = OllamaEmbedder::new(&ollama.url, "not-pulled:1");
     assert!(format!("{:#}", absent.model_identity().unwrap_err()).contains("does not list the model"));
     let refusing = stub(&[("POST /api/embed", 500, r#"{"error":"boom"}"#)]);
@@ -542,4 +549,52 @@ fn qdrant_describes_creates_lists_and_writes_what_the_projector_asks() {
 
     let failing = stub(&[("PUT /collections/", 500, r#"{"status":{"error":"disk full"}}"#)]);
     assert!(QdrantIndex::new(&failing.url).upsert(&name, &[]).is_err());
+}
+
+/// The collection's name is the contract with the store: one per instance,
+/// `huginn_mind_<instance>`.
+#[test]
+fn the_collection_is_named_for_the_instance() {
+    assert_eq!(collection_name(&slug("yggdrasil")), "huginn_mind_yggdrasil");
+    assert_eq!(collection_name(&slug("a.b")), "huginn_mind_a.b");
+}
+
+#[test]
+fn a_step_error_says_what_stopped_it() {
+    assert_eq!(StepError::Refused("not ours".into()).to_string(), "not ours");
+    let unavailable = StepError::Unavailable(anyhow::anyhow!("inner").context("outer"));
+    assert_eq!(unavailable.to_string(), "outer: inner");
+}
+
+/// What the sink reports is the worker's health with the inbox added to the
+/// pending count, and a current index with something queued is behind.
+#[test]
+fn queued_entries_count_toward_every_status_that_has_a_pending_count() {
+    use IndexStatus as S;
+    assert_eq!(including(&S::Current, 0), S::Current);
+    assert_eq!(including(&S::Current, 3), S::Behind { pending: 3 });
+    assert_eq!(including(&S::Reconciling { pending: 2 }, 3), S::Reconciling { pending: 5 });
+    assert_eq!(including(&S::Behind { pending: 2 }, 3), S::Behind { pending: 5 });
+    assert_eq!(
+        including(&S::Failing { pending: 2, attempts: 4, error: "e".into() }, 3),
+        S::Failing { pending: 5, attempts: 4, error: "e".into() }
+    );
+    assert_eq!(
+        including(&S::Refused { pending: 2, attempts: 4, reason: "r".into() }, 3),
+        S::Refused { pending: 5, attempts: 4, reason: "r".into() }
+    );
+}
+
+/// Dropping the sink stops the worker: the worker's hold on the shared state
+/// is released. A worker that never stopped would hold it forever.
+#[test]
+fn dropping_the_sink_stops_the_worker() {
+    let (embedder, index) = pair();
+    let sink = WorkerSink::spawn(embedder, index, &slug(INSTANCE), Vec::new(), quick());
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    let shared = Arc::downgrade(&sink.shared);
+    drop(sink);
+    while shared.upgrade().is_some() {
+        std::thread::yield_now();
+    }
 }
