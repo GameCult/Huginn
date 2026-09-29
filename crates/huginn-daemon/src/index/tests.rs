@@ -1315,10 +1315,11 @@ fn a_model_changed_refusal_names_the_state_and_the_pending_count() {
     let (_root, mind) = mind_with_documents();
     let entries = mind.index_entries(None).unwrap();
     let (embedder, index) = pair();
-    let mut projector = projected(&embedder, &index, &entries);
+    let mut projector = projected(&embedder, &index, &entries[..3]);
+    projector.want(entries[3..].iter().cloned());
     embedder.state.lock().unwrap().identity.digest = "d2".into();
     let refusal = format!("{:#}", projector.search("anything", 3, SEARCH_DEADLINE).unwrap_err());
-    assert!(refusal.contains("model changed") && refusal.contains("being rebuilt") && refusal.contains("pending: 4"), "{refusal}");
+    assert!(refusal.contains("model changed") && refusal.contains("being rebuilt") && refusal.contains("pending: 1"), "{refusal}");
 }
 
 /// A search asks the store what the collection says about itself: a label for
