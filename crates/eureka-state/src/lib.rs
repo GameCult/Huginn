@@ -13,7 +13,8 @@
 //! in the shape the protocol promises.
 //!
 //! Every call is its own session: it connects, asks, fetches what was
-//! deferred, and drops the session. Nothing is kept between calls.
+//! deferred, and disconnects, whether the call succeeded or failed. Nothing is
+//! kept between calls.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -24,7 +25,7 @@ use cultnet_rs::{
     CULTNET_OPERATION_CONNECTION_ID, CultMesh, CultMeshRudpSocketOptions, CultNetMessage,
     CultNetRudpSocketTransportConnection, fetch_content,
 };
-use huginn_mind::envelope::{decode_response, encode_request};
+use huginn_mind::envelope::{OperationFailure, decode_response, encode_request};
 use huginn_mind::epiphany_pipeline::Slug;
 use huginn_mind::{HuginnMindRequest, HuginnMindResponse, MAX_DEFERRED_BODY_BYTES};
 
@@ -32,25 +33,47 @@ use huginn_mind::{HuginnMindRequest, HuginnMindResponse, MAX_DEFERRED_BODY_BYTES
 const MESSAGE_ID: &str = "eureka-state-call";
 const POLL: Duration = Duration::from_millis(2);
 
-/// The daemon could not be reached, went quiet, or did not answer as the
-/// protocol says it must. `detail` says which.
+/// Why a call produced no answer. `Unavailable` is the transport's failure and
+/// the only one worth retrying: the daemon could not be reached, went quiet
+/// past the call's deadline, or answered out of protocol. `Rejected` is the
+/// daemon refusing the envelope itself, which a retry of the same call cannot
+/// change.
 #[derive(Debug)]
 pub enum ClientError {
     Unavailable { endpoint: SocketAddr, detail: String },
+    Rejected { endpoint: SocketAddr, code: String, detail: String },
 }
 
 impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self::Unavailable { endpoint, detail } = self;
-        write!(f, "the Huginn daemon at rudp://{endpoint} is unavailable: {detail}")
+        match self {
+            Self::Unavailable { endpoint, detail } => {
+                write!(f, "the Huginn daemon at rudp://{endpoint} is unavailable: {detail}")
+            }
+            Self::Rejected { endpoint, code, detail } => {
+                write!(f, "the Huginn daemon at rudp://{endpoint} rejected the request: {code}: {detail}")
+            }
+        }
     }
 }
 
 impl std::error::Error for ClientError {}
 
-/// A daemon's address, the instance the caller acts for, and how long any one
-/// wait may last: the connection, the answer, and each chunk of a deferred
-/// body each get `timeout`.
+/// What `exchange` can fail with, before the endpoint is attached.
+enum Failure {
+    Transport(anyhow::Error),
+    Rejected(OperationFailure),
+}
+
+impl From<anyhow::Error> for Failure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Transport(error)
+    }
+}
+
+/// A daemon's address, the instance the caller acts for, and the time one whole
+/// call may take: the connection, the answer, and every chunk of a deferred
+/// body together must finish within `timeout` of the call starting.
 #[derive(Clone, Debug)]
 pub struct HuginnClient {
     endpoint: SocketAddr,
@@ -70,21 +93,47 @@ impl HuginnClient {
     }
 
     pub fn call(&self, request: HuginnMindRequest) -> Result<HuginnMindResponse, ClientError> {
-        self.exchange(&request)
-            .map_err(|error| ClientError::Unavailable { endpoint: self.endpoint, detail: format!("{error:#}") })
+        let deadline = Instant::now() + self.timeout;
+        let unavailable =
+            |error: anyhow::Error| ClientError::Unavailable { endpoint: self.endpoint, detail: format!("{error:#}") };
+        let mut session = self.connect(deadline).map_err(unavailable)?;
+        let outcome = self.exchange(&mut session, &request, deadline);
+        // Best effort: the daemon drops a session it never hears from, only later.
+        let _ = session.disconnect(Vec::new());
+        outcome.map_err(|failure| match failure {
+            Failure::Transport(error) => unavailable(error),
+            Failure::Rejected(rejection) => ClientError::Rejected {
+                endpoint: self.endpoint,
+                code: rejection.code,
+                detail: rejection.message,
+            },
+        })
     }
 
-    fn exchange(&self, request: &HuginnMindRequest) -> Result<HuginnMindResponse> {
-        let mut session = self.connect()?;
-        let reply = self.ask(&mut session, &encode_request(MESSAGE_ID, request, None)?)?;
-        let (_, answer) = decode_response(&reply)?;
-        match answer.map_err(|failure| anyhow!("the daemon rejected the envelope: {}: {}", failure.code, failure.message))? {
+    fn exchange(
+        &self,
+        session: &mut CultNetRudpSocketTransportConnection,
+        request: &HuginnMindRequest,
+        deadline: Instant,
+    ) -> Result<HuginnMindResponse, Failure> {
+        let reply = self.ask(session, &encode_request(MESSAGE_ID, request, None)?, deadline)?;
+        let CultNetMessage::OperationResponse { operation, .. } = &reply else {
+            return Err(anyhow!("the daemon answered with something other than an operation response").into());
+        };
+        if operation != request.operation() {
+            return Err(anyhow!("the daemon answered {operation}, not the {} that was asked", request.operation()).into());
+        }
+        let (message_id, answer) = decode_response(&reply)?;
+        if message_id != MESSAGE_ID {
+            return Err(anyhow!("the daemon answered request {message_id}, not {MESSAGE_ID}").into());
+        }
+        match answer.map_err(Failure::Rejected)? {
             HuginnMindResponse::Deferred(deferred) => {
                 let body = fetch_content(&deferred.manifest, MAX_DEFERRED_BODY_BYTES, |chunk| {
-                    self.ask(&mut session, &chunk)
+                    self.ask(session, &chunk, deadline)
                 })?;
                 match rmp_serde::from_slice::<HuginnMindResponse>(&body).context("the deferred body is not a response")? {
-                    HuginnMindResponse::Deferred(_) => bail!("a deferred body is itself deferred"),
+                    HuginnMindResponse::Deferred(_) => Err(anyhow!("a deferred body is itself deferred").into()),
                     answered => Ok(answered),
                 }
             }
@@ -92,7 +141,7 @@ impl HuginnClient {
         }
     }
 
-    fn connect(&self) -> Result<CultNetRudpSocketTransportConnection> {
+    fn connect(&self, deadline: Instant) -> Result<CultNetRudpSocketTransportConnection> {
         let mut session = CultMesh::create_rudp_client_for_endpoint(
             format!("eureka-state-{}", self.instance.0),
             CULTNET_OPERATION_CONNECTION_ID,
@@ -100,7 +149,6 @@ impl HuginnClient {
             CultMeshRudpSocketOptions::default(),
         )?;
         session.connect(Vec::new())?;
-        let deadline = Instant::now() + self.timeout;
         loop {
             session.poll_resends()?;
             let _ = session.receive_once()?;
@@ -108,23 +156,28 @@ impl HuginnClient {
                 return Ok(session);
             }
             if Instant::now() >= deadline {
-                bail!("no accept within {:?}", self.timeout);
+                bail!("no accept before the call's {:?} deadline", self.timeout);
             }
             std::thread::sleep(POLL);
         }
     }
 
-    /// One message on the session and the next message back, within `timeout`.
-    fn ask(&self, session: &mut CultNetRudpSocketTransportConnection, message: &CultNetMessage) -> Result<CultNetMessage> {
+    /// One message on the session and the next message back, before the call's
+    /// `deadline`.
+    fn ask(
+        &self,
+        session: &mut CultNetRudpSocketTransportConnection,
+        message: &CultNetMessage,
+        deadline: Instant,
+    ) -> Result<CultNetMessage> {
         session.send_schema_message(message)?;
-        let deadline = Instant::now() + self.timeout;
         loop {
             session.poll_resends()?;
             if let Some(reply) = session.receive_schema_message_once()? {
                 return Ok(reply);
             }
             if Instant::now() >= deadline {
-                bail!("no answer within {:?}", self.timeout);
+                bail!("no answer before the call's {:?} deadline", self.timeout);
             }
             std::thread::sleep(POLL);
         }

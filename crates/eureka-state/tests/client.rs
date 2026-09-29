@@ -4,7 +4,7 @@
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -199,6 +199,9 @@ struct Server {
     addr: SocketAddr,
     stopping: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// The sessions a scripted server has seen end: what the client's
+    /// disconnect looks like from the daemon's side.
+    ended: Arc<AtomicUsize>,
     _root: Option<TempDir>,
 }
 
@@ -220,7 +223,7 @@ fn serve(root: TempDir, mut daemon: TestDaemon) -> Server {
     let thread = std::thread::spawn(move || {
         run(&mut daemon, &mut hub, &registry, &loop_stopping, &ServeOptions::default()).unwrap();
     });
-    Server { addr, stopping, thread: Some(thread), _root: Some(root) }
+    Server { addr, stopping, thread: Some(thread), ended: Arc::default(), _root: Some(root) }
 }
 
 /// A server that answers each schema message with whatever `script` says.
@@ -229,10 +232,15 @@ fn scripted(mut script: impl FnMut(&CultNetMessage) -> CultNetMessage + Send + '
     let addr = hub.local_addr().unwrap();
     let stopping = Arc::new(AtomicBool::new(false));
     let loop_stopping = Arc::clone(&stopping);
+    let ended = Arc::new(AtomicUsize::new(0));
+    let loop_ended = Arc::clone(&ended);
     let thread = std::thread::spawn(move || {
         while !loop_stopping.load(Ordering::Relaxed) {
             hub.poll_resends().unwrap();
             while let Some(event) = hub.receive_event_once().unwrap() {
+                if matches!(event, CultNetRudpServerEvent::Disconnected { .. }) {
+                    loop_ended.fetch_add(1, Ordering::Relaxed);
+                }
                 let CultNetRudpServerEvent::Frame { session, frame } = event else { continue };
                 let message =
                     decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0).unwrap();
@@ -241,13 +249,19 @@ fn scripted(mut script: impl FnMut(&CultNetMessage) -> CultNetMessage + Send + '
             std::thread::sleep(Duration::from_millis(2));
         }
     });
-    Server { addr, stopping, thread: Some(thread), _root: None }
+    Server { addr, stopping, thread: Some(thread), ended, _root: None }
 }
 
 /// A scripted server that answers any operation with a deferral of `body` and
 /// serves its chunks faithfully.
 fn deferring(body: Vec<u8>) -> Server {
-    let (manifest, chunks) = pack_content("art", "package", "", "", "", &body, 256 * 1024).expect("a body packs");
+    deferring_in_chunks(body, 256 * 1024, Duration::ZERO)
+}
+
+/// `deferring`, with `chunk_bytes` per chunk and each chunk answered only after
+/// `drip`.
+fn deferring_in_chunks(body: Vec<u8>, chunk_bytes: usize, drip: Duration) -> Server {
+    let (manifest, chunks) = pack_content("art", "package", "", "", "", &body, chunk_bytes).expect("a body packs");
     let deferred = encode_response(
         "eureka-state-call",
         "whoami",
@@ -257,9 +271,12 @@ fn deferring(body: Vec<u8>) -> Server {
     .unwrap();
     scripted(move |message| match message {
         CultNetMessage::OperationRequest { .. } => deferred.clone(),
-        chunk => answer_content_chunk_request(chunk, |hash| {
-            chunks.iter().find(|c| c.chunk_hash == hash).map(|c| c.payload.as_slice())
-        }),
+        chunk => {
+            std::thread::sleep(drip);
+            answer_content_chunk_request(chunk, |hash| {
+                chunks.iter().find(|c| c.chunk_hash == hash).map(|c| c.payload.as_slice())
+            })
+        }
     })
 }
 
@@ -268,8 +285,38 @@ fn client(addr: SocketAddr) -> HuginnClient {
 }
 
 fn unavailable(error: ClientError) -> (SocketAddr, String) {
-    let ClientError::Unavailable { endpoint, detail } = error;
-    (endpoint, detail)
+    match error {
+        ClientError::Unavailable { endpoint, detail } => (endpoint, detail),
+        rejected @ ClientError::Rejected { .. } => panic!("expected Unavailable, got {rejected}"),
+    }
+}
+
+fn rejected(error: ClientError) -> (SocketAddr, String, String) {
+    match error {
+        ClientError::Rejected { endpoint, code, detail } => (endpoint, code, detail),
+        unavailable @ ClientError::Unavailable { .. } => panic!("expected Rejected, got {unavailable}"),
+    }
+}
+
+/// A scripted server whose every answer is `reply`.
+fn answering(reply: CultNetMessage) -> Server {
+    scripted(move |_| reply.clone())
+}
+
+fn nothing_found(message_id: &str, operation: &str) -> CultNetMessage {
+    encode_response(message_id, operation, &HuginnMindResponse::View(None), "scripted").unwrap()
+}
+
+/// Wait for a scripted server to have seen `count` sessions end.
+fn ended_within(server: &Server, count: usize, wait: Duration) -> bool {
+    let until = Instant::now() + wait;
+    while server.ended.load(Ordering::Relaxed) < count {
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
 }
 
 fn document_query(instance: &str) -> HuginnMindRequest {
@@ -373,7 +420,7 @@ fn a_closed_port_is_unavailable_naming_the_endpoint_within_the_timeout() {
         assert!(error.to_string().contains(&closed.to_string()), "{error}");
         let (endpoint, detail) = unavailable(error);
         assert_eq!(endpoint, closed);
-        assert!(detail.contains("no accept"), "{detail}");
+        assert!(detail.contains("no accept") && detail.contains("deadline"), "{detail}");
         waited.push(elapsed);
     }
     assert!(waited[1] > waited[0] + Duration::from_millis(500), "{waited:?}");
@@ -398,20 +445,79 @@ fn a_daemon_that_never_answers_is_unavailable_within_the_timeout() {
     assert!(detail.contains("no answer"), "{detail}");
 }
 
-/// An envelope failure means the request never reached a mind; it is not an
-/// answer, so the caller sees the code.
+/// An envelope failure means the request never reached a mind. It is the
+/// daemon refusing, not a transport failure, so a caller that retries on
+/// `Unavailable` does not loop on it; the code and the message arrive intact.
 #[test]
-fn an_envelope_failure_is_unavailable_and_carries_its_code() {
-    let server = scripted(|_| {
-        encode_failure(
-            "eureka-state-call",
-            "whoami",
-            &OperationFailure { code: "wrong-service".into(), message: "not huginn.mind".into() },
-            "scripted",
-        )
+fn an_envelope_failure_is_rejected_and_carries_its_code() {
+    let server = answering(encode_failure(
+        "eureka-state-call",
+        "whoami",
+        &OperationFailure { code: "wrong-service".into(), message: "not huginn.mind".into() },
+        "scripted",
+    ));
+    let error = client(server.addr).call(HuginnMindRequest::Whoami).unwrap_err();
+    assert!(error.to_string().contains("wrong-service"), "{error}");
+    let (endpoint, code, detail) = rejected(error);
+    assert_eq!((endpoint, code.as_str(), detail.as_str()), (server.addr, "wrong-service", "not huginn.mind"));
+}
+
+/// An answer to another request, or to another operation, is not this call's
+/// answer, whatever it says.
+#[test]
+fn an_answer_that_is_not_to_this_request_is_refused() {
+    let foreign = answering(nothing_found("someone-elses-call", "whoami"));
+    let (_, detail) = unavailable(client(foreign.addr).call(HuginnMindRequest::Whoami).unwrap_err());
+    assert!(detail.contains("someone-elses-call"), "{detail}");
+
+    let other_operation = answering(nothing_found("eureka-state-call", "query"));
+    let (_, detail) = unavailable(client(other_operation.addr).call(HuginnMindRequest::Whoami).unwrap_err());
+    assert!(detail.contains("query") && detail.contains("whoami"), "{detail}");
+
+    let matching = answering(nothing_found("eureka-state-call", "whoami"));
+    assert_eq!(client(matching.addr).call(HuginnMindRequest::Whoami).unwrap(), HuginnMindResponse::View(None));
+}
+
+/// The timeout bounds the whole call. Seven chunks each answered after 300 ms
+/// take two seconds; no single wait exceeds the 500 ms timeout, and the call
+/// still gives up at it.
+#[test]
+fn the_timeout_bounds_the_whole_call_not_each_wait() {
+    let server = deferring_in_chunks(vec![7_u8; 7 * 1024], 1024, Duration::from_millis(300));
+    let timeout = Duration::from_millis(500);
+    let started = Instant::now();
+    let error = HuginnClient::new(server.addr, slug(INSTANCE), timeout).call(HuginnMindRequest::Whoami).unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(elapsed >= timeout && elapsed < Duration::from_millis(1100), "{elapsed:?}");
+    let (_, detail) = unavailable(error);
+    assert!(detail.contains("deadline"), "{detail}");
+}
+
+/// Every call ends its session, whether it answered, was rejected, or gave up.
+#[test]
+fn every_call_disconnects_its_session() {
+    let answered = answering(nothing_found("eureka-state-call", "whoami"));
+    client(answered.addr).call(HuginnMindRequest::Whoami).unwrap();
+    assert!(ended_within(&answered, 1, Duration::from_secs(5)), "an answered call left its session open");
+
+    let refused = answering(encode_failure(
+        "eureka-state-call",
+        "whoami",
+        &OperationFailure { code: "wrong-service".into(), message: "no".into() },
+        "scripted",
+    ));
+    rejected(client(refused.addr).call(HuginnMindRequest::Whoami).unwrap_err());
+    assert!(ended_within(&refused, 1, Duration::from_secs(5)), "a rejected call left its session open");
+
+    let silent = scripted(|_| {
+        std::thread::sleep(Duration::from_millis(800));
+        CultNetMessage::Error { error: "late".into(), code: None, details: None }
     });
-    let (_, detail) = unavailable(client(server.addr).call(HuginnMindRequest::Whoami).unwrap_err());
-    assert!(detail.contains("wrong-service"), "{detail}");
+    let error = HuginnClient::new(silent.addr, slug(INSTANCE), Duration::from_millis(300))
+        .call(HuginnMindRequest::Whoami)
+        .unwrap_err();
+    unavailable(error);
+    assert!(ended_within(&silent, 1, Duration::from_secs(5)), "a timed-out call left its session open");
 }
 
 /// A deferred body that is not a response, and one that is another deferral,
