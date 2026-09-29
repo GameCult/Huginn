@@ -287,6 +287,7 @@ fn every_operation_round_trips_against_a_live_daemon() {
     let (root, daemon) = mind(vec![]);
     let server = serve(root, daemon);
     let client = client(server.addr);
+    assert_eq!(client.instance(), &slug(INSTANCE), "the client reports the instance it was configured for");
 
     let HuginnMindResponse::Whoami(status) = client.call(HuginnMindRequest::Whoami).unwrap() else {
         panic!("whoami is answered with a status");
