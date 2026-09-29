@@ -171,7 +171,7 @@ where
     let mind = Mind::open(&options.state_root, &options.instance)?;
     let hub = bind(options.bind, &runtime_id(&options.instance))?;
     let startup_entries = mind.index_entries(None)?;
-    let sink = WorkerSink::spawn(embedder, index, &options.instance, startup_entries, backoff);
+    let sink = WorkerSink::spawn(embedder, index, &options.instance, mind.genesis_receipt_id()?, startup_entries, backoff);
     Ok((Daemon::new(mind, sink), hub, schema_registry()?))
 }
 

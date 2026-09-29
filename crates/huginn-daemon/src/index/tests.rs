@@ -23,6 +23,22 @@ fn collection() -> String {
     collection_name(&slug(INSTANCE))
 }
 
+/// A mind identity for tests that project entries without a mind behind them.
+const MIND: &str = "mind-commit-first";
+
+/// A mind of the same instance name whose first batch differs, so its genesis
+/// receipt id does too.
+fn other_mind_of_the_same_name() -> (TempDir, Mind<OwnedRedbMessagePackBackingStore>) {
+    let root = tempfile::tempdir().unwrap();
+    let mut mind = Mind::open(root.path(), &slug(INSTANCE)).unwrap();
+    let (question, _) = question_and_ruling();
+    let mut first = campaign_seed();
+    first.push(question);
+    let outcome = mind.admit(batch(INSTANCE, first), now());
+    assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+    (root, mind)
+}
+
 /// A real mind holding a campaign, a question, the ruling that answers it and
 /// the resolution admission derived: four indexable documents, beside the
 /// identity and the stewardship, which carry no text.
@@ -52,7 +68,7 @@ fn point_ids(entries: &[IndexEntry]) -> BTreeSet<String> {
 }
 
 fn projected(embedder: &FakeEmbedder, index: &FakeIndex, entries: &[IndexEntry]) -> Projector<FakeEmbedder, FakeIndex> {
-    let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE));
+    let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
     projector.want(entries.iter().cloned());
     drain(&mut projector);
     projector
@@ -166,9 +182,10 @@ fn a_model_digest_change_rebuilds_the_collection() {
 fn a_collection_owned_by_another_instance_is_never_recreated() {
     let (_root, mind) = mind_with_documents();
     let entries = mind.index_entries(None).unwrap();
-    let ours = |managed_by: &str, instance: &str| CollectionMeta {
+    let ours = |managed_by: &str, instance: &str, mind: &str| CollectionMeta {
         managed_by: managed_by.into(),
         instance: instance.into(),
+        mind: mind.into(),
         model: "model".into(),
         model_digest: "d1".into(),
         dimensions: 4,
@@ -176,8 +193,10 @@ fn a_collection_owned_by_another_instance_is_never_recreated() {
     };
     for foreign in [
         Described::Unlabelled,
-        Described::Labelled(ours(MANAGED_BY, OTHER)),
-        Described::Labelled(ours("voidbot", INSTANCE)),
+        Described::Labelled(ours(MANAGED_BY, OTHER, MIND)),
+        Described::Labelled(ours("voidbot", INSTANCE, MIND)),
+        Described::Labelled(ours(MANAGED_BY, INSTANCE, "mind-commit-another")),
+        Described::Labelled(ours(MANAGED_BY, INSTANCE, "")),
     ] {
         let (embedder, index) = pair();
         index.plant(&collection(), foreign.clone());
@@ -196,7 +215,7 @@ fn a_collection_owned_by_another_instance_is_never_recreated() {
                 },
             },
         );
-        let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE));
+        let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
         projector.want(entries.iter().cloned());
         let error = projector.reconcile().expect_err("a foreign collection is refused");
         assert!(matches!(error, StepError::Refused(_)), "{foreign:?}: {error}");
@@ -216,7 +235,7 @@ fn a_vector_of_the_wrong_length_is_refused_and_nothing_is_dropped() {
     let (_root, mind) = mind_with_documents();
     let entries = mind.index_entries(None).unwrap();
     let (embedder, index) = pair();
-    let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE));
+    let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
     projector.want(entries.iter().cloned());
     projector.reconcile().unwrap();
     embedder.state.lock().unwrap().identity.dimensions = 8;
@@ -255,7 +274,7 @@ fn an_admission_replies_while_the_embedder_is_blocked() {
     let gate = Gate::shut();
     let embedder = FakeEmbedder::new("d1").behind(&gate);
     let index = FakeIndex::default();
-    let sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), mind.index_entries(None).unwrap(), quick());
+    let sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), mind.genesis_receipt_id().unwrap(), mind.index_entries(None).unwrap(), quick());
     let mut daemon = Daemon::new(mind, sink);
     daemon.index().wait_status(|status| *status == IndexStatus::Current);
 
@@ -283,7 +302,7 @@ fn a_failing_embedder_is_visible_in_whoami_and_retried_never_dropped() {
     let root = tempfile::tempdir().unwrap();
     let mind = Mind::open(root.path(), &slug(INSTANCE)).unwrap();
     let (embedder, index) = pair();
-    let sink = WorkerSink::spawn(embedder.clone(), index.clone(), &slug(INSTANCE), Vec::new(), quick());
+    let sink = WorkerSink::spawn(embedder.clone(), index.clone(), &slug(INSTANCE), None, Vec::new(), quick());
     let mut daemon = Daemon::new(mind, sink);
     daemon.index().wait_status(|status| *status == IndexStatus::Current);
 
@@ -313,7 +332,7 @@ fn a_refused_collection_is_reported_and_reread() {
     let entries = mind.index_entries(None).unwrap();
     let (embedder, index) = pair();
     index.plant(&collection(), Described::Unlabelled);
-    let sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), entries, quick());
+    let sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), mind.genesis_receipt_id().unwrap(), entries, quick());
     let mut daemon = Daemon::new(mind, sink);
     daemon.index().wait_status(|status| matches!(status, IndexStatus::Refused { attempts, .. } if *attempts >= 2));
     assert!(matches!(whoami_index(&mut daemon), IndexStatus::Refused { pending: 4, .. }));
@@ -452,13 +471,13 @@ fn the_embedders_address_is_not_part_of_the_collections_compatibility() {
     let repulled = TAGS.replace("ac6d", "beef");
     let index = FakeIndex::default();
 
-    let mut first = Projector::new(OllamaEmbedder::new(&stub(&routes).url, "m:1"), index.clone(), &slug(INSTANCE));
+    let mut first = Projector::new(OllamaEmbedder::new(&stub(&routes).url, "m:1"), index.clone(), &slug(INSTANCE), Some(MIND.into()));
     first.want(entries.iter().cloned());
     drain(&mut first);
     assert_eq!(counts(&index), (1, 1));
 
     // Another address, the same model and digest.
-    let mut moved = Projector::new(OllamaEmbedder::new(&stub(&routes).url, "m:1"), index.clone(), &slug(INSTANCE));
+    let mut moved = Projector::new(OllamaEmbedder::new(&stub(&routes).url, "m:1"), index.clone(), &slug(INSTANCE), Some(MIND.into()));
     moved.want(entries.iter().cloned());
     drain(&mut moved);
     assert_eq!(counts(&index), (1, 1));
@@ -466,7 +485,7 @@ fn the_embedders_address_is_not_part_of_the_collections_compatibility() {
     // The same model name re-pulled: another digest.
     let leaked: &'static str = Box::leak(repulled.into_boxed_str());
     let other = [("GET /api/tags", 200, leaked), routes[1], routes[2]];
-    let mut rebuilt = Projector::new(OllamaEmbedder::new(&stub(&other).url, "m:1"), index.clone(), &slug(INSTANCE));
+    let mut rebuilt = Projector::new(OllamaEmbedder::new(&stub(&other).url, "m:1"), index.clone(), &slug(INSTANCE), Some(MIND.into()));
     rebuilt.want(entries.iter().cloned());
     drain(&mut rebuilt);
     assert_eq!(counts(&index), (2, 2));
@@ -486,13 +505,14 @@ fn qdrant_describes_creates_lists_and_writes_what_the_projector_asks() {
     let labelled = stub(&[(
         "GET /collections/",
         200,
-        r#"{"result":{"config":{"metadata":{"managed_by":"huginn","instance":"yggdrasil","model":"m:1","model_digest":"ac6d","dimensions":4,"index_text_version":1}}}}"#,
+        r#"{"result":{"config":{"metadata":{"managed_by":"huginn","instance":"yggdrasil","mind":"mind-commit-first","model":"m:1","model_digest":"ac6d","dimensions":4,"index_text_version":1}}}}"#,
     )]);
     assert_eq!(
         QdrantIndex::new(&labelled.url).describe(&name).unwrap(),
         Described::Labelled(CollectionMeta {
             managed_by: "huginn".into(),
             instance: "yggdrasil".into(),
+            mind: "mind-commit-first".into(),
             model: "m:1".into(),
             model_digest: "ac6d".into(),
             dimensions: 4,
@@ -517,6 +537,7 @@ fn qdrant_describes_creates_lists_and_writes_what_the_projector_asks() {
     let meta = CollectionMeta {
         managed_by: MANAGED_BY.into(),
         instance: INSTANCE.into(),
+        mind: MIND.into(),
         model: "m:1".into(),
         model_digest: "ac6d".into(),
         dimensions: 4,
@@ -590,11 +611,141 @@ fn queued_entries_count_toward_every_status_that_has_a_pending_count() {
 #[test]
 fn dropping_the_sink_stops_the_worker() {
     let (embedder, index) = pair();
-    let sink = WorkerSink::spawn(embedder, index, &slug(INSTANCE), Vec::new(), quick());
+    let sink = WorkerSink::spawn(embedder, index, &slug(INSTANCE), Some(MIND.into()), Vec::new(), quick());
     sink.wait_status(|status| *status == IndexStatus::Current);
     let shared = Arc::downgrade(&sink.shared);
     drop(sink);
     while shared.upgrade().is_some() {
         std::thread::yield_now();
     }
+}
+
+/// F1. The promised curve, pure: 30 s doubling to a 10 min cap, never below
+/// the first delay and never past the cap. A retry that shrank would hot-loop
+/// against a dead Ollama.
+#[test]
+fn the_backoff_doubles_from_thirty_seconds_to_a_ten_minute_cap() {
+    let backoff = Backoff::default();
+    assert_eq!((backoff.initial, backoff.max), (Duration::from_secs(30), Duration::from_secs(600)));
+    let mut delay = backoff.initial;
+    let mut seen = vec![delay.as_secs()];
+    for _ in 0..7 {
+        let next = backoff.after(delay);
+        assert!(next >= delay && next >= backoff.initial, "the delay never shrinks: {delay:?} -> {next:?}");
+        assert!(next <= backoff.max, "the delay never passes the cap: {next:?}");
+        delay = next;
+        seen.push(delay.as_secs());
+    }
+    assert_eq!(seen, [30, 60, 120, 240, 480, 600, 600, 600]);
+    let small = Backoff { initial: Duration::from_millis(1), max: Duration::from_millis(3) };
+    assert_eq!(small.after(Duration::from_millis(1)), Duration::from_millis(2));
+    assert_eq!(small.after(Duration::from_millis(2)), Duration::from_millis(3));
+}
+
+/// F2. A collection lost while the daemon runs is found by the next failed
+/// write, recreated and refilled from what the projector knows, without a
+/// restart.
+#[test]
+fn a_collection_lost_after_startup_is_recreated_and_refilled() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut projector = projected(&embedder, &index, &entries[..3]);
+    assert_eq!(projector.progress_status(), IndexStatus::Current);
+    assert_eq!(index.holding(&collection()).len(), 3);
+
+    index.state.lock().unwrap().collections.remove(&collection());
+    projector.want(entries[3..].iter().cloned());
+    let error = projector.advance().expect_err("the write meets no collection");
+    assert!(matches!(error, StepError::Unavailable(_)), "{error}");
+    assert!(matches!(projector.failure_status(&error, 1), IndexStatus::Failing { pending: 1, .. }));
+
+    drain(&mut projector);
+    assert_eq!(index.state.lock().unwrap().recreated.len(), 2, "the collection was made again");
+    assert_eq!(index.holding(&collection()), point_ids(&entries), "and holds every document, not only the new one");
+    assert_eq!(projector.progress_status(), IndexStatus::Current);
+}
+
+/// F2. A model re-pulled with other dimensions fails one write, then the next
+/// attempt reads the new identity and rebuilds the collection to match.
+#[test]
+fn a_model_that_changes_dimensions_after_startup_rebuilds_the_collection() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut projector = projected(&embedder, &index, &entries[..3]);
+
+    embedder.state.lock().unwrap().identity.dimensions = 8;
+    projector.want(entries[3..].iter().cloned());
+    assert!(projector.advance().is_err(), "a vector of 8 does not fit a collection of 4");
+    drain(&mut projector);
+
+    let state = index.state.lock().unwrap();
+    assert_eq!(state.recreated.len(), 2);
+    assert_eq!(state.recreated.last().unwrap().1.dimensions, 8);
+    let stored = &state.collections[&collection()];
+    assert_eq!(stored.points.len(), 4);
+    assert!(stored.points.values().all(|point| point.vector.len() == 8));
+}
+
+/// F3. Two minds that share an instance name never share a collection: the
+/// second is refused, and the first's points, label and history are untouched.
+#[test]
+fn a_second_mind_of_the_same_name_is_refused_and_leaves_the_first_alone() {
+    let (_first_root, first) = mind_with_documents();
+    let (_second_root, second) = other_mind_of_the_same_name();
+    let (first_id, second_id) = (first.genesis_receipt_id().unwrap().unwrap(), second.genesis_receipt_id().unwrap().unwrap());
+    assert_ne!(first_id, second_id);
+
+    let (embedder, index) = pair();
+    let mut ours = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(first_id.clone()));
+    ours.want(first.index_entries(None).unwrap());
+    drain(&mut ours);
+    let held = index.holding(&collection());
+    assert_eq!(held.len(), 4);
+
+    let intruder = FakeEmbedder::new("d1");
+    let mut theirs = Projector::new(intruder.clone(), index.clone(), &slug(INSTANCE), Some(second_id));
+    theirs.want(second.index_entries(None).unwrap());
+    let error = theirs.advance().expect_err("another mind's collection is refused");
+    assert!(matches!(error, StepError::Refused(_)), "{error}");
+    assert!(matches!(theirs.failure_status(&error, 1), IndexStatus::Refused { .. }));
+
+    let state = index.state.lock().unwrap();
+    assert_eq!(state.recreated.len(), 1, "never rebuilt by the second mind");
+    assert_eq!(state.upserts.len(), 1, "never written by the second mind");
+    assert!(intruder.texts().is_empty());
+    let Described::Labelled(label) = &state.collections[&collection()].label else { panic!() };
+    assert_eq!(label.mind, first_id);
+    drop(state);
+    assert_eq!(index.holding(&collection()), held);
+}
+
+/// A mind with no receipt has no identity: nothing is reconciled and no
+/// collection is made, until the first admission reveals one.
+#[test]
+fn a_mind_without_an_identity_makes_no_collection_until_its_first_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let mind = Mind::open(root.path(), &slug(INSTANCE)).unwrap();
+    assert_eq!(mind.genesis_receipt_id().unwrap(), None);
+    let (embedder, index) = pair();
+    let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), None);
+    assert_eq!(projector.progress_status(), IndexStatus::Current);
+    assert_eq!(projector.advance().unwrap(), Advance::Idle);
+    assert!(index.state.lock().unwrap().collections.is_empty());
+
+    let sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), None, Vec::new(), quick());
+    let mut daemon = Daemon::new(mind, sink);
+    let seed = campaign_seed();
+    let without_text = vec![seed[0].clone(), seed[1].clone()];
+    committed(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, without_text)), now()));
+    for _ in 0..500 {
+        if index.state.lock().unwrap().collections.contains_key(&collection()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let state = index.state.lock().unwrap();
+    let Described::Labelled(label) = &state.collections[&collection()].label else { panic!("no collection was made") };
+    assert_eq!(Some(&label.mind), daemon.mind().genesis_receipt_id().unwrap().as_ref());
 }

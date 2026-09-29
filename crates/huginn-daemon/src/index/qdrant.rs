@@ -36,6 +36,7 @@ fn metadata_json(meta: &CollectionMeta) -> Value {
     json!({
         "managed_by": meta.managed_by,
         "instance": meta.instance,
+        "mind": meta.mind,
         "model": meta.model,
         "model_digest": meta.model_digest,
         "dimensions": meta.dimensions,
@@ -45,8 +46,9 @@ fn metadata_json(meta: &CollectionMeta) -> Value {
 
 /// What a collection's `config.metadata` says. A collection whose metadata
 /// does not name a writer and an instance is unlabelled; one that does but is
-/// missing the rest reads as an empty model, which will not match and will be
-/// rebuilt if the writer and the instance are ours.
+/// missing the rest reads as an empty mind or model, which will not match: an
+/// empty mind is refused as another's, an empty model is rebuilt when the
+/// writer, the instance and the mind are ours.
 fn described(metadata: &Value) -> Described {
     let text = |key: &str| metadata[key].as_str().map(str::to_owned);
     let (Some(managed_by), Some(instance)) = (text("managed_by"), text("instance")) else {
@@ -56,6 +58,7 @@ fn described(metadata: &Value) -> Described {
     Described::Labelled(CollectionMeta {
         managed_by,
         instance,
+        mind: text("mind").unwrap_or_default(),
         model: text("model").unwrap_or_default(),
         model_digest: text("model_digest").unwrap_or_default(),
         dimensions: number("dimensions"),

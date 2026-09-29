@@ -18,11 +18,37 @@
 //! `Embedder` (`ollama`) and `VectorIndex` (`qdrant`). Those two files are the
 //! xenos boundary; nothing else in the organ speaks HTTP or JSON.
 //!
-//! Stated limits. The inbox is unbounded: it holds at most the documents
-//! admitted while the index is unreachable, each of which is also in the mind.
-//! The model identity is read at reconciliation only, so a model re-pulled
-//! while the daemon runs takes effect at the next start, and vectors of the
-//! wrong length are refused rather than written.
+//! Reconciliation is not a startup event. After any failed step the worker
+//! reconciles again before it writes anything else: a collection lost while the
+//! daemon runs is recreated and refilled, and a model re-pulled with other
+//! dimensions rebuilds the collection, all without a restart. Refilling needs
+//! the text, so the projector keeps every entry it was given (`known`) beside
+//! the ids it still owes (`wanted`): the whole indexable mind's text is held in
+//! memory for the process's life.
+//!
+//! A collection belongs to a mind, not to a name. It is labelled with the
+//! instance and with the mind's genesis receipt id (`Mind::genesis_receipt_id`),
+//! and a collection labelled for another mind of the same instance name, or
+//! for none, is refused and left untouched. A mind with no receipt yet has no
+//! identity, so nothing is reconciled until its first admission.
+//!
+//! Stated limits.
+//!
+//! - The inbox is unbounded: it holds at most the documents admitted while the
+//!   index is unreachable, each of which is also in the mind.
+//! - Vectors of the wrong length are refused rather than written.
+//! - The real input limit is the embedding model's context, not the 16 KiB
+//!   `INDEX_TEXT_MAX_BYTES` bound. `qwen3-embedding:0.6b` has a 4096 token
+//!   context, so dense text is cut at about 4k tokens and the tail of a long
+//!   document is not searchable. Ollama truncates silently by default; its
+//!   `truncate: false` option refuses over-context input instead, which would
+//!   fail the whole batch forever on one dense document, so it is not set.
+//!   There is no chunking.
+//! - Points are never deleted. Withdrawn and superseded documents are indexed
+//!   on purpose and the payload carries no status. Cut 11b's semantic read must
+//!   therefore join every hit back through the mind: drop ids the mind does not
+//!   hold, and filter by resolution using RS-3's in-force derivation through
+//!   selection, never by anything in the payload.
 
 pub mod ollama;
 pub mod qdrant;
@@ -63,6 +89,8 @@ pub struct ModelIdentity {
 pub struct CollectionMeta {
     pub managed_by: String,
     pub instance: String,
+    /// The mind's genesis receipt id: the identity the instance name lacks.
+    pub mind: String,
     pub model: String,
     pub model_digest: String,
     pub dimensions: u32,
@@ -165,20 +193,35 @@ pub struct Projector<E: Embedder, V: VectorIndex> {
     embedder: E,
     index: V,
     instance: String,
+    /// `None` until the mind's first admission; nothing is reconciled before.
+    mind: Option<String>,
     collection: String,
-    wanted: BTreeMap<String, IndexEntry>,
+    /// Every entry ever given, by document id: refilling a lost collection
+    /// needs text the mind's writes have already gone past.
+    known: BTreeMap<String, IndexEntry>,
+    /// The ids in `known` whose points the collection may lack.
+    wanted: BTreeSet<String>,
     dimensions: Option<u32>,
 }
 
 impl<E: Embedder, V: VectorIndex> Projector<E, V> {
-    pub fn new(embedder: E, index: V, instance: &Slug) -> Self {
+    pub fn new(embedder: E, index: V, instance: &Slug, mind: Option<String>) -> Self {
         Self {
             embedder,
             index,
             instance: instance.0.clone(),
+            mind,
             collection: collection_name(instance),
-            wanted: BTreeMap::new(),
+            known: BTreeMap::new(),
+            wanted: BTreeSet::new(),
             dimensions: None,
+        }
+    }
+
+    /// The mind's identity, once it has one. It never changes after that.
+    fn identify(&mut self, mind: String) {
+        if self.mind.is_none() {
+            self.mind = Some(mind);
         }
     }
 
@@ -186,7 +229,8 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     /// the same document.
     pub fn want(&mut self, entries: impl IntoIterator<Item = IndexEntry>) {
         for entry in entries {
-            self.wanted.insert(entry.id.id.0.clone(), entry);
+            self.wanted.insert(entry.id.id.0.clone());
+            self.known.insert(entry.id.id.0.clone(), entry);
         }
     }
 
@@ -196,7 +240,21 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
 
     /// One step: reconcile first, then one batch at a time until nothing is
     /// wanted.
+    ///
+    /// Any failure forgets the reconciliation: the next attempt starts from
+    /// the model and the collection as they are then.
     pub fn advance(&mut self) -> Result<Advance, StepError> {
+        let stepped = self.step();
+        if stepped.is_err() {
+            self.dimensions = None;
+        }
+        stepped
+    }
+
+    fn step(&mut self) -> Result<Advance, StepError> {
+        if self.mind.is_none() {
+            return Ok(Advance::Idle);
+        }
         if self.dimensions.is_none() {
             self.reconcile()?;
             return Ok(Advance::Progressed);
@@ -211,13 +269,17 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     /// The only place a point is judged missing. Reads the model identity,
     /// makes the collection agree with it (creating it, or rebuilding it when
     /// the model, its digest, its dimensions or the text version differ),
-    /// refuses a collection that is not this instance's, then drops from
-    /// `wanted` every entry whose point the collection already holds.
+    /// refuses a collection that is not this mind's, then makes `wanted` every
+    /// known entry whose point the collection does not hold.
     pub fn reconcile(&mut self) -> Result<(), StepError> {
+        let Some(mind) = self.mind.clone() else {
+            return Err(StepError::Unavailable(anyhow::anyhow!("the mind has no identity yet")));
+        };
         let identity = self.embedder.model_identity().context("reading the embedding model's identity")?;
         let wanted = CollectionMeta {
             managed_by: MANAGED_BY.into(),
             instance: self.instance.clone(),
+            mind: mind.clone(),
             model: identity.name.clone(),
             model_digest: identity.digest.clone(),
             dimensions: identity.dimensions,
@@ -231,17 +293,19 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
                     self.collection
                 )));
             }
-            Described::Labelled(found) if found.managed_by != MANAGED_BY || found.instance != self.instance => {
+            Described::Labelled(found)
+                if found.managed_by != MANAGED_BY || found.instance != self.instance || found.mind != mind =>
+            {
                 return Err(StepError::Refused(format!(
-                    "collection {} is managed by {:?} for instance {:?}; this organ serves {:?}",
-                    self.collection, found.managed_by, found.instance, self.instance
+                    "collection {} is managed by {:?} for instance {:?}, mind {:?}; this organ serves instance {:?}, mind {:?}",
+                    self.collection, found.managed_by, found.instance, found.mind, self.instance, mind
                 )));
             }
             Described::Labelled(found) if found != wanted => self.recreate(&wanted)?,
             Described::Labelled(_) => {}
         }
         let present = self.index.ids(&self.collection).context("listing the collection's points")?;
-        self.wanted.retain(|document_id, _| !present.contains(&point_id(document_id)));
+        self.wanted = self.known.keys().filter(|document_id| !present.contains(&point_id(document_id))).cloned().collect();
         self.dimensions = Some(identity.dimensions);
         Ok(())
     }
@@ -259,7 +323,8 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
 
     fn flush(&mut self) -> Result<()> {
         let dimensions = self.dimensions.context("flush before reconcile")? as usize;
-        let batch: Vec<IndexEntry> = self.wanted.values().take(BATCH).cloned().collect();
+        let batch: Vec<IndexEntry> =
+            self.wanted.iter().take(BATCH).filter_map(|document_id| self.known.get(document_id)).cloned().collect();
         if batch.is_empty() {
             return Ok(());
         }
@@ -296,6 +361,7 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     /// The health after a step that did not fail.
     pub fn progress_status(&self) -> IndexStatus {
         match (self.dimensions, self.pending()) {
+            (None, 0) if self.mind.is_none() => IndexStatus::Current,
             (None, pending) => IndexStatus::Reconciling { pending },
             (Some(_), 0) => IndexStatus::Current,
             (Some(_), pending) => IndexStatus::Behind { pending },
@@ -335,6 +401,8 @@ impl Backoff {
 
 struct Shared {
     inbox: Vec<IndexEntry>,
+    /// The mind's identity, once a commit has revealed it to a mind that had none.
+    mind: Option<String>,
     status: IndexStatus,
     closed: bool,
 }
@@ -345,14 +413,14 @@ fn lock(shared: &Lock) -> MutexGuard<'_, Shared> {
     shared.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// With no timeout, blocks until the inbox holds something or the sink is
-/// closed. With one, sleeps out the backoff whatever arrives: a failing index
+/// With no timeout, blocks until the inbox holds something, the mind reveals
+/// its identity, or the sink is closed. With one, sleeps out the backoff whatever arrives: a failing index
 /// is retried on its schedule, not once per admission.
 fn wait_for_work(shared: &Lock, timeout: Option<Duration>) {
     let mut guard = lock(shared);
     match timeout {
         None => {
-            while guard.inbox.is_empty() && !guard.closed {
+            while guard.inbox.is_empty() && guard.mind.is_none() && !guard.closed {
                 guard = shared.1.wait(guard).unwrap_or_else(|poisoned| poisoned.into_inner());
             }
         }
@@ -396,13 +464,16 @@ fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Loc
     let mut failures = 0_u32;
     let mut delay = backoff.initial;
     loop {
-        let inbox = {
+        let (mind, inbox) = {
             let mut guard = lock(&shared);
             if guard.closed {
                 return;
             }
-            std::mem::take(&mut guard.inbox)
+            (guard.mind.take(), std::mem::take(&mut guard.inbox))
         };
+        if let Some(mind) = mind {
+            projector.identify(mind);
+        }
         projector.want(inbox);
         // While a failure is being reported, the report stands until an
         // attempt succeeds: publishing progress between retries would flicker.
@@ -442,25 +513,37 @@ fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Loc
 /// it: a call in flight ends with its own timeout or with the process.
 pub struct WorkerSink {
     shared: Lock,
+    /// Whether the worker has been told the mind's identity.
+    identified: bool,
 }
 
 impl WorkerSink {
-    /// Starts the worker. `startup` is every indexable document the mind holds
-    /// now; the worker's first act is to reconcile the collection against it.
-    pub fn spawn<E, V>(embedder: E, index: V, instance: &Slug, startup: Vec<IndexEntry>, backoff: Backoff) -> Self
+    /// Starts the worker. `mind` is the mind's genesis receipt id, `None` for
+    /// a mind not yet written. `startup` is every indexable document the mind
+    /// holds now; the worker's first act is to reconcile the collection
+    /// against it.
+    pub fn spawn<E, V>(
+        embedder: E,
+        index: V,
+        instance: &Slug,
+        mind: Option<String>,
+        startup: Vec<IndexEntry>,
+        backoff: Backoff,
+    ) -> Self
     where
         E: Embedder + Send + 'static,
         V: VectorIndex + Send + 'static,
     {
-        let mut projector = Projector::new(embedder, index, instance);
+        let identified = mind.is_some();
+        let mut projector = Projector::new(embedder, index, instance, mind);
         projector.want(startup);
         let shared: Lock = Arc::new((
-            Mutex::new(Shared { inbox: Vec::new(), status: projector.progress_status(), closed: false }),
+            Mutex::new(Shared { inbox: Vec::new(), mind: None, status: projector.progress_status(), closed: false }),
             Condvar::new(),
         ));
         let worker = Arc::clone(&shared);
         std::thread::spawn(move || work(projector, worker, backoff));
-        Self { shared }
+        Self { shared, identified }
     }
 
     /// Blocks until the health satisfies `predicate`, and returns it. For
@@ -494,10 +577,17 @@ impl Drop for WorkerSink {
 impl<S: MindStore> IndexSink<S> for WorkerSink {
     fn committed(&mut self, mind: &Mind<S>, writes: &[PipelineRef]) -> Result<()> {
         let entries = mind.index_entries(Some(writes))?;
-        if entries.is_empty() {
+        let revealed = if self.identified { None } else { mind.genesis_receipt_id()? };
+        if entries.is_empty() && revealed.is_none() {
             return Ok(());
         }
-        lock(&self.shared).inbox.extend(entries);
+        let mut guard = lock(&self.shared);
+        guard.inbox.extend(entries);
+        if let Some(revealed) = revealed {
+            guard.mind = Some(revealed);
+            self.identified = true;
+        }
+        drop(guard);
         self.shared.1.notify_all();
         Ok(())
     }
