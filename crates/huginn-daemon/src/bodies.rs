@@ -31,9 +31,6 @@ use cultnet_rs::{CultMeshCdnArtifactManifest, CultMeshCdnChunk};
 /// The size of one chunk of a deferred body. Four fit one send with room for a
 /// control-plane answer beside them on the same session.
 pub const DEFERRED_CHUNK_BYTES: usize = 256 * 1024;
-/// The largest answer that is deferred rather than refused, measured on the
-/// encoded payload.
-pub const MAX_DEFERRED_BODY_BYTES: u64 = 64 * 1024 * 1024;
 /// What the daemon keeps across all deferred bodies.
 pub const DEFERRED_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -163,6 +160,7 @@ impl DeferredBodies {
 mod tests {
     use super::*;
     use cultnet_rs::pack_content;
+    use huginn_mind::MAX_DEFERRED_BODY_BYTES;
 
     /// The three numbers a client author is told, spelled out: a chunk of
     /// 256 KiB, a largest deferred body of 64 MiB, a budget of 256 MiB that

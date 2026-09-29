@@ -23,6 +23,11 @@ pub const MIND_SERVICE_ID: &str = "huginn.mind";
 pub const MIND_REQUEST_SCHEMA: &str = "huginn.mind_request.v1";
 pub const MIND_RESPONSE_SCHEMA: &str = "huginn.mind_response.v1";
 
+/// The largest answer that is deferred rather than refused, measured on the
+/// encoded payload. The daemon refuses past it and a client caps its fetch at
+/// it, so both sides read one number.
+pub const MAX_DEFERRED_BODY_BYTES: u64 = 64 * 1024 * 1024;
+
 /// The published JSON schema of each wire type, as the catalog advertises it.
 /// The files are derived from the types below and pinned byte for byte by
 /// `published_wire_schemas_match_derivation`, so the catalog cannot advertise

@@ -76,10 +76,11 @@ use huginn_mind::wire::{
 use huginn_mind::{Mind, MindRefusal, MindStore, OwnedRedbMessagePackBackingStore};
 
 use crate::bodies::{
-    DEFERRED_BUDGET_BYTES, DEFERRED_CHUNK_BYTES, DeferredBodies, MAX_DEFERRED_BODY_BYTES,
+    DEFERRED_BUDGET_BYTES, DEFERRED_CHUNK_BYTES, DeferredBodies,
 };
 use crate::daemon::{Daemon, Handled, IndexSink, Search, SearchTicket, runtime_id};
 use huginn_mind::envelope::{OperationFailure, decode_request, encode_failure, encode_response};
+use huginn_mind::MAX_DEFERRED_BODY_BYTES;
 use crate::index::{Backoff, Embedder, VectorIndex, WorkerSink};
 
 /// What the loop does when nothing is waiting. A deferred body untouched for
