@@ -48,7 +48,7 @@ pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvena
 pub use refusal::MindRefusal;
 pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{
-    HuginnMindRequest, HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA,
+    DeferredAnswer, HuginnMindRequest, HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA,
     MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus,
 };
 
