@@ -318,7 +318,8 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
     use cultnet_rs::{CultMesh, CultMeshRudpSocketOptions};
     use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, MindStatus};
-    use huginn_mind::{MindRefusal, PipelineAdmissionOutcome, PipelineQuery};
+    use cultnet_rs::{FieldPredicate, Selection};
+    use huginn_mind::{MindRefusal, PipelineAdmissionOutcome, PipelinePageItems};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -408,7 +409,7 @@ mod tests {
 
         // A mind's refusal is an answer on the response schema, not a failure
         // of the envelope: the client decodes it as the typed refusal it is.
-        let read = HuginnMindRequest::Query { instance: slug(OTHER), query: PipelineQuery::default() };
+        let read = HuginnMindRequest::Query { instance: slug(OTHER), selection: Selection::default(), semantic: None };
         let reply = answer(&mut daemon, &registry, encode_request("m-r", &read, None).unwrap(), now());
         let CultNetMessage::OperationResponse { status, payload_schema, .. } = &reply else {
             panic!("expected an operation response, got {reply:?}");
@@ -483,7 +484,7 @@ mod tests {
 
         let requests = [
             ("m-a", HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)]))),
-            ("m-b", HuginnMindRequest::Query { instance: slug(INSTANCE), query: PipelineQuery::default() }),
+            ("m-b", HuginnMindRequest::Query { instance: slug(INSTANCE), selection: Selection::default(), semantic: None }),
         ];
         for (client, (message_id, request)) in clients.iter_mut().zip(requests.iter()) {
             client.send_schema_message(&encode_request(message_id, request, None).unwrap()).unwrap();
@@ -587,7 +588,17 @@ mod tests {
         assert!(client.connected());
 
         let reads = [
-            ("m-q", HuginnMindRequest::Query { instance: slug(INSTANCE), query: PipelineQuery::default() }),
+            // The whole documents: a header page is small by construction, so
+            // the transport's bound is measured on the projection that can
+            // exceed it.
+            (
+                "m-q",
+                HuginnMindRequest::Query {
+                    instance: slug(INSTANCE),
+                    selection: Selection { projection: "document".into(), ..Selection::default() },
+                    semantic: None,
+                },
+            ),
             ("m-v", HuginnMindRequest::View { instance: slug(INSTANCE), id: wide }),
         ];
         let stopping = Arc::new(AtomicBool::new(false));
@@ -906,18 +917,24 @@ mod tests {
 
     /// One cut spec's own reference, by its cut label.
     fn spec_ref(daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, NoIndex>, cut: &str) -> PipelineRef {
-        let query = PipelineQuery {
-            kinds: vec![PipelineKind::CutSpec],
-            cut: Some(cut.into()),
-            ..PipelineQuery::default()
+        let selection = Selection {
+            schemas: Some(vec![PipelineKind::CutSpec.type_id().into()]),
+            fields: Some(vec![FieldPredicate {
+                index: "cut".into(),
+                op: "any_of".into(),
+                values: Some(vec![cut.into()]),
+                number: None,
+            }]),
+            ..Selection::default()
         };
         let HuginnMindResponse::Query(page) =
-            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), query }, now())
+            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection, semantic: None }, now())
         else {
             panic!("expected a page");
         };
         assert_eq!(page.matched, 1, "one cut spec is labelled {cut}");
-        page.items[0].id.clone()
+        let PipelinePageItems::Headers(headers) = &page.items else { panic!("expected headers") };
+        headers[0].id.clone()
     }
 
     /// Ruling 15 as an order in the one place both happen. Both gates are shut

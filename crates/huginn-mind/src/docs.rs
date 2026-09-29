@@ -36,7 +36,7 @@ pub(crate) struct Docs {
     pub(crate) batch: Vec<Staged>,
 }
 
-fn kind_of_type(type_id: &str) -> Option<PipelineKind> {
+pub(crate) fn kind_of_type(type_id: &str) -> Option<PipelineKind> {
     PipelineKind::ALL.iter().copied().find(|kind| kind.type_id() == type_id)
 }
 

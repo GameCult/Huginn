@@ -85,7 +85,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
                 Ok(view) => HuginnMindResponse::View(view),
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
-            HuginnMindRequest::Query { query, .. } => match self.mind.query(&query) {
+            HuginnMindRequest::Query { selection, semantic, .. } => match self.mind.query(&selection, semantic.as_ref()) {
                 Ok(page) => HuginnMindResponse::Query(page),
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
@@ -104,7 +104,8 @@ pub(crate) mod tests {
         StructuralDelta, Title, VerificationTest,
     };
     use huginn_mind::wire::MindStatus;
-    use huginn_mind::{Faculty, PipelineAdmissionBatch, PipelineProvenance, PipelineQuery, PipelineStatus, SemanticQuery};
+    use cultnet_rs::Selection;
+    use huginn_mind::{Faculty, PipelineAdmissionBatch, PipelineProvenance, PipelinePageItems, PipelineStatus, SemanticQuery};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -375,19 +376,29 @@ pub(crate) mod tests {
         );
         assert_eq!(daemon.runtime_id(), "huginn-yggdrasil");
 
-        let query = PipelineQuery { kinds: vec![PipelineKind::Instance], ..PipelineQuery::default() };
-        let HuginnMindResponse::Query(page) =
-            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), query }, now())
-        else {
+        let instances = Selection { schemas: Some(vec![PipelineKind::Instance.type_id().into()]), ..Selection::default() };
+        let HuginnMindResponse::Query(page) = daemon.handle(
+            HuginnMindRequest::Query { instance: slug(INSTANCE), selection: instances.clone(), semantic: None },
+            now(),
+        ) else {
             panic!("expected a page");
         };
         assert_eq!(page.matched, 1);
-        assert_eq!(page.items[0].admission.provenance, provenance());
-        assert_eq!(page.items[0].status, PipelineStatus::InForce);
+        let PipelinePageItems::Headers(headers) = &page.items else { panic!("the default projection is a header") };
+        assert_eq!(headers[0].admission.provenance, provenance());
+        assert_eq!(headers[0].status, huginn_mind::PipelineStatusSummary::InForce);
 
         let id = writes[0].clone();
+        let whole = Selection { projection: "document".into(), ..instances };
+        let HuginnMindResponse::Query(page) =
+            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection: whole, semantic: None }, now())
+        else {
+            panic!("expected a page");
+        };
+        let PipelinePageItems::Documents(views) = &page.items else { panic!("the document projection is the view") };
+        assert_eq!(views[0].status, PipelineStatus::InForce);
         let view = daemon.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id: id.clone() }, now());
-        assert_eq!(view, HuginnMindResponse::View(Some(page.items[0].clone())));
+        assert_eq!(view, HuginnMindResponse::View(Some(views[0].clone())));
     }
 
     /// Ruling 14 across the transport, on both sides: the mind refuses a read
@@ -402,7 +413,7 @@ pub(crate) mod tests {
         };
         let foreign = MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() };
 
-        let query = HuginnMindRequest::Query { instance: slug(OTHER), query: PipelineQuery::default() };
+        let query = HuginnMindRequest::Query { instance: slug(OTHER), selection: Selection::default(), semantic: None };
         assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(foreign.clone()));
 
         let admit = HuginnMindRequest::Admit(batch(OTHER, vec![identity(OTHER)]));
@@ -437,7 +448,7 @@ pub(crate) mod tests {
         assert_eq!(CASED.to_ascii_lowercase(), INSTANCE);
         for declared in [NEAR, PREFIXED, CASED] {
             let refusal = MindRefusal::ForeignInstance { declared: declared.into(), mind: INSTANCE.into() };
-            let query = HuginnMindRequest::Query { instance: slug(declared), query: PipelineQuery::default() };
+            let query = HuginnMindRequest::Query { instance: slug(declared), selection: Selection::default(), semantic: None };
             assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(refusal.clone()), "{declared}");
             let view = HuginnMindRequest::View { instance: slug(declared), id: writes[0].clone() };
             assert_eq!(daemon.handle(view, now()), HuginnMindResponse::Refused(refusal.clone()), "{declared}");
@@ -472,7 +483,7 @@ pub(crate) mod tests {
             value: fullwidth.into(),
         });
 
-        let query = HuginnMindRequest::Query { instance: slug(fullwidth), query: PipelineQuery::default() };
+        let query = HuginnMindRequest::Query { instance: slug(fullwidth), selection: Selection::default(), semantic: None };
         assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(expected.clone()));
 
         let view = HuginnMindRequest::View {
@@ -508,7 +519,7 @@ pub(crate) mod tests {
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(expected.clone()))
         );
 
-        let query = HuginnMindRequest::Query { instance: slug(fullwidth), query: PipelineQuery::default() };
+        let query = HuginnMindRequest::Query { instance: slug(fullwidth), selection: Selection::default(), semantic: None };
         assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(expected));
     }
 
@@ -535,14 +546,11 @@ pub(crate) mod tests {
 
         // A semantic query is unavailable until Cut 11 wires an index, and the
         // detail is the mind's own sentence.
-        let query = PipelineQuery {
-            semantic: Some(SemanticQuery { text: "who owns the state".into(), top_k: 4 }),
-            ..PipelineQuery::default()
-        };
+        let semantic = Some(SemanticQuery { text: "who owns the state".into(), top_k: 4 });
         let unwired =
             MindRefusal::Unavailable { detail: "semantic query: the index is not wired (Cut 11)".into() };
         assert_eq!(
-            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), query }, now()),
+            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection: Selection::default(), semantic }, now()),
             HuginnMindResponse::Refused(unwired)
         );
 
@@ -553,9 +561,45 @@ pub(crate) mod tests {
             PipelineRef { kind: PipelineKind::Question, id: Short(format!("{CAMPAIGN}:question:Q1")) };
         let present = HuginnMindRequest::View { instance: slug(INSTANCE), id: absent };
         assert_eq!(daemon.handle(present, now()), HuginnMindResponse::View(None));
-        let plain = HuginnMindRequest::Query { instance: slug(INSTANCE), query: PipelineQuery::default() };
+        let plain = HuginnMindRequest::Query { instance: slug(INSTANCE), selection: Selection::default(), semantic: None };
         let HuginnMindResponse::Query(page) = daemon.handle(plain, now()) else { panic!("expected a page") };
         assert_eq!(page.matched, 1);
+    }
+
+    /// A refusal of the selection crosses the dispatch as itself: typed, on
+    /// the field the client sent, and never swallowed into an empty page or
+    /// rewrapped as an unavailable store. A stale cursor is the organ's own
+    /// defect, so a valid walk never meets it.
+    #[test]
+    fn a_selection_refusal_crosses_the_dispatch_as_itself() {
+        let (_root, mut daemon) = seeded();
+        let ask = |daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, NoIndex>, selection: Selection| {
+            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection, semantic: None }, now())
+        };
+        let predicate = |index: &str, value: &str| Selection {
+            fields: Some(vec![cultnet_rs::FieldPredicate {
+                index: index.into(),
+                op: "any_of".into(),
+                values: Some(vec![value.into()]),
+                number: None,
+            }]),
+            ..Selection::default()
+        };
+        let HuginnMindResponse::Refused(MindRefusal::SelectionInvalid { field, .. }) =
+            ask(&mut daemon, predicate("nonsense", "x"))
+        else {
+            panic!("an undeclared alias is the substrate's refusal");
+        };
+        assert_eq!(field, "fields[0].index");
+        let HuginnMindResponse::Refused(MindRefusal::SelectionInvalid { field, value, .. }) =
+            ask(&mut daemon, predicate("repo", "a/b/c"))
+        else {
+            panic!("a value outside its domain is the organ's refusal");
+        };
+        assert_eq!((field.as_str(), value.as_deref()), ("fields[0].values", Some("a/b/c")));
+        let garbled = Selection { cursor: Some("not a cursor".into()), ..Selection::default() };
+        assert!(matches!(ask(&mut daemon, garbled), HuginnMindResponse::Refused(MindRefusal::CursorInvalid { .. })));
+        assert_eq!(ask(&mut daemon, predicate("repo", "a/b/c")).status(), "rejected");
     }
 
     /// Cut 11's seam: the index is handed every landed write, derived ones

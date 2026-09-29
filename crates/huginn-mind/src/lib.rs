@@ -10,8 +10,9 @@
 //! cross-document rule, every derived write, and the replay check, in one
 //! ordered path that `admit`, the daemon's sink and the hand-off all share.
 //!
-//! The read side derives status, joins the receipts and answers typed queries
-//! through the same `docs` the rules use; nothing is stored for it.
+//! The read side derives status, joins the receipts and answers one typed
+//! selection (CultNet's, over rows this crate supplies) through the same
+//! `docs` the rules use; nothing is stored for it.
 //!
 //! The wire vocabulary is here too, so the daemon and the client share one set
 //! of types.
@@ -26,6 +27,7 @@
 pub mod admission;
 mod docs;
 pub mod mind;
+mod rows;
 pub mod query;
 pub mod receipt;
 pub mod refusal;
@@ -39,8 +41,8 @@ pub use docs::CitationRole;
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
 pub use mind::{HuginnMindEpoch, Mind};
 pub use query::{
-    AdmissionFacts, PipelineDocumentView, PipelineQuery, PipelineQueryPage, PipelineStatus, QUERY_LIMIT_MAX,
-    SemanticQuery,
+    AdmissionFacts, PipelineDocumentSummary, PipelineDocumentView, PipelineEdge, PipelineFacts, PipelinePageItems,
+    PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, SUMMARY_MAX_BYTES, SemanticQuery,
 };
 pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
 pub use refusal::MindRefusal;

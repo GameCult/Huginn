@@ -5,13 +5,14 @@
 //! names a transport.
 
 use cultcache_rs::DatabaseEntry;
+use cultnet_rs::Selection;
 use epiphany_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Slug};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::admission::{PipelineAdmissionBatch, PipelineAdmissionOutcome};
 use crate::mind::Mind;
-use crate::query::{PipelineDocumentView, PipelineQuery, PipelineQueryPage};
+use crate::query::{PipelineDocumentView, PipelineSelectionPage, SemanticQuery};
 use crate::receipt::HuginnCommitReceipt;
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
@@ -31,6 +32,15 @@ pub const MIND_REQUEST_SCHEMA_JSON: &str =
 pub const MIND_RESPONSE_SCHEMA_JSON: &str =
     include_str!("../../../schemas/cultnet/huginn.mind_response.v1.schema.json");
 
+/// The request's `selection` is CultNet's, and its published schema is
+/// CultLib's: a `$ref` to the `$id` it publishes, so one owner holds the
+/// selection's shape and nothing here copies it.
+fn selection_ref(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "$ref": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.selection.schema.json"
+    })
+}
+
 /// Every operation a mind answers. `Admit` carries the batch whole because the
 /// batch already names the instance and the asker; a second `instance` beside
 /// it would be two declarations. Every read names the instance because ruling
@@ -42,7 +52,12 @@ pub enum HuginnMindRequest {
     Whoami,
     Admit(PipelineAdmissionBatch),
     View { instance: Slug, id: PipelineRef },
-    Query { instance: Slug, query: PipelineQuery },
+    Query {
+        instance: Slug,
+        #[schemars(schema_with = "selection_ref")]
+        selection: Selection,
+        semantic: Option<SemanticQuery>,
+    },
 }
 
 impl HuginnMindRequest {
@@ -74,7 +89,7 @@ pub enum HuginnMindResponse {
     Whoami(MindStatus),
     Admit(PipelineAdmissionOutcome),
     View(Option<PipelineDocumentView>),
-    Query(PipelineQueryPage),
+    Query(PipelineSelectionPage),
     Refused(MindRefusal),
 }
 
@@ -127,6 +142,7 @@ impl<S: MindStore> Mind<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::PipelinePageItems;
     use crate::fixtures::{CAMPAIGN, INSTANCE, OTHER_INSTANCE, instance, provenance, r, seeded, slug};
     use crate::receipt::Faculty;
 
@@ -140,7 +156,7 @@ mod tests {
             HuginnMindRequest::Whoami,
             HuginnMindRequest::Admit(batch),
             HuginnMindRequest::View { instance: slug(INSTANCE), id: r(PipelineKind::Campaign, CAMPAIGN) },
-            HuginnMindRequest::Query { instance: slug(OTHER_INSTANCE), query: PipelineQuery::default() },
+            HuginnMindRequest::Query { instance: slug(OTHER_INSTANCE), selection: Selection::default(), semantic: None },
         ]
     }
 
@@ -152,7 +168,13 @@ mod tests {
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Conflict { identities: vec![] }),
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(refusal.clone())),
             HuginnMindResponse::View(None),
-            HuginnMindResponse::Query(PipelineQueryPage { items: vec![], matched: 0 }),
+            HuginnMindResponse::Query(PipelineSelectionPage {
+                matched: 0,
+                as_of: 1,
+                next: None,
+                items: PipelinePageItems::Headers(vec![]),
+                edges: None,
+            }),
             HuginnMindResponse::Refused(refusal),
         ]
     }
@@ -195,5 +217,10 @@ mod tests {
         let response = serde_json::to_string_pretty(&schemars::schema_for!(HuginnMindResponse)).unwrap();
         assert_eq!(MIND_REQUEST_SCHEMA_JSON.replace("\r\n", "\n"), request);
         assert_eq!(MIND_RESPONSE_SCHEMA_JSON.replace("\r\n", "\n"), response);
+        // The selection is CultLib's, referenced by the `$id` it publishes and
+        // not copied into this schema.
+        let selection = "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.selection.schema.json";
+        assert!(request.contains(&format!("\"$ref\": \"{selection}\"")));
+        assert!(!request.contains("\"cursor\""), "no second copy of the selection's shape");
     }
 }

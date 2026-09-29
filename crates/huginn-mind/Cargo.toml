@@ -8,12 +8,16 @@ publish.workspace = true
 # The organ's rule engine: storage, identity and admission of one instance's
 # mind. Document shape, bounds, formats and keys come from `epiphany-pipeline`;
 # the store comes from CultLib's Rust CultCache at the same rev Epiphany pins,
-# so the leaf's wrappers and this crate's cache are one `cultcache-rs`. No
-# network, no socket, no index: those are the daemon's (Cut 10, Cut 11).
+# so the leaf's wrappers and this crate's cache are one `cultcache-rs`. The
+# read side selects through CultNet's typed selection (`cultnet-rs`, the same
+# rev the daemon pins): the selection's vocabulary and evaluator are the
+# substrate's, this crate supplies the rows. No socket, no index: those are the
+# daemon's (Cut 10, Cut 11).
 [dependencies]
 anyhow = "1"
 chrono = "0.4.44"
 cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "6251cbcd37c12ef3f0c1cc50063a03369225b7ac", package = "cultcache-rs" }
+cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "6251cbcd37c12ef3f0c1cc50063a03369225b7ac", package = "cultnet-rs" }
 epiphany-pipeline = { git = "https://github.com/GameCult/Epiphany.git", rev = "4891f2e59008efeb262197564eddaa75bc3c75ea", package = "epiphany-pipeline" }
 rmp-serde = "1"
 schemars = "1"

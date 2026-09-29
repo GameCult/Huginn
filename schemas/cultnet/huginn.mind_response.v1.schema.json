@@ -50,7 +50,7 @@
       "type": "object",
       "properties": {
         "Query": {
-          "$ref": "#/$defs/PipelineQueryPage"
+          "$ref": "#/$defs/PipelineSelectionPage"
         }
       },
       "additionalProperties": false,
@@ -73,7 +73,7 @@
   ],
   "$defs": {
     "AdmissionFacts": {
-      "description": "What admission recorded about a document when it landed: the receipt that\nwrote it, the `now` that receipt was taken at, who asked, and the\nreceipt's ordinal. `ordinal` is display-only here until RS-3 makes it the\nread side's order.",
+      "description": "What admission recorded about a document when it landed: the receipt that\nwrote it, the `now` that receipt was taken at, who asked, and the\nreceipt's ordinal, which is the read side's order and its snapshot\nposition.",
       "type": "object",
       "properties": {
         "admitted_at": {
@@ -151,6 +151,27 @@
         "forbidden_writers",
         "shared_paths",
         "deletion_line"
+      ]
+    },
+    "CitationRole": {
+      "description": "The referring field of a citation edge, one per leaf field that names\nanother document. The wire spelling is the field's own name, so a client\nreads an edge's role as the field it came from.",
+      "type": "string",
+      "enum": [
+        "raised_in",
+        "answers",
+        "rulings",
+        "questions",
+        "cut_spec",
+        "forks",
+        "cut_report",
+        "findings",
+        "verdict",
+        "source",
+        "subject",
+        "superseded_by",
+        "resolved_by",
+        "deferred_to",
+        "documents"
       ]
     },
     "ClaimOutcome": {
@@ -1210,6 +1231,58 @@
           ]
         },
         {
+          "description": "A selection the substrate or the organ's value door refused: `field`\nis the selection field the client sent, `value` the offending part.",
+          "type": "object",
+          "properties": {
+            "SelectionInvalid": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "field",
+                "message"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "SelectionInvalid"
+          ]
+        },
+        {
+          "description": "A cursor that does not decode, does not belong to this selection or\nwas not minted by this process, or names a snapshot this mind has not\nreached.",
+          "type": "object",
+          "properties": {
+            "CursorInvalid": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "CursorInvalid"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "Unavailable": {
@@ -1876,6 +1949,30 @@
         }
       ]
     },
+    "PipelineDocumentSummary": {
+      "description": "The organ's meaning of `projection: header`: a document's id, the facts of\nits admission, its status and the few fields of its kind a caller triages\nby. Derived per read and bounded by `SUMMARY_MAX_BYTES`.",
+      "type": "object",
+      "properties": {
+        "admission": {
+          "$ref": "#/$defs/AdmissionFacts"
+        },
+        "facts": {
+          "$ref": "#/$defs/PipelineFacts"
+        },
+        "id": {
+          "$ref": "#/$defs/PipelineRef"
+        },
+        "status": {
+          "$ref": "#/$defs/PipelineStatusSummary"
+        }
+      },
+      "required": [
+        "id",
+        "admission",
+        "status",
+        "facts"
+      ]
+    },
     "PipelineDocumentView": {
       "description": "One document as a reader gets it: its id, the document, the facts of its\nadmission and its status. The id travels with the document because a\n`PipelineDocument` does not carry its key and a client must never derive\none.",
       "type": "object",
@@ -1898,6 +1995,587 @@
         "document",
         "admission",
         "status"
+      ]
+    },
+    "PipelineEdge": {
+      "description": "One citation edge a hop traversed: the organ's typing of the substrate's\nedge, whose ends are record keys and whose role is a string.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/PipelineRef"
+        },
+        "role": {
+          "$ref": "#/$defs/CitationRole"
+        },
+        "to": {
+          "$ref": "#/$defs/PipelineRef"
+        }
+      },
+      "required": [
+        "from",
+        "role",
+        "to"
+      ]
+    },
+    "PipelineFacts": {
+      "description": "The triage fields of each kind, in the leaf's own envelope spelling. Prose\n(`Para`) and unbounded lists are not carried; `finding.claim` and\n`follow_up.item` are, because the leaf typed them as one-line statements.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "campaign"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "repos": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/OrgRepo"
+                  }
+                },
+                "title": {
+                  "$ref": "#/$defs/Title"
+                }
+              },
+              "required": [
+                "title",
+                "repos"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "target"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "invariants": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Label"
+                  }
+                },
+                "revision": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "revision",
+                "invariants"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "question"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "asked_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "label": {
+                  "$ref": "#/$defs/Label"
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Label"
+                  }
+                },
+                "raised_in": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PipelineRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "recommended": {
+                  "$ref": "#/$defs/Label"
+                },
+                "title": {
+                  "$ref": "#/$defs/Title"
+                }
+              },
+              "required": [
+                "label",
+                "title",
+                "options",
+                "recommended",
+                "asked_on"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "ruling"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "answers": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Short"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "authority": {
+                  "$ref": "#/$defs/RulingAuthority"
+                },
+                "choice": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Label"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "label": {
+                  "$ref": "#/$defs/Label"
+                },
+                "ruled_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "title": {
+                  "$ref": "#/$defs/Title"
+                }
+              },
+              "required": [
+                "label",
+                "title",
+                "authority",
+                "ruled_on"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cut_spec"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "base": {
+                  "$ref": "#/$defs/Sha"
+                },
+                "branch": {
+                  "$ref": "#/$defs/Short"
+                },
+                "cut": {
+                  "$ref": "#/$defs/Label"
+                },
+                "depends_on": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Short"
+                  }
+                },
+                "repo": {
+                  "$ref": "#/$defs/OrgRepo"
+                },
+                "revision": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "title": {
+                  "$ref": "#/$defs/Title"
+                }
+              },
+              "required": [
+                "cut",
+                "revision",
+                "title",
+                "repo",
+                "branch",
+                "base",
+                "depends_on"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cut_report"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "branch": {
+                  "$ref": "#/$defs/Short"
+                },
+                "cut_spec": {
+                  "$ref": "#/$defs/Short"
+                },
+                "range": {
+                  "$ref": "#/$defs/CommitRange"
+                },
+                "repo": {
+                  "$ref": "#/$defs/OrgRepo"
+                }
+              },
+              "required": [
+                "cut_spec",
+                "attempt",
+                "repo",
+                "branch",
+                "range"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "verdict"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "cut_report": {
+                  "$ref": "#/$defs/Short"
+                },
+                "outcomes": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/ClaimOutcome"
+                  }
+                },
+                "pass": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "range": {
+                  "$ref": "#/$defs/CommitRange"
+                }
+              },
+              "required": [
+                "cut_report",
+                "pass",
+                "range",
+                "outcomes"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "finding"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/Line"
+                },
+                "confidence": {
+                  "$ref": "#/$defs/FindingConfidence"
+                },
+                "invariants": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Label"
+                  }
+                },
+                "label": {
+                  "$ref": "#/$defs/Label"
+                },
+                "origin": {
+                  "$ref": "#/$defs/FindingOrigin"
+                },
+                "range": {
+                  "$ref": "#/$defs/CommitRange"
+                },
+                "severity": {
+                  "$ref": "#/$defs/FindingSeverity"
+                },
+                "verdict": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "verdict",
+                "label",
+                "confidence",
+                "severity",
+                "origin",
+                "claim",
+                "invariants",
+                "range"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "follow_up"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "item": {
+                  "$ref": "#/$defs/Line"
+                },
+                "label": {
+                  "$ref": "#/$defs/Label"
+                },
+                "owner": {
+                  "$ref": "#/$defs/Short"
+                },
+                "repo": {
+                  "$ref": "#/$defs/OrgRepo"
+                },
+                "source": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "label",
+                "source",
+                "repo",
+                "owner",
+                "item"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resolution"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "outcome": {
+                  "$ref": "#/$defs/ResolutionOutcome"
+                },
+                "resolved_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "sequence": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "subject": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "subject",
+                "sequence",
+                "outcome",
+                "resolved_on"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "instance"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "created_at": {
+                  "$ref": "#/$defs/Date"
+                },
+                "display_name": {
+                  "$ref": "#/$defs/Short"
+                },
+                "host": {
+                  "$ref": "#/$defs/Short"
+                },
+                "instance": {
+                  "$ref": "#/$defs/Slug"
+                }
+              },
+              "required": [
+                "instance",
+                "display_name",
+                "host",
+                "created_at"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stewardship"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "assigned_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "instance": {
+                  "$ref": "#/$defs/Slug"
+                },
+                "note": {
+                  "$ref": "#/$defs/Line"
+                },
+                "repo": {
+                  "$ref": "#/$defs/OrgRepo"
+                },
+                "sequence": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "instance",
+                "repo",
+                "sequence",
+                "assigned_on",
+                "note"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "hand_off"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "from_instance": {
+                  "$ref": "#/$defs/Slug"
+                },
+                "handed_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "repo": {
+                  "$ref": "#/$defs/OrgRepo"
+                },
+                "to_instance": {
+                  "$ref": "#/$defs/Slug"
+                }
+              },
+              "required": [
+                "from_instance",
+                "to_instance",
+                "repo",
+                "handed_on"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
       ]
     },
     "PipelineFinding": {
@@ -2096,6 +2774,41 @@
         "HandOff"
       ]
     },
+    "PipelinePageItems": {
+      "description": "The items of a page, chosen once by the selection's `projection`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Headers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PipelineDocumentSummary"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Headers"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Documents": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PipelineDocumentView"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Documents"
+          ]
+        }
+      ]
+    },
     "PipelineProvenance": {
       "description": "Who admitted a batch: the faculty, the agent, its session and the tool.\nA field on the receipt and nothing else; the digest excludes it.",
       "type": "object",
@@ -2118,27 +2831,6 @@
         "agent",
         "session",
         "tool"
-      ]
-    },
-    "PipelineQueryPage": {
-      "description": "One page of a query, with the number of documents that matched before the\ncap, so a short page is never mistaken for the whole answer.",
-      "type": "object",
-      "properties": {
-        "items": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PipelineDocumentView"
-          }
-        },
-        "matched": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "items",
-        "matched"
       ]
     },
     "PipelineQuestion": {
@@ -2446,6 +3138,45 @@
         "authority"
       ]
     },
+    "PipelineSelectionPage": {
+      "description": "One page of a selection. `matched` is the count before paging, `as_of` the\nsnapshot the page and every cursor of its walk are exact as of, and `edges`\nis present exactly when the selection follows a hop.",
+      "type": "object",
+      "properties": {
+        "as_of": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "edges": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/PipelineEdge"
+          }
+        },
+        "items": {
+          "$ref": "#/$defs/PipelinePageItems"
+        },
+        "matched": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "matched",
+        "as_of",
+        "items"
+      ]
+    },
     "PipelineStatus": {
       "description": "Whether a document still stands, and if not, what closed it. Derived at\nread time; no document carries a status field and no admission writes one.\nThe whole closing record travels, not only its outcome, because a reader\nrehydrating wants why.",
       "oneOf": [
@@ -2471,6 +3202,41 @@
               "required": [
                 "resolution",
                 "record"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Resolved"
+          ]
+        }
+      ]
+    },
+    "PipelineStatusSummary": {
+      "description": "Whether a summarised document stands: the closing record's outcome, not its\nrationale. A caller who wants why opens the resolution.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "InForce"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Resolved": {
+              "type": "object",
+              "properties": {
+                "outcome": {
+                  "$ref": "#/$defs/ResolutionOutcome"
+                },
+                "resolution": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "resolution",
+                "outcome"
               ]
             }
           },

@@ -54,13 +54,23 @@
             "instance": {
               "$ref": "#/$defs/Slug"
             },
-            "query": {
-              "$ref": "#/$defs/PipelineQuery"
+            "selection": {
+              "$ref": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.selection.schema.json"
+            },
+            "semantic": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SemanticQuery"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "instance",
-            "query"
+            "selection"
           ]
         }
       },
@@ -1187,89 +1197,6 @@
         "agent",
         "session",
         "tool"
-      ]
-    },
-    "PipelineQuery": {
-      "description": "The filters over one mind. Each is one rule, and an unset filter matches\neverything. The mind is the instance, so there is no `instance` field: the\ndaemon picks the mind before it calls here.",
-      "type": "object",
-      "properties": {
-        "campaign": {
-          "description": "The key's root segment: a campaign slug, or an instance for\nstewardships, hand-offs and the identity document.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Slug"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "cut": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Label"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "faculty": {
-          "description": "Attribution, ruling 18: it filters, it grants nothing.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Faculty"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "in_force": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "kinds": {
-          "description": "Empty matches every kind.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PipelineKind"
-          }
-        },
-        "limit": {
-          "description": "`None` is `QUERY_LIMIT_MAX`; anything else is clamped into\n`1..=QUERY_LIMIT_MAX`.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "repo": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OrgRepo"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "semantic": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SemanticQuery"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "kinds"
       ]
     },
     "PipelineQuestion": {

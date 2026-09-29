@@ -2,6 +2,7 @@
 //! act on, never a transport error: the outcome carries it, the wire (Cut 10)
 //! serialises it, the tools (Cut 13) show it.
 
+use cultnet_rs::SelectionRefusal;
 use epiphany_pipeline::{PipelineKind, PipelineRefusal};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,13 @@ pub enum MindRefusal {
     /// truncated or paginated on its behalf. The daemon owns it and the
     /// transport's own bound decides it; no rule of the mind is involved.
     ResponseTooLarge { bytes: u64, limit: u64 },
+    /// A selection the substrate or the organ's value door refused: `field`
+    /// is the selection field the client sent, `value` the offending part.
+    SelectionInvalid { field: String, value: Option<String>, message: String },
+    /// A cursor that does not decode, does not belong to this selection or
+    /// was not minted by this process, or names a snapshot this mind has not
+    /// reached.
+    CursorInvalid { message: String },
     Unavailable { detail: String },
 }
 
@@ -77,5 +85,62 @@ impl std::error::Error for MindRefusal {}
 impl From<PipelineRefusal> for MindRefusal {
     fn from(refusal: PipelineRefusal) -> Self {
         Self::Document(refusal)
+    }
+}
+
+/// The one total mapping from the substrate's refusals, with no wildcard arm.
+/// `CursorStale` is unreachable: the organ answers at the cursor's own `asOf`,
+/// so a stale refusal is an organ defect and says so. `ReferenceOutsideTarget`
+/// is integrity: A7 admits only referents of the declared kind, so a stored
+/// edge outside its target means the store is not what admission wrote.
+impl From<SelectionRefusal> for MindRefusal {
+    fn from(refusal: SelectionRefusal) -> Self {
+        match refusal {
+            SelectionRefusal::Invalid(invalid) => {
+                Self::SelectionInvalid { field: invalid.field, value: invalid.value, message: invalid.message }
+            }
+            SelectionRefusal::CursorInvalid { message } => Self::CursorInvalid { message },
+            SelectionRefusal::CursorStale { as_of, current } => Self::Unavailable {
+                detail: format!("cursor_stale: the organ answers at the cursor's asOf ({as_of}), yet was asked at {current}"),
+            },
+            reference @ SelectionRefusal::ReferenceOutsideTarget { .. } => {
+                Self::Unavailable { detail: format!("stored reference outside its declared target: {reference}") }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cultnet_rs::SelectionInvalid;
+
+    /// The mapping is the organ's word on each substrate refusal: a bad
+    /// selection and a bad cursor cross as themselves, and the two the organ
+    /// is built never to raise cross as integrity faults, not as anything a
+    /// client could act on.
+    #[test]
+    fn each_substrate_refusal_maps_to_one_organ_refusal() {
+        let invalid = SelectionInvalid { field: "keys".into(), value: Some("x".into()), message: "no".into() };
+        assert_eq!(
+            MindRefusal::from(SelectionRefusal::Invalid(invalid)),
+            MindRefusal::SelectionInvalid { field: "keys".into(), value: Some("x".into()), message: "no".into() }
+        );
+        assert_eq!(
+            MindRefusal::from(SelectionRefusal::CursorInvalid { message: "bad".into() }),
+            MindRefusal::CursorInvalid { message: "bad".into() }
+        );
+        assert!(matches!(
+            MindRefusal::from(SelectionRefusal::CursorStale { as_of: 3, current: 4 }),
+            MindRefusal::Unavailable { detail } if detail.contains("cursor_stale")
+        ));
+        let outside = SelectionRefusal::ReferenceOutsideTarget {
+            from_schema_id: "a".into(),
+            from_key: "k".into(),
+            role: "answers".into(),
+            to_schema_id: "b".into(),
+            to_key: "j".into(),
+        };
+        assert!(matches!(MindRefusal::from(outside), MindRefusal::Unavailable { .. }));
     }
 }

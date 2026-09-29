@@ -468,6 +468,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "cultcache-rs",
+ "cultnet-rs",
  "epiphany-pipeline",
  "rmp-serde",
  "schemars",

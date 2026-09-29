@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, OwnedRedbMessagePackBackingStore};
+use cultnet_rs::CursorKey;
 use epiphany_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineKind, Slug, register_pipeline_document_types};
 
 use crate::receipt::HuginnCommitReceipt;
@@ -96,6 +97,9 @@ pub struct Mind<S: MindStore> {
     store: S,
     cache: CultCache,
     image: Vec<CultCacheEnvelope>,
+    /// Mints and verifies this process's selection cursors. Never stored: a
+    /// cursor does not survive a reopen, which the substrate accepts.
+    cursor_key: CursorKey,
 }
 
 impl Mind<OwnedRedbMessagePackBackingStore> {
@@ -180,7 +184,7 @@ impl<S: MindStore> Mind<S> {
         refuse_foreign_types(&raw)?;
         refuse_foreign_identity(&raw, instance)?;
         let (cache, image) = attach(store.clone())?;
-        Ok(Self { instance: instance.clone(), store, cache, image })
+        Ok(Self { instance: instance.clone(), store, cache, image, cursor_key: CursorKey::random() })
     }
 
     pub fn instance(&self) -> &Slug {
@@ -206,6 +210,10 @@ impl<S: MindStore> Mind<S> {
     /// identity order. Cut 10's snapshot source reads this.
     pub fn envelopes(&self) -> &[CultCacheEnvelope] {
         &self.image
+    }
+
+    pub(crate) fn cursor_key(&self) -> &CursorKey {
+        &self.cursor_key
     }
 
     pub fn is_empty(&self) -> bool {
