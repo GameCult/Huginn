@@ -69,6 +69,19 @@
       "required": [
         "Refused"
       ]
+    },
+    {
+      "description": "The answer did not fit one send and is being held for the client to\nfetch. Nothing in a mind produces this: the daemon's serve module does,\nin place of an answer, and the answer it stands for is the named\nMessagePack of the `HuginnMindResponse` the mind gave.",
+      "type": "object",
+      "properties": {
+        "Deferred": {
+          "$ref": "#/$defs/DeferredAnswer"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Deferred"
+      ]
     }
   ],
   "$defs": {
@@ -286,6 +299,19 @@
       "description": "A calendar date, `YYYY-MM-DD`.",
       "type": "string",
       "maxLength": 10
+    },
+    "DeferredAnswer": {
+      "description": "Where the body of an answer that did not fit one send can be fetched: the\nreference's own manifest, whose `contentHash` is the SHA-256 of the answer's\nencoded bytes and whose chunks are asked for, one at a time, on the session\nthis arrived on. Row-level facts come from asking again with a header\nprojection; there is no summary.",
+      "type": "object",
+      "properties": {
+        "manifest": {
+          "description": "gamecult.mesh.cdn_artifact_manifest.v1, the C# reference's CultMeshCdnArtifactManifest as its positional array: [artifactId, kind, version, contentHash, sizeBytes, mimeType, createdAtUtc, chunks[[chunkHash, offset, sizeBytes, recordKey]], tags, metadata].",
+          "type": "array"
+        }
+      },
+      "required": [
+        "manifest"
+      ]
     },
     "Deviation": {
       "type": "object",
@@ -1324,7 +1350,7 @@
           ]
         },
         {
-          "description": "The one refusal a mind never raises: the answer does not fit the\ntransport that would have carried it. It lives here because a refusal\nrides the response schema and there is one of those, so a client reads\nit the way it reads every other refusal rather than parsing a second\nvocabulary. `bytes` is the encoded answer and `limit` is what one send\nmay carry, both so a caller can narrow its own request; nothing is\ntruncated or paginated on its behalf. The daemon owns it and the\ntransport's own bound decides it; no rule of the mind is involved.",
+          "description": "The one refusal a mind never raises: the answer exceeds the largest\nbody the organ will deliver by any plane, one send or a deferred body.\nIt lives here because a refusal rides the response schema and there is\none of those, so a client reads it the way it reads every other refusal\nrather than parsing a second vocabulary. `bytes` is the encoded answer\n(the payload, not its envelope) and `limit` is the largest body the\ndaemon defers, both so a caller can narrow its own request; nothing is\ntruncated or paginated on its behalf. The daemon owns it and its\ndeferral bound decides it; no rule of the mind is involved.",
           "type": "object",
           "properties": {
             "ResponseTooLarge": {
