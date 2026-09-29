@@ -335,6 +335,15 @@ dependencies = [
 [[package]]
 name = "eureka-state"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cultnet-rs",
+ "huginn-daemon",
+ "huginn-mind",
+ "rmp-serde",
+ "tempfile",
+]
 
 [[package]]
 name = "fastrand"
@@ -477,7 +486,6 @@ dependencies = [
  "cultnet-rs",
  "huginn-mind",
  "rmp-serde",
- "schemars",
  "serde",
  "serde_json",
  "sha2",
@@ -491,6 +499,7 @@ name = "huginn-mind"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "cultcache-rs",
  "cultnet-rs",

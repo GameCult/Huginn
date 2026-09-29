@@ -15,6 +15,7 @@ publish.workspace = true
 # daemon's (Cut 10, Cut 11).
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 chrono = "0.4.44"
 cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "6251cbcd37c12ef3f0c1cc50063a03369225b7ac", package = "cultcache-rs" }
 cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "6251cbcd37c12ef3f0c1cc50063a03369225b7ac", package = "cultnet-rs" }

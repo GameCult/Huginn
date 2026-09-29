@@ -24,7 +24,6 @@ chrono = "0.4.44"
 cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "6251cbcd37c12ef3f0c1cc50063a03369225b7ac", package = "cultnet-rs" }
 huginn-mind = { path = "../huginn-mind" }
 rmp-serde = "1"
-schemars = "1"
 serde = { version = "1", features = ["derive"] }
 # The vector store's and the embedder's HTTP APIs are the xenos boundary, and
 # JSON exists in `index/ollama.rs` and `index/qdrant.rs` only. `ureq` 3 with

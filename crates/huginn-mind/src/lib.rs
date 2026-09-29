@@ -14,7 +14,8 @@
 //! selection (CultNet's, over rows this crate supplies) through the same
 //! `docs` the rules use; nothing is stored for it.
 //!
-//! The wire vocabulary is here too, so the daemon and the client share one set
+//! The wire vocabulary and its operation envelope (`envelope`) are here too,
+//! so the daemon and the client share one set
 //! of types.
 //!
 //! Document shape, bounds, formats and keys are `epiphany-pipeline`'s; the
@@ -26,6 +27,7 @@
 
 pub mod admission;
 mod docs;
+pub mod envelope;
 pub mod index;
 pub mod mind;
 mod rows;
@@ -50,7 +52,7 @@ pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvena
 pub use refusal::MindRefusal;
 pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{
-    DeferredAnswer, HuginnMindRequest, HuginnMindResponse, IndexStatus, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON,
+    DeferredAnswer, HuginnMindRequest, HuginnMindResponse, IndexStatus, MAX_DEFERRED_BODY_BYTES, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON,
     MIND_RESPONSE_SCHEMA, MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus,
 };
 

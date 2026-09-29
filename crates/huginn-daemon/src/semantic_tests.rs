@@ -20,7 +20,7 @@ use tempfile::TempDir;
 
 use crate::daemon::Daemon;
 use crate::daemon::tests::{CAMPAIGN, INSTANCE, batch, campaign_seed, now, slug};
-use crate::envelope::{decode_response, encode_request};
+use huginn_mind::envelope::{decode_response, encode_request};
 use crate::index::fakes::{FakeEmbedder, FakeIndex, Gate};
 use crate::index::{Backoff, Described, Hit, WorkerSink, collection_name};
 use crate::serve::{ServeOptions, bind, run, schema_registry};
