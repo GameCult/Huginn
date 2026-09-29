@@ -5,7 +5,7 @@
 //! names a transport.
 
 use cultcache_rs::DatabaseEntry;
-use cultnet_rs::Selection;
+use cultnet_rs::{CultMeshCdnArtifactManifest, Selection};
 use epiphany_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Slug};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,18 @@ pub const MIND_RESPONSE_SCHEMA_JSON: &str =
 fn selection_ref(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "$ref": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.selection.schema.json"
+    })
+}
+
+/// The deferred answer's manifest is CultMesh's own type, a positional array
+/// the C# reference defines (`CultMeshCdnArtifactManifest`, schema version
+/// `gamecult.mesh.cdn_artifact_manifest.v1`). CultLib publishes no JSON schema
+/// for it, so the schema says what the reference says: an array of its ten
+/// fields in order, and nothing here copies their meaning.
+fn manifest_array(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "description": "gamecult.mesh.cdn_artifact_manifest.v1, the C# reference's CultMeshCdnArtifactManifest as its positional array: [artifactId, kind, version, contentHash, sizeBytes, mimeType, createdAtUtc, chunks[[chunkHash, offset, sizeBytes, recordKey]], tags, metadata].",
+        "type": "array"
     })
 }
 
@@ -91,6 +103,22 @@ pub enum HuginnMindResponse {
     View(Option<PipelineDocumentView>),
     Query(PipelineSelectionPage),
     Refused(MindRefusal),
+    /// The answer did not fit one send and is being held for the client to
+    /// fetch. Nothing in a mind produces this: the daemon's serve module does,
+    /// in place of an answer, and the answer it stands for is the named
+    /// MessagePack of the `HuginnMindResponse` the mind gave.
+    Deferred(DeferredAnswer),
+}
+
+/// Where the body of an answer that did not fit one send can be fetched: the
+/// reference's own manifest, whose `contentHash` is the SHA-256 of the answer's
+/// encoded bytes and whose chunks are asked for, one at a time, on the session
+/// this arrived on. Row-level facts come from asking again with a header
+/// projection; there is no summary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeferredAnswer {
+    #[schemars(schema_with = "manifest_array")]
+    pub manifest: CultMeshCdnArtifactManifest,
 }
 
 impl HuginnMindResponse {
@@ -176,6 +204,11 @@ mod tests {
                 edges: None,
             }),
             HuginnMindResponse::Refused(refusal),
+            HuginnMindResponse::Deferred(DeferredAnswer {
+                manifest: cultnet_rs::pack_content("huginn.mind_response", "package", "", "", "", b"body", 4)
+                    .unwrap()
+                    .0,
+            }),
         ]
     }
 

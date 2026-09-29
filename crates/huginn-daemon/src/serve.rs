@@ -7,14 +7,23 @@
 //! spins with logging rather than exiting, and Cut 14's health check is the
 //! observer.
 //!
-//! One answer may be `MAX_RESPONSE_BYTES` encoded, 1,228,800 today: the
+//! One send carries `MAX_RESPONSE_BYTES` encoded, 1,228,800 today: the
 //! reliable window one session holds, `MAX_PENDING_RELIABLE_PACKETS` packets
-//! of `MAX_FRAGMENT_BYTES`. A larger answer is refused by name,
-//! `MindRefusal::ResponseTooLarge`, carrying the encoded size and the limit,
-//! and the caller narrows its own request. This is the current bound and not a
-//! design target: a single cut spec at the leaf's own bounds does not fit it,
-//! and what a list read should return is an open question, so a client author
-//! should expect the number to move.
+//! of `MAX_FRAGMENT_BYTES`. `deliver` decides every answer's plane: one that
+//! fits goes whole; a larger one whose encoded payload is at most
+//! `MAX_DEFERRED_BODY_BYTES` is held by `DeferredBodies` and answered with
+//! `HuginnMindResponse::Deferred`, a `CultMeshCdnArtifactManifest`, and the
+//! client fetches the payload with `cultnet_rs::fetch_content`, one
+//! `cultmesh.content_chunk_request.v1` at a time on the session it already
+//! holds, exactly as the C# reference's `CultMeshLegacyRudpContentServer` is
+//! asked. The fetched bytes are the named MessagePack of the
+//! `HuginnMindResponse` the mind gave. A body the daemon will not defer is
+//! refused by name, `MindRefusal::ResponseTooLarge`, carrying the payload size
+//! and `MAX_DEFERRED_BODY_BYTES`, and the caller narrows its own request. A
+//! deferred body is memory only: it expires untouched after
+//! `ServeOptions::deferred_ttl`, is evicted past `DEFERRED_BUDGET_BYTES`, and
+//! is gone when the process exits, so a chunk request that finds it gone is
+//! answered `found: false` and the client asks the operation again.
 //!
 //! Four things this cut does not do, which a client has nowhere else to learn:
 //!
@@ -50,31 +59,43 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use cultnet_rs::{
     CULTNET_OPERATION_CONNECTION_ID, CultNetMessage, CultNetRudpServerEvent, CultNetRudpServerHub,
     CultNetRudpServerHubOptions, CultNetSchemaKind, CultNetSchemaRegistration, CultNetSchemaRegistry,
-    CultNetWireContract, decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
+    CultNetWireContract, answer_content_chunk_request, decode_cultnet_message_from_slice,
+    encode_cultnet_message_to_vec, pack_content,
 };
 use huginn_mind::epiphany_pipeline::Slug;
 use huginn_mind::wire::{
-    HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA,
+    DeferredAnswer, HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA,
     MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID,
 };
 use huginn_mind::{MindRefusal, MindStore, OwnedRedbMessagePackBackingStore};
 
+use crate::bodies::{
+    DEFERRED_BUDGET_BYTES, DEFERRED_CHUNK_BYTES, DeferredBodies, MAX_DEFERRED_BODY_BYTES,
+};
 use crate::daemon::{Daemon, IndexSink, NoIndex};
-use crate::envelope::{decode_request, encode_failure, encode_response};
+use crate::envelope::{OperationFailure, decode_request, encode_failure, encode_response};
 
-/// What the loop does when nothing is waiting.
+/// What the loop does when nothing is waiting. A deferred body untouched for
+/// `deferred_ttl`, twice the session timeout, is dropped.
 pub struct ServeOptions {
     pub session_timeout: Duration,
     pub idle_sleep: Duration,
+    pub deferred_ttl: Duration,
 }
 
 impl Default for ServeOptions {
     fn default() -> Self {
-        Self { session_timeout: Duration::from_secs(30), idle_sleep: Duration::from_millis(2) }
+        Self {
+            session_timeout: Duration::from_secs(30),
+            idle_sleep: Duration::from_millis(2),
+            deferred_ttl: Duration::from_secs(60),
+        }
     }
 }
 
@@ -164,20 +185,24 @@ pub fn schema_registry() -> Result<CultNetSchemaRegistry> {
 
 /// One message in, one message out. Nothing here reaches a mind except through
 /// `Daemon::handle`, and an envelope that does not decode never gets that far.
+/// A chunk request is answered from `bodies` alone, on the session it came in
+/// on; every operation's reply leaves through `deliver`.
 pub fn answer<S: MindStore, I: IndexSink<S>>(
     daemon: &mut Daemon<S, I>,
     registry: &CultNetSchemaRegistry,
+    bodies: &mut DeferredBodies,
     message: CultNetMessage,
     now: DateTime<Utc>,
 ) -> CultNetMessage {
     let runtime_id = daemon.runtime_id();
+    bodies.expire(now);
     match &message {
         CultNetMessage::OperationRequest { message_id, operation, .. } => match decode_request(&message) {
             Ok((message_id, request)) => {
                 let operation = request.operation();
                 let response = daemon.handle(request, now);
                 let reply = encode_or_fail(&message_id, operation, &response, &runtime_id);
-                within_window(reply, &message_id, operation, &runtime_id)
+                deliver(reply, &message_id, operation, &runtime_id, bodies, now)
             }
             Err(failure) => encode_failure(message_id, operation, &failure, &runtime_id),
         },
@@ -185,9 +210,13 @@ pub fn answer<S: MindStore, I: IndexSink<S>>(
             Ok(response) => response,
             Err(error) => CultNetMessage::Error { error: format!("{error:#}"), code: None, details: None },
         },
+        CultNetMessage::ContentChunkRequest { .. } => {
+            answer_content_chunk_request(&message, |hash| bodies.chunk(hash, now))
+        }
         _ => CultNetMessage::Error {
             error: format!(
-                "{MIND_SERVICE_ID} answers cultnet.operation_request.v0 and cultnet.schema_catalog_request.v0"
+                "{MIND_SERVICE_ID} answers cultnet.operation_request.v0, cultnet.schema_catalog_request.v0 \
+                 and cultmesh.content_chunk_request.v1"
             ),
             code: None,
             details: None,
@@ -216,40 +245,73 @@ fn encode_or_fail(
     }
 }
 
-/// The reply, or a typed refusal saying it will not fit. The hub cuts a reply
-/// into `MAX_FRAGMENT_BYTES` packets and refuses a send needing more than
-/// `MAX_PENDING_RELIABLE_PACKETS` of them; that refusal is a transport error
-/// the client never sees, so it waits for an answer nothing will send. The
-/// size is therefore measured here, against the window this module configured,
-/// before a send that can already be seen to fail is attempted, and the client
-/// is told by name how large the answer was and how large one may be.
+/// How one answer leaves: whole, deferred or refused, in that order, and
+/// nothing else decides. The hub cuts a reply into `MAX_FRAGMENT_BYTES` packets
+/// and refuses a send needing more than `MAX_PENDING_RELIABLE_PACKETS` of them;
+/// that refusal is a transport error the client never sees, so it waits for an
+/// answer nothing will send. The envelope is therefore measured here, against
+/// the window this module configured, before a send that can already be seen to
+/// fail is attempted.
 ///
-/// Nothing is truncated, paginated or retried: the caller narrows its own
-/// request. The refusal rides the response schema like every other refusal, so
-/// it is not a second thing for a client to parse.
-fn within_window(reply: CultNetMessage, message_id: &str, operation: &str, runtime_id: &str) -> CultNetMessage {
+/// A reply that fits is returned as it is. A larger one whose payload, the
+/// named MessagePack of the response, is at most `MAX_DEFERRED_BODY_BYTES` is
+/// packed by CultNet's content plane, retained in `bodies`, and answered with
+/// `Deferred` and the manifest. That answer is a small fixed-shape envelope and
+/// is never itself measured or deferred. A larger payload is refused by name
+/// with its own size and the deferral bound: nothing is truncated or paginated,
+/// and the caller narrows its own request. Both answers ride the response
+/// schema like every other, so a client parses no second vocabulary.
+fn deliver(
+    reply: CultNetMessage,
+    message_id: &str,
+    operation: &str,
+    runtime_id: &str,
+    bodies: &mut DeferredBodies,
+    now: DateTime<Utc>,
+) -> CultNetMessage {
+    let not_encodable = |message: String| {
+        encode_failure(
+            message_id,
+            operation,
+            &OperationFailure { code: "response-not-encodable".into(), message },
+            runtime_id,
+        )
+    };
     let encoded = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
         Ok(bytes) => bytes.len() as u64,
-        Err(error) => {
-            return encode_failure(
-                message_id,
-                operation,
-                &crate::envelope::OperationFailure {
-                    code: "response-not-encodable".into(),
-                    message: format!("{error:#}"),
-                },
-                runtime_id,
-            );
-        }
+        Err(error) => return not_encodable(format!("{error:#}")),
     };
     if encoded <= MAX_RESPONSE_BYTES {
         return reply;
     }
-    let refusal = HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge {
-        bytes: encoded,
-        limit: MAX_RESPONSE_BYTES,
-    });
-    encode_or_fail(message_id, operation, &refusal, runtime_id)
+    let payload = match &reply {
+        CultNetMessage::OperationResponse { payload, .. } => STANDARD.decode(payload),
+        _ => return not_encodable("only an operation response is deferred".into()),
+    };
+    let payload = match payload {
+        Ok(bytes) => bytes,
+        Err(error) => return not_encodable(format!("the payload is not base64: {error}")),
+    };
+    let size = payload.len() as u64;
+    if size > MAX_DEFERRED_BODY_BYTES {
+        let refusal = HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge {
+            bytes: size,
+            limit: MAX_DEFERRED_BODY_BYTES,
+        });
+        return encode_or_fail(message_id, operation, &refusal, runtime_id);
+    }
+    let (manifest, chunks) = pack_content(
+        "huginn.mind_response",
+        "package",
+        "",
+        "application/vnd.gamecult.huginn.mind-response+msgpack",
+        &now.to_rfc3339(),
+        &payload,
+        DEFERRED_CHUNK_BYTES,
+    )
+    .expect("the deferral constants are a valid pack");
+    bodies.retain(&manifest, chunks, now);
+    encode_or_fail(message_id, operation, &HuginnMindResponse::Deferred(DeferredAnswer { manifest }), runtime_id)
 }
 
 /// Until `stopping`: expire what timed out, resend what was not acknowledged,
@@ -264,6 +326,7 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
     options: &ServeOptions,
 ) -> Result<()> {
     let timeout_ms = options.session_timeout.as_millis() as u64;
+    let mut bodies = DeferredBodies::new(DEFERRED_BUDGET_BYTES, options.deferred_ttl);
     while !stopping.load(Ordering::Relaxed) {
         hub.remove_timed_out_sessions(timeout_ms);
         if let Err(error) = hub.poll_resends() {
@@ -293,7 +356,7 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
                     continue;
                 }
             };
-            let reply = answer(daemon, registry, message, Utc::now());
+            let reply = answer(daemon, registry, &mut bodies, message, Utc::now());
             if let Err(error) = hub.send_schema_message(&session, &reply) {
                 eprintln!("huginn: {} did not receive its reply: {error:#}", session.remote_addr);
             }
@@ -314,9 +377,7 @@ mod tests {
     };
     use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef};
     use crate::envelope::{FAILURE_SCHEMA, decode_response, encode_request};
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD;
-    use cultnet_rs::{CultMesh, CultMeshRudpSocketOptions};
+    use cultnet_rs::{CultMesh, CultMeshCdnArtifactManifest, CultMeshRudpSocketOptions, fetch_content};
     use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, MindStatus};
     use cultnet_rs::{FieldPredicate, Selection};
     use huginn_mind::{MindRefusal, PipelineAdmissionOutcome, PipelinePageItems};
@@ -391,14 +452,14 @@ mod tests {
             ("m-5b", request("m-5b", MIND_SERVICE_ID, "Admit", MIND_REQUEST_SCHEMA, admit), "operation-mismatch"),
         ];
         for (id, message, code) in cases {
-            let reply = answer(&mut daemon, &registry, message, now());
+            let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), message, now());
             assert_eq!(rejected(&reply).0, id, "the client's own correlation key is echoed");
             assert_eq!(rejected(&reply).1, code);
         }
         // The sixth code, `not-an-operation-request`, is the codec's and is
         // pinned in `envelope::tests`: `answer` never produces it, because a
         // message of another family is answered with `Error` instead.
-        let reply = answer(&mut daemon, &registry, CultNetMessage::Error { error: "hello".into(), code: None, details: None }, now());
+        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), CultNetMessage::Error { error: "hello".into(), code: None, details: None }, now());
         let CultNetMessage::Error { error, .. } = &reply else { panic!("expected an error, got {reply:?}") };
         assert!(
             !error.is_empty() && error.contains("cultnet.operation_request.v0") && error.contains("cultnet.schema_catalog_request.v0"),
@@ -410,7 +471,7 @@ mod tests {
         // A mind's refusal is an answer on the response schema, not a failure
         // of the envelope: the client decodes it as the typed refusal it is.
         let read = HuginnMindRequest::Query { instance: slug(OTHER), selection: Selection::default(), semantic: None };
-        let reply = answer(&mut daemon, &registry, encode_request("m-r", &read, None).unwrap(), now());
+        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), encode_request("m-r", &read, None).unwrap(), now());
         let CultNetMessage::OperationResponse { status, payload_schema, .. } = &reply else {
             panic!("expected an operation response, got {reply:?}");
         };
@@ -428,7 +489,7 @@ mod tests {
             schema_ids: None,
             kinds: None,
         };
-        let reply = answer(&mut daemon, &registry, catalog, now());
+        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), catalog, now());
         let CultNetMessage::SchemaCatalogResponse { message_id, schemas } = reply else {
             panic!("expected a catalog response");
         };
@@ -532,29 +593,109 @@ mod tests {
         assert_eq!(documents(&mut daemon), 1, "the admission that crossed the wire landed");
     }
 
-    /// An answer larger than one send can carry is a refusal by name, not a
-    /// transport failure the client waits out. The wide document is one cut spec
-    /// with every list the leaf bounds filled: about a megabyte of field
-    /// content, which base64 in the operation envelope carries past the window
-    /// this module configures, so a single read of it is already over. The
-    /// fitting one is the same document narrowed until its answer lands inside
-    /// the window, and it is delivered whole.
+    fn encoded_len(message: &CultNetMessage) -> u64 {
+        encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap().len() as u64
+    }
+
+    const TTL: Duration = Duration::from_secs(60);
+
+    fn fresh_bodies() -> DeferredBodies {
+        DeferredBodies::new(DEFERRED_BUDGET_BYTES, TTL)
+    }
+
+    type Client = cultnet_rs::CultNetRudpSocketTransportConnection;
+    type BodyDaemon = Daemon<OwnedRedbMessagePackBackingStore, NoIndex>;
+
+    /// One request on the client's own session and its reply, the way
+    /// `fetch_content` is asked for each chunk.
+    fn exchange(client: &mut Client, message: &CultNetMessage) -> Result<CultNetMessage> {
+        client.send_schema_message(message)?;
+        for _ in 0..3000 {
+            client.poll_resends()?;
+            if let Some(reply) = client.receive_schema_message_once()? {
+                return Ok(reply);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        anyhow::bail!("no reply")
+    }
+
+    fn deferred_manifest(reply: &CultNetMessage) -> CultMeshCdnArtifactManifest {
+        match decode_response(reply).unwrap().1.expect("an answer, not an envelope failure") {
+            HuginnMindResponse::Deferred(DeferredAnswer { manifest }) => manifest,
+            other => panic!("expected a deferred answer, got {other:?}"),
+        }
+    }
+
+    fn chunk_request(manifest: &CultMeshCdnArtifactManifest, index: usize) -> CultNetMessage {
+        let chunk = &manifest.chunks[index];
+        CultNetMessage::ContentChunkRequest {
+            message_id: format!("c-{index}"),
+            chunk_hash: chunk.chunk_hash.clone(),
+            record_key: chunk.record_key.clone(),
+            expected_size_bytes: chunk.size_bytes,
+        }
+    }
+
+    fn found(reply: &CultNetMessage) -> bool {
+        let CultNetMessage::ContentChunkResponse { found, .. } = reply else {
+            panic!("expected a content chunk response, got {reply:?}");
+        };
+        *found
+    }
+
+    fn document_query() -> HuginnMindRequest {
+        HuginnMindRequest::Query {
+            instance: slug(INSTANCE),
+            selection: Selection { projection: "document".into(), ..Selection::default() },
+            semantic: None,
+        }
+    }
+
+    /// One operation asked of `answer` at an injected time, and the manifest of
+    /// the deferred answer it gives back.
+    fn ask_deferred(
+        daemon: &mut BodyDaemon,
+        bodies: &mut DeferredBodies,
+        message_id: &str,
+        read: &HuginnMindRequest,
+        at: DateTime<Utc>,
+    ) -> CultMeshCdnArtifactManifest {
+        let registry = schema_registry().unwrap();
+        deferred_manifest(&answer(daemon, &registry, bodies, encode_request(message_id, read, None).unwrap(), at))
+    }
+
+    /// Whether the first chunk of a manifest is still served at an injected time.
+    fn first_chunk_found(
+        daemon: &mut BodyDaemon,
+        bodies: &mut DeferredBodies,
+        manifest: &CultMeshCdnArtifactManifest,
+        at: DateTime<Utc>,
+    ) -> bool {
+        let registry = schema_registry().unwrap();
+        found(&answer(daemon, &registry, bodies, chunk_request(manifest, 0), at))
+    }
+
+    /// An answer larger than one send can carry is deferred to the body plane
+    /// and fetches, on the same session, to the answer the mind gave. The wide
+    /// document is one cut spec with every list the leaf bounds filled: about a
+    /// megabyte of field content, which base64 in the operation envelope
+    /// carries past the window this module configures, so a single read of it is
+    /// already over. The fitting one is the same document narrowed until its
+    /// envelope lands inside the window, and it is delivered whole.
     ///
-    /// Both halves are load-bearing. Without the refused reads a daemon that
-    /// never measured would pass; without the delivered one a daemon that
-    /// refused everything, or configured a window smaller than the number it
-    /// measures against, would pass too. The delivered answer sits within one
-    /// packet-count's slack of the limit, so shrinking the configured window
-    /// breaks it.
+    /// The client holds the `Deferred` answer before it fetches, so the size
+    /// the daemon decided on is observed at the decision and not only
+    /// downstream of the fetch.
     #[test]
-    fn an_answer_too_large_for_one_send_is_a_typed_refusal_that_reaches_the_client() {
+    fn an_oversize_answer_arrives_deferred_and_fetches_to_the_same_answer() {
         let (_root, mut daemon) = seeded_wide();
         let registry = schema_registry().unwrap();
 
-        let sized = |daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, NoIndex>, id: PipelineRef| {
+        let sized = |daemon: &mut BodyDaemon, id: PipelineRef| {
             let view = daemon.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id }, now());
             let message = encode_response("m-0", "view", &view, "huginn-yggdrasil").unwrap();
-            encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).unwrap().len() as u64
+            encoded_len(&message)
         };
         let wide = spec_ref(&mut daemon, WIDE_CUT);
         let fitting = spec_ref(&mut daemon, FITTING_CUT);
@@ -566,6 +707,13 @@ mod tests {
             MAX_RESPONSE_BYTES - under < 64 * MAX_FRAGMENT_BYTES as u64,
             "the delivered answer must sit close enough to the limit that the window's value is load-bearing"
         );
+
+        let reads = [
+            ("m-q", document_query()),
+            ("m-v", HuginnMindRequest::View { instance: slug(INSTANCE), id: wide }),
+        ];
+        let expected: Vec<HuginnMindResponse> =
+            reads.iter().map(|(_, read)| daemon.handle(read.clone(), now())).collect();
 
         let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
         let endpoint = format!("rudp://{}", hub.local_addr().unwrap());
@@ -587,20 +735,6 @@ mod tests {
         }
         assert!(client.connected());
 
-        let reads = [
-            // The whole documents: a header page is small by construction, so
-            // the transport's bound is measured on the projection that can
-            // exceed it.
-            (
-                "m-q",
-                HuginnMindRequest::Query {
-                    instance: slug(INSTANCE),
-                    selection: Selection { projection: "document".into(), ..Selection::default() },
-                    semantic: None,
-                },
-            ),
-            ("m-v", HuginnMindRequest::View { instance: slug(INSTANCE), id: wide }),
-        ];
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
         let serving = std::thread::spawn(move || {
@@ -609,50 +743,30 @@ mod tests {
         });
 
         // One read at a time: the window is per session and counts what is
-        // still unacknowledged, so two large answers in flight together are a
-        // separate limit this gate does not measure.
-        for (message_id, request) in reads {
-            client.send_schema_message(&encode_request(message_id, &request, None).unwrap()).unwrap();
-            let mut reply = None;
-            for _ in 0..500 {
-                client.poll_resends().unwrap();
-                if let Some(message) = client.receive_schema_message_once().unwrap() {
-                    reply = Some(message);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            let reply = reply.unwrap_or_else(|| panic!("{message_id} got no reply"));
-            let (correlation, answered) = decode_response(&reply).unwrap();
-            assert_eq!(&correlation, message_id);
-            let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
-                answered.expect("a refusal is an answer, not an envelope failure")
-            else {
-                panic!("{message_id} was not refused for its size");
-            };
-            assert_eq!(limit, MAX_RESPONSE_BYTES);
-            assert!(bytes > limit, "{message_id} answered {bytes} bytes against a {limit} limit");
+        // still unacknowledged, so the fetch is one chunk in flight.
+        for ((message_id, read), expected) in reads.into_iter().zip(expected) {
+            let reply = exchange(&mut client, &encode_request(message_id, &read, None).unwrap()).unwrap();
+            assert!(encoded_len(&reply) <= MAX_RESPONSE_BYTES, "the deferred answer fits one send");
+            assert_eq!(decode_response(&reply).unwrap().0, message_id);
+            let manifest = deferred_manifest(&reply);
+            let bytes_expected = rmp_serde::to_vec_named(&expected).unwrap();
+            assert_eq!(manifest.size_bytes as usize, bytes_expected.len(), "{message_id}: the manifest is of the answer");
+
+            let bytes = fetch_content(&manifest, MAX_DEFERRED_BODY_BYTES, |request| exchange(&mut client, &request))
+                .unwrap();
+            assert_eq!(bytes, bytes_expected, "{message_id}: byte-identical to the answer the mind gave");
+            assert_eq!(rmp_serde::from_slice::<HuginnMindResponse>(&bytes).unwrap(), expected);
+            assert!(!matches!(expected, HuginnMindResponse::Deferred(_)));
         }
 
         // A real-sized answer that does fit is delivered whole, over the same
-        // session that was just refused twice: the gate measures the answer, and
-        // the window it measures against is one the hub actually carries.
+        // session that just fetched two bodies.
         let delivered = [
             ("m-f", HuginnMindRequest::View { instance: slug(INSTANCE), id: fitting.clone() }),
             ("m-w", HuginnMindRequest::Whoami),
         ];
         for (message_id, request) in delivered {
-            client.send_schema_message(&encode_request(message_id, &request, None).unwrap()).unwrap();
-            let mut reply = None;
-            for _ in 0..2000 {
-                client.poll_resends().unwrap();
-                if let Some(message) = client.receive_schema_message_once().unwrap() {
-                    reply = Some(message);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            let reply = reply.unwrap_or_else(|| panic!("{message_id} got no reply"));
+            let reply = exchange(&mut client, &encode_request(message_id, &request, None).unwrap()).unwrap();
             let (correlation, answered) = decode_response(&reply).unwrap();
             assert_eq!(&correlation, message_id);
             match answered.unwrap() {
@@ -664,69 +778,6 @@ mod tests {
 
         stopping.store(true, Ordering::Relaxed);
         serving.join().unwrap().0.unwrap();
-    }
-
-    fn encoded_len(message: &CultNetMessage) -> u64 {
-        encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap().len() as u64
-    }
-
-    /// A reply carrying `payload_len` bytes of payload under a chosen
-    /// `message_id`: the envelope a view answer travels in, with the document
-    /// replaced by filler, so a size can be chosen instead of found. The
-    /// `message_id` is part of the encoded envelope too, so pinning the gate
-    /// against one length alone (every other fixture uses `m-0`) hides a gate
-    /// that hard-codes that length's contribution instead of measuring it.
-    fn synthetic_with_id(message_id: &str, payload_len: usize) -> CultNetMessage {
-        synthetic_full(message_id, "view", "huginn-yggdrasil", payload_len)
-    }
-
-    /// N4: `operation` and `source_runtime_id` are in the encoded envelope
-    /// too, exactly as `message_id` is, so a boundary fixture that only ever
-    /// varies `message_id` cannot tell a gate that genuinely measures the
-    /// encoded bytes from one that hard-codes a formula shaped to fit that
-    /// one dimension. `synthetic_with_id` is this with the operation and
-    /// runtime id `the_gates_boundary_*` tests were pinned to before N4.
-    fn synthetic_full(message_id: &str, operation: &str, runtime_id: &str, payload_len: usize) -> CultNetMessage {
-        CultNetMessage::OperationResponse {
-            message_id: message_id.into(),
-            service_id: MIND_SERVICE_ID.into(),
-            operation: operation.into(),
-            status: "accepted".into(),
-            payload_schema: MIND_RESPONSE_SCHEMA.into(),
-            payload_encoding: "messagepack-base64".into(),
-            payload: "A".repeat(payload_len),
-            diagnostics: vec![],
-            source_runtime_id: Some(runtime_id.into()),
-        }
-    }
-
-    fn synthetic(payload_len: usize) -> CultNetMessage {
-        synthetic_with_id("m-0", payload_len)
-    }
-
-    /// One whose encoded envelope is exactly `target` bytes, under a chosen
-    /// `message_id`. The envelope's own overhead is measured rather than
-    /// assumed: the length prefix is the same width on either side of a
-    /// megabyte, so one probe fixes it.
-    fn sized_exactly_with_id(message_id: &str, target: u64) -> CultNetMessage {
-        sized_exactly_full(message_id, "view", "huginn-yggdrasil", target)
-    }
-
-    /// N4's own probe: `sized_exactly_with_id` generalised over the
-    /// operation and the runtime id as well as the message id, so a fixture
-    /// can pin the gate's boundary at a combination a formula shaped to fit
-    /// `view`/`huginn-yggdrasil` alone was never measured against.
-    fn sized_exactly_full(message_id: &str, operation: &str, runtime_id: &str, target: u64) -> CultNetMessage {
-        let probe = 1_200_000_usize;
-        let at_probe = encoded_len(&synthetic_full(message_id, operation, runtime_id, probe));
-        let message =
-            synthetic_full(message_id, operation, runtime_id, (probe as i64 + (target as i64 - at_probe as i64)) as usize);
-        assert_eq!(encoded_len(&message), target);
-        message
-    }
-
-    fn sized_exactly(target: u64) -> CultNetMessage {
-        sized_exactly_with_id("m-0", target)
     }
 
     /// A connected session whose accept has been acknowledged, so its window
@@ -769,150 +820,224 @@ mod tests {
         (client, session.unwrap())
     }
 
-    /// The gate's boundary is the transport's, byte for byte. The test above
-    /// proves the two agree at the sizes real documents reach, which leaves
-    /// the width of a whole document between the largest answer it delivers
-    /// and the smallest it refuses; this one leaves nothing. A reply whose
-    /// encoded envelope is exactly `MAX_RESPONSE_BYTES` passes the gate
-    /// unchanged and is accepted by a hub `bind` configured; one byte more is
-    /// refused by both.
-    ///
-    /// So the gate measures the encoded envelope, which is what the hub
-    /// fragments, and not the payload string inside it, which is 231 bytes
-    /// smaller; and it admits the limit rather than stopping one short of it.
-    /// Neither is visible to a test whose answers sit tens of thousands of
-    /// bytes from the boundary.
-    ///
-    /// The refusal is measured on the same scale: it is one packet, so the
-    /// answer that says an answer did not fit always fits itself. And the
-    /// accepted reply is shown to have filled the window it was measured
-    /// against, because a one-byte reply after it is refused.
-    #[test]
-    fn the_gates_boundary_is_the_transports_boundary_byte_for_byte() {
-        let at = sized_exactly(MAX_RESPONSE_BYTES);
-        let over = sized_exactly(MAX_RESPONSE_BYTES + 1);
-        assert_eq!(within_window(at.clone(), "m-0", "view", "huginn-yggdrasil"), at, "exactly the limit passes");
+    /// A reply carrying a chosen payload string, with every field the envelope
+    /// echoes chosen too, so a size can be chosen instead of found.
+    fn reply_with_payload(message_id: &str, operation: &str, runtime_id: &str, payload: String) -> CultNetMessage {
+        CultNetMessage::OperationResponse {
+            message_id: message_id.into(),
+            service_id: MIND_SERVICE_ID.into(),
+            operation: operation.into(),
+            status: "accepted".into(),
+            payload_schema: MIND_RESPONSE_SCHEMA.into(),
+            payload_encoding: "messagepack-base64".into(),
+            payload,
+            diagnostics: vec![],
+            source_runtime_id: Some(runtime_id.into()),
+        }
+    }
 
-        let refused = within_window(over.clone(), "m-0", "view", "huginn-yggdrasil");
+    /// One whose encoded envelope is exactly `target` bytes and whose payload is
+    /// valid base64, under a `message_id` that is `stem` followed by as many
+    /// zeros as make the payload a whole number of base64 quanta. The envelope's
+    /// own overhead is measured, not assumed: the length prefix is the same
+    /// width on either side of a megabyte, so one probe fixes it. The id is
+    /// echoed, so it is part of the result.
+    fn sized_exactly(stem: &str, operation: &str, runtime_id: &str, target: u64) -> (String, CultNetMessage) {
+        let probe = 1_200_000_usize;
+        for zeros in 0..4 {
+            let message_id = format!("{stem}{}", "0".repeat(zeros));
+            let at_probe = encoded_len(&reply_with_payload(&message_id, operation, runtime_id, "A".repeat(probe)));
+            let payload_len = (probe as i64 + (target as i64 - at_probe as i64)) as usize;
+            if payload_len % 4 == 0 {
+                let message = reply_with_payload(&message_id, operation, runtime_id, "A".repeat(payload_len));
+                assert_eq!(encoded_len(&message), target);
+                return (message_id, message);
+            }
+        }
+        unreachable!("one of four consecutive id lengths aligns the payload")
+    }
+
+    /// The boundary is the transport's, byte for byte, at every shape of
+    /// envelope. A reply whose encoded envelope is exactly `MAX_RESPONSE_BYTES`
+    /// is delivered unchanged and a hub `bind` configured accepts it; one byte
+    /// more is deferred, not refused, and a hub refuses it.
+    ///
+    /// So the threshold measures the encoded envelope, which is what the hub
+    /// fragments, and not the payload string inside it, which is a couple of
+    /// hundred bytes smaller; it admits the limit rather than stopping one
+    /// short of it; and it is the window itself and not a margin under it. The
+    /// echoed ids, operations and runtime ids vary independently and in length,
+    /// so a formula fitted to one envelope shape is measured where it was never
+    /// fitted. The accepted reply is shown to have filled the window it was
+    /// measured against, because a one-byte reply after it is refused.
+    #[test]
+    fn the_delivery_boundary_is_the_transports_boundary_byte_for_byte() {
+        let long = format!("m-{}", "1".repeat(38));
+        for (stem, operation, runtime_id) in [
+            ("m-", "view", "huginn-yggdrasil"),
+            (long.as_str(), "view", "huginn-yggdrasil"),
+            ("m-", "whoami", "huginn-thought-cage"),
+            ("m-", "whoami", "huginn-yggdrasil"),
+            ("m-", "view", "huginn-thought-cage"),
+        ] {
+            let (id_at, at) = sized_exactly(stem, operation, runtime_id, MAX_RESPONSE_BYTES);
+            let (id_over, over) = sized_exactly(stem, operation, runtime_id, MAX_RESPONSE_BYTES + 1);
+            let mut bodies = fresh_bodies();
+            let case = format!("{operation}/{runtime_id}/{}", stem.len());
+
+            let delivered = deliver(at.clone(), &id_at, operation, runtime_id, &mut bodies, now());
+            assert_eq!(delivered, at, "{case}: exactly the limit is delivered whole");
+            assert_eq!(bodies.body_count(), 0, "{case}: nothing was retained for it");
+
+            let deferred = deliver(over.clone(), &id_over, operation, runtime_id, &mut bodies, now());
+            let (correlation, answered) = decode_response(&deferred).unwrap();
+            assert_eq!(correlation, id_over, "{case}");
+            let Some(HuginnMindResponse::Deferred(DeferredAnswer { manifest })) = answered.ok() else {
+                panic!("{case}: one byte over the limit was not deferred: {deferred:?}");
+            };
+            assert_eq!(bodies.body_count(), 1, "{case}");
+            assert!(
+                encoded_len(&deferred) <= MAX_FRAGMENT_BYTES as u64 * 4,
+                "{case}: the deferred answer is a few packets"
+            );
+            let CultNetMessage::OperationResponse { payload, .. } = &over else { unreachable!() };
+            assert_eq!(manifest.size_bytes as usize, STANDARD.decode(payload).unwrap().len(), "{case}");
+
+            if stem == "m-" && operation == "view" && runtime_id == "huginn-yggdrasil" {
+                let mut hub = bind("127.0.0.1:0".parse().unwrap(), "huginn-yggdrasil").unwrap();
+                let (_client, session) = settled_session(&mut hub);
+                let error = hub.send_schema_message(&session, &over).unwrap_err();
+                assert!(format!("{error:#}").contains("queue is full"), "limit + 1 was accepted: {error:#}");
+                hub.send_schema_message(&session, &at).expect("exactly the limit is accepted on an empty window");
+                hub.send_schema_message(&session, &reply_with_payload("m-0", "view", runtime_id, "A".into()))
+                    .expect_err("the accepted answer filled the window, so nothing follows it");
+            }
+        }
+    }
+
+    /// The backstop stays, measured against the deferral bound and on the
+    /// payload: a body of exactly `MAX_DEFERRED_BODY_BYTES` is deferred, one
+    /// byte more is refused by name with its own size and that bound, and the
+    /// deferred answer at the bound still fits one send, so it is never itself
+    /// deferred.
+    #[test]
+    fn an_answer_over_the_deferral_bound_is_refused_by_name() {
+        let payload_of = |len: u64| STANDARD.encode(vec![0_u8; len as usize]);
+        let mut bodies = fresh_bodies();
+
+        let at = reply_with_payload("m-b", "view", "huginn-yggdrasil", payload_of(MAX_DEFERRED_BODY_BYTES));
+        let deferred = deliver(at, "m-b", "view", "huginn-yggdrasil", &mut bodies, now());
+        let manifest = deferred_manifest(&deferred);
+        assert_eq!(manifest.size_bytes as u64, MAX_DEFERRED_BODY_BYTES);
+        assert_eq!(manifest.chunks.len() as u64, MAX_DEFERRED_BODY_BYTES / DEFERRED_CHUNK_BYTES as u64);
+        assert!(encoded_len(&deferred) <= MAX_RESPONSE_BYTES, "at the bound the deferred answer still fits one send");
+        assert_eq!(bodies.body_count(), 1);
+        drop(bodies);
+
+        let over = reply_with_payload("m-b", "view", "huginn-yggdrasil", payload_of(MAX_DEFERRED_BODY_BYTES + 1));
+        let mut empty = fresh_bodies();
+        let refused = deliver(over, "m-b", "view", "huginn-yggdrasil", &mut empty, now());
         let (correlation, answered) = decode_response(&refused).unwrap();
-        assert_eq!(correlation, "m-0");
+        assert_eq!(correlation, "m-b");
         let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
             answered.expect("a refusal is an answer, not an envelope failure")
         else {
-            panic!("one byte over the limit was not refused: {refused:?}");
+            panic!("one byte over the deferral bound was not refused: {refused:?}");
         };
-        assert_eq!((bytes, limit), (MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES));
-        let refusal_bytes = encoded_len(&refused);
+        assert_eq!((bytes, limit), (MAX_DEFERRED_BODY_BYTES + 1, MAX_DEFERRED_BODY_BYTES));
+        assert!(encoded_len(&refused) <= MAX_FRAGMENT_BYTES as u64, "the refusal is one packet");
+        assert_eq!(empty.body_count(), 0, "a refused answer retains nothing");
+    }
+
+    /// An oversize reply whose payload cannot be read as the response's bytes
+    /// is a failure of the envelope, named, and never deferred.
+    #[test]
+    fn an_oversize_reply_that_is_not_a_response_is_not_deferred() {
+        let mut bodies = fresh_bodies();
+        let not_base64 = reply_with_payload("m-x", "view", "huginn-yggdrasil", "A".repeat(MAX_RESPONSE_BYTES as usize) + "!");
+        let not_a_response =
+            CultNetMessage::Error { error: "e".repeat(MAX_RESPONSE_BYTES as usize + 1), code: None, details: None };
+        for reply in [not_base64, not_a_response] {
+            assert!(encoded_len(&reply) > MAX_RESPONSE_BYTES);
+            let answered = deliver(reply, "m-x", "view", "huginn-yggdrasil", &mut bodies, now());
+            assert_eq!(rejected(&answered).1, "response-not-encodable");
+        }
+        assert_eq!(bodies.body_count(), 0);
+    }
+
+    /// Lifecycle end to end through the daemon's own `answer`, on an injected
+    /// clock: a chunk served inside the TTL slides the expiry, a body untouched
+    /// for the TTL is gone and its chunk is answered `found: false` by name,
+    /// and the client asks again and fetches the same answer.
+    #[test]
+    fn an_expired_body_answers_found_false_and_the_client_can_ask_again() {
+        let (_root, mut daemon) = seeded_wide();
+        let registry = schema_registry().unwrap();
+        let wide = spec_ref(&mut daemon, WIDE_CUT);
+        let read = HuginnMindRequest::View { instance: slug(INSTANCE), id: wide };
+        let expected = rmp_serde::to_vec_named(&daemon.handle(read.clone(), now())).unwrap();
+        let t0 = now();
+        let after = |seconds: i64| t0 + chrono::Duration::seconds(seconds);
+        let mut bodies = fresh_bodies();
+
+        let manifest = ask_deferred(&mut daemon, &mut bodies, "m-v", &read, t0);
+        assert!(manifest.chunks.len() >= 2, "the fixture needs a second chunk to serve");
+        let mut chunk = |index: usize, at: i64| {
+            answer(&mut daemon, &registry, &mut bodies, chunk_request(&manifest, index), after(at))
+        };
+        assert!(found(&chunk(0, 59)), "inside the TTL");
+        assert!(found(&chunk(1, 118)), "serving a chunk slid the expiry past the first TTL");
+        let gone = chunk(0, 178);
+        assert!(!found(&gone), "untouched for the TTL since t=118");
+        let CultNetMessage::ContentChunkResponse { error, payload, .. } = &gone else { unreachable!() };
+        assert!(error.starts_with("FileNotFoundException"), "{error}");
+        assert!(payload.is_empty());
+
+        let again = ask_deferred(&mut daemon, &mut bodies, "m-v2", &read, after(179));
+        assert_eq!(again.content_hash, manifest.content_hash, "the same answer is the same body");
+        let bytes = fetch_content(&again, MAX_DEFERRED_BODY_BYTES, |request| {
+            Ok(answer(&mut daemon, &registry, &mut bodies, request, after(180)))
+        })
+        .unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    /// Past the budget the body touched longest ago is evicted, its chunks
+    /// answer `found: false`, and asking again evicts the other in turn. Two
+    /// identical answers are one body.
+    #[test]
+    fn eviction_and_sharing_through_the_daemons_answer() {
+        let (_root, mut daemon) = seeded_wide();
+        let wide = spec_ref(&mut daemon, WIDE_CUT);
+        let view = HuginnMindRequest::View { instance: slug(INSTANCE), id: wide };
+        let query = document_query();
+        let size = |daemon: &mut BodyDaemon, read: &HuginnMindRequest| {
+            rmp_serde::to_vec_named(&daemon.handle(read.clone(), now())).unwrap().len() as u64
+        };
+        let (view_bytes, query_bytes) = (size(&mut daemon, &view), size(&mut daemon, &query));
+        // Room for the larger body alone, and not for both.
+        let budget = view_bytes.max(query_bytes) + 1;
+        let t0 = now();
+        let after = |seconds: i64| t0 + chrono::Duration::seconds(seconds);
+        let mut bodies = DeferredBodies::new(budget, TTL);
+
+        let first = ask_deferred(&mut daemon, &mut bodies, "m-1", &view, after(0));
+        let same = ask_deferred(&mut daemon, &mut bodies, "m-2", &view, after(1));
+        assert_eq!(first.content_hash, same.content_hash, "two identical answers are one body");
+        assert_eq!((bodies.body_count(), bodies.stored_bytes()), (1, view_bytes));
+
+        let second = ask_deferred(&mut daemon, &mut bodies, "m-3", &query, after(2));
+        assert_eq!(bodies.body_count(), 1, "the least recently touched body was evicted");
+        assert!(bodies.stored_bytes() <= budget);
+        assert!(!first_chunk_found(&mut daemon, &mut bodies, &first, after(3)), "the evicted body answers found: false");
+        assert!(first_chunk_found(&mut daemon, &mut bodies, &second, after(3)), "the newer body stays");
+
+        let again = ask_deferred(&mut daemon, &mut bodies, "m-4", &view, after(4));
+        assert!(first_chunk_found(&mut daemon, &mut bodies, &again, after(5)));
         assert!(
-            refusal_bytes <= MAX_FRAGMENT_BYTES as u64,
-            "the refusal is {refusal_bytes} bytes and must fit one packet"
+            !first_chunk_found(&mut daemon, &mut bodies, &second, after(5)),
+            "the client's re-ask evicted the one touched longest ago"
         );
-
-        let mut hub = bind("127.0.0.1:0".parse().unwrap(), "huginn-yggdrasil").unwrap();
-        let (_client, session) = settled_session(&mut hub);
-        let error = hub.send_schema_message(&session, &over).unwrap_err();
-        assert!(format!("{error:#}").contains("queue is full"), "limit + 1 was accepted: {error:#}");
-        hub.send_schema_message(&session, &at).expect("exactly the limit is accepted on an empty window");
-        hub.send_schema_message(&session, &synthetic(1))
-            .expect_err("the accepted answer filled the window, so nothing follows it");
-    }
-
-    /// The boundary above is pinned for one envelope shape: every reply in it
-    /// carries `message_id` `m-0`, three bytes, so a gate that measures
-    /// `payload.len() + 231` — exactly the encoded envelope's overhead for
-    /// that one id — passes it unnoticed. The reply echoes the client's own
-    /// `message_id`, so that overhead is under the client's control: at a
-    /// longer id, such a gate is wrong, and wrong on the side that lets an
-    /// oversize answer through the size check to a send that then fails
-    /// silently. Forty bytes is used because it is far from `m-0`'s length in
-    /// either direction, not chosen to sit near some other boundary.
-    #[test]
-    fn the_gates_boundary_holds_for_a_second_message_id_length() {
-        let long_id = format!("m-{}", "0".repeat(38));
-        assert_eq!(long_id.len(), 40, "a message_id far from m-0's own length");
-
-        let at = sized_exactly_with_id(&long_id, MAX_RESPONSE_BYTES);
-        let over = sized_exactly_with_id(&long_id, MAX_RESPONSE_BYTES + 1);
-        assert_eq!(
-            within_window(at.clone(), &long_id, "view", "huginn-yggdrasil"),
-            at,
-            "exactly the limit passes at this id's length too"
-        );
-
-        let refused = within_window(over.clone(), &long_id, "view", "huginn-yggdrasil");
-        let (correlation, answered) = decode_response(&refused).unwrap();
-        assert_eq!(correlation, long_id);
-        let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
-            answered.expect("a refusal is an answer, not an envelope failure")
-        else {
-            panic!("one byte over the limit was not refused: {refused:?}");
-        };
-        assert_eq!((bytes, limit), (MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES));
-    }
-
-    /// N4: the boundary above is pinned at one `message_id` length, but
-    /// `operation` and `source_runtime_id` are in the encoded envelope the
-    /// same way `message_id` is, and every fixture before this one held both
-    /// fixed at `"view"` and `"huginn-yggdrasil"`. A gate whose measurement is
-    /// a formula of `message_id`'s length alone -- shaped to pass at exactly
-    /// `m-0`'s three bytes and the other fixture's forty -- has no way to be
-    /// wrong there and every way to be wrong once the operation or the
-    /// runtime id it never looked at changes length too. This holds the
-    /// boundary at `whoami` (six bytes, not `view`'s four) over a second
-    /// runtime id, so such a formula is measured somewhere it was never
-    /// fitted.
-    #[test]
-    fn the_gates_boundary_holds_across_operation_and_runtime_id() {
-        for (operation, runtime_id) in [("view", "huginn-yggdrasil"), ("whoami", "huginn-thought-cage")] {
-            let at = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES);
-            let over = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES + 1);
-            assert_eq!(
-                within_window(at.clone(), "m-g", operation, runtime_id),
-                at,
-                "{operation}/{runtime_id}: exactly the limit passes"
-            );
-
-            let refused = within_window(over.clone(), "m-g", operation, runtime_id);
-            let (correlation, answered) = decode_response(&refused).unwrap();
-            assert_eq!(correlation, "m-g");
-            let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
-                answered.expect("a refusal is an answer, not an envelope failure")
-            else {
-                panic!("{operation}/{runtime_id}: one byte over the limit was not refused: {refused:?}");
-            };
-            assert_eq!((bytes, limit), (MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES), "{operation}/{runtime_id}");
-        }
-    }
-
-    /// Every fixture up to this one, including the pair above,
-    /// moves `operation` and the runtime id together -- both short (`view`,
-    /// 4 bytes / `huginn-yggdrasil`, 16) or both long (`whoami`, 6 /
-    /// `huginn-thought-cage`, 19) -- so a formula that tracks only one of the
-    /// two and ignores the other still lands on the right answer at both
-    /// points by coincidence. This pins a point where they move apart: a long
-    /// operation with the short runtime id, and a short operation with the
-    /// long one, so a gate that dropped either term is wrong at one of them.
-    #[test]
-    fn the_gates_boundary_holds_when_operation_and_runtime_id_vary_independently() {
-        for (operation, runtime_id) in [("whoami", "huginn-yggdrasil"), ("view", "huginn-thought-cage")] {
-            let at = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES);
-            let over = sized_exactly_full("m-g", operation, runtime_id, MAX_RESPONSE_BYTES + 1);
-            assert_eq!(
-                within_window(at.clone(), "m-g", operation, runtime_id),
-                at,
-                "{operation}/{runtime_id}: exactly the limit passes"
-            );
-
-            let refused = within_window(over.clone(), "m-g", operation, runtime_id);
-            let (correlation, answered) = decode_response(&refused).unwrap();
-            assert_eq!(correlation, "m-g");
-            let HuginnMindResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) =
-                answered.expect("a refusal is an answer, not an envelope failure")
-            else {
-                panic!("{operation}/{runtime_id}: one byte over the limit was not refused: {refused:?}");
-            };
-            assert_eq!((bytes, limit), (MAX_RESPONSE_BYTES + 1, MAX_RESPONSE_BYTES), "{operation}/{runtime_id}");
-        }
     }
 
     /// One cut spec's own reference, by its cut label.
