@@ -59,8 +59,15 @@ fn counts(index: &FakeIndex) -> (usize, usize) {
     (state.recreated.len(), state.upserts.len())
 }
 
+/// Steps until the projector has nothing to do. A step that never settles is a
+/// failure of the test, not a hang: it is bounded.
 fn drain<E: Embedder, V: VectorIndex>(projector: &mut Projector<E, V>) {
-    while projector.advance().unwrap() == Advance::Progressed {}
+    for _ in 0..1000 {
+        if projector.advance().unwrap() == Advance::Idle {
+            return;
+        }
+    }
+    panic!("the projector was still stepping after 1000 steps");
 }
 
 fn point_ids(entries: &[IndexEntry]) -> BTreeSet<String> {
@@ -758,7 +765,7 @@ fn a_mind_without_an_identity_makes_no_collection_until_its_first_admission() {
 /// assertion: it polls for at most ten seconds and then says what never
 /// happened.
 fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
-    for _ in 0..2000 {
+    for _ in 0..1000 {
         if condition() {
             return;
         }
@@ -1349,7 +1356,7 @@ fn steady_searches_do_not_postpone_the_workers_recheck() {
     let listed = index.state.lock().unwrap().listed;
     let started = Instant::now();
     while index.state.lock().unwrap().listed < listed + 2 {
-        assert!(started.elapsed() < Duration::from_secs(10), "the worker never rechecked while searches kept arriving");
+        assert!(started.elapsed() < Duration::from_secs(5), "the worker never rechecked while searches kept arriving");
         let _ = ask_sink(&mut sink, "anything", 3);
         collected(&mut sink);
         std::thread::sleep(Duration::from_millis(10));
@@ -1384,4 +1391,19 @@ fn wait_status_gives_up_at_its_overall_deadline_however_often_the_health_changes
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     ticker.join().unwrap();
     assert_eq!(gave_up, Ok(true), "the wait did not end at its deadline");
+}
+
+/// An idle worker verifies once per interval, not in a loop: the recheck moves
+/// its own deadline when it runs.
+#[test]
+fn an_idle_worker_rechecks_once_per_interval() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let backoff = Backoff { recheck: Duration::from_millis(100), ..quick() };
+    let sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), Some(MIND.into()), entries, backoff);
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    std::thread::sleep(Duration::from_millis(600));
+    let listed = index.state.lock().unwrap().listed;
+    assert!((2..=40).contains(&listed), "the startup reconciliation and about five rechecks listed the collection {listed} times");
 }

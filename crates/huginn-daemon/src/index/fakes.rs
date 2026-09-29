@@ -24,7 +24,7 @@ impl Gate {
 
     /// Blocks until `count` calls to `embed` have arrived at the gate.
     pub(crate) fn wait_arrived(&self, count: u32) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut state = self.0.0.lock().unwrap();
         while state.0 < count {
             let left = deadline.saturating_duration_since(std::time::Instant::now());

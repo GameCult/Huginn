@@ -699,7 +699,9 @@ fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Loc
     // When the worker next verifies the model and the collection whether or
     // not anything has woken it: an absolute time, moved only by a
     // verification, so a steady stream of searches cannot keep pushing it out.
-    let mut recheck_at = Instant::now() + backoff.recheck;
+    // The first step is a verification (the startup reconciliation), so it is
+    // due now.
+    let mut recheck_at = Instant::now();
     loop {
         if !absorb(&mut projector, &shared, failing.as_ref().map(|(error, attempts)| (error, *attempts))) {
             return;
@@ -811,7 +813,7 @@ impl WorkerSink {
 }
 
 /// The longest `WorkerSink::wait_status` waits, in all.
-const WAIT_STATUS_MAX: Duration = Duration::from_secs(30);
+const WAIT_STATUS_MAX: Duration = Duration::from_secs(10);
 
 impl Drop for WorkerSink {
     fn drop(&mut self) {

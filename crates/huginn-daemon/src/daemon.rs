@@ -70,6 +70,20 @@ impl Handled {
     }
 }
 
+/// What the log says of the hits the mind held no document for: how many, and
+/// the first few by name (a restored mind can leave hundreds), or nothing when
+/// the mind held them all.
+fn dropped_note(dropped: &[PipelineRef]) -> Option<String> {
+    if dropped.is_empty() {
+        return None;
+    }
+    let named: Vec<&str> = dropped.iter().take(5).map(|hit| hit.id.0.as_str()).collect();
+    Some(format!(
+        "huginn: the index returned {} ids this mind does not hold (first {named:?}); they are left out",
+        dropped.len()
+    ))
+}
+
 /// The envelope's `source_runtime_id` on every response a daemon serving this
 /// instance sends. Also what the socket is bound under, before a daemon exists.
 pub fn runtime_id(instance: &Slug) -> String {
@@ -181,13 +195,8 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         };
         match self.mind.rank(&search.selection, &search.semantic, &hits) {
             Ok(ranked) => {
-                if !ranked.dropped.is_empty() {
-                    let named: Vec<&str> = ranked.dropped.iter().take(5).map(|hit| hit.id.0.as_str()).collect();
-                    eprintln!(
-                        "huginn: the index returned {} ids this mind does not hold (first {:?}); they are left out",
-                        ranked.dropped.len(),
-                        named
-                    );
+                if let Some(note) = dropped_note(&ranked.dropped) {
+                    eprintln!("{note}");
                 }
                 HuginnMindResponse::Query(ranked.page)
             }
@@ -426,6 +435,19 @@ pub(crate) mod tests {
             "{outcome:?}"
         );
         (root, daemon)
+    }
+
+    /// The log names how many hits the mind did not hold and the first five, and
+    /// says nothing when it held them all.
+    #[test]
+    fn the_dropped_hits_are_reported_by_count_and_the_first_five_names() {
+        assert_eq!(dropped_note(&[]), None);
+        let dropped: Vec<PipelineRef> =
+            (0..7).map(|n| PipelineRef { kind: PipelineKind::Question, id: Short(format!("gone-{n}")) }).collect();
+        let note = dropped_note(&dropped).unwrap();
+        assert!(note.contains("returned 7 ids"), "{note}");
+        assert!(note.contains("gone-0") && note.contains("gone-4") && !note.contains("gone-5"), "{note}");
+        assert_eq!(dropped_note(&dropped[..1]).unwrap().matches("gone-").count(), 1);
     }
 
     /// No index: for the tests whose subject is not the projection.
