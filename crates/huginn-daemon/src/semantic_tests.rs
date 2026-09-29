@@ -140,7 +140,7 @@ fn ids(response: &HuginnMindResponse) -> Vec<String> {
 }
 
 fn quick() -> Backoff {
-    Backoff { initial: Duration::from_millis(1), max: Duration::from_millis(2), recheck: Duration::from_secs(3600) }
+    Backoff { initial: Duration::from_millis(1), max: Duration::from_millis(2), recheck: Duration::from_secs(3600), search_deadline: Duration::from_secs(30) }
 }
 
 /// A daemon serving a mind over a real socket, with the ports the test gave it.
@@ -167,7 +167,7 @@ impl Harness {
             &slug(INSTANCE),
             mind.genesis_receipt_id().unwrap(),
             mind.index_entries(None).unwrap(),
-            quick(),
+            Backoff { search_deadline: search_timeout, ..quick() },
         );
         let mut daemon: Daemon<OwnedRedbMessagePackBackingStore, WorkerSink> = Daemon::new(mind, sink);
         let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
@@ -175,7 +175,7 @@ impl Harness {
         let registry = schema_registry().unwrap();
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
-        let options = ServeOptions { search_timeout, ..ServeOptions::default() };
+        let options = ServeOptions::default();
         let serving = std::thread::spawn(move || run(&mut daemon, &mut hub, &registry, &loop_stopping, &options));
         Self { endpoint, stopping, serving: Some(serving), embedder, index, _root: root }
     }

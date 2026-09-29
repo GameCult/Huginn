@@ -71,6 +71,8 @@ pub(crate) struct EmbedderState {
     /// Whether an identity read is never answered: it fails when its bound
     /// has passed, as an adapter that honours its bound does.
     pub(crate) hang_identity: bool,
+    /// How long an identity read takes to answer, when it answers.
+    pub(crate) identity_delay: Duration,
 }
 
 #[derive(Clone)]
@@ -81,7 +83,7 @@ pub(crate) struct FakeEmbedder {
 
 impl FakeEmbedder {
     pub(crate) fn new(digest: &str) -> Self {
-        let state = EmbedderState { identity: identity(digest), down: false, embedded: Vec::new(), bounds: Vec::new(), vector_length: None, identity_bounds: Vec::new(), hang_identity: false };
+        let state = EmbedderState { identity: identity(digest), down: false, embedded: Vec::new(), bounds: Vec::new(), vector_length: None, identity_bounds: Vec::new(), hang_identity: false, identity_delay: Duration::ZERO };
         Self { state: Arc::new(Mutex::new(state)), gate: None }
     }
 
@@ -107,7 +109,10 @@ impl Embedder for FakeEmbedder {
         if state.down {
             bail!("the embedder is down");
         }
-        Ok(state.identity.clone())
+        let (identity, delay) = (state.identity.clone(), state.identity_delay);
+        drop(state);
+        std::thread::sleep(delay);
+        Ok(identity)
     }
 
     fn embed(&mut self, texts: &[String], within: Duration) -> Result<Vec<Vec<f32>>> {

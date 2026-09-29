@@ -88,10 +88,6 @@ pub struct ServeOptions {
     pub session_timeout: Duration,
     pub idle_sleep: Duration,
     pub deferred_ttl: Duration,
-    /// How long a semantic query may wait for the index before it is answered
-    /// `Unavailable`. The worker's own calls time out on their own; this is
-    /// what the client is promised.
-    pub search_timeout: Duration,
 }
 
 impl Default for ServeOptions {
@@ -100,7 +96,6 @@ impl Default for ServeOptions {
             session_timeout: Duration::from_secs(30),
             idle_sleep: Duration::from_millis(2),
             deferred_ttl: Duration::from_secs(60),
-            search_timeout: crate::index::SEARCH_DEADLINE,
         }
     }
 }
@@ -449,7 +444,8 @@ struct Waiting {
 
 /// Until `stopping`: expire what timed out, resend what was not acknowledged,
 /// answer every frame waiting on the socket, then answer every semantic query
-/// the index has finished or that has waited out `search_timeout`. A semantic
+/// the index has finished or that has waited out the index's own
+/// `search_deadline`. A semantic
 /// query is never answered inline: `answer` hands back a `Search`, the loop
 /// holds it beside its session and goes on serving, and the embedder and the
 /// vector store are the worker's to wait on. A hostile datagram and a departed
@@ -497,13 +493,13 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
             match answer(daemon, registry, &mut bodies, message, Utc::now()) {
                 Routed::Reply(reply) => send(hub, &session, &reply),
                 Routed::Search { message_id, operation, search } => {
-                    let until = Instant::now() + options.search_timeout;
+                    let until = Instant::now() + daemon.search_deadline();
                     waiting.insert(search.ticket, Waiting { session, message_id, operation, search, until });
                 }
             }
             served += 1;
         }
-        let finished = collect_searches(daemon, &waiting, options);
+        let finished = collect_searches(daemon, &waiting);
         let answered = !finished.is_empty();
         for (ticket, found) in finished {
             let Some(asked) = waiting.remove(&ticket) else { continue };
@@ -525,14 +521,14 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
 fn collect_searches<S: MindStore, I: IndexSink<S>>(
     daemon: &mut Daemon<S, I>,
     waiting: &BTreeMap<SearchTicket, Waiting>,
-    options: &ServeOptions,
 ) -> Vec<(SearchTicket, Result<crate::daemon::Hits, String>)> {
+    let deadline = daemon.search_deadline();
     let mut collected = daemon.searched();
     let now = Instant::now();
     for (ticket, asked) in waiting {
         if asked.until <= now {
             daemon.abandon(*ticket);
-            collected.push((*ticket, Err(format!("the semantic search did not finish within {:?}", options.search_timeout))));
+            collected.push((*ticket, Err(format!("the semantic search did not finish within {deadline:?}"))));
         }
     }
     collected

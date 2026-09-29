@@ -25,6 +25,9 @@ pub trait IndexSink<S: MindStore> {
     /// Starts a search for the documents nearest `text`, at most `top_k` of
     /// them wanted. `Err` says why the index cannot be asked now.
     fn search(&mut self, text: &str, top_k: u32) -> Result<SearchTicket, String>;
+    /// How long after it was asked a search is worth answering: the index's
+    /// own bound on it, which the loop waiting for the answer must share.
+    fn search_deadline(&self) -> std::time::Duration;
     /// Every search that finished since the last call, by ticket: its
     /// candidates and scores, or why it failed.
     fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)>;
@@ -172,6 +175,11 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
             Ok(ticket) => Handled::Searching(Search { ticket, selection, semantic }),
             Err(detail) => refused(MindRefusal::Unavailable { detail }),
         }
+    }
+
+    /// How long a search is worth waiting for.
+    pub fn search_deadline(&self) -> std::time::Duration {
+        self.index.search_deadline()
     }
 
     /// Searches the index has finished since this was last called.
@@ -466,6 +474,10 @@ pub(crate) mod tests {
             Err("this index cannot search".into())
         }
 
+        fn search_deadline(&self) -> std::time::Duration {
+            std::time::Duration::ZERO
+        }
+
         fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
             Vec::new()
         }
@@ -502,6 +514,10 @@ pub(crate) mod tests {
             Err("this index cannot search".into())
         }
 
+        fn search_deadline(&self) -> std::time::Duration {
+            std::time::Duration::ZERO
+        }
+
         fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
             Vec::new()
         }
@@ -522,6 +538,10 @@ pub(crate) mod tests {
 
         fn search(&mut self, _text: &str, _top_k: u32) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
+        }
+
+        fn search_deadline(&self) -> std::time::Duration {
+            std::time::Duration::ZERO
         }
 
         fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
