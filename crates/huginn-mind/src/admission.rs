@@ -37,7 +37,7 @@ use epiphany_pipeline::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::docs::{Docs, Staged};
+use crate::docs::{CitationRole, Docs, Staged, citations, kind_of_id, outcome_citations};
 use crate::mind::{HuginnMindEpoch, Mind, unavailable};
 use crate::receipt::{self, CommitOutcome, PipelineProvenance};
 use crate::refusal::MindRefusal;
@@ -170,13 +170,6 @@ impl<S: MindStore> Mind<S> {
     }
 }
 
-/// The kind segment of a full id, for the one field typed `Short` whose
-/// referent may be of any kind.
-fn kind_of_id(id: &str) -> Option<PipelineKind> {
-    let name = id.split(':').nth(1)?;
-    PipelineKind::ALL.iter().copied().find(|kind| kind.name() == name)
-}
-
 /// A3 through the leaf, then A5.
 fn stage(envelope: CultCacheEnvelope, mind: &Slug) -> Result<Staged, MindRefusal> {
     validate_pipeline_write_envelope(&envelope)?;
@@ -212,74 +205,35 @@ struct Reference {
     missing: Missing,
 }
 
-fn reference(kind: PipelineKind, id: &str) -> Reference {
-    Reference { kind, id: id.to_string(), missing: Missing::Reference }
-}
-
-fn referenced(pipeline_ref: &PipelineRef) -> Reference {
-    reference(pipeline_ref.kind, &pipeline_ref.id.0)
-}
-
-fn outcome_references(outcome: &ResolutionOutcome) -> Vec<Reference> {
-    match outcome {
-        ResolutionOutcome::Superseded { by } => by
-            .iter()
-            .map(|supersessor| Reference { kind: supersessor.kind, id: supersessor.id.0.clone(), missing: Missing::Supersessor })
-            .collect(),
-        ResolutionOutcome::Answered { by } => vec![referenced(by)],
-        ResolutionOutcome::Fixed { by: Some(by), .. } => vec![referenced(by)],
-        ResolutionOutcome::Deferred { to } => vec![referenced(to)],
-        ResolutionOutcome::Fixed { by: None, .. } | ResolutionOutcome::Recorded { .. } | ResolutionOutcome::Withdrawn { .. } => {
-            vec![]
-        }
-    }
-}
-
-/// A7's field list: every `PipelineRef` and every full-id `Short` field.
-/// `Fixed.commit` and `ForeignRef` are syntax only. A hand-off's documents
-/// are cited on the source side only; the receiving side imports them
-/// afterwards (Cut 12).
+/// A7's field list is `docs::citations`: every `PipelineRef` and every
+/// full-id `Short` field, each carrying the refusal its absence earns. A
+/// hand-off's documents are cited on the source side only, and each must read
+/// as an id of a kind; the receiving side imports them afterwards (Cut 12).
 fn references(staged: &Staged, mind: &Slug) -> Result<Vec<Reference>, MindRefusal> {
-    use PipelineDocument as D;
-    use PipelineKind as K;
-    let mut refs = Vec::new();
-    match &staged.document {
-        D::Question(question) => refs.extend(question.raised_in.as_ref().map(referenced)),
-        D::Ruling(ruling) => refs.extend(ruling.answers.as_ref().map(|question| reference(K::Question, &question.0))),
-        D::CutSpec(spec) => {
-            refs.extend(spec.rulings.iter().map(|ruling| reference(K::Ruling, &ruling.0)));
-            refs.extend(spec.questions.iter().map(|question| reference(K::Question, &question.0)));
+    if let PipelineDocument::HandOff(hand_off) = &staged.document {
+        if hand_off.from_instance != *mind {
+            return Ok(Vec::new());
         }
-        D::CutReport(report) => {
-            refs.push(Reference {
-                kind: K::CutSpec,
-                id: report.cut_spec.0.clone(),
-                missing: Missing::SpecOfReport(staged.key.clone()),
-            });
-            refs.extend(report.forks.iter().map(|question| reference(K::Question, &question.0)));
-        }
-        D::Verdict(verdict) => {
-            refs.push(reference(K::CutReport, &verdict.cut_report.0));
-            refs.extend(verdict.claims.iter().flat_map(|claim| claim.findings.iter()).map(|finding| reference(K::Finding, &finding.0)));
-        }
-        D::Finding(finding) => refs.push(reference(K::Verdict, &finding.verdict.0)),
-        D::FollowUp(follow_up) => refs.push(referenced(&follow_up.source)),
-        D::Resolution(resolution) => {
-            refs.push(referenced(&resolution.subject));
-            refs.extend(outcome_references(&resolution.outcome));
-        }
-        D::HandOff(hand_off) if hand_off.from_instance == *mind => {
-            for document in &hand_off.documents {
-                let kind = kind_of_id(&document.0).ok_or_else(|| PipelineRefusal::InvalidFormat {
-                    field: "hand_off.documents".into(),
-                    value: document.0.clone(),
-                })?;
-                refs.push(reference(kind, &document.0));
+        if let Some(document) = hand_off.documents.iter().find(|document| kind_of_id(&document.0).is_none()) {
+            return Err(PipelineRefusal::InvalidFormat {
+                field: "hand_off.documents".into(),
+                value: document.0.clone(),
             }
+            .into());
         }
-        D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) | D::HandOff(_) => {}
     }
-    Ok(refs)
+    Ok(citations(&staged.document)
+        .into_iter()
+        .map(|(role, target)| Reference {
+            kind: target.kind,
+            id: target.id.0,
+            missing: match role {
+                CitationRole::CutSpec => Missing::SpecOfReport(staged.key.clone()),
+                CitationRole::SupersededBy => Missing::Supersessor,
+                _ => Missing::Reference,
+            },
+        })
+        .collect())
 }
 
 /// A7: every referent is in the batch or the image; the image ones are the
@@ -652,9 +606,9 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
             later: later.into(),
         });
     }
-    for referent in outcome_references(&resolution.outcome) {
-        if !docs.in_force(referent.kind, &referent.id) {
-            return Err(MindRefusal::CitesResolvedDocument { kind: referent.kind, id: referent.id });
+    for (_, referent) in outcome_citations(&resolution.outcome) {
+        if !docs.in_force(referent.kind, &referent.id.0) {
+            return Err(MindRefusal::CitesResolvedDocument { kind: referent.kind, id: referent.id.0 });
         }
     }
     match &resolution.outcome {

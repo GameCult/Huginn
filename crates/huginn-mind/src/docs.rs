@@ -8,8 +8,10 @@
 use cultcache_rs::CultCacheEnvelope;
 use epiphany_pipeline::{
     OrgRepo, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineStewardship, ResolutionOutcome,
-    Slug,
+    Short, Slug,
 };
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::refusal::MindRefusal;
 
@@ -261,4 +263,181 @@ fn later_than(base: &PipelineDocument, other: &PipelineDocument) -> bool {
         }
         _ => false,
     }
+}
+
+/// The referring field of a citation edge, one per leaf field that names
+/// another document. The wire spelling is the field's own name, so a client
+/// reads an edge's role as the field it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CitationRole {
+    RaisedIn,
+    Answers,
+    Rulings,
+    Questions,
+    CutSpec,
+    Forks,
+    CutReport,
+    Findings,
+    Verdict,
+    Source,
+    Subject,
+    SupersededBy,
+    ResolvedBy,
+    DeferredTo,
+    Documents,
+}
+
+impl CitationRole {
+    pub const ALL: [CitationRole; 15] = [
+        Self::RaisedIn,
+        Self::Answers,
+        Self::Rulings,
+        Self::Questions,
+        Self::CutSpec,
+        Self::Forks,
+        Self::CutReport,
+        Self::Findings,
+        Self::Verdict,
+        Self::Source,
+        Self::Subject,
+        Self::SupersededBy,
+        Self::ResolvedBy,
+        Self::DeferredTo,
+        Self::Documents,
+    ];
+
+    /// The wire spelling, equal to the referring field's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::RaisedIn => "raised_in",
+            Self::Answers => "answers",
+            Self::Rulings => "rulings",
+            Self::Questions => "questions",
+            Self::CutSpec => "cut_spec",
+            Self::Forks => "forks",
+            Self::CutReport => "cut_report",
+            Self::Findings => "findings",
+            Self::Verdict => "verdict",
+            Self::Source => "source",
+            Self::Subject => "subject",
+            Self::SupersededBy => "superseded_by",
+            Self::ResolvedBy => "resolved_by",
+            Self::DeferredTo => "deferred_to",
+            Self::Documents => "documents",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|role| role.name() == name)
+    }
+
+    /// The kind whose documents carry this field.
+    pub fn carrier(self) -> PipelineKind {
+        use PipelineKind as K;
+        match self {
+            Self::RaisedIn => K::Question,
+            Self::Answers => K::Ruling,
+            Self::Rulings | Self::Questions => K::CutSpec,
+            Self::CutSpec | Self::Forks => K::CutReport,
+            Self::CutReport | Self::Findings => K::Verdict,
+            Self::Verdict => K::Finding,
+            Self::Source => K::FollowUp,
+            Self::Subject | Self::SupersededBy | Self::ResolvedBy | Self::DeferredTo => K::Resolution,
+            Self::Documents => K::HandOff,
+        }
+    }
+
+    /// The kinds a referent of this field may be: the one kind the field is
+    /// typed to, or every kind for the fields typed `PipelineRef` or a full
+    /// id of any kind. "Any" is spelled as all thirteen, never as none.
+    pub fn target_kinds(self) -> Vec<PipelineKind> {
+        use PipelineKind as K;
+        match self {
+            Self::Answers | Self::Questions | Self::Forks => vec![K::Question],
+            Self::Rulings => vec![K::Ruling],
+            Self::CutSpec => vec![K::CutSpec],
+            Self::CutReport => vec![K::CutReport],
+            Self::Findings => vec![K::Finding],
+            Self::Verdict => vec![K::Verdict],
+            Self::RaisedIn
+            | Self::Source
+            | Self::Subject
+            | Self::SupersededBy
+            | Self::ResolvedBy
+            | Self::DeferredTo
+            | Self::Documents => PipelineKind::ALL.to_vec(),
+        }
+    }
+}
+
+/// The kind segment of a full id, for the fields typed `Short` whose referent
+/// may be of any kind.
+pub(crate) fn kind_of_id(id: &str) -> Option<PipelineKind> {
+    let name = id.split(':').nth(1)?;
+    PipelineKind::ALL.iter().copied().find(|kind| kind.name() == name)
+}
+
+fn cited(kind: PipelineKind, id: &Short) -> PipelineRef {
+    PipelineRef { kind, id: id.clone() }
+}
+
+/// What a resolution's outcome names, by the field that names it.
+pub(crate) fn outcome_citations(outcome: &ResolutionOutcome) -> Vec<(CitationRole, PipelineRef)> {
+    match outcome {
+        ResolutionOutcome::Superseded { by } => by.iter().map(|by| (CitationRole::SupersededBy, by.clone())).collect(),
+        ResolutionOutcome::Answered { by } => vec![(CitationRole::ResolvedBy, by.clone())],
+        ResolutionOutcome::Fixed { by: Some(by), .. } => vec![(CitationRole::ResolvedBy, by.clone())],
+        ResolutionOutcome::Deferred { to } => vec![(CitationRole::DeferredTo, to.clone())],
+        ResolutionOutcome::Fixed { by: None, .. } | ResolutionOutcome::Recorded { .. } | ResolutionOutcome::Withdrawn { .. } => {
+            vec![]
+        }
+    }
+}
+
+/// Every citation edge a document carries, derived from its leaf fields each
+/// time it is asked and never stored: the one edge list. Admission's A7 reads
+/// it to require the referents, and the read side's rows read it as their
+/// references. `Fixed.commit`, `ForeignRef` precedents and the labels
+/// (`depends_on`, `invariants`, `promise`) are not edges. A hand-off's
+/// `documents` entry whose kind segment does not read cites nothing here;
+/// admission refuses such an entry on the source side before it asks.
+pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, PipelineRef)> {
+    use CitationRole as R;
+    use PipelineDocument as D;
+    use PipelineKind as K;
+    let mut edges = Vec::new();
+    match document {
+        D::Question(question) => edges.extend(question.raised_in.iter().map(|to| (R::RaisedIn, to.clone()))),
+        D::Ruling(ruling) => edges.extend(ruling.answers.iter().map(|to| (R::Answers, cited(K::Question, to)))),
+        D::CutSpec(spec) => {
+            edges.extend(spec.rulings.iter().map(|to| (R::Rulings, cited(K::Ruling, to))));
+            edges.extend(spec.questions.iter().map(|to| (R::Questions, cited(K::Question, to))));
+        }
+        D::CutReport(report) => {
+            edges.push((R::CutSpec, cited(K::CutSpec, &report.cut_spec)));
+            edges.extend(report.forks.iter().map(|to| (R::Forks, cited(K::Question, to))));
+        }
+        D::Verdict(verdict) => {
+            edges.push((R::CutReport, cited(K::CutReport, &verdict.cut_report)));
+            edges.extend(
+                verdict
+                    .claims
+                    .iter()
+                    .flat_map(|claim| claim.findings.iter())
+                    .map(|to| (R::Findings, cited(K::Finding, to))),
+            );
+        }
+        D::Finding(finding) => edges.push((R::Verdict, cited(K::Verdict, &finding.verdict))),
+        D::FollowUp(follow_up) => edges.push((R::Source, follow_up.source.clone())),
+        D::Resolution(resolution) => {
+            edges.push((R::Subject, resolution.subject.clone()));
+            edges.extend(outcome_citations(&resolution.outcome));
+        }
+        D::HandOff(hand_off) => edges.extend(
+            hand_off.documents.iter().filter_map(|to| kind_of_id(&to.0).map(|kind| (R::Documents, cited(kind, to)))),
+        ),
+        D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) => {}
+    }
+    edges
 }

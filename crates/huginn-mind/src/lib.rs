@@ -35,6 +35,7 @@ pub mod wire;
 #[cfg(test)]
 pub(crate) mod fixtures;
 
+pub use docs::CitationRole;
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
 pub use mind::{HuginnMindEpoch, Mind};
 pub use query::{
