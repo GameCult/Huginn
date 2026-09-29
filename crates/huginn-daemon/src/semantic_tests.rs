@@ -461,12 +461,13 @@ fn a_search_that_timed_out_while_queued_is_never_embedded() {
     assert!(embedded[0].ends_with("Query: first") && embedded[1].ends_with("Query: third"), "{embedded:?}");
 }
 
-/// While the index is rebuilding, a semantic query is refused with an
-/// `Unavailable` that names the state and how many documents are pending, and
-/// the embedder is not asked for it. When the index has caught up the same
-/// query is answered.
+/// A search asked while the index lags the mind is not refused: it waits behind
+/// the writes ahead of it, through the real serve loop, and reads them. The
+/// worker is inside its first batch with the rest of the mind still to write;
+/// the reply does not come until the gate opens, and it comes with every
+/// document already in the collection.
 #[test]
-fn a_search_while_the_index_is_being_rebuilt_is_refused_and_asks_the_embedder_nothing() {
+fn a_search_asked_while_the_index_lags_waits_for_the_writes_ahead_of_it_and_reads_them() {
     let gate = Gate::shut();
     let embedder = FakeEmbedder::new("d1").behind(&gate);
     let harness = Harness::start(shelf(), embedder, FakeIndex::default(), Duration::from_secs(30));
@@ -474,14 +475,17 @@ fn a_search_while_the_index_is_being_rebuilt_is_refused_and_asks_the_embedder_no
     let mut client = harness.client();
     let IndexStatus::Behind { pending } = index_status(&mut client, "m-status") else { panic!("the worker is inside its first batch") };
     assert!(pending > 0);
+    harness.index.state.lock().unwrap().hits = vec![hit("ruling", id("ruling", "R4"), 0.5)];
 
-    let refused = ask(&mut client, "m-behind", &semantic(standing(), 5));
-    let HuginnMindResponse::Refused(MindRefusal::Unavailable { detail }) = &refused else { panic!("{refused:?}") };
-    assert!(detail.contains("being rebuilt") && detail.contains(&format!("pending: {pending}")), "{detail}");
-    assert!(harness.embedder.texts().is_empty(), "nothing was embedded, not even the documents, for a refused search");
+    send(&mut client, "m-behind", &semantic(standing(), 5));
+    assert!(receive(&mut client, "m-behind", 100).is_none(), "the search waits: it is neither refused nor answered from a half-filled collection");
 
     gate.open();
+    let answered = receive(&mut client, "m-behind", 3000).expect("the search is answered once the index has caught up");
+    assert_eq!(ids(&answered), vec![id("ruling", "R4")]);
     until_index(&mut client, "Current", |status| *status == IndexStatus::Current);
-    harness.index.state.lock().unwrap().hits = vec![hit("ruling", id("ruling", "R4"), 0.5)];
-    assert_eq!(ids(&ask(&mut client, "m-current", &semantic(standing(), 5))), vec![id("ruling", "R4")]);
+    let state = harness.index.state.lock().unwrap();
+    let written = state.collections[&collection_name(&slug(INSTANCE))].points.len();
+    assert_eq!(state.held_when_searched, [written], "the search saw every document");
+    assert!(written >= pending as usize);
 }

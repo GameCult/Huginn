@@ -65,15 +65,24 @@
 //!   (`ServeOptions::search_timeout` bounds the wait), and takes back a search
 //!   it has stopped waiting for. At most `SEARCHES_QUEUED_MAX` wait; one more is
 //!   refused. A search whose embed is already running cannot be recalled, so it
-//!   can hold the writes off for as long as its bound, `QUERY_EMBED_TIMEOUT`,
-//!   which is `SEARCH_DEADLINE`, the deadline the serve loop gives the search.
-//! - Only a current index answers a search. While the worker is `Reconciling`
-//!   or `Behind` (a re-pulled model, a lost collection, entries not yet
-//!   written), `Failing` or `Refused`, a search is refused at once with an
-//!   `Unavailable` that names the state and how many documents are pending; it
-//!   is never answered from a half-filled collection. A search that fails after
-//!   it was accepted forgets the reconciliation, so `whoami` stops reporting
-//!   `Current` and the worker verifies the model and the collection again.
+//!   can hold the writes off for as long as it has left: the ticket carries the
+//!   moment `SEARCH_DEADLINE` after it was asked, and every call the search
+//!   makes (the model's identity, the collection's label, the embed, the
+//!   query) is bounded by what remains of it.
+//! - A search reads its own writes. Admissions and searches meet under one
+//!   lock, admissions first: a search waits in the queue while the worker
+//!   absorbs and writes what was admitted before it, and is answered once the
+//!   index has caught up. Lag is not a rebuild and refuses nothing. Under a
+//!   steady stream of admissions a search may never see the index caught up;
+//!   its deadline then answers it.
+//! - A search is refused only while the index is being rebuilt or cannot be
+//!   asked: `Reconciling` (a re-pulled model, a lost collection, a mind's first
+//!   admission), `Failing` or `Refused`. The refusal is an `Unavailable` that
+//!   names the state and how many documents are pending; it is never answered
+//!   from a collection being rebuilt. A search that fails for its own reasons
+//!   (a timeout, a store error) fails that search alone and the
+//!   reconciliation stands. Only what the check-then-embed finds changed (the
+//!   model, the collection's label) forgets it.
 
 pub mod ollama;
 pub mod qdrant;
@@ -101,20 +110,20 @@ pub const MANAGED_BY: &str = "huginn";
 pub const BATCH: usize = 32;
 
 /// How long a search may take, queue wait included: the serve loop's default
-/// `ServeOptions::search_timeout`. It is the one number the query embed's
-/// bound derives from, so the two cannot drift apart.
+/// `ServeOptions::search_timeout`. Every bound on the search path derives from
+/// the moment this long after the search was asked, so the two cannot drift
+/// apart.
 pub const SEARCH_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The bound on one query embed. A running embed cannot be recalled, so it
-/// holds the index's writes off for as long as it lasts; it is held to the
-/// search's own deadline, after which nobody is waiting for its vector.
-pub const QUERY_EMBED_TIMEOUT: Duration = SEARCH_DEADLINE;
-
-/// The bound on a bulk index-flush embed, and on the embedder's identity
-/// reads. A cold model takes seconds to load. It does not block serving: the
-/// serve loop never waits on the worker, and a search queued behind a flush is
-/// answered by its own deadline.
+/// The bound on a bulk index-flush embed, the identity and label reads around
+/// it, and the reconciliation's identity read. A cold model takes seconds to
+/// load. It does not block serving: the serve loop never waits on the worker,
+/// and a search queued behind a flush is answered by its own deadline.
 pub const BULK_EMBED_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The bound on a call to the vector store that is not a search: the
+/// adapter's default.
+pub const INDEX_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The most candidates one search asks the index for.
 pub const OVERSAMPLE_MAX: u32 = 200;
@@ -179,13 +188,16 @@ pub struct Hit {
 }
 
 pub trait Embedder {
-    fn model_identity(&mut self) -> Result<ModelIdentity>;
+    /// The model's identity, or an error once `within` has passed.
+    fn model_identity(&mut self, within: Duration) -> Result<ModelIdentity>;
     /// One vector per text, in order, or an error once `within` has passed.
     fn embed(&mut self, texts: &[String], within: Duration) -> Result<Vec<Vec<f32>>>;
 }
 
 pub trait VectorIndex {
-    fn describe(&mut self, collection: &str) -> Result<Described>;
+    /// What the collection says about itself, or an error once `within` has
+    /// passed.
+    fn describe(&mut self, collection: &str, within: Duration) -> Result<Described>;
     /// Drops the collection if it exists and creates it empty with this
     /// metadata.
     fn recreate(&mut self, collection: &str, meta: &CollectionMeta) -> Result<()>;
@@ -193,8 +205,9 @@ pub trait VectorIndex {
     fn ids(&mut self, collection: &str) -> Result<BTreeSet<String>>;
     fn upsert(&mut self, collection: &str, points: &[Point]) -> Result<()>;
     /// The `limit` nearest points to `vector`, best first, with no filter: which
-    /// documents may be shown is the mind's to decide.
-    fn search(&mut self, collection: &str, vector: &[f32], limit: u32) -> Result<Vec<Hit>>;
+    /// documents may be shown is the mind's to decide. An error once `within`
+    /// has passed.
+    fn search(&mut self, collection: &str, vector: &[f32], limit: u32, within: Duration) -> Result<Vec<Hit>>;
 }
 
 /// The mind's collection: one per instance.
@@ -243,6 +256,25 @@ impl std::fmt::Display for StepError {
 pub enum Advance {
     Progressed,
     Idle,
+}
+
+/// The time one operation has left. Every call the operation makes is bounded
+/// by what remains, not by a bound of its own, so their sum cannot outlast it.
+struct Budget {
+    end: Instant,
+    total: Duration,
+}
+
+impl Budget {
+    fn new(total: Duration) -> Self {
+        Self { end: Instant::now() + total, total }
+    }
+
+    fn left(&self) -> Result<Duration> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        ensure!(!left.is_zero(), "the time allowed ({:?}) has run out", self.total);
+        Ok(left)
+    }
 }
 
 /// The projection's state: the entries not yet known to be in the collection,
@@ -344,8 +376,8 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     /// collection was reconciled under. A different model, digest or length
     /// forgets the reconciliation, so the next step reconciles (and rebuilds)
     /// instead of writing or searching with vectors the collection cannot mix.
-    fn model_unchanged(&mut self) -> Result<bool, StepError> {
-        let now = self.embedder.model_identity().context("re-reading the embedding model's identity")?;
+    fn model_unchanged(&mut self, budget: &Budget) -> Result<bool> {
+        let now = self.embedder.model_identity(budget.left()?).context("re-reading the embedding model's identity")?;
         if self.reconciled.as_ref() == Some(&now) {
             return Ok(true);
         }
@@ -362,9 +394,10 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         let Some(mind) = self.mind.clone() else {
             return Err(StepError::Unavailable(anyhow::anyhow!("the mind has no identity yet")));
         };
-        let identity = self.embedder.model_identity().context("reading the embedding model's identity")?;
+        let identity =
+            self.embedder.model_identity(BULK_EMBED_TIMEOUT).context("reading the embedding model's identity")?;
         let wanted = self.collection_meta(&mind, &identity);
-        match self.index.describe(&self.collection).context("describing the collection")? {
+        match self.index.describe(&self.collection, INDEX_CALL_TIMEOUT).context("describing the collection")? {
             Described::Absent => self.recreate(&wanted)?,
             Described::Unlabelled => {
                 return Err(StepError::Refused(format!(
@@ -411,10 +444,10 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     /// the first `BATCH` wanted entries are embedded, written, and only then
     /// no longer wanted.
     pub fn flush_batch(&mut self) -> Result<(), StepError> {
-        self.flush().map_err(StepError::Unavailable)
+        self.flush(&Budget::new(BULK_EMBED_TIMEOUT)).map_err(StepError::Unavailable)
     }
 
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&mut self, budget: &Budget) -> Result<()> {
         let dimensions = self.reconciled.as_ref().context("flush before reconcile")?.dimensions as usize;
         let batch: Vec<IndexEntry> =
             self.wanted.iter().take(BATCH).filter_map(|document_id| self.known.get(document_id)).cloned().collect();
@@ -424,7 +457,7 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         let texts: Vec<String> = batch.iter().map(|entry| entry.text.clone()).collect();
         // A model that changed leaves nothing written and the reconciliation
         // forgotten: the next step reconciles and rebuilds.
-        let Ok(vectors) = self.embed_verified(&texts, BULK_EMBED_TIMEOUT)? else { return Ok(()) };
+        let Ok(vectors) = self.embed_verified(&texts, budget)? else { return Ok(()) };
         ensure!(vectors.len() == batch.len(), "the embedder returned {} vectors for {} texts", vectors.len(), batch.len());
         let mut points = Vec::with_capacity(batch.len());
         for (entry, vector) in batch.iter().zip(vectors) {
@@ -453,28 +486,29 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         Ok(())
     }
 
-    /// The one check-then-embed: reads the model's identity and the
-    /// collection's label, embeds, reads the identity again, and gives the
-    /// vectors back only if the model is still the one the collection was
-    /// reconciled under. A model that changed forgets the reconciliation and
-    /// answers `Err(when)`; a collection that is no longer this mind's, built
-    /// as reconciled, is an error and forgets it too. Search and flush both
-    /// embed through here, so neither compares or writes vectors made by a
-    /// model the collection cannot mix.
-    fn embed_verified(&mut self, texts: &[String], within: Duration) -> Result<Result<Vec<Vec<f32>>, &'static str>> {
+    /// The one check-then-embed, every call bounded by what `budget` has left:
+    /// reads the model's identity and the collection's label, embeds, reads the
+    /// identity again, and gives the vectors back only if the model is still
+    /// the one the collection was reconciled under. A model that changed
+    /// forgets the reconciliation and answers `Err(when)`; a collection that
+    /// is no longer this mind's, built as reconciled, is an error and forgets
+    /// it too. A call that fails or times out forgets nothing. Search and
+    /// flush both embed through here, so neither compares or writes vectors
+    /// made by a model the collection cannot mix.
+    fn embed_verified(&mut self, texts: &[String], budget: &Budget) -> Result<Result<Vec<Vec<f32>>, &'static str>> {
         let (Some(mind), Some(reconciled)) = (self.mind.clone(), self.reconciled.clone()) else {
             bail!("the mind has no identity yet, so it has no index");
         };
-        if !self.model_unchanged().map_err(|error| anyhow::anyhow!("{error}"))? {
+        if !self.model_unchanged(budget)? {
             return Ok(Err("since the collection was built"));
         }
-        let described = self.index.describe(&self.collection).context("describing the collection")?;
+        let described = self.index.describe(&self.collection, budget.left()?).context("describing the collection")?;
         if described != Described::Labelled(self.collection_meta(&mind, &reconciled)) {
             self.reconciled = None;
             bail!("collection {} is no longer the one this mind's index was built as: {described:?}", self.collection);
         }
-        let vectors = self.embedder.embed(texts, within).context("embedding")?;
-        if !self.model_unchanged().map_err(|error| anyhow::anyhow!("{error}"))? {
+        let vectors = self.embedder.embed(texts, budget.left()?).context("embedding")?;
+        if !self.model_unchanged(budget)? {
             return Ok(Err("while the texts were embedded"));
         }
         Ok(Ok(vectors))
@@ -486,41 +520,38 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     /// what the index cannot know is not in force. A hit naming a kind this
     /// organ has no name for is logged and left out.
     ///
-    /// A search is answered only from an index that is current: while it is
-    /// being reconciled or written to, it refuses, naming why and how many
-    /// documents are pending, rather than answer from a half-filled
-    /// collection. It is also answered only from a collection that is still
-    /// this mind's, built by the model that is still the embedder: the model's
-    /// identity is read before and after the query is embedded and the
-    /// collection's label before it, and the query is refused if either
-    /// disagrees with what the collection was reconciled under. Any failure
-    /// after that forgets the reconciliation, so `progress_status` stops
-    /// reporting `Current` and the worker verifies again before it answers.
-    pub fn search(&mut self, text: &str, top_k: u32) -> Result<Hits> {
+    /// A search is refused while the index is being rebuilt or cannot be asked
+    /// (`unsearchable`), naming the state and how many documents are pending.
+    /// Catching up on lag is the worker's: it serves a search only once the
+    /// documents admitted before it are written. The answer is also only from
+    /// a collection that is still this mind's, built by the model that is
+    /// still the embedder: the identity is read before and after the query is
+    /// embedded and the label before it, and the query is refused, with the
+    /// reconciliation forgotten, if either disagrees with what the collection
+    /// was reconciled under. Every call is bounded by what remains of
+    /// `within`. A search that fails for any other reason (a timeout, a store
+    /// error) fails alone and leaves the reconciliation standing.
+    pub fn search(&mut self, text: &str, top_k: u32, within: Duration) -> Result<Hits> {
         if let Some(why) = unsearchable(&self.progress_status()) {
             bail!("{why}");
         }
-        let found = self.nearest(text, top_k);
-        if found.is_err() {
-            self.reconciled = None;
-        }
-        found
-    }
-
-    fn nearest(&mut self, text: &str, top_k: u32) -> Result<Hits> {
+        let budget = Budget::new(within);
         let Some(reconciled) = self.reconciled.clone() else {
             bail!("the mind has no identity yet, so it has no index");
         };
         let dimensions = reconciled.dimensions as usize;
         let query = format!("Instruct: {QUERY_INSTRUCTION}\nQuery: {text}");
-        let mut vectors = match self.embed_verified(&[query], QUERY_EMBED_TIMEOUT)? {
+        let mut vectors = match self.embed_verified(&[query], &budget)? {
             Ok(vectors) => vectors,
-            Err(when) => bail!("the embedding model changed {when}; the index is being rebuilt for it"),
+            Err(when) => {
+                bail!("the embedding model changed {when}: {}", unsearchable(&self.progress_status()).unwrap_or_default())
+            }
         };
         ensure!(vectors.len() == 1, "the embedder returned {} vectors for one query", vectors.len());
         let vector = vectors.remove(0);
         ensure!(vector.len() == dimensions, "the embedder returned a query vector of {} where the collection holds {dimensions}", vector.len());
-        let found = self.index.search(&self.collection, &vector, top_k.saturating_mul(4).min(OVERSAMPLE_MAX))?;
+        let limit = top_k.saturating_mul(4).min(OVERSAMPLE_MAX);
+        let found = self.index.search(&self.collection, &vector, limit, budget.left()?)?;
         let mut hits = Vec::with_capacity(found.len());
         for hit in found {
             match PipelineKind::ALL.into_iter().find(|kind| kind.name() == hit.kind) {
@@ -579,6 +610,16 @@ impl Backoff {
 /// told, not by the worker's patience.
 pub const SEARCHES_QUEUED_MAX: usize = 16;
 
+/// A search waiting for the worker: what was asked, and the moment nobody is
+/// waiting for the answer any more. Every call the search makes is bounded by
+/// what remains until `due`.
+struct Queued {
+    ticket: SearchTicket,
+    text: String,
+    top_k: u32,
+    due: Instant,
+}
+
 struct Shared {
     inbox: Vec<IndexEntry>,
     /// The mind's identity, once a commit has revealed it to a mind that had none.
@@ -588,7 +629,7 @@ struct Shared {
     /// Searches started and not yet taken by the worker, at most
     /// `SEARCHES_QUEUED_MAX`; the serve loop takes back one it has stopped
     /// waiting for.
-    searches: VecDeque<(SearchTicket, String, u32)>,
+    searches: VecDeque<Queued>,
     /// Searches the worker finished and the serve loop has not collected.
     found: Vec<(SearchTicket, Result<Hits, String>)>,
     next_ticket: u64,
@@ -655,18 +696,19 @@ fn including(status: &IndexStatus, queued: u32) -> IndexStatus {
     }
 }
 
-/// Why a status cannot answer a search, or `None` when it can. Only a current
-/// index answers: one that is being reconciled or written to holds a
-/// half-filled collection, and one that is failing or refused cannot be asked.
-/// The reason names the state and how many documents are pending.
+/// Why a status cannot answer a search, or `None` when it can: the one
+/// predicate for asking and for answering. An index being rebuilt
+/// (`Reconciling`) holds a collection that is not the model's yet, and one
+/// that is failing or refused cannot be asked. `Behind` is lag, not a
+/// rebuild: the worker writes what was admitted before a search and then
+/// answers it. The reason names the state and how many documents are pending.
 fn unsearchable(status: &IndexStatus) -> Option<String> {
     use IndexStatus as S;
     match status {
-        S::Current => None,
+        S::Current | S::Behind { .. } => None,
         S::Reconciling { pending } => Some(format!(
             "the semantic index is being rebuilt: reconciling with the model and the collection (pending: {pending})"
         )),
-        S::Behind { pending } => Some(format!("the semantic index is being rebuilt: behind the mind (pending: {pending})")),
         S::Failing { pending, error, .. } => Some(format!("the semantic index is failing: {error} (pending: {pending})")),
         S::Refused { pending, reason, .. } => Some(format!("the semantic index is refused: {reason} (pending: {pending})")),
     }
@@ -676,9 +718,18 @@ fn unsearchable(status: &IndexStatus) -> Option<String> {
 /// for the loop to collect. Between batches, never inside one, and only one:
 /// the worker returns to its writes after each, so a queue of searches cannot
 /// hold the index's writes off for the sum of their embeddings.
+///
+/// Admissions come first: the inbox is absorbed before the search is taken, so
+/// every document committed before the search was asked is wanted, and a search
+/// behind lag stays queued until the worker's writes have caught up. An index
+/// being rebuilt does not wait: the search is taken and refused. The search's
+/// calls are bounded by what remains of the time it was given when it was asked.
 fn serve_search<E: Embedder, V: VectorIndex>(projector: &mut Projector<E, V>, shared: &Lock) {
-    let Some((ticket, text, top_k)) = lock(shared).searches.pop_front() else { return };
-    let found = projector.search(&text, top_k).map_err(|error| format!("{error:#}"));
+    if !absorb(projector, shared, None) || (projector.pending() > 0 && !projector.stale()) {
+        return;
+    }
+    let Some(Queued { ticket, text, top_k, due }) = lock(shared).searches.pop_front() else { return };
+    let found = projector.search(&text, top_k, due.saturating_duration_since(Instant::now())).map_err(|error| format!("{error:#}"));
     lock(shared).found.push((ticket, found));
 }
 
@@ -686,8 +737,8 @@ fn serve_search<E: Embedder, V: VectorIndex>(projector: &mut Projector<E, V>, sh
 /// while it was healthy and it has failed since.
 fn refuse_searches(shared: &Lock, why: &str) {
     let mut guard = lock(shared);
-    while let Some((ticket, ..)) = guard.searches.pop_front() {
-        guard.found.push((ticket, Err(why.to_owned())));
+    while let Some(queued) = guard.searches.pop_front() {
+        guard.found.push((queued.ticket, Err(why.to_owned())));
     }
 }
 
@@ -748,8 +799,8 @@ fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Loc
                 }
                 publish(&shared, projector.progress_status());
                 serve_search(&mut projector, &shared);
-                // A search that failed has left the reconciliation to redo:
-                // do it now, not at the next wake.
+                // A model or collection the search found changed has left the
+                // reconciliation to redo: do it now, not at the next wake.
                 if advance == Advance::Idle && !projector.stale() {
                     wait_for_work(&shared, Wait::Work { until: recheck_at });
                 }
@@ -762,7 +813,7 @@ fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Loc
                     delay
                 );
                 publish(&shared, projector.failure_status(&error, attempts));
-                refuse_searches(&shared, &format!("the index could not advance: {error}"));
+                refuse_searches(&shared, &unsearchable(&projector.failure_status(&error, attempts)).unwrap_or_default());
                 failing = Some((error, attempts));
                 wait_for_work(&shared, Wait::Backoff(delay));
                 delay = backoff.after(delay);
@@ -875,8 +926,10 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
     }
 
     /// Queues the search for the worker and returns its ticket. An index that
-    /// is not current is not asked, and neither is a full queue: the refusal
-    /// is the answer, naming why and how many documents are pending.
+    /// is being rebuilt or cannot be asked is not asked, and neither is a full
+    /// queue: the refusal is the answer, naming why and how many documents are
+    /// pending. Documents admitted and not yet written are not a refusal: the
+    /// search waits behind them.
     fn search(&mut self, text: &str, top_k: u32) -> Result<SearchTicket, String> {
         let mut guard = lock(&self.shared);
         let status = including(&guard.status, u32::try_from(guard.inbox.len()).unwrap_or(u32::MAX));
@@ -891,7 +944,7 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
         }
         let ticket = SearchTicket(guard.next_ticket);
         guard.next_ticket += 1;
-        guard.searches.push_back((ticket, text.to_owned(), top_k));
+        guard.searches.push_back(Queued { ticket, text: text.to_owned(), top_k, due: Instant::now() + SEARCH_DEADLINE });
         drop(guard);
         self.shared.1.notify_all();
         Ok(ticket)
@@ -905,7 +958,7 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
     /// the worker already holds cannot be recalled; its answer is collected
     /// and dropped by the loop, which no longer waits for it.
     fn abandon(&mut self, ticket: SearchTicket) {
-        lock(&self.shared).searches.retain(|(queued, ..)| *queued != ticket);
+        lock(&self.shared).searches.retain(|queued| queued.ticket != ticket);
     }
 }
 
@@ -930,6 +983,11 @@ impl Http {
         let agent: ureq::Agent =
             ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into();
         Self { agent, base: base_url.trim_end_matches('/').to_owned() }
+    }
+
+    /// The same address under a bound of its own.
+    pub(crate) fn bounded(&self, timeout: Duration) -> Self {
+        Self::new(&self.base, timeout)
     }
 
     /// The status and the body, whatever the status is.
