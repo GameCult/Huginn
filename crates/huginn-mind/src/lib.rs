@@ -44,7 +44,7 @@ pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome}
 pub use mind::{HuginnMindEpoch, Mind};
 pub use query::{
     AdmissionFacts, PipelineDocumentSummary, PipelineDocumentView, PipelineEdge, PipelineFacts, PipelinePageItems,
-    PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, SUMMARY_MAX_BYTES, SemanticQuery,
+    PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, Ranked, SUMMARY_MAX_BYTES, SemanticQuery,
 };
 pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
 pub use refusal::MindRefusal;

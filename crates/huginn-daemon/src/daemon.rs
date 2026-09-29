@@ -3,18 +3,85 @@
 //! thing that reads a wall clock.
 
 use chrono::{DateTime, Utc};
+use cultnet_rs::Selection;
 use huginn_mind::epiphany_pipeline::{PipelineRef, Slug};
 use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, IndexStatus};
-use huginn_mind::{Mind, MindStore, PipelineAdmissionOutcome};
+use huginn_mind::{Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery};
 
 /// Where the index attaches. Called after a batch commits, with the refs the
 /// batch landed, derived writes included; the sink may read each through
 /// `mind.view`. Its error is logged and never reaches the caller: the index
 /// does not decide whether a batch was admitted, and the call must not wait on
 /// the index's transport. `status` is what `whoami` reports of it.
+///
+/// A semantic query is asked in two steps because the index answers on its own
+/// time: `search` starts one and returns a ticket at once, and `searched`
+/// hands over the searches that have finished since it was last called. The
+/// candidates are the index's word about nearness and nothing else; the daemon
+/// judges them through the mind.
 pub trait IndexSink<S: MindStore> {
     fn committed(&mut self, mind: &Mind<S>, writes: &[PipelineRef]) -> anyhow::Result<()>;
     fn status(&self) -> IndexStatus;
+    /// Starts a search for the documents nearest `text`, at most `top_k` of
+    /// them wanted. `Err` says why the index cannot be asked now.
+    fn search(&mut self, text: &str, top_k: u32) -> Result<SearchTicket, String>;
+    /// Every search that finished since the last call, by ticket: its
+    /// candidates and scores, or why it failed.
+    fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)>;
+    /// The asker has stopped waiting for `ticket`. A search not yet started is
+    /// dropped, so a queue of searches nobody wants cannot hold the index's
+    /// writes off.
+    fn abandon(&mut self, ticket: SearchTicket);
+}
+
+/// Names one search the index was asked, so the loop can match the answer to
+/// the client that is waiting for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SearchTicket(pub u64);
+
+/// What a search returns: candidate documents and how near each scored, best
+/// first. Nothing else about them.
+pub type Hits = Vec<(PipelineRef, f32)>;
+
+/// A semantic query the index has been asked and has not yet answered. The
+/// serve loop holds it beside the session that asked, and hands it back to
+/// `Daemon::finish` with the index's answer.
+pub struct Search {
+    pub ticket: SearchTicket,
+    selection: Selection,
+    semantic: SemanticQuery,
+}
+
+/// What a request came to: an answer, or a search the index has yet to
+/// finish.
+pub enum Handled {
+    Answered(HuginnMindResponse),
+    Searching(Search),
+}
+
+impl Handled {
+    /// The answer, for a request that cannot be a search.
+    #[cfg(test)]
+    pub(crate) fn answered(self) -> HuginnMindResponse {
+        match self {
+            Self::Answered(response) => response,
+            Self::Searching(search) => panic!("expected an answer, got the search {:?}", search.ticket),
+        }
+    }
+}
+
+/// What the log says of the hits the mind held no document for: how many, and
+/// the first few by name (a restored mind can leave hundreds), or nothing when
+/// the mind held them all.
+fn dropped_note(dropped: &[PipelineRef]) -> Option<String> {
+    if dropped.is_empty() {
+        return None;
+    }
+    let named: Vec<&str> = dropped.iter().take(5).map(|hit| hit.id.0.as_str()).collect();
+    Some(format!(
+        "huginn: the index returned {} ids this mind does not hold (first {named:?}); they are left out",
+        dropped.len()
+    ))
 }
 
 /// The envelope's `source_runtime_id` on every response a daemon serving this
@@ -54,20 +121,20 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         runtime_id(self.mind.instance())
     }
 
-    /// One request, one answer. `Admit` goes to the mind whole, because the
+    /// One request, one answer, or a search to finish. `Admit` goes to the mind whole, because the
     /// batch declares its own instance and admission's A1 is the check. Every
     /// other request names an instance: `require_instance` now applies the
     /// leaf's own grammar before it compares identity, so a name outside the
     /// grammar (a fullwidth fold, say) is refused by name rather than read as
     /// merely a foreign mind, and the daemon asks nothing twice.
-    pub fn handle(&mut self, request: HuginnMindRequest, now: DateTime<Utc>) -> HuginnMindResponse {
+    pub fn handle(&mut self, request: HuginnMindRequest, now: DateTime<Utc>) -> Handled {
         if let Some(declared) = request.instance()
             && !matches!(request, HuginnMindRequest::Admit(_))
             && let Err(refusal) = self.mind.require_instance(declared)
         {
-            return HuginnMindResponse::Refused(refusal);
+            return Handled::Answered(HuginnMindResponse::Refused(refusal));
         }
-        match request {
+        let answer = match request {
             HuginnMindRequest::Whoami => HuginnMindResponse::Whoami(self.mind.status(self.index.status())),
             HuginnMindRequest::Admit(batch) => {
                 let outcome = self.mind.admit(batch, now);
@@ -83,10 +150,57 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
                 Ok(view) => HuginnMindResponse::View(view),
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
-            HuginnMindRequest::Query { selection, semantic, .. } => match self.mind.query(&selection, semantic.as_ref()) {
+            HuginnMindRequest::Query { selection, semantic: None, .. } => match self.mind.query(&selection) {
                 Ok(page) => HuginnMindResponse::Query(page),
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
+            HuginnMindRequest::Query { selection, semantic: Some(semantic), .. } => {
+                return self.begin_search(selection, semantic);
+            }
+        };
+        Handled::Answered(answer)
+    }
+
+    /// A semantic query starts only if the mind would accept it (so nothing is
+    /// embedded for a query that cannot be ranked) and the index can be asked.
+    fn begin_search(&mut self, selection: Selection, semantic: SemanticQuery) -> Handled {
+        let refused = |refusal: MindRefusal| Handled::Answered(HuginnMindResponse::Refused(refusal));
+        if let Err(refusal) = self.mind.check_semantic(&selection, &semantic) {
+            return refused(refusal);
+        }
+        match self.index.search(&semantic.text.0, semantic.top_k) {
+            Ok(ticket) => Handled::Searching(Search { ticket, selection, semantic }),
+            Err(detail) => refused(MindRefusal::Unavailable { detail }),
+        }
+    }
+
+    /// Searches the index has finished since this was last called.
+    pub fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
+        self.index.searched()
+    }
+
+    /// The client has stopped waiting for `ticket`.
+    pub fn abandon(&mut self, ticket: SearchTicket) {
+        self.index.abandon(ticket);
+    }
+
+    /// The answer to a search: the index's candidates ranked through the mind
+    /// (`Mind::rank` drops what the mind does not hold and lets the selection
+    /// decide the rest), or, when the index could not answer, a typed
+    /// `Unavailable`. Never an empty page in place of a failure.
+    pub fn finish(&mut self, search: Search, found: Result<Hits, String>) -> HuginnMindResponse {
+        let hits = match found {
+            Ok(hits) => hits,
+            Err(detail) => return HuginnMindResponse::Refused(MindRefusal::Unavailable { detail }),
+        };
+        match self.mind.rank(&search.selection, &search.semantic, &hits) {
+            Ok(ranked) => {
+                if let Some(note) = dropped_note(&ranked.dropped) {
+                    eprintln!("{note}");
+                }
+                HuginnMindResponse::Query(ranked.page)
+            }
+            Err(refusal) => HuginnMindResponse::Refused(refusal),
         }
     }
 }
@@ -105,7 +219,7 @@ pub(crate) mod tests {
     use huginn_mind::{MindRefusal, OwnedRedbMessagePackBackingStore};
     use std::path::Path;
     use cultnet_rs::Selection;
-    use huginn_mind::{Faculty, PipelineAdmissionBatch, PipelineProvenance, PipelinePageItems, PipelineStatus, SemanticQuery};
+    use huginn_mind::{Faculty, PipelineAdmissionBatch, PipelineProvenance, PipelinePageItems, PipelineStatus};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -300,7 +414,7 @@ pub(crate) mod tests {
             campaign_seed(),
             vec![cut_spec(WIDE_CUT, WIDE_CHANGES), cut_spec(FITTING_CUT, FITTING_CHANGES)],
         ] {
-            let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), now());
+            let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), now()).answered();
             assert!(
                 matches!(outcome, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })),
                 "{outcome:?}"
@@ -315,12 +429,25 @@ pub(crate) mod tests {
     pub(crate) fn seeded() -> (TempDir, Daemon<OwnedRedbMessagePackBackingStore, NoIndex>) {
         let root = tempfile::tempdir().unwrap();
         let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
-        let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
+        let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now()).answered();
         assert!(
             matches!(outcome, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })),
             "{outcome:?}"
         );
         (root, daemon)
+    }
+
+    /// The log names how many hits the mind did not hold and the first five, and
+    /// says nothing when it held them all.
+    #[test]
+    fn the_dropped_hits_are_reported_by_count_and_the_first_five_names() {
+        assert_eq!(dropped_note(&[]), None);
+        let dropped: Vec<PipelineRef> =
+            (0..7).map(|n| PipelineRef { kind: PipelineKind::Question, id: Short(format!("gone-{n}")) }).collect();
+        let note = dropped_note(&dropped).unwrap();
+        assert!(note.contains("returned 7 ids"), "{note}");
+        assert!(note.contains("gone-0") && note.contains("gone-4") && !note.contains("gone-5"), "{note}");
+        assert_eq!(dropped_note(&dropped[..1]).unwrap().matches("gone-").count(), 1);
     }
 
     /// No index: for the tests whose subject is not the projection.
@@ -334,6 +461,16 @@ pub(crate) mod tests {
         fn status(&self) -> IndexStatus {
             IndexStatus::Current
         }
+
+        fn search(&mut self, _text: &str, _top_k: u32) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
+        fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
+            Vec::new()
+        }
+
+        fn abandon(&mut self, _ticket: SearchTicket) {}
     }
 
     /// A daemon over the instance's mind under `state_root`, with no index.
@@ -360,6 +497,16 @@ pub(crate) mod tests {
         fn status(&self) -> IndexStatus {
             IndexStatus::Current
         }
+
+        fn search(&mut self, _text: &str, _top_k: u32) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
+        fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
+            Vec::new()
+        }
+
+        fn abandon(&mut self, _ticket: SearchTicket) {}
     }
 
     struct FailingIndex;
@@ -372,10 +519,20 @@ pub(crate) mod tests {
         fn status(&self) -> IndexStatus {
             IndexStatus::Current
         }
+
+        fn search(&mut self, _text: &str, _top_k: u32) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
+        fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
+            Vec::new()
+        }
+
+        fn abandon(&mut self, _ticket: SearchTicket) {}
     }
 
     fn status(daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, impl IndexSink<OwnedRedbMessagePackBackingStore>>) -> MindStatus {
-        match daemon.handle(HuginnMindRequest::Whoami, now()) {
+        match daemon.handle(HuginnMindRequest::Whoami, now()).answered() {
             HuginnMindResponse::Whoami(status) => status,
             other => panic!("expected a status, got {other:?}"),
         }
@@ -387,7 +544,7 @@ pub(crate) mod tests {
     fn a_batch_round_trips_typed_through_handle_without_a_socket() {
         let root = tempfile::tempdir().unwrap();
         let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
-        let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
+        let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now()).answered();
         let HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { writes, .. }) = outcome else {
             panic!("expected a commit");
         };
@@ -410,7 +567,7 @@ pub(crate) mod tests {
         let HuginnMindResponse::Query(page) = daemon.handle(
             HuginnMindRequest::Query { instance: slug(INSTANCE), selection: instances.clone(), semantic: None },
             now(),
-        ) else {
+        ).answered() else {
             panic!("expected a page");
         };
         assert_eq!(page.matched, 1);
@@ -421,13 +578,13 @@ pub(crate) mod tests {
         let id = writes[0].clone();
         let whole = Selection { projection: "document".into(), ..instances };
         let HuginnMindResponse::Query(page) =
-            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection: whole, semantic: None }, now())
+            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection: whole, semantic: None }, now()).answered()
         else {
             panic!("expected a page");
         };
         let PipelinePageItems::Documents(views) = &page.items else { panic!("the document projection is the view") };
         assert_eq!(views[0].status, PipelineStatus::InForce);
-        let view = daemon.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id: id.clone() }, now());
+        let view = daemon.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id: id.clone() }, now()).answered();
         assert_eq!(view, HuginnMindResponse::View(Some(views[0].clone())));
     }
 
@@ -437,18 +594,18 @@ pub(crate) mod tests {
     fn a_read_or_a_write_naming_another_instance_is_refused_by_the_mind_and_writes_nothing() {
         let root = tempfile::tempdir().unwrap();
         let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
-        let landed = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
+        let landed = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now()).answered();
         let HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { writes, .. }) = landed else {
             panic!("expected a commit");
         };
         let foreign = MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() };
 
         let query = HuginnMindRequest::Query { instance: slug(OTHER), selection: Selection::default(), semantic: None };
-        assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(foreign.clone()));
+        assert_eq!(daemon.handle(query, now()).answered(), HuginnMindResponse::Refused(foreign.clone()));
 
         let admit = HuginnMindRequest::Admit(batch(OTHER, vec![identity(OTHER)]));
         assert_eq!(
-            daemon.handle(admit, now()),
+            daemon.handle(admit, now()).answered(),
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(foreign.clone()))
         );
 
@@ -459,12 +616,12 @@ pub(crate) mod tests {
         let (question, _) = question_and_ruling();
         let admit = HuginnMindRequest::Admit(batch(OTHER, vec![question]));
         assert_eq!(
-            daemon.handle(admit, now()),
+            daemon.handle(admit, now()).answered(),
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(foreign.clone()))
         );
 
         let view = HuginnMindRequest::View { instance: slug(OTHER), id: writes[0].clone() };
-        assert_eq!(daemon.handle(view, now()), HuginnMindResponse::Refused(foreign));
+        assert_eq!(daemon.handle(view, now()).answered(), HuginnMindResponse::Refused(foreign));
 
         // Three names a comparison could mistake for this mind's. `NEAR` is
         // `INSTANCE`'s own length and differs in its last byte, so a check
@@ -479,12 +636,12 @@ pub(crate) mod tests {
         for declared in [NEAR, PREFIXED, CASED] {
             let refusal = MindRefusal::ForeignInstance { declared: declared.into(), mind: INSTANCE.into() };
             let query = HuginnMindRequest::Query { instance: slug(declared), selection: Selection::default(), semantic: None };
-            assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(refusal.clone()), "{declared}");
+            assert_eq!(daemon.handle(query, now()).answered(), HuginnMindResponse::Refused(refusal.clone()), "{declared}");
             let view = HuginnMindRequest::View { instance: slug(declared), id: writes[0].clone() };
-            assert_eq!(daemon.handle(view, now()), HuginnMindResponse::Refused(refusal.clone()), "{declared}");
+            assert_eq!(daemon.handle(view, now()).answered(), HuginnMindResponse::Refused(refusal.clone()), "{declared}");
             let admit = HuginnMindRequest::Admit(batch(declared, vec![identity(declared)]));
             assert_eq!(
-                daemon.handle(admit, now()),
+                daemon.handle(admit, now()).answered(),
                 HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(refusal)),
                 "{declared}"
             );
@@ -514,13 +671,13 @@ pub(crate) mod tests {
         });
 
         let query = HuginnMindRequest::Query { instance: slug(fullwidth), selection: Selection::default(), semantic: None };
-        assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(expected.clone()));
+        assert_eq!(daemon.handle(query, now()).answered(), HuginnMindResponse::Refused(expected.clone()));
 
         let view = HuginnMindRequest::View {
             instance: slug(fullwidth),
             id: PipelineRef { kind: PipelineKind::Question, id: Short("not-reached".into()) },
         };
-        assert_eq!(daemon.handle(view, now()), HuginnMindResponse::Refused(expected));
+        assert_eq!(daemon.handle(view, now()).answered(), HuginnMindResponse::Refused(expected));
     }
 
     /// `Admit` is excluded from the daemon's own pre-check (its batch is not a
@@ -545,12 +702,12 @@ pub(crate) mod tests {
 
         let admit = HuginnMindRequest::Admit(batch(fullwidth, vec![identity(INSTANCE)]));
         assert_eq!(
-            daemon.handle(admit, now()),
+            daemon.handle(admit, now()).answered(),
             HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(expected.clone()))
         );
 
         let query = HuginnMindRequest::Query { instance: slug(fullwidth), selection: Selection::default(), semantic: None };
-        assert_eq!(daemon.handle(query, now()), HuginnMindResponse::Refused(expected));
+        assert_eq!(daemon.handle(query, now()).answered(), HuginnMindResponse::Refused(expected));
     }
 
     /// A refusal a read method raised is the answer the dispatch returns, whole.
@@ -572,17 +729,7 @@ pub(crate) mod tests {
             value: "not a reference".into(),
         });
         let view = HuginnMindRequest::View { instance: slug(INSTANCE), id: invalid };
-        assert_eq!(daemon.handle(view, now()), HuginnMindResponse::Refused(malformed));
-
-        // A semantic query is unavailable until Cut 11 wires an index, and the
-        // detail is the mind's own sentence.
-        let semantic = Some(SemanticQuery { text: "who owns the state".into(), top_k: 4 });
-        let unwired =
-            MindRefusal::Unavailable { detail: "semantic query: the index is not wired (Cut 11)".into() };
-        assert_eq!(
-            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection: Selection::default(), semantic }, now()),
-            HuginnMindResponse::Refused(unwired)
-        );
+        assert_eq!(daemon.handle(view, now()).answered(), HuginnMindResponse::Refused(malformed));
 
         // And the same reads answer rather than refuse when they are asked
         // something answerable, so the arms above are refusing on the mind's
@@ -590,9 +737,9 @@ pub(crate) mod tests {
         let absent =
             PipelineRef { kind: PipelineKind::Question, id: Short(format!("{CAMPAIGN}:question:Q1")) };
         let present = HuginnMindRequest::View { instance: slug(INSTANCE), id: absent };
-        assert_eq!(daemon.handle(present, now()), HuginnMindResponse::View(None));
+        assert_eq!(daemon.handle(present, now()).answered(), HuginnMindResponse::View(None));
         let plain = HuginnMindRequest::Query { instance: slug(INSTANCE), selection: Selection::default(), semantic: None };
-        let HuginnMindResponse::Query(page) = daemon.handle(plain, now()) else { panic!("expected a page") };
+        let HuginnMindResponse::Query(page) = daemon.handle(plain, now()).answered() else { panic!("expected a page") };
         assert_eq!(page.matched, 1);
     }
 
@@ -604,7 +751,7 @@ pub(crate) mod tests {
     fn a_selection_refusal_crosses_the_dispatch_as_itself() {
         let (_root, mut daemon) = seeded();
         let ask = |daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, NoIndex>, selection: Selection| {
-            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection, semantic: None }, now())
+            daemon.handle(HuginnMindRequest::Query { instance: slug(INSTANCE), selection, semantic: None }, now()).answered()
         };
         let predicate = |index: &str, value: &str| Selection {
             fields: Some(vec![cultnet_rs::FieldPredicate {
@@ -641,7 +788,7 @@ pub(crate) mod tests {
         let mut daemon = daemon.with_index(recording.clone());
         let (question, ruling) = question_and_ruling();
 
-        let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![question, ruling])), now());
+        let outcome = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![question, ruling])), now()).answered();
         let HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { writes, .. }) = outcome else {
             panic!("expected a commit");
         };
@@ -657,13 +804,13 @@ pub(crate) mod tests {
         let mut daemon = daemon.with_index(FailingIndex);
         let root = tempfile::tempdir().unwrap();
         let mut fresh = open_unindexed(root.path(), &slug(INSTANCE)).unwrap().with_index(FailingIndex);
-        fresh.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
-        let outcome = fresh.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![question, ruling])), now());
+        fresh.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now()).answered();
+        let outcome = fresh.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![question, ruling])), now()).answered();
         let HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { writes, .. }) = outcome else {
             panic!("a failing index does not refuse the batch");
         };
         for write in &writes {
-            let view = fresh.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id: write.clone() }, now());
+            let view = fresh.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id: write.clone() }, now()).answered();
             assert!(matches!(view, HuginnMindResponse::View(Some(_))), "{write:?} is readable");
         }
         assert_eq!(status(&mut daemon).documents, 4, "identity, question, ruling and the derived resolution");
@@ -684,7 +831,7 @@ pub(crate) mod tests {
         drop(held);
 
         let mut planted = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
-        planted.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now());
+        planted.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), now()).answered();
         drop(planted);
         let moved = Mind::<OwnedRedbMessagePackBackingStore>::store_path_for(root.path(), &slug(OTHER)).unwrap();
         std::fs::create_dir_all(moved.parent().unwrap()).unwrap();

@@ -4,10 +4,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 
-use super::{CollectionMeta, Described, Embedder, ModelIdentity, Point, VectorIndex};
+use super::{CollectionMeta, Described, Embedder, Hit, ModelIdentity, Point, VectorIndex};
 
 pub(crate) fn identity(digest: &str) -> ModelIdentity {
     ModelIdentity { name: "model".into(), digest: digest.into(), dimensions: 4 }
@@ -24,10 +25,20 @@ impl Gate {
 
     /// Blocks until `count` calls to `embed` have arrived at the gate.
     pub(crate) fn wait_arrived(&self, count: u32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut state = self.0.0.lock().unwrap();
         while state.0 < count {
-            state = self.0.1.wait(state).unwrap();
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!left.is_zero(), "{count} calls never arrived at the gate; {} did", state.0);
+            state = self.0.1.wait_timeout(state, left).unwrap().0;
         }
+    }
+
+    /// Shuts the door again and forgets who arrived, so a test that let start-up
+    /// work through can hold the next call.
+    pub(crate) fn shut_again(&self) {
+        let mut state = self.0.0.lock().unwrap();
+        *state = (0, false);
     }
 
     pub(crate) fn open(&self) {
@@ -50,6 +61,11 @@ pub(crate) struct EmbedderState {
     pub(crate) down: bool,
     /// The texts of every completed call, in order.
     pub(crate) embedded: Vec<Vec<String>>,
+    /// The bound each completed call was given, in order.
+    pub(crate) bounds: Vec<Duration>,
+    /// The length of the vectors it answers with, where that is not the
+    /// identity's.
+    pub(crate) vector_length: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -60,7 +76,7 @@ pub(crate) struct FakeEmbedder {
 
 impl FakeEmbedder {
     pub(crate) fn new(digest: &str) -> Self {
-        let state = EmbedderState { identity: identity(digest), down: false, embedded: Vec::new() };
+        let state = EmbedderState { identity: identity(digest), down: false, embedded: Vec::new(), bounds: Vec::new(), vector_length: None };
         Self { state: Arc::new(Mutex::new(state)), gate: None }
     }
 
@@ -83,7 +99,7 @@ impl Embedder for FakeEmbedder {
         Ok(state.identity.clone())
     }
 
-    fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed(&mut self, texts: &[String], within: Duration) -> Result<Vec<Vec<f32>>> {
         if let Some(gate) = &self.gate {
             gate.pass();
         }
@@ -92,7 +108,8 @@ impl Embedder for FakeEmbedder {
             bail!("the embedder is down");
         }
         state.embedded.push(texts.to_vec());
-        let dimensions = state.identity.dimensions as usize;
+        state.bounds.push(within);
+        let dimensions = state.vector_length.unwrap_or(state.identity.dimensions as usize);
         Ok(texts.iter().map(|text| (0..dimensions).map(|at| (text.len() + at) as f32).collect()).collect())
     }
 }
@@ -109,6 +126,15 @@ pub(crate) struct IndexState {
     pub(crate) recreated: Vec<(String, CollectionMeta)>,
     /// The point ids of every upsert call, in order.
     pub(crate) upserts: Vec<Vec<String>>,
+    /// What every search answers, whatever the vector: the test decides the
+    /// candidates, as a real index would decide them from vectors.
+    pub(crate) hits: Vec<Hit>,
+    /// The collection, vector length and limit of every search, in order.
+    pub(crate) searches: Vec<(String, usize, u32)>,
+    /// How many times every point id was listed: only a reconciliation does.
+    pub(crate) listed: u32,
+    /// Whether a search fails at the vector store, the rest of it working.
+    pub(crate) fail_search: bool,
 }
 
 #[derive(Clone, Default)]
@@ -150,10 +176,11 @@ impl VectorIndex for FakeIndex {
     }
 
     fn ids(&mut self, collection: &str) -> Result<BTreeSet<String>> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if state.down {
             bail!("the vector store is down");
         }
+        state.listed += 1;
         Ok(state.collections.get(collection).map(|stored| stored.points.keys().cloned().collect()).unwrap_or_default())
     }
 
@@ -168,6 +195,17 @@ impl VectorIndex for FakeIndex {
             stored.points.insert(point.id.clone(), point.clone());
         }
         Ok(())
+    }
+
+    fn search(&mut self, collection: &str, vector: &[f32], limit: u32) -> Result<Vec<Hit>> {
+        let mut state = self.state.lock().unwrap();
+        if state.down {
+            bail!("the vector store is down");
+        }
+        state.searches.push((collection.into(), vector.len(), limit));
+        ensure!(!state.fail_search, "the vector store failed the search");
+        ensure!(state.collections.contains_key(collection), "no collection {collection}");
+        Ok(state.hits.clone())
     }
 }
 

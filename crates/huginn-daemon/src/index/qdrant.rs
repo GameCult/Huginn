@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
-use super::{CollectionMeta, Described, Http, Method, Point, VectorIndex};
+use super::{CollectionMeta, Described, Hit, Http, Method, Point, VectorIndex};
 
 /// One Qdrant. Every path names a collection this organ was told to own; it
 /// never lists or touches another.
@@ -131,5 +131,21 @@ impl VectorIndex for QdrantIndex {
             &[200],
         )?;
         Ok(())
+    }
+
+    fn search(&mut self, collection: &str, vector: &[f32], limit: u32) -> Result<Vec<Hit>> {
+        let body = json!({ "vector": vector, "limit": limit, "with_payload": ["doc_id", "kind"], "with_vector": false });
+        let (_, answer) = self.ask(Method::Post, &format!("/collections/{collection}/points/search"), Some(&body), &[200])?;
+        let found = answer["result"].as_array().context("Qdrant's search has no result")?;
+        found
+            .iter()
+            .map(|point| {
+                Ok(Hit {
+                    doc_id: point["payload"]["doc_id"].as_str().context("a hit carries no doc_id")?.to_owned(),
+                    kind: point["payload"]["kind"].as_str().context("a hit carries no kind")?.to_owned(),
+                    score: point["score"].as_f64().context("a hit carries no score")? as f32,
+                })
+            })
+            .collect()
     }
 }

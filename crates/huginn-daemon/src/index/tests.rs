@@ -12,7 +12,7 @@ use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, IndexStatus};
 use huginn_mind::{Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionOutcome};
 use tempfile::TempDir;
 
-use super::fakes::{FakeEmbedder, FakeIndex, Gate, pair};
+use super::fakes::{FakeEmbedder, FakeIndex, Gate, Stored, pair};
 use super::ollama::OllamaEmbedder;
 use super::qdrant::QdrantIndex;
 use super::*;
@@ -59,8 +59,15 @@ fn counts(index: &FakeIndex) -> (usize, usize) {
     (state.recreated.len(), state.upserts.len())
 }
 
+/// Steps until the projector has nothing to do. A step that never settles is a
+/// failure of the test, not a hang: it is bounded.
 fn drain<E: Embedder, V: VectorIndex>(projector: &mut Projector<E, V>) {
-    while projector.advance().unwrap() == Advance::Progressed {}
+    for _ in 0..1000 {
+        if projector.advance().unwrap() == Advance::Idle {
+            return;
+        }
+    }
+    panic!("the projector was still stepping after 1000 steps");
 }
 
 fn point_ids(entries: &[IndexEntry]) -> BTreeSet<String> {
@@ -228,8 +235,8 @@ fn a_collection_owned_by_another_instance_is_never_recreated() {
     }
 }
 
-/// A vector of the wrong length is refused before anything is written, and the
-/// documents stay wanted.
+/// The vector's length is checked against the collection's, so a flush that
+/// the model did not change is still refused when the embedder answers wrongly.
 #[test]
 fn a_vector_of_the_wrong_length_is_refused_and_nothing_is_dropped() {
     let (_root, mind) = mind_with_documents();
@@ -238,15 +245,113 @@ fn a_vector_of_the_wrong_length_is_refused_and_nothing_is_dropped() {
     let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
     projector.want(entries.iter().cloned());
     projector.reconcile().unwrap();
-    embedder.state.lock().unwrap().identity.dimensions = 8;
+    embedder.state.lock().unwrap().vector_length = Some(8);
     let error = projector.flush_batch().expect_err("a longer vector is refused");
     assert!(matches!(error, StepError::Unavailable(_)), "{error}");
     assert_eq!(projector.pending(), 4);
     assert!(index.state.lock().unwrap().upserts.is_empty());
 }
 
+/// A flush embeds through the same check as a search: a model that changed
+/// before the embed is never asked, a model that changed during it has its
+/// vectors dropped, and a collection that is no longer this mind's is refused.
+/// In each case nothing is written, the documents stay wanted, and the
+/// reconciliation is forgotten.
+#[test]
+fn a_flush_is_refused_as_a_search_is_when_the_model_or_the_collection_changed() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let reconciled = || {
+        let (embedder, index) = pair();
+        let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
+        projector.want(entries.iter().cloned());
+        projector.reconcile().unwrap();
+        (embedder, index, projector)
+    };
+
+    let (embedder, index, mut projector) = reconciled();
+    embedder.state.lock().unwrap().identity.digest = "d2".into();
+    projector.flush_batch().expect("a changed model is not a failure");
+    assert!(embedder.texts().is_empty(), "before: the texts were not embedded under the new model");
+    assert!(index.state.lock().unwrap().upserts.is_empty());
+    assert_eq!((projector.pending(), projector.stale()), (4, true), "before");
+
+    let (embedder, index, mut projector) = reconciled();
+    change_label(&index, |meta| meta.mind = "mind-commit-another".into());
+    let error = projector.flush_batch().expect_err("another mind's label is refused");
+    assert!(error.to_string().contains("no longer the one this mind's index was built as"), "{error}");
+    assert!(embedder.texts().is_empty(), "label: nothing was embedded");
+    assert!(index.state.lock().unwrap().upserts.is_empty());
+    assert_eq!((projector.pending(), projector.stale()), (4, true), "label");
+
+    let gate = Gate::shut();
+    let embedder = FakeEmbedder::new("d1").behind(&gate);
+    let index = FakeIndex::default();
+    let mut projector = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
+    projector.want(entries.iter().cloned());
+    projector.reconcile().unwrap();
+    let flushing = std::thread::spawn(move || {
+        let flushed = projector.flush_batch();
+        (projector, flushed)
+    });
+    gate.wait_arrived(1);
+    embedder.state.lock().unwrap().identity.digest = "d2".into();
+    gate.open();
+    let (projector, flushed) = flushing.join().unwrap();
+    flushed.expect("a changed model is not a failure");
+    assert!(index.state.lock().unwrap().upserts.is_empty(), "during: the vectors were not written");
+    assert_eq!((projector.pending(), projector.stale()), (4, true), "during");
+}
+
+fn change_label(index: &FakeIndex, change: impl FnOnce(&mut CollectionMeta)) {
+    let mut state = index.state.lock().unwrap();
+    let Described::Labelled(meta) = &mut state.collections.get_mut(&collection()).unwrap().label else { panic!() };
+    change(meta);
+}
+
+/// The query embed is bounded by the search's deadline, one constant behind
+/// both, so a query embed that cannot be recalled cannot hold the writes off
+/// past the moment nobody is waiting for it. A bulk flush keeps its own bound.
+#[test]
+fn the_query_embed_is_bounded_by_the_search_deadline_and_the_flush_by_its_own() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut projector = projected(&embedder, &index, &entries);
+    assert!(!embedder.state.lock().unwrap().bounds.is_empty());
+    assert!(embedder.state.lock().unwrap().bounds.iter().all(|bound| *bound == BULK_EMBED_TIMEOUT), "the flushes");
+    projector.search("anything", 3).unwrap();
+    let bounds = embedder.state.lock().unwrap().bounds.clone();
+    assert_eq!(bounds.last(), Some(&QUERY_EMBED_TIMEOUT), "the query");
+    let served = crate::serve::ServeOptions::default().search_timeout;
+    assert_eq!(served, SEARCH_DEADLINE);
+    assert!(QUERY_EMBED_TIMEOUT <= served);
+    assert!(QUERY_EMBED_TIMEOUT < BULK_EMBED_TIMEOUT);
+}
+
+/// The Ollama adapter enforces the bound it is given: an embed that is never
+/// answered fails at the bound, not at the adapter's default.
+#[test]
+fn an_ollama_embed_that_is_never_answered_fails_at_its_bound() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let held = std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().take(1) {
+            held.push(stream.unwrap());
+            std::thread::sleep(Duration::from_secs(8));
+        }
+    });
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut embedder = OllamaEmbedder::new(&url, "m:1");
+        sent.send(embedder.embed(&["a".into()], Duration::from_millis(300)).is_err()).ok();
+    });
+    assert_eq!(received.recv_timeout(Duration::from_secs(5)), Ok(true), "the embed did not fail at its bound");
+    drop(held);
+}
 fn whoami_index(daemon: &mut Daemon<OwnedRedbMessagePackBackingStore, WorkerSink>) -> IndexStatus {
-    match daemon.handle(HuginnMindRequest::Whoami, now()) {
+    match daemon.handle(HuginnMindRequest::Whoami, now()).answered() {
         HuginnMindResponse::Whoami(status) => status.index,
         other => panic!("expected a status, got {other:?}"),
     }
@@ -260,7 +365,7 @@ fn committed(response: HuginnMindResponse) {
 }
 
 fn quick() -> Backoff {
-    Backoff { initial: Duration::from_millis(1), max: Duration::from_millis(2) }
+    Backoff { initial: Duration::from_millis(1), max: Duration::from_millis(2), recheck: Duration::from_secs(3600) }
 }
 
 /// The index never delays or refuses admission: the embedder is shut, the
@@ -278,10 +383,10 @@ fn an_admission_replies_while_the_embedder_is_blocked() {
     let mut daemon = Daemon::new(mind, sink);
     daemon.index().wait_status(|status| *status == IndexStatus::Current);
 
-    committed(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, campaign_seed())), now()));
+    committed(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, campaign_seed())), now()).answered());
     gate.wait_arrived(1);
     let (question, ruling) = question_and_ruling();
-    committed(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![question, ruling])), now()));
+    committed(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![question, ruling])), now()).answered());
     assert_eq!(
         whoami_index(&mut daemon),
         IndexStatus::Behind { pending: 4 },
@@ -309,7 +414,7 @@ fn a_failing_embedder_is_visible_in_whoami_and_retried_never_dropped() {
     embedder.state.lock().unwrap().down = true;
     let (question, ruling) = question_and_ruling();
     for documents in [campaign_seed(), vec![question, ruling]] {
-        committed(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), now()));
+        committed(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), now()).answered());
     }
     let seen = daemon.index().wait_status(|status| matches!(status, IndexStatus::Failing { attempts, .. } if *attempts >= 2));
     let IndexStatus::Failing { pending, error, .. } = seen else { panic!() };
@@ -439,7 +544,7 @@ fn ollama_identity_is_the_listed_digest_and_the_models_embedding_length() {
     let ollama = stub(&[("GET /api/tags", 200, TAGS), ("POST /api/show", 200, SHOW), ("POST /api/embed", 200, EMBED)]);
     let mut embedder = OllamaEmbedder::new(&ollama.url, "m:1");
     assert_eq!(embedder.model_identity().unwrap(), ModelIdentity { name: "m:1".into(), digest: "ac6d".into(), dimensions: 4 });
-    let vectors = embedder.embed(&["a".into(), "b".into(), "c".into(), "d".into()]).unwrap();
+    let vectors = embedder.embed(&["a".into(), "b".into(), "c".into(), "d".into()], Duration::from_secs(5)).unwrap();
     assert_eq!(vectors.len(), 4);
     assert_eq!(vectors[0], vec![0.5, 1.0, 2.0, 3.0]);
     let seen = ollama.seen.lock().unwrap();
@@ -457,7 +562,7 @@ fn ollama_identity_is_the_listed_digest_and_the_models_embedding_length() {
     let mut absent = OllamaEmbedder::new(&ollama.url, "not-pulled:1");
     assert!(format!("{:#}", absent.model_identity().unwrap_err()).contains("does not list the model"));
     let refusing = stub(&[("POST /api/embed", 500, r#"{"error":"boom"}"#)]);
-    assert!(OllamaEmbedder::new(&refusing.url, "m:1").embed(&["a".into()]).is_err());
+    assert!(OllamaEmbedder::new(&refusing.url, "m:1").embed(&["a".into()], Duration::from_secs(5)).is_err());
 }
 
 /// Compatibility never reads the address: the same model at another address
@@ -615,9 +720,7 @@ fn dropping_the_sink_stops_the_worker() {
     sink.wait_status(|status| *status == IndexStatus::Current);
     let shared = Arc::downgrade(&sink.shared);
     drop(sink);
-    while shared.upgrade().is_some() {
-        std::thread::yield_now();
-    }
+    eventually("the worker letting go of the shared state", || shared.upgrade().is_none());
 }
 
 /// F1. The promised curve, pure: 30 s doubling to a 10 min cap, never below
@@ -627,6 +730,7 @@ fn dropping_the_sink_stops_the_worker() {
 fn the_backoff_doubles_from_thirty_seconds_to_a_ten_minute_cap() {
     let backoff = Backoff::default();
     assert_eq!((backoff.initial, backoff.max), (Duration::from_secs(30), Duration::from_secs(600)));
+    assert_eq!(backoff.recheck, Duration::from_secs(60), "an idle worker verifies the model and the collection each minute");
     let mut delay = backoff.initial;
     let mut seen = vec![delay.as_secs()];
     for _ in 0..7 {
@@ -637,7 +741,7 @@ fn the_backoff_doubles_from_thirty_seconds_to_a_ten_minute_cap() {
         seen.push(delay.as_secs());
     }
     assert_eq!(seen, [30, 60, 120, 240, 480, 600, 600, 600]);
-    let small = Backoff { initial: Duration::from_millis(1), max: Duration::from_millis(3) };
+    let small = Backoff { initial: Duration::from_millis(1), max: Duration::from_millis(3), recheck: Duration::from_secs(3600) };
     assert_eq!(small.after(Duration::from_millis(1)), Duration::from_millis(2));
     assert_eq!(small.after(Duration::from_millis(2)), Duration::from_millis(3));
 }
@@ -666,8 +770,9 @@ fn a_collection_lost_after_startup_is_recreated_and_refilled() {
     assert_eq!(projector.progress_status(), IndexStatus::Current);
 }
 
-/// F2. A model re-pulled with other dimensions fails one write, then the next
-/// attempt reads the new identity and rebuilds the collection to match.
+/// F2. A model re-pulled with other dimensions is seen before anything is
+/// written: no vector of the new length is offered to the old collection, and
+/// the next step rebuilds the collection to match.
 #[test]
 fn a_model_that_changes_dimensions_after_startup_rebuilds_the_collection() {
     let (_root, mind) = mind_with_documents();
@@ -677,7 +782,9 @@ fn a_model_that_changes_dimensions_after_startup_rebuilds_the_collection() {
 
     embedder.state.lock().unwrap().identity.dimensions = 8;
     projector.want(entries[3..].iter().cloned());
-    assert!(projector.advance().is_err(), "a vector of 8 does not fit a collection of 4");
+    let writes = index.state.lock().unwrap().upserts.len();
+    assert_eq!(projector.advance().unwrap(), Advance::Progressed, "the change is seen, not written through");
+    assert_eq!(index.state.lock().unwrap().upserts.len(), writes, "no vector of 8 was offered to a collection of 4");
     drain(&mut projector);
 
     let state = index.state.lock().unwrap();
@@ -740,7 +847,7 @@ fn a_mind_without_an_identity_makes_no_collection_until_its_first_admission() {
     let mut daemon = Daemon::new(mind, sink);
     let seed = campaign_seed();
     let without_text = vec![seed[0].clone(), seed[1].clone()];
-    committed(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, without_text)), now()));
+    committed(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, without_text)), now()).answered());
     for _ in 0..500 {
         if index.state.lock().unwrap().collections.contains_key(&collection()) {
             break;
@@ -750,4 +857,651 @@ fn a_mind_without_an_identity_makes_no_collection_until_its_first_admission() {
     let state = index.state.lock().unwrap();
     let Described::Labelled(label) = &state.collections[&collection()].label else { panic!("no collection was made") };
     assert_eq!(Some(&label.mind), daemon.mind().genesis_receipt_id().unwrap().as_ref());
+}
+
+/// Waits for a condition the worker will make true, without a clock in the
+/// assertion: it polls for at most ten seconds and then says what never
+/// happened.
+fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+    for _ in 0..1000 {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("{what} never happened");
+}
+
+/// A model re-pulled under the same name and dimensions but a new digest must
+/// not mix its vectors with the old model's. The check is before the write,
+/// not after a failure: nothing is offered to the old collection, the
+/// collection is rebuilt under the new digest, and every document is embedded
+/// again.
+#[test]
+fn a_model_re_pulled_with_the_same_dimensions_never_writes_beside_the_old_vectors() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut projector = projected(&embedder, &index, &entries[..3]);
+
+    embedder.state.lock().unwrap().identity.digest = "d2".into();
+    projector.want(entries[3..].iter().cloned());
+    let writes = index.state.lock().unwrap().upserts.len();
+    assert_eq!(projector.advance().unwrap(), Advance::Progressed);
+    assert_eq!(index.state.lock().unwrap().upserts.len(), writes, "the new vector was not written into the old collection");
+    assert_eq!(projector.progress_status(), IndexStatus::Reconciling { pending: 1 }, "the reconciliation was forgotten, not the entry");
+
+    drain(&mut projector);
+    let state = index.state.lock().unwrap();
+    assert_eq!(state.recreated.len(), 2);
+    assert_eq!(state.recreated.last().unwrap().1.model_digest, "d2");
+    let stored = &state.collections[&collection()];
+    assert_eq!(stored.points.len(), 4, "every document is in the rebuilt collection");
+    assert_eq!(embedder.texts().len(), 3 + 4, "and was embedded again under the new digest");
+}
+
+/// Nothing is written while idle, so no write can fail to announce that the
+/// collection is gone or the model has changed. The idle worker looks again on
+/// its own clock: a lost collection is refilled and a re-pulled model rebuilds
+/// it, with no admission to prompt either.
+#[test]
+fn an_idle_worker_finds_a_lost_collection_and_a_changed_model_without_a_write() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let recheck = Backoff { recheck: Duration::from_millis(20), ..quick() };
+    let sink = WorkerSink::spawn(embedder.clone(), index.clone(), &slug(INSTANCE), mind.genesis_receipt_id().unwrap(), entries.clone(), recheck);
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    assert_eq!(index.holding(&collection()), point_ids(&entries));
+
+    index.state.lock().unwrap().collections.remove(&collection());
+    eventually("the lost collection being made again and refilled", || {
+        index.state.lock().unwrap().recreated.len() == 2 && index.holding(&collection()) == point_ids(&entries)
+    });
+
+    embedder.state.lock().unwrap().identity.digest = "d2".into();
+    eventually("the collection being rebuilt under the new digest", || {
+        let state = index.state.lock().unwrap();
+        state.recreated.len() == 3
+            && state.recreated.last().is_some_and(|(_, meta)| meta.model_digest == "d2")
+            && state.collections[&collection()].points.len() == 4
+    });
+    sink.wait_status(|status| *status == IndexStatus::Current);
+}
+
+/// A search embeds the query behind the model's instruction, asks the index
+/// with no filter for `min(top_k * 4, 200)`, and hands back candidates by id
+/// and kind; a hit of a kind this organ has no name for is left out.
+#[test]
+fn a_search_embeds_the_query_with_its_instruction_and_oversamples() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut projector = projected(&embedder, &index, &entries);
+    index.state.lock().unwrap().hits = vec![
+        Hit { doc_id: "eureka-state:question:Q1".into(), kind: "question".into(), score: 0.9 },
+        Hit { doc_id: "eureka-state:mystery:X".into(), kind: "mystery".into(), score: 0.8 },
+    ];
+
+    let hits = projector.search("who owns the state", 3).unwrap();
+    assert_eq!(hits.len(), 1, "the unknown kind is left out");
+    assert_eq!(hits[0].0.id.0, "eureka-state:question:Q1");
+    assert_eq!(hits[0].0.kind, PipelineKind::Question);
+    assert_eq!(hits[0].1, 0.9);
+    let embedded = embedder.texts();
+    assert_eq!(embedded.last().unwrap(), &format!("Instruct: {QUERY_INSTRUCTION}\nQuery: who owns the state"));
+    projector.search("again", 100).unwrap();
+    let searches = index.state.lock().unwrap().searches.clone();
+    assert_eq!(searches.iter().map(|(name, length, limit)| (name.as_str(), *length, *limit)).collect::<Vec<_>>(), [
+        (collection().as_str(), 4, 12),
+        (collection().as_str(), 4, 200),
+    ]);
+}
+
+/// A search is never run against a collection that is not known to fit the
+/// model: before reconciliation, and after the model has changed, it refuses
+/// by saying so rather than comparing vectors of two models.
+#[test]
+fn a_search_refuses_when_the_index_is_not_reconciled_with_the_model() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut fresh = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
+    assert!(format!("{:#}", fresh.search("anything", 3).unwrap_err()).contains("being rebuilt"));
+    assert!(embedder.texts().is_empty() && index.state.lock().unwrap().searches.is_empty());
+
+    let mut projector = projected(&embedder, &index, &entries);
+    embedder.state.lock().unwrap().identity.digest = "d2".into();
+    let before = embedder.texts().len();
+    assert!(format!("{:#}", projector.search("anything", 3).unwrap_err()).contains("model changed"));
+    assert_eq!(embedder.texts().len(), before, "the query was not embedded under the new model");
+    assert!(index.state.lock().unwrap().searches.is_empty());
+    assert!(projector.stale(), "and the reconciliation is to be redone");
+}
+
+/// The search asks for the nearest points to a vector with no filter of any
+/// kind (which documents may be shown is the mind's), and reads back the
+/// document id, the kind and the score, in the order Qdrant gave them. A hit
+/// missing what the join needs is an error, not a guess.
+#[test]
+fn qdrant_search_sends_no_filter_and_reads_ids_kinds_and_scores() {
+    let name = collection();
+    let answering = stub(&[(
+        "POST /collections/",
+        200,
+        r#"{"result":[{"id":"p1","score":0.75,"payload":{"doc_id":"eureka-state:question:Q1","kind":"question"}},{"id":"p2","score":0.5,"payload":{"doc_id":"eureka-state:ruling:R1","kind":"ruling"}}]}"#,
+    )]);
+    let hits = QdrantIndex::new(&answering.url).search(&name, &[0.5, 1.0, 2.0, 3.0], 12).unwrap();
+    assert_eq!(
+        hits,
+        [
+            Hit { doc_id: "eureka-state:question:Q1".into(), kind: "question".into(), score: 0.75 },
+            Hit { doc_id: "eureka-state:ruling:R1".into(), kind: "ruling".into(), score: 0.5 },
+        ]
+    );
+    let seen = answering.seen.lock().unwrap();
+    assert_eq!((seen[0].0.as_str(), seen[0].1.as_str()), ("POST", format!("/collections/{name}/points/search").as_str()));
+    for expected in ["\"vector\":[0.5,1.0,2.0,3.0]", "\"limit\":12", "\"with_vector\":false"] {
+        assert!(seen[0].2.contains(expected), "{expected} in {}", seen[0].2);
+    }
+    assert!(!seen[0].2.contains("filter"), "no predicate is lowered into the index: {}", seen[0].2);
+    drop(seen);
+
+    let nameless = stub(&[("POST /collections/", 200, r#"{"result":[{"id":"p","score":0.5,"payload":{"kind":"question"}}]}"#)]);
+    assert!(QdrantIndex::new(&nameless.url).search(&name, &[1.0], 1).is_err());
+    let failing = stub(&[("POST /collections/", 404, r#"{"status":{"error":"not found"}}"#)]);
+    assert!(QdrantIndex::new(&failing.url).search(&name, &[1.0], 1).is_err());
+}
+
+fn shared_with(
+    inbox: Vec<IndexEntry>,
+    mind: Option<String>,
+    searches: Vec<(SearchTicket, String, u32)>,
+    closed: bool,
+) -> Lock {
+    Arc::new((
+        Mutex::new(Shared {
+            inbox,
+            mind,
+            status: IndexStatus::Current,
+            closed,
+            searches: searches.into(),
+            found: Vec::new(),
+            next_ticket: 0,
+        }),
+        Condvar::new(),
+    ))
+}
+
+/// The idle wait is for work: an entry, the mind's identity, a search or the
+/// sink closing ends it at once, and only a quiet worker waits out its
+/// deadline. The deadline is the caller's: a deadline already past ends the
+/// wait at once too, and waking for work does not extend it.
+#[test]
+fn an_idle_wait_ends_for_work_and_otherwise_at_its_deadline() {
+    let (_root, mind) = mind_with_documents();
+    let entry = mind.index_entries(None).unwrap().remove(0);
+    let waits = |shared: &Lock| {
+        let started = Instant::now();
+        wait_for_work(shared, Wait::Work { until: Instant::now() + Duration::from_secs(30) });
+        started.elapsed() < Duration::from_secs(10)
+    };
+    assert!(waits(&shared_with(vec![entry], None, Vec::new(), false)), "an entry");
+    assert!(waits(&shared_with(Vec::new(), Some(MIND.into()), Vec::new(), false)), "the mind's identity");
+    assert!(waits(&shared_with(Vec::new(), None, vec![(SearchTicket(0), "q".into(), 3)], false)), "a search");
+    assert!(waits(&shared_with(Vec::new(), None, Vec::new(), true)), "the sink closing");
+
+    let quiet = shared_with(Vec::new(), None, Vec::new(), false);
+    let started = Instant::now();
+    wait_for_work(&quiet, Wait::Work { until: started + Duration::from_millis(60) });
+    assert!(started.elapsed() >= Duration::from_millis(60), "a quiet worker waits for its deadline");
+    let started = Instant::now();
+    wait_for_work(&quiet, Wait::Work { until: started.checked_sub(Duration::from_secs(1)).unwrap_or(started) });
+    assert!(started.elapsed() < Duration::from_secs(10), "a deadline already past is not waited for");
+}
+
+/// A backoff is the whole delay, whatever arrives: a failing index is retried
+/// on its schedule.
+#[test]
+fn a_backoff_wait_is_the_whole_delay_whatever_arrives() {
+    let (_root, mind) = mind_with_documents();
+    let entry = mind.index_entries(None).unwrap().remove(0);
+    let busy = shared_with(vec![entry], Some(MIND.into()), vec![(SearchTicket(0), "q".into(), 3)], false);
+    let started = Instant::now();
+    wait_for_work(&busy, Wait::Backoff(Duration::from_millis(80)));
+    assert!(started.elapsed() >= Duration::from_millis(80), "the delay was waited out although work was queued");
+    let closed = shared_with(Vec::new(), None, Vec::new(), true);
+    let started = Instant::now();
+    wait_for_work(&closed, Wait::Backoff(Duration::from_secs(30)));
+    assert!(started.elapsed() < Duration::from_secs(10), "a closed sink ends even a backoff");
+}
+
+/// Searches accepted while the index was healthy are answered, with the
+/// reason, when the worker fails: nothing is left to wait for its deadline.
+#[test]
+fn queued_searches_are_answered_with_why_when_the_worker_gives_up() {
+    let queued = vec![(SearchTicket(3), "a".into(), 1), (SearchTicket(4), "b".into(), 2)];
+    let shared = shared_with(Vec::new(), None, queued, false);
+    refuse_searches(&shared, "the index could not advance: down");
+    let guard = lock(&shared);
+    assert!(guard.searches.is_empty());
+    assert_eq!(
+        guard.found,
+        [
+            (SearchTicket(3), Err("the index could not advance: down".to_string())),
+            (SearchTicket(4), Err("the index could not advance: down".to_string())),
+        ]
+    );
+}
+
+// The semantic read's index side: when a search is answered, how many wait,
+// and what the worker does between them.
+
+type Answers = Vec<(SearchTicket, Result<Hits, String>)>;
+
+/// The sink's own calls, named: the trait is generic over the store and the
+/// worker does not care which.
+fn ask_sink(sink: &mut WorkerSink, text: &str, top_k: u32) -> Result<SearchTicket, String> {
+    <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search(sink, text, top_k)
+}
+
+fn collected(sink: &mut WorkerSink) -> Answers {
+    <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::searched(sink)
+}
+
+fn abandon(sink: &mut WorkerSink, ticket: SearchTicket) {
+    <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::abandon(sink, ticket);
+}
+
+/// Waits for `count` answers and returns them, in the order they were given.
+fn answers(sink: &mut WorkerSink, count: usize) -> Answers {
+    let mut all = Vec::new();
+    eventually("the searches being answered", || {
+        all.extend(collected(sink));
+        all.len() >= count
+    });
+    all
+}
+
+/// `count` documents that share one document's text and differ in id, for the
+/// tests whose subject is how many there are.
+fn entries_of(count: usize) -> Vec<IndexEntry> {
+    let (_root, mind) = mind_with_documents();
+    let template = mind.index_entries(None).unwrap().remove(0);
+    (0..count)
+        .map(|n| {
+            let mut entry = template.clone();
+            entry.id.id.0 = format!("{}#{n}", entry.id.id.0);
+            entry
+        })
+        .collect()
+}
+
+fn queries(embedder: &FakeEmbedder) -> Vec<String> {
+    embedder.texts().into_iter().filter(|text| text.starts_with("Instruct: ")).collect()
+}
+
+/// Only a current index answers. Being reconciled, being written to, failing
+/// and being refused each refuse by name, and the count of documents pending
+/// is in the words.
+#[test]
+fn only_a_current_index_answers_a_search() {
+    use IndexStatus as S;
+    assert_eq!(unsearchable(&S::Current), None);
+    let says = |status: S, wanted: &[&str]| {
+        let why = unsearchable(&status).unwrap_or_else(|| panic!("{status:?} answered"));
+        for word in wanted {
+            assert!(why.contains(word), "{status:?}: {word} in {why}");
+        }
+    };
+    says(S::Reconciling { pending: 7 }, &["being rebuilt", "reconciling", "pending: 7"]);
+    says(S::Behind { pending: 5 }, &["being rebuilt", "behind", "pending: 5"]);
+    says(S::Failing { pending: 3, attempts: 2, error: "boom".into() }, &["failing", "boom", "pending: 3"]);
+    says(S::Refused { pending: 4, attempts: 2, reason: "not ours".into() }, &["refused", "not ours", "pending: 4"]);
+
+    // The projector never answers from a half-filled collection, and never
+    // touches the embedder or the vector store to find out.
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut projector = projected(&embedder, &index, &entries[..3]);
+    projector.want(entries[3..].iter().cloned());
+    let embedded = embedder.texts().len();
+    let refusal = format!("{:#}", projector.search("anything", 3).unwrap_err());
+    assert!(refusal.contains("being rebuilt") && refusal.contains("pending: 1"), "{refusal}");
+    assert_eq!(embedder.texts().len(), embedded);
+    assert!(index.state.lock().unwrap().searches.is_empty());
+    drain(&mut projector);
+    assert!(projector.search("anything", 3).is_ok(), "once it has caught up it answers");
+
+    // The sink refuses before the worker is asked, while the worker is inside a batch.
+    let gate = Gate::shut();
+    let mut sink = WorkerSink::spawn(
+        FakeEmbedder::new("d1").behind(&gate),
+        FakeIndex::default(),
+        &slug(INSTANCE),
+        Some(MIND.into()),
+        entries.clone(),
+        quick(),
+    );
+    gate.wait_arrived(1);
+    let refusal = ask_sink(&mut sink, "anything", 3).unwrap_err();
+    assert!(refusal.contains("being rebuilt") && refusal.contains("pending: 4"), "{refusal}");
+    gate.open();
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    assert!(ask_sink(&mut sink, "anything", 3).is_ok());
+}
+
+/// A search that fails after it was accepted has found the index not what it
+/// claimed: the reconciliation is forgotten, so the status stops reading
+/// `Current` and the worker verifies the model and the collection again.
+#[test]
+fn a_search_that_fails_forgets_the_reconciliation() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let breaks: [(&str, Box<dyn Fn(&FakeEmbedder, &FakeIndex)>); 2] = [
+        ("the vector store fails the search", Box::new(|_, index| index.state.lock().unwrap().fail_search = true)),
+        ("the embedder is down", Box::new(|embedder, _| embedder.state.lock().unwrap().down = true)),
+    ];
+    for (what, breaks) in breaks {
+        let (embedder, index) = pair();
+        let mut projector = projected(&embedder, &index, &entries);
+        assert_eq!(projector.progress_status(), IndexStatus::Current);
+        breaks(&embedder, &index);
+        assert!(projector.search("anything", 3).is_err(), "{what}");
+        assert_eq!(projector.progress_status(), IndexStatus::Reconciling { pending: 0 }, "{what}");
+        assert!(projector.stale(), "{what}");
+    }
+
+    // In the worker the next step is the verification, with nothing to prompt it.
+    let (embedder, index) = pair();
+    let mut sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), Some(MIND.into()), entries, quick());
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    let listed = index.state.lock().unwrap().listed;
+    index.state.lock().unwrap().fail_search = true;
+    let ticket = ask_sink(&mut sink, "anything", 3).unwrap();
+    let failed = answers(&mut sink, 1);
+    assert_eq!(failed[0].0, ticket);
+    assert!(failed[0].1.is_err());
+    eventually("the worker listing the collection again", || index.state.lock().unwrap().listed > listed);
+}
+
+/// A search asks the store what the collection says about itself: a label for
+/// another mind, no label, or no collection is refused before the query is
+/// embedded, and the reconciliation is to be redone.
+#[test]
+fn a_search_re_reads_the_collections_label() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let cases: [(&str, Box<dyn Fn(&mut Stored)>); 3] = [
+        (
+            "another mind's label",
+            Box::new(|stored| {
+                let Described::Labelled(meta) = &mut stored.label else { panic!() };
+                meta.mind = "mind-commit-another".into();
+            }),
+        ),
+        ("no label", Box::new(|stored| stored.label = Described::Unlabelled)),
+        ("another text version", Box::new(|stored| {
+            let Described::Labelled(meta) = &mut stored.label else { panic!() };
+            meta.index_text_version += 1;
+        })),
+    ];
+    for (what, change) in cases {
+        let (embedder, index) = pair();
+        let mut projector = projected(&embedder, &index, &entries);
+        change(index.state.lock().unwrap().collections.get_mut(&collection()).unwrap());
+        let embedded = embedder.texts().len();
+        let refusal = format!("{:#}", projector.search("anything", 3).unwrap_err());
+        assert!(refusal.contains("no longer the one this mind's index was built as"), "{what}: {refusal}");
+        assert_eq!(embedder.texts().len(), embedded, "{what}: nothing was embedded");
+        assert!(index.state.lock().unwrap().searches.is_empty(), "{what}");
+        assert!(projector.stale(), "{what}");
+    }
+    let (embedder, index) = pair();
+    let mut projector = projected(&embedder, &index, &entries);
+    index.state.lock().unwrap().collections.clear();
+    assert!(projector.search("anything", 3).is_err(), "no collection");
+    assert!(projector.stale());
+}
+
+/// The model is read again after the query is embedded: a vector made while the
+/// model changed is never compared with the collection.
+#[test]
+fn a_model_that_changes_while_the_query_is_embedded_is_refused() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let gate = Gate::shut();
+    let embedder = FakeEmbedder::new("d1").behind(&gate);
+    let index = FakeIndex::default();
+    gate.open();
+    let mut projector = projected(&embedder, &index, &entries);
+    gate.shut_again();
+    let searching = std::thread::spawn(move || {
+        let found = projector.search("anything", 3);
+        (projector, found)
+    });
+    gate.wait_arrived(1);
+    embedder.state.lock().unwrap().identity.digest = "d2".into();
+    gate.open();
+    let (projector, found) = searching.join().unwrap();
+    let refusal = format!("{:#}", found.unwrap_err());
+    assert!(refusal.contains("while the texts were embedded"), "{refusal}");
+    assert!(index.state.lock().unwrap().searches.is_empty(), "the vector was not used");
+    assert!(projector.stale());
+}
+
+/// Each search has a ticket of its own, and its answer comes back once, as the
+/// worker gave it: nothing is added to it and nothing is left to be
+/// collected twice.
+#[test]
+fn every_search_has_its_own_ticket_and_its_answer_comes_back_exactly_once() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    index.state.lock().unwrap().hits =
+        vec![Hit { doc_id: "eureka-state:question:Q1".into(), kind: "question".into(), score: 0.9 }];
+    let mut sink = WorkerSink::spawn(embedder, index, &slug(INSTANCE), Some(MIND.into()), entries, quick());
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    let expected: Hits = vec![(
+        PipelineRef { kind: PipelineKind::Question, id: Short("eureka-state:question:Q1".into()) },
+        0.9,
+    )];
+    let mut tickets = Vec::new();
+    for text in ["a", "b", "c"] {
+        let ticket = ask_sink(&mut sink, text, 3).unwrap();
+        assert_eq!(answers(&mut sink, 1), vec![(ticket, Ok(expected.clone()))]);
+        assert!(collected(&mut sink).is_empty(), "an answer is handed over once");
+        tickets.push(ticket);
+    }
+    assert_eq!(tickets, [SearchTicket(0), SearchTicket(1), SearchTicket(2)]);
+}
+
+/// The queue of searches is bounded and the asker who does not fit is told.
+/// One search is inside the embedder and the queue is full; the next is
+/// refused by name, and when the worker has answered some it takes more.
+#[test]
+fn the_search_queue_is_bounded_and_the_asker_is_told_when_it_is_full() {
+    let gate = Gate::shut();
+    let (_, index) = pair();
+    let embedder = FakeEmbedder::new("d1").behind(&gate);
+    let mut sink = WorkerSink::spawn(embedder, index, &slug(INSTANCE), Some(MIND.into()), Vec::new(), quick());
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    ask_sink(&mut sink, "in flight", 3).unwrap();
+    gate.wait_arrived(1);
+    for n in 0..SEARCHES_QUEUED_MAX {
+        ask_sink(&mut sink, &format!("waiting {n}"), 3).unwrap_or_else(|why| panic!("{n} of {SEARCHES_QUEUED_MAX}: {why}"));
+    }
+    let refusal = ask_sink(&mut sink, "one too many", 3).unwrap_err();
+    assert!(refusal.contains(&format!("{SEARCHES_QUEUED_MAX} searches waiting")), "{refusal}");
+
+    gate.open();
+    let answered = answers(&mut sink, SEARCHES_QUEUED_MAX + 1);
+    assert_eq!(answered.len(), SEARCHES_QUEUED_MAX + 1);
+    assert!(ask_sink(&mut sink, "room again", 3).is_ok());
+}
+
+/// A search the asker has stopped waiting for is taken out of the queue and
+/// never embedded; the ones on either side of it are.
+#[test]
+fn an_abandoned_search_is_never_embedded() {
+    let gate = Gate::shut();
+    let (_, index) = pair();
+    let embedder = FakeEmbedder::new("d1").behind(&gate);
+    let mut sink = WorkerSink::spawn(embedder.clone(), index, &slug(INSTANCE), Some(MIND.into()), Vec::new(), quick());
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    let first = ask_sink(&mut sink, "first", 3).unwrap();
+    gate.wait_arrived(1);
+    let second = ask_sink(&mut sink, "second", 3).unwrap();
+    let third = ask_sink(&mut sink, "third", 3).unwrap();
+    abandon(&mut sink, second);
+    gate.open();
+    let answered = answers(&mut sink, 2);
+    let tickets: Vec<SearchTicket> = answered.iter().map(|(ticket, _)| *ticket).collect();
+    assert_eq!(tickets, [first, third]);
+    let texts = queries(&embedder);
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts[0].ends_with("Query: first") && texts[1].ends_with("Query: third"), "{texts:?}");
+}
+
+/// The worker serves one queued search and returns to its writes: three
+/// waiting searches leave two after one turn.
+#[test]
+fn one_queued_search_is_served_per_turn() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut projector = projected(&embedder, &index, &entries);
+    let queued = vec![(SearchTicket(1), "a".into(), 3), (SearchTicket(2), "b".into(), 3), (SearchTicket(3), "c".into(), 3)];
+    let shared = shared_with(Vec::new(), None, queued, false);
+    serve_search(&mut projector, &shared);
+    let guard = lock(&shared);
+    assert_eq!(guard.searches.iter().map(|(ticket, ..)| *ticket).collect::<Vec<_>>(), [SearchTicket(2), SearchTicket(3)]);
+    assert_eq!(guard.found.iter().map(|(ticket, _)| *ticket).collect::<Vec<_>>(), [SearchTicket(1)]);
+}
+
+/// Searches are answered between batches, not after the last: a search waiting
+/// while the first of two batches is written is answered, refused for the
+/// documents still pending, before the second batch is embedded.
+#[test]
+fn a_waiting_search_is_answered_between_batches() {
+    let gate = Gate::shut();
+    let (_, index) = pair();
+    let embedder = FakeEmbedder::new("d1").behind(&gate);
+    let mut sink = WorkerSink::spawn(embedder, index, &slug(INSTANCE), Some(MIND.into()), entries_of(BATCH + 8), quick());
+    gate.wait_arrived(1);
+    lock(&sink.shared).searches.push_back((SearchTicket(9), "anything".into(), 3));
+    gate.open();
+    let answered = answers(&mut sink, 1);
+    assert_eq!(answered[0].0, SearchTicket(9));
+    let Err(refusal) = &answered[0].1 else { panic!("a search was answered from a half-filled collection: {answered:?}") };
+    assert!(refusal.contains("being rebuilt") && refusal.contains("pending: 8"), "{refusal}");
+    sink.wait_status(|status| *status == IndexStatus::Current);
+}
+
+/// A search that was queued when the worker failed is answered with why, by
+/// the worker's own failure path.
+#[test]
+fn a_search_queued_before_the_worker_fails_is_answered_with_why() {
+    let gate = Gate::shut();
+    let (_, index) = pair();
+    let embedder = FakeEmbedder::new("d1").behind(&gate);
+    let mut sink = WorkerSink::spawn(embedder.clone(), index, &slug(INSTANCE), Some(MIND.into()), entries_of(1), quick());
+    gate.wait_arrived(1);
+    lock(&sink.shared).searches.push_back((SearchTicket(5), "anything".into(), 3));
+    embedder.state.lock().unwrap().down = true;
+    gate.open();
+    let answered = answers(&mut sink, 1);
+    assert_eq!(answered[0].0, SearchTicket(5));
+    let Err(why) = &answered[0].1 else { panic!("{answered:?}") };
+    assert!(why.contains("the index could not advance") && why.contains("the embedder is down"), "{why}");
+}
+
+/// While a failure is being reported, the report's pending count is the one
+/// the worker holds now, published under the lock that took the entries out of
+/// the inbox: never the count from before they moved.
+#[test]
+fn a_failure_report_carries_the_pending_count_it_has_now() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let mut projector = Projector::new(embedder, index, &slug(INSTANCE), Some(MIND.into()));
+    projector.want(entries[..2].iter().cloned());
+    let shared = shared_with(entries[2..].to_vec(), None, Vec::new(), false);
+    let error = StepError::Unavailable(anyhow::anyhow!("down"));
+    assert!(absorb(&mut projector, &shared, Some((&error, 3))));
+    {
+        let guard = lock(&shared);
+        assert!(guard.inbox.is_empty());
+        assert_eq!(guard.status, IndexStatus::Failing { pending: 4, attempts: 3, error: "down".into() });
+    }
+    assert!(absorb(&mut projector, &shared, None));
+    assert_eq!(lock(&shared).status, IndexStatus::Reconciling { pending: 4 });
+    lock(&shared).closed = true;
+    assert!(!absorb(&mut projector, &shared, None), "a closed sink ends the worker");
+}
+
+/// The worker's recheck is on its own clock: searches arriving faster than the
+/// interval do not keep pushing it out.
+#[test]
+fn steady_searches_do_not_postpone_the_workers_recheck() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let backoff = Backoff { recheck: Duration::from_millis(200), ..quick() };
+    let mut sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), Some(MIND.into()), entries, backoff);
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    let listed = index.state.lock().unwrap().listed;
+    let started = Instant::now();
+    while index.state.lock().unwrap().listed < listed + 2 {
+        assert!(started.elapsed() < Duration::from_secs(5), "the worker never rechecked while searches kept arriving");
+        let _ = ask_sink(&mut sink, "anything", 3);
+        collected(&mut sink);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `wait_status` gives up at one deadline, not one per wake: a health that
+/// keeps changing does not keep it waiting.
+#[test]
+fn wait_status_gives_up_at_its_overall_deadline_however_often_the_health_changes() {
+    let (embedder, index) = pair();
+    let sink = WorkerSink::spawn(embedder, index, &slug(INSTANCE), Some(MIND.into()), Vec::new(), quick());
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    let shared = Arc::clone(&sink.shared);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ticking = Arc::clone(&stop);
+    let ticker = std::thread::spawn(move || {
+        while !ticking.load(std::sync::atomic::Ordering::Relaxed) {
+            shared.1.notify_all();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    let (tell, told) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let gave_up = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sink.wait_status_for(Duration::from_millis(300), |status| *status == IndexStatus::Reconciling { pending: 99 })
+        }))
+        .is_err();
+        let _ = tell.send(gave_up);
+    });
+    let gave_up = told.recv_timeout(Duration::from_secs(10));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    ticker.join().unwrap();
+    assert_eq!(gave_up, Ok(true), "the wait did not end at its deadline");
+}
+
+/// An idle worker verifies once per interval, not in a loop: the recheck moves
+/// its own deadline when it runs.
+#[test]
+fn an_idle_worker_rechecks_once_per_interval() {
+    let (_root, mind) = mind_with_documents();
+    let entries = mind.index_entries(None).unwrap();
+    let (embedder, index) = pair();
+    let backoff = Backoff { recheck: Duration::from_millis(100), ..quick() };
+    let sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), Some(MIND.into()), entries, backoff);
+    sink.wait_status(|status| *status == IndexStatus::Current);
+    std::thread::sleep(Duration::from_millis(600));
+    let listed = index.state.lock().unwrap().listed;
+    assert!((2..=40).contains(&listed), "the startup reconciliation and about five rechecks listed the collection {listed} times");
 }
