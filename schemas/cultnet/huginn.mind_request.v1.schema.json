@@ -473,9 +473,9 @@
       ]
     },
     "OrgRepo": {
-      "description": "A GitHub repository as `Org/Repo`.",
+      "description": "A GitHub repository as `Org/Repo`, at most 140 UTF-8 bytes (39 + 1 +\n100). The owner is 1 to 39 `[A-Za-z0-9-]` bytes with no leading or\ntrailing hyphen; the repo is 1 to 100 `[A-Za-z0-9._-]` bytes, is never\n`.` or `..`, and does not end in `.git`, ASCII-case-insensitively.\nIdentity is case-insensitive: `GameCult/Epiphany` and `gamecult/epiphany`\nare the same repository.",
       "type": "string",
-      "maxLength": 200
+      "maxLength": 140
     },
     "Para": {
       "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
@@ -522,7 +522,7 @@
           "$ref": "#/$defs/DocRef"
         },
         "title": {
-          "$ref": "#/$defs/Short"
+          "$ref": "#/$defs/Title"
         },
         "working_branch": {
           "$ref": "#/$defs/Short"
@@ -730,7 +730,7 @@
           "maxItems": 32
         },
         "title": {
-          "$ref": "#/$defs/Short"
+          "$ref": "#/$defs/Title"
         },
         "verification": {
           "$ref": "#/$defs/CutVerification"
@@ -1313,11 +1313,15 @@
         },
         "recommended": {
           "$ref": "#/$defs/Label"
+        },
+        "title": {
+          "$ref": "#/$defs/Title"
         }
       },
       "required": [
         "campaign",
         "label",
+        "title",
         "question",
         "options",
         "recommended",
@@ -1425,11 +1429,15 @@
         },
         "ruling": {
           "$ref": "#/$defs/Para"
+        },
+        "title": {
+          "$ref": "#/$defs/Title"
         }
       },
       "required": [
         "campaign",
         "label",
+        "title",
         "ruling",
         "ruled_on",
         "precedents",
@@ -1861,6 +1869,12 @@
         "label",
         "statement"
       ]
+    },
+    "Title": {
+      "description": "A title: 1 to 200 UTF-8 bytes, enforced by admission; JSON Schema\nlength counts characters. Holds at least one alphanumeric character,\nno control character, and no bidi control character (`U+061C`,\n`U+200E`, `U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`).",
+      "type": "string",
+      "maxLength": 200,
+      "minLength": 1
     },
     "VerdictClaim": {
       "description": "The promise this claim measured, and the report's mutations it ran. An\n`Unproven` claim with a promise is one Soul could not reach.",

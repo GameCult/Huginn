@@ -643,7 +643,7 @@ mod tests {
         assert!(!eureka.contains(&"other-campaign:question:Q1".to_string()));
         assert_eq!(matching(PipelineQuery { campaign: Some(slug(INSTANCE)), ..Default::default() }), vec![
             format!("{INSTANCE}:instance:self"),
-            format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1"),
+            format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1"),
         ]);
 
         // `repo`: a campaign lists its repos, five kinds name one, and a
@@ -655,7 +655,7 @@ mod tests {
             id("cut_spec", "cut-9.r1"),
             id("cut_report", "cut-9.h1"),
             id("follow_up", "FU-1"),
-            format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1"),
+            format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1"),
             supersession.clone(),
         ] {
             assert!(epiphany.contains(&expected), "{expected}");
@@ -714,7 +714,7 @@ mod tests {
             id("campaign", "self"),
             id("target", "r1"),
             format!("{INSTANCE}:instance:self"),
-            format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1"),
+            format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1"),
         ]);
 
         // 201 questions over four batches at rising `now`s, with Q1 -- the id

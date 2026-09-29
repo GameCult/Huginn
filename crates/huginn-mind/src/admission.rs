@@ -758,7 +758,7 @@ mod tests {
         );
         committed(admit(&mut yggdrasil, vec![instance(INSTANCE), stewardship(INSTANCE, REPO)]));
         committed(admit(&mut thought_cage, vec![instance(OTHER_INSTANCE)]));
-        let key = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1");
+        let key = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
         assert!(yggdrasil.envelope(K::Stewardship, &key).is_some());
         assert!(thought_cage.envelope(K::Stewardship, &key).is_none());
         assert_eq!(yggdrasil.envelopes().len(), 4);
@@ -1199,7 +1199,7 @@ mod tests {
     #[test]
     fn a_repo_is_stewarded_once_at_a_time_and_again_after_a_transfer() {
         let mut mind = seeded();
-        let first = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1");
+        let first = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
         assert_eq!(
             refusal(admit(&mut mind, vec![stewardship_n(INSTANCE, REPO, 2)])),
             MindRefusal::AlreadyStewarded { repo: REPO.into() }
@@ -1215,10 +1215,10 @@ mod tests {
         // is a resolution of that record, sequence and all. The stewardship it
         // reads to derive that is an image document, so it is pinned.
         let (receipt_id, writes) = committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
-        let away = format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.GameCult_-Epiphany.{}", date().0);
+        let away = format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.gamecult_-epiphany.{}", date().0);
         assert_eq!(writes, vec![
             r(K::HandOff, &away),
-            r(K::Resolution, &format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n1")),
+            r(K::Resolution, &format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1")),
         ]);
         let receipt = mind.receipts().unwrap().into_iter().find(|receipt| receipt.receipt_id == receipt_id).unwrap();
         let stewardship_envelope = mind.envelope(K::Stewardship, &first).unwrap().clone();
@@ -1242,9 +1242,9 @@ mod tests {
         let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
         back.handed_on = epiphany_pipeline::Date("2026-09-17".into());
         let (_, writes) = committed(admit(&mut mind, vec![D::HandOff(back)]));
-        let again = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n2");
+        let again = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2");
         assert_eq!(writes, vec![
-            r(K::HandOff, &format!("{OTHER_INSTANCE}:hand_off:{INSTANCE}.GameCult_-Epiphany.2026-09-17")),
+            r(K::HandOff, &format!("{OTHER_INSTANCE}:hand_off:{INSTANCE}.gamecult_-epiphany.2026-09-17")),
             r(K::Stewardship, &again),
         ]);
         let Some(D::Stewardship(taken)) = mind.get(K::Stewardship, &again).unwrap() else { panic!() };
@@ -1264,9 +1264,9 @@ mod tests {
         let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
         back.handed_on = epiphany_pipeline::Date("2026-09-17".into());
         committed(admit(&mut mind, vec![D::HandOff(back)]));
-        let first = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1");
-        let again = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n2");
-        let withdrawal = format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n1");
+        let first = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
+        let again = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2");
+        let withdrawal = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1");
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())])),
             MindRefusal::WouldReinstateOverLater { subject: first, later: again.clone() }
@@ -1305,14 +1305,14 @@ mod tests {
         committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
         // Nothing later stands over the first assignment, so withdrawing the
         // withdrawal puts it back in force and the repo is this mind's again.
-        let withdrawal = format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n1");
+        let withdrawal = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1");
         committed(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())]));
         let D::HandOff(mut again) = hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[]) else { panic!() };
         again.handed_on = epiphany_pipeline::Date("2026-09-17".into());
         let (_, writes) = committed(admit(&mut mind, vec![D::HandOff(again)]));
         assert_eq!(writes, vec![
-            r(K::HandOff, &format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.GameCult_-Epiphany.2026-09-17")),
-            r(K::Resolution, &format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n2")),
+            r(K::HandOff, &format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.gamecult_-epiphany.2026-09-17")),
+            r(K::Resolution, &format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n2")),
         ]);
     }
 
@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     fn stewardship_key(sequence: u32) -> String {
-        format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n{sequence}")
+        format!("{INSTANCE}:stewardship:gamecult_-epiphany.n{sequence}")
     }
 
     /// Which assignment a hand-off's derived withdrawal names is a question of
@@ -1362,7 +1362,7 @@ mod tests {
         // carries a withdrawal -- of another hand-off. Sorting first, it is
         // what a match on the outcome alone would pick.
         committed(admit(&mut mind, vec![hand_off_on(INSTANCE, OTHER_INSTANCE, "2026-09-11")]));
-        let withdrawal = format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n11.n1");
+        let withdrawal = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n11.n1");
         committed(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())]));
         let (away, receipt_id) = &aways[1];
         assert_eq!(
@@ -1381,7 +1381,7 @@ mod tests {
         committed(admit(&mut mind, vec![hand_off_on(INSTANCE, OTHER_INSTANCE, "2026-09-16")]));
         committed(admit(&mut mind, vec![hand_off_on(OTHER_INSTANCE, INSTANCE, "2026-09-17")]));
         committed(admit(&mut mind, vec![hand_off_on(INSTANCE, OTHER_INSTANCE, "2026-09-18")]));
-        let withdrawal = format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n1");
+        let withdrawal = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1");
         committed(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())]));
         let in_force = docs_of(&mind).stewardships_of(&slug(INSTANCE), &repo(REPO), None).iter().map(|(key, _)| key.to_string()).collect::<Vec<_>>();
         assert_eq!(in_force, vec![stewardship_key(1)]);
@@ -1394,7 +1394,7 @@ mod tests {
     fn a_reinstatement_is_blocked_by_an_assignment_in_its_own_batch() {
         let mut mind = seeded();
         committed(admit(&mut mind, vec![hand_off_on(INSTANCE, OTHER_INSTANCE, "2026-09-16")]));
-        let withdrawal = format!("{INSTANCE}:resolution:stewardship.GameCult_-Epiphany.n1.n1");
+        let withdrawal = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1");
         assert_eq!(
             refusal(admit(&mut mind, vec![
                 hand_off_on(OTHER_INSTANCE, INSTANCE, "2026-09-17"),
@@ -1464,12 +1464,12 @@ mod tests {
         let spec_ref = r(K::CutSpec, &id("cut_spec", "cut-1.r1"));
         let finding_ref = r(K::Finding, &id("finding", "cut-1.s1.F1"));
         let follow_up_ref = r(K::FollowUp, &id("follow_up", "FU-1"));
-        let stewardship_ref = r(K::Stewardship, &format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1"));
+        let stewardship_ref = r(K::Stewardship, &format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1"));
         let campaign_ref = r(K::Campaign, &id("campaign", "self"));
         let report_ref = r(K::CutReport, &id("cut_report", "cut-1.h1"));
         let verdict_ref = r(K::Verdict, &id("verdict", "cut-1.s1"));
         let instance_ref = r(K::Instance, &format!("{INSTANCE}:instance:self"));
-        let hand_off_ref = r(K::HandOff, &format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.GameCult_-Huginn.2026-09-16"));
+        let hand_off_ref = r(K::HandOff, &format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.gamecult_-huginn.2026-09-16"));
 
         // Accepted, one per resolvable kind.
         committed(admit(&mut world(), vec![target(2, &[INVARIANT]), resolution(target_ref.clone(), superseded(&[target_r2.clone()]))]));
@@ -1900,9 +1900,9 @@ mod tests {
 
     #[test]
     fn a_hand_off_derives_this_minds_side_only() {
-        let key = format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.GameCult_-Epiphany.2026-09-16");
+        let key = format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.gamecult_-epiphany.2026-09-16");
         let campaign_key = id("campaign", "self");
-        let stewardship_key = format!("{INSTANCE}:stewardship:GameCult_-Epiphany.n1");
+        let stewardship_key = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
 
         let mut source = seeded();
         assert_eq!(
@@ -1923,7 +1923,7 @@ mod tests {
         let mut receiving = opened(MemoryStore::new(), OTHER_INSTANCE);
         committed(admit(&mut receiving, vec![instance(OTHER_INSTANCE)]));
         let (_, writes) = committed(admit(&mut receiving, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[&campaign_key])]));
-        let assigned = format!("{OTHER_INSTANCE}:stewardship:GameCult_-Epiphany.n1");
+        let assigned = format!("{OTHER_INSTANCE}:stewardship:gamecult_-epiphany.n1");
         assert_eq!(writes, vec![r(K::HandOff, &key), r(K::Stewardship, &assigned)]);
         let Some(D::Stewardship(derived)) = receiving.get(K::Stewardship, &assigned).unwrap() else { panic!() };
         assert_eq!(derived.note, Line(key.clone()));

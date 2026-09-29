@@ -101,7 +101,7 @@ pub(crate) mod tests {
         AuthorityMap, CodeLocation, CutDelete, CutVerification, Date, DocRef, FileChange, Line, NegativeCheck,
         OrgRepo, PipelineCampaign, PipelineCutSpec, PipelineDocument, PipelineInstance, PipelineKind,
         PipelineQuestion, PipelineRuling, PipelineStewardship, QuestionOption, RulingAuthority, Sha, Short,
-        StructuralDelta, VerificationTest,
+        StructuralDelta, Title, VerificationTest,
     };
     use huginn_mind::wire::MindStatus;
     use huginn_mind::{Faculty, PipelineAdmissionBatch, PipelineProvenance, PipelineQuery, PipelineStatus, SemanticQuery};
@@ -154,6 +154,7 @@ pub(crate) mod tests {
         let question = PipelineDocument::Question(PipelineQuestion {
             campaign: slug(CAMPAIGN),
             label: "Q1".into(),
+            title: Title("Who owns the state?".into()),
             question: "Who owns the state?".into(),
             options: vec![
                 QuestionOption { label: "A".into(), text: "the organ".into() },
@@ -167,6 +168,7 @@ pub(crate) mod tests {
         let ruling = PipelineDocument::Ruling(PipelineRuling {
             campaign: slug(CAMPAIGN),
             label: "R1".into(),
+            title: Title("An instance owns its mind".into()),
             answers: Some(Short(format!("{CAMPAIGN}:question:Q1"))),
             choice: Some("A".into()),
             ruling: "An instance owns its mind.".into(),
@@ -213,7 +215,7 @@ pub(crate) mod tests {
             }),
             PipelineDocument::Campaign(PipelineCampaign {
                 slug: slug(CAMPAIGN),
-                title: Short("Eureka pipeline state".into()),
+                title: Title("Eureka pipeline state".into()),
                 repos: vec![OrgRepo(REPO.into())],
                 working_branch: Short("codex/eureka-pipeline-state".into()),
                 target_doc: doc_ref(),
@@ -237,7 +239,7 @@ pub(crate) mod tests {
             campaign: slug(CAMPAIGN),
             cut: cut.into(),
             revision: 1,
-            title: short(0),
+            title: Title(short(0).0),
             repo: OrgRepo(REPO.into()),
             branch: short(1),
             base: sha(),
@@ -366,7 +368,7 @@ pub(crate) mod tests {
             status(&mut daemon),
             MindStatus {
                 instance: slug(INSTANCE),
-                schema_epoch: "epiphany.pipeline.epoch.v1".into(),
+                schema_epoch: "epiphany.pipeline.epoch.v2".into(),
                 documents: 1,
                 receipts: 1,
             }

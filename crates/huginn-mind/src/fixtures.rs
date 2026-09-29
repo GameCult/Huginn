@@ -138,7 +138,7 @@ pub(crate) fn stewardship_n(instance: &str, repo_name: &str, sequence: u32) -> P
 pub(crate) fn campaign(repos: &[&str]) -> PipelineDocument {
     PipelineDocument::Campaign(PipelineCampaign {
         slug: slug(CAMPAIGN),
-        title: s("Eureka pipeline state"),
+        title: "Eureka pipeline state".into(),
         repos: repos.iter().map(|name| repo(name)).collect(),
         working_branch: s("codex/eureka-pipeline-state"),
         target_doc: doc_ref(),
@@ -163,6 +163,7 @@ pub(crate) fn question(label: &str, options: &[&str], recommended: &str) -> Pipe
     PipelineDocument::Question(PipelineQuestion {
         campaign: slug(CAMPAIGN),
         label: l(label),
+        title: "Who owns the state?".into(),
         question: "Who owns the state?".into(),
         options: options.iter().map(|option| QuestionOption { label: l(option), text: "an option".into() }).collect(),
         recommended: l(recommended),
@@ -176,6 +177,7 @@ pub(crate) fn ruling(label: &str) -> PipelineRuling {
     PipelineRuling {
         campaign: slug(CAMPAIGN),
         label: l(label),
+        title: "An instance owns its mind".into(),
         answers: None,
         choice: None,
         ruling: "An instance owns its mind.".into(),
@@ -191,7 +193,7 @@ pub(crate) fn cut_spec(cut: &str, revision: u32) -> PipelineCutSpec {
         campaign: slug(CAMPAIGN),
         cut: l(cut),
         revision,
-        title: s("A cut"),
+        title: "A cut".into(),
         repo: repo(REPO),
         branch: s("codex/eureka-pipeline-state"),
         base: sha(),

@@ -183,12 +183,14 @@ pub fn answer<S: MindStore, I: IndexSink<S>>(
         },
         CultNetMessage::SchemaCatalogRequest { .. } => match registry.create_catalog_response(&message) {
             Ok(response) => response,
-            Err(error) => CultNetMessage::Error { error: format!("{error:#}") },
+            Err(error) => CultNetMessage::Error { error: format!("{error:#}"), code: None, details: None },
         },
         _ => CultNetMessage::Error {
             error: format!(
                 "{MIND_SERVICE_ID} answers cultnet.operation_request.v0 and cultnet.schema_catalog_request.v0"
             ),
+            code: None,
+            details: None,
         },
     }
 }
@@ -395,8 +397,8 @@ mod tests {
         // The sixth code, `not-an-operation-request`, is the codec's and is
         // pinned in `envelope::tests`: `answer` never produces it, because a
         // message of another family is answered with `Error` instead.
-        let reply = answer(&mut daemon, &registry, CultNetMessage::Error { error: "hello".into() }, now());
-        let CultNetMessage::Error { error } = &reply else { panic!("expected an error, got {reply:?}") };
+        let reply = answer(&mut daemon, &registry, CultNetMessage::Error { error: "hello".into(), code: None, details: None }, now());
+        let CultNetMessage::Error { error, .. } = &reply else { panic!("expected an error, got {reply:?}") };
         assert!(
             !error.is_empty() && error.contains("cultnet.operation_request.v0") && error.contains("cultnet.schema_catalog_request.v0"),
             "{error}"

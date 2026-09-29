@@ -180,7 +180,7 @@ mod tests {
             (
                 HuginnMindResponse::Whoami(MindStatus {
                     instance: slug(INSTANCE),
-                    schema_epoch: "epiphany.pipeline.epoch.v1".into(),
+                    schema_epoch: "epiphany.pipeline.epoch.v2".into(),
                     documents: 0,
                     receipts: 0,
                 }),
@@ -217,7 +217,7 @@ mod tests {
         let message = encode_request("m-3", &request, Some("eureka-state".into())).unwrap();
         assert_eq!(decode_request(&message).unwrap(), ("m-3".into(), request));
 
-        let foreign = CultNetMessage::Error { error: "not for you".into() };
+        let foreign = CultNetMessage::Error { error: "not for you".into(), code: None, details: None };
         assert_eq!(decode_request(&foreign).unwrap_err().code, "not-an-operation-request");
     }
 }
