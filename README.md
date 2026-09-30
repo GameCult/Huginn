@@ -78,8 +78,12 @@ next.
 
 ```powershell
 cargo check --workspace
-cargo run -p huginn-daemon -- --state-root <abs> --instance <slug> --bind 127.0.0.1:17872
+cargo run -p huginn-daemon -- --state-root <abs> --instance <slug> --bind 127.0.0.1:17872 `
+  --qdrant-url http://127.0.0.1:6333 --ollama-url http://10.77.0.4:11434 --embedding-model qwen3-embedding:0.6b
 ```
+
+The deployed daemon (instance `eureka` on Yggdrasil) is installed and run by
+`gamecult-ops/runbooks/huginn-yggdrasil.md`.
 
 ## Persona
 
