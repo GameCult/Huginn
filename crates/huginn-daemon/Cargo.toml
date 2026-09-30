@@ -21,7 +21,7 @@ path = "src/main.rs"
 anyhow = "1"
 base64 = "0.22"
 chrono = "0.4.44"
-cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "6251cbcd37c12ef3f0c1cc50063a03369225b7ac", package = "cultnet-rs" }
+cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultnet-rs" }
 huginn-mind = { path = "../huginn-mind" }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
