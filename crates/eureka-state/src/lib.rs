@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use cultnet_rs::{
     CULTNET_OPERATION_CONNECTION_ID, CultMesh, CultMeshRudpSocketOptions, CultNetMessage,
-    CultNetRudpSocketTransportConnection, fetch_content,
+    CultNetRudpSocketTransportConnection, CultNetWireContract, encode_cultnet_message_to_vec, fetch_content,
 };
 use huginn_mind::envelope::{OperationFailure, decode_response, encode_request};
 use huginn_mind::epiphany_pipeline::Slug;
@@ -33,15 +33,25 @@ use huginn_mind::{HuginnMindRequest, HuginnMindResponse, MAX_DEFERRED_BODY_BYTES
 const MESSAGE_ID: &str = "eureka-state-call";
 const POLL: Duration = Duration::from_millis(2);
 
+/// The largest encoded message one send carries. The client's RUDP session
+/// does not fragment (`max_fragment_bytes` is unset), so a message is one UDP
+/// datagram: at most 65,507 bytes over IPv4 (65,535 less the 8-byte UDP and
+/// 20-byte IP headers), less RUDP's 36-byte fixed header (`RUDP_FIXED_HEADER_BYTES`
+/// in `cultnet-rs`, private there) and the 6-byte `schema` channel id. A larger
+/// message makes the operating system refuse the send ("Message too long").
+pub const MAX_REQUEST_BYTES: usize = 65_507 - 36 - "schema".len();
+
 /// Why a call produced no answer. `Unavailable` is the transport's failure and
 /// the only one worth retrying: the daemon could not be reached, went quiet
 /// past the call's deadline, or answered out of protocol. `Rejected` is the
-/// daemon refusing the envelope itself, which a retry of the same call cannot
-/// change.
+/// daemon refusing the envelope itself, and `TooLarge` is the client refusing
+/// a request that no single send can carry, before sending it; a retry of the
+/// same call cannot change either.
 #[derive(Debug)]
 pub enum ClientError {
     Unavailable { endpoint: SocketAddr, detail: String },
     Rejected { endpoint: SocketAddr, code: String, detail: String },
+    TooLarge { bytes: usize, limit: usize },
 }
 
 impl fmt::Display for ClientError {
@@ -52,6 +62,9 @@ impl fmt::Display for ClientError {
             }
             Self::Rejected { endpoint, code, detail } => {
                 write!(f, "the Huginn daemon at rudp://{endpoint} rejected the request: {code}: {detail}")
+            }
+            Self::TooLarge { bytes, limit } => {
+                write!(f, "the request encodes to {bytes} bytes and one send carries at most {limit}")
             }
         }
     }
@@ -96,8 +109,15 @@ impl HuginnClient {
         let deadline = Instant::now() + self.timeout;
         let unavailable =
             |error: anyhow::Error| ClientError::Unavailable { endpoint: self.endpoint, detail: format!("{error:#}") };
+        let message = encode_request(MESSAGE_ID, &request, None).map_err(unavailable)?;
+        let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
+            .map_err(unavailable)?
+            .len();
+        if bytes > MAX_REQUEST_BYTES {
+            return Err(ClientError::TooLarge { bytes, limit: MAX_REQUEST_BYTES });
+        }
         let mut session = self.connect(deadline).map_err(unavailable)?;
-        let outcome = self.exchange(&mut session, &request, deadline);
+        let outcome = self.exchange(&mut session, &request, &message, deadline);
         // Best effort: the daemon drops a session it never hears from, only later.
         let _ = session.disconnect(Vec::new());
         outcome.map_err(|failure| match failure {
@@ -114,9 +134,10 @@ impl HuginnClient {
         &self,
         session: &mut CultNetRudpSocketTransportConnection,
         request: &HuginnMindRequest,
+        message: &CultNetMessage,
         deadline: Instant,
     ) -> Result<HuginnMindResponse, Failure> {
-        let reply = self.ask(session, &encode_request(MESSAGE_ID, request, None)?, deadline)?;
+        let reply = self.ask(session, message, deadline)?;
         let CultNetMessage::OperationResponse { operation, .. } = &reply else {
             return Err(anyhow!("the daemon answered with something other than an operation response").into());
         };

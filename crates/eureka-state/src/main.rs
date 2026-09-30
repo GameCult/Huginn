@@ -11,8 +11,10 @@
 //! startup vanishes from Claude Code without a word. `whoami` reports it and
 //! every other tool refuses with it. A refusal from the mind is an answer and
 //! comes back as a normal result; a daemon that cannot be reached or that
-//! rejects the envelope is a result with `isError: true`, typed, so a caller
-//! can tell a down daemon from a permanent mismatch.
+//! rejects the envelope, or a request too large for one send, is a result with
+//! `isError: true`, typed, so a caller can tell a down daemon from a permanent
+//! mismatch. Arguments that do not fit a tool's input are typed the same way
+//! (`InvalidInput`), as a tool error and not a protocol one.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,9 +27,11 @@ use huginn_mind::{
     Faculty, HuginnMindRequest, HuginnMindResponse, PipelineAdmissionBatch, PipelineProvenance, SemanticQuery,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
-use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -101,6 +105,9 @@ impl Trouble {
             Self::Client(ClientError::Rejected { endpoint, code, detail }) => {
                 json!({ "error": "Rejected", "endpoint": format!("rudp://{endpoint}"), "code": code, "detail": detail })
             }
+            Self::Client(ClientError::TooLarge { bytes, limit }) => {
+                json!({ "error": "TooLarge", "bytes": bytes, "limit": limit })
+            }
             Self::Internal(detail) => json!({ "error": "Internal", "detail": detail }),
         }
     }
@@ -116,18 +123,28 @@ struct Settings {
 
 impl Settings {
     fn from_env() -> Self {
-        let instance = std::env::var("EUREKA_INSTANCE").ok();
-        let endpoint = std::env::var("HUGINN_ENDPOINT").ok();
-        let client = client(instance.as_deref(), endpoint.as_deref());
-        Self { instance, endpoint, client }
+        let instance = variable("EUREKA_INSTANCE");
+        let endpoint = variable("HUGINN_ENDPOINT");
+        let shown = |value: &Result<Option<String>, String>| value.as_ref().ok().cloned().flatten();
+        let (shown_instance, shown_endpoint) = (shown(&instance), shown(&endpoint));
+        Self { instance: shown_instance, endpoint: shown_endpoint, client: client(instance, endpoint) }
     }
 }
 
-fn client(instance: Option<&str>, endpoint: Option<&str>) -> Result<HuginnClient, String> {
-    let instance = instance.ok_or("EUREKA_INSTANCE is not set")?;
-    let slug = Slug(instance.to_string());
+/// An environment variable: its value, `None` when unset, or why it cannot be read.
+fn variable(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid UTF-8")),
+    }
+}
+
+fn client(instance: Result<Option<String>, String>, endpoint: Result<Option<String>, String>) -> Result<HuginnClient, String> {
+    let instance = instance?.ok_or("EUREKA_INSTANCE is not set")?;
+    let slug = Slug(instance);
     slug.validate_slug().map_err(|refusal| format!("EUREKA_INSTANCE is not a valid instance name: {refusal:?}"))?;
-    let endpoint = endpoint.ok_or("HUGINN_ENDPOINT is not set")?;
+    let endpoint = endpoint?.ok_or("HUGINN_ENDPOINT is not set")?;
     let address = endpoint
         .strip_prefix("rudp://")
         .and_then(|address| address.parse::<SocketAddr>().ok())
@@ -138,7 +155,6 @@ fn client(instance: Option<&str>, endpoint: Option<&str>) -> Result<HuginnClient
 #[derive(Clone)]
 struct EurekaState {
     settings: Arc<Settings>,
-    #[expect(dead_code, reason = "the tool_handler macro reads this router field")]
     tool_router: ToolRouter<Self>,
 }
 
@@ -244,8 +260,32 @@ impl EurekaState {
     }
 }
 
+/// Every tool error is a typed JSON body. The ones this server writes already
+/// are; the one rmcp writes, for arguments that do not deserialize into the
+/// tool's input, is plain text, so it is put into the same shape.
+fn typed_error(result: CallToolResult) -> CallToolResult {
+    if result.is_error != Some(true) {
+        return result;
+    }
+    let Some(text) = result.content.first().and_then(ContentBlock::as_text).map(|text| text.text.as_str()) else {
+        return result;
+    };
+    if serde_json::from_str::<Value>(text).is_ok_and(|body| body.is_object()) {
+        return result;
+    }
+    reply(json!({ "error": "InvalidInput", "detail": text }), true)
+}
+
 #[tool_handler]
 impl ServerHandler for EurekaState {
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(typed_error(self.tool_router.call(ToolCallContext::new(self, request, context)).await?))
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Huginn's typed mind for this instance: whoami, admit, view, query. Refusals are answers; isError means the daemon could not be reached or rejected the request.",
@@ -258,4 +298,47 @@ async fn main() -> anyhow::Result<()> {
     let server = EurekaState::new(Settings::from_env()).serve(rmcp::transport::stdio()).await?;
     server.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body_of(result: &CallToolResult) -> (bool, String) {
+        (result.is_error == Some(true), result.content[0].as_text().unwrap().text.clone())
+    }
+
+    /// Reaching `Internal` for real takes a panic in a blocking task, so its
+    /// body is pinned where it is built.
+    #[test]
+    fn every_trouble_has_its_typed_body() {
+        assert_eq!(Trouble::Internal("task panicked".into()).body(), json!({ "error": "Internal", "detail": "task panicked" }));
+        assert_eq!(
+            Trouble::Client(ClientError::TooLarge { bytes: 70_000, limit: 65_000 }).body(),
+            json!({ "error": "TooLarge", "bytes": 70_000, "limit": 65_000 })
+        );
+        assert_eq!(Trouble::Misconfigured("bad".into()).body(), json!({ "error": "Misconfigured", "detail": "bad" }));
+    }
+
+    /// Only the text rmcp writes is rewritten: our own typed bodies and every
+    /// success pass through untouched.
+    #[test]
+    fn typed_error_rewrites_only_rmcp_plain_text() {
+        let plain = CallToolResult::error(vec![ContentBlock::text("failed to deserialize parameters: missing field `faculty`")]);
+        let (is_error, text) = body_of(&typed_error(plain));
+        assert!(is_error);
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap(),
+            json!({ "error": "InvalidInput", "detail": "failed to deserialize parameters: missing field `faculty`" })
+        );
+
+        let typed = reply(json!({ "error": "Unavailable", "detail": "down" }), true);
+        assert_eq!(body_of(&typed_error(typed.clone())), body_of(&typed));
+
+        let success = CallToolResult::success(vec![ContentBlock::text("not json, and fine")]);
+        assert_eq!(body_of(&typed_error(success)), (false, "not json, and fine".to_string()));
+
+        let quoted = CallToolResult::error(vec![ContentBlock::text("[1, 2]")]);
+        assert_eq!(serde_json::from_str::<Value>(&body_of(&typed_error(quoted)).1).unwrap()["error"], json!("InvalidInput"));
+    }
 }

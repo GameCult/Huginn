@@ -11,9 +11,9 @@ use cultnet_rs::{
     CultNetMessage, CultNetWireContract, Selection, answer_content_chunk_request, encode_cultnet_message_to_vec,
     pack_content,
 };
-use eureka_state::{ClientError, HuginnClient};
+use eureka_state::{ClientError, HuginnClient, MAX_REQUEST_BYTES};
 use huginn_daemon::serve::MAX_RESPONSE_BYTES;
-use huginn_mind::envelope::{OperationFailure, encode_failure, encode_response};
+use huginn_mind::envelope::{OperationFailure, encode_failure, encode_request, encode_response};
 use huginn_mind::epiphany_pipeline::{
     AuthorityMap, CodeLocation, CutDelete, CutVerification, FileChange, Line, NegativeCheck, OrgRepo,
     PipelineCutSpec, PipelineDocument, PipelineKind, PipelineRef, Short, StructuralDelta, Title,
@@ -128,14 +128,14 @@ fn client(addr: SocketAddr) -> HuginnClient {
 fn unavailable(error: ClientError) -> (SocketAddr, String) {
     match error {
         ClientError::Unavailable { endpoint, detail } => (endpoint, detail),
-        rejected @ ClientError::Rejected { .. } => panic!("expected Unavailable, got {rejected}"),
+        other @ (ClientError::Rejected { .. } | ClientError::TooLarge { .. }) => panic!("expected Unavailable, got {other}"),
     }
 }
 
 fn rejected(error: ClientError) -> (SocketAddr, String, String) {
     match error {
         ClientError::Rejected { endpoint, code, detail } => (endpoint, code, detail),
-        unavailable @ ClientError::Unavailable { .. } => panic!("expected Rejected, got {unavailable}"),
+        other @ (ClientError::Unavailable { .. } | ClientError::TooLarge { .. }) => panic!("expected Rejected, got {other}"),
     }
 }
 
@@ -379,4 +379,84 @@ fn a_body_over_the_deferral_cap_is_refused() {
     let server = deferring(vec![0_u8; over]);
     let (_, detail) = unavailable(client(server.addr).call(HuginnMindRequest::Whoami).unwrap_err());
     assert!(detail.contains("exceeds"), "{detail}");
+}
+
+/// An admission whose attribution is `agent_pad` and `session_pad` characters
+/// long: the two knobs that size a request without changing what it asks.
+fn padded_admit(agent_pad: usize, session_pad: usize) -> HuginnMindRequest {
+    let mut request = batch(INSTANCE, vec![stewardship()]);
+    request.provenance.agent = Short("a".repeat(agent_pad));
+    request.provenance.session = Short("s".repeat(session_pad));
+    HuginnMindRequest::Admit(request)
+}
+
+/// What one send has to carry for `request`, measured the way the client does.
+fn encoded_bytes(request: &HuginnMindRequest) -> usize {
+    let message = encode_request("eureka-state-call", request, None).unwrap();
+    encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).unwrap().len()
+}
+
+/// A request that encodes to exactly `target` bytes: the session padding is
+/// searched for each agent padding until the base64 steps land on it.
+fn request_of_size(target: usize) -> HuginnMindRequest {
+    for agent_pad in 1..16 {
+        let (mut low, mut high) = (0, target);
+        while low < high {
+            let middle = (low + high) / 2;
+            if encoded_bytes(&padded_admit(agent_pad, middle)) < target {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let request = padded_admit(agent_pad, low);
+        if encoded_bytes(&request) == target {
+            return request;
+        }
+    }
+    panic!("no padding encodes to {target} bytes");
+}
+
+fn admitted_answer() -> CultNetMessage {
+    encode_response(
+        "eureka-state-call",
+        "admit",
+        &HuginnMindResponse::Admit(PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: "r".into() }),
+        "scripted",
+    )
+    .unwrap()
+}
+
+/// A request larger than one send carries is refused by the client before it
+/// connects to anything, as its own error and not as a transport failure the
+/// caller would retry; one byte under the limit is sent, and answered.
+#[test]
+fn a_request_over_what_one_send_carries_is_too_large_and_one_at_the_limit_is_sent() {
+    let closed = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let over = request_of_size(MAX_REQUEST_BYTES + 1);
+    let started = Instant::now();
+    match client(closed).call(over) {
+        Err(ClientError::TooLarge { bytes, limit }) => assert_eq!((bytes, limit), (MAX_REQUEST_BYTES + 1, MAX_REQUEST_BYTES)),
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(1), "refused only after trying the transport");
+
+    let server = answering(admitted_answer());
+    for size in [MAX_REQUEST_BYTES - 1, MAX_REQUEST_BYTES] {
+        let answer = client(server.addr).call(request_of_size(size));
+        assert!(
+            matches!(answer, Ok(HuginnMindResponse::Admit(PipelineAdmissionOutcome::AlreadyAdmitted { .. }))),
+            "a request of {size} bytes: {answer:?}"
+        );
+    }
+}
+
+/// The transport's own refusal of an oversize send ("Message too long") is
+/// what an unchecked request used to report, as an `Unavailable` daemon a
+/// caller would retry forever.
+#[test]
+fn an_oversize_admission_is_never_reported_as_an_unavailable_daemon() {
+    let server = answering(admitted_answer());
+    let error = client(server.addr).call(padded_admit(6, 70_000)).unwrap_err();
+    assert!(matches!(error, ClientError::TooLarge { .. }), "{error}");
 }

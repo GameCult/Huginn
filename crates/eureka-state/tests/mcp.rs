@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 use huginn_mind::envelope::{OperationFailure, encode_failure, encode_response};
-use huginn_mind::HuginnMindResponse;
+use huginn_mind::{HuginnMindRequest, HuginnMindResponse};
 use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef, Short};
 use serde_json::{Value, json};
 
@@ -38,11 +38,17 @@ impl Drop for Mcp {
 impl Mcp {
     /// The binary with exactly the environment given, initialised.
     fn start(env: &[(&str, &str)]) -> Self {
+        Self::spawn(|command| {
+            command.envs(env.iter().copied());
+        })
+    }
+
+    /// The binary with no configuration but what `configure` gives its command.
+    fn spawn(configure: impl FnOnce(&mut Command)) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_eureka-state"));
+        command.env_remove("EUREKA_INSTANCE").env_remove("HUGINN_ENDPOINT");
+        configure(&mut command);
         command
-            .env_remove("EUREKA_INSTANCE")
-            .env_remove("HUGINN_ENDPOINT")
-            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -130,6 +136,18 @@ fn refs(schema: &Value, found: &mut Vec<String>) {
     }
 }
 
+/// Every key named `key` anywhere below `schema`'s root.
+fn keys_below_root(schema: &Value, key: &str) -> usize {
+    fn count(value: &Value, key: &str) -> usize {
+        match value {
+            Value::Object(map) => map.iter().map(|(name, inner)| usize::from(name == key) + count(inner, key)).sum(),
+            Value::Array(items) => items.iter().map(|item| count(item, key)).sum(),
+            _ => 0,
+        }
+    }
+    schema.as_object().unwrap().values().map(|inner| count(inner, key)).sum()
+}
+
 /// Four tools, each input schema a self-contained document: every `$ref` is
 /// internal and resolves, and the selection's definitions are bundled in.
 #[test]
@@ -147,7 +165,12 @@ fn tools_list_offers_four_tools_with_self_contained_schemas() {
             let name = reference.strip_prefix("#/$defs/").unwrap_or_else(|| panic!("{}: remote $ref {reference}", tool["name"]));
             assert!(schema["$defs"].get(name).is_some(), "{}: {reference} does not resolve", tool["name"]);
         }
+        // The vendored selection schema brings its own `$id` and `$schema`,
+        // which would make its `$ref`s resolve against a remote document.
         assert!(schema.get("$id").is_none(), "{}: a remote identity", tool["name"]);
+        for key in ["$id", "$schema"] {
+            assert_eq!(keys_below_root(schema, key), 0, "{}: a nested {key}", tool["name"]);
+        }
     }
     let query = tools.iter().find(|tool| tool["name"] == "query").unwrap();
     for bundled in ["fieldPredicate", "citation", "incoming", "recordRef"] {
@@ -363,9 +386,123 @@ fn malformed_input_is_refused_before_any_call() {
     let response = mcp.rpc("tools/call", json!({ "name": "admit", "arguments": { "faculty": "Hands" } }));
     assert!(response.get("error").is_none(), "{response}");
     assert_eq!(response["result"]["isError"], json!(true));
-    assert!(response["result"]["content"][0]["text"].as_str().unwrap().contains("missing field"), "{response}");
+    let body: Value = serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).expect("a JSON body");
+    assert_eq!(body["error"], json!("InvalidInput"), "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("missing field"), "{body}");
     let (error, _) = mcp.call("whoami", json!({}));
     assert!(!error);
+}
+
+/// A request too large for one send is the client's typed refusal, an error
+/// result that names the size and the limit and does not call the daemon
+/// unavailable.
+#[test]
+fn an_oversize_admit_is_a_typed_too_large_error() {
+    let mut mcp = Mcp::at(INSTANCE, closed_port());
+    let mut arguments = faculty_args(vec![]);
+    arguments["session"] = json!("s".repeat(90_000));
+    let (error, body) = mcp.call("admit", arguments);
+    assert!(error);
+    assert_eq!(body["error"], json!("TooLarge"), "{body}");
+    assert_eq!(body["limit"], json!(eureka_state::MAX_REQUEST_BYTES));
+    assert!(body["bytes"].as_u64().unwrap() > eureka_state::MAX_REQUEST_BYTES as u64, "{body}");
+}
+
+/// Who admitted a batch is validated by the mind, whichever door the batch
+/// came through: a blank, whitespace, multi-line or oversized session or agent
+/// is a typed refusal, and nothing is committed.
+#[test]
+fn admit_refuses_an_unusable_attribution() {
+    let (root, daemon) = mind(vec![]);
+    let server = serve(root, daemon);
+    let mut mcp = Mcp::at(INSTANCE, server.addr);
+    for (field, value) in [
+        ("session", "".to_string()),
+        ("session", " ".to_string()),
+        ("session", "x".repeat(5_000)),
+        ("session", "line\nbreak".to_string()),
+        ("agent", "".to_string()),
+        ("agent", "two\nlines".to_string()),
+        ("agent", "y".repeat(201)),
+    ] {
+        let mut arguments = faculty_args(vec![campaign_json()]);
+        arguments[field] = json!(value);
+        let (error, refused) = mcp.call("admit", arguments);
+        assert!(!error, "{field}={value:?}");
+        let refusal = &refused["Refused"]["Document"];
+        let named = json!(format!("provenance.{field}"));
+        assert!(
+            refusal["InvalidFormat"]["field"] == named || refusal["FieldBound"]["field"] == named,
+            "{field}={value:?}: {refused}"
+        );
+    }
+    let (_, whoami) = mcp.call("whoami", json!({}));
+    assert_eq!(whoami["status"]["receipts"], json!(1), "only the seed is committed: {whoami}");
+    let (error, admitted) = mcp.call("admit", faculty_args(vec![campaign_json()]));
+    assert!(!error);
+    assert!(admitted.get("Committed").is_some(), "{admitted}");
+}
+
+/// The tool forwards the caller's semantic query, and only that, to the mind.
+#[test]
+fn query_sends_the_semantic_request_on_the_wire() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    let server = scripted(move |message| {
+        let (_, request) = huginn_mind::envelope::decode_request(message).expect("a mind request");
+        sink.lock().unwrap().push(request);
+        encode_response("eureka-state-call", "query", &HuginnMindResponse::View(None), "scripted").unwrap()
+    });
+    let mut mcp = Mcp::at(INSTANCE, server.addr);
+    mcp.call("query", json!({ "selection": { "projection": "document" }, "semantic": { "text": "drift", "top_k": 7 } }));
+    mcp.call("query", json!({ "selection": {} }));
+    let seen = seen.lock().unwrap();
+    let [HuginnMindRequest::Query { instance: first, semantic: Some(asked), .. }, HuginnMindRequest::Query { semantic: None, .. }] =
+        &seen[..]
+    else {
+        panic!("two queries expected, the first with its semantic part: {seen:?}");
+    };
+    assert_eq!(first.0, INSTANCE);
+    assert_eq!((asked.text.0.as_str(), asked.top_k), ("drift", 7));
+}
+
+/// A daemon that never answers is given up on after the server's own call
+/// timeout, 15 seconds: not earlier, and not much later.
+#[test]
+fn a_silent_daemon_is_given_up_on_after_fifteen_seconds() {
+    let silent = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut mcp = Mcp::at(INSTANCE, silent.local_addr().unwrap());
+    let started = std::time::Instant::now();
+    let (error, body) = mcp.call("view", json!({ "id": absent() }));
+    let elapsed = started.elapsed();
+    assert!(error);
+    assert_eq!(body["error"], json!("Unavailable"), "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("15s"), "{body}");
+    assert!(elapsed >= Duration::from_secs(15), "gave up after {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(20), "gave up after {elapsed:?}");
+}
+
+/// An instance name that is not UTF-8 is reported as that, not as unset.
+#[test]
+fn a_non_utf8_instance_is_reported_as_such() {
+    let mut mcp = Mcp::spawn(|command| {
+        command.env("EUREKA_INSTANCE", non_utf8()).env("HUGINN_ENDPOINT", "rudp://127.0.0.1:1");
+    });
+    let (error, whoami) = mcp.call("whoami", json!({}));
+    assert!(!error);
+    let detail = whoami["error"]["detail"].as_str().unwrap();
+    assert!(detail.contains("EUREKA_INSTANCE is not valid UTF-8"), "{whoami}");
+    assert_eq!(whoami["instance"], Value::Null);
+}
+
+#[cfg(unix)]
+fn non_utf8() -> std::ffi::OsString {
+    std::os::unix::ffi::OsStringExt::from_vec(vec![b'e', 0xff])
+}
+
+#[cfg(windows)]
+fn non_utf8() -> std::ffi::OsString {
+    std::os::windows::ffi::OsStringExt::from_wide(&[0x65, 0xd800])
 }
 
 /// A well-formed id of a document no mind here holds.
