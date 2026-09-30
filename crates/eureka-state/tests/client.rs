@@ -423,15 +423,18 @@ fn smallest_request_over() -> HuginnMindRequest {
     padded_admit(pad_for(MAX_REQUEST_BYTES + 1))
 }
 
-/// A message that encodes to exactly `target` bytes: the largest request that
-/// fits under it, topped up with a source runtime id, which rides outside the
-/// payload and moves the size a byte at a time.
+/// A message that encodes to exactly `target` bytes: a request a little under
+/// it, topped up with a source runtime id, which rides outside the payload and
+/// moves the size a byte at a time once the field is there at all.
 fn message_of_size(target: usize) -> CultNetMessage {
-    let request = padded_admit(pad_for(target + 1) - 1);
-    for pad in 0..16 {
-        let message = message_for(&request, (pad > 0).then(|| "r".repeat(pad)));
-        if encoded_bytes(&message) == target {
-            return message;
+    let fitting = pad_for(target + 1) - 1;
+    for padding in (fitting.saturating_sub(80)..=fitting).rev() {
+        let request = padded_admit(padding);
+        for source in 1..80 {
+            let message = message_for(&request, Some("r".repeat(source)));
+            if encoded_bytes(&message) == target {
+                return message;
+            }
         }
     }
     panic!("no message encodes to {target} bytes");

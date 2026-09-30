@@ -413,7 +413,7 @@ fn an_oversize_admit_is_a_typed_too_large_error() {
 /// is a typed refusal, and nothing is committed.
 #[test]
 fn admit_refuses_an_unusable_attribution() {
-    let (root, daemon) = mind(vec![]);
+    let (root, daemon) = mind(vec![vec![stewardship()]]);
     let server = serve(root, daemon);
     let mut mcp = Mcp::at(INSTANCE, server.addr);
     for (field, value) in [
@@ -437,7 +437,7 @@ fn admit_refuses_an_unusable_attribution() {
         );
     }
     let (_, whoami) = mcp.call("whoami", json!({}));
-    assert_eq!(whoami["status"]["receipts"], json!(1), "only the seed is committed: {whoami}");
+    assert_eq!(whoami["status"]["receipts"], json!(2), "only the seed is committed: {whoami}");
     let (error, admitted) = mcp.call("admit", faculty_args(vec![campaign_json()]));
     assert!(!error);
     assert!(admitted.get("Committed").is_some(), "{admitted}");
