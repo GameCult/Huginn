@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use cultnet_rs::{
-    CultNetMessage, CultNetWireContract, Selection, answer_content_chunk_request, encode_cultnet_message_to_vec,
-    pack_content,
+    CULTNET_OPERATION_CONNECTION_ID, CultMesh, CultMeshRudpSocketOptions, CultNetMessage, CultNetWireContract, Selection,
+    answer_content_chunk_request, encode_cultnet_message_to_vec, pack_content,
 };
 use eureka_state::{ClientError, HuginnClient, MAX_REQUEST_BYTES};
 use huginn_daemon::serve::MAX_RESPONSE_BYTES;
@@ -381,40 +381,60 @@ fn a_body_over_the_deferral_cap_is_refused() {
     assert!(detail.contains("exceeds"), "{detail}");
 }
 
-/// An admission whose attribution is `agent_pad` and `session_pad` characters
-/// long: the two knobs that size a request without changing what it asks.
-fn padded_admit(agent_pad: usize, session_pad: usize) -> HuginnMindRequest {
+/// An admission whose session is `session_pad` characters long: the knob that
+/// sizes a request without changing what it asks.
+fn padded_admit(session_pad: usize) -> HuginnMindRequest {
     let mut request = batch(INSTANCE, vec![stewardship()]);
-    request.provenance.agent = Short("a".repeat(agent_pad));
     request.provenance.session = Short("s".repeat(session_pad));
     HuginnMindRequest::Admit(request)
 }
 
-/// What one send has to carry for `request`, measured the way the client does.
-fn encoded_bytes(request: &HuginnMindRequest) -> usize {
-    let message = encode_request("eureka-state-call", request, None).unwrap();
-    encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).unwrap().len()
+/// What one send has to carry for `message`, measured the way the client does.
+fn encoded_bytes(message: &CultNetMessage) -> usize {
+    encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap().len()
 }
 
-/// A request that encodes to exactly `target` bytes: the session padding is
-/// searched for each agent padding until the base64 steps land on it.
-fn request_of_size(target: usize) -> HuginnMindRequest {
-    for agent_pad in 1..16 {
-        let (mut low, mut high) = (0, target);
-        while low < high {
-            let middle = (low + high) / 2;
-            if encoded_bytes(&padded_admit(agent_pad, middle)) < target {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        let request = padded_admit(agent_pad, low);
-        if encoded_bytes(&request) == target {
-            return request;
+fn message_for(request: &HuginnMindRequest, source: Option<String>) -> CultNetMessage {
+    encode_request("eureka-state-call", request, source).unwrap()
+}
+
+/// The smallest session padding whose request encodes to at least `target`
+/// bytes. The payload rides as base64, so request sizes step by four and only
+/// every fourth size is reachable through the request alone.
+fn pad_for(target: usize) -> usize {
+    let (mut low, mut high) = (0, target);
+    while low < high {
+        let middle = (low + high) / 2;
+        if encoded_bytes(&message_for(&padded_admit(middle), None)) < target {
+            low = middle + 1;
+        } else {
+            high = middle;
         }
     }
-    panic!("no padding encodes to {target} bytes");
+    low
+}
+
+/// The largest request one send carries, and the smallest it does not.
+fn largest_request_that_fits() -> HuginnMindRequest {
+    padded_admit(pad_for(MAX_REQUEST_BYTES + 1) - 1)
+}
+
+fn smallest_request_over() -> HuginnMindRequest {
+    padded_admit(pad_for(MAX_REQUEST_BYTES + 1))
+}
+
+/// A message that encodes to exactly `target` bytes: the largest request that
+/// fits under it, topped up with a source runtime id, which rides outside the
+/// payload and moves the size a byte at a time.
+fn message_of_size(target: usize) -> CultNetMessage {
+    let request = padded_admit(pad_for(target + 1) - 1);
+    for pad in 0..16 {
+        let message = message_for(&request, (pad > 0).then(|| "r".repeat(pad)));
+        if encoded_bytes(&message) == target {
+            return message;
+        }
+    }
+    panic!("no message encodes to {target} bytes");
 }
 
 fn admitted_answer() -> CultNetMessage {
@@ -429,26 +449,27 @@ fn admitted_answer() -> CultNetMessage {
 
 /// A request larger than one send carries is refused by the client before it
 /// connects to anything, as its own error and not as a transport failure the
-/// caller would retry; one byte under the limit is sent, and answered.
+/// caller would retry; the largest request that fits is sent, and answered.
 #[test]
-fn a_request_over_what_one_send_carries_is_too_large_and_one_at_the_limit_is_sent() {
+fn a_request_over_what_one_send_carries_is_too_large_and_one_that_fits_is_sent() {
     let closed = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-    let over = request_of_size(MAX_REQUEST_BYTES + 1);
+    let over = smallest_request_over();
     let started = Instant::now();
-    match client(closed).call(over) {
-        Err(ClientError::TooLarge { bytes, limit }) => assert_eq!((bytes, limit), (MAX_REQUEST_BYTES + 1, MAX_REQUEST_BYTES)),
+    match client(closed).call(over.clone()) {
+        Err(ClientError::TooLarge { bytes, limit }) => {
+            assert_eq!(bytes, encoded_bytes(&message_for(&over, None)));
+            assert_eq!(limit, MAX_REQUEST_BYTES);
+            assert!(bytes > limit);
+        }
         other => panic!("expected TooLarge, got {other:?}"),
     }
     assert!(started.elapsed() < Duration::from_secs(1), "refused only after trying the transport");
 
+    let fits = largest_request_that_fits();
+    assert!(MAX_REQUEST_BYTES - encoded_bytes(&message_for(&fits, None)) < 4, "not the largest that fits");
     let server = answering(admitted_answer());
-    for size in [MAX_REQUEST_BYTES - 1, MAX_REQUEST_BYTES] {
-        let answer = client(server.addr).call(request_of_size(size));
-        assert!(
-            matches!(answer, Ok(HuginnMindResponse::Admit(PipelineAdmissionOutcome::AlreadyAdmitted { .. }))),
-            "a request of {size} bytes: {answer:?}"
-        );
-    }
+    let answer = client(server.addr).call(fits);
+    assert!(matches!(answer, Ok(HuginnMindResponse::Admit(PipelineAdmissionOutcome::AlreadyAdmitted { .. }))), "{answer:?}");
 }
 
 /// The transport's own refusal of an oversize send ("Message too long") is
@@ -457,6 +478,30 @@ fn a_request_over_what_one_send_carries_is_too_large_and_one_at_the_limit_is_sen
 #[test]
 fn an_oversize_admission_is_never_reported_as_an_unavailable_daemon() {
     let server = answering(admitted_answer());
-    let error = client(server.addr).call(padded_admit(6, 70_000)).unwrap_err();
+    let error = client(server.addr).call(padded_admit(70_000)).unwrap_err();
     assert!(matches!(error, ClientError::TooLarge { .. }), "{error}");
+}
+
+/// The limit is the transport's own: a message of `MAX_REQUEST_BYTES` goes out
+/// on an RUDP session, and one byte more is refused by the socket.
+#[test]
+fn the_limit_is_the_largest_message_the_transport_sends() {
+    let server = answering(admitted_answer());
+    let mut session = CultMesh::create_rudp_client_for_endpoint(
+        "limit-probe".to_string(),
+        CULTNET_OPERATION_CONNECTION_ID,
+        &format!("rudp://{}", server.addr),
+        CultMeshRudpSocketOptions::default(),
+    )
+    .unwrap();
+    session.connect(Vec::new()).unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    while !session.connected() {
+        session.poll_resends().unwrap();
+        let _ = session.receive_once().unwrap();
+        assert!(Instant::now() < until, "the server never accepted");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    session.send_schema_message(&message_of_size(MAX_REQUEST_BYTES)).expect("the limit is carried");
+    assert!(session.send_schema_message(&message_of_size(MAX_REQUEST_BYTES + 1)).is_err(), "one byte more is sent");
 }
