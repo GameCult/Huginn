@@ -108,6 +108,7 @@ impl Trouble {
             Self::Client(ClientError::TooLarge { bytes, limit }) => {
                 json!({ "error": "TooLarge", "bytes": bytes, "limit": limit })
             }
+            Self::Client(ClientError::Unencodable { detail }) => json!({ "error": "Unencodable", "detail": detail }),
             Self::Internal(detail) => json!({ "error": "Internal", "detail": detail }),
         }
     }
@@ -316,6 +317,10 @@ mod tests {
         assert_eq!(
             Trouble::Client(ClientError::TooLarge { bytes: 70_000, limit: 65_000 }).body(),
             json!({ "error": "TooLarge", "bytes": 70_000, "limit": 65_000 })
+        );
+        assert_eq!(
+            Trouble::Client(ClientError::Unencodable { detail: "no".into() }).body(),
+            json!({ "error": "Unencodable", "detail": "no" })
         );
         assert_eq!(Trouble::Misconfigured("bad".into()).body(), json!({ "error": "Misconfigured", "detail": "bad" }));
     }

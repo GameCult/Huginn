@@ -128,14 +128,14 @@ fn client(addr: SocketAddr) -> HuginnClient {
 fn unavailable(error: ClientError) -> (SocketAddr, String) {
     match error {
         ClientError::Unavailable { endpoint, detail } => (endpoint, detail),
-        other @ (ClientError::Rejected { .. } | ClientError::TooLarge { .. }) => panic!("expected Unavailable, got {other}"),
+        other @ (ClientError::Rejected { .. } | ClientError::TooLarge { .. } | ClientError::Unencodable { .. }) => panic!("expected Unavailable, got {other}"),
     }
 }
 
 fn rejected(error: ClientError) -> (SocketAddr, String, String) {
     match error {
         ClientError::Rejected { endpoint, code, detail } => (endpoint, code, detail),
-        other @ (ClientError::Unavailable { .. } | ClientError::TooLarge { .. }) => panic!("expected Rejected, got {other}"),
+        other @ (ClientError::Unavailable { .. } | ClientError::TooLarge { .. } | ClientError::Unencodable { .. }) => panic!("expected Rejected, got {other}"),
     }
 }
 

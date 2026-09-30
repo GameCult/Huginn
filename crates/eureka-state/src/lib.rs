@@ -45,13 +45,15 @@ pub const MAX_REQUEST_BYTES: usize = 65_507 - 36 - "schema".len();
 /// the only one worth retrying: the daemon could not be reached, went quiet
 /// past the call's deadline, or answered out of protocol. `Rejected` is the
 /// daemon refusing the envelope itself, and `TooLarge` is the client refusing
-/// a request that no single send can carry, before sending it; a retry of the
-/// same call cannot change either.
+/// a request that no single send can carry, before sending it; `Unencodable` is
+/// the request failing to encode at all, a defect in this client. A retry of the
+/// same call cannot change any of those three.
 #[derive(Debug)]
 pub enum ClientError {
     Unavailable { endpoint: SocketAddr, detail: String },
     Rejected { endpoint: SocketAddr, code: String, detail: String },
     TooLarge { bytes: usize, limit: usize },
+    Unencodable { detail: String },
 }
 
 impl fmt::Display for ClientError {
@@ -66,6 +68,7 @@ impl fmt::Display for ClientError {
             Self::TooLarge { bytes, limit } => {
                 write!(f, "the request encodes to {bytes} bytes and one send carries at most {limit}")
             }
+            Self::Unencodable { detail } => write!(f, "the request could not be encoded: {detail}"),
         }
     }
 }
@@ -109,9 +112,10 @@ impl HuginnClient {
         let deadline = Instant::now() + self.timeout;
         let unavailable =
             |error: anyhow::Error| ClientError::Unavailable { endpoint: self.endpoint, detail: format!("{error:#}") };
-        let message = encode_request(MESSAGE_ID, &request, None).map_err(unavailable)?;
+        let unencodable = |error: anyhow::Error| ClientError::Unencodable { detail: format!("{error:#}") };
+        let message = encode_request(MESSAGE_ID, &request, None).map_err(unencodable)?;
         let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
-            .map_err(unavailable)?
+            .map_err(unencodable)?
             .len();
         if bytes > MAX_REQUEST_BYTES {
             return Err(ClientError::TooLarge { bytes, limit: MAX_REQUEST_BYTES });

@@ -495,6 +495,19 @@ fn a_non_utf8_instance_is_reported_as_such() {
     assert_eq!(whoami["instance"], Value::Null);
 }
 
+/// Likewise an endpoint that is not UTF-8: reported as that, not as unset.
+#[test]
+fn a_non_utf8_endpoint_is_reported_as_such() {
+    let mut mcp = Mcp::spawn(|command| {
+        command.env("EUREKA_INSTANCE", INSTANCE).env("HUGINN_ENDPOINT", non_utf8());
+    });
+    let (error, whoami) = mcp.call("whoami", json!({}));
+    assert!(!error);
+    let detail = whoami["error"]["detail"].as_str().unwrap();
+    assert!(detail.contains("HUGINN_ENDPOINT is not valid UTF-8"), "{whoami}");
+    assert_eq!(whoami["endpoint"], Value::Null);
+}
+
 #[cfg(unix)]
 fn non_utf8() -> std::ffi::OsString {
     std::os::unix::ffi::OsStringExt::from_vec(vec![b'e', 0xff])
