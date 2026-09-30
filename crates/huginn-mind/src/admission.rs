@@ -5,7 +5,8 @@
 //! hand-off and import, and Cut 13's tools. The steps run in order and the
 //! first failing step is the outcome:
 //!
-//! - A1 the batch names this mind; A2 one to sixty-four envelopes;
+//! - A1 the batch names this mind, and attributes itself to a named agent and
+//!   session (`refuse_provenance`); A2 one to sixty-four envelopes;
 //! - A3 every envelope passes the leaf's bounds, formats and key
 //!   recomputation; A4 identities are unique in the batch; A5 every document
 //!   carrying an instance names this mind;
@@ -107,6 +108,7 @@ impl<S: MindStore> Mind<S> {
     ) -> Result<PipelineAdmissionOutcome, MindRefusal> {
         // A1
         self.require_instance(instance)?;
+        refuse_provenance(&provenance)?;
         // A2
         if envelopes.is_empty() || envelopes.len() > BATCH_MAX {
             return Err(MindRefusal::BatchSize { actual: envelopes.len() as u32 });
@@ -168,6 +170,39 @@ impl<S: MindStore> Mind<S> {
             CommitOutcome::Conflict(identities) => Ok(PipelineAdmissionOutcome::Conflict { identities }),
         }
     }
+}
+
+/// The bound `epiphany_pipeline::Short` declares, in UTF-8 bytes. The leaf
+/// exposes no validator for it, so `short_bound_is_the_leafs_own` pins this to
+/// the `maxLength` its schema publishes.
+const SHORT_MAX: usize = 200;
+
+/// Who admitted a batch is the receipt's only record of it, so the mind checks
+/// it here and every writer, whatever its transport, gets the check: the agent,
+/// the session and the tool follow the leaf's `Title` rule (one alphanumeric
+/// character, no control or line-break character, no bidi control) within
+/// `Short`'s bound. The leaf keeps that rule private, so
+/// `provenance_text_is_the_leafs_title_rule` pins this to it. Refused as the
+/// leaf's own refusals, since the fields are the leaf's own type.
+fn refuse_provenance(provenance: &PipelineProvenance) -> Result<(), MindRefusal> {
+    let bidi = |c: char| {
+        matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    };
+    let control = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
+    for (field, value) in [
+        ("provenance.agent", &provenance.agent),
+        ("provenance.session", &provenance.session),
+        ("provenance.tool", &provenance.tool),
+    ] {
+        let text = value.0.as_str();
+        if !text.chars().any(char::is_alphanumeric) || text.contains(control) || text.contains(bidi) {
+            return Err(PipelineRefusal::InvalidFormat { field: field.into(), value: text.into() }.into());
+        }
+        if text.len() > SHORT_MAX {
+            return Err(PipelineRefusal::FieldBound { field: field.into(), limit: SHORT_MAX as u32, actual: text.len() as u32 }.into());
+        }
+    }
+    Ok(())
 }
 
 /// A3 through the leaf, then A5.
@@ -691,6 +726,116 @@ mod tests {
         let (second, _) = committed(admit(&mut mind, vec![campaign(&[REPO])]));
         assert_ne!(first, second);
         assert_eq!(mind.genesis_receipt_id().unwrap(), Some(first));
+    }
+
+    fn admit_attributed(agent: &str, session: &str) -> (Mind<MemoryStore>, PipelineAdmissionOutcome) {
+        admit_signed(agent, session, "admit")
+    }
+
+    fn admit_signed(agent: &str, session: &str, tool: &str) -> (Mind<MemoryStore>, PipelineAdmissionOutcome) {
+        let mut mind = opened(MemoryStore::new(), INSTANCE);
+        let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: s(agent), session: s(session), tool: s(tool) };
+        let batch = PipelineAdmissionBatch { instance: slug(INSTANCE), provenance, documents: vec![instance(INSTANCE), stewardship(INSTANCE, REPO)] };
+        let outcome = mind.admit(batch, now());
+        (mind, outcome)
+    }
+
+    /// Who admitted a batch is validated by the mind, so no writer can commit
+    /// a blank, multi-line or oversized attribution, and a refused batch leaves
+    /// nothing behind.
+    #[test]
+    fn provenance_names_an_agent_a_session_and_a_tool_on_one_clean_line_within_short() {
+        let over = "x".repeat(SHORT_MAX + 1);
+        let exact = "y".repeat(SHORT_MAX);
+        for bad in [
+            "",
+            " \t ",
+            "\u{2003}",
+            "\u{200B}",
+            "line\nbreak",
+            "line\rbreak",
+            "a\u{0B}b",
+            "a\u{0C}b",
+            "a\u{85}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+            "a\0b",
+            "a\u{1B}[31mb",
+            "a\u{202E}b",
+            "a\u{2066}b",
+            "a\u{200F}b",
+        ] {
+            for field in ["provenance.agent", "provenance.session", "provenance.tool"] {
+                let (mind, outcome) = match field {
+                    "provenance.agent" => admit_signed(bad, "session-1", "admit"),
+                    "provenance.session" => admit_signed("claude", bad, "admit"),
+                    _ => admit_signed("claude", "session-1", bad),
+                };
+                let refused = refusal(outcome);
+                assert!(
+                    matches!(&refused, MindRefusal::Document(PipelineRefusal::InvalidFormat { field: named, .. }) if named == field),
+                    "{field}={bad:?}: {refused:?}"
+                );
+                assert!(mind.is_empty(), "{field}={bad:?}: a refused batch wrote");
+            }
+        }
+        for (field, outcome) in [
+            ("provenance.agent", admit_signed(&over, "session-1", "admit")),
+            ("provenance.session", admit_signed("claude", &over, "admit")),
+            ("provenance.tool", admit_signed("claude", "session-1", &over)),
+        ] {
+            let (mind, outcome) = outcome;
+            assert_eq!(
+                refusal(outcome),
+                MindRefusal::Document(PipelineRefusal::FieldBound { field: field.into(), limit: 200, actual: 201 })
+            );
+            assert!(mind.is_empty());
+        }
+        // The bound is in bytes, not characters: 101 two-byte characters are 202 bytes.
+        let (_, outcome) = admit_attributed(&"é".repeat(101), "session-1");
+        assert_eq!(
+            refusal(outcome),
+            MindRefusal::Document(PipelineRefusal::FieldBound { field: "provenance.agent".into(), limit: 200, actual: 202 })
+        );
+        let (_, outcome) = admit_signed("claude", "session-1", &"é".repeat(101));
+        assert!(matches!(refusal(outcome), MindRefusal::Document(PipelineRefusal::FieldBound { actual: 202, .. })));
+        let (_, outcome) = admit_attributed(&"é".repeat(100), "session-1");
+        committed(outcome);
+        // The bound is inclusive and a name with inner spaces is a name.
+        let (mind, outcome) = admit_signed(&exact, "session 7", "admit tool");
+        committed(outcome);
+        let receipts = mind.receipts().unwrap();
+        assert_eq!(receipts[0].provenance.agent, s(&exact));
+        assert_eq!(receipts[0].provenance.session, s("session 7"));
+        assert_eq!(receipts[0].provenance.tool, s("admit tool"));
+    }
+
+    /// The leaf's `Title` rule is private, so this holds the provenance rule to
+    /// it: the two accept and refuse the same text.
+    #[test]
+    fn provenance_text_is_the_leafs_title_rule() {
+        let leaf_accepts = |text: &str| {
+            let D::Campaign(mut campaign) = campaign(&[REPO]) else { unreachable!() };
+            campaign.title = epiphany_pipeline::Title(text.into());
+            D::Campaign(campaign).validate().is_ok()
+        };
+        let mine_accepts = |text: &str| {
+            let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: s(text), session: s("s"), tool: s("t") };
+            refuse_provenance(&provenance).is_ok()
+        };
+        for text in [
+            "claude", "session 7", "", " ", "\t", "\u{200B}", "\u{2003}", "!!!", "a\nb", "a\u{0B}b", "a\u{85}b", "a\u{2028}b",
+            "a\0b", "a\u{7F}b", "a\u{202E}b", "a\u{061C}b", "a\u{2069}b", "a\u{200D}b", "é", "日本", "a\u{FEFF}b",
+            &"x".repeat(200), &"x".repeat(201), &"é".repeat(100), &"é".repeat(101),
+        ] {
+            assert_eq!(mine_accepts(text), leaf_accepts(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn short_bound_is_the_leafs_own() {
+        let schema = serde_json::to_value(schemars::schema_for!(Short)).unwrap();
+        assert_eq!(schema["maxLength"], serde_json::json!(SHORT_MAX));
     }
 
     #[test]

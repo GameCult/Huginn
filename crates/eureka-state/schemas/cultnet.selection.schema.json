@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.selection.schema.json",
+  "title": "CultNet Typed Selection",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemas": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "description": "Absent means every schema. Present and empty is refused at the door (selection_invalid), never treated as \"every schema\": omit the field instead."
+    },
+    "keys": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "description": "Absent means every key. Present and empty is refused at the door (selection_invalid), never treated as \"every key\": omit the field instead."
+    },
+    "fields": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fieldPredicate" }
+    },
+    "cites": { "$ref": "#/$defs/citation" },
+    "cited": { "$ref": "#/$defs/incoming" },
+    "projection": {
+      "type": "string",
+      "enum": ["header", "document"],
+      "default": "header"
+    },
+    "descending": { "type": "boolean", "default": false },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200,
+      "description": "Clamped to 1..=200 by the answering server, not refused outside that range: an absent value or one outside the bound is treated as the nearer bound (absent = 200)."
+    },
+    "cursor": { "type": "string" }
+  },
+  "$defs": {
+    "recordRef": {
+      "type": "object",
+      "required": ["schemaId", "recordKey"],
+      "additionalProperties": false,
+      "properties": {
+        "schemaId": { "type": "string", "minLength": 1 },
+        "recordKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "fieldPredicate": {
+      "type": "object",
+      "required": ["index", "op"],
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "string", "minLength": 1 },
+        "op": { "type": "string", "enum": ["any_of", "lt", "le", "ge", "gt"] },
+        "values": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "number": {
+          "type": "string",
+          "description": "Q-J: a canonical decimal string, never a JSON number. Matches ^-?(0|[1-9][0-9]*)(\\.[0-9]*[1-9])?$ and is not \"-0\"; any other spelling is refused typed at the door (selection_invalid), never normalised.",
+          "pattern": "^(?!-0$)-?(0|[1-9][0-9]*)(\\.[0-9]*[1-9])?$"
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["values"],
+          "not": { "required": ["number"] },
+          "properties": { "op": { "const": "any_of" } }
+        },
+        {
+          "required": ["number"],
+          "not": { "required": ["values"] },
+          "properties": { "op": { "enum": ["lt", "le", "ge", "gt"] } }
+        }
+      ]
+    },
+    "citation": {
+      "type": "object",
+      "required": ["target"],
+      "additionalProperties": false,
+      "properties": {
+        "target": { "$ref": "#/$defs/recordRef" },
+        "role": { "type": "string", "minLength": 1 }
+      }
+    },
+    "incoming": {
+      "type": "object",
+      "required": ["role", "exists"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "type": "string", "minLength": 1 },
+        "exists": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -3,86 +3,29 @@
 //! made to misbehave.
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::JoinHandle;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use cultnet_rs::{
-    CultNetMessage, CultNetRudpServerEvent, CultNetWireContract, Selection, answer_content_chunk_request,
-    decode_cultnet_message_from_slice, encode_cultnet_message_to_vec, pack_content,
+    CULTNET_OPERATION_CONNECTION_ID, CultMesh, CultMeshRudpSocketOptions, CultNetMessage, CultNetWireContract, Selection,
+    answer_content_chunk_request, encode_cultnet_message_to_vec, pack_content,
 };
-use eureka_state::{ClientError, HuginnClient};
-use huginn_daemon::serve::{MAX_RESPONSE_BYTES, bind, run, schema_registry};
-use huginn_daemon::{Daemon, Handled, Hits, IndexSink, SearchTicket, ServeOptions};
-use huginn_mind::envelope::{OperationFailure, encode_failure, encode_response};
+use eureka_state::{ClientError, HuginnClient, MAX_REQUEST_BYTES};
+use huginn_daemon::serve::MAX_RESPONSE_BYTES;
+use huginn_mind::envelope::{OperationFailure, encode_failure, encode_request, encode_response};
 use huginn_mind::epiphany_pipeline::{
-    AuthorityMap, CodeLocation, CutDelete, CutVerification, Date, DocRef, FileChange, Line, NegativeCheck, OrgRepo,
-    PipelineCampaign, PipelineCutSpec, PipelineDocument, PipelineInstance, PipelineKind, PipelineRef,
-    PipelineStewardship, Sha, Short, Slug, StructuralDelta, Title, VerificationTest,
+    AuthorityMap, CodeLocation, CutDelete, CutVerification, FileChange, Line, NegativeCheck, OrgRepo,
+    PipelineCutSpec, PipelineDocument, PipelineKind, PipelineRef, Short, StructuralDelta, Title,
+    VerificationTest,
 };
-use huginn_mind::{
-    DeferredAnswer, Faculty, HuginnMindRequest, HuginnMindResponse, IndexStatus, Mind, MindRefusal, MindStore,
-    OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineProvenance,
-};
-use tempfile::TempDir;
+use huginn_mind::{DeferredAnswer, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionOutcome};
 
-const INSTANCE: &str = "eureka";
+mod common;
+use common::*;
+
 const OTHER: &str = "thought-cage";
-const CAMPAIGN: &str = "eureka-state";
-const REPO: &str = "GameCult/Epiphany";
 const TIMEOUT: Duration = Duration::from_secs(20);
-
-fn slug(value: &str) -> Slug {
-    Slug(value.into())
-}
-
-fn sha() -> Sha {
-    Sha("5f98228d".into())
-}
-
-fn identity(name: &str) -> PipelineDocument {
-    PipelineDocument::Instance(PipelineInstance {
-        instance: slug(name),
-        display_name: Short(format!("{name} mind")),
-        created_at: Date("2026-09-29".into()),
-        host: Short(name.into()),
-    })
-}
-
-fn stewardship() -> PipelineDocument {
-    PipelineDocument::Stewardship(PipelineStewardship {
-        instance: slug(INSTANCE),
-        repo: OrgRepo(REPO.into()),
-        sequence: 1,
-        assigned_on: Date("2026-09-29".into()),
-        note: "assigned".into(),
-    })
-}
-
-fn campaign() -> PipelineDocument {
-    PipelineDocument::Campaign(PipelineCampaign {
-        slug: slug(CAMPAIGN),
-        title: Title("Eureka pipeline state".into()),
-        repos: vec![OrgRepo(REPO.into())],
-        working_branch: Short("hands/cut13a".into()),
-        target_doc: DocRef { path: Short("notes/target.md".into()), start_line: 1, end_line: 9, commit: sha() },
-    })
-}
-
-fn batch(instance: &str, documents: Vec<PipelineDocument>) -> PipelineAdmissionBatch {
-    PipelineAdmissionBatch {
-        instance: slug(instance),
-        provenance: PipelineProvenance {
-            faculty: Faculty::Hands,
-            agent: Short("claude".into()),
-            session: Short("session-1".into()),
-            tool: Short("admit".into()),
-        },
-        documents,
-    }
-}
 
 /// A `Line` and a `Short` at the leaf's own bound.
 fn line(n: usize) -> Line {
@@ -151,108 +94,6 @@ fn cut_ref(cut: &str) -> PipelineRef {
     PipelineRef { kind: PipelineKind::CutSpec, id: Short(format!("{CAMPAIGN}:cut_spec:cut-{cut}.r1")) }
 }
 
-/// No index: the client's subject is the transport, not the projection.
-struct Inert;
-
-impl<S: MindStore> IndexSink<S> for Inert {
-    fn committed(&mut self, _mind: &Mind<S>, _writes: &[PipelineRef]) -> anyhow::Result<()> {
-        Ok(())
-    }
-    fn status(&self) -> IndexStatus {
-        IndexStatus::Current
-    }
-    fn search(&mut self, _text: &str, _top_k: u32) -> Result<SearchTicket, String> {
-        Err("this index cannot search".into())
-    }
-    fn search_deadline(&self) -> Duration {
-        Duration::ZERO
-    }
-    fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
-        Vec::new()
-    }
-    fn abandon(&mut self, _ticket: SearchTicket) {}
-}
-
-type TestDaemon = Daemon<OwnedRedbMessagePackBackingStore, Inert>;
-
-fn answered(handled: Handled) -> HuginnMindResponse {
-    match handled {
-        Handled::Answered(response) => response,
-        Handled::Searching(_) => panic!("the inert index cannot search"),
-    }
-}
-
-/// A daemon over a temporary mind whose identity is admitted, and whatever
-/// else `seed` admits.
-fn mind(seed: Vec<Vec<PipelineDocument>>) -> (TempDir, TestDaemon) {
-    let root = tempfile::tempdir().unwrap();
-    let mut daemon = Daemon::new(Mind::open(root.path(), &slug(INSTANCE)).unwrap(), Inert);
-    for documents in std::iter::once(vec![identity(INSTANCE)]).chain(seed) {
-        let outcome = answered(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), Utc::now()));
-        assert!(matches!(outcome, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })), "{outcome:?}");
-    }
-    (root, daemon)
-}
-
-/// A server on a loopback port that stops when dropped.
-struct Server {
-    addr: SocketAddr,
-    stopping: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-    /// The sessions a scripted server has seen end: what the client's
-    /// disconnect looks like from the daemon's side.
-    ended: Arc<AtomicUsize>,
-    _root: Option<TempDir>,
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-fn serve(root: TempDir, mut daemon: TestDaemon) -> Server {
-    let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
-    let addr = hub.local_addr().unwrap();
-    let stopping = Arc::new(AtomicBool::new(false));
-    let loop_stopping = Arc::clone(&stopping);
-    let registry = schema_registry().unwrap();
-    let thread = std::thread::spawn(move || {
-        run(&mut daemon, &mut hub, &registry, &loop_stopping, &ServeOptions::default()).unwrap();
-    });
-    Server { addr, stopping, thread: Some(thread), ended: Arc::default(), _root: Some(root) }
-}
-
-/// A server that answers each schema message with whatever `script` says.
-fn scripted(mut script: impl FnMut(&CultNetMessage) -> CultNetMessage + Send + 'static) -> Server {
-    let mut hub = bind("127.0.0.1:0".parse().unwrap(), "scripted").unwrap();
-    let addr = hub.local_addr().unwrap();
-    let stopping = Arc::new(AtomicBool::new(false));
-    let loop_stopping = Arc::clone(&stopping);
-    let ended = Arc::new(AtomicUsize::new(0));
-    let loop_ended = Arc::clone(&ended);
-    let thread = std::thread::spawn(move || {
-        while !loop_stopping.load(Ordering::Relaxed) {
-            hub.poll_resends().unwrap();
-            while let Some(event) = hub.receive_event_once().unwrap() {
-                if matches!(event, CultNetRudpServerEvent::Disconnected { .. }) {
-                    loop_ended.fetch_add(1, Ordering::Relaxed);
-                }
-                let CultNetRudpServerEvent::Frame { session, frame } = event else { continue };
-                let message =
-                    decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0).unwrap();
-                hub.send_schema_message(&session, &script(&message)).unwrap();
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    });
-    Server { addr, stopping, thread: Some(thread), ended, _root: None }
-}
-
-/// A scripted server that answers any operation with a deferral of `body` and
 /// serves its chunks faithfully.
 fn deferring(body: Vec<u8>) -> Server {
     deferring_in_chunks(body, 256 * 1024, Duration::ZERO)
@@ -287,20 +128,15 @@ fn client(addr: SocketAddr) -> HuginnClient {
 fn unavailable(error: ClientError) -> (SocketAddr, String) {
     match error {
         ClientError::Unavailable { endpoint, detail } => (endpoint, detail),
-        rejected @ ClientError::Rejected { .. } => panic!("expected Unavailable, got {rejected}"),
+        other @ (ClientError::Rejected { .. } | ClientError::TooLarge { .. } | ClientError::Unencodable { .. }) => panic!("expected Unavailable, got {other}"),
     }
 }
 
 fn rejected(error: ClientError) -> (SocketAddr, String, String) {
     match error {
         ClientError::Rejected { endpoint, code, detail } => (endpoint, code, detail),
-        unavailable @ ClientError::Unavailable { .. } => panic!("expected Rejected, got {unavailable}"),
+        other @ (ClientError::Unavailable { .. } | ClientError::TooLarge { .. } | ClientError::Unencodable { .. }) => panic!("expected Rejected, got {other}"),
     }
-}
-
-/// A scripted server whose every answer is `reply`.
-fn answering(reply: CultNetMessage) -> Server {
-    scripted(move |_| reply.clone())
 }
 
 fn nothing_found(message_id: &str, operation: &str) -> CultNetMessage {
@@ -543,4 +379,132 @@ fn a_body_over_the_deferral_cap_is_refused() {
     let server = deferring(vec![0_u8; over]);
     let (_, detail) = unavailable(client(server.addr).call(HuginnMindRequest::Whoami).unwrap_err());
     assert!(detail.contains("exceeds"), "{detail}");
+}
+
+/// An admission whose session is `session_pad` characters long: the knob that
+/// sizes a request without changing what it asks.
+fn padded_admit(session_pad: usize) -> HuginnMindRequest {
+    let mut request = batch(INSTANCE, vec![stewardship()]);
+    request.provenance.session = Short("s".repeat(session_pad));
+    HuginnMindRequest::Admit(request)
+}
+
+/// What one send has to carry for `message`, measured the way the client does.
+fn encoded_bytes(message: &CultNetMessage) -> usize {
+    encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap().len()
+}
+
+fn message_for(request: &HuginnMindRequest, source: Option<String>) -> CultNetMessage {
+    encode_request("eureka-state-call", request, source).unwrap()
+}
+
+/// The smallest session padding whose request encodes to at least `target`
+/// bytes. The payload rides as base64, so request sizes step by four and only
+/// every fourth size is reachable through the request alone.
+fn pad_for(target: usize) -> usize {
+    let (mut low, mut high) = (0, target);
+    while low < high {
+        let middle = (low + high) / 2;
+        if encoded_bytes(&message_for(&padded_admit(middle), None)) < target {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+/// The largest request one send carries, and the smallest it does not.
+fn largest_request_that_fits() -> HuginnMindRequest {
+    padded_admit(pad_for(MAX_REQUEST_BYTES + 1) - 1)
+}
+
+fn smallest_request_over() -> HuginnMindRequest {
+    padded_admit(pad_for(MAX_REQUEST_BYTES + 1))
+}
+
+/// A message that encodes to exactly `target` bytes: a request a little under
+/// it, topped up with a source runtime id, which rides outside the payload and
+/// moves the size a byte at a time once the field is there at all.
+fn message_of_size(target: usize) -> CultNetMessage {
+    let fitting = pad_for(target + 1) - 1;
+    for padding in (fitting.saturating_sub(80)..=fitting).rev() {
+        let request = padded_admit(padding);
+        for source in 1..80 {
+            let message = message_for(&request, Some("r".repeat(source)));
+            if encoded_bytes(&message) == target {
+                return message;
+            }
+        }
+    }
+    panic!("no message encodes to {target} bytes");
+}
+
+fn admitted_answer() -> CultNetMessage {
+    encode_response(
+        "eureka-state-call",
+        "admit",
+        &HuginnMindResponse::Admit(PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: "r".into() }),
+        "scripted",
+    )
+    .unwrap()
+}
+
+/// A request larger than one send carries is refused by the client before it
+/// connects to anything, as its own error and not as a transport failure the
+/// caller would retry; the largest request that fits is sent, and answered.
+#[test]
+fn a_request_over_what_one_send_carries_is_too_large_and_one_that_fits_is_sent() {
+    let closed = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let over = smallest_request_over();
+    let started = Instant::now();
+    match client(closed).call(over.clone()) {
+        Err(ClientError::TooLarge { bytes, limit }) => {
+            assert_eq!(bytes, encoded_bytes(&message_for(&over, None)));
+            assert_eq!(limit, MAX_REQUEST_BYTES);
+            assert!(bytes > limit);
+        }
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(1), "refused only after trying the transport");
+
+    let fits = largest_request_that_fits();
+    assert!(MAX_REQUEST_BYTES - encoded_bytes(&message_for(&fits, None)) < 4, "not the largest that fits");
+    let server = answering(admitted_answer());
+    let answer = client(server.addr).call(fits);
+    assert!(matches!(answer, Ok(HuginnMindResponse::Admit(PipelineAdmissionOutcome::AlreadyAdmitted { .. }))), "{answer:?}");
+}
+
+/// The transport's own refusal of an oversize send ("Message too long") is
+/// what an unchecked request used to report, as an `Unavailable` daemon a
+/// caller would retry forever.
+#[test]
+fn an_oversize_admission_is_never_reported_as_an_unavailable_daemon() {
+    let server = answering(admitted_answer());
+    let error = client(server.addr).call(padded_admit(70_000)).unwrap_err();
+    assert!(matches!(error, ClientError::TooLarge { .. }), "{error}");
+}
+
+/// The limit is the transport's own: a message of `MAX_REQUEST_BYTES` goes out
+/// on an RUDP session, and one byte more is refused by the socket.
+#[test]
+fn the_limit_is_the_largest_message_the_transport_sends() {
+    let server = answering(admitted_answer());
+    let mut session = CultMesh::create_rudp_client_for_endpoint(
+        "limit-probe".to_string(),
+        CULTNET_OPERATION_CONNECTION_ID,
+        &format!("rudp://{}", server.addr),
+        CultMeshRudpSocketOptions::default(),
+    )
+    .unwrap();
+    session.connect(Vec::new()).unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    while !session.connected() {
+        session.poll_resends().unwrap();
+        let _ = session.receive_once().unwrap();
+        assert!(Instant::now() < until, "the server never accepted");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    session.send_schema_message(&message_of_size(MAX_REQUEST_BYTES)).expect("the limit is carried");
+    assert!(session.send_schema_message(&message_of_size(MAX_REQUEST_BYTES + 1)).is_err(), "one byte more is sent");
 }
