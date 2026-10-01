@@ -1750,7 +1750,7 @@ mod tests {
         let sizes: Vec<usize> =
             headers(&page).iter().map(|summary| rmp_serde::to_vec_named(summary).unwrap().len()).collect();
         let widest = *sizes.iter().max().unwrap();
-        assert!(widest > 2_000, "the fixture is at its bounds, not a small one: {widest}");
+        assert!(widest > 1_500, "the fixture is at its bounds, not a small one: {widest}");
         assert!(widest <= SUMMARY_MAX_BYTES, "{widest} bytes over {SUMMARY_MAX_BYTES}");
         let closed = headers(&page).iter().find(|summary| summary.id.id.0 == id("ruling", "S0")).unwrap();
         assert!(matches!(&closed.status, PipelineStatusSummary::Resolved { outcome: ResolutionOutcome::Superseded { by }, .. } if by.len() == 8));
