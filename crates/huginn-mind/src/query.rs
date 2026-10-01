@@ -1701,11 +1701,20 @@ mod tests {
     fn a_summary_is_bounded_whatever_the_lists() {
         let mut mind = seeded();
         let long = |unit: &str, bytes: usize| unit.repeat(bytes);
+        // depends_on holds cut labels (at most 64 bytes), each a cut that exists.
+        let dependencies: Vec<String> = (0..8).map(|n| format!("{n}{}", long("d", 63))).collect();
+        let dependency_specs: Vec<D> = dependencies.iter().map(|label| D::CutSpec(cut_spec(label, 1))).collect();
+        let batch = crate::admission::PipelineAdmissionBatch {
+            instance: slug(INSTANCE),
+            provenance: provenance(Faculty::SelfFaculty),
+            documents: dependency_specs,
+        };
+        committed(mind.admit(batch, now()));
         let mut maximal = cut_spec("1", 1);
         maximal.title = long("t", 200).as_str().into();
         maximal.branch = s(&long("b", 200));
         maximal.base = Sha("a".repeat(40));
-        maximal.depends_on = (0..8).map(|n| s(&format!("{n}{}", long("d", 199)))).collect();
+        maximal.depends_on = dependencies.iter().map(|label| s(label)).collect();
         let maximal_provenance = || PipelineProvenance {
             faculty: Faculty::SelfFaculty,
             agent: s(&long("a", 200)),
