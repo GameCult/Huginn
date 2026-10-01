@@ -1701,8 +1701,8 @@ mod tests {
     fn a_summary_is_bounded_whatever_the_lists() {
         let mut mind = seeded();
         let long = |unit: &str, bytes: usize| unit.repeat(bytes);
-        // depends_on holds cut labels (at most 64 bytes), each a cut that exists.
-        let dependencies: Vec<String> = (0..8).map(|n| format!("{n}{}", long("d", 63))).collect();
+        // depends_on holds cut labels, each a cut that exists (its spec key stays within 64 bytes).
+        let dependencies: Vec<String> = (0..8).map(|n| format!("{n}{}", long("d", 55))).collect();
         let dependency_specs: Vec<D> = dependencies.iter().map(|label| D::CutSpec(cut_spec(label, 1))).collect();
         let batch = crate::admission::PipelineAdmissionBatch {
             instance: slug(INSTANCE),
