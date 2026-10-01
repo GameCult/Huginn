@@ -368,11 +368,6 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             if campaign.repos.is_empty() {
                 return Err(MindRefusal::EmptyRepos { campaign: key.into() });
             }
-            for repo in &campaign.repos {
-                if docs.stewardship_of(mind, repo, None).is_none() {
-                    return Err(MindRefusal::RepoNotStewarded { repo: repo.0.clone() });
-                }
-            }
             Ok(())
         }
         D::Target(target) => {
@@ -422,6 +417,18 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
                     return Err(MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: ruling.0.clone() });
                 }
             }
+            for dependency in &spec.depends_on {
+                // A cut naming itself is no ordering (ruling self-dep).
+                if dependency.0 == spec.cut.0 {
+                    return Err(MindRefusal::UnknownDependency { cut: dependency.0.clone() });
+                }
+                let names_a_cut = docs.of_kind(K::CutSpec).any(|(_, document)| {
+                    matches!(document, D::CutSpec(other) if other.campaign == spec.campaign && other.cut.0 == dependency.0)
+                });
+                if !names_a_cut {
+                    return Err(MindRefusal::UnknownDependency { cut: dependency.0.clone() });
+                }
+            }
             let predecessor = D::CutSpec(epiphany_pipeline::PipelineCutSpec { revision: spec.revision.wrapping_sub(1), ..spec.clone() });
             revision_rule(docs, K::CutSpec, key, spec.revision, &predecessor)
         }
@@ -438,7 +445,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             if report.branch != spec.branch {
                 return Err(MindRefusal::SpecMismatch { field: "branch".into() });
             }
-            if !report.commits.iter().any(|commit| commit.sha == report.range.head) {
+            if !report.commits.iter().any(|commit| commit.sha.names_same_commit(&report.range.head)) {
                 return Err(MindRefusal::RangeOutsideCommits { head: report.range.head.0.clone() });
             }
             Ok(())
@@ -579,7 +586,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::CutSpec, O::Superseded { by }) => all(by, K::CutSpec),
         (K::CutSpec, O::Withdrawn { .. }) => true,
         (K::Finding, O::Fixed { by, .. }) => by.as_ref().is_none_or(|report| report.kind == K::CutReport),
-        (K::Finding, O::Deferred { to }) => to.kind == K::FollowUp,
+        (K::Finding, O::Deferred { to }) => matches!(to.kind, K::FollowUp | K::CutSpec),
         (K::Finding, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::FollowUp, O::Fixed { by, .. }) => by.as_ref().is_none_or(|report| report.kind == K::CutReport),
         (K::FollowUp, O::Superseded { by }) => all(by, K::FollowUp),
@@ -1350,14 +1357,11 @@ mod tests {
             receipt.strong_reads
         );
 
-        // Nothing stewards the repo now, and `stewardship_of` says so: a new
-        // campaign over it is refused.
+        // Nothing stewards the repo now, and a campaign over it still admits:
+        // campaign admission reads no stewardship (ruling stewardship-rule).
         let D::Campaign(mut second) = campaign(&[REPO]) else { panic!() };
         second.slug = slug("second");
-        assert_eq!(
-            refusal(admit(&mut mind, vec![D::Campaign(second)])),
-            MindRefusal::RepoNotStewarded { repo: REPO.into() }
-        );
+        committed(admit(&mut mind, vec![D::Campaign(second)]));
 
         // Handed back, the mind stewards it again, as `n2`. No field names a
         // return: this is the same hand-off shape with the instances swapped.
@@ -1911,6 +1915,136 @@ mod tests {
     }
 
     #[test]
+    fn depends_on_names_cuts() {
+        let depending = |cut: &str, on: &[&str]| {
+            let mut spec = cut_spec(cut, 1);
+            spec.depends_on = on.iter().map(|label| s(label)).collect();
+            D::CutSpec(spec)
+        };
+        let mut mind = seeded();
+        // An unknown label, and a spec id (a revision, not a cut), are refused.
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("2", &["1"])])),
+            MindRefusal::UnknownDependency { cut: "1".into() }
+        );
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("2", &[&id("cut_spec", "cut-1.r1")])])),
+            MindRefusal::UnknownDependency { cut: id("cut_spec", "cut-1.r1") }
+        );
+        // The same batch carries the cut it depends on.
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1)), depending("2", &["1"])]));
+        // The image carries it, and any revision of the cut names it.
+        committed(admit(&mut mind, vec![depending("3", &["1", "2"])]));
+        // A cut of another campaign is not this campaign's cut.
+        let mut other = cut_spec("9", 1);
+        other.campaign = slug("elsewhere");
+        let mut elsewhere = campaign(&[REPO]);
+        if let D::Campaign(campaign) = &mut elsewhere {
+            campaign.slug = slug("elsewhere");
+        }
+        committed(admit(&mut mind, vec![elsewhere, D::CutSpec(other)]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("4", &["9"])])),
+            MindRefusal::UnknownDependency { cut: "9".into() }
+        );
+    }
+
+    #[test]
+    fn depends_on_matches_cut_labels_whole() {
+        let depending = |cut: &str, on: &[&str]| {
+            let mut spec = cut_spec(cut, 1);
+            spec.depends_on = on.iter().map(|label| s(label)).collect();
+            D::CutSpec(spec)
+        };
+        // The image carries cut 10: neither its prefix nor an extension of it names it.
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("10", 1))]));
+        for near in ["1", "100"] {
+            assert_eq!(
+                refusal(admit(&mut mind, vec![depending("11", &[near])])),
+                MindRefusal::UnknownDependency { cut: near.into() }
+            );
+        }
+        // The same holds when the cut arrives in the same batch.
+        for near in ["2", "200"] {
+            assert_eq!(
+                refusal(admit(&mut mind, vec![D::CutSpec(cut_spec("20", 1)), depending("21", &[near])])),
+                MindRefusal::UnknownDependency { cut: near.into() }
+            );
+        }
+        committed(admit(&mut mind, vec![depending("12", &["10"])]));
+    }
+
+    #[test]
+    fn a_cut_may_not_depend_on_itself() {
+        let depending = |cut: &str, revision: u32, on: &[&str]| {
+            let mut spec = cut_spec(cut, revision);
+            spec.depends_on = on.iter().map(|label| s(label)).collect();
+            D::CutSpec(spec)
+        };
+        let mut mind = seeded();
+        // Alone in the batch, and beside another cut it legitimately names.
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("1", 1, &["1"])])),
+            MindRefusal::UnknownDependency { cut: "1".into() }
+        );
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("2", 1))]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("1", 1, &["2", "1"])])),
+            MindRefusal::UnknownDependency { cut: "1".into() }
+        );
+        // An earlier revision of the same cut in the image does not make it a real dependency.
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1))]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("1", 2, &["1"])])),
+            MindRefusal::UnknownDependency { cut: "1".into() }
+        );
+    }
+
+    #[test]
+    fn a_report_head_may_spell_its_commit_short_or_full() {
+        let full = "5f98228d0123456789abcdef0123456789abcdef";
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1))]));
+        // The commit is spelled short and the head full, and the reverse.
+        let mut report = cut_report("1", 1);
+        report.range.head = epiphany_pipeline::Sha(full.into());
+        committed(admit(&mut mind, vec![D::CutReport(report)]));
+        let mut report = cut_report("1", 2);
+        report.commits[0].sha = epiphany_pipeline::Sha(full.into());
+        committed(admit(&mut mind, vec![D::CutReport(report)]));
+        // A head that is no commit's prefix, long or short, is outside.
+        let mut report = cut_report("1", 3);
+        report.range.head = epiphany_pipeline::Sha("5f98229d0123456789abcdef0123456789abcdef".into());
+        assert!(matches!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::RangeOutsideCommits { .. }));
+        let mut report = cut_report("1", 3);
+        report.commits[0].sha = epiphany_pipeline::Sha(full.into());
+        report.range.head = epiphany_pipeline::Sha("5f98229".into());
+        assert!(matches!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::RangeOutsideCommits { .. }));
+    }
+
+    #[test]
+    fn a_finding_defers_to_a_cut_spec() {
+        let finding_ref = r(K::Finding, &id("finding", "cut-1.s1.F1"));
+        let defer_to = |to: PipelineRef| resolution(finding_ref.clone(), ResolutionOutcome::Deferred { to });
+        committed(admit(&mut world(), vec![defer_to(r(K::CutSpec, &id("cut_spec", "cut-1.r1")))]));
+        // A spec superseded since is no longer a place to defer to.
+        let mut mind = world();
+        committed(admit(&mut mind, vec![
+            D::CutSpec(cut_spec("1", 2)),
+            resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), superseded(&[r(K::CutSpec, &id("cut_spec", "cut-1.r2"))])),
+        ]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![defer_to(r(K::CutSpec, &id("cut_spec", "cut-1.r1")))])),
+            MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: id("cut_spec", "cut-1.r1") }
+        );
+        assert_eq!(
+            refusal(admit(&mut world(), vec![defer_to(r(K::Ruling, &id("ruling", "R1")))])),
+            MindRefusal::IncompatibleResolution { subject_kind: K::Finding, outcome: "Deferred".into() }
+        );
+    }
+
+    #[test]
     fn verdict_vocabulary_binds_claims_to_findings_promises_and_mutations() {
         let mut mind = seeded();
         committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1)), D::CutReport(cut_report("1", 1))]));
@@ -2041,27 +2175,15 @@ mod tests {
     }
 
     #[test]
-    fn a_campaign_names_only_repos_this_mind_stewards() {
+    fn a_campaign_needs_no_stewardship() {
         let mut mind = opened(MemoryStore::new(), INSTANCE);
-        assert_eq!(
-            refusal(admit(&mut mind, vec![instance(INSTANCE), campaign(&[REPO])])),
-            MindRefusal::RepoNotStewarded { repo: REPO.into() }
-        );
-        committed(admit(&mut mind, vec![instance(INSTANCE), stewardship(INSTANCE, REPO), campaign(&[REPO])]));
-        // A campaign of no repos is the organ's refusal, not a leaf bound:
-        // "every repo is stewarded" is vacuous and the campaign steers
-        // nothing.
+        committed(admit(&mut mind, vec![instance(INSTANCE), campaign(&[REPO])]));
         let D::Campaign(mut empty) = campaign(&[]) else { panic!() };
         empty.slug = slug("other");
         assert_eq!(
             refusal(admit(&mut mind, vec![D::Campaign(empty)])),
             MindRefusal::EmptyRepos { campaign: "other:campaign:self".into() }
         );
-        // The stewardship may be held in the image: a later campaign over the
-        // same repo carries no stewardship of its own.
-        let D::Campaign(mut second) = campaign(&[REPO]) else { panic!() };
-        second.slug = slug("second");
-        committed(admit(&mut mind, vec![D::Campaign(second)]));
         let mut spec = cut_spec("1", 1);
         spec.repo = repo(OTHER_REPO);
         assert_eq!(refusal(admit(&mut mind, vec![D::CutSpec(spec)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });

@@ -393,7 +393,7 @@
         "Imagination",
         "Hands",
         "Soul",
-        "MindSteward",
+        "Life",
         "Eyes",
         "Operator"
       ]
@@ -1132,26 +1132,6 @@
         {
           "type": "object",
           "properties": {
-            "RepoNotStewarded": {
-              "type": "object",
-              "properties": {
-                "repo": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "repo"
-              ]
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "RepoNotStewarded"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
             "RepoNotInCampaign": {
               "type": "object",
               "properties": {
@@ -1167,6 +1147,26 @@
           "additionalProperties": false,
           "required": [
             "RepoNotInCampaign"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "UnknownDependency": {
+              "type": "object",
+              "properties": {
+                "cut": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cut"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "UnknownDependency"
           ]
         },
         {

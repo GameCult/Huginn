@@ -39,7 +39,7 @@ pub(crate) enum Alias {
     Outcome,
 }
 
-const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "MindSteward", "Eyes", "Operator"];
+const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
 const SEVERITIES: [&str; 4] = ["Blocker", "High", "Medium", "Low"];
 const CONFIDENCES: [&str; 2] = ["Confirmed", "Plausible"];
 const ORIGINS: [&str; 2] = ["Introduced", "PreExisting"];

@@ -1046,6 +1046,9 @@ mod tests {
         // `faculty`: attribution selects, and grants nothing (ruling 18).
         assert_eq!(by("faculty", &["Soul"]), vec![id("ruling", "R2")]);
         assert!(!by("faculty", &["Hands"]).contains(&id("ruling", "R2")));
+        // The renamed faculty is selectable by its new name only.
+        assert!(by("faculty", &["Life"]).is_empty());
+        assert!(invalid("fields[0].values", "MindSteward")(&refused(&mind, &with(Selection::default(), any_of("faculty", &["MindSteward"])))));
 
         // A repo is named by its identity, which is case-insensitive.
         assert_eq!(by("repo", &["GAMECULT/EPIPHANY"]), epiphany);
@@ -1698,11 +1701,20 @@ mod tests {
     fn a_summary_is_bounded_whatever_the_lists() {
         let mut mind = seeded();
         let long = |unit: &str, bytes: usize| unit.repeat(bytes);
+        // depends_on holds cut labels, each a cut that exists (its spec key stays within 64 bytes).
+        let dependencies: Vec<String> = (0..8).map(|n| format!("{n}{}", long("d", 55))).collect();
+        let dependency_specs: Vec<D> = dependencies.iter().map(|label| D::CutSpec(cut_spec(label, 1))).collect();
+        let batch = crate::admission::PipelineAdmissionBatch {
+            instance: slug(INSTANCE),
+            provenance: provenance(Faculty::SelfFaculty),
+            documents: dependency_specs,
+        };
+        committed(mind.admit(batch, now()));
         let mut maximal = cut_spec("1", 1);
         maximal.title = long("t", 200).as_str().into();
         maximal.branch = s(&long("b", 200));
         maximal.base = Sha("a".repeat(40));
-        maximal.depends_on = (0..8).map(|n| s(&format!("{n}{}", long("d", 199)))).collect();
+        maximal.depends_on = dependencies.iter().map(|label| s(label)).collect();
         let maximal_provenance = || PipelineProvenance {
             faculty: Faculty::SelfFaculty,
             agent: s(&long("a", 200)),
@@ -1738,7 +1750,7 @@ mod tests {
         let sizes: Vec<usize> =
             headers(&page).iter().map(|summary| rmp_serde::to_vec_named(summary).unwrap().len()).collect();
         let widest = *sizes.iter().max().unwrap();
-        assert!(widest > 2_000, "the fixture is at its bounds, not a small one: {widest}");
+        assert!(widest > 1_500, "the fixture is at its bounds, not a small one: {widest}");
         assert!(widest <= SUMMARY_MAX_BYTES, "{widest} bytes over {SUMMARY_MAX_BYTES}");
         let closed = headers(&page).iter().find(|summary| summary.id.id.0 == id("ruling", "S0")).unwrap();
         assert!(matches!(&closed.status, PipelineStatusSummary::Resolved { outcome: ResolutionOutcome::Superseded { by }, .. } if by.len() == 8));
