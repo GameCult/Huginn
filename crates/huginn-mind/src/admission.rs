@@ -417,6 +417,14 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
                     return Err(MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: ruling.0.clone() });
                 }
             }
+            for dependency in &spec.depends_on {
+                let names_a_cut = docs.of_kind(K::CutSpec).any(|(_, document)| {
+                    matches!(document, D::CutSpec(other) if other.campaign == spec.campaign && other.cut.0 == dependency.0)
+                });
+                if !names_a_cut {
+                    return Err(MindRefusal::UnknownDependency { cut: dependency.0.clone() });
+                }
+            }
             let predecessor = D::CutSpec(epiphany_pipeline::PipelineCutSpec { revision: spec.revision.wrapping_sub(1), ..spec.clone() });
             revision_rule(docs, K::CutSpec, key, spec.revision, &predecessor)
         }
@@ -1899,6 +1907,41 @@ mod tests {
         assert_eq!(
             refusal(admit(&mut mind, vec![D::CutReport(cut_report("1", 1))])),
             MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: id("cut_spec", "cut-1.r1") }
+        );
+    }
+
+    #[test]
+    fn depends_on_names_cuts() {
+        let depending = |cut: &str, on: &[&str]| {
+            let mut spec = cut_spec(cut, 1);
+            spec.depends_on = on.iter().map(|label| s(label)).collect();
+            D::CutSpec(spec)
+        };
+        let mut mind = seeded();
+        // An unknown label, and a spec id (a revision, not a cut), are refused.
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("2", &["1"])])),
+            MindRefusal::UnknownDependency { cut: "1".into() }
+        );
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("2", &[&id("cut_spec", "cut-1.r1")])])),
+            MindRefusal::UnknownDependency { cut: id("cut_spec", "cut-1.r1") }
+        );
+        // The same batch carries the cut it depends on.
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1)), depending("2", &["1"])]));
+        // The image carries it, and any revision of the cut names it.
+        committed(admit(&mut mind, vec![depending("3", &["1", "2"])]));
+        // A cut of another campaign is not this campaign's cut.
+        let mut other = cut_spec("9", 1);
+        other.campaign = slug("elsewhere");
+        let mut elsewhere = campaign(&[REPO]);
+        if let D::Campaign(campaign) = &mut elsewhere {
+            campaign.slug = slug("elsewhere");
+        }
+        committed(admit(&mut mind, vec![elsewhere, D::CutSpec(other)]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("4", &["9"])])),
+            MindRefusal::UnknownDependency { cut: "9".into() }
         );
     }
 

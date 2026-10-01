@@ -43,6 +43,7 @@ pub enum MindRefusal {
     QuoteWithoutOperator { ruling: String },
     EmptyRepos { campaign: String },
     RepoNotInCampaign { repo: String },
+    UnknownDependency { cut: String },
     CutReportWithoutSpec { report: String },
     SpecMismatch { field: String },
     RangeOutsideCommits { head: String },
