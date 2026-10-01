@@ -418,6 +418,10 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
                 }
             }
             for dependency in &spec.depends_on {
+                // A cut naming itself is no ordering (ruling self-dep).
+                if dependency.0 == spec.cut.0 {
+                    return Err(MindRefusal::UnknownDependency { cut: dependency.0.clone() });
+                }
                 let names_a_cut = docs.of_kind(K::CutSpec).any(|(_, document)| {
                     matches!(document, D::CutSpec(other) if other.campaign == spec.campaign && other.cut.0 == dependency.0)
                 });
@@ -1942,6 +1946,58 @@ mod tests {
         assert_eq!(
             refusal(admit(&mut mind, vec![depending("4", &["9"])])),
             MindRefusal::UnknownDependency { cut: "9".into() }
+        );
+    }
+
+    #[test]
+    fn depends_on_matches_cut_labels_whole() {
+        let depending = |cut: &str, on: &[&str]| {
+            let mut spec = cut_spec(cut, 1);
+            spec.depends_on = on.iter().map(|label| s(label)).collect();
+            D::CutSpec(spec)
+        };
+        // The image carries cut 10: neither its prefix nor an extension of it names it.
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("10", 1))]));
+        for near in ["1", "100"] {
+            assert_eq!(
+                refusal(admit(&mut mind, vec![depending("11", &[near])])),
+                MindRefusal::UnknownDependency { cut: near.into() }
+            );
+        }
+        // The same holds when the cut arrives in the same batch.
+        for near in ["2", "200"] {
+            assert_eq!(
+                refusal(admit(&mut mind, vec![D::CutSpec(cut_spec("20", 1)), depending("21", &[near])])),
+                MindRefusal::UnknownDependency { cut: near.into() }
+            );
+        }
+        committed(admit(&mut mind, vec![depending("12", &["10"])]));
+    }
+
+    #[test]
+    fn a_cut_may_not_depend_on_itself() {
+        let depending = |cut: &str, revision: u32, on: &[&str]| {
+            let mut spec = cut_spec(cut, revision);
+            spec.depends_on = on.iter().map(|label| s(label)).collect();
+            D::CutSpec(spec)
+        };
+        let mut mind = seeded();
+        // Alone in the batch, and beside another cut it legitimately names.
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("1", 1, &["1"])])),
+            MindRefusal::UnknownDependency { cut: "1".into() }
+        );
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("2", 1))]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("1", 1, &["2", "1"])])),
+            MindRefusal::UnknownDependency { cut: "1".into() }
+        );
+        // An earlier revision of the same cut in the image does not make it a real dependency.
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1))]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![depending("1", 2, &["1"])])),
+            MindRefusal::UnknownDependency { cut: "1".into() }
         );
     }
 
