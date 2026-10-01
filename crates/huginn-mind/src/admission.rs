@@ -438,7 +438,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             if report.branch != spec.branch {
                 return Err(MindRefusal::SpecMismatch { field: "branch".into() });
             }
-            if !report.commits.iter().any(|commit| commit.sha == report.range.head) {
+            if !report.commits.iter().any(|commit| commit.sha.names_same_commit(&report.range.head)) {
                 return Err(MindRefusal::RangeOutsideCommits { head: report.range.head.0.clone() });
             }
             Ok(())
@@ -579,7 +579,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::CutSpec, O::Superseded { by }) => all(by, K::CutSpec),
         (K::CutSpec, O::Withdrawn { .. }) => true,
         (K::Finding, O::Fixed { by, .. }) => by.as_ref().is_none_or(|report| report.kind == K::CutReport),
-        (K::Finding, O::Deferred { to }) => to.kind == K::FollowUp,
+        (K::Finding, O::Deferred { to }) => matches!(to.kind, K::FollowUp | K::CutSpec),
         (K::Finding, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::FollowUp, O::Fixed { by, .. }) => by.as_ref().is_none_or(|report| report.kind == K::CutReport),
         (K::FollowUp, O::Superseded { by }) => all(by, K::FollowUp),
@@ -1907,6 +1907,49 @@ mod tests {
         assert_eq!(
             refusal(admit(&mut mind, vec![D::CutReport(cut_report("1", 1))])),
             MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: id("cut_spec", "cut-1.r1") }
+        );
+    }
+
+    #[test]
+    fn a_report_head_may_spell_its_commit_short_or_full() {
+        let full = "5f98228d0123456789abcdef0123456789abcdef";
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1))]));
+        // The commit is spelled short and the head full, and the reverse.
+        let mut report = cut_report("1", 1);
+        report.range.head = epiphany_pipeline::Sha(full.into());
+        committed(admit(&mut mind, vec![D::CutReport(report)]));
+        let mut report = cut_report("1", 2);
+        report.commits[0].sha = epiphany_pipeline::Sha(full.into());
+        committed(admit(&mut mind, vec![D::CutReport(report)]));
+        // A head that is no commit's prefix, long or short, is outside.
+        let mut report = cut_report("1", 3);
+        report.range.head = epiphany_pipeline::Sha("5f98229d0123456789abcdef0123456789abcdef".into());
+        assert!(matches!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::RangeOutsideCommits { .. }));
+        let mut report = cut_report("1", 3);
+        report.commits[0].sha = epiphany_pipeline::Sha(full.into());
+        report.range.head = epiphany_pipeline::Sha("5f98229".into());
+        assert!(matches!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::RangeOutsideCommits { .. }));
+    }
+
+    #[test]
+    fn a_finding_defers_to_a_cut_spec() {
+        let finding_ref = r(K::Finding, &id("finding", "cut-1.s1.F1"));
+        let defer_to = |to: PipelineRef| resolution(finding_ref.clone(), ResolutionOutcome::Deferred { to });
+        committed(admit(&mut world(), vec![defer_to(r(K::CutSpec, &id("cut_spec", "cut-1.r1")))]));
+        // A spec superseded since is no longer a place to defer to.
+        let mut mind = world();
+        committed(admit(&mut mind, vec![
+            D::CutSpec(cut_spec("1", 2)),
+            resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), superseded(&[r(K::CutSpec, &id("cut_spec", "cut-1.r2"))])),
+        ]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![defer_to(r(K::CutSpec, &id("cut_spec", "cut-1.r1")))])),
+            MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: id("cut_spec", "cut-1.r1") }
+        );
+        assert_eq!(
+            refusal(admit(&mut world(), vec![defer_to(r(K::Ruling, &id("ruling", "R1")))])),
+            MindRefusal::IncompatibleResolution { subject_kind: K::Finding, outcome: "Deferred".into() }
         );
     }
 

@@ -36,7 +36,8 @@ pub enum Faculty {
     Imagination,
     Hands,
     Soul,
-    MindSteward,
+    #[serde(alias = "MindSteward")]
+    Life,
     Eyes,
     Operator,
 }
@@ -295,6 +296,17 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+
+    /// A receipt written before the rename spells the faculty `MindSteward`;
+    /// it decodes as `Life`, and `Life` is what a new one writes.
+    #[test]
+    fn life_is_the_faculty_and_the_old_spelling_decodes() {
+        let old = rmp_serde::to_vec_named("MindSteward").unwrap();
+        assert_eq!(rmp_serde::from_slice::<Faculty>(&old).unwrap(), Faculty::Life);
+        let new = rmp_serde::to_vec_named(&Faculty::Life).unwrap();
+        assert_eq!(rmp_serde::from_slice::<String>(&new).unwrap(), "Life");
+    }
+
     use crate::fixtures::{INSTANCE, admit, committed, id, instance, now, opened, prepare, provenance, question, refusal, seed, slug};
     use crate::mind::schema_cache;
     use crate::store::test_stores::MemoryStore;

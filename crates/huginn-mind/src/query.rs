@@ -1046,6 +1046,9 @@ mod tests {
         // `faculty`: attribution selects, and grants nothing (ruling 18).
         assert_eq!(by("faculty", &["Soul"]), vec![id("ruling", "R2")]);
         assert!(!by("faculty", &["Hands"]).contains(&id("ruling", "R2")));
+        // The renamed faculty is selectable by its new name only.
+        assert!(by("faculty", &["Life"]).is_empty());
+        assert!(invalid("fields[0].values", "MindSteward")(&refused(&mind, &with(Selection::default(), any_of("faculty", &["MindSteward"])))));
 
         // A repo is named by its identity, which is case-insensitive.
         assert_eq!(by("repo", &["GAMECULT/EPIPHANY"]), epiphany);
