@@ -797,6 +797,7 @@ mod tests {
         // The census is taken apart from the loop that checks each document.
         let pipeline_envelopes = mind
             .envelopes()
+            .iter()
             .filter(|envelope| PipelineKind::ALL.iter().any(|kind| kind.type_id() == envelope.r#type))
             .count();
         assert!(pipeline_envelopes > 0, "the snapshot held no pipeline document");
