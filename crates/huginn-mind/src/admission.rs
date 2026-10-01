@@ -1698,14 +1698,16 @@ mod tests {
         seed(&mut mind);
         let before = store.rows();
         let receipts = receipt_count(&mind);
-        for document in unkeyable() {
+        for (document, field) in unkeyable().into_iter().zip(["finding.key", "resolution.key"]) {
             document.validate().unwrap();
-            match refusal(admit(&mut mind, vec![document])) {
-                MindRefusal::Document(PipelineRefusal::InvalidFormat { field, .. }) => {
-                    assert!(field.ends_with(".key"), "{field}")
-                }
-                other => panic!("{other:?}"),
-            }
+            // The leaf owns what a key error says; admission must carry it
+            // unchanged, field and offending value included.
+            let leaf = pipeline_key(&document).expect_err("the fixture must not key");
+            assert!(
+                matches!(&leaf, PipelineRefusal::InvalidFormat { field: named, value } if named == field && !value.is_empty()),
+                "{leaf:?}"
+            );
+            assert_eq!(refusal(admit(&mut mind, vec![document])), MindRefusal::Document(leaf), "{field}");
             assert_eq!(store.rows(), before);
             assert_eq!(receipt_count(&mind), receipts);
         }
@@ -1721,10 +1723,8 @@ mod tests {
         let keyable = question("Q1", &["A", "B"], "A");
         assert_eq!(super::prepare(&keyable, &cache).unwrap(), prepare(&keyable));
         for document in unkeyable() {
-            assert!(matches!(
-                super::prepare(&document, &cache),
-                Err(MindRefusal::Document(PipelineRefusal::InvalidFormat { .. }))
-            ));
+            let leaf = pipeline_key(&document).expect_err("the fixture must not key");
+            assert_eq!(super::prepare(&document, &cache).unwrap_err(), MindRefusal::Document(leaf));
         }
     }
 

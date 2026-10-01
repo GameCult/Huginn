@@ -788,17 +788,27 @@ mod tests {
     #[test]
     #[ignore = "reads and writes the scratch copy of a live state root named by HUGINN_MIND_SNAPSHOT"]
     fn snapshot_admits_and_reads_back() {
-        use crate::fixtures::{admit, committed, r, resolution, withdrawn};
+        use crate::fixtures::{admit, r, resolution, withdrawn};
         use epiphany_pipeline::{PipelineRef, ResolutionOutcome, Short, pipeline_key};
 
         let root = std::env::var("HUGINN_MIND_SNAPSHOT").expect("HUGINN_MIND_SNAPSHOT names a scratch copy of the state root");
         let mut mind = Mind::open(Path::new(&root), &slug("eureka")).unwrap();
+
+        // The census is taken apart from the loop that checks each document.
+        let pipeline_envelopes = mind
+            .envelopes()
+            .filter(|envelope| PipelineKind::ALL.iter().any(|kind| kind.type_id() == envelope.r#type))
+            .count();
+        assert!(pipeline_envelopes > 0, "the snapshot held no pipeline document");
 
         let mut viewed = 0;
         let mut resolutions = Vec::new();
         for envelope in mind.envelopes() {
             let Some(kind) = PipelineKind::ALL.iter().copied().find(|kind| kind.type_id() == envelope.r#type) else { continue };
             let stored = PipelineDocument::decode(envelope).unwrap();
+            stored.validate().unwrap_or_else(|refusal| panic!("{} no longer validates: {refusal:?}", envelope.key));
+            let rekeyed = pipeline_key(&stored).unwrap_or_else(|refusal| panic!("{} no longer keys: {refusal:?}", envelope.key));
+            assert_eq!(rekeyed, envelope.key, "stored key differs from the key the leaf computes");
             let view = mind
                 .view(&PipelineRef { kind, id: Short(envelope.key.clone()) })
                 .unwrap()
@@ -812,38 +822,50 @@ mod tests {
             }
             viewed += 1;
         }
-        assert!(viewed > 0, "the snapshot held no pipeline document");
-        println!("viewed {viewed} stored documents unchanged");
+        assert_eq!(viewed, pipeline_envelopes, "every pipeline envelope validates, rekeys and views back");
+        println!("validated, rekeyed and viewed {viewed} stored documents unchanged");
 
-        for local in [
+        let stuck = [
             "cut-bifrost-retire-alarm.s2.verb-default-accepts-malformed",
             "cut-ops-notice-deploy.s2.pinned-bifrost-predates-retry",
             "cut-bifrost-notice-retry.s1.unknown-test-ignores-backoff",
             "cut-bifrost-notice-retry.s2.closed-unknown-retry-unpinned",
             "cut-bifrost-notice-retry.s2.flapping-clock-retries-every-tick",
             "cut-idunn-topology-lock.s2.boot-reconcile-skipped-on-contention",
-        ] {
+        ];
+        let mut resolved = 0;
+        for local in stuck {
             let subject = r(PipelineKind::Finding, &format!("idunn-watchdog:finding:{local}"));
             let outcome = admit(&mut mind, vec![resolution(subject, ResolutionOutcome::Recorded { reason: "snapshot read-back".into() })]);
-            let (_, writes) = committed(outcome);
-            assert_eq!(writes.len(), 1, "{local}");
+            match outcome {
+                PipelineAdmissionOutcome::Committed { writes, .. } => {
+                    assert_eq!(writes.len(), 1, "{local}");
+                    resolved += 1;
+                }
+                other => panic!("stuck finding {local} was not resolved: {other:?}"),
+            }
         }
 
-        let mut tried = 0;
-        let mut withdrew = None;
+        assert_eq!(resolved, stuck.len(), "every stuck finding resolves");
+
+        let mut candidates = Vec::new();
         for key in resolutions {
             let withdrawal = resolution(r(PipelineKind::Resolution, &key), withdrawn());
-            let withdrawal_key = pipeline_key(&withdrawal).unwrap();
-            if withdrawal_key.rsplit(':').next().unwrap().len() <= 64 {
-                continue;
-            }
-            tried += 1;
-            if let PipelineAdmissionOutcome::Committed { .. } = admit(&mut mind, vec![withdrawal]) {
-                withdrew = Some(withdrawal_key);
-                break;
+            let withdrawal_key = pipeline_key(&withdrawal).unwrap_or_else(|refusal| panic!("withdrawal of {key} does not key: {refusal:?}"));
+            if withdrawal_key.rsplit(':').next().unwrap().len() > 64 {
+                candidates.push((key, withdrawal));
             }
         }
-        let withdrew = withdrew.unwrap_or_else(|| panic!("no stored resolution with a withdrawal key over 64 bytes withdrew; tried {tried}"));
-        println!("withdrew a resolution under a {}-byte key", withdrew.len());
+        assert!(!candidates.is_empty(), "no stored resolution had a withdrawal key over 64 bytes");
+        let wanted = candidates.len();
+        let mut withdrew = 0;
+        for (key, withdrawal) in candidates {
+            match admit(&mut mind, vec![withdrawal]) {
+                PipelineAdmissionOutcome::Committed { .. } => withdrew += 1,
+                other => panic!("withdrawal of {key} was not committed: {other:?}"),
+            }
+        }
+        assert_eq!(withdrew, wanted, "every candidate withdraws");
+        println!("withdrew {withdrew} resolutions whose withdrawal keys exceed 64 bytes");
     }
 }
