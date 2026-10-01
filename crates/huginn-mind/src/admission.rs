@@ -29,7 +29,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use cultcache_rs::CultCacheEnvelope;
+use cultcache_rs::{CultCache, CultCacheEnvelope};
 use epiphany_pipeline::{
     ClaimOutcome, FindingConfidence, Line, PipelineDocument, PipelineKind, PipelineRef, PipelineRefusal,
     PipelineResolution, PipelineStewardship, ResolutionOutcome, RulingAuthority, Short, Slug, pipeline_key,
@@ -67,6 +67,14 @@ pub enum PipelineAdmissionOutcome {
     Conflict { identities: Vec<PipelineRef> },
 }
 
+/// Keys a document through the leaf, then encodes it. A key the leaf cannot
+/// compose is the document's fault and is refused as a document; only the
+/// cache's encode fault is the organ's.
+fn prepare(document: &PipelineDocument, cache: &CultCache) -> Result<CultCacheEnvelope, MindRefusal> {
+    pipeline_key(document).map_err(MindRefusal::Document)?;
+    document.prepare(cache).map_err(unavailable)
+}
+
 impl<S: MindStore> Mind<S> {
     /// Validates and prepares every document through the leaf, then admits
     /// the envelopes.
@@ -76,9 +84,9 @@ impl<S: MindStore> Mind<S> {
             if let Err(refusal) = document.validate() {
                 return PipelineAdmissionOutcome::Refused(MindRefusal::Document(refusal));
             }
-            match document.prepare(self.cache()) {
+            match prepare(document, self.cache()) {
                 Ok(envelope) => envelopes.push(envelope),
-                Err(error) => return PipelineAdmissionOutcome::Refused(unavailable(error)),
+                Err(refusal) => return PipelineAdmissionOutcome::Refused(refusal),
             }
         }
         self.admit_prepared(&batch.instance, batch.provenance, envelopes, now)
@@ -133,7 +141,7 @@ impl<S: MindStore> Mind<S> {
         let originals = docs.batch.len();
         for document in derive(&docs, &mind) {
             document.validate()?;
-            let envelope = document.prepare(self.cache()).map_err(unavailable)?;
+            let envelope = prepare(&document, self.cache())?;
             docs.push(stage(envelope, &mind)?)?;
         }
         for staged in &docs.batch[originals..] {
@@ -684,6 +692,8 @@ fn refuse_collisions(docs: &Docs) -> Result<(), MindRefusal> {
 mod tests {
     use super::*;
     use crate::fixtures::*;
+    use crate::fixtures::prepare;
+    use crate::mind::schema_cache;
     use crate::receipt::{DocumentVersion, Faculty, HuginnCommitReceipt};
     use crate::store::test_stores::{MemoryStore, RefusingStore, SwapCommand};
     use cultcache_rs::DatabaseEntry;
@@ -1669,6 +1679,53 @@ mod tests {
             refusal(admit(&mut mind, vec![resolution(subject, superseded(&[r(K::Ruling, &id("ruling", "R2"))]))])),
             MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: id("ruling", "R2") }
         );
+    }
+
+    /// refusals-typed: a document the leaf cannot key is the client's fault.
+    /// The finding's local is 64 bytes of label under `cut-1.s1.`; the
+    /// resolution's subject is a resolution whose own local leaves no room for
+    /// a third nesting. Both pass `validate` and fail only at the key.
+    fn unkeyable() -> Vec<D> {
+        let wide = D::Finding(finding("1", 1, &"w".repeat(64), FindingConfidence::Confirmed));
+        let deep_subject = id("resolution", &format!("{}.{}", "x".repeat(60), "y".repeat(40)));
+        vec![wide, resolution(r(K::Resolution, &deep_subject), withdrawn())]
+    }
+
+    #[test]
+    fn an_unkeyable_document_is_refused_as_a_document() {
+        let store = RefusingStore::new();
+        let mut mind = opened(store.clone(), INSTANCE);
+        seed(&mut mind);
+        let before = store.rows();
+        let receipts = receipt_count(&mind);
+        for document in unkeyable() {
+            document.validate().unwrap();
+            match refusal(admit(&mut mind, vec![document])) {
+                MindRefusal::Document(PipelineRefusal::InvalidFormat { field, .. }) => {
+                    assert!(field.ends_with(".key"), "{field}")
+                }
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(store.rows(), before);
+            assert_eq!(receipt_count(&mind), receipts);
+        }
+    }
+
+    /// The derived path (`admit_steps`) shares the helper. No derivable
+    /// document can fail to key after the leaf's per-kind bound (a derived
+    /// resolution is depth one or two over a subject of at most 64 bytes), so
+    /// the helper is pinned directly.
+    #[test]
+    fn prepare_classifies_a_key_refusal_as_a_document_and_encodes_the_rest() {
+        let cache = schema_cache().unwrap();
+        let keyable = question("Q1", &["A", "B"], "A");
+        assert_eq!(super::prepare(&keyable, &cache).unwrap(), prepare(&keyable));
+        for document in unkeyable() {
+            assert!(matches!(
+                super::prepare(&document, &cache),
+                Err(MindRefusal::Document(PipelineRefusal::InvalidFormat { .. }))
+            ));
+        }
     }
 
     #[test]

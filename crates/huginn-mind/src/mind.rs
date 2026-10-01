@@ -355,6 +355,7 @@ fn snapshot(cache: &CultCache) -> Vec<CultCacheEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admission::PipelineAdmissionOutcome;
     use crate::fixtures::{INSTANCE, epoch, instance, prepare, slug};
     use crate::store::test_stores::MemoryStore;
     use cultcache_rs::CacheBackingStore;
@@ -777,5 +778,72 @@ mod tests {
                 value: declared.0.clone(),
             }))
         );
+    }
+
+    /// stored-documents-valid and every-subject-resolvable, against the real
+    /// mind: every stored document views back unchanged; the six findings the
+    /// 64-byte bound left unresolvable take a resolution; and a stored
+    /// resolution whose withdrawal key is over 64 bytes is withdrawn. Run it
+    /// on a scratch copy of the state root only: it writes.
+    #[test]
+    #[ignore = "reads and writes the scratch copy of a live state root named by HUGINN_MIND_SNAPSHOT"]
+    fn snapshot_admits_and_reads_back() {
+        use crate::fixtures::{admit, committed, r, resolution, withdrawn};
+        use epiphany_pipeline::{PipelineRef, ResolutionOutcome, Short, pipeline_key};
+
+        let root = std::env::var("HUGINN_MIND_SNAPSHOT").expect("HUGINN_MIND_SNAPSHOT names a scratch copy of the state root");
+        let mut mind = Mind::open(Path::new(&root), &slug("eureka")).unwrap();
+
+        let mut viewed = 0;
+        let mut resolutions = Vec::new();
+        for envelope in mind.envelopes() {
+            let Some(kind) = PipelineKind::ALL.iter().copied().find(|kind| kind.type_id() == envelope.r#type) else { continue };
+            let stored = PipelineDocument::decode(envelope).unwrap();
+            let view = mind
+                .view(&PipelineRef { kind, id: Short(envelope.key.clone()) })
+                .unwrap()
+                .unwrap_or_else(|| panic!("{} does not view", envelope.key));
+            assert_eq!(view.document, stored, "{}", envelope.key);
+            if let PipelineDocument::Resolution(held) = &stored
+                && !matches!(held.outcome, epiphany_pipeline::ResolutionOutcome::Withdrawn { .. })
+                && !envelope.key.contains(":resolution:resolution.")
+            {
+                resolutions.push(envelope.key.clone());
+            }
+            viewed += 1;
+        }
+        assert!(viewed > 0, "the snapshot held no pipeline document");
+        println!("viewed {viewed} stored documents unchanged");
+
+        for local in [
+            "cut-bifrost-retire-alarm.s2.verb-default-accepts-malformed",
+            "cut-ops-notice-deploy.s2.pinned-bifrost-predates-retry",
+            "cut-bifrost-notice-retry.s1.unknown-test-ignores-backoff",
+            "cut-bifrost-notice-retry.s2.closed-unknown-retry-unpinned",
+            "cut-bifrost-notice-retry.s2.flapping-clock-retries-every-tick",
+            "cut-idunn-topology-lock.s2.boot-reconcile-skipped-on-contention",
+        ] {
+            let subject = r(PipelineKind::Finding, &format!("idunn-watchdog:finding:{local}"));
+            let outcome = admit(&mut mind, vec![resolution(subject, ResolutionOutcome::Recorded { reason: "snapshot read-back".into() })]);
+            let (_, writes) = committed(outcome);
+            assert_eq!(writes.len(), 1, "{local}");
+        }
+
+        let mut tried = 0;
+        let mut withdrew = None;
+        for key in resolutions {
+            let withdrawal = resolution(r(PipelineKind::Resolution, &key), withdrawn());
+            let withdrawal_key = pipeline_key(&withdrawal).unwrap();
+            if withdrawal_key.rsplit(':').next().unwrap().len() <= 64 {
+                continue;
+            }
+            tried += 1;
+            if let PipelineAdmissionOutcome::Committed { .. } = admit(&mut mind, vec![withdrawal]) {
+                withdrew = Some(withdrawal_key);
+                break;
+            }
+        }
+        let withdrew = withdrew.unwrap_or_else(|| panic!("no stored resolution with a withdrawal key over 64 bytes withdrew; tried {tried}"));
+        println!("withdrew a resolution under a {}-byte key", withdrew.len());
     }
 }
