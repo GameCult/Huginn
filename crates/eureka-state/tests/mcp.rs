@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use huginn_mind::envelope::{OperationFailure, encode_failure, encode_response};
 use huginn_mind::{HuginnMindRequest, HuginnMindResponse};
-use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef, Short};
+use huginn_mind::epiphany_pipeline::{Date, PipelineDocument, PipelineKind, PipelineRef, Short};
 use serde_json::{Value, json};
 
 mod common;
@@ -529,4 +529,36 @@ fn absent() -> Value {
 fn initialize_advertises_tools() {
     let mcp = Mcp::at(INSTANCE, closed_port());
     assert!(mcp.init["capabilities"]["tools"].is_object(), "{}", mcp.init);
+}
+
+/// A document the leaf cannot key is the client's fault, and the tool result
+/// carries the leaf's own refusal: the same field and the same offending
+/// value `pipeline_key` computes for that document, never a re-built one.
+#[test]
+fn admit_carries_the_leaf_key_refusal_with_its_field_and_value() {
+    use huginn_mind::epiphany_pipeline::{PipelineResolution, ResolutionOutcome, pipeline_key};
+
+    let (root, daemon) = mind(vec![vec![stewardship()]]);
+    let server = serve(root, daemon);
+    let mut mcp = Mcp::at(INSTANCE, server.addr);
+    // A resolution of a resolution of a resolution: it validates and has no
+    // room left in the key for a third nesting.
+    let subject = format!("{CAMPAIGN}:resolution:{}.{}", "x".repeat(60), "y".repeat(40));
+    let document = PipelineDocument::Resolution(PipelineResolution {
+        subject: PipelineRef { kind: PipelineKind::Resolution, id: Short(subject) },
+        sequence: 1,
+        outcome: ResolutionOutcome::Withdrawn { reason: "moot".into() },
+        rationale: "Resolved.".into(),
+        resolved_on: Date("2026-09-29".into()),
+    });
+    document.validate().unwrap();
+    let leaf = pipeline_key(&document).expect_err("the fixture must not key");
+    let expected = serde_json::to_value(&leaf).unwrap();
+    assert_eq!(expected["InvalidFormat"]["field"], json!("resolution.key"));
+
+    let (error, refused) = mcp.call("admit", faculty_args(vec![serde_json::to_value(&document).unwrap()]));
+    assert!(!error, "{refused}");
+    assert_eq!(refused["Refused"]["Document"], expected, "{refused}");
+    let (_, whoami) = mcp.call("whoami", json!({}));
+    assert_eq!(whoami["status"]["receipts"], json!(2), "only the seed is committed: {whoami}");
 }

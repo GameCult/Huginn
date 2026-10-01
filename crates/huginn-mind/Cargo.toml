@@ -19,7 +19,7 @@ base64 = "0.22"
 chrono = "0.4.44"
 cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultcache-rs" }
 cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultnet-rs" }
-epiphany-pipeline = { git = "https://github.com/GameCult/Epiphany.git", rev = "73edee5cdaddece8bda9c6c3271e8ddd064337f9", package = "epiphany-pipeline" }
+epiphany-pipeline = { git = "https://github.com/GameCult/Epiphany.git", rev = "ef9568655e75bb6cb362a038e2739a5ac5e777ee", package = "epiphany-pipeline" }
 rmp-serde = "1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
