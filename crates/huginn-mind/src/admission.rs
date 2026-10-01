@@ -368,11 +368,6 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             if campaign.repos.is_empty() {
                 return Err(MindRefusal::EmptyRepos { campaign: key.into() });
             }
-            for repo in &campaign.repos {
-                if docs.stewardship_of(mind, repo, None).is_none() {
-                    return Err(MindRefusal::RepoNotStewarded { repo: repo.0.clone() });
-                }
-            }
             Ok(())
         }
         D::Target(target) => {
@@ -1350,14 +1345,11 @@ mod tests {
             receipt.strong_reads
         );
 
-        // Nothing stewards the repo now, and `stewardship_of` says so: a new
-        // campaign over it is refused.
+        // Nothing stewards the repo now, and a campaign over it still admits:
+        // campaign admission reads no stewardship (ruling stewardship-rule).
         let D::Campaign(mut second) = campaign(&[REPO]) else { panic!() };
         second.slug = slug("second");
-        assert_eq!(
-            refusal(admit(&mut mind, vec![D::Campaign(second)])),
-            MindRefusal::RepoNotStewarded { repo: REPO.into() }
-        );
+        committed(admit(&mut mind, vec![D::Campaign(second)]));
 
         // Handed back, the mind stewards it again, as `n2`. No field names a
         // return: this is the same hand-off shape with the instances swapped.
@@ -2084,27 +2076,15 @@ mod tests {
     }
 
     #[test]
-    fn a_campaign_names_only_repos_this_mind_stewards() {
+    fn a_campaign_needs_no_stewardship() {
         let mut mind = opened(MemoryStore::new(), INSTANCE);
-        assert_eq!(
-            refusal(admit(&mut mind, vec![instance(INSTANCE), campaign(&[REPO])])),
-            MindRefusal::RepoNotStewarded { repo: REPO.into() }
-        );
-        committed(admit(&mut mind, vec![instance(INSTANCE), stewardship(INSTANCE, REPO), campaign(&[REPO])]));
-        // A campaign of no repos is the organ's refusal, not a leaf bound:
-        // "every repo is stewarded" is vacuous and the campaign steers
-        // nothing.
+        committed(admit(&mut mind, vec![instance(INSTANCE), campaign(&[REPO])]));
         let D::Campaign(mut empty) = campaign(&[]) else { panic!() };
         empty.slug = slug("other");
         assert_eq!(
             refusal(admit(&mut mind, vec![D::Campaign(empty)])),
             MindRefusal::EmptyRepos { campaign: "other:campaign:self".into() }
         );
-        // The stewardship may be held in the image: a later campaign over the
-        // same repo carries no stewardship of its own.
-        let D::Campaign(mut second) = campaign(&[REPO]) else { panic!() };
-        second.slug = slug("second");
-        committed(admit(&mut mind, vec![D::Campaign(second)]));
         let mut spec = cut_spec("1", 1);
         spec.repo = repo(OTHER_REPO);
         assert_eq!(refusal(admit(&mut mind, vec![D::CutSpec(spec)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });

@@ -42,7 +42,6 @@ pub enum MindRefusal {
     InvalidChoice { ruling: String, choice: String },
     QuoteWithoutOperator { ruling: String },
     EmptyRepos { campaign: String },
-    RepoNotStewarded { repo: String },
     RepoNotInCampaign { repo: String },
     CutReportWithoutSpec { report: String },
     SpecMismatch { field: String },
