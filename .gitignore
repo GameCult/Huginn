@@ -1,5 +1,2 @@
 node_modules/
-dist-test/
-dist-inspector/
-release/
-release-inspector/
+target/

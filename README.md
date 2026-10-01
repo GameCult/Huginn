@@ -1,74 +1,94 @@
 # Huginn
 
-Huginn reads CultCache `.cc` state and emits Eve DSL for inspectable witness
-surfaces.
-
-CultLib owns the CultCache implementation: document registration, MessagePack
-payloads, schema catalogs, backing stores, and the canonical
-`cultcache.store.v1` snapshot parser/writer. Huginn consumes CultLib's
-`cultcache-ts/inspection` surface and projects inspection results into UI
-documents that Eve-capable runtimes can lower.
+Huginn is the GameCult memory organ. It owns each agent instance's mind as
+typed state: what an instance remembers, which of that memory is admitted to
+steer its next action, and the provenance of every admitted claim.
 
 Upstream: `https://github.com/GameCult/Huginn.git`
 
 ## Authority
 
-- Owner: Huginn owns `.cc` inspection projection, not `.cc` persistence.
-- Input: `.cc`, `.msgpack`, or `.mpack` bytes readable by CultLib.
-- Output: Eve DSL for `cultcache.huginn.inspector`.
-- Renderers: browser, native, overlay, TUI, or future rooms lower the emitted
-  DSL without becoming state owners.
+- An instance owns its mind; Huginn owns the state. Huginn is the single
+  writer of an instance's memory documents. No other service, script, or agent
+  writes them.
+- Memory documents are CultCache state. `huginn-mind` persists them through
+  CultLib's Rust CultCache into a redb store at
+  `<state_root>/minds/<instance>/mind.redb`. `huginn-daemon` serves one such
+  mind over CultNet RUDP: admission and the read side ride
+  `cultnet.operation_request.v0` and `cultnet.operation_response.v0`, and the
+  two wire schemas answer a schema catalog request.
+- Retrieval depends on Qdrant directly, with no second store and no second
+  writer. `huginn-daemon` keeps one collection per mind, `huginn_mind_<instance>`,
+  as a projection of the mind: one worker thread embeds each indexable
+  document through Ollama and writes its point, off the serving path, and a
+  restart compares the mind with the collection and writes what is missing. An
+  unreachable Qdrant or Ollama shows in `whoami` as the index's status and is
+  retried; admission never waits on it. The daemon requires `--qdrant-url`,
+  `--ollama-url` and `--embedding-model`. A `query` carrying `semantic` is
+  answered through the same selection as any other: the index supplies
+  candidate ids and scores, and the mind keeps only the documents it holds and
+  the selection admits (ask for `in_force` to exclude resolved ones), ordered by
+  score. It takes no cursor, and it is refused `Unavailable` while the index is
+  failing or refused.
+- Mind state is not version-controlled. It lives in Huginn's store, not in
+  any repository.
 
-There is no Electron app, Vite dashboard, React renderer, or Norn-owned
-presentation path in this repo. If a runtime wants to display Huginn, it should
-consume the emitted Eve DSL.
+Generic `.cc` inspection is not Huginn's job. CultCache Studio inspects and
+edits `.cc` state. Huginn reads and writes minds.
 
-## Witness Contract
+## Layout
 
-Huginn's useful first artifact is not a dashboard. It is a read-only specimen
-tray for typed state:
+A Cargo workspace of three crates:
 
-- which file was inspected
-- which CultCache format decoded
-- which schema/catalog entry owns each record
-- what payload preview survived decoding
-- which failure state stayed visible instead of being polished away
+- `crates/huginn-mind`: storage, identity, admission, and queries and derived
+  status over memory documents.
+- `crates/huginn-daemon`: the CultNet surface. The socket, the sessions and
+  the process, and no rule. The operation envelope both sides speak is
+  `huginn-mind`'s.
+- `crates/eureka-state`: the client core, `HuginnClient::call`: one request to a
+  daemon over CultNet RUDP, a deferred answer resolved, and no state.
 
-The inspector may make evidence easier to read. It must not mutate canonical
-bytes, bless missing schemas, or let a renderer become the source of truth.
+`huginn-mind` is live: it opens one instance's store (an owned redb CultCache
+at `<state_root>/minds/<instance>/mind.redb`, locked for the mind's lifetime),
+and refuses a store whose `instance` document names another instance, whose
+epoch record is foreign, or whose types are not a mind's. It admits batches
+of pipeline documents through one commit path: the leaf's bounds, formats and
+keys, then the organ's cross-document rules (references, in-force status,
+the resolution matrix, derived resolutions and stewardships), then one
+compare-and-swap that lands the batch whole with a receipt naming the exact
+bytes it read and wrote. An exact replay answers with the stored receipt.
+It reads them back the same way: a document with the facts of its admission
+joined from that receipt and its status derived at read time, and typed
+queries over one mind. Status is never stored, and the views derive it
+through the same rules admission does. Document shape and keys come from
+`epiphany-pipeline`; the store is CultLib's Rust CultCache.
 
-## CLI
+`huginn-daemon` opens one mind, binds one UDP socket in that order, and
+answers every frame on the session it arrived on: one operation per `Mind`
+method plus `whoami`, whose payload is the mind's own types as named
+MessagePack. A refusal is an answer with a `rejected` status, never a
+transport error; an envelope that does not decode is answered with a typed
+failure and reaches no mind. The two schemas it publishes live in
+`schemas/cultnet/` and are pinned to their derivation by a test. There is no
+index yet.
 
-```sh
-npm install
-npm run build
-npx huginn path/to/state.cc > huginn.eve
-```
-
-The CLI writes Eve DSL to stdout and errors to stderr.
-
-## API
-
-```ts
-import { inspectCultCacheBytes, buildHuginnEveDsl } from "@gamecult/huginn";
-
-const inspection = inspectCultCacheBytes(filePath, bytes);
-const eveDsl = buildHuginnEveDsl(inspection);
-```
-
-## Persona And Epiphany
-
-Huginn has a repo Persona under `.voidbot/voice`. The Persona's current
-jurisdiction is this repository body, `E:\Projects\Huginn`, and its useful
-pressure is simple: return from the world with evidence, not vibes.
-
-Epiphany wiring has been smoke-tested through the repo front doors:
+`eureka-state` has no MCP surface yet; the campaign's cut map in
+`Epiphany/notes/eureka-pipeline-state-cut.md` owns what each crate must do
+next.
 
 ```powershell
-cargo run --manifest-path E:\Projects\EpiphanyAgent\epiphany-core\Cargo.toml --bin epiphany-repo -- init --workspace E:\Projects\Huginn
-cargo run --manifest-path E:\Projects\EpiphanyAgent\epiphany-core\Cargo.toml --bin epiphany-swarm -- online --workspace E:\Projects\Huginn
+cargo check --workspace
+cargo run -p huginn-daemon -- --state-root <abs> --instance <slug> --bind 127.0.0.1:17872 `
+  --qdrant-url http://127.0.0.1:6333 --ollama-url http://10.77.0.4:11434 --embedding-model qwen3-embedding:0.6b
 ```
 
-Live fire should happen on an `epiphany/*` or `codex/*` workbench branch.
-Publication to `main` remains a maintainer/Bifrost decision, not something the
-inspection projection owns.
+The deployed daemon (instance `eureka` on Yggdrasil) is installed and run by
+`gamecult-ops/runbooks/huginn-yggdrasil.md`.
+
+## Persona
+
+Huginn's legacy repo Persona lives under `.voidbot/`. Its `state/huginn.cc`
+holds legacy `void.*` documents and its `voice/identity.json` names the
+Persona. The two disagree about jurisdiction; that migration belongs to the
+portable-Persona work, not to this workspace, and nothing here reads or writes
+`.voidbot/`.

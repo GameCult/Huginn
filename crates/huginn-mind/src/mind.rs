@@ -1,0 +1,781 @@
+//! The mind: one instance's store, opened fail-closed, and its image.
+//!
+//! Ruling 14: a store is canonical to exactly one instance, and the identity
+//! lives in the state, in the `instance` document, not in a path. The path
+//! under the state root is derived from the slug for convenience; the
+//! document is the authority, and a store moved to another instance's
+//! directory is refused. Ruling 15: one writer, the owned redb store's
+//! lifetime-long exclusive lock. Ruling 20's analogue: the opener validates
+//! every gate before it attaches, so a refused store is never read into an
+//! image.
+
+use std::path::{Path, PathBuf};
+
+use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, OwnedRedbMessagePackBackingStore};
+use cultnet_rs::CursorKey;
+use epiphany_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineKind, Slug, register_pipeline_document_types};
+
+use crate::receipt::HuginnCommitReceipt;
+use crate::refusal::MindRefusal;
+use crate::store::MindStore;
+
+/// The store's record of the schema epoch it was written at, keyed by the
+/// epoch string. Derived by admission on the first write; read by the opener,
+/// which refuses a store written at any other epoch (`ForeignEpoch`) so a
+/// breaking schema bump refuses the old store instead of misreading it.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "huginn.mind_epoch.v1", schema = "HuginnMindEpoch")]
+pub struct HuginnMindEpoch {
+    #[cultcache(key = 0)]
+    pub schema_epoch: String,
+}
+
+impl HuginnMindEpoch {
+    /// The one envelope the record ever has: the current epoch, keyed by
+    /// itself. Admission appends it to the first write.
+    pub(crate) fn envelope(cache: &CultCache) -> Result<CultCacheEnvelope, MindRefusal> {
+        let record = Self { schema_epoch: PIPELINE_SCHEMA_EPOCH.to_string() };
+        cache
+            .prepare_entry_named(PIPELINE_SCHEMA_EPOCH, &record)
+            .map(|(envelope, _)| envelope)
+            .map_err(unavailable)
+    }
+}
+
+/// A store or cache error, carried as data.
+pub(crate) fn unavailable(error: anyhow::Error) -> MindRefusal {
+    MindRefusal::Unavailable { detail: format!("{error:#}") }
+}
+
+/// A declared name's grammar, checked before its bytes are compared to
+/// anything or reach the filesystem. `Slug` is `epiphany_pipeline`'s,
+/// dot-joined ASCII labels, and the leaf now opens a public door onto its own
+/// check, `Slug::validate_slug`, on the pattern of `PipelineRef::validate_ref`
+/// (Self's ruling on the F6 fork): the grammar is the leaf's, never
+/// re-derived here, so a fold that widens what counts as ASCII (a fullwidth
+/// character folded to its plain form, say) has nothing local to weaken.
+///
+/// The leaf's own refusal names its own field, `slug`, and for a dotted name
+/// the one label that failed rather than the whole declared name; a caller
+/// here reports neither, since both would misname what the caller actually
+/// sent. This instead names the field the declared name was held under and
+/// the whole declared name, so `require_instance` and `Mind::open` each
+/// refuse by the name a client can recognise, not `instance.instance` (the
+/// old wrapper's field, a client never sent) and not a label fragment.
+fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefusal> {
+    declared.validate_slug().map_err(|_| {
+        MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            field: field.into(),
+            value: declared.0.clone(),
+        })
+    })
+}
+
+/// A cache that knows the fifteen types a mind's store may hold: the leaf's
+/// thirteen through its registrar, the epoch record and the commit receipt.
+/// It is the cache every envelope is prepared against.
+pub(crate) fn schema_cache() -> Result<CultCache, MindRefusal> {
+    let mut cache = CultCache::new();
+    register_pipeline_document_types(&mut cache).map_err(unavailable)?;
+    cache.register_entry_type::<HuginnMindEpoch>().map_err(unavailable)?;
+    cache.register_entry_type::<HuginnCommitReceipt>().map_err(unavailable)?;
+    Ok(cache)
+}
+
+fn is_known_type(type_id: &str) -> bool {
+    type_id == HuginnMindEpoch::TYPE
+        || type_id == HuginnCommitReceipt::TYPE
+        || PipelineKind::ALL.iter().any(|kind| kind.type_id() == type_id)
+}
+
+/// One instance's mind: the declared instance, the store, the registered
+/// cache attached to it, and the image (the store's envelopes as last pulled,
+/// in identity order). The image is a cache of the store and is re-pulled
+/// after every commit; nothing writes it directly.
+pub struct Mind<S: MindStore> {
+    instance: Slug,
+    store: S,
+    cache: CultCache,
+    image: Vec<CultCacheEnvelope>,
+    /// Mints and verifies this process's selection cursors. Never stored: a
+    /// cursor does not survive a reopen, which the substrate accepts.
+    cursor_key: CursorKey,
+}
+
+impl Mind<OwnedRedbMessagePackBackingStore> {
+    /// `<state_root>/minds/<instance>/mind.redb`. Derived for convenience;
+    /// the `instance` document inside is the identity. Private: every caller
+    /// that can reach a raw path must go through the grammar door first, so
+    /// this is never exposed on its own. `open` calls it only after
+    /// `require_grammatical_slug` has already passed.
+    fn path_for(state_root: &Path, instance: &Slug) -> PathBuf {
+        state_root.join("minds").join(&instance.0).join("mind.redb")
+    }
+
+    /// Test-only door onto the same path: validates through
+    /// `require_grammatical_slug` first, exactly as `open` does, so a test
+    /// that must reach the raw store directly (to break a row on purpose)
+    /// cannot bypass the grammar the way the old public `path_for` did. Built
+    /// only for `cfg(test)` in this crate and for `huginn-daemon`'s own tests
+    /// via the `test-support` feature; never compiled into a release binary.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn store_path_for(state_root: &Path, instance: &Slug) -> Result<PathBuf, MindRefusal> {
+        require_grammatical_slug("instance", instance)?;
+        Ok(Self::path_for(state_root, instance))
+    }
+
+    /// Opens the instance's mind under the state root, taking the store's
+    /// exclusive lock for the mind's lifetime. A second owner of the same
+    /// path, in this process or another, is `MindAlreadyOwned`. An empty
+    /// store is a valid open; only the first admission may write into it.
+    pub fn open(state_root: &Path, instance: &Slug) -> Result<Self, MindRefusal> {
+        require_grammatical_slug("instance", instance)?;
+        let path = Self::path_for(state_root, instance);
+        let store = OwnedRedbMessagePackBackingStore::new(&path).map_err(|error| {
+            // The store reports a held lock as an error like any other; its
+            // message is the only signal, so it is matched here, once.
+            if format!("{error:#}").contains("already has an active owner") {
+                MindRefusal::MindAlreadyOwned { path: path.display().to_string() }
+            } else {
+                unavailable(error)
+            }
+        })?;
+        Self::open_checked(store, instance)
+    }
+}
+
+impl<S: MindStore> Mind<S> {
+    /// Test-only door onto the same fail-closed sequence `open` runs, for a
+    /// store already in hand (planted directly, or opened by a test through
+    /// `store_path_for`). Gated exactly like `store_path_for`: it compiles
+    /// only under `cfg(test)` in this crate or for a dependent's own tests
+    /// via the `test-support` feature. `huginn-daemon` enables that feature
+    /// only in `[dev-dependencies]`, so a plain `cargo build --release -p
+    /// huginn-daemon` never pulls it into the shipped binary; but
+    /// `--all-targets` (and `cargo test`) unifies dev-dependency features
+    /// across the whole invocation, and that build's `huginn-daemon` binary
+    /// does carry `open_with`. As of this writing no Idunn deploy recipe for
+    /// Huginn exists to pin which of those commands is the actual shipped
+    /// build, so treat this as the open question rather than a settled
+    /// release-only guarantee. A second in-process owner of one store is not
+    /// yet sealed for every `MindStore` impl (F2's recorded follow-up);
+    /// production reaches this sequence only through `Mind::open`, which
+    /// takes the per-path redb lock first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_with(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
+        Self::open_checked(store, instance)
+    }
+
+    /// Fail-closed, in this order, nothing attached until every step passes:
+    /// pull the raw envelopes; if anything is stored, exactly one epoch
+    /// record at the current epoch; every type is one of the fifteen; and
+    /// exactly one `instance` document naming the declared instance; then
+    /// register, attach and pull. The epoch gate runs first so a store
+    /// written at a foreign epoch is refused as `ForeignEpoch`, never as
+    /// `ForeignStore`: a real epoch bump always moves every type id, so the
+    /// type gate would otherwise fire first and the epoch gate would never
+    /// be reached for the one case it exists for (F5). This is the one
+    /// construction site of a `Mind`; `open` and the test-only `open_with`
+    /// both call it and neither reimplements it.
+    fn open_checked(store: S, instance: &Slug) -> Result<Self, MindRefusal> {
+        require_grammatical_slug("instance", instance)?;
+        let raw = store.pull_all().map_err(unavailable)?;
+        refuse_foreign_epoch(&raw)?;
+        refuse_foreign_types(&raw)?;
+        refuse_foreign_identity(&raw, instance)?;
+        let (cache, image) = attach(store.clone())?;
+        Ok(Self { instance: instance.clone(), store, cache, image, cursor_key: CursorKey::random() })
+    }
+
+    pub fn instance(&self) -> &Slug {
+        &self.instance
+    }
+
+    /// Ruling 14 across every transport: the declared instance is this mind's,
+    /// else `ForeignInstance { declared, mind }`. A1 for admission; the daemon
+    /// asks it for every read that names an instance, and compares nothing
+    /// itself.
+    pub fn require_instance(&self, declared: &Slug) -> Result<(), MindRefusal> {
+        require_grammatical_slug("declared", declared)?;
+        if declared != self.instance() {
+            return Err(MindRefusal::ForeignInstance {
+                declared: declared.0.clone(),
+                mind: self.instance().0.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The image: every envelope the store held at the last pull, in
+    /// identity order. Cut 10's snapshot source reads this.
+    pub fn envelopes(&self) -> &[CultCacheEnvelope] {
+        &self.image
+    }
+
+    pub(crate) fn cursor_key(&self) -> &CursorKey {
+        &self.cursor_key
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.image.is_empty()
+    }
+
+    /// The stored bytes of one document, by kind and id.
+    pub fn envelope(&self, kind: PipelineKind, id: &str) -> Option<&CultCacheEnvelope> {
+        self.raw_envelope(kind.type_id(), id)
+    }
+
+    /// One document, decoded through the leaf.
+    pub fn get(&self, kind: PipelineKind, id: &str) -> Result<Option<PipelineDocument>, MindRefusal> {
+        self.envelope(kind, id)
+            .map(|envelope| PipelineDocument::decode(envelope).map_err(MindRefusal::Document))
+            .transpose()
+    }
+
+    /// Every commit receipt in the image, in receipt-id order.
+    pub(crate) fn receipts(&self) -> Result<Vec<HuginnCommitReceipt>, MindRefusal> {
+        self.image
+            .iter()
+            .filter(|envelope| envelope.r#type == HuginnCommitReceipt::TYPE)
+            .map(|envelope| {
+                rmp_serde::from_slice::<HuginnCommitReceipt>(&envelope.payload).map_err(|error| {
+                    MindRefusal::Unavailable { detail: format!("receipt {} does not decode: {error}", envelope.key) }
+                })
+            })
+            .collect()
+    }
+
+    /// The mind's own identity: the receipt id of its first admission
+    /// (ordinal 1), which admission never rewrites and which digests the
+    /// instance and the first batch's bytes. `None` for a mind that has not
+    /// been written yet. The instance name is only a label, since two stores
+    /// on two hosts may share it; this tells them apart unless their first
+    /// batches were byte-identical.
+    pub fn genesis_receipt_id(&self) -> Result<Option<String>, MindRefusal> {
+        Ok(self.receipts()?.into_iter().find(|receipt| receipt.ordinal == 1).map(|receipt| receipt.receipt_id))
+    }
+
+    pub(crate) fn raw_envelope(&self, type_id: &str, key: &str) -> Option<&CultCacheEnvelope> {
+        self.image.iter().find(|envelope| envelope.r#type == type_id && envelope.key == key)
+    }
+
+    pub(crate) fn cache(&self) -> &CultCache {
+        &self.cache
+    }
+
+    pub(crate) fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// Re-pulls the image from the store through the attached cache.
+    pub(crate) fn refresh(&mut self) -> Result<(), MindRefusal> {
+        self.cache.pull_all_backing_stores().map_err(unavailable)?;
+        self.image = snapshot(&self.cache);
+        Ok(())
+    }
+}
+
+/// Step 3: a runtime store, a Mind store or any other file passed by mistake
+/// dies on its first foreign type.
+fn refuse_foreign_types(raw: &[CultCacheEnvelope]) -> Result<(), MindRefusal> {
+    if let Some(foreign) = raw.iter().find(|envelope| !is_known_type(&envelope.r#type)) {
+        return Err(MindRefusal::ForeignStore { r#type: foreign.r#type.clone() });
+    }
+    Ok(())
+}
+
+/// Step 2: a non-empty store carries exactly one epoch record, keyed by the
+/// epoch it names, at the epoch this binary writes. A store with no epoch
+/// record at all is `MissingIdentity`; every other defect is `ForeignEpoch`,
+/// whose `found` names the defect: the stored epoch when the value is
+/// foreign, the record's key when a record is keyed by anything else, and the
+/// record count rendered as `"<n> records"` when more than one is stored. The
+/// count is decided before any value is read, so a current record beside a
+/// foreign one refuses the same way whichever the store returns first.
+fn refuse_foreign_epoch(raw: &[CultCacheEnvelope]) -> Result<(), MindRefusal> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let foreign = |found: String| MindRefusal::ForeignEpoch { found, expected: PIPELINE_SCHEMA_EPOCH.into() };
+    let mut records = raw.iter().filter(|envelope| envelope.r#type == HuginnMindEpoch::TYPE);
+    let Some(record) = records.next() else {
+        return Err(MindRefusal::MissingIdentity);
+    };
+    let extra = records.count();
+    if extra > 0 {
+        return Err(foreign(format!("{} records", extra + 1)));
+    }
+    if record.key != PIPELINE_SCHEMA_EPOCH {
+        return Err(foreign(record.key.clone()));
+    }
+    let record: HuginnMindEpoch = rmp_serde::from_slice(&record.payload)
+        .map_err(|error| MindRefusal::Unavailable { detail: format!("epoch record does not decode: {error}") })?;
+    if record.schema_epoch != PIPELINE_SCHEMA_EPOCH {
+        return Err(foreign(record.schema_epoch));
+    }
+    Ok(())
+}
+
+/// Step 4: a non-empty store carries exactly one `instance` document, and it
+/// names the declared instance. This is where a store moved to another
+/// instance's directory is refused.
+fn refuse_foreign_identity(raw: &[CultCacheEnvelope], instance: &Slug) -> Result<(), MindRefusal> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let mut documents = raw.iter().filter(|envelope| envelope.r#type == PipelineKind::Instance.type_id());
+    let (Some(envelope), None) = (documents.next(), documents.next()) else {
+        return Err(MindRefusal::MissingIdentity);
+    };
+    let PipelineDocument::Instance(stored) = PipelineDocument::decode(envelope)? else {
+        return Err(MindRefusal::MissingIdentity);
+    };
+    if stored.instance != *instance {
+        return Err(MindRefusal::ForeignInstance { declared: instance.0.clone(), mind: stored.instance.0 });
+    }
+    Ok(())
+}
+
+/// Step 5: the registered cache, the store as its one generic home, and the
+/// image pulled through it.
+fn attach<S: MindStore>(store: S) -> Result<(CultCache, Vec<CultCacheEnvelope>), MindRefusal> {
+    let mut cache = schema_cache()?;
+    cache.add_generic_backing_store(store).map_err(unavailable)?;
+    cache.pull_all_backing_stores().map_err(unavailable)?;
+    let image = snapshot(&cache);
+    Ok((cache, image))
+}
+
+fn snapshot(cache: &CultCache) -> Vec<CultCacheEnvelope> {
+    let mut image = cache.snapshot_envelopes();
+    image.sort_by(|left, right| (&left.r#type, &left.key).cmp(&(&right.r#type, &right.key)));
+    image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::{INSTANCE, epoch, instance, prepare, slug};
+    use crate::store::test_stores::MemoryStore;
+    use cultcache_rs::CacheBackingStore;
+
+    fn planted(rows: Vec<CultCacheEnvelope>) -> MemoryStore {
+        let store = MemoryStore::new();
+        for row in rows {
+            store.plant(row);
+        }
+        store
+    }
+
+    fn foreign(type_id: &str) -> CultCacheEnvelope {
+        let mut envelope = epoch();
+        envelope.r#type = type_id.into();
+        envelope
+    }
+
+    const FOREIGN_EPOCH: &str = "epiphany.pipeline.epoch.v0";
+
+    /// A type id that is foreign under every epoch, unlike
+    /// `"epiphany.pipeline.campaign.v1"`: that string names the pinned
+    /// leaf's real, currently-registered campaign kind, so `is_known_type`
+    /// accepts it and a gate-order mutant that runs the type gate first
+    /// still passes these fixtures by accident. `_never_a_kind_` cannot
+    /// collide with any real `PipelineKind` id at any epoch this leaf pin
+    /// will ever carry, so these fixtures actually exercise the epoch-first
+    /// order rather than getting lucky on a real id.
+    const NEVER_A_KNOWN_TYPE: &str = "epiphany.pipeline._never_a_kind_.v1";
+
+    /// An epoch record under an arbitrary key naming an arbitrary epoch, so a
+    /// key defect and a value defect can be planted apart.
+    fn epoch_record(key: &str, schema_epoch: &str) -> CultCacheEnvelope {
+        let cache = schema_cache().unwrap();
+        let record = HuginnMindEpoch { schema_epoch: schema_epoch.into() };
+        cache.prepare_entry_named(key, &record).unwrap().0
+    }
+
+    fn foreign_epoch() -> CultCacheEnvelope {
+        epoch_record(FOREIGN_EPOCH, FOREIGN_EPOCH)
+    }
+
+    #[test]
+    fn the_opener_refuses_foreign_epoch_missing_identity_and_foreign_type_before_attaching() {
+        let yggdrasil = slug(INSTANCE);
+        let cases: Vec<(Vec<CultCacheEnvelope>, MindRefusal)> = vec![
+            // Step 3, reached because the epoch record here is current: a
+            // runtime store passed by mistake.
+            (
+                vec![foreign("epiphany.runtime_spine.v47"), epoch(), prepare(&instance(INSTANCE))],
+                MindRefusal::ForeignStore { r#type: "epiphany.runtime_spine.v47".into() },
+            ),
+            // Step 2 before step 4: a foreign epoch with no identity at all.
+            // Its key is foreign too, which is what refuses it here.
+            (
+                vec![foreign_epoch()],
+                MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
+            ),
+            // Step 2: the value, under the one key the record may have.
+            (
+                vec![epoch_record(PIPELINE_SCHEMA_EPOCH, FOREIGN_EPOCH), prepare(&instance(INSTANCE))],
+                MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
+            ),
+            // Step 2: the current epoch under any other key is not the epoch
+            // record, whatever it says about itself.
+            (
+                vec![epoch_record("not-the-epoch", PIPELINE_SCHEMA_EPOCH), prepare(&instance(INSTANCE))],
+                MindRefusal::ForeignEpoch { found: "not-the-epoch".into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
+            ),
+            // Step 2: two records are no record, counted before either value
+            // is read.
+            (
+                vec![epoch(), epoch_record("second", PIPELINE_SCHEMA_EPOCH), prepare(&instance(INSTANCE))],
+                MindRefusal::ForeignEpoch { found: "2 records".into(), expected: PIPELINE_SCHEMA_EPOCH.into() },
+            ),
+            // Step 2: an identity without an epoch record.
+            (vec![prepare(&instance(INSTANCE))], MindRefusal::MissingIdentity),
+            // Step 4: an epoch record without an identity.
+            (vec![epoch()], MindRefusal::MissingIdentity),
+            // Step 4: two identities are no identity.
+            (
+                vec![epoch(), prepare(&instance(INSTANCE)), prepare(&instance("thought-cage"))],
+                MindRefusal::MissingIdentity,
+            ),
+        ];
+        for (rows, expected) in cases {
+            let store = planted(rows);
+            let before = store.rows();
+            let refusal = Mind::open_with(store.clone(), &yggdrasil).err().expect("refused");
+            assert_eq!(refusal, expected);
+            assert_eq!(store.pull_count(), 1, "{expected:?}: refused before attaching");
+            assert_eq!(store.rows(), before, "{expected:?}: bytes unchanged");
+        }
+        // A current record beside a foreign one is refused on the count, not
+        // on whichever of the two the store happens to return first.
+        let pair = (epoch(), foreign_epoch());
+        for rows in [vec![pair.0.clone(), pair.1.clone()], vec![pair.1, pair.0]] {
+            assert_eq!(
+                refuse_foreign_epoch(&rows).err(),
+                Some(MindRefusal::ForeignEpoch { found: "2 records".into(), expected: PIPELINE_SCHEMA_EPOCH.into() })
+            );
+        }
+        // A store that passes every gate attaches, which is the second pull.
+        let store = planted(vec![epoch(), prepare(&instance(INSTANCE))]);
+        let mind = Mind::open_with(store.clone(), &yggdrasil).unwrap();
+        assert_eq!(store.pull_count(), 2);
+        assert_eq!(mind.envelopes().len(), 2);
+        assert!(!mind.is_empty());
+        let empty = MemoryStore::new();
+        assert!(Mind::open_with(empty, &yggdrasil).unwrap().is_empty());
+    }
+
+    /// RS-1: receipt v2 is a new type id, so a store carrying an old,
+    /// v1-shaped receipt is refused at the type gate, before anything tries
+    /// to decode its 7-slot payload as the 8-slot v2 shape (F3: with
+    /// `#[serde(default)]` that decode would succeed and silently misread
+    /// every old receipt's ordinal as 0).
+    #[test]
+    fn a_v1_receipt_store_is_refused_at_open() {
+        let store =
+            planted(vec![epoch(), prepare(&instance(INSTANCE)), foreign("huginn.mind_commit_receipt.v1")]);
+        assert_eq!(
+            Mind::open_with(store, &slug(INSTANCE)).err(),
+            Some(MindRefusal::ForeignStore { r#type: "huginn.mind_commit_receipt.v1".into() })
+        );
+    }
+
+    /// RS-1, F5: a real epoch bump always moves every type id (F4), so a
+    /// store written at a foreign epoch also carries at least one foreign
+    /// type. The epoch gate must run first, or the type gate fires instead
+    /// and the epoch gate is never reached for the one case it exists for.
+    /// The eight cases of the opener test above are unchanged by the swap.
+    #[test]
+    fn a_store_written_at_the_previous_epoch_is_refused_by_the_epoch_gate() {
+        let raw = vec![foreign_epoch(), foreign("epiphany.pipeline.campaign.v0")];
+        assert_eq!(
+            Mind::open_with(planted(raw), &slug(INSTANCE)).err(),
+            Some(MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() })
+        );
+    }
+
+    /// A foreign store with no epoch record at all still refuses
+    /// `MissingIdentity`, the epoch-first order's own answer -- not
+    /// `ForeignStore`, which is what a mutant that only reorders the gates
+    /// when there *is* some epoch record present would answer, by running
+    /// the type gate first over a store that has no epoch record to look at.
+    /// Pinned by this test.
+    #[test]
+    fn a_foreign_type_with_no_epoch_record_is_missing_identity_not_foreign_store() {
+        let store = planted(vec![foreign(NEVER_A_KNOWN_TYPE)]);
+        assert_eq!(Mind::open_with(store, &slug(INSTANCE)).err(), Some(MindRefusal::MissingIdentity));
+    }
+
+    /// F3 (RS fix batch): an epoch record at the current key, but a
+    /// foreign value, beside a foreign type, still refuses `ForeignEpoch` --
+    /// the epoch gate reads the record's *value* before the type gate ever
+    /// runs, not only when the record's *key* is itself foreign. A mutant
+    /// that reorders the gates only on a foreign key would answer
+    /// `ForeignStore` here instead, since this record sits at the correct
+    /// key.
+    #[test]
+    fn a_foreign_epoch_value_at_the_current_key_beside_a_foreign_type_is_foreign_epoch() {
+        let store = planted(vec![epoch_record(PIPELINE_SCHEMA_EPOCH, FOREIGN_EPOCH), foreign(NEVER_A_KNOWN_TYPE)]);
+        assert_eq!(
+            Mind::open_with(store, &slug(INSTANCE)).err(),
+            Some(MindRefusal::ForeignEpoch { found: FOREIGN_EPOCH.into(), expected: PIPELINE_SCHEMA_EPOCH.into() })
+        );
+    }
+
+    #[test]
+    fn the_instance_document_is_the_identity_not_the_path() {
+        // The same bytes opened under another name are refused.
+        let store = planted(vec![epoch(), prepare(&instance(INSTANCE))]);
+        assert_eq!(
+            Mind::open_with(store, &slug("thought-cage")).err(),
+            Some(MindRefusal::ForeignInstance { declared: "thought-cage".into(), mind: INSTANCE.into() })
+        );
+
+        // A real store copied into another instance's directory is still
+        // yggdrasil's mind: it opens as yggdrasil, and not as thought-cage.
+        let root = tempfile::tempdir().unwrap();
+        let written = Mind::path_for(root.path(), &slug(INSTANCE));
+        {
+            let mut store = OwnedRedbMessagePackBackingStore::new(&written).unwrap();
+            store.push(&epoch()).unwrap();
+            store.push(&prepare(&instance(INSTANCE))).unwrap();
+        }
+        let moved = Mind::path_for(root.path(), &slug("thought-cage"));
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::copy(&written, &moved).unwrap();
+        assert_eq!(
+            Mind::open(root.path(), &slug("thought-cage")).err(),
+            Some(MindRefusal::ForeignInstance { declared: "thought-cage".into(), mind: INSTANCE.into() })
+        );
+        let store = OwnedRedbMessagePackBackingStore::new(&moved).unwrap();
+        let mind = Mind::open_with(store, &slug(INSTANCE)).unwrap();
+        assert_eq!(mind.instance(), &slug(INSTANCE));
+        assert_eq!(mind.envelopes().len(), 2);
+    }
+
+    /// One check, one owner: the value admission refuses a foreign instance
+    /// with is the value `require_instance` returns, so the daemon asking it
+    /// for a read and `admit_steps` asking it for a write cannot disagree.
+    ///
+    /// The foreign names are chosen so the check cannot pass by resembling a
+    /// comparison. `NEAR_INSTANCE` is the mind's own length and shares all but
+    /// its last byte, so a check reading only the lengths, only the first byte,
+    /// or running only when the declared name is longer lets it through;
+    /// `PREFIXED_INSTANCE` has the mind's whole name as its prefix, so a check
+    /// asking whether one starts with the other lets that one through; and
+    /// `CASED_INSTANCE` differs in case alone, which a slug label permits, so a
+    /// check folding case answers for a mind that is not this one.
+    #[test]
+    fn require_instance_is_the_one_check_admission_and_the_daemon_share() {
+        use crate::fixtures::{
+            CASED_INSTANCE, DOTTED_INSTANCE, NEAR_INSTANCE, OTHER_INSTANCE, PREFIXED_INSTANCE, UNDERSCORE_INSTANCE,
+            now, opened, provenance, seeded,
+        };
+        use crate::receipt::Faculty;
+
+        let mut mind = seeded();
+        let foreign = MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() };
+        assert_eq!(mind.require_instance(&slug(OTHER_INSTANCE)).err(), Some(foreign.clone()));
+        assert_eq!(mind.require_instance(&slug(INSTANCE)), Ok(()));
+
+        assert_eq!(NEAR_INSTANCE.len(), INSTANCE.len(), "the near name is the mind's own length");
+        assert_eq!(NEAR_INSTANCE[..INSTANCE.len() - 1], INSTANCE[..INSTANCE.len() - 1], "and differs in one byte");
+        assert!(PREFIXED_INSTANCE.starts_with(INSTANCE), "the prefixed name carries the mind's whole name");
+        assert_eq!(CASED_INSTANCE.to_ascii_lowercase(), INSTANCE, "the cased name differs in case alone");
+        assert_ne!(CASED_INSTANCE, INSTANCE);
+        for declared in [NEAR_INSTANCE, PREFIXED_INSTANCE, CASED_INSTANCE] {
+            assert_eq!(
+                mind.require_instance(&slug(declared)).err(),
+                Some(MindRefusal::ForeignInstance { declared: declared.into(), mind: INSTANCE.into() }),
+                "{declared} is not {INSTANCE}"
+            );
+        }
+
+        let batch = crate::admission::PipelineAdmissionBatch {
+            instance: slug(OTHER_INSTANCE),
+            provenance: provenance(Faculty::Hands),
+            documents: vec![instance(OTHER_INSTANCE)],
+        };
+        assert_eq!(mind.admit(batch, now()), crate::admission::PipelineAdmissionOutcome::Refused(foreign));
+
+        // `INSTANCE` ("yggdrasil") carries no separator, so no fold of `_` or
+        // `.` into `-` can ever equate a declared name with it; a mind whose
+        // own name carries one is required to tell the fold apart. Opened as
+        // `OTHER_INSTANCE` ("thought-cage"), a declared name that folds to the
+        // same string under such a comparison must still be refused.
+        let separated = opened(MemoryStore::new(), OTHER_INSTANCE);
+        assert_eq!(UNDERSCORE_INSTANCE.replace('_', "-"), OTHER_INSTANCE, "differs from OTHER_INSTANCE by `_` alone");
+        assert_eq!(DOTTED_INSTANCE.replace('.', "-"), OTHER_INSTANCE, "differs from OTHER_INSTANCE by `.` alone");
+        assert_ne!(UNDERSCORE_INSTANCE, OTHER_INSTANCE);
+        assert_ne!(DOTTED_INSTANCE, OTHER_INSTANCE);
+        for declared in [UNDERSCORE_INSTANCE, DOTTED_INSTANCE] {
+            assert_eq!(
+                separated.require_instance(&slug(declared)).err(),
+                Some(MindRefusal::ForeignInstance { declared: declared.into(), mind: OTHER_INSTANCE.into() }),
+                "{declared} is not {OTHER_INSTANCE}"
+            );
+        }
+    }
+
+    /// One generated test in place of more fixture pairs. The base name
+    /// carries all three separator bytes a `Slug` permits -- `_`, `.` and `-`
+    /// -- at three non-adjacent positions, so every combination of swapping
+    /// one separator for another at a fixed position is itself a grammatical,
+    /// distinct `Slug`. The cartesian product over the three positions (26
+    /// variants, the all-unchanged combination excepted) covers every
+    /// same-position permutation, including a fold that unifies two distinct
+    /// separators (`_` and `.` folded to one canonical byte) and a fold
+    /// applied to only one side of the comparison (the mind's own name
+    /// folded, the declared name left as written, or the reverse). Three more
+    /// variants pad the base with a leading dash, a trailing dash, and a
+    /// doubled interior dash -- all still grammatical, since a label's
+    /// hyphens carry no position or run restriction -- to reach `trim_matches`
+    /// and run-collapsing folds a same-position swap cannot produce. Every
+    /// one of the 30 variants must be refused as `ForeignInstance`, never
+    /// silently admitted as the mind's own name.
+    #[test]
+    fn every_separator_variant_of_a_declared_name_is_foreign_not_the_mind() {
+        const BASE: &str = "ab_cd.ef-gh";
+        let separators: Vec<(usize, char)> =
+            BASE.char_indices().filter(|(_, c)| matches!(c, '_' | '.' | '-')).collect();
+        assert_eq!(separators.len(), 3, "the base carries exactly one of each separator");
+
+        let mut variants: Vec<String> = Vec::new();
+        for a in ['_', '.', '-'] {
+            for b in ['_', '.', '-'] {
+                for c in ['_', '.', '-'] {
+                    let mut bytes: Vec<char> = BASE.chars().collect();
+                    bytes[separators[0].0] = a;
+                    bytes[separators[1].0] = b;
+                    bytes[separators[2].0] = c;
+                    variants.push(bytes.into_iter().collect());
+                }
+            }
+        }
+        variants.retain(|variant| variant != BASE);
+        assert_eq!(variants.len(), 26, "3^3 combinations, less the one that reproduces BASE");
+
+        variants.push(format!("-{BASE}"));
+        variants.push(format!("{BASE}-"));
+        variants.push(format!("-{BASE}-"));
+        variants.push(BASE.replacen('-', "--", 1));
+
+        let mut seen = std::collections::BTreeSet::new();
+        variants.retain(|variant| seen.insert(variant.clone()));
+        assert_eq!(variants.len(), 30, "26 same-length separator permutations plus 4 padded variants, none colliding");
+
+        let mind = crate::fixtures::opened(MemoryStore::new(), BASE);
+        for declared in &variants {
+            assert!(declared.split('.').all(|label| !label.is_empty()), "{declared}: still grammatical");
+            assert_eq!(
+                mind.require_instance(&slug(declared)).err(),
+                Some(MindRefusal::ForeignInstance { declared: declared.clone(), mind: BASE.into() }),
+                "{declared} must be refused as foreign, not folded into {BASE}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mind_has_one_owner_at_a_time() {
+        let root = tempfile::tempdir().unwrap();
+        let yggdrasil = slug(INSTANCE);
+        let first = Mind::open(root.path(), &yggdrasil).unwrap();
+        assert!(first.is_empty());
+        let path = Mind::path_for(root.path(), &yggdrasil).display().to_string();
+        assert_eq!(
+            Mind::open(root.path(), &yggdrasil).err(),
+            Some(MindRefusal::MindAlreadyOwned { path: path.clone() })
+        );
+        drop(first);
+        let second = Mind::open(root.path(), &yggdrasil).unwrap();
+        assert!(second.is_empty());
+        assert_eq!(Mind::path_for(root.path(), &yggdrasil), root.path().join("minds").join(INSTANCE).join("mind.redb"));
+    }
+
+    /// N1, Soul's probe: `Mind::open(outer/inner, Slug("..\..\escaped"))` used
+    /// to return `Ok` and create `outer/escaped/mind.redb`, a store outside
+    /// the state root nothing beneath `outer/inner` names. `path_for` joins a
+    /// declared name as written and never validated it, so a `Slug` carrying
+    /// `..` and a path separator escaped through the one door that touches the
+    /// filesystem. `require_grammatical_slug` now runs before `path_for` is
+    /// even called, so the store is never created and the refusal is the
+    /// leaf's own grammar, not a filesystem error surfacing later.
+    #[test]
+    fn a_slug_outside_the_grammar_cannot_escape_the_state_root() {
+        let outer = tempfile::tempdir().unwrap();
+        let inner = outer.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+
+        let escaping = Slug("..\\..\\escaped".into());
+        assert_eq!(
+            Mind::open(&inner, &escaping).err(),
+            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+                field: "instance".into(),
+                value: escaping.0.clone(),
+            }))
+        );
+
+        assert!(!outer.path().join("escaped").join("mind.redb").exists(), "no store escaped the state root");
+        assert!(!inner.join("minds").exists(), "no store was created under the state root either");
+    }
+
+    /// `open_with` calls `open_checked`, the one construction site `open`
+    /// shares with every store already in hand (planted directly, or opened
+    /// by a test through `store_path_for`), so it must run
+    /// `require_grammatical_slug` too, not only `open`'s own path-joining
+    /// caller. A store need not hold anything for this to refuse: the
+    /// declared name is checked before the store is even pulled.
+    #[test]
+    fn open_with_refuses_a_declared_instance_outside_the_grammar() {
+        let store = MemoryStore::new();
+        let bad = Slug("not a slug!".into());
+        assert_eq!(
+            Mind::open_with(store.clone(), &bad).err(),
+            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+                field: "instance".into(),
+                value: bad.0.clone(),
+            }))
+        );
+        assert_eq!(store.pull_count(), 0, "refused before the store was ever pulled");
+    }
+
+    /// `require_instance` is A1 for admission and the daemon's reads
+    /// alike, and it runs the same grammar door on the *declared* name before
+    /// comparing it to the mind's own. A declared name outside the grammar is
+    /// `InvalidFormat { field: "declared" }`, never folded into a comparison
+    /// or silently treated as merely foreign.
+    #[test]
+    fn require_instance_refuses_a_declared_name_outside_the_grammar() {
+        let mind = crate::fixtures::seeded();
+        let bad = Slug("not a slug!".into());
+        assert_eq!(
+            mind.require_instance(&bad).err(),
+            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+                field: "declared".into(),
+                value: bad.0.clone(),
+            }))
+        );
+    }
+
+    /// A Unicode hyphen (U+2010) is not ASCII `-`, so a grammatical
+    /// `Slug` never contains one and a name carrying it is refused by the
+    /// leaf's own grammar as written -- nothing here may fold it to plain
+    /// `-` before asking `Slug::validate_slug`, the way a fullwidth mutant
+    /// pinned by
+    /// `daemon::tests::a_declared_instance_outside_the_grammar_is_refused_by_name_before_the_identity_check`
+    /// folds a fullwidth letter to its ASCII form.
+    #[test]
+    fn a_unicode_hyphen_is_not_folded_before_the_grammar_check() {
+        let declared = Slug(format!("ab{}cd", '\u{2010}'));
+        assert!(!declared.0.is_ascii(), "U+2010 is not ASCII, unlike plain '-'");
+        assert_eq!(
+            Mind::open_with(MemoryStore::new(), &declared).err(),
+            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+                field: "instance".into(),
+                value: declared.0.clone(),
+            }))
+        );
+    }
+}

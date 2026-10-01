@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/huginn-mind",
+    "crates/huginn-daemon",
+    "crates/eureka-state",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false

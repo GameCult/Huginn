@@ -1,0 +1,39 @@
+[package]
+name = "huginn-mind"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The organ's rule engine: storage, identity and admission of one instance's
+# mind. Document shape, bounds, formats and keys come from `epiphany-pipeline`;
+# the store comes from CultLib's Rust CultCache at the same rev Epiphany pins,
+# so the leaf's wrappers and this crate's cache are one `cultcache-rs`. The
+# read side selects through CultNet's typed selection (`cultnet-rs`, the same
+# rev the daemon pins): the selection's vocabulary and evaluator are the
+# substrate's, this crate supplies the rows. No socket, no index: those are the
+# daemon's (Cut 10, Cut 11).
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = "0.4.44"
+cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultcache-rs" }
+cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultnet-rs" }
+epiphany-pipeline = { git = "https://github.com/GameCult/Epiphany.git", rev = "73edee5cdaddece8bda9c6c3271e8ddd064337f9", package = "epiphany-pipeline" }
+rmp-serde = "1"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+
+# `test-support` exposes `Mind::store_path_for` and `Mind::open_with`, a
+# grammar-checked path accessor and the fail-closed open door, for tests in
+# other crates that need to reach a raw store directly. It buys no runtime
+# surface: gated `#[cfg(any(test, feature = "test-support"))]`, so it
+# compiles only under `cargo test` in this crate or when a dependent's own
+# dev-dependencies enable it (see huginn-daemon/Cargo.toml).
+[features]
+test-support = []
