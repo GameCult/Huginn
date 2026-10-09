@@ -225,6 +225,8 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
 
+    use eureka_pipeline::{RunOperator, RunTurn};
+
     use super::*;
     use crate::testkit::*;
 

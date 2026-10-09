@@ -144,7 +144,7 @@ pub enum LaunchOutcome {
     Refused(Declined),
 }
 
-fn run_ref(instance: &Slug, label: &Label) -> PipelineRef {
+fn opened_run(instance: &Slug, label: &Label) -> PipelineRef {
     PipelineRef { kind: PipelineKind::Run, id: format!("{}:run:{}", instance.0, label.0).as_str().into() }
 }
 
@@ -205,7 +205,7 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
     if let Err(declined) = committed(ports.mind.admit(&agent, &label.0, vec![PipelineDocument::Run(run)])?) {
         return Ok(LaunchOutcome::Refused(declined));
     }
-    let run = run_ref(&instance, &label);
+    let run = opened_run(&instance, &label);
     if ports.launcher.start(turn, &label).is_err() {
         let withdrawal = PipelineResolution {
             subject: run,
