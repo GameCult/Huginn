@@ -305,6 +305,7 @@ struct WrongDial {
 fn write_wrong_dial(path: &Path, heat: &str) {
     let mut cache = CultCache::new();
     cache.register_entry_type::<WrongDial>().unwrap();
+    cache.register_entry_type::<mind_body::control::Brake>().unwrap();
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(path)).unwrap();
     cache.pull_all_backing_stores().unwrap();
     cache.put(mind_body::control::DIAL_KEY, &WrongDial { heat: heat.into() }).unwrap();
