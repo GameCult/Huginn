@@ -61,7 +61,7 @@ It reads them back the same way: a document with the facts of its admission
 joined from that receipt and its status derived at read time, and typed
 queries over one mind. Status is never stored, and the views derive it
 through the same rules admission does. Document shape and keys come from
-`epiphany-pipeline`; the store is CultLib's Rust CultCache.
+`eureka-pipeline` (`crates/eureka-pipeline`); the store is CultLib's Rust CultCache.
 
 `huginn-daemon` opens one mind, binds one UDP socket in that order, and
 answers every frame on the session it arrived on: one operation per `Mind`
@@ -69,12 +69,11 @@ method plus `whoami`, whose payload is the mind's own types as named
 MessagePack. A refusal is an answer with a `rejected` status, never a
 transport error; an envelope that does not decode is answered with a typed
 failure and reaches no mind. The two schemas it publishes live in
-`schemas/cultnet/` and are pinned to their derivation by a test. There is no
-index yet.
+`schemas/cultnet/`, listed in its `index.json`, and are pinned to their
+derivation by a test.
 
-`eureka-state` has no MCP surface yet; the campaign's cut map in
-`Epiphany/notes/eureka-pipeline-state-cut.md` owns what each crate must do
-next.
+The campaign's cut specs in the mind (`eureka-body`) and
+`docs/eureka-body-map.md` own what each crate does next.
 
 ```powershell
 cargo check --workspace

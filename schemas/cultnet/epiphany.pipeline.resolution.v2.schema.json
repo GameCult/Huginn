@@ -1,0 +1,234 @@
+{
+  "$defs": {
+    "Date": {
+      "description": "A calendar date, `YYYY-MM-DD`.",
+      "maxLength": 10,
+      "type": "string"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "Para": {
+      "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
+      "maxLength": 4000,
+      "type": "string"
+    },
+    "PipelineKind": {
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff"
+      ],
+      "type": "string"
+    },
+    "PipelineRef": {
+      "description": "A reference to another document. The id is parsed as a full pipeline id of\nthe declared `kind`, so the kind and the id's kind segment cannot disagree.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ResolutionOutcome": {
+      "description": "How a subject was resolved. Every referent is a parsed `PipelineRef`, so a\nresolution names its records by ids of the kinds they declare, validated\nwhere every other referent is; a `Fixed` commit is a `Sha` whose referent\nis outside the document set (ruling B). Whether a named document exists,\nand how many may supersede one subject, are admission's rules.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Overturned, in whole or in part, by later records. The list is bounded\nhere because the enum is outside `value_types!`, the only place a list\nmaximum is emitted automatically.",
+          "properties": {
+            "Superseded": {
+              "properties": {
+                "by": {
+                  "items": {
+                    "$ref": "#/$defs/PipelineRef"
+                  },
+                  "maxItems": 8,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "by"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Superseded"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Answered": {
+              "properties": {
+                "by": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "by"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Answered"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Fixed": {
+              "properties": {
+                "by": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PipelineRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "commit": {
+                  "$ref": "#/$defs/Sha"
+                }
+              },
+              "required": [
+                "commit"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Fixed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Deferred": {
+              "properties": {
+                "to": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "to"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Deferred"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Recorded": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/Line"
+                }
+              },
+              "required": [
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Recorded"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Withdrawn": {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/Line"
+                }
+              },
+              "required": [
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Withdrawn"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Sha": {
+      "description": "A git commit id: 7-40 lowercase hex characters.",
+      "maxLength": 40,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.resolution.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The record of how a subject was closed and by what. `sequence` is per\nsubject and set by the writer, `1` for the first, and it is the last\npart of the key, so a subject's resolutions share a prefix and a\nwithdrawn one is kept under its subject rather than overwritten.\nWhether a sequence is the previous plus one, and whether an earlier\nresolution still stands, are admission's rules: this crate refuses\nneither `0` nor a gap, exactly as it refuses neither `revision: 0` nor\na `revision` with no predecessor.",
+  "properties": {
+    "outcome": {
+      "$ref": "#/$defs/ResolutionOutcome"
+    },
+    "rationale": {
+      "$ref": "#/$defs/Para"
+    },
+    "resolved_on": {
+      "$ref": "#/$defs/Date"
+    },
+    "sequence": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "subject": {
+      "$ref": "#/$defs/PipelineRef"
+    }
+  },
+  "required": [
+    "subject",
+    "sequence",
+    "outcome",
+    "rationale",
+    "resolved_on"
+  ],
+  "title": "PipelineResolution",
+  "type": "object"
+}

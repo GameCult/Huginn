@@ -1,0 +1,166 @@
+{
+  "$defs": {
+    "ClaimOutcome": {
+      "enum": [
+        "Holds",
+        "Falsified",
+        "Unproven"
+      ],
+      "type": "string"
+    },
+    "CommitRange": {
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/Sha"
+        },
+        "head": {
+          "$ref": "#/$defs/Sha"
+        }
+      },
+      "required": [
+        "base",
+        "head"
+      ],
+      "type": "object"
+    },
+    "Evidence": {
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EvidenceKind"
+        },
+        "locator": {
+          "$ref": "#/$defs/Line"
+        },
+        "result": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "kind",
+        "locator",
+        "result"
+      ],
+      "type": "object"
+    },
+    "EvidenceKind": {
+      "enum": [
+        "Command",
+        "Test",
+        "Mutation",
+        "Probe",
+        "SourceRead",
+        "Capture"
+      ],
+      "type": "string"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "Sha": {
+      "description": "A git commit id: 7-40 lowercase hex characters.",
+      "maxLength": 40,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "VerdictClaim": {
+      "description": "The promise this claim measured, and the report's mutations it ran. An\n`Unproven` claim with a promise is one Soul could not reach.",
+      "properties": {
+        "claim": {
+          "$ref": "#/$defs/Line"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "mutations": {
+          "items": {
+            "$ref": "#/$defs/Label"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ClaimOutcome"
+        },
+        "promise": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Label"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "claim",
+        "outcome",
+        "evidence",
+        "findings",
+        "mutations"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.verdict.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "claims": {
+      "items": {
+        "$ref": "#/$defs/VerdictClaim"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "cut_report": {
+      "$ref": "#/$defs/Short"
+    },
+    "pass": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "range": {
+      "$ref": "#/$defs/CommitRange"
+    }
+  },
+  "required": [
+    "campaign",
+    "cut_report",
+    "pass",
+    "range",
+    "claims"
+  ],
+  "title": "PipelineVerdict",
+  "type": "object"
+}

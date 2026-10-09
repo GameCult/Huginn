@@ -6,7 +6,7 @@
 
 use cultcache_rs::DatabaseEntry;
 use cultnet_rs::{CultMeshCdnArtifactManifest, Selection};
-use epiphany_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Slug};
+use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Slug};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

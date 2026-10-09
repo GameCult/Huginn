@@ -1,0 +1,375 @@
+{
+  "$defs": {
+    "CodeLocation": {
+      "properties": {
+        "end_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "path",
+        "line"
+      ],
+      "type": "object"
+    },
+    "CommitRange": {
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/Sha"
+        },
+        "head": {
+          "$ref": "#/$defs/Sha"
+        }
+      },
+      "required": [
+        "base",
+        "head"
+      ],
+      "type": "object"
+    },
+    "Deviation": {
+      "properties": {
+        "what": {
+          "$ref": "#/$defs/Line"
+        },
+        "why": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "what",
+        "why"
+      ],
+      "type": "object"
+    },
+    "Evidence": {
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EvidenceKind"
+        },
+        "locator": {
+          "$ref": "#/$defs/Line"
+        },
+        "result": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "kind",
+        "locator",
+        "result"
+      ],
+      "type": "object"
+    },
+    "EvidenceKind": {
+      "enum": [
+        "Command",
+        "Test",
+        "Mutation",
+        "Probe",
+        "SourceRead",
+        "Capture"
+      ],
+      "type": "string"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "LandedName": {
+      "description": "A name the cut landed, and where it lives.",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/Short"
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "MutationRecord": {
+      "description": "One mutation a report ran: a key-safe label a verdict claim can name,\nthe exact edit, and the tree it was applied to.",
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/Line"
+        },
+        "before": {
+          "$ref": "#/$defs/Line"
+        },
+        "commit": {
+          "$ref": "#/$defs/Sha"
+        },
+        "failed_as_expected": {
+          "type": "boolean"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "location": {
+          "$ref": "#/$defs/CodeLocation"
+        },
+        "rule": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "label",
+        "rule",
+        "location",
+        "before",
+        "after",
+        "commit",
+        "failed_as_expected"
+      ],
+      "type": "object"
+    },
+    "OrgRepo": {
+      "description": "A GitHub repository as `Org/Repo`, at most 140 UTF-8 bytes (39 + 1 +\n100). The owner is 1 to 39 `[A-Za-z0-9-]` bytes with no leading or\ntrailing hyphen; the repo is 1 to 100 `[A-Za-z0-9._-]` bytes, is never\n`.` or `..`, and does not end in `.git`, ASCII-case-insensitively.\nIdentity is case-insensitive: `GameCult/Epiphany` and `gamecult/epiphany`\nare the same repository.",
+      "maxLength": 140,
+      "type": "string"
+    },
+    "Promise": {
+      "description": "A promise a report makes about what it landed. Not a document and not\nresolvable: it is identified by its report's id and its label, as a\n`TargetInvariant` is by its target's. Soul measures every one (ruling\nA), and the rule that every one is measured is admission's.",
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "text": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "label",
+        "text"
+      ],
+      "type": "object"
+    },
+    "ReportCommit": {
+      "properties": {
+        "builds": {
+          "type": "boolean"
+        },
+        "sha": {
+          "$ref": "#/$defs/Sha"
+        },
+        "subject": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "sha",
+        "subject",
+        "builds"
+      ],
+      "type": "object"
+    },
+    "Sha": {
+      "description": "A git commit id: 7-40 lowercase hex characters.",
+      "maxLength": 40,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "StructuralDelta": {
+      "properties": {
+        "dependencies_added": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "dependencies_removed": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "formats_added": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "formats_removed": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "lines_added": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lines_removed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "targets_added": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "targets_removed": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": [
+        "lines_added",
+        "lines_removed",
+        "dependencies_added",
+        "dependencies_removed",
+        "formats_added",
+        "formats_removed",
+        "targets_added",
+        "targets_removed"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.cut_report.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "attempt": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "branch": {
+      "$ref": "#/$defs/Short"
+    },
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "commits": {
+      "items": {
+        "$ref": "#/$defs/ReportCommit"
+      },
+      "maxItems": 128,
+      "type": "array"
+    },
+    "cut_spec": {
+      "$ref": "#/$defs/Short"
+    },
+    "deviations": {
+      "items": {
+        "$ref": "#/$defs/Deviation"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "forks": {
+      "items": {
+        "$ref": "#/$defs/Short"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "landed_names": {
+      "items": {
+        "$ref": "#/$defs/LandedName"
+      },
+      "maxItems": 128,
+      "type": "array"
+    },
+    "mutations": {
+      "items": {
+        "$ref": "#/$defs/MutationRecord"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "promises": {
+      "items": {
+        "$ref": "#/$defs/Promise"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "range": {
+      "$ref": "#/$defs/CommitRange"
+    },
+    "repo": {
+      "$ref": "#/$defs/OrgRepo"
+    },
+    "structural_delta": {
+      "$ref": "#/$defs/StructuralDelta"
+    },
+    "undone": {
+      "items": {
+        "$ref": "#/$defs/Line"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "verification": {
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      },
+      "maxItems": 64,
+      "type": "array"
+    }
+  },
+  "required": [
+    "campaign",
+    "cut_spec",
+    "attempt",
+    "repo",
+    "branch",
+    "commits",
+    "range",
+    "verification",
+    "mutations",
+    "deviations",
+    "forks",
+    "structural_delta",
+    "landed_names",
+    "undone",
+    "promises"
+  ],
+  "title": "PipelineCutReport",
+  "type": "object"
+}

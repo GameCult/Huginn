@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/eureka-pipeline",
     "crates/huginn-mind",
     "crates/huginn-daemon",
     "crates/eureka-state",
@@ -8,5 +9,11 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 publish = false
+
+# The one CultLib revision the workspace speaks. Every crate inherits these
+# entries; a bump is a change to this table and nowhere else.
+[workspace.dependencies]
+cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultcache-rs" }
+cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultnet-rs" }

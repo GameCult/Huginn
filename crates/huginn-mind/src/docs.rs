@@ -6,7 +6,7 @@
 //! `stored_at`.
 
 use cultcache_rs::CultCacheEnvelope;
-use epiphany_pipeline::{
+use eureka_pipeline::{
     OrgRepo, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineStewardship, ResolutionOutcome,
     Short, Slug,
 };

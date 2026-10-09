@@ -1,0 +1,174 @@
+{
+  "$defs": {
+    "Date": {
+      "description": "A calendar date, `YYYY-MM-DD`.",
+      "maxLength": 10,
+      "type": "string"
+    },
+    "ForeignRef": {
+      "description": "A citation of a document in another repo's pipeline store (D6).",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/FullSha"
+        },
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        }
+      },
+      "required": [
+        "repo",
+        "commit",
+        "kind",
+        "id",
+        "payload_sha256"
+      ],
+      "type": "object"
+    },
+    "FullSha": {
+      "description": "A full git commit id: exactly 40 lowercase hex characters.",
+      "maxLength": 40,
+      "type": "string"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "OrgRepo": {
+      "description": "A GitHub repository as `Org/Repo`, at most 140 UTF-8 bytes (39 + 1 +\n100). The owner is 1 to 39 `[A-Za-z0-9-]` bytes with no leading or\ntrailing hyphen; the repo is 1 to 100 `[A-Za-z0-9._-]` bytes, is never\n`.` or `..`, and does not end in `.git`, ASCII-case-insensitively.\nIdentity is case-insensitive: `GameCult/Epiphany` and `gamecult/epiphany`\nare the same repository.",
+      "maxLength": 140,
+      "type": "string"
+    },
+    "Para": {
+      "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
+      "maxLength": 4000,
+      "type": "string"
+    },
+    "PipelineKind": {
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff"
+      ],
+      "type": "string"
+    },
+    "RulingAuthority": {
+      "enum": [
+        "Operator",
+        "Standing",
+        "Defaulted"
+      ],
+      "type": "string"
+    },
+    "Sha256Hex": {
+      "description": "A SHA-256 digest: exactly 64 lowercase hex characters.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Title": {
+      "description": "A title: 1 to 200 UTF-8 bytes, enforced by admission; JSON Schema\nlength counts characters. Holds at least one alphanumeric character,\nno control character, and no bidi control character (`U+061C`,\n`U+200E`, `U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`).",
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.ruling.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "answers": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Short"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "authority": {
+      "$ref": "#/$defs/RulingAuthority"
+    },
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "choice": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Label"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "label": {
+      "$ref": "#/$defs/Label"
+    },
+    "operator_quote": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Para"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "precedents": {
+      "items": {
+        "$ref": "#/$defs/ForeignRef"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "ruled_on": {
+      "$ref": "#/$defs/Date"
+    },
+    "ruling": {
+      "$ref": "#/$defs/Para"
+    },
+    "title": {
+      "$ref": "#/$defs/Title"
+    }
+  },
+  "required": [
+    "campaign",
+    "label",
+    "title",
+    "ruling",
+    "ruled_on",
+    "precedents",
+    "authority"
+  ],
+  "title": "PipelineRuling",
+  "type": "object"
+}

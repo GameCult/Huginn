@@ -14,7 +14,7 @@ use cultnet_rs::{
 use eureka_state::{ClientError, HuginnClient, MAX_REQUEST_BYTES};
 use huginn_daemon::serve::MAX_RESPONSE_BYTES;
 use huginn_mind::envelope::{OperationFailure, encode_failure, encode_request, encode_response};
-use huginn_mind::epiphany_pipeline::{
+use huginn_mind::eureka_pipeline::{
     AuthorityMap, CodeLocation, CutDelete, CutVerification, FileChange, Line, NegativeCheck, OrgRepo,
     PipelineCutSpec, PipelineDocument, PipelineKind, PipelineRef, Short, StructuralDelta, Title,
     VerificationTest,

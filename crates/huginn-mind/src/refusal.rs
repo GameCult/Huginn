@@ -3,7 +3,7 @@
 //! serialises it, the tools (Cut 13) show it.
 
 use cultnet_rs::SelectionRefusal;
-use epiphany_pipeline::{PipelineKind, PipelineRefusal};
+use eureka_pipeline::{PipelineKind, PipelineRefusal};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

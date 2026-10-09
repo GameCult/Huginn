@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use cultnet_rs::{Row, RowSet, Selection};
-use epiphany_pipeline::{OrgRepo, Label, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, Slug};
+use eureka_pipeline::{OrgRepo, Label, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, Slug};
 
 use crate::docs::{CitationRole, Held, kind_of_id, kind_of_type};
 use crate::query::PipelineDocumentView;

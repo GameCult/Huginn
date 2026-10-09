@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, OwnedRedbMessagePackBackingStore};
 use cultnet_rs::CursorKey;
-use epiphany_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineKind, Slug, register_pipeline_document_types};
+use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineKind, Slug, register_pipeline_document_types};
 
 use crate::receipt::HuginnCommitReceipt;
 use crate::refusal::MindRefusal;
@@ -48,7 +48,7 @@ pub(crate) fn unavailable(error: anyhow::Error) -> MindRefusal {
 }
 
 /// A declared name's grammar, checked before its bytes are compared to
-/// anything or reach the filesystem. `Slug` is `epiphany_pipeline`'s,
+/// anything or reach the filesystem. `Slug` is `eureka_pipeline`'s,
 /// dot-joined ASCII labels, and the leaf now opens a public door onto its own
 /// check, `Slug::validate_slug`, on the pattern of `PipelineRef::validate_ref`
 /// (Self's ruling on the F6 fork): the grammar is the leaf's, never
@@ -64,7 +64,7 @@ pub(crate) fn unavailable(error: anyhow::Error) -> MindRefusal {
 /// old wrapper's field, a client never sent) and not a label fragment.
 fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefusal> {
     declared.validate_slug().map_err(|_| {
-        MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+        MindRefusal::Document(eureka_pipeline::PipelineRefusal::InvalidFormat {
             field: field.into(),
             value: declared.0.clone(),
         })
@@ -712,7 +712,7 @@ mod tests {
         let escaping = Slug("..\\..\\escaped".into());
         assert_eq!(
             Mind::open(&inner, &escaping).err(),
-            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            Some(MindRefusal::Document(eureka_pipeline::PipelineRefusal::InvalidFormat {
                 field: "instance".into(),
                 value: escaping.0.clone(),
             }))
@@ -734,7 +734,7 @@ mod tests {
         let bad = Slug("not a slug!".into());
         assert_eq!(
             Mind::open_with(store.clone(), &bad).err(),
-            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            Some(MindRefusal::Document(eureka_pipeline::PipelineRefusal::InvalidFormat {
                 field: "instance".into(),
                 value: bad.0.clone(),
             }))
@@ -753,7 +753,7 @@ mod tests {
         let bad = Slug("not a slug!".into());
         assert_eq!(
             mind.require_instance(&bad).err(),
-            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            Some(MindRefusal::Document(eureka_pipeline::PipelineRefusal::InvalidFormat {
                 field: "declared".into(),
                 value: bad.0.clone(),
             }))
@@ -773,7 +773,7 @@ mod tests {
         assert!(!declared.0.is_ascii(), "U+2010 is not ASCII, unlike plain '-'");
         assert_eq!(
             Mind::open_with(MemoryStore::new(), &declared).err(),
-            Some(MindRefusal::Document(epiphany_pipeline::PipelineRefusal::InvalidFormat {
+            Some(MindRefusal::Document(eureka_pipeline::PipelineRefusal::InvalidFormat {
                 field: "instance".into(),
                 value: declared.0.clone(),
             }))
@@ -789,7 +789,7 @@ mod tests {
     #[ignore = "reads and writes the scratch copy of a live state root named by HUGINN_MIND_SNAPSHOT"]
     fn snapshot_admits_and_reads_back() {
         use crate::fixtures::{admit, r, resolution, withdrawn};
-        use epiphany_pipeline::{PipelineRef, ResolutionOutcome, Short, pipeline_key};
+        use eureka_pipeline::{PipelineRef, ResolutionOutcome, Short, pipeline_key};
 
         let root = std::env::var("HUGINN_MIND_SNAPSHOT").expect("HUGINN_MIND_SNAPSHOT names a scratch copy of the state root");
         let mut mind = Mind::open(Path::new(&root), &slug("eureka")).unwrap();
@@ -816,7 +816,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} does not view", envelope.key));
             assert_eq!(view.document, stored, "{}", envelope.key);
             if let PipelineDocument::Resolution(held) = &stored
-                && !matches!(held.outcome, epiphany_pipeline::ResolutionOutcome::Withdrawn { .. })
+                && !matches!(held.outcome, eureka_pipeline::ResolutionOutcome::Withdrawn { .. })
                 && !envelope.key.contains(":resolution:resolution.")
             {
                 resolutions.push(envelope.key.clone());

@@ -11,22 +11,24 @@ Studio's job, not Huginn's.
 
 - Project root: `F:\Projects\Huginn`
 - Upstream: `https://github.com/GameCult/Huginn.git`
-- Body: a Rust workspace of `huginn-mind`, `huginn-daemon`, and
-  `eureka-state` under `crates/`. Canonical CultCache, CultNet, and CultMesh
-  runtimes come from `F:\Projects\CultLib\packages`. `huginn-mind` is live:
-  it persists, admits and reads back an instance's mind, queries and derived
-  status included, over `cultcache-rs` and `epiphany-pipeline` pinned by git
-  rev. `huginn-daemon` serves one mind over CultNet RUDP through `cultnet-rs`
-  at the same rev, and reaches the leaf and the store type through
-  `huginn-mind` so one crate pins each revision. `eureka-state` is the client
-  core: one call to a daemon over CultNet, holding no state.
+- Body: a Rust workspace of `eureka-pipeline`, `huginn-mind`, `huginn-daemon`,
+  and `eureka-state` under `crates/`. Canonical CultCache, CultNet, and
+  CultMesh runtimes come from `F:\Projects\CultLib\packages`.
+  `eureka-pipeline` is the pipeline leaf: document shapes, bounds, formats,
+  keys and the schemas published under `schemas/cultnet`. `huginn-mind` is
+  live: it persists, admits and reads back an instance's mind, queries and
+  derived status included, over `cultcache-rs` and `eureka-pipeline`.
+  `huginn-daemon` serves one mind over CultNet RUDP through `cultnet-rs`, and reaches the leaf and the store type through `huginn-mind`
+  so the workspace's one CultLib revision (root `[workspace.dependencies]`) decides both. `eureka-state` is the client core: one call
+  to a daemon over CultNet, holding no state.
 - Owned: an instance's memory documents, their admission and the read side
   that derives their status, in `huginn-mind`,
   over a redb CultCache store at `<state_root>/minds/<instance>/mind.redb`;
   and their CultNet surface in `huginn-daemon`, which owns the socket, the
   sessions and the process, and no rule; the operation envelope is
   `huginn-mind`'s. The two wire
-  schemas are published from `schemas/cultnet/`. There is no index yet.
+  schemas are published from `schemas/cultnet/` and listed, with the
+  pipeline schemas, in its `index.json`.
 - To depend on: Qdrant, directly, once retrieval exists. Unreachable Qdrant is
   to be a loud refusal, never a fallback store. No crate connects to it yet.
 - Forbidden: a second writer of mind state; mind state in version control;
@@ -36,7 +38,8 @@ Studio's job, not Huginn's.
 
 - Prefer CultLib's typed Rust APIs over ad hoc decoding. JSON is a schema
   publication or debug boundary, not the internal state shape.
-- The Eureka cut map in `Epiphany/notes/eureka-pipeline-state-cut.md` owns
+- The campaign's cut specs in the mind (`eureka-body`, read through
+  `eureka-state`) and `docs/eureka-body-map.md` own
   what each crate does next. Read the cut before the crate.
 - Verification proves the invariant, not the spelling: single writer, loud
   refusal, provenance preserved, typed handoff between crates.

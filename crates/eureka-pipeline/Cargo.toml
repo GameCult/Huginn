@@ -1,0 +1,32 @@
+[package]
+name = "eureka-pipeline"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+autobins = false
+
+# Provenance: this crate was copied once from GameCult/Epiphany at ef956865,
+# where it was licensed PolyForm Noncommercial. Its sole copyright holder
+# relicensed it AGPL-3.0-only on 2026-10-09, as the rest of the workspace is
+# (ruling eureka-body:ruling:leaf-relicensed-agpl).
+
+[lib]
+name = "eureka_pipeline"
+path = "src/lib.rs"
+
+# A leaf type library. Every dependency here is one the document types or the
+# write path need in a non-test build: the organ prepares, decodes and
+# validates envelopes through this crate, so `anyhow` (the cache's error type)
+# and `rmp-serde` (the payload decode) are normal dependencies. Only the
+# schema-publication check needs JSON.
+[dependencies]
+anyhow = "1"
+chrono = "0.4.44"
+cultcache-rs.workspace = true
+rmp-serde = "1"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

@@ -68,7 +68,7 @@ use cultnet_rs::{
     CultNetWireContract, answer_content_chunk_request, decode_cultnet_message_from_slice,
     encode_cultnet_message_to_vec, pack_content,
 };
-use huginn_mind::epiphany_pipeline::Slug;
+use huginn_mind::eureka_pipeline::Slug;
 use huginn_mind::wire::{
     DeferredAnswer, HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON, MIND_RESPONSE_SCHEMA,
     MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID,
@@ -548,7 +548,7 @@ mod tests {
         FITTING_CHANGES, FITTING_CUT, INSTANCE, NoIndex, OTHER, WIDE_CHANGES, WIDE_CUT, batch, identity, now,
         open_unindexed, seeded_wide, slug,
     };
-    use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef};
+    use huginn_mind::eureka_pipeline::{PipelineKind, PipelineRef};
     use huginn_mind::envelope::{FAILURE_SCHEMA, decode_response, encode_request};
     use crate::index::Backoff;
     use base64::Engine;

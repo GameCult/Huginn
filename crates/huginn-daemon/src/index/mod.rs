@@ -99,7 +99,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use huginn_mind::epiphany_pipeline::{PipelineKind, PipelineRef, Short, Slug};
+use huginn_mind::eureka_pipeline::{PipelineKind, PipelineRef, Short, Slug};
 use huginn_mind::wire::IndexStatus;
 use huginn_mind::{INDEX_TEXT_VERSION, IndexEntry, Mind, MindStore};
 use sha2::{Digest, Sha256};

@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use cultcache_rs::CultCacheEnvelope;
-use epiphany_pipeline::{
+use eureka_pipeline::{
     AuthorityMap, ClaimOutcome, CodeLocation, CommitRange, CutVerification, Date, DocRef, Evidence, EvidenceKind,
     FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MutationRecord, OrgRepo, PipelineCampaign,
     PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFinding, PipelineFollowUp, PipelineHandOff,
@@ -32,7 +32,7 @@ pub(crate) const NEAR_INSTANCE: &str = "yggdrasix";
 pub(crate) const PREFIXED_INSTANCE: &str = "yggdrasil-two";
 /// A foreign instance differing from `INSTANCE` in case alone. A `Slug` is
 /// dot-joined labels, each `[A-Za-z0-9_-]{1,64}`, bounded to 64 bytes whole
-/// (`epiphany_pipeline::dotted_text`), so this is a name a client may declare
+/// (`eureka_pipeline::dotted_text`), so this is a name a client may declare
 /// and a mind may hold: two minds whose names differ only in case are two
 /// minds, and a comparison that folds case answers one of them for the other.
 pub(crate) const CASED_INSTANCE: &str = "Yggdrasil";

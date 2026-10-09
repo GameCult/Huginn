@@ -26,7 +26,7 @@ use cultnet_rs::{
     CultNetRudpSocketTransportConnection, CultNetWireContract, encode_cultnet_message_to_vec, fetch_content,
 };
 use huginn_mind::envelope::{OperationFailure, decode_response, encode_request};
-use huginn_mind::epiphany_pipeline::Slug;
+use huginn_mind::eureka_pipeline::Slug;
 use huginn_mind::{HuginnMindRequest, HuginnMindResponse, MAX_DEFERRED_BODY_BYTES};
 
 /// The correlation key of the one request a session carries.

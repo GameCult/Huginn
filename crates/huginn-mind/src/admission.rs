@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use cultcache_rs::{CultCache, CultCacheEnvelope};
-use epiphany_pipeline::{
+use eureka_pipeline::{
     ClaimOutcome, FindingConfidence, Line, PipelineDocument, PipelineKind, PipelineRef, PipelineRefusal,
     PipelineResolution, PipelineStewardship, ResolutionOutcome, RulingAuthority, Short, Slug, pipeline_key,
     validate_pipeline_write_envelope,
@@ -180,7 +180,7 @@ impl<S: MindStore> Mind<S> {
     }
 }
 
-/// The bound `epiphany_pipeline::Short` declares, in UTF-8 bytes. The leaf
+/// The bound `eureka_pipeline::Short` declares, in UTF-8 bytes. The leaf
 /// exposes no validator for it, so `short_bound_is_the_leafs_own` pins this to
 /// the `maxLength` its schema publishes.
 const SHORT_MAX: usize = 200;
@@ -371,7 +371,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             Ok(())
         }
         D::Target(target) => {
-            let predecessor = D::Target(epiphany_pipeline::PipelineTarget { revision: target.revision.wrapping_sub(1), ..target.clone() });
+            let predecessor = D::Target(eureka_pipeline::PipelineTarget { revision: target.revision.wrapping_sub(1), ..target.clone() });
             revision_rule(docs, K::Target, key, target.revision, &predecessor)?;
             unique_labels("target.invariants", target.invariants.iter().map(|invariant| invariant.label.0.as_str()))
         }
@@ -429,7 +429,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
                     return Err(MindRefusal::UnknownDependency { cut: dependency.0.clone() });
                 }
             }
-            let predecessor = D::CutSpec(epiphany_pipeline::PipelineCutSpec { revision: spec.revision.wrapping_sub(1), ..spec.clone() });
+            let predecessor = D::CutSpec(eureka_pipeline::PipelineCutSpec { revision: spec.revision.wrapping_sub(1), ..spec.clone() });
             revision_rule(docs, K::CutSpec, key, spec.revision, &predecessor)
         }
         D::CutReport(report) => {
@@ -704,7 +704,7 @@ mod tests {
     use crate::receipt::{DocumentVersion, Faculty, HuginnCommitReceipt};
     use crate::store::test_stores::{MemoryStore, RefusingStore, SwapCommand};
     use cultcache_rs::DatabaseEntry;
-    use epiphany_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument as D, PipelineKind as K};
+    use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument as D, PipelineKind as K};
     use sha2::{Digest, Sha256};
 
     fn receipt_count<S: MindStore>(mind: &Mind<S>) -> usize {
@@ -833,7 +833,7 @@ mod tests {
     fn provenance_text_is_the_leafs_title_rule() {
         let leaf_accepts = |text: &str| {
             let D::Campaign(mut campaign) = campaign(&[REPO]) else { unreachable!() };
-            campaign.title = epiphany_pipeline::Title(text.into());
+            campaign.title = eureka_pipeline::Title(text.into());
             D::Campaign(campaign).validate().is_ok()
         };
         let mine_accepts = |text: &str| {
@@ -1280,7 +1280,7 @@ mod tests {
         let mut steward = seeded();
         committed(admit(&mut steward, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
         let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
-        back.handed_on = epiphany_pipeline::Date("2026-09-17".into());
+        back.handed_on = eureka_pipeline::Date("2026-09-17".into());
         committed(admit(&mut steward, vec![D::HandOff(back)]));
         assert_eq!(
             refusal(admit(&mut steward, vec![stewardship_n(INSTANCE, REPO, 4)])),
@@ -1366,7 +1366,7 @@ mod tests {
         // Handed back, the mind stewards it again, as `n2`. No field names a
         // return: this is the same hand-off shape with the instances swapped.
         let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
-        back.handed_on = epiphany_pipeline::Date("2026-09-17".into());
+        back.handed_on = eureka_pipeline::Date("2026-09-17".into());
         let (_, writes) = committed(admit(&mut mind, vec![D::HandOff(back)]));
         let again = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2");
         assert_eq!(writes, vec![
@@ -1375,7 +1375,7 @@ mod tests {
         ]);
         let Some(D::Stewardship(taken)) = mind.get(K::Stewardship, &again).unwrap() else { panic!() };
         assert_eq!(taken.sequence, 2);
-        assert_eq!(taken.assigned_on, epiphany_pipeline::Date("2026-09-17".into()));
+        assert_eq!(taken.assigned_on, eureka_pipeline::Date("2026-09-17".into()));
         assert!(mind.envelope(K::Stewardship, &first).is_some(), "the first assignment is still readable by key");
     }
 
@@ -1388,7 +1388,7 @@ mod tests {
         let mut mind = seeded();
         committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
         let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
-        back.handed_on = epiphany_pipeline::Date("2026-09-17".into());
+        back.handed_on = eureka_pipeline::Date("2026-09-17".into());
         committed(admit(&mut mind, vec![D::HandOff(back)]));
         let first = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
         let again = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2");
@@ -1434,7 +1434,7 @@ mod tests {
         let withdrawal = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1");
         committed(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())]));
         let D::HandOff(mut again) = hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[]) else { panic!() };
-        again.handed_on = epiphany_pipeline::Date("2026-09-17".into());
+        again.handed_on = eureka_pipeline::Date("2026-09-17".into());
         let (_, writes) = committed(admit(&mut mind, vec![D::HandOff(again)]));
         assert_eq!(writes, vec![
             r(K::HandOff, &format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.gamecult_-epiphany.2026-09-17")),
@@ -1444,7 +1444,7 @@ mod tests {
 
     fn hand_off_on(from: &str, to: &str, day: &str) -> D {
         let D::HandOff(mut hand_off) = hand_off(from, to, REPO, &[]) else { panic!() };
-        hand_off.handed_on = epiphany_pipeline::Date(day.into());
+        hand_off.handed_on = eureka_pipeline::Date(day.into());
         D::HandOff(hand_off)
     }
 
@@ -1905,7 +1905,7 @@ mod tests {
         report.repo = repo(OTHER_REPO);
         assert_eq!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::SpecMismatch { field: "repo".into() });
         let mut report = cut_report("1", 1);
-        report.range.head = epiphany_pipeline::Sha("abcdef0".into());
+        report.range.head = eureka_pipeline::Sha("abcdef0".into());
         assert_eq!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::RangeOutsideCommits { head: "abcdef0".into() });
         committed(admit(&mut mind, vec![resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), withdrawn())]));
         assert_eq!(
@@ -2008,18 +2008,18 @@ mod tests {
         committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1))]));
         // The commit is spelled short and the head full, and the reverse.
         let mut report = cut_report("1", 1);
-        report.range.head = epiphany_pipeline::Sha(full.into());
+        report.range.head = eureka_pipeline::Sha(full.into());
         committed(admit(&mut mind, vec![D::CutReport(report)]));
         let mut report = cut_report("1", 2);
-        report.commits[0].sha = epiphany_pipeline::Sha(full.into());
+        report.commits[0].sha = eureka_pipeline::Sha(full.into());
         committed(admit(&mut mind, vec![D::CutReport(report)]));
         // A head that is no commit's prefix, long or short, is outside.
         let mut report = cut_report("1", 3);
-        report.range.head = epiphany_pipeline::Sha("5f98229d0123456789abcdef0123456789abcdef".into());
+        report.range.head = eureka_pipeline::Sha("5f98229d0123456789abcdef0123456789abcdef".into());
         assert!(matches!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::RangeOutsideCommits { .. }));
         let mut report = cut_report("1", 3);
-        report.commits[0].sha = epiphany_pipeline::Sha(full.into());
-        report.range.head = epiphany_pipeline::Sha("5f98229".into());
+        report.commits[0].sha = eureka_pipeline::Sha(full.into());
+        report.range.head = eureka_pipeline::Sha("5f98229".into());
         assert!(matches!(refusal(admit(&mut mind, vec![D::CutReport(report)])), MindRefusal::RangeOutsideCommits { .. }));
     }
 
@@ -2115,16 +2115,16 @@ mod tests {
         struct Rangeless {
             campaign: Slug,
             verdict: Short,
-            label: epiphany_pipeline::Label,
+            label: eureka_pipeline::Label,
             confidence: FindingConfidence,
-            severity: epiphany_pipeline::FindingSeverity,
+            severity: eureka_pipeline::FindingSeverity,
             claim: Line,
-            invariants: Vec<epiphany_pipeline::Label>,
-            locations: Vec<epiphany_pipeline::CodeLocation>,
-            failure_scenario: epiphany_pipeline::Para,
-            evidence: Vec<epiphany_pipeline::Evidence>,
-            precedents: Vec<epiphany_pipeline::ForeignRef>,
-            origin: epiphany_pipeline::FindingOrigin,
+            invariants: Vec<eureka_pipeline::Label>,
+            locations: Vec<eureka_pipeline::CodeLocation>,
+            failure_scenario: eureka_pipeline::Para,
+            evidence: Vec<eureka_pipeline::Evidence>,
+            precedents: Vec<eureka_pipeline::ForeignRef>,
+            origin: eureka_pipeline::FindingOrigin,
         }
         let whole = finding("1", 1, "F1", FindingConfidence::Plausible);
         let rangeless = Rangeless {

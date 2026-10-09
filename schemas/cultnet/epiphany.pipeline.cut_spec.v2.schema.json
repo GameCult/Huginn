@@ -1,0 +1,412 @@
+{
+  "$defs": {
+    "AuthorityMap": {
+      "properties": {
+        "deletion_line": {
+          "$ref": "#/$defs/Line"
+        },
+        "derived_state": {
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "forbidden_writers": {
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "outputs": {
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "owner": {
+          "$ref": "#/$defs/Line"
+        },
+        "shared_paths": {
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 16,
+          "type": "array"
+        }
+      },
+      "required": [
+        "owner",
+        "inputs",
+        "outputs",
+        "derived_state",
+        "forbidden_writers",
+        "shared_paths",
+        "deletion_line"
+      ],
+      "type": "object"
+    },
+    "CodeLocation": {
+      "properties": {
+        "end_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "path",
+        "line"
+      ],
+      "type": "object"
+    },
+    "CutDelete": {
+      "properties": {
+        "lines": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "note": {
+          "$ref": "#/$defs/Line"
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "path",
+        "lines",
+        "note"
+      ],
+      "type": "object"
+    },
+    "CutVerification": {
+      "properties": {
+        "builds": {
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "negative": {
+          "items": {
+            "$ref": "#/$defs/NegativeCheck"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "operator": {
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "tests": {
+          "items": {
+            "$ref": "#/$defs/VerificationTest"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": [
+        "builds",
+        "tests",
+        "negative",
+        "operator"
+      ],
+      "type": "object"
+    },
+    "FileChange": {
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/Line"
+        },
+        "location": {
+          "$ref": "#/$defs/CodeLocation"
+        }
+      },
+      "required": [
+        "location",
+        "change"
+      ],
+      "type": "object"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "NegativeCheck": {
+      "properties": {
+        "pattern": {
+          "$ref": "#/$defs/Short"
+        },
+        "scope": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "pattern",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "OrgRepo": {
+      "description": "A GitHub repository as `Org/Repo`, at most 140 UTF-8 bytes (39 + 1 +\n100). The owner is 1 to 39 `[A-Za-z0-9-]` bytes with no leading or\ntrailing hyphen; the repo is 1 to 100 `[A-Za-z0-9._-]` bytes, is never\n`.` or `..`, and does not end in `.git`, ASCII-case-insensitively.\nIdentity is case-insensitive: `GameCult/Epiphany` and `gamecult/epiphany`\nare the same repository.",
+      "maxLength": 140,
+      "type": "string"
+    },
+    "Sha": {
+      "description": "A git commit id: 7-40 lowercase hex characters.",
+      "maxLength": 40,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "StructuralDelta": {
+      "properties": {
+        "dependencies_added": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "dependencies_removed": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "formats_added": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "formats_removed": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "lines_added": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lines_removed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "targets_added": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "targets_removed": {
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": [
+        "lines_added",
+        "lines_removed",
+        "dependencies_added",
+        "dependencies_removed",
+        "formats_added",
+        "formats_removed",
+        "targets_added",
+        "targets_removed"
+      ],
+      "type": "object"
+    },
+    "Title": {
+      "description": "A title: 1 to 200 UTF-8 bytes, enforced by admission; JSON Schema\nlength counts characters. Holds at least one alphanumeric character,\nno control character, and no bidi control character (`U+061C`,\n`U+200E`, `U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`).",
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "VerificationTest": {
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/Short"
+        },
+        "pins": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "name",
+        "pins"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.cut_spec.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "adds": {
+      "items": {
+        "$ref": "#/$defs/Line"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "authority_map": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuthorityMap"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "base": {
+      "$ref": "#/$defs/Sha"
+    },
+    "branch": {
+      "$ref": "#/$defs/Short"
+    },
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "cut": {
+      "$ref": "#/$defs/Label"
+    },
+    "deletes": {
+      "items": {
+        "$ref": "#/$defs/CutDelete"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "depends_on": {
+      "items": {
+        "$ref": "#/$defs/Short"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "estimate": {
+      "$ref": "#/$defs/StructuralDelta"
+    },
+    "file_changes": {
+      "items": {
+        "$ref": "#/$defs/FileChange"
+      },
+      "maxItems": 256,
+      "type": "array"
+    },
+    "first": {
+      "items": {
+        "$ref": "#/$defs/Line"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "keeps_moves": {
+      "items": {
+        "$ref": "#/$defs/Line"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "questions": {
+      "items": {
+        "$ref": "#/$defs/Short"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "repo": {
+      "$ref": "#/$defs/OrgRepo"
+    },
+    "revision": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "rulings": {
+      "items": {
+        "$ref": "#/$defs/Short"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "title": {
+      "$ref": "#/$defs/Title"
+    },
+    "verification": {
+      "$ref": "#/$defs/CutVerification"
+    }
+  },
+  "required": [
+    "campaign",
+    "cut",
+    "revision",
+    "title",
+    "repo",
+    "branch",
+    "base",
+    "depends_on",
+    "first",
+    "deletes",
+    "keeps_moves",
+    "adds",
+    "file_changes",
+    "verification",
+    "estimate",
+    "rulings",
+    "questions"
+  ],
+  "title": "PipelineCutSpec",
+  "type": "object"
+}

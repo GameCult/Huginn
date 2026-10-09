@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use cultnet_rs::{
     Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, Row, Selection, select, validate,
 };
-use epiphany_pipeline::{
+use eureka_pipeline::{
     ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, OrgRepo,
     PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, Sha, Short,
     Slug, Title,
@@ -621,7 +621,7 @@ mod tests {
     use crate::mind::schema_cache;
     use crate::store::test_stores::MemoryStore;
     use chrono::{TimeZone, Utc};
-    use epiphany_pipeline::{
+    use eureka_pipeline::{
         ClaimOutcome, FindingConfidence, PipelineDocument as D, PipelineKind as K, PipelineRefusal, ResolutionOutcome,
     };
 
