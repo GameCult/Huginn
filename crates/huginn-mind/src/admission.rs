@@ -603,7 +603,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
     use PipelineKind as K;
     use ResolutionOutcome as O;
     let all = |by: &[PipelineRef], kind: K| by.iter().all(|supersessor| supersessor.kind == kind);
-    let fits = match (subject, outcome) {
+    match (subject, outcome) {
         (K::Target, O::Superseded { by }) => all(by, K::Target),
         (K::Question, O::Answered { by }) => by.kind == K::Ruling,
         (K::Question, O::Withdrawn { .. }) => true,
@@ -621,8 +621,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Run, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::Resolution, O::Withdrawn { .. }) => true,
         _ => false,
-    };
-    fits
+    }
 }
 
 /// The resolution row: the sequence, the in-force subject, the matrix, the
@@ -861,6 +860,42 @@ mod tests {
         assert_eq!(receipts[0].provenance.agent, s(&exact));
         assert_eq!(receipts[0].provenance.session, s("session 7"));
         assert_eq!(receipts[0].provenance.tool, s("admit tool"));
+    }
+
+    /// The read bounds are the leaf's: admission applies the leaf's validation
+    /// and adds none. Sixteen anchors of a hundred lines admit and read back;
+    /// a seventeenth refuses at `cut_spec.reads` and nothing is written.
+    #[test]
+    fn reads_admit_at_the_bound_and_refuse_over_it() {
+        let anchors = |count: usize| {
+            (0..count)
+                .map(|n| eureka_pipeline::ReadAnchor {
+                    location: eureka_pipeline::CodeLocation {
+                        path: s("crates/eureka-pipeline/src/lib.rs"),
+                        line: 1,
+                        end_line: Some(100),
+                        symbol: Some(format!("symbol_{n}").as_str().into()),
+                    },
+                    why: s("read"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut mind = seeded();
+        let mut spec = cut_spec("1", 1);
+        spec.reads = anchors(16);
+        committed(admit(&mut mind, vec![D::CutSpec(spec.clone())]));
+        let held = mind.view(&r(K::CutSpec, &id("cut_spec", "cut-1.r1"))).unwrap().expect("the spec is held");
+        assert_eq!(held.document, D::CutSpec(spec));
+
+        let mut over = cut_spec("2", 1);
+        over.reads = anchors(17);
+        let receipts = mind.receipts().unwrap().len();
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::CutSpec(over)])),
+            MindRefusal::Document(PipelineRefusal::FieldBound { field: "cut_spec.reads".into(), limit: 16, actual: 17 })
+        );
+        assert_eq!(mind.receipts().unwrap().len(), receipts);
+        assert_eq!(mind.view(&r(K::CutSpec, &id("cut_spec", "cut-2.r1"))).unwrap(), None, "nothing is written");
     }
 
     /// The leaf's `Title` rule is private, so this holds the provenance rule to

@@ -17,6 +17,16 @@
         },
         "path": {
           "$ref": "#/$defs/Short"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Symbol"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -268,6 +278,12 @@
         "targets_removed"
       ],
       "type": "object"
+    },
+    "Symbol": {
+      "description": "A name the location's lines must contain as written there (an\nidentifier or a YAML `&fileID`); not an identity. 1 to 128 bytes, no\nwhitespace and no control character.",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
     }
   },
   "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.cut_report.v2.schema.json",

@@ -15,7 +15,8 @@ like the rest of the workspace.
 Committed (runs in `cargo test -p eureka-pipeline`): `encoded_envelopes_match_the_committed_golden`
 asserts key, cultcache type id, schema name and payload bytes of every kind
 and every encoding-relevant variant against `golden/envelopes.txt`. A diff
-there is a wire change; do not regenerate it to make the test pass.
+there is a wire change; do not regenerate it to make the test pass. An additive
+field adds golden lines and never changes an existing one.
 
 Opt-in, against a real store: `stored_documents_read_back` decodes, validates
 and keys every stored pipeline document and asserts that it re-encodes to the
