@@ -14,7 +14,9 @@
 //! The reader opens the file read-only through CultCache's read-only snapshot
 //! door: it takes no lock and creates no sibling file, so the units she runs as
 //! need no write authority anywhere under `/etc`. Writing is the operator's;
-//! the filesystem is the authority and nothing here checks permission.
+//! the filesystem is the authority. The writer only refuses to write through an
+//! existing directory, lock or store that is not root's or that group or world
+//! can write (`UnsafeStore`); it checks no caller identity.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -215,6 +217,45 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
         .with_context(|| format!("failed to set the mode of {}", path.display()))
 }
 
+/// A control path the writer will not write through: it is not root's, or
+/// group or world can write it. Names the path, its mode and its owner.
+#[derive(Debug)]
+pub struct UnsafeStore {
+    pub path: PathBuf,
+    pub mode: u32,
+    pub uid: u32,
+}
+
+impl std::fmt::Display for UnsafeStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "refusing to write: {} is mode {:04o} owned by uid {}; it must be owned by root (uid 0) and not group- or world-writable",
+            self.path.display(),
+            self.mode,
+            self.uid
+        )
+    }
+}
+
+impl std::error::Error for UnsafeStore {}
+
+#[cfg(unix)]
+fn require_root_only_writable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).with_context(|| format!("failed to inspect {}", path.display()))?;
+    let (mode, uid) = (meta.mode() & 0o7777, meta.uid());
+    if uid != 0 || mode & 0o022 != 0 {
+        return Err(UnsafeStore { path: path.to_path_buf(), mode, uid }.into());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn require_root_only_writable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
@@ -231,16 +272,24 @@ impl ControlWriter {
 
     /// Before the first write: the control directory exists at 0755 and the
     /// lock file at 0644, set explicitly because creation takes the umask.
-    /// Called after a setter's own refusals, so a refused write creates nothing.
+    /// A directory, lock or store that already exists must be root's and not
+    /// group- or world-writable, else the write is refused (`UnsafeStore`): the
+    /// operator fixes the install. Called after a setter's own refusals, so a
+    /// refused write creates nothing.
     fn prepare(&self) -> Result<()> {
         let directory = self.path.parent().context("control path has no directory")?;
+        let mut lock_name = self.path.file_name().context("control path has no file name")?.to_os_string();
+        lock_name.push(".lock");
+        let lock = self.path.with_file_name(lock_name);
+        for existing in [directory, lock.as_path(), self.path.as_path()] {
+            if existing.exists() {
+                require_root_only_writable(existing)?;
+            }
+        }
         if !directory.exists() {
             std::fs::create_dir_all(directory).with_context(|| format!("failed to create {}", directory.display()))?;
             set_mode(directory, DIR_MODE)?;
         }
-        let mut lock_name = self.path.file_name().context("control path has no file name")?.to_os_string();
-        lock_name.push(".lock");
-        let lock = self.path.with_file_name(lock_name);
         if !lock.exists() {
             std::fs::OpenOptions::new()
                 .create(true)

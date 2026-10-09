@@ -832,6 +832,7 @@ dependencies = [
  "chrono",
  "cultcache-rs",
  "eureka-pipeline",
+ "libc",
  "rust_decimal",
  "serde",
  "tempfile",

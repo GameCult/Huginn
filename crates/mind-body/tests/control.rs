@@ -1,10 +1,13 @@
 //! Behavioural tests for the brake, the dial and the one reader. Every test
 //! works in a temporary directory through the same file door the units use;
-//! nothing touches `/etc`.
+//! nothing touches `/etc` except the window probe, which writes a uniquely named
+//! instance there as root and removes it.
 //!
-//! The permission boundary (no user she runs as can write the file) belongs to
-//! the filesystem, not to this crate, and is not tested here: the verify
-//! container runs as root, where a permission failure cannot be provoked.
+//! The permission boundary is the filesystem's, but the writer refuses to write
+//! through a directory, lock or store that is not root's or that group or world
+//! can write, and creates its own files at fixed modes. The suite therefore runs
+//! as root (the verify container does); the tests that need a second user become
+//! uid 65534 with setpriv and skip with a message when they cannot.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -346,7 +349,8 @@ mod modes {
     #[test]
     fn mode_child() {
         let Ok(role) = std::env::var(CHILD) else { return };
-        let path = Path::new(&std::env::var(ROOT).unwrap()).join("eureka").join("control.cc");
+        let instance = std::env::var("MIND_BODY_INSTANCE").unwrap_or_else(|_| "eureka".into());
+        let path = Path::new(&std::env::var(ROOT).unwrap()).join(instance).join("control.cc");
         match role.as_str() {
             "write" => {
                 let mut writer = ControlWriter::open(&path).unwrap();
@@ -355,6 +359,18 @@ mod modes {
             }
             "brake" => {
                 ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").unwrap();
+            }
+            "attacker" => {
+                // Spins on an open-for-write of the live store; any success is a hit.
+                let stop = std::env::var("MIND_BODY_STOP").unwrap();
+                let started = std::time::Instant::now();
+                while !Path::new(&stop).exists() && started.elapsed() < Duration::from_secs(120) {
+                    for _ in 0..2000 {
+                        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+                            std::process::exit(3);
+                        }
+                    }
+                }
             }
             "intruder" => {
                 assert!(ControlWriter::open(&path).and_then(|mut writer| writer.set_brake(false, at(1), "intruder")).is_err());
@@ -417,5 +433,139 @@ mod modes {
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         let status = spawn_child("intruder", dir.path(), &exe, &["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups"], "022");
         assert!(status.success(), "the intruder child asserted a refusal that did not happen");
+    }
+}
+
+#[cfg(unix)]
+mod unsafe_installs {
+    use super::*;
+    use mind_body::control::UnsafeStore;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    fn running_as_root() -> bool {
+        Command::new("id").arg("-u").output().map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0").unwrap_or(false)
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// An instance directory at `dir_mode`, optionally with a lock and a store
+    /// at the given modes, all root's (the suite runs as root).
+    fn install(dir_mode: u32, lock_mode: Option<u32>, store_mode: Option<u32>) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let instance = root.path().join("eureka");
+        std::fs::create_dir(&instance).unwrap();
+        for (name, mode) in [("control.cc.lock", lock_mode), ("control.cc", store_mode)] {
+            if let Some(mode) = mode {
+                std::fs::write(instance.join(name), b"").unwrap();
+                chmod(&instance.join(name), mode);
+            }
+        }
+        chmod(&instance, dir_mode);
+        (root, instance)
+    }
+
+    fn refusal(instance: &Path) -> UnsafeStore {
+        let path = instance.join("control.cc");
+        let error = ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").expect_err("an unsafe install must be refused");
+        error.downcast::<UnsafeStore>().expect("the refusal is the typed UnsafeStore error")
+    }
+
+    #[test]
+    fn a_group_or_world_writable_directory_lock_or_store_is_refused_and_nothing_is_written() {
+        if !running_as_root() {
+            eprintln!("SKIPPED: needs root to own the fixtures");
+            return;
+        }
+        let cases: [(&str, u32, Option<u32>, Option<u32>, &str); 5] = [
+            ("world-writable directory", 0o777, None, None, ""),
+            ("group-writable directory", 0o775, None, None, ""),
+            ("world-writable lock", 0o755, Some(0o666), None, "control.cc.lock"),
+            ("group-writable store", 0o755, Some(0o644), Some(0o664), "control.cc"),
+            ("world-writable store", 0o755, None, Some(0o666), "control.cc"),
+        ];
+        for (what, dir_mode, lock_mode, store_mode, culprit) in cases {
+            let (_root, instance) = install(dir_mode, lock_mode, store_mode);
+            let before: Vec<_> = std::fs::read_dir(&instance).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+            let unsafe_store = refusal(&instance);
+            let expected = if culprit.is_empty() { instance.clone() } else { instance.join(culprit) };
+            assert_eq!(unsafe_store.path, expected, "{what}: names the offending path");
+            assert!(unsafe_store.mode & 0o022 != 0, "{what}: names the mode");
+            assert!(unsafe_store.to_string().contains(&expected.display().to_string()), "{what}: the message names the path");
+            let mut after: Vec<_> = std::fs::read_dir(&instance).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+            let mut before = before;
+            before.sort();
+            after.sort();
+            assert_eq!(before, after, "{what}: a refused write creates nothing");
+        }
+    }
+
+    #[test]
+    fn a_directory_not_owned_by_root_is_refused() {
+        if !running_as_root() {
+            eprintln!("SKIPPED: needs root to chown");
+            return;
+        }
+        let (_root, instance) = install(0o755, None, None);
+        std::os::unix::fs::chown(&instance, Some(65534), Some(65534)).unwrap();
+        let unsafe_store = refusal(&instance);
+        assert_eq!((unsafe_store.path, unsafe_store.uid), (instance, 65534));
+    }
+
+    #[test]
+    fn a_root_owned_install_without_group_or_world_write_is_accepted() {
+        if !running_as_root() {
+            eprintln!("SKIPPED: needs root to own the fixtures");
+            return;
+        }
+        for dir_mode in [0o755, 0o750, 0o700] {
+            let (_root, instance) = install(dir_mode, Some(0o644), Some(0o644));
+            ControlWriter::open(instance.join("control.cc")).unwrap().set_brake(true, at(0), "op").unwrap();
+        }
+    }
+
+    /// The window between CultCache's rename and the writer's chmod, probed by
+    /// a non-root process spinning open-for-write on the live store while the
+    /// real binary writes it under a starting umask of 000. The binary sets
+    /// its own umask, so the staged file is never writable by anyone else.
+    #[test]
+    fn no_non_root_open_for_write_succeeds_while_the_binary_writes_under_umask_000() {
+        if !running_as_root() || Command::new("setpriv").arg("--version").output().is_err() {
+            eprintln!("SKIPPED: needs root and setpriv; it writes under /etc/gamecult/minds in the verify container");
+            return;
+        }
+        let instance = format!("window-probe-{}", std::process::id());
+        let live = Path::new(mind_body::control::CONTROL_ROOT).join(&instance);
+        let work = tempfile::tempdir().unwrap();
+        chmod(work.path(), 0o755);
+        let attacker_bin = work.path().join("attacker");
+        std::fs::copy(std::env::current_exe().unwrap(), &attacker_bin).unwrap();
+        chmod(&attacker_bin, 0o755);
+        let stop = work.path().join("stop");
+        let mut attacker = Command::new("setpriv")
+            .args(["--reuid=65534", "--regid=65534", "--clear-groups"])
+            .arg(&attacker_bin)
+            .args(["--exact", "modes::mode_child", "--nocapture"])
+            .env("MIND_BODY_MODE_CHILD", "attacker")
+            .env("MIND_BODY_MODE_ROOT", live.parent().unwrap())
+            .env("MIND_BODY_STOP", &stop)
+            .env("MIND_BODY_INSTANCE", &instance)
+            .spawn()
+            .unwrap();
+        let bin = env!("CARGO_BIN_EXE_mind-control");
+        for round in 0..60 {
+            let verb = if round % 2 == 0 { "release" } else { "hold" };
+            let status = Command::new("sh")
+                .args(["-c", "umask 000; exec \"$@\"", "sh", bin, "--instance", &instance, "brake", verb])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        std::fs::write(&stop, b"").unwrap();
+        let attacker_status = attacker.wait().unwrap();
+        std::fs::remove_dir_all(&live).unwrap();
+        assert_eq!(attacker_status.code(), Some(0), "a non-root process opened the live store for write");
     }
 }

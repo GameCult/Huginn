@@ -1,5 +1,5 @@
 //! The `mind-control` command line: the operator's hand on one instance's
-//! control store. It performs no permission check of its own: the file is
+//! control store. It checks no caller identity: the file is
 //! root-owned and the filesystem is the authority.
 //!
 //! ```text
