@@ -199,20 +199,72 @@ pub fn read_effective(source: &impl ControlSource) -> Effective {
 /// first write.
 pub struct ControlWriter {
     cache: CultCache,
+    path: PathBuf,
+}
+
+/// The modes the store is created with, whatever the operator's umask: the
+/// directory and the files under it are world-readable and writable by their
+/// owner alone, which is what makes the filesystem the write authority.
+const DIR_MODE: u32 = 0o755;
+const FILE_MODE: u32 = 0o644;
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("failed to set the mode of {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
 }
 
 impl ControlWriter {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
         let mut cache = registered_cache()?;
-        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(path))?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
         cache.pull_all_backing_stores()?;
-        Ok(Self { cache })
+        Ok(Self { cache, path })
+    }
+
+    /// Before the first write: the control directory exists at 0755 and the
+    /// lock file at 0644, set explicitly because creation takes the umask.
+    /// Called after a setter's own refusals, so a refused write creates nothing.
+    fn prepare(&self) -> Result<()> {
+        let directory = self.path.parent().context("control path has no directory")?;
+        if !directory.exists() {
+            std::fs::create_dir_all(directory).with_context(|| format!("failed to create {}", directory.display()))?;
+            set_mode(directory, DIR_MODE)?;
+        }
+        let mut lock_name = self.path.file_name().context("control path has no file name")?.to_os_string();
+        lock_name.push(".lock");
+        let lock = self.path.with_file_name(lock_name);
+        if !lock.exists() {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock)
+                .with_context(|| format!("failed to open {}", lock.display()))?;
+            set_mode(&lock, FILE_MODE)?;
+        }
+        Ok(())
+    }
+
+    /// After a write: the store file the atomic rename put in place takes the
+    /// umask-free mode. CultCache stages with the process umask and offers no
+    /// way to pass a mode, so this is where the mode can be set.
+    fn settle(&self) -> Result<()> {
+        set_mode(&self.path, FILE_MODE)
     }
 
     pub fn set_brake(&mut self, released: bool, set_at: DateTime<Utc>, set_by: &str) -> Result<()> {
         let brake = Brake { released, set_at, set_by: set_by.to_string() };
+        self.prepare()?;
         self.cache.put(BRAKE_KEY, &brake)?;
-        Ok(())
+        self.settle()
     }
 
     /// Refuses an out-of-bounds dial before anything is written, so the store
@@ -225,7 +277,8 @@ impl ControlWriter {
                 heat_max()
             );
         }
+        self.prepare()?;
         self.cache.put(DIAL_KEY, &dial)?;
-        Ok(())
+        self.settle()
     }
 }
