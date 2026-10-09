@@ -322,7 +322,6 @@ mod tests {
         assert_eq!(breaker(&mind, &item).unwrap(), Breaker::Trip, "the next run's batch is not the previous run's window");
     }
 
-    #[test]
     /// The adapter over the wire vocabulary, answered by a real mind.
     #[test]
     fn the_daemon_port_asks_and_admits_in_the_wire_vocabulary() {
