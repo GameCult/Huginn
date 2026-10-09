@@ -2,7 +2,6 @@
 //! works in a temporary directory through the same file door the units use;
 //! nothing touches `/etc`, including the window probe, which points the real
 //! binary at a tempdir with `--root`.
-//! instance there as root and removes it.
 //!
 //! The permission boundary is the filesystem's, but the writer refuses to write
 //! through a directory, lock or store that is not root's or that group or world
