@@ -5,6 +5,12 @@ Status: map, Imagination (`imagination-substrate`), 2026-10-01. Campaign
 typed documents there; this page keeps body facts, the model page and
 rationale only. Target: `docs/eureka-substrate-target.md` (`133324a7`).
 
+Revised 2026-10-09 (Modeling). The leaf is now Huginn `crates/eureka-pipeline`
+(`afc35f9`, leaf-into-huginn): no Epiphany repo owns or pins it, and
+`leaf-key-bound` is in it (see `docs/eureka-body-map.md` F16). The pinned heads,
+the Epiphany rows and the `lib.rs` line numbers below are as read on 2026-10-01
+and describe the leaf at `epiphany-pipeline/src/lib.rs`.
+
 Pinned heads for every fact below:
 
 | Repo | Ref | Commit |
@@ -48,8 +54,11 @@ against those commits. `lib.rs` below is `epiphany-pipeline/src/lib.rs`.
   makes a key that no id parser accepts. The parser bound has to move with it.
 - The epoch is `epiphany.pipeline.epoch.v2` (`lib.rs:886`). `value_types!`
   (`lib.rs:400-419`) emits no serde default on any field, so adding a field
-  would break the decode of stored documents. **No cut in this map adds a
-  field**, so this constraint is recorded and not exercised.
+  would break the decode of stored documents. No cut in this map added a
+  field. `leaf-read-anchors` r2 (admitted 2026-10-09, not yet landed) does add
+  fields, through the leaf's `= absent` marker, which defaults on read and omits
+  on write when empty, so stored documents still decode and existing golden
+  lines do not move.
 - The published schemas (`schemas/cultnet/epiphany.pipeline.*.v2.schema.json`)
   carry no key bound. A resolution's `subject.id` is `Short`, 200 bytes. A key
   is not a field, so no published schema changes when a local bound moves.
@@ -242,8 +251,8 @@ long, so the client swap sits next to the daemon flip.
 is an ancestor of Epiphany `main`, and the leaf tree is byte-identical. So the
 daemon built from Huginn `main` is built from main code
 (`code-from-main`), with an unchanged `Cargo.lock`, and the deployed release
-stays as it is. The pin moves in the Huginn admission cut, to the leaf cut's
-merge on Epiphany `main`.
+stays as it is. The pin later moved to Epiphany `ef956865` (F1 of the body map);
+`leaf-into-huginn` then removed it, since the leaf lives in Huginn.
 
 **Proof of `stored-documents-valid`.** Each code cut runs one read-back test
 over a real copy of the mind. Every envelope decodes; `pipeline_key` of the

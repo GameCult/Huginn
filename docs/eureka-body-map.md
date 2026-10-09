@@ -8,12 +8,19 @@ Campaign `eureka-body` in Eureka's mind (instance `eureka`). Target in force
 documents in the mind; read them by id. Self commits this page where the
 target doc lives (Huginn `docs/`), probably as `docs/eureka-body-map.md`.
 
+Revised 2026-10-09 (Modeling, session `self-2026-10-09-morning`) after
+`leaf-into-huginn` (Huginn `afc35f9`) and the Epiphany body teardown
+(gamecult-ops `9c12adb`; leftovers in follow-up
+`eureka-body:follow_up:epiphany-body-leftovers`). Pinned heads and facts F1-F14 are
+as read on 2026-10-08 and keep their tense; each carries a note where a cut has since
+changed it. F15-F17 are new.
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
 | --- | --- | --- | --- |
 | Huginn | `origin/main` = local `main`, `F:\Projects\Huginn`, clean | `6b496eb` | last commit 2026-10-02; deployed daemon is `107552d` (docs-only diff to main) |
-| Epiphany | `origin/main` | `ef956865` | = Huginn's leaf pin; local checkout is on `codex/eureka-pipeline-state` `4006b14b`. GitHub `isArchived: false` |
+| Epiphany | `origin/main` | `ef956865` | was Huginn's leaf pin (no pin since `afc35f9`); local checkout is on `codex/eureka-pipeline-state` `4006b14b`. GitHub `isArchived: false` |
 | CodexConnector | `origin/main` | `3ddc12e` | local checkout is on `codex/ghostlight-release-binding` `6519289`; Ghostlight pins `68fe94b` |
 | gamecult-ops | `origin/main` | `7e23387` | clean |
 | Bifrost | `origin/main` | `160fac2` | clean |
@@ -24,7 +31,7 @@ target doc lives (Huginn `docs/`), probably as `docs/eureka-body-map.md`.
 
 Each line: what was run, where, result.
 
-- **F1 Huginn never left Epiphany.** `grep epiphany crates/*/Cargo.toml` (Huginn 6b496eb):
+- **F1 Huginn never left Epiphany (at 6b496eb; cut at `afc35f9`, no build edge remains).** `grep epiphany crates/*/Cargo.toml` (Huginn 6b496eb):
   `crates/huginn-mind/Cargo.toml:22` pins `epiphany-pipeline` by git at Epiphany
   `ef956865`. `Cargo.lock:376-378` carries the git source. The map-r4 cut
   `leaf-into-huginn` was never specified; no `cut_spec` for it exists in any
@@ -38,7 +45,7 @@ Each line: what was run, where, result.
   `tests/client.rs:17`, `tests/common/mod.rs:16`, `tests/mcp.rs:14,539`; huginn-daemon
   `src/daemon.rs:7,220,688,718,747`, `src/index/mod.rs:102`, `src/semantic_tests.rs:13`,
   `src/serve.rs:71,551`. Prose: `README.md:64`, `AGENTS.md:18`.
-- **F3 The leaf at the pin.** Epiphany `ef956865`: `epiphany-pipeline/Cargo.toml`
+- **F3 The leaf at the pin (now Huginn `crates/eureka-pipeline`, `afc35f9`).** Epiphany `ef956865`: `epiphany-pipeline/Cargo.toml`
   (lib `epiphany_pipeline`, deps anyhow, chrono, cultcache-rs at CultLib `8fc74c7`
   = Huginn's own CultLib pin, rmp-serde, schemars, serde; dev serde_json),
   `epiphany-pipeline/src/lib.rs` (schema-publication test reads
@@ -48,12 +55,12 @@ Each line: what was run, where, result.
 - **F4 Mind deployment.** `ssh yggdrasil`: `huginn.service` active, ExecStart
   `/opt/gamecult/huginn/current/huginn-daemon --state-root /var/lib/gamecult/huginn
   --instance eureka --bind 10.77.0.1:17872 ...`; `current ->
-  releases/107552dc...` (Huginn merge of huginn-admission-rules; main adds docs only).
+  releases/107552dc...` (Huginn merge of huginn-admission-rules; on 2026-10-08 main added docs only, and since then main has moved code: see F17).
   UFW admits 17872/udp on wg-gamecult from 10.77.0.2 only (runbook
   `huginn-yggdrasil.md:38,124`). The daemon has no peer authentication
   (`serve.rs`: one session per peer, `max_peers = 256`); any reachable peer admits
   as any faculty.
-- **F5 Epiphany residue on Yggdrasil (12:13 UTC).** Units `epiphany.service`,
+- **F5 Epiphany residue on Yggdrasil (12:13 UTC, before the teardown; what the teardown left is follow-up `eureka-body:follow_up:epiphany-body-leftovers`).** Units `epiphany.service`,
   `epiphany-swarm.service`, `epiphany-heartbeat.service` inactive/dead;
   `epiphany-model-connector.service` loaded, disabled. Users `epiphany` (988; groups
   epiphany-state, bifrost-feedback-readers) and `epiphany-model` (984; group
@@ -96,7 +103,7 @@ Each line: what was run, where, result.
   reasoning item), `CodexTransportInvocation` :238-245 (no `max_cost_usd`),
   `CodexTransportOutcome::Completed` :449-462 (tokens, no cost), `CodexRefusal`
   :464-474 (no `Budget`). Schema ids `gamecult.codex.*.v2` lib.rs:51-55.
-- **F11 gamecult-ops Epiphany tooling** (`git ls-files | grep -i epiphany`, 7e23387):
+- **F11 gamecult-ops Epiphany tooling, before the teardown** (`git ls-files | grep -i epiphany`, 7e23387):
   `compose/epiphany.capstone-17.yggdrasil.yaml` 38, `compose/epiphany.yggdrasil.Dockerfile` 55,
   `runbooks/epiphany-yggdrasil-deploy.md` 196, `runbooks/epiphany-starfire-bifrost-crossing.md` 101
   (live crossing binding, kept), scripts `bootstrap-epiphany-yggdrasil.sh` 134,
@@ -118,13 +125,25 @@ Each line: what was run, where, result.
 - **F13 eureka-substrate specs written against Epiphany.** `cut-mind-authority.r1` and
   `cut-run-kind.r1` have repo `GameCult/Epiphany`, base `ef956865`;
   `cut-huginn-persona-state.r2` base `bf73c42`; `cut-doctrine-persona-in-huginn.r2`
-  gamecult-ops base `2aeb7364`. None has a report. After `leaf-into-huginn` they point at
-  a repo nothing builds from.
+  gamecult-ops base `2aeb7364`. None has a report. Since `leaf-into-huginn` they point at
+  a repo nothing builds from; `mind-authority` and `run-kind` have r2 specs against Huginn
+  (see Undone).
 - **F14 Discord developer policy** on training with message content: the policy page
   (support-dev.discord.com article 8563934450327) answered 403 to a fetch on 2026-10-08.
   Self's recollection, unverified: the policy forbids using message content obtained
   through the API to train AI models without express permission. An Eyes pass must
   verify before question `persona-trace-retention` is ruled.
+- **F15 Selection order is admission ordinal.** CultLib `packages/cultnet-rs/src/selection.rs:1998-2005`
+  (`order_rows`: ordinal, then schema id, then record key; reversed when descending). So
+  "newest" is `descending: true, limit: 1`, and a run label needs no order of its own.
+- **F16 Huginn's leaf holds `leaf-key-bound`.** `crates/eureka-pipeline/src/lib.rs`
+  at `afc35f9`: `SUBJECT_LOCAL_MAX` (:898), `RESOLUTION_LOCAL_MAX` derived from it (:912),
+  `Sha::names_same_commit` (:272). The literal `64` at :915 (the root bound in the
+  fits-`Short` assert) is follow-up `eureka-substrate:follow_up:leaf-bound-hygiene`.
+  `leaf-key-bound` landed at Epiphany `ef956865` and came in with the leaf.
+- **F17 The live Huginn release is still `107552dc`.** Read-only `ssh yggdrasil readlink
+  /opt/gamecult/huginn/current` on 2026-10-09: `releases/107552dc4b27b8856b043616ae74c2ebe7908b66`.
+  Main (`afc35f9`) is ahead of it by the leaf move and the relicense; no deploy has happened since.
 
 ## The model page (step 0b)
 
@@ -133,10 +152,10 @@ pipeline kinds are in Huginn `docs/eureka-substrate-map.md`.
 
 | Kind | Identity (what names it) | Lifecycle (what happens over time) | Authority (who decides) |
 | --- | --- | --- | --- |
-| Pipeline wire ids | `epiphany.pipeline.<kind>.v2`, epoch `epiphany.pipeline.epoch.v2`, defined by the leaf. After `leaf-into-huginn` the crate is Huginn `crates/eureka-pipeline` (lib `eureka_pipeline`), ids unchanged. | Renamed once to `eureka.pipeline.<kind>.v3` by one `mind.redb` migration, at the next breaking leaf change or before the first hosted mind (ruling `wire-names-rename-before-hosting`). Adding the `run` kind or the `Mind` authority variant is additive (old stored documents decode; no migration), so it does not trigger the rename; a field added to an existing struct would. | Huginn owns the leaf. The migration is a live-mind upgrade, which is the operator's (`mind-rules-which-forks`). |
-| Leaf crate and schema catalogue | Huginn `crates/eureka-pipeline`, `schemas/cultnet/` (13 pipeline schemas, `gamecult.persona_state.v0`, index, README). `epiphany.work_organ_state.v0` dies: no reader outside Epiphany (grep, F1/F3). | Copied once from Epiphany `ef956865` byte-for-byte, then renamed in a separate commit; Epiphany's copy is archived with the repo. | Huginn. Forbidden: any Cargo source resolving into GameCult/Epiphany (`nothing-runs-from-epiphany`). |
-| `run` | `<instance>:run:<label>` (cut-run-kind r1). Label `mind-<YYYY-MM-DD>-<n>` allocated by the waker as one plus the count of that day's runs; two wakers racing produce the same key with different content, which admission answers `Conflict`, so the name stays injective. | The waker admits it open, with its claims, before starting the unit (the run is the grant). The Self in the unit admits under that label and ends it `Recorded { reason }`; a run with no end after 24 h is `Withdrawn` by the next wake. Initiative runs (empty queue, `no-idle-time`) carry no claims; the dial bounds them. Cadence is read from the run's admission time, not `started_on` (a date cannot carry seconds; run-kind r2). | Opening: the waker. Ending: the Self that worked it; the waker only withdraws dead ones. Forbidden: Hands, Soul, Imagination, Life. |
-| Repetition breaker | No state of its own (rulings `self-waker`, `merge-gate-own-soul`). Trip condition derived from ended runs over one claimed item: last 3 ended runs admitted nothing but themselves, or 10 of the last 50. | When tripped, the waker admits one `question` labelled `breaker-<item local>` under the item's campaign, `raised_in` the item; the existing blocked-spec recipe then removes the item from the queue. Answered by a ruling or withdrawn; either reopens the item. | The waker admits the question; any Self may answer it (substrate-internal, `mind-rules-which-forks`). |
+| Pipeline wire ids | `epiphany.pipeline.<kind>.v2`, epoch `epiphany.pipeline.epoch.v2`, defined by the leaf, the Huginn crate `crates/eureka-pipeline` (lib `eureka_pipeline`), ids unchanged. | Renamed once to `eureka.pipeline.<kind>.v3` by one `mind.redb` migration, at the next breaking leaf change or before the first hosted mind (ruling `wire-names-rename-before-hosting`). Adding the `run` kind or the `Mind` authority variant is additive (old stored documents decode; no migration), so it does not trigger the rename; a field added with the leaf's `= absent` marker is additive too (leaf-read-anchors r2: old bytes decode, empty fields encode byte-identically, `golden/envelopes.txt` gains lines and loses none); a field added any other way would. | Huginn owns the leaf. The migration is a live-mind upgrade, which is the operator's (`mind-rules-which-forks`). |
+| Leaf crate and schema catalogue | Huginn `crates/eureka-pipeline`, `schemas/cultnet/` (13 pipeline schemas, `gamecult.persona_state.v0`, index, README). `epiphany.work_organ_state.v0` dies: no reader outside Epiphany (grep, F1/F3). | Landed at Huginn `afc35f9` (leaf-into-huginn). Wire pinned by `crates/eureka-pipeline/golden/envelopes.txt` and the opt-in `stored_documents_read_back`. Huginn is AGPL-3.0-only (ruling `eureka-body:ruling:leaf-relicensed-agpl`). | Huginn. Forbidden: any Cargo source resolving into GameCult/Epiphany (`nothing-runs-from-epiphany`). |
+| `run` | `<instance>:run:<label>` (cut-run-kind r2). Label `mind-<YYYYMMDD>T<HHMMSS><mmm>Z` from mind-launch's `run_label`; two launches in one millisecond produce the same key with different content, which admission answers `Conflict`, so the name stays injective. Order is admission ordinal (F15), not label. | Each wake opens a PersonaTurn run with no claims (ruling `eureka-substrate:ruling:every-wake-a-run`); the Persona tool opens SelfRun runs with claims; both go through `open_and_launch`, and the unit starts only after the run commits (the run is the grant). The Self in a unit admits under its label and ends it `Recorded { reason }`. The waker withdraws a run whose unit is not alive past a 120 s grace (replaces the 24 h rule). Cadence comes from the newest PersonaTurn run's `admitted_at`, found through the `turn` and `operated_by` aliases, not `started_on` (a date cannot carry seconds). | Opening: `open_and_launch`, called by the waker for PersonaTurn and by the Persona tool for SelfRun. Ending: the Self that worked it; the waker only withdraws dead ones. Concurrency of live runs: question `eureka-body:question:mind-run-concurrency` (open). Forbidden: Hands, Soul, Imagination, Life. |
+| Repetition breaker | No state of its own (rulings `self-waker`, `merge-gate-own-soul`). Trip condition derived from the item's ended SelfRun runs: last 3 empty, or 10 of the last 50. A run is empty when no non-run document citing the item has an ordinal in its window (its admission up to the next run's, or now). | Evaluated in `open_and_launch` when a Self run claims the item, not by the waker. When tripped, it admits one `question` labelled `breaker-<item local>` under the item's campaign, `raised_in` the item, and launches nothing; the existing blocked-spec recipe then removes the item from the queue. Answered by a ruling or withdrawn; either reopens the item. | `open_and_launch` admits the question; any Self may answer it (substrate-internal, `mind-rules-which-forks`). |
 | Brake | One document per instance in a root-owned CultCache store `/etc/gamecult/minds/<instance>/control.cc`, type `eureka.control.brake.v1 { released: bool, set_at, set_by }`. | Replaced whole by the operator's CLI; never appended. Absent or undecodable reads as held. Holding it also stops running units (`systemctl stop`, ruling `self-run-actuator`). | Operator only (ruling `brake-dial-root-store-now`); her units read it, and the file is not writable by any user she runs as. |
 | Burn-rate dial | Same store, `eureka.control.burn_rate.v1 { heat, base_cooldown_s, base_run_usd, set_at, set_by }`; `heat` in 0.05..=2.0. | Replaced whole by the CLI. Absent or out of bounds reads as heat 0, which launches nothing (fail closed, LiteLLM scar rider of ruling `connector-owner`). Schedules and her own rest arrive later as follow-up `burn-schedule-and-rest`. | Operator. Derived (never stored): wake cadence `base_cooldown_s / heat`, per-run cap `--max-budget-usd = base_run_usd × heat`, per-request `max_cost_usd`. |
 | Connector request and transcript items | Request: `(caller_runtime_id, request_id)`, the replay key the daemon already keeps (`replay.cc`). Items: UserText, AssistantText, ToolCall, ToolResult, plus `ReasoningState { provider, model, opaque }` (ruling `connector-opaque-state-item`). Contract ids become provider-neutral `gamecult.model.*.v3` (follow-up `connector-contract-untyped`); the connector serves Ghostlight too, so not `eureka.*`. | Invocation expires at `expires_at_unix_ms`; replay record per key; restart-era `Indeterminate`. The caller stores the transcript and replays it verbatim; foreign-tagged reasoning state inside an in-flight tool exchange is refused typed; completed-turn foreign state is settled per provider in the connector cut (follow-up `connector-reasoning-state-cheap-providers`). | The connector produces, reads or refuses reasoning bytes; callers never branch on provider. |
@@ -145,20 +164,20 @@ pipeline kinds are in Huginn `docs/eureka-substrate-map.md`.
 | Persona state | `gamecult.persona_state.v0`, one per mind, `personaId` = instance (cut-huginn-persona-state r2, eureka-substrate). | Replaced whole under CAS with a receipt; she may rewrite any field (`identity-write-all-visible`). | The Persona organ is the only writer. |
 | Identity diffs | The pair of receipts of two consecutive Persona puts whose identity fields (publicName, publicDescription, presentation, values) differ. Derived, not stored. | Composed by the Persona organ at put time and sent as one delivery request through the crossing; a failed post is retried by Bifrost's delivery journal, not by her. | Persona organ composes; Bifrost posts under the permit. No rate limit. |
 | Discord body surfaces | Outbound: crossing ids `epiphany.persona_discord_delivery_request.v0` and `..._permit.v0`, agent `epiphany.Persona`, runtime `epiphany-starfire` (F6), renamed to `eureka.*` and `eureka-yggdrasil` in the mouth rebinding (`mouth-crossing-on-yggdrasil`). Inbound: Bifrost persona-feedback deliveries for target `epiphany` (F6). Persona-session tools reach both (`body-includes-discord`). | Request, permit, post, receipt (Bifrost journal). Inbound deliveries: **unprobed** who records that a delivery was answered; `run-is-the-grant` forbids her organ from holding that fact. Blocks the Persona cuts only, not the cuts admitted today. | Bifrost owns posting and delivery records; her permit issuer grants while the brake is released. |
-| Units and instance templates | `mind-wake@<instance>.timer/.service`, `mind-self@<instance>:<label>.service`, `mind-persona@<instance>`, `mind-permit@<instance>`; users `mind-<instance>` (organs) and `mind-<instance>-self` (Self runs); state `/var/lib/gamecult/minds/<instance>/`; control `/etc/gamecult/minds/<instance>/`. Instance `eureka`. | Hand-installed by gamecult-ops now; Idunn targets declared before the first hosted member, which deletes the hand install (`mind-units-templated-interim`). | gamecult-ops installs; Idunn later. |
+| Units and instance templates | `mind-wake@<instance>.timer/.service`, `mind-self@<instance>:<label>.service`, `mind-persona@<instance>:<label>.service` (one-shot per Persona turn; `RuntimeMaxSec` set at install bounds a hung unit), `mind-permit@<instance>`; users `mind-<instance>` (organs) and `mind-<instance>-self` (Self runs); state `/var/lib/gamecult/minds/<instance>/`; control `/etc/gamecult/minds/<instance>/`. Instance `eureka`. | Hand-installed by gamecult-ops now; Idunn targets declared before the first hosted member, which deletes the hand install (`mind-units-templated-interim`). | gamecult-ops installs; Idunn later. |
 | Self-run credential | `CLAUDE_CODE_OAUTH_TOKEN` in a root-0600 EnvironmentFile per instance. | Created by `claude setup-token`; rotated by the operator. | **Open: question `self-run-token-reach`.** The Self run's `claude` process can read its own environment, so `token-out-of-her-reach` holds only if the operator names this unit (F4 of the prior-art file, follow-up `token-reach-two-units`). |
-| Wake frame | Fixed prompt frame (provenance, jurisdiction, brake obedience) in `/etc/gamecult/minds/<instance>/wake-frame.md`, root-owned. | Changed only by an install. | Host config (ruling `self-waker` rider 2); never a file her runs merge into. |
-| Epiphany residue | F5, F8, F11. | Deleted by `epiphany-body-teardown`; the repo archived last. | gamecult-ops for host and repo tooling; Idunn for its legacy target list (follow-up). |
+| Wake frame | Fixed prompt frame (provenance, jurisdiction, brake obedience) in `/etc/gamecult/minds/<instance>/wake-frame.md`, root-owned. Composed by the Persona organ from host config; the waker passes the unit only the instance and the run label. | Changed only by an install. | Host config (ruling `self-waker` rider 2); never a file her runs merge into. |
+| Epiphany residue | F5, F8, F11, as they stood before the teardown. | Teardown landed (gamecult-ops `9c12adb`); what it did not name is follow-up `eureka-body:follow_up:epiphany-body-leftovers`; the repo is archived last. | gamecult-ops for host and repo tooling; Idunn for its legacy target list (follow-up). |
 
 ## Rationale
 
 ### Why the order is leaf, teardown, control, wake
 
 The four specs admitted today depend on nothing the operator has to rule except the
-wake target. `leaf-into-huginn` removes the only build edge into Epiphany and is the
+wake target. `leaf-into-huginn` removed the only build edge into Epiphany and is the
 base every Huginn-side body cut needs (the `run` kind re-pointed, Persona state, the
-v3 rename). The teardown removes 24.7 GB and the tooling that would otherwise be
-re-read by every later pass. The control store comes before the waker because the
+v3 rename); it landed at `afc35f9`. The teardown removed the 24.7 GB (F5) and the tooling that would otherwise be
+re-read by every later pass; it landed at gamecult-ops `9c12adb`. The control store comes before the waker because the
 waker's first rule is "read the brake before any consequence". The waker raises
 `wake-target`, because the operator's 2026-10-03 ruling (`body-includes-discord`, "the
 Persona session, which is also what drives the Self") and the Defaulted `self-waker`
@@ -182,17 +201,22 @@ neutral. Keeping the backend compiling costs nothing; deploying it is not propos
 
 In dependency order, with what blocks each:
 
-1. eureka-substrate re-points, admitted 2026-10-09 against Huginn: `mind-authority` r2,
-   `run-kind` r2 (absorbs `huginn-mind-self-kinds`: `AlreadyClaimed`, the run's resolution
-   row, the `claims` edge), `huginn-persona-state` r3, `doctrine-persona-in-huginn` r3. All
-   wait on `leaf-into-huginn` merging; `run-kind` also on question `persona-turn-run`.
-   `leaf-key-bound` and `leaf-read-anchors` re-point after the merge (follow-up
-   `leaf-specs-repoint`).
+1. eureka-substrate re-points, admitted 2026-10-09 against Huginn: `mind-authority` r2
+   (landed on branch `eureka-substrate/mind-authority`, Soul pending), `run-kind` r2
+   (absorbs `huginn-mind-self-kinds`: `AlreadyClaimed`, the run's resolution row, the
+   `claims` edge; question `persona-turn-run` is ruled by `every-wake-a-run`),
+   `huginn-persona-state` r3, `doctrine-persona-in-huginn` r3.
+   `leaf-key-bound` landed at Epiphany `ef956865` and came in with the leaf (F16).
+   `leaf-read-anchors` r2 (absorbs `huginn-read-anchors`, withdrawn), `ops-read-anchors-upgrade`
+   r2 and `context-pack-reads` r2 were admitted 2026-10-09; `leaf-read-anchors` depends on
+   `mind-authority` merging.
 2. `connector-kit-lift`, `connector-spend`, `connector-reasoning-item`,
    `connector-contract-v3`, `claude-connector`, `openai-compatible-connector`: blocked
    on the kit repo joining the campaign (follow-up `body-campaign-repos`).
 3. `self-run-unit` and `skill-mind-self` (Eureka): blocked on `self-run-token-reach`
-   and `wake-target`.
+   and `wake-target`. `mind-wake` r2 and `mind-launch` r1 (Huginn) are admitted;
+   `mind-launch` is blocked on question `eureka-body:question:mind-run-concurrency`
+   (the Busy answer for a Self run), and `mind-wake` calls it.
 4. `mind-units-install` (gamecult-ops): after 3; needs `body-repos-on-forge`.
 5. `mind-persona` and `mouth-rebinding` (Huginn, Bifrost): blocked on `wake-target`,
    `persona-trace-retention`, the inbound-delivery cell, and the connector cuts.
@@ -202,11 +226,11 @@ In dependency order, with what blocks each:
 
 Specs, in dependency order: `eureka-body:cut_spec:cut-leaf-into-huginn.r1`,
 `cut-epiphany-body-teardown.r1` (independent), `cut-mind-control-store.r1`,
-`cut-mind-wake.r1` (blocked: `wake-target`, and the run kind in Huginn).
+`cut-mind-wake.r1` (superseded by r2 on 2026-10-09).
 Questions: `eureka-body:question:wake-target`, `self-run-token-reach`,
 `persona-trace-retention`. Follow-ups: `eureka-body:follow_up:substrate-specs-repoint`,
 `body-campaign-repos`. H9 sources exist at Epiphany ef956865: notes/huginn-organ-cut.md,
 eureka-body-plane-cut.md, eureka-pipeline-state-cut.md, eureka-pipeline-state-target.md,
 eureka-query-prior-art.md, eureka-read-side-cut.md, postmortem-eureka-schema-phase.md.
-Huginn has no LICENSE file (ruling `license-split` wants AGPL for the substrate; not
-this campaign's cuts, noted for Self).
+Huginn carries an AGPL-3.0 LICENSE and the workspace license is AGPL-3.0-only
+(rulings `license-split`, `eureka-body:ruling:leaf-relicensed-agpl`).
