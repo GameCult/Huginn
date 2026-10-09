@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use cultcache_rs::{CultCache, CultCacheEnvelope};
 use eureka_pipeline::{
     ClaimOutcome, FindingConfidence, Line, PipelineDocument, PipelineKind, PipelineRef, PipelineRefusal,
-    PipelineResolution, PipelineStewardship, ResolutionOutcome, RulingAuthority, Short, Slug, pipeline_key,
+    PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome, RulingAuthority, Short, Slug, pipeline_key,
     validate_pipeline_write_envelope,
 };
 use schemars::JsonSchema;
@@ -525,19 +525,25 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
         // after the work it claimed has moved on.
         D::Run(run) => {
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
-            for claim in &run.claims {
-                if !replay && !docs.in_force(claim.kind, &claim.id.0) {
-                    return Err(MindRefusal::CitesResolvedDocument { kind: claim.kind, id: claim.id.0.clone() });
-                }
-                let holder = docs.claim_holder(key, claim);
-                if let Some(holder) = holder {
-                    return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: holder.into() });
-                }
-            }
-            Ok(())
+            run_claims_rule(docs, key, run, replay)
         }
         D::FollowUp(_) | D::Instance(_) => Ok(()),
     }
+}
+
+/// The one rule for a run holding claims, whether it is opened or reinstated
+/// by withdrawing its close: every claim in force (a replay of an admitted run
+/// owes none) and held by no other live run.
+fn run_claims_rule(docs: &Docs, run_key: &str, run: &PipelineRun, replay: bool) -> Result<(), MindRefusal> {
+    for claim in &run.claims {
+        if !replay && !docs.in_force(claim.kind, &claim.id.0) {
+            return Err(MindRefusal::CitesResolvedDocument { kind: claim.kind, id: claim.id.0.clone() });
+        }
+        if let Some(holder) = docs.claim_holder(run_key, claim) {
+            return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: holder.into() });
+        }
+    }
+    Ok(())
 }
 
 /// Revision 1 stands alone; revision N needs a resolution in the batch that
@@ -684,11 +690,7 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         && reinstating.subject.kind == K::Run
         && let Some(D::Run(run)) = docs.find(K::Run, &reinstating.subject.id.0)
     {
-        for claim in &run.claims {
-            if let Some(holder) = docs.claim_holder(&reinstating.subject.id.0, claim) {
-                return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: holder.into() });
-            }
-        }
+        run_claims_rule(docs, &reinstating.subject.id.0, run, false)?;
     }
     for (_, referent) in outcome_citations(&resolution.outcome) {
         if !docs.in_force(referent.kind, &referent.id.0) {
@@ -2062,6 +2064,45 @@ mod tests {
         committed(admit(&mut free, vec![run("a", &[spec_ref("1")])]));
         committed(admit(&mut free, vec![recorded("a")]));
         committed(admit(&mut free, vec![resolution(closure, withdrawn())]));
+    }
+
+    /// Reinstatement finds a contested claim anywhere in the run's list: a
+    /// reinstated run of two claims where only the second is held is refused,
+    /// and the first alone being contested is refused too.
+    #[test]
+    fn reinstating_a_run_finds_a_contested_second_claim() {
+        let closure = r(K::Resolution, &format!("{INSTANCE}:resolution:run.a.n1"));
+        for (held, expected) in [("2", "2"), ("1", "1")] {
+            let mut mind = with_specs();
+            committed(admit(&mut mind, vec![run("a", &[spec_ref("1"), spec_ref("2")])]));
+            committed(admit(&mut mind, vec![recorded("a")]));
+            committed(admit(&mut mind, vec![run("c", &[spec_ref(held)])]));
+            assert_eq!(
+                refusal(admit(&mut mind, vec![resolution(closure.clone(), withdrawn())])),
+                MindRefusal::AlreadyClaimed { item: spec_ref(expected).id.0, run: run_key("c") }
+            );
+        }
+    }
+
+    /// Reinstating a run needs every claim in force, as opening it does: once
+    /// a claimed item has resolved the withdrawal is refused, and while all
+    /// stay in force it is allowed.
+    #[test]
+    fn reinstating_a_run_needs_its_claims_in_force() {
+        let closure = r(K::Resolution, &format!("{INSTANCE}:resolution:run.a.n1"));
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![run("a", &[spec_ref("1"), spec_ref("2")])]));
+        committed(admit(&mut mind, vec![recorded("a")]));
+        committed(admit(&mut mind, vec![resolution(spec_ref("2"), withdrawn())]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(closure.clone(), withdrawn())])),
+            MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: spec_ref("2").id.0 }
+        );
+
+        let mut live = with_specs();
+        committed(admit(&mut live, vec![run("a", &[spec_ref("1"), spec_ref("2")])]));
+        committed(admit(&mut live, vec![recorded("a")]));
+        committed(admit(&mut live, vec![resolution(closure, withdrawn())]));
     }
 
     /// A holder is found by any of its claims, not only the first.

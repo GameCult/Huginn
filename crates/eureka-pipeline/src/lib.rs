@@ -1531,12 +1531,17 @@ mod tests {
     /// A run claims an item once: a repeated claim is refused at validate.
     #[test]
     fn a_run_cannot_claim_one_item_twice() {
-        let claim = PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "F1") };
+        let claim_one = || PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "F1") };
+        let claim = claim_one();
         let other = PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "F2") };
         let mut run = run_sample();
         run.claims = vec![claim.clone(), other.clone()];
         assert_eq!(PipelineDocument::Run(run.clone()).validate(), Ok(()));
         run.claims = vec![claim.clone(), other, claim];
+        assert!(matches!(PipelineDocument::Run(run).validate(), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "run.claims[2]"));
+        let third = PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "F3") };
+        let mut run = run_sample();
+        run.claims = vec![claim_one(), third.clone(), third];
         assert!(matches!(PipelineDocument::Run(run).validate(), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "run.claims[2]"));
     }
 
