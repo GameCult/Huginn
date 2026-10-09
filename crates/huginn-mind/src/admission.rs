@@ -221,13 +221,14 @@ fn stage(envelope: CultCacheEnvelope, mind: &Slug) -> Result<Staged, MindRefusal
     Ok(Staged { kind: document.kind(), key: envelope.key.clone(), document, envelope })
 }
 
-/// A5: every document carrying an instance field names this mind; a hand-off
-/// names it on one side.
+/// A5: every document carrying an instance field names this mind (a run
+/// included); a hand-off names it on one side.
 fn refuse_foreign_instance(document: &PipelineDocument, mind: &Slug) -> Result<(), MindRefusal> {
     let foreign = |declared: &Slug| MindRefusal::ForeignInstance { declared: declared.0.clone(), mind: mind.0.clone() };
     match document {
         PipelineDocument::Instance(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Stewardship(value) if value.instance != *mind => Err(foreign(&value.instance)),
+        PipelineDocument::Run(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::HandOff(value) if value.from_instance != *mind && value.to_instance != *mind => {
             Err(foreign(&value.from_instance))
         }
@@ -517,6 +518,27 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             }
             Ok(())
         }
+        // run-is-the-grant: the claim is the one consumption fact. A claim must
+        // be in force, and no other run in force may hold it. A run already in
+        // the image under this key, byte for byte, is a replay and owes its
+        // claims no fresh freedom, so the replay still answers AlreadyAdmitted
+        // after the work it claimed has moved on.
+        D::Run(run) => {
+            let replay = docs.in_image(K::Run, key) == Some(&staged.document);
+            for claim in &run.claims {
+                if !replay && !docs.in_force(claim.kind, &claim.id.0) {
+                    return Err(MindRefusal::CitesResolvedDocument { kind: claim.kind, id: claim.id.0.clone() });
+                }
+                let holder = docs.of_kind(K::Run).find_map(|(other_key, document)| match document {
+                    D::Run(other) if other_key != key && other.claims.contains(claim) && docs.in_force(K::Run, other_key) => Some(other_key),
+                    _ => None,
+                });
+                if let Some(holder) = holder {
+                    return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: holder.into() });
+                }
+            }
+            Ok(())
+        }
         D::FollowUp(_) | D::Instance(_) => Ok(()),
     }
 }
@@ -593,6 +615,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::FollowUp, O::Withdrawn { .. }) => true,
         (K::Stewardship, O::Superseded { by }) => all(by, K::Stewardship),
         (K::Stewardship, O::Withdrawn { .. }) => true,
+        (K::Run, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::Resolution, O::Withdrawn { .. }) => true,
         _ => false,
     };
@@ -1923,6 +1946,126 @@ mod tests {
             refusal(admit(&mut mind, vec![D::CutReport(cut_report("1", 1))])),
             MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: id("cut_spec", "cut-1.r1") }
         );
+    }
+
+    fn spec_ref(cut: &str) -> PipelineRef {
+        r(K::CutSpec, &id("cut_spec", &format!("cut-{cut}.r1")))
+    }
+
+    fn run_key(label: &str) -> String {
+        format!("{INSTANCE}:run:{label}")
+    }
+
+    /// A seeded mind holding cut specs 1 and 2.
+    fn with_specs() -> Mind<MemoryStore> {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1)), D::CutSpec(cut_spec("2", 1))]));
+        mind
+    }
+
+    fn recorded(label: &str) -> PipelineDocument {
+        resolution(r(K::Run, &run_key(label)), ResolutionOutcome::Recorded { reason: "finished".into() })
+    }
+
+    /// run-is-the-grant: the claim is the only consumption fact. A second run
+    /// on a claim a live run holds is AlreadyClaimed, naming the claim and the
+    /// holder; another claim is free; once the holder is Recorded the claim is
+    /// free, and withdrawing that record makes the holder live again.
+    #[test]
+    fn a_second_run_on_a_live_claim_is_already_claimed() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![run("a", &[spec_ref("1")])]));
+        let claimed = MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: run_key("a") };
+        assert_eq!(refusal(admit(&mut mind, vec![run("b", &[spec_ref("1")])])), claimed);
+        assert_eq!(refusal(admit(&mut mind, vec![run("b", &[spec_ref("2"), spec_ref("1")])])), claimed, "any one held claim refuses the run");
+        committed(admit(&mut mind, vec![run("b", &[spec_ref("2")])]));
+        committed(admit(&mut mind, vec![recorded("a")]));
+        committed(admit(&mut mind, vec![run("c", &[spec_ref("1")])]));
+
+        let mut reopened = with_specs();
+        committed(admit(&mut reopened, vec![run("a", &[spec_ref("1")])]));
+        committed(admit(&mut reopened, vec![recorded("a")]));
+        let closure = r(K::Resolution, &format!("{INSTANCE}:resolution:run.a.n1"));
+        committed(admit(&mut reopened, vec![resolution(closure, withdrawn())]));
+        assert_eq!(refusal(admit(&mut reopened, vec![run("d", &[spec_ref("1")])])), claimed);
+    }
+
+    /// Two openers on one claim in one batch: the claim is held by neither, so
+    /// the batch is refused whole and nothing is written. One opener at a time
+    /// is `a_second_run_on_a_live_claim_is_already_claimed`.
+    #[test]
+    fn two_openers_in_one_batch_hold_nothing() {
+        let mut mind = with_specs();
+        let refused = refusal(admit(&mut mind, vec![run("a", &[spec_ref("1")]), run("b", &[spec_ref("1")])]));
+        assert!(matches!(refused, MindRefusal::AlreadyClaimed { .. }), "{refused:?}");
+        assert!(mind.envelope(K::Run, &run_key("a")).is_none() && mind.envelope(K::Run, &run_key("b")).is_none());
+    }
+
+    /// Every claim names a document that exists and is in force.
+    #[test]
+    fn a_runs_claims_must_exist_and_be_in_force() {
+        let mut mind = with_specs();
+        assert_eq!(
+            refusal(admit(&mut mind, vec![run("a", &[spec_ref("9")])])),
+            MindRefusal::MissingReference { kind: K::CutSpec, id: spec_ref("9").id.0 }
+        );
+        committed(admit(&mut mind, vec![resolution(spec_ref("2"), withdrawn())]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![run("a", &[spec_ref("2")])])),
+            MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: spec_ref("2").id.0 }
+        );
+        assert!(mind.envelope(K::Run, &run_key("a")).is_none());
+    }
+
+    /// A replay of an admitted run is AlreadyAdmitted even when its claim has
+    /// since been closed: a retry owes nothing to the work moving on. A
+    /// different run on that closed claim is still refused.
+    #[test]
+    fn replaying_an_admitted_run_after_its_claim_closed_is_already_admitted() {
+        let mut mind = with_specs();
+        let (first, _) = committed(admit(&mut mind, vec![run("a", &[spec_ref("1")])]));
+        committed(admit(&mut mind, vec![resolution(spec_ref("1"), withdrawn())]));
+        assert_eq!(admit(&mut mind, vec![run("a", &[spec_ref("1")])]), PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: first });
+        assert_eq!(
+            refusal(admit(&mut mind, vec![run("b", &[spec_ref("1")])])),
+            MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: spec_ref("1").id.0 }
+        );
+    }
+
+    /// A5 for runs: a run of another instance is a ForeignInstance.
+    #[test]
+    fn a_run_of_another_mind_is_a_foreign_instance() {
+        let mut mind = with_specs();
+        let D::Run(mut foreign) = run("a", &[]) else { panic!() };
+        foreign.instance = slug(OTHER_INSTANCE);
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Run(foreign)])),
+            MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() }
+        );
+    }
+
+    /// A run ends: Recorded or Withdrawn, and no other outcome.
+    #[test]
+    fn a_run_resolves_recorded_or_withdrawn_and_nothing_else() {
+        let incompatible = |outcome: &str| MindRefusal::IncompatibleResolution { subject_kind: K::Run, outcome: outcome.into() };
+        let subject = || r(K::Run, &run_key("a"));
+        let open = || {
+            let mut mind = with_specs();
+            committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), run("a", &[spec_ref("1")]), run("z", &[])]));
+            mind
+        };
+        committed(admit(&mut open(), vec![recorded("a")]));
+        committed(admit(&mut open(), vec![resolution(subject(), withdrawn())]));
+        let other_run = r(K::Run, &run_key("z"));
+        let refused = [
+            (superseded(&[other_run.clone()]), "Superseded"),
+            (ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) }, "Answered"),
+            (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
+            (ResolutionOutcome::Deferred { to: other_run }, "Deferred"),
+        ];
+        for (outcome, name) in refused {
+            assert_eq!(refusal(admit(&mut open(), vec![resolution(subject(), outcome)])), incompatible(name), "{name}");
+        }
     }
 
     #[test]

@@ -767,7 +767,7 @@
       ]
     },
     "PipelineDocument": {
-      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\nthirteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
+      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\nfourteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
       "oneOf": [
         {
           "type": "object",
@@ -976,6 +976,22 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineRun"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -1172,7 +1188,8 @@
         "Resolution",
         "Instance",
         "Stewardship",
-        "HandOff"
+        "HandOff",
+        "Run"
       ]
     },
     "PipelineProvenance": {
@@ -1369,6 +1386,58 @@
         "ruled_on",
         "precedents",
         "authority"
+      ]
+    },
+    "PipelineRun": {
+      "description": "One launch of a Self or a Persona turn: the one record of what it took\non. `claims` are the work it holds, and a claim is live while its run\nhas no resolution in force. `budget_usd` is a canonical decimal string,\n`0` for an interactive run. Instance-rooted like stewardship: the key\nis `<instance>:run:<label>`. Whether a claim is free is admission's rule.",
+      "type": "object",
+      "properties": {
+        "budget_usd": {
+          "$ref": "#/$defs/Short"
+        },
+        "campaigns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 8
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 64
+        },
+        "host": {
+          "$ref": "#/$defs/Short"
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "operated_by": {
+          "$ref": "#/$defs/RunOperator"
+        },
+        "started_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "turn": {
+          "$ref": "#/$defs/RunTurn"
+        }
+      },
+      "required": [
+        "instance",
+        "label",
+        "operated_by",
+        "turn",
+        "host",
+        "started_on",
+        "budget_usd",
+        "claims",
+        "campaigns"
       ]
     },
     "PipelineStewardship": {
@@ -1676,6 +1745,20 @@
         "Standing",
         "Defaulted",
         "Mind"
+      ]
+    },
+    "RunOperator": {
+      "type": "string",
+      "enum": [
+        "Operator",
+        "Mind"
+      ]
+    },
+    "RunTurn": {
+      "type": "string",
+      "enum": [
+        "PersonaTurn",
+        "SelfRun"
       ]
     },
     "SemanticQuery": {

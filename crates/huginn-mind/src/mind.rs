@@ -71,8 +71,8 @@ fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefu
     })
 }
 
-/// A cache that knows the fifteen types a mind's store may hold: the leaf's
-/// thirteen through its registrar, the epoch record and the commit receipt.
+/// A cache that knows the sixteen types a mind's store may hold: the leaf's
+/// fourteen through its registrar, the epoch record and the commit receipt.
 /// It is the cache every envelope is prepared against.
 pub(crate) fn schema_cache() -> Result<CultCache, MindRefusal> {
     let mut cache = CultCache::new();
@@ -168,7 +168,7 @@ impl<S: MindStore> Mind<S> {
 
     /// Fail-closed, in this order, nothing attached until every step passes:
     /// pull the raw envelopes; if anything is stored, exactly one epoch
-    /// record at the current epoch; every type is one of the fifteen; and
+    /// record at the current epoch; every type is one of the sixteen; and
     /// exactly one `instance` document naming the declared instance; then
     /// register, attach and pull. The epoch gate runs first so a store
     /// written at a foreign epoch is refused as `ForeignEpoch`, never as

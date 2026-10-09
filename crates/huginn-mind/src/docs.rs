@@ -286,10 +286,11 @@ pub enum CitationRole {
     ResolvedBy,
     DeferredTo,
     Documents,
+    Claims,
 }
 
 impl CitationRole {
-    pub const ALL: [CitationRole; 15] = [
+    pub const ALL: [CitationRole; 16] = [
         Self::RaisedIn,
         Self::Answers,
         Self::Rulings,
@@ -305,6 +306,7 @@ impl CitationRole {
         Self::ResolvedBy,
         Self::DeferredTo,
         Self::Documents,
+        Self::Claims,
     ];
 
     /// The wire spelling, equal to the referring field's name.
@@ -325,6 +327,7 @@ impl CitationRole {
             Self::ResolvedBy => "resolved_by",
             Self::DeferredTo => "deferred_to",
             Self::Documents => "documents",
+            Self::Claims => "claims",
         }
     }
 
@@ -345,12 +348,13 @@ impl CitationRole {
             Self::Source => K::FollowUp,
             Self::Subject | Self::SupersededBy | Self::ResolvedBy | Self::DeferredTo => K::Resolution,
             Self::Documents => K::HandOff,
+            Self::Claims => K::Run,
         }
     }
 
     /// The kinds a referent of this field may be: the one kind the field is
     /// typed to, or every kind for the fields typed `PipelineRef` or a full
-    /// id of any kind. "Any" is spelled as all thirteen, never as none.
+    /// id of any kind. "Any" is spelled as every kind, never as none.
     pub fn target_kinds(self) -> Vec<PipelineKind> {
         use PipelineKind as K;
         match self {
@@ -360,6 +364,7 @@ impl CitationRole {
             Self::CutReport => vec![K::CutReport],
             Self::Findings => vec![K::Finding],
             Self::Verdict => vec![K::Verdict],
+            Self::Claims => vec![K::CutSpec, K::Finding, K::FollowUp],
             Self::RaisedIn
             | Self::Source
             | Self::Subject
@@ -437,6 +442,7 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
         D::HandOff(hand_off) => edges.extend(
             hand_off.documents.iter().filter_map(|to| kind_of_id(&to.0).map(|kind| (R::Documents, cited(kind, to)))),
         ),
+        D::Run(run) => edges.extend(run.claims.iter().map(|to| (R::Claims, to.clone()))),
         D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) => {}
     }
     edges

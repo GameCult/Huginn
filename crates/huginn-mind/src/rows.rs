@@ -182,7 +182,7 @@ impl SelectionRow {
                 D::FollowUp(follow_up) => vec![follow_up.repo.identity()],
                 D::Stewardship(stewardship) => vec![stewardship.repo.identity()],
                 D::HandOff(hand_off) => vec![hand_off.repo.identity()],
-                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) => {
+                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) => {
                     Vec::new()
                 }
             },
@@ -240,7 +240,7 @@ impl Row for SelectionRow {
     }
 }
 
-/// The organ's closed lists: thirteen schemas, eleven aliases, fifteen roles.
+/// The organ's closed lists: fourteen schemas, eleven aliases, sixteen roles.
 /// A schema's name is its id, so the substrate's alias matching resolves
 /// nothing beyond exact ids.
 pub(crate) struct Vocabulary;
@@ -286,7 +286,7 @@ fn invalid(field: impl Into<String>, value: &str, message: impl Into<String>) ->
 /// because `OrgRepo` identity is case-insensitive.
 ///
 /// Refuses, naming the field the client sent: a `schemas` entry that is not
-/// one of the thirteen ids; a `keys` entry that is not a full id whose kind
+/// one of the fourteen ids; a `keys` entry that is not a full id whose kind
 /// segment reads and passes the leaf's ref grammar; an `any_of` value outside
 /// its alias's domain; and a `cites.target` whose key fails the ref grammar
 /// for its schema's kind (V24's rule, at this door). Whether the target
@@ -353,7 +353,7 @@ mod tests {
     /// refused at the substrate's door.
     #[test]
     fn each_kind_declares_exactly_its_aliases_and_none_is_numeric() {
-        let table: [(K, &[&str]); 13] = [
+        let table: [(K, &[&str]); 14] = [
             (K::Campaign, &["repo"]),
             (K::Target, &[]),
             (K::Question, &[]),
@@ -367,6 +367,7 @@ mod tests {
             (K::Instance, &[]),
             (K::Stewardship, &["repo"]),
             (K::HandOff, &["repo"]),
+            (K::Run, &[]),
         ];
         for (kind, extra) in table {
             let want = [&["root", "in_force", "faculty"][..], extra].concat();
@@ -379,10 +380,10 @@ mod tests {
 
     /// Each role is declared by the one kind whose field carries it, and its
     /// targets are the kinds that field is typed to, "any" spelled as all
-    /// thirteen.
+    /// fourteen.
     #[test]
     fn each_kind_declares_the_roles_it_carries_and_their_targets() {
-        let table: [(K, &[&str]); 13] = [
+        let table: [(K, &[&str]); 14] = [
             (K::Campaign, &[]),
             (K::Target, &[]),
             (K::Question, &["raised_in"]),
@@ -396,13 +397,18 @@ mod tests {
             (K::Instance, &[]),
             (K::Stewardship, &[]),
             (K::HandOff, &["documents"]),
+            (K::Run, &["claims"]),
         ];
         for (kind, roles) in table {
             assert_eq!(sorted(Vocabulary.declared_roles(kind.type_id())), strings(roles), "{kind:?}");
         }
         assert_eq!(Vocabulary.target_leaves("answers"), vec![K::Question.type_id().to_string()]);
         assert_eq!(Vocabulary.target_leaves("rulings"), vec![K::Ruling.type_id().to_string()]);
-        assert_eq!(Vocabulary.target_leaves("subject").len(), 13);
+        assert_eq!(Vocabulary.target_leaves("subject").len(), 14);
+        assert_eq!(
+            sorted(Vocabulary.target_leaves("claims")),
+            sorted([K::CutSpec, K::Finding, K::FollowUp].iter().map(|kind| kind.type_id().to_string()).collect())
+        );
         assert!(Vocabulary.target_leaves("nonsense").is_empty());
         assert_eq!(Vocabulary.schema_name(K::Question.type_id()), Some(K::Question.type_id().to_string()));
         assert_eq!(Vocabulary.schema_name("epiphany.pipeline.nonsense.v2"), None);

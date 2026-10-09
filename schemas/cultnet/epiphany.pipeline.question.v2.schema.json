@@ -34,7 +34,8 @@
         "Resolution",
         "Instance",
         "Stewardship",
-        "HandOff"
+        "HandOff",
+        "Run"
       ],
       "type": "string"
     },

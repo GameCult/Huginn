@@ -27,8 +27,8 @@ use cultnet_rs::{
 };
 use eureka_pipeline::{
     ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, OrgRepo,
-    PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, Sha, Short,
-    Slug, Title,
+    PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha,
+    Short, Slug, Title,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,7 @@ pub enum PipelineFacts {
     Instance { instance: Slug, display_name: Short, host: Short, created_at: Date },
     Stewardship { instance: Slug, repo: OrgRepo, sequence: u32, assigned_on: Date, note: Line },
     HandOff { from_instance: Slug, to_instance: Slug, repo: OrgRepo, handed_on: Date },
+    Run { label: Label, operated_by: RunOperator, turn: RunTurn, started_on: Date, claims: Vec<PipelineRef> },
 }
 
 impl PipelineFacts {
@@ -226,6 +227,13 @@ impl PipelineFacts {
                 to_instance: value.to_instance.clone(),
                 repo: value.repo.clone(),
                 handed_on: value.handed_on.clone(),
+            },
+            D::Run(value) => Self::Run {
+                label: value.label.clone(),
+                operated_by: value.operated_by,
+                turn: value.turn,
+                started_on: value.started_on.clone(),
+                claims: value.claims.clone(),
             },
         }
     }
@@ -1263,6 +1271,33 @@ mod tests {
         assert_eq!(ids(&mind.query(&right).unwrap()), vec![id("follow_up", "FU-1")]);
     }
 
+    /// The claim edge is the waker's queue: a `cites` hop over the `claims`
+    /// role returns exactly the runs that claim the spec, closed ones included
+    /// with their status.
+    #[test]
+    fn a_claims_selection_returns_exactly_the_runs_claiming_a_spec() {
+        let mut mind = seeded();
+        let (one, two) = (id("cut_spec", "cut-1.r1"), id("cut_spec", "cut-2.r1"));
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1)), D::CutSpec(cut_spec("2", 1))]));
+        committed(admit(&mut mind, vec![run("a", &[r(K::CutSpec, &one)]), run("b", &[r(K::CutSpec, &two)])]));
+        let claiming = |mind: &Mind<MemoryStore>, spec: &str| {
+            let selection = Selection { cites: Some(cites(K::CutSpec, spec, Some("claims"))), ..of_kinds(&[K::Run]) };
+            ids(&mind.query(&selection).unwrap())
+        };
+        assert_eq!(claiming(&mind, &one), vec![format!("{INSTANCE}:run:a")]);
+        assert_eq!(claiming(&mind, &two), vec![format!("{INSTANCE}:run:b")]);
+        let done = ResolutionOutcome::Recorded { reason: "done".into() };
+        committed(admit(&mut mind, vec![resolution(r(K::Run, &format!("{INSTANCE}:run:a")), done)]));
+        assert_eq!(claiming(&mind, &one), vec![format!("{INSTANCE}:run:a")], "a closed run is still a citer");
+        let page = mind.query(&of_kinds(&[K::Run])).unwrap();
+        let facts = headers(&page).iter().map(|header| header.facts.clone()).collect::<Vec<_>>();
+        assert!(facts.iter().any(|fact| matches!(
+            fact,
+            PipelineFacts::Run { label, turn: RunTurn::SelfRun, operated_by: RunOperator::Mind, claims, .. }
+                if label.0 == "a" && claims.len() == 1
+        )), "{facts:?}");
+    }
+
     /// The substrate's own refusals cross as themselves: an undeclared alias
     /// is a `SelectionInvalid` from the substrate's door, before the organ's.
     #[test]
@@ -1336,6 +1371,8 @@ mod tests {
         ]));
         let (_, landed) = committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[&q1])]));
         let handoff = landed.iter().find(|write| write.kind == K::HandOff).expect("the hand-off landed").id.0.clone();
+        let (_, landed) = committed(admit(&mut mind, vec![run("w1", &[r(K::CutSpec, &id("cut_spec", "cut-1.r2")), r(K::FollowUp, &fu)])]));
+        let run_id = landed[0].id.0.clone();
 
         let (n1, f1_closed, f2_closed) = (
             id("resolution", "question.Q1.n1"),
@@ -1367,8 +1404,10 @@ mod tests {
             (CitationRole::ResolvedBy, &f1_closed, &report),
             (CitationRole::DeferredTo, &f2_closed, &fu),
             (CitationRole::Documents, &handoff, &q1),
+            (CitationRole::Claims, &run_id, &spec_r2),
+            (CitationRole::Claims, &run_id, &fu),
         ];
-        assert_eq!(CitationRole::ALL.len(), 15);
+        assert_eq!(CitationRole::ALL.len(), 16);
         for role in CitationRole::ALL {
             let selection =
                 Selection { cited: Some(Incoming { role: role.name().into(), exists: true }), ..Selection::default() };
