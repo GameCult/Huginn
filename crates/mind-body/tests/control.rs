@@ -1,6 +1,7 @@
 //! Behavioural tests for the brake, the dial and the one reader. Every test
 //! works in a temporary directory through the same file door the units use;
-//! nothing touches `/etc` except the window probe, which writes a uniquely named
+//! nothing touches `/etc`, including the window probe, which points the real
+//! binary at a tempdir with `--root`.
 //! instance there as root and removes it.
 //!
 //! The permission boundary is the filesystem's, but the writer refuses to write
@@ -290,7 +291,7 @@ fn reading_writes_nothing_and_takes_no_lock_file() {
 #[test]
 fn the_control_path_is_derived_from_a_valid_instance_only() {
     use eureka_pipeline::Slug;
-    let root = Path::new("/etc/gamecult/minds");
+    let root = Path::new(mind_body::control::CONTROL_ROOT);
     assert_eq!(control_path(root, &Slug("eureka".into())).unwrap(), root.join("eureka").join("control.cc"));
     for bad in ["", "../etc", "a/b", "A b", "eureka/.."] {
         assert!(control_path(root, &Slug(bad.into())).is_err(), "{bad:?}");
@@ -545,13 +546,17 @@ mod unsafe_installs {
     #[test]
     fn no_non_root_open_for_write_succeeds_while_the_binary_writes_under_umask_000() {
         if !running_as_root() || Command::new("setpriv").arg("--version").output().is_err() {
-            eprintln!("SKIPPED: needs root and setpriv; it writes under /etc/gamecult/minds in the verify container");
+            eprintln!("SKIPPED: needs root and setpriv");
             return;
         }
         let instance = format!("window-probe-{}", std::process::id());
-        let live = Path::new(mind_body::control::CONTROL_ROOT).join(&instance);
+        // A root-owned 0755 tempdir is the control root; its drop removes whatever
+        // the probe left, even after a failed assert.
         let work = tempfile::tempdir().unwrap();
         chmod(work.path(), 0o755);
+        let minds = work.path().join("minds");
+        std::fs::create_dir(&minds).unwrap();
+        chmod(&minds, 0o755);
         let attacker_bin = work.path().join("attacker");
         std::fs::copy(std::env::current_exe().unwrap(), &attacker_bin).unwrap();
         chmod(&attacker_bin, 0o755);
@@ -561,7 +566,7 @@ mod unsafe_installs {
             .arg(&attacker_bin)
             .args(["--exact", "modes::mode_child", "--nocapture"])
             .env("MIND_BODY_MODE_CHILD", "attacker")
-            .env("MIND_BODY_MODE_ROOT", live.parent().unwrap())
+            .env("MIND_BODY_MODE_ROOT", &minds)
             .env("MIND_BODY_STOP", &stop)
             .env("MIND_BODY_INSTANCE", &instance)
             .spawn()
@@ -570,14 +575,13 @@ mod unsafe_installs {
         for round in 0..100 {
             let verb = if round % 2 == 0 { "release" } else { "hold" };
             let status = Command::new("sh")
-                .args(["-c", "umask 000; exec \"$@\"", "sh", bin, "--instance", &instance, "brake", verb])
+                .args(["-c", "umask 000; exec \"$@\"", "sh", bin, "--root", minds.to_str().unwrap(), "--instance", &instance, "brake", verb])
                 .status()
                 .unwrap();
             assert!(status.success());
         }
         std::fs::write(&stop, b"").unwrap();
         let attacker_status = attacker.wait().unwrap();
-        std::fs::remove_dir_all(&live).unwrap();
         assert_eq!(attacker_status.code(), Some(0), "a non-root process opened the live store for write");
     }
 }

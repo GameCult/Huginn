@@ -3,7 +3,7 @@
 //! root-owned and the filesystem is the authority.
 //!
 //! ```text
-//! mind-control --instance <slug> show
+//! mind-control [--root <dir>] --instance <slug> show
 //! mind-control --instance <slug> brake hold
 //! mind-control --instance <slug> brake release
 //! mind-control --instance <slug> dial set --heat H --base-cooldown-s S --base-run-usd U
@@ -21,7 +21,7 @@ use rust_decimal::Decimal;
 use crate::control::{BurnRate, ControlWriter, FileSource, control_path, load_state, read_effective};
 
 const USAGE: &str =
-    "usage: mind-control --instance <slug> show | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U";
+    "usage: mind-control [--root <dir>] --instance <slug> show | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U";
 
 /// Who made the change: `SUDO_USER`, else `USER`, else `unknown`. An empty
 /// variable counts as unset.
@@ -33,10 +33,15 @@ pub fn operator_name(sudo_user: Option<String>, user: Option<String>) -> String 
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Runs one command against `<root>/<instance>/control.cc`. The root, the
-/// operator's name, the clock and the output are parameters so a test drives
+/// Runs one command against `<root>/<instance>/control.cc`. `root` is the
+/// default; a leading `--root <dir>` argument replaces it (argv, not environment,
+/// because `sudo -E` carries the environment). The operator's name, the clock and the output are parameters so a test drives
 /// the whole command without touching `/etc`.
 pub fn run(args: &[String], root: &Path, set_by: &str, now: DateTime<Utc>, out: &mut impl Write) -> Result<()> {
+    let (root, args) = match args {
+        [flag, dir, rest @ ..] if flag == "--root" => (Path::new(dir), rest),
+        _ => (root, args),
+    };
     let (instance, command) = match args {
         [flag, instance, command @ ..] if flag == "--instance" => (Slug(instance.clone()), command),
         _ => bail!("{USAGE}"),

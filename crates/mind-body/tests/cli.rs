@@ -110,3 +110,27 @@ fn the_binary_exits_nonzero_with_the_usage_when_refused() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("usage: mind-control"));
     assert!(output.stdout.is_empty());
 }
+
+#[test]
+fn a_leading_root_flag_replaces_the_default_root() {
+    let default = tempfile::tempdir().unwrap();
+    let chosen = tempfile::tempdir().unwrap();
+    let chosen_arg = chosen.path().to_str().unwrap();
+    let (result, _) = go(default.path(), &["--root", chosen_arg, "--instance", "eureka", "brake", "release"], "op", 0);
+    result.unwrap();
+    assert!(chosen.path().join("eureka").join("control.cc").exists(), "the write went to the chosen root");
+    assert_eq!(std::fs::read_dir(default.path()).unwrap().count(), 0, "the default root was not touched");
+    // Without the flag the default applies.
+    go(default.path(), &["--instance", "eureka", "brake", "release"], "op", 1).0.unwrap();
+    assert!(default.path().join("eureka").join("control.cc").exists());
+}
+
+#[test]
+fn a_root_flag_without_a_directory_or_an_instance_is_refused_and_writes_nothing() {
+    let default = tempfile::tempdir().unwrap();
+    for args in [&["--root"][..], &["--root", "/nonexistent-root-for-test"][..]] {
+        assert!(go(default.path(), args, "op", 0).0.is_err(), "{args:?}");
+    }
+    assert_eq!(std::fs::read_dir(default.path()).unwrap().count(), 0);
+    assert!(!std::path::Path::new("/nonexistent-root-for-test").exists());
+}
