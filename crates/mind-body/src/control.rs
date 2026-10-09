@@ -1,4 +1,13 @@
-//! The operator's brake and burn-rate dial, and the one reader of them.
+        // Every directory this write creates is 0755, ancestors included: a
+        // restrictive process umask would otherwise leave /etc/gamecult/minds
+        // untraversable by the units that only read.
+        let missing: Vec<&Path> = directory.ancestors().take_while(|ancestor| !ancestor.exists()).collect();
+        if !missing.is_empty() {
+            std::fs::create_dir_all(directory).with_context(|| format!("failed to create {}", directory.display()))?;
+            for created in missing {
+                set_mode(created, DIR_MODE)?;
+            }
+        }//! The operator's brake and burn-rate dial, and the one reader of them.
 //!
 //! State is a CultCache single-file store at
 //! `/etc/gamecult/minds/<instance>/control.cc`, root-owned and world-readable.

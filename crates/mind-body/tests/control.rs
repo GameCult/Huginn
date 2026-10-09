@@ -364,6 +364,7 @@ mod modes {
                 // Spins on an open-for-write of the live store; any success is a hit.
                 let stop = std::env::var("MIND_BODY_STOP").unwrap();
                 let started = std::time::Instant::now();
+                let (mut sweeps, mut seen) = (0u64, 0usize);
                 while !Path::new(&stop).exists() && started.elapsed() < Duration::from_secs(120) {
                     // The live store, and anything else in its directory (the staged
                     // file CultCache writes before its rename is the wider window).
@@ -372,6 +373,8 @@ mod modes {
                         if let Ok(entries) = std::fs::read_dir(path.parent().unwrap()) {
                             targets.extend(entries.flatten().map(|entry| entry.path()));
                         }
+                        sweeps += 1;
+                        seen = seen.max(targets.len());
                         for target in targets {
                             if std::fs::OpenOptions::new().write(true).open(&target).is_ok() {
                                 std::process::exit(3);
@@ -379,6 +382,7 @@ mod modes {
                         }
                     }
                 }
+                eprintln!("attacker: {sweeps} sweeps, at most {seen} entries seen");
             }
             "intruder" => {
                 assert!(ControlWriter::open(&path).and_then(|mut writer| writer.set_brake(false, at(1), "intruder")).is_err());
@@ -575,5 +579,29 @@ mod unsafe_installs {
         let attacker_status = attacker.wait().unwrap();
         std::fs::remove_dir_all(&live).unwrap();
         assert_eq!(attacker_status.code(), Some(0), "a non-root process opened the live store for write");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn directories_the_writer_creates_are_0755_ancestors_included_under_a_restrictive_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let top = dir.path().join("gamecult");
+    let path = top.join("minds").join("eureka").join("control.cc");
+    // Create nothing but run the writer; the umask is the test process's own, so
+    // the child role does the write under 077.
+    let status = std::process::Command::new("sh")
+        .args(["-c", "umask 077; exec \"$@\" --exact modes::mode_child --nocapture", "sh"])
+        .arg(std::env::current_exe().unwrap())
+        .env("MIND_BODY_MODE_CHILD", "brake")
+        .env("MIND_BODY_MODE_ROOT", top.join("minds"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(path.exists());
+    for created in [&top, &top.join("minds"), &top.join("minds").join("eureka")] {
+        assert_eq!(mode(created), 0o755, "{}", created.display());
     }
 }
