@@ -83,6 +83,8 @@ fn malformed_commands_are_refused_and_write_nothing() {
         &["--instance", "eureka", "dial", "set", "--heat", "1", "--base-cooldown-s", "60", "--base-run-usd", "1", "--extra", "1"],
         &["--instance", "eureka", "dial", "set", "--heat"],
         &["--instance", "../evil", "brake", "release"],
+        &["--instances", "eureka", "brake", "release"],
+        &["eureka", "eureka", "brake", "release"],
     ];
     for args in bad {
         assert!(go(root.path(), args, "op", 0).0.is_err(), "{args:?}");
@@ -98,4 +100,13 @@ fn the_operator_is_sudo_user_then_user_then_unknown() {
     assert_eq!(operator_name(s(""), s("bob")), "bob");
     assert_eq!(operator_name(None, s("")), "unknown");
     assert_eq!(operator_name(None, None), "unknown");
+}
+
+#[test]
+fn the_binary_exits_nonzero_with_the_usage_when_refused() {
+    // A refusal before any path is derived, so this never reaches /etc.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mind-control")).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("usage: mind-control"));
+    assert!(output.stdout.is_empty());
 }
