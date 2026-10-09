@@ -13,7 +13,7 @@ use eureka_pipeline::{
     PipelineTarget, QuestionOption, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Slug, StructuralDelta, TargetInvariant,
 };
 use huginn_mind::{
-    Faculty, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineDocumentView, PipelineProvenance,
+    Faculty, HuginnMindRequest, HuginnMindResponse, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineDocumentView, PipelineProvenance,
     PipelineSelectionPage,
 };
 use tempfile::TempDir;
@@ -90,6 +90,18 @@ impl TestMind {
     pub(crate) fn committed(&self, documents: Vec<PipelineDocument>) {
         let outcome = self.put(documents);
         assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+    }
+
+    /// What a daemon over this mind answers a request with.
+    pub(crate) fn answer(&self, request: HuginnMindRequest) -> HuginnMindResponse {
+        match request {
+            HuginnMindRequest::Query { selection, .. } => match self.mind.borrow().query(&selection) {
+                Ok(page) => HuginnMindResponse::Query(page),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
+            HuginnMindRequest::Admit(batch) => HuginnMindResponse::Admit(self.mind.borrow_mut().admit(batch, self.now.get())),
+            other => panic!("the tests ask nothing else: {other:?}"),
+        }
     }
 
     pub(crate) fn view(&self, kind: PipelineKind, id: &str) -> Option<PipelineDocumentView> {
@@ -331,8 +343,8 @@ pub(crate) fn withdrawn() -> ResolutionOutcome {
 /// Her Self run on `item`, ended, as `n` in a history: opened, closed, and
 /// followed by a ruling when `leaves_something` (the one document that makes it
 /// non-empty).
-pub(crate) fn ended_run(mind: &TestMind, item: &PipelineRef, n: usize, leaves_something: bool) {
-    let label = format!("h{n}");
+pub(crate) fn ended_run(mind: &TestMind, item: &PipelineRef, prefix: &str, n: usize, leaves_something: bool) {
+    let label = format!("{prefix}{n}");
     mind.committed(vec![run(&label, RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(item))]);
     let mut closing = vec![close(run_ref(&label), recorded())];
     if leaves_something {
@@ -343,8 +355,14 @@ pub(crate) fn ended_run(mind: &TestMind, item: &PipelineRef, n: usize, leaves_so
 
 /// A history of ended runs on `item`, oldest first; `true` leaves a document.
 pub(crate) fn history(mind: &TestMind, item: &PipelineRef, runs: &[bool]) {
+    history_as(mind, item, "h", runs);
+}
+
+/// The same, with run labels `<prefix>0`, `<prefix>1`, and so on, for a mind
+/// holding the histories of several items.
+pub(crate) fn history_as(mind: &TestMind, item: &PipelineRef, prefix: &str, runs: &[bool]) {
     for (n, leaves_something) in runs.iter().enumerate() {
-        ended_run(mind, item, n, *leaves_something);
+        ended_run(mind, item, prefix, n, *leaves_something);
     }
 }
 

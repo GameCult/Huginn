@@ -9,7 +9,7 @@
 use anyhow::{Result, anyhow, bail};
 use cultnet_rs::{Citation, FieldPredicate, Incoming, RecordRef, Selection};
 use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, Slug};
-use eureka_state::HuginnClient;
+use eureka_state::{ClientError, HuginnClient};
 use huginn_mind::{
     Faculty, HuginnMindRequest, HuginnMindResponse, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts,
     PipelinePageItems, PipelineProvenance, PipelineSelectionPage, PipelineStatusSummary,
@@ -35,25 +35,36 @@ pub trait MindPort {
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome>;
 }
 
+/// One call to a mind: the `eureka-state` client's `call`, or whatever a test
+/// answers with.
+type Call<'a> = Box<dyn Fn(HuginnMindRequest) -> Result<HuginnMindResponse, ClientError> + 'a>;
+
 /// The daemon's mind, reached over the `eureka-state` client.
-pub struct HuginnMind {
-    client: HuginnClient,
+pub struct HuginnMind<'a> {
+    instance: Slug,
+    call: Call<'a>,
 }
 
-impl HuginnMind {
+impl HuginnMind<'static> {
     pub fn new(client: HuginnClient) -> Self {
-        Self { client }
+        Self::over(client.instance().clone(), Box::new(move |request| client.call(request)))
     }
 }
 
-impl MindPort for HuginnMind {
+impl<'a> HuginnMind<'a> {
+    pub(crate) fn over(instance: Slug, call: Call<'a>) -> Self {
+        Self { instance, call }
+    }
+}
+
+impl MindPort for HuginnMind<'_> {
     fn instance(&self) -> &Slug {
-        self.client.instance()
+        &self.instance
     }
 
     fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage> {
         let request = HuginnMindRequest::Query { instance: self.instance().clone(), selection: selection.clone(), semantic: None };
-        match self.client.call(request).map_err(|error| anyhow!("the mind could not be asked: {}", client_error_code(&error)))? {
+        match (self.call)(request).map_err(|error| anyhow!("the mind could not be asked: {}", client_error_code(&error)))? {
             HuginnMindResponse::Query(page) => Ok(page),
             HuginnMindResponse::Refused(_) => bail!("the mind refused the query"),
             _ => bail!("the mind answered a query with something else"),
@@ -66,7 +77,7 @@ impl MindPort for HuginnMind {
             provenance: PipelineProvenance { faculty: Faculty::SelfFaculty, agent: agent.into(), session: session.into(), tool: "mind-body".into() },
             documents,
         };
-        match self.client.call(HuginnMindRequest::Admit(batch)).map_err(|error| anyhow!("the mind could not be asked: {}", client_error_code(&error)))? {
+        match (self.call)(HuginnMindRequest::Admit(batch)).map_err(|error| anyhow!("the mind could not be asked: {}", client_error_code(&error)))? {
             HuginnMindResponse::Admit(outcome) => Ok(outcome),
             _ => bail!("the mind answered an admission with something else"),
         }
@@ -75,12 +86,12 @@ impl MindPort for HuginnMind {
 
 /// The variant of a client failure, without its detail (an endpoint and a
 /// transport message are not ours to print).
-fn client_error_code(error: &eureka_state::ClientError) -> &'static str {
+fn client_error_code(error: &ClientError) -> &'static str {
     match error {
-        eureka_state::ClientError::Unavailable { .. } => "unavailable",
-        eureka_state::ClientError::Rejected { .. } => "rejected",
-        eureka_state::ClientError::TooLarge { .. } => "too_large",
-        eureka_state::ClientError::Unencodable { .. } => "unencodable",
+        ClientError::Unavailable { .. } => "unavailable",
+        ClientError::Rejected { .. } => "rejected",
+        ClientError::TooLarge { .. } => "too_large",
+        ClientError::Unencodable { .. } => "unencodable",
     }
 }
 
@@ -290,8 +301,8 @@ mod tests {
             if ruling_after {
                 mind.committed(vec![ruling("after", None)]);
             }
-            ended_run(&mind, &item, 1, false);
-            ended_run(&mind, &item, 2, false);
+            ended_run(&mind, &item, "h", 1, false);
+            ended_run(&mind, &item, "h", 2, false);
             breaker(&mind, &item).unwrap()
         };
         assert_eq!(withdrawn_between(false), Breaker::Trip, "the withdrawn run is neither counted nor does it break the streak");
@@ -309,6 +320,44 @@ mod tests {
         let (mind, item) = worked(&[E, E, E]);
         mind.committed(vec![run("live", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)), ruling("with-next", None)]);
         assert_eq!(breaker(&mind, &item).unwrap(), Breaker::Trip, "the next run's batch is not the previous run's window");
+    }
+
+    #[test]
+    /// The adapter over the wire vocabulary, answered by a real mind.
+    #[test]
+    fn the_daemon_port_asks_and_admits_in_the_wire_vocabulary() {
+        let mind = TestMind::seeded();
+        mind.committed(vec![spec("x")]);
+        let port = HuginnMind::over(Slug(INSTANCE.into()), Box::new(|request| Ok(mind.answer(request))));
+        assert_eq!(port.instance().0, INSTANCE);
+        assert_eq!(queue(&port, port.instance()).unwrap(), vec![spec_ref("x")]);
+        let outcome = port.admit("agent-x", "session-y", vec![run("p", RunTurn::PersonaTurn, RunOperator::Mind, &[])]).unwrap();
+        assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+        let facts = mind.view(PipelineKind::Run, &run_ref("p").id.0).unwrap().admission.provenance;
+        assert_eq!((facts.faculty, facts.agent.0.as_str(), facts.session.0.as_str(), facts.tool.0.as_str()), (Faculty::SelfFaculty, "agent-x", "session-y", "mind-body"));
+        let refused = port.query(&any_of(of_kind(PipelineKind::Ruling), "turn", &["canary-turn-5d2e"])).unwrap_err();
+        assert!(format!("{refused:#}").contains("refused the query"));
+        assert!(!format!("{refused:#}").contains("canary"), "{refused:#}");
+    }
+
+    #[test]
+    fn runs_of_another_item_are_not_this_items_runs() {
+        let mind = TestMind::seeded();
+        mind.committed(vec![spec("x"), spec("y")]);
+        history_as(&mind, &spec_ref("x"), "x", &[E, E]);
+        history_as(&mind, &spec_ref("y"), "y", &[E, E, E]);
+        assert_eq!(breaker(&mind, &spec_ref("x")).unwrap(), Breaker::Clear);
+        assert_eq!(breaker(&mind, &spec_ref("y")).unwrap(), Breaker::Trip);
+    }
+
+    #[test]
+    fn the_oldest_counted_runs_own_batch_is_in_its_window() {
+        let (mind, item) = worked(&[]);
+        mind.committed(vec![run("h0", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)), ruling("with-oldest", None)]);
+        mind.committed(vec![close(run_ref("h0"), recorded())]);
+        ended_run(&mind, &item, "h", 1, false);
+        ended_run(&mind, &item, "h", 2, false);
+        assert_eq!(breaker(&mind, &item).unwrap(), Breaker::Clear);
     }
 
     #[test]
