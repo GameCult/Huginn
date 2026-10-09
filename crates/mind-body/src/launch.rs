@@ -335,6 +335,8 @@ mod tests {
             assert_eq!(the_run(&view).budget_usd.0, want);
             assert_eq!(the_run(&view).turn, RunTurn::PersonaTurn);
             assert!(the_run(&view).claims.is_empty() && the_run(&view).campaigns.is_empty());
+            // One live Persona turn of hers at a time (admission): end this one.
+            rig.mind.committed(vec![close(run, recorded())]);
         }
         assert_eq!(rig.started(), 3, "a Persona turn is never Busy");
     }
