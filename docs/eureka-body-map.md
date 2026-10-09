@@ -15,6 +15,12 @@ Revised 2026-10-09 (Modeling, session `self-2026-10-09-morning`) after
 as read on 2026-10-08 and keep their tense; each carries a note where a cut has since
 changed it. F15-F17 are new.
 
+Revised again on 2026-10-09 by Imagination (`imagination-brake-stop`, session
+`self-2026-10-09-eureka`) at Huginn `df7507b`, after leaf-into-huginn, mind-authority,
+mind-control-store and run-kind had merged. New facts are F18-F20, which name the
+owner of the brake stop. The Brake, Units and run rows changed, and a rationale
+section was added.
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
@@ -144,6 +150,35 @@ Each line: what was run, where, result.
 - **F17 The live Huginn release is still `107552dc`.** Read-only `ssh yggdrasil readlink
   /opt/gamecult/huginn/current` on 2026-10-09: `releases/107552dc4b27b8856b043616ae74c2ebe7908b66`.
   Main (`afc35f9`) is ahead of it by the leaf move and the relicense; no deploy has happened since.
+- **F18 At Huginn `df7507b` nothing stops a unit of hers.** Read from `git show df7507b:`
+  on 2026-10-09 (Imagination `imagination-brake-stop`). `crates/mind-body` holds
+  `control.rs`, `cli.rs`, `main.rs` and `lib.rs`. `cli::run` (cli.rs:40-61) dispatches `show`,
+  `brake hold`, `brake release` and `dial set`. `brake hold` is `ControlWriter::open(&path)?.set_brake(false, ..)`
+  (cli.rs:53) and does nothing else. `git grep systemctl` over `crates/mind-body` finds nothing.
+  The binary sets umask 077 and calls `cli::run` with the root `CONTROL_ROOT` (main.rs:21-37).
+  The window probe runs the real binary with `brake release` and `brake hold` 100 times
+  (tests/control.rs:573-581), so a hold that ran `systemctl` would run it in the verify container.
+  No `launch.rs` exists yet: the Launcher is cut mind-launch. RunTurn and RunOperator carry
+  `NAMES` (crates/eureka-pipeline/src/lib.rs:507-508).
+- **F19 Yggdrasil has no unit, user or control store of hers.** Read-only `ssh yggdrasil`
+  as `gamecultadmin` on 2026-10-09:
+  - `systemctl list-units --all 'mind-*'` and `list-unit-files 'mind-*'` both list nothing.
+  - `ls /etc/gamecult/minds` gives "No such file or directory". `command -v mind-control`
+    finds nothing. `id mind-eureka` gives "no such user".
+  - The host runs systemd 257 (257.13-1~deb13u1). `systemctl --help` lists
+    `stop UNIT...` and "--no-block  Do not wait until operation finished", so a stop
+    waits by default.
+  - `systemctl stop --no-ask-password 'zz-probe-none@eureka:*.service'` as non-root returned 0:
+    a glob that matches no loaded unit is a no-op. `systemctl is-active 'huginn*.service'`
+    matched by glob (`active`).
+  - Operators act through `sudo`: the gamecult-ops runbook `huginn-yggdrasil.md:86` uses
+    `sudo systemctl stop huginn`, and `/etc/sudoers.d/` holds `90-gamecultadmin`.
+- **F20 The ruling decides when the stop happens.** Ruling `eureka-body:ruling:self-run-actuator` says:
+  "Holding the brake stops running units (systemctl stop; SIGTERM exits 143 with the turn
+  unfinished, section 1.4)". It cites the OpenClaw inbox incident: a stop sent as a message
+  was not acted on in time, and the process was killed at the host (prior-art file
+  lines 323-325, secondary). Cut mind-wake r2 has the waker return `Held` before any query,
+  admission or unit call, and lists "the waker ... ending a live run" among its forbidden writers.
 
 ## The model page (step 0b)
 
@@ -154,9 +189,9 @@ pipeline kinds are in Huginn `docs/eureka-substrate-map.md`.
 | --- | --- | --- | --- |
 | Pipeline wire ids | `epiphany.pipeline.<kind>.v2`, epoch `epiphany.pipeline.epoch.v2`, defined by the leaf, the Huginn crate `crates/eureka-pipeline` (lib `eureka_pipeline`), ids unchanged. | Renamed once to `eureka.pipeline.<kind>.v3` by one `mind.redb` migration, at the next breaking leaf change or before the first hosted mind (ruling `wire-names-rename-before-hosting`). Adding the `run` kind or the `Mind` authority variant is additive (old stored documents decode; no migration), so it does not trigger the rename; a field added with the leaf's `= absent` marker is additive too (leaf-read-anchors r2: old bytes decode, empty fields encode byte-identically, `golden/envelopes.txt` gains lines and loses none); a field added any other way would. | Huginn owns the leaf. The migration is a live-mind upgrade, which is the operator's (`mind-rules-which-forks`). |
 | Leaf crate and schema catalogue | Huginn `crates/eureka-pipeline`, `schemas/cultnet/` (13 pipeline schemas, `gamecult.persona_state.v0`, index, README). `epiphany.work_organ_state.v0` dies: no reader outside Epiphany (grep, F1/F3). | Landed at Huginn `afc35f9` (leaf-into-huginn). Wire pinned by `crates/eureka-pipeline/golden/envelopes.txt` and the opt-in `stored_documents_read_back`. Huginn is AGPL-3.0-only (ruling `eureka-body:ruling:leaf-relicensed-agpl`). | Huginn. Forbidden: any Cargo source resolving into GameCult/Epiphany (`nothing-runs-from-epiphany`). |
-| `run` | `<instance>:run:<label>` (cut-run-kind r2). Label `mind-<YYYYMMDD>T<HHMMSS><mmm>Z` from mind-launch's `run_label`; two launches in one millisecond produce the same key with different content, which admission answers `Conflict`, so the name stays injective. Order is admission ordinal (F15), not label. | Each wake opens a PersonaTurn run with no claims (ruling `eureka-substrate:ruling:every-wake-a-run`); the Persona tool opens SelfRun runs with claims; both go through `open_and_launch`, and the unit starts only after the run commits (the run is the grant). The Self in a unit admits under its label and ends it `Recorded { reason }`. The waker withdraws a run whose unit is not alive past a 120 s grace (replaces the 24 h rule). Cadence comes from the newest PersonaTurn run's `admitted_at`, found through the `turn` and `operated_by` aliases, not `started_on` (a date cannot carry seconds). | Opening: `open_and_launch`, called by the waker for PersonaTurn and by the Persona tool for SelfRun. Ending: the Self that worked it; the waker only withdraws dead ones. Concurrency of live runs: question `eureka-body:question:mind-run-concurrency` (open). Forbidden: Hands, Soul, Imagination, Life. |
+| `run` | `<instance>:run:<label>` (cut-run-kind r2). Label `mind-<YYYYMMDD>T<HHMMSS><mmm>Z` from mind-launch's `run_label`; two launches in one millisecond produce the same key with different content, which admission answers `Conflict`, so the name stays injective. Order is admission ordinal (F15), not label. | Each wake opens a PersonaTurn run with no claims (ruling `eureka-substrate:ruling:every-wake-a-run`); the Persona tool opens SelfRun runs with claims; both go through `open_and_launch`, and the unit starts only after the run commits (the run is the grant). The Self in a unit admits under its label and ends it `Recorded { reason }`. The waker withdraws a run whose unit is not alive past a 120 s grace (replaces the 24 h rule). Cadence comes from the newest PersonaTurn run's `admitted_at`, found through the `turn` and `operated_by` aliases, not `started_on` (a date cannot carry seconds). | Opening: `open_and_launch`, called by the waker for PersonaTurn and by the Persona tool for SelfRun. Ending: the Self that worked it; the waker only withdraws dead ones. Concurrency of live runs: at most one in-force SelfRun of hers per instance; `open_and_launch` answers `Busy` to a second (ruling `one-live-self-run`, cut mind-launch r2). A unit stopped by a brake hold leaves its run in force until the waker's first sweep after release. Forbidden: Hands, Soul, Imagination, Life. |
 | Repetition breaker | No state of its own (rulings `self-waker`, `merge-gate-own-soul`). Trip condition derived from the item's ended SelfRun runs: last 3 empty, or 10 of the last 50. A run is empty when no non-run document citing the item has an ordinal in its window (its admission up to the next run's, or now). | Evaluated in `open_and_launch` when a Self run claims the item, not by the waker. When tripped, it admits one `question` labelled `breaker-<item local>` under the item's campaign, `raised_in` the item, and launches nothing; the existing blocked-spec recipe then removes the item from the queue. Answered by a ruling or withdrawn; either reopens the item. | `open_and_launch` admits the question; any Self may answer it (substrate-internal, `mind-rules-which-forks`). |
-| Brake | One document per instance in a root-owned CultCache store `/etc/gamecult/minds/<instance>/control.cc`, type `eureka.control.brake.v1 { released: bool, set_at, set_by }`. | Replaced whole by the operator's CLI; never appended. Absent or undecodable reads as held. Holding it also stops running units (`systemctl stop`, ruling `self-run-actuator`). | Operator only (ruling `brake-dial-root-store-now`); her units read it, and the file is not writable by any user she runs as. |
+| Brake | One document per instance in a root-owned CultCache store `/etc/gamecult/minds/<instance>/control.cc`, type `eureka.control.brake.v1 { released: bool, set_at, set_by }`. | Replaced whole by the operator's CLI; never appended. Absent or undecodable reads as held. `mind-control brake hold` writes it held and then, in the same command, stops her running units: `systemctl stop` (blocking) over `mind-self@<i>:*` and `mind-persona@<i>:*`, through `SystemdLauncher::stop_all` (cut brake-stop; ruling `self-run-actuator`; F18-F20). | Operator only (ruling `brake-dial-root-store-now`); her units read it, and the file is not writable by any user she runs as. The hold is the one stopper of her units. |
 | Burn-rate dial | Same store, `eureka.control.burn_rate.v1 { heat, base_cooldown_s, base_run_usd, set_at, set_by }`; `heat` in 0.05..=2.0. | Replaced whole by the CLI. Absent or out of bounds reads as heat 0, which launches nothing (fail closed, LiteLLM scar rider of ruling `connector-owner`). Schedules and her own rest arrive later as follow-up `burn-schedule-and-rest`. | Operator. Derived (never stored): wake cadence `base_cooldown_s / heat`, per-run cap `--max-budget-usd = base_run_usd × heat`, per-request `max_cost_usd`. |
 | Connector request and transcript items | Request: `(caller_runtime_id, request_id)`, the replay key the daemon already keeps (`replay.cc`). Items: UserText, AssistantText, ToolCall, ToolResult, plus `ReasoningState { provider, model, opaque }` (ruling `connector-opaque-state-item`). Contract ids become provider-neutral `gamecult.model.*.v3` (follow-up `connector-contract-untyped`); the connector serves Ghostlight too, so not `eureka.*`. | Invocation expires at `expires_at_unix_ms`; replay record per key; restart-era `Indeterminate`. The caller stores the transcript and replays it verbatim; foreign-tagged reasoning state inside an in-flight tool exchange is refused typed; completed-turn foreign state is settled per provider in the connector cut (follow-up `connector-reasoning-state-cheap-providers`). | The connector produces, reads or refuses reasoning bytes; callers never branch on provider. |
 | Connector spend ledger | `gamecult.model.caller_spend.v1` keyed by caller runtime id and window start, in each daemon's state root. | Rolled per window; refusal `Budget` at the cap; durable, and a missing ledger refuses the request. | Each daemon writes its own; the root caller config sets the cap. |
@@ -164,7 +199,7 @@ pipeline kinds are in Huginn `docs/eureka-substrate-map.md`.
 | Persona state | `gamecult.persona_state.v0`, one per mind, `personaId` = instance (cut-huginn-persona-state r2, eureka-substrate). | Replaced whole under CAS with a receipt; she may rewrite any field (`identity-write-all-visible`). | The Persona organ is the only writer. |
 | Identity diffs | The pair of receipts of two consecutive Persona puts whose identity fields (publicName, publicDescription, presentation, values) differ. Derived, not stored. | Composed by the Persona organ at put time and sent as one delivery request through the crossing; a failed post is retried by Bifrost's delivery journal, not by her. | Persona organ composes; Bifrost posts under the permit. No rate limit. |
 | Discord body surfaces | Outbound: crossing ids `epiphany.persona_discord_delivery_request.v0` and `..._permit.v0`, agent `epiphany.Persona`, runtime `epiphany-starfire` (F6), renamed to `eureka.*` and `eureka-yggdrasil` in the mouth rebinding (`mouth-crossing-on-yggdrasil`). Inbound: Bifrost persona-feedback deliveries for target `epiphany` (F6). Persona-session tools reach both (`body-includes-discord`). | Request, permit, post, receipt (Bifrost journal). Inbound deliveries: **unprobed** who records that a delivery was answered; `run-is-the-grant` forbids her organ from holding that fact. Blocks the Persona cuts only, not the cuts admitted today. | Bifrost owns posting and delivery records; her permit issuer grants while the brake is released. |
-| Units and instance templates | `mind-wake@<instance>.timer/.service`, `mind-self@<instance>:<label>.service`, `mind-persona@<instance>:<label>.service` (one-shot per Persona turn; `RuntimeMaxSec` set at install bounds a hung unit), `mind-permit@<instance>`; users `mind-<instance>` (organs) and `mind-<instance>-self` (Self runs); state `/var/lib/gamecult/minds/<instance>/`; control `/etc/gamecult/minds/<instance>/`. Instance `eureka`. | Hand-installed by gamecult-ops now; Idunn targets declared before the first hosted member, which deletes the hand install (`mind-units-templated-interim`). | gamecult-ops installs; Idunn later. |
+| Units and instance templates | `mind-wake@<instance>.timer/.service`, `mind-self@<instance>:<label>.service`, `mind-persona@<instance>:<label>.service` (one-shot per Persona turn; `RuntimeMaxSec` set at install bounds a hung unit), `mind-permit@<instance>`; users `mind-<instance>` (organs) and `mind-<instance>-self` (Self runs); state `/var/lib/gamecult/minds/<instance>/`; control `/etc/gamecult/minds/<instance>/`. Instance `eureka`. | Hand-installed by gamecult-ops now; Idunn targets declared before the first hosted member, which deletes the hand install (`mind-units-templated-interim`). | gamecult-ops installs; Idunn later. Starting: `open_and_launch` through `SystemdLauncher::start`, as her users, who are granted start only. Stopping: only the operator's `brake hold`, as root (cut brake-stop). The unit-level brake gate and the start-only grant are follow-up `mind-units-brake-gate`. None of this exists on Yggdrasil yet (F19). |
 | Self-run credential | `CLAUDE_CODE_OAUTH_TOKEN` in a root-0600 EnvironmentFile per instance. | Created by `claude setup-token`; rotated by the operator. | **Open: question `self-run-token-reach`.** The Self run's `claude` process can read its own environment, so `token-out-of-her-reach` holds only if the operator names this unit (F4 of the prior-art file, follow-up `token-reach-two-units`). |
 | Wake frame | Fixed prompt frame (provenance, jurisdiction, brake obedience) in `/etc/gamecult/minds/<instance>/wake-frame.md`, root-owned. Composed by the Persona organ from host config; the waker passes the unit only the instance and the run label. | Changed only by an install. | Host config (ruling `self-waker` rider 2); never a file her runs merge into. |
 | Epiphany residue | F5, F8, F11, as they stood before the teardown. | Teardown landed (gamecult-ops `9c12adb`); what it did not name is follow-up `eureka-body:follow_up:epiphany-body-leftovers`; the repo is archived last. | gamecult-ops for host and repo tooling; Idunn for its legacy target list (follow-up). |
@@ -191,6 +226,44 @@ one crate, `mind-body`, with one binary per earned process (`mind-control` for t
 root CLI, `mind-wake`; the Persona organ and permit issuer later), not a crate per
 organ. The crate name is instance-generic because the units are templates.
 
+### Who stops her units when the brake is held
+
+Ruling `self-run-actuator` says holding the brake stops her running units. Three cuts each
+held part of that and none held all of it (finding
+`cut-mind-control-store.s1.brake-hold-stops-no-units`). The control-store CLI writes the brake.
+mind-launch owns the unit actuator, which had start and alive. mind-wake reads the brake. The
+stop now has one owner: the operator's `mind-control brake hold`. It writes the brake held
+and then, in the same command, runs `SystemdLauncher::stop_all`, a blocking `systemctl stop`
+over the instance's `mind-self@` and `mind-persona@` units (cut brake-stop).
+
+- **Synchronous, not on the waker's next tick.** The ruling's own precedent is a stop that
+  had to happen at the host. A stop sent as a message was not acted on in time (F20). The
+  waker's next tick comes one timer interval later, and mind-wake r2 already keeps the waker
+  away from units while the brake is held. Prior art agrees. `systemctl stop` waits for its job
+  unless `--no-block` (F19). `kubectl drain` cordons the node and then evicts its pods.
+  `supervisorctl stop` waits through `stopwaitsecs` and then kills. In each, the operator's
+  command does the stop; no reconciler's next pass does.
+- **Write first, then stop, and stop even if the write failed.** This is cordon before drain.
+  A unit that starts after the write must already see the brake held. Stopping is always the
+  safe direction, so a failed write does not skip it.
+- **Privilege.** The hold runs as root because the store is root-owned, and root needs no polkit
+  rule to stop a system unit. Her users get start only (follow-up `mind-units-brake-gate`), so no
+  organ of hers can stop or restart around the operator.
+- **Stop is not on the Launcher port.** `stop_all` is a method on `SystemdLauncher` itself, called
+  only from `main.rs`. Code that holds a `Launcher`, such as `open_and_launch` or the waker,
+  cannot reach it. The stop patterns come from the same templates as start, so the units
+  stopped are exactly the ones started.
+- **Not a mind client.** A Self run killed by a hold cannot record its own end. Its run stays in
+  force until the waker's sweep after release withdraws it, so the operator's CLI never talks
+  to the mind.
+- **One race the CLI cannot close.** A launch can read `Released`, then the hold writes and stops,
+  then the launch starts its unit. The unit's own `ExecCondition=` on the brake closes that, so
+  the gate belongs with the units install (follow-up `mind-units-brake-gate`), not in a second
+  stopper.
+- **Idunn.** Her Self and Persona units are one-shot jobs. Idunn's continuity restarts installed
+  daemons, so stopping one of these jobs is not a continuity decision. When Idunn targets
+  replace the hand install, Idunn must not restart a unit the hold stopped.
+
 ### Why the kit keeps its Codex backend
 
 Idunn's migration doc says Codex is dead (F9). The kit is lifted out of CodexConnector,
@@ -214,9 +287,9 @@ In dependency order, with what blocks each:
    `connector-contract-v3`, `claude-connector`, `openai-compatible-connector`: blocked
    on the kit repo joining the campaign (follow-up `body-campaign-repos`).
 3. `self-run-unit` and `skill-mind-self` (Eureka): blocked on `self-run-token-reach`
-   and `wake-target`. `mind-wake` r2 and `mind-launch` r1 (Huginn) are admitted;
-   `mind-launch` is blocked on question `eureka-body:question:mind-run-concurrency`
-   (the Busy answer for a Self run), and `mind-wake` calls it.
+   and `wake-target`. `mind-launch` r2 (Huginn `df7507b`, unblocked: the
+   `one-live-self-run` ruling answered its question), then `brake-stop` r1 and
+   `mind-wake` r2, which both depend on it.
 4. `mind-units-install` (gamecult-ops): after 3; needs `body-repos-on-forge`.
 5. `mind-persona` and `mouth-rebinding` (Huginn, Bifrost): blocked on `wake-target`,
    `persona-trace-retention`, the inbound-delivery cell, and the connector cuts.
