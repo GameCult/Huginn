@@ -1,0 +1,1024 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://gamecult.dev/cultnet/gamecult.persona_state.v0.schema.json",
+  "title": "GameCult Persona State v0",
+  "description": "Portable person-state contract for Epiphany Persona, VoidBot repo Personas, and Ghostlight characters. Epiphany work organs should not use this unless they are acting as a public Persona.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "gamecult.persona_state.v0"
+    },
+    "provenance": {
+      "$ref": "#/definitions/provenance"
+    },
+    "personaId": {
+      "type": "string"
+    },
+    "publicName": {
+      "type": "string"
+    },
+    "publicDescription": {
+      "type": "string"
+    },
+    "presentation": {
+      "$ref": "#/definitions/presentation"
+    },
+    "privateNotes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "values": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/value"
+      },
+      "default": []
+    },
+    "activationProfile": {
+      "$ref": "#/definitions/activationProfile"
+    },
+    "thoughtMemory": {
+      "$ref": "#/definitions/thoughtMemory"
+    },
+    "agencyPressure": {
+      "$ref": "#/definitions/agencyPressure"
+    },
+    "candidateActions": {
+      "$ref": "#/definitions/candidateActions"
+    },
+    "voidbotProjection": {
+      "$ref": "#/definitions/voidbotProjection"
+    },
+    "affect": {
+      "$ref": "#/definitions/personaAffect"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "provenance",
+    "personaId",
+    "publicName",
+    "presentation",
+    "activationProfile",
+    "thoughtMemory",
+    "agencyPressure",
+    "candidateActions",
+    "affect",
+    "updatedAt"
+  ],
+  "definitions": {
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sourceSystem": {
+          "type": "string"
+        },
+        "sourceDocumentId": {
+          "type": "string"
+        },
+        "sourceUpdatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "exportedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "authority": {
+          "type": "string",
+          "enum": [
+            "canonical",
+            "projection",
+            "import"
+          ]
+        }
+      },
+      "required": [
+        "sourceSystem",
+        "sourceDocumentId",
+        "sourceUpdatedAt",
+        "exportedAt",
+        "authority"
+      ]
+    },
+    "publicHandle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "system": {
+          "type": "string"
+        },
+        "handle": {
+          "type": "string"
+        },
+        "uri": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "required": [
+        "system",
+        "handle"
+      ]
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "avatarUri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "pronouns": {
+          "type": "string"
+        },
+        "voiceSummary": {
+          "type": "string"
+        },
+        "defaultRenderer": {
+          "type": "string",
+          "enum": [
+            "text",
+            "chat",
+            "avatar",
+            "voice",
+            "scene",
+            "repo_persona",
+            "custom"
+          ]
+        },
+        "customRenderer": {
+          "type": "string"
+        },
+        "homeContext": {
+          "$ref": "#/definitions/target"
+        },
+        "jurisdiction": {
+          "type": "string"
+        },
+        "publicHandles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/publicHandle"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "voiceSummary"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "defaultRenderer": {
+                "const": "custom"
+              }
+            },
+            "required": [
+              "defaultRenderer"
+            ]
+          },
+          "then": {
+            "required": [
+              "customRenderer"
+            ]
+          }
+        }
+      ]
+    },
+    "traitVector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mean": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "plasticity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "currentActivation": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "mean",
+        "plasticity",
+        "currentActivation"
+      ]
+    },
+    "traitMap": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/traitVector"
+      }
+    },
+    "activationProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "underlyingOrganization": {
+          "$ref": "#/definitions/traitMap"
+        },
+        "stableDispositions": {
+          "$ref": "#/definitions/traitMap"
+        },
+        "behavioralDimensions": {
+          "$ref": "#/definitions/traitMap"
+        },
+        "presentationStrategy": {
+          "$ref": "#/definitions/traitMap"
+        },
+        "voiceStyle": {
+          "$ref": "#/definitions/traitMap"
+        },
+        "situationalState": {
+          "$ref": "#/definitions/traitMap"
+        }
+      },
+      "required": [
+        "underlyingOrganization",
+        "stableDispositions",
+        "behavioralDimensions",
+        "presentationStrategy",
+        "voiceStyle",
+        "situationalState"
+      ]
+    },
+    "value": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "priority"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "person",
+            "repo",
+            "scene",
+            "system",
+            "room",
+            "artifact",
+            "concept",
+            "relationship",
+            "self",
+            "community",
+            "thread",
+            "document",
+            "runtime",
+            "custom"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "customKind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "custom"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "customKind"
+            ]
+          }
+        }
+      ]
+    },
+    "thoughtStatus": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "active",
+        "cooling",
+        "crystallized",
+        "resolved",
+        "retired"
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "description": "Non-authoritative extension data from source systems. Portable consumers may preserve it, but must not treat it as core PersonaState authority unless they understand the source contract.",
+      "additionalProperties": true
+    },
+    "anchoredThought": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/thoughtStatus"
+        },
+        "target": {
+          "$ref": "#/definitions/target"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "claim": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "tension": {
+          "type": "string"
+        },
+        "actionImplication": {
+          "type": "string"
+        },
+        "intensity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "valence": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "retiredAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/definitions/extensions"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "target",
+        "summary",
+        "tension",
+        "actionImplication",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "thoughtMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "shortTerm": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/anchoredThought"
+          },
+          "default": []
+        },
+        "memories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/anchoredThought"
+          },
+          "default": []
+        },
+        "incubation": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/anchoredThought"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "shortTerm",
+        "memories",
+        "incubation"
+      ]
+    },
+    "agencyPressure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pressures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/anchoredThought"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "pressures"
+      ]
+    },
+    "candidateActions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/candidateAction"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "actions"
+      ]
+    },
+    "candidateAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/thoughtStatus"
+        },
+        "actionType": {
+          "type": "string",
+          "enum": [
+            "speak",
+            "draft",
+            "ask",
+            "propose",
+            "inspect",
+            "notify",
+            "wait",
+            "remember",
+            "handoff",
+            "render",
+            "external_action",
+            "custom"
+          ]
+        },
+        "customActionType": {
+          "type": "string"
+        },
+        "readiness": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "ready",
+            "blocked",
+            "waiting",
+            "expired"
+          ]
+        },
+        "riskLevel": {
+          "type": "string",
+          "enum": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "severe",
+            "unknown"
+          ]
+        },
+        "target": {
+          "$ref": "#/definitions/target"
+        },
+        "deliveryTarget": {
+          "$ref": "#/definitions/target"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "urgency": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/anchoredThought"
+          },
+          "default": []
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "extensions": {
+          "$ref": "#/definitions/extensions"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "actionType",
+        "readiness",
+        "riskLevel",
+        "target",
+        "summary",
+        "createdAt",
+        "updatedAt"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "actionType": {
+                "const": "custom"
+              }
+            },
+            "required": [
+              "actionType"
+            ]
+          },
+          "then": {
+            "required": [
+              "customActionType"
+            ]
+          }
+        }
+      ]
+    },
+    "voidbotProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "candidateInterventions": {
+          "type": "array",
+          "description": "VoidBot-flavored projection of candidateActions for repo Persona routines. This is not the generic PersonaState action authority.",
+          "items": {
+            "$ref": "#/definitions/candidateAction"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "candidateInterventions"
+      ]
+    },
+    "moodDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "source": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "updatedAt"
+      ]
+    },
+    "socialBias": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "summary": {
+          "type": "string"
+        },
+        "behavioralPull": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "summary",
+        "behavioralPull",
+        "updatedAt"
+      ]
+    },
+    "socialBond": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/thoughtStatus"
+        },
+        "subject": {
+          "$ref": "#/definitions/target"
+        },
+        "object": {
+          "$ref": "#/definitions/target"
+        },
+        "relationshipKind": {
+          "type": "string",
+          "enum": [
+            "ally",
+            "friend",
+            "collaborator",
+            "mentor",
+            "ward",
+            "rival",
+            "audience",
+            "community_member",
+            "self_relation",
+            "unknown",
+            "custom"
+          ]
+        },
+        "customRelationshipKind": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "trust": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "tension": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "intensity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "lastEvidence": {
+          "$ref": "#/definitions/anchoredThought"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "extensions": {
+          "$ref": "#/definitions/extensions"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "subject",
+        "object",
+        "relationshipKind",
+        "summary",
+        "trust",
+        "tension",
+        "updatedAt"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "relationshipKind": {
+                "const": "custom"
+              }
+            },
+            "required": [
+              "relationshipKind"
+            ]
+          },
+          "then": {
+            "required": [
+              "customRelationshipKind"
+            ]
+          }
+        }
+      ]
+    },
+    "statusRead": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/thoughtStatus"
+        },
+        "target": {
+          "$ref": "#/definitions/target"
+        },
+        "statusKind": {
+          "type": "string",
+          "enum": [
+            "attention",
+            "authority",
+            "risk",
+            "trust",
+            "need",
+            "conflict",
+            "mood",
+            "opportunity",
+            "uncertainty",
+            "custom"
+          ]
+        },
+        "customStatusKind": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "intensity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "valence": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "lastEvidence": {
+          "$ref": "#/definitions/anchoredThought"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "extensions": {
+          "$ref": "#/definitions/extensions"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "target",
+        "statusKind",
+        "summary",
+        "confidence",
+        "updatedAt"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "statusKind": {
+                "const": "custom"
+              }
+            },
+            "required": [
+              "statusKind"
+            ]
+          },
+          "then": {
+            "required": [
+              "customStatusKind"
+            ]
+          }
+        }
+      ]
+    },
+    "doctrineStance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/thoughtStatus"
+        },
+        "target": {
+          "$ref": "#/definitions/target"
+        },
+        "stanceKind": {
+          "type": "string",
+          "enum": [
+            "aligned",
+            "tension",
+            "rejected",
+            "uncertain",
+            "contextual",
+            "custom"
+          ]
+        },
+        "customStanceKind": {
+          "type": "string"
+        },
+        "principle": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "actionImplication": {
+          "type": "string"
+        },
+        "intensity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "extensions": {
+          "$ref": "#/definitions/extensions"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "target",
+        "stanceKind",
+        "principle",
+        "summary",
+        "actionImplication",
+        "updatedAt"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "stanceKind": {
+                "const": "custom"
+              }
+            },
+            "required": [
+              "stanceKind"
+            ]
+          },
+          "then": {
+            "required": [
+              "customStanceKind"
+            ]
+          }
+        }
+      ]
+    },
+    "personaAffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "needs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/anchoredThought"
+          },
+          "default": []
+        },
+        "socialBonds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/socialBond"
+          },
+          "default": []
+        },
+        "statusReads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/statusRead"
+          },
+          "default": []
+        },
+        "moodDimensions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/moodDimension"
+          },
+          "default": []
+        },
+        "socialBiases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/socialBias"
+          },
+          "default": []
+        },
+        "doctrineStances": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/doctrineStance"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "needs",
+        "socialBonds",
+        "statusReads",
+        "moodDimensions",
+        "socialBiases",
+        "doctrineStances"
+      ]
+    }
+  }
+}

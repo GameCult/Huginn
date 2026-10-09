@@ -1,0 +1,55 @@
+{
+  "$defs": {
+    "Date": {
+      "description": "A calendar date, `YYYY-MM-DD`.",
+      "maxLength": 10,
+      "type": "string"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "OrgRepo": {
+      "description": "A GitHub repository as `Org/Repo`, at most 140 UTF-8 bytes (39 + 1 +\n100). The owner is 1 to 39 `[A-Za-z0-9-]` bytes with no leading or\ntrailing hyphen; the repo is 1 to 100 `[A-Za-z0-9._-]` bytes, is never\n`.` or `..`, and does not end in `.git`, ASCII-case-insensitively.\nIdentity is case-insensitive: `GameCult/Epiphany` and `gamecult/epiphany`\nare the same repository.",
+      "maxLength": 140,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.stewardship.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Stewardship over a repo, as an assignment recorded in a mind. One\ninstance may steward several repos, so the repo is part of the key.\n`sequence` is per `(instance, repo)`, set by the writer, `1` for the\nfirst, so a repo transferred away and back is two records under one\nprefix rather than one document overwriting the other. `assigned_on`\nis a field, not a key part. As on a resolution, whether the sequence\nis the previous plus one, and which assignment is in force, are\nadmission's rules and not this crate's.",
+  "properties": {
+    "assigned_on": {
+      "$ref": "#/$defs/Date"
+    },
+    "instance": {
+      "$ref": "#/$defs/Slug"
+    },
+    "note": {
+      "$ref": "#/$defs/Line"
+    },
+    "repo": {
+      "$ref": "#/$defs/OrgRepo"
+    },
+    "sequence": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "instance",
+    "repo",
+    "sequence",
+    "assigned_on",
+    "note"
+  ],
+  "title": "PipelineStewardship",
+  "type": "object"
+}

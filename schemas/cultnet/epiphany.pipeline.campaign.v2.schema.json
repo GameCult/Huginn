@@ -1,0 +1,89 @@
+{
+  "$defs": {
+    "DocRef": {
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/Sha"
+        },
+        "end_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        },
+        "start_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line",
+        "commit"
+      ],
+      "type": "object"
+    },
+    "OrgRepo": {
+      "description": "A GitHub repository as `Org/Repo`, at most 140 UTF-8 bytes (39 + 1 +\n100). The owner is 1 to 39 `[A-Za-z0-9-]` bytes with no leading or\ntrailing hyphen; the repo is 1 to 100 `[A-Za-z0-9._-]` bytes, is never\n`.` or `..`, and does not end in `.git`, ASCII-case-insensitively.\nIdentity is case-insensitive: `GameCult/Epiphany` and `gamecult/epiphany`\nare the same repository.",
+      "maxLength": 140,
+      "type": "string"
+    },
+    "Sha": {
+      "description": "A git commit id: 7-40 lowercase hex characters.",
+      "maxLength": 40,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Title": {
+      "description": "A title: 1 to 200 UTF-8 bytes, enforced by admission; JSON Schema\nlength counts characters. Holds at least one alphanumeric character,\nno control character, and no bidi control character (`U+061C`,\n`U+200E`, `U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`).",
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.campaign.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "repos": {
+      "items": {
+        "$ref": "#/$defs/OrgRepo"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "slug": {
+      "$ref": "#/$defs/Slug"
+    },
+    "target_doc": {
+      "$ref": "#/$defs/DocRef"
+    },
+    "title": {
+      "$ref": "#/$defs/Title"
+    },
+    "working_branch": {
+      "$ref": "#/$defs/Short"
+    }
+  },
+  "required": [
+    "slug",
+    "title",
+    "repos",
+    "working_branch",
+    "target_doc"
+  ],
+  "title": "PipelineCampaign",
+  "type": "object"
+}

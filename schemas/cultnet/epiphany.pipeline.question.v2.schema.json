@@ -1,0 +1,147 @@
+{
+  "$defs": {
+    "Date": {
+      "description": "A calendar date, `YYYY-MM-DD`.",
+      "maxLength": 10,
+      "type": "string"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "Para": {
+      "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
+      "maxLength": 4000,
+      "type": "string"
+    },
+    "PipelineKind": {
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff"
+      ],
+      "type": "string"
+    },
+    "PipelineRef": {
+      "description": "A reference to another document. The id is parsed as a full pipeline id of\nthe declared `kind`, so the kind and the id's kind segment cannot disagree.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "QuestionOption": {
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "text": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "label",
+        "text"
+      ],
+      "type": "object"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Title": {
+      "description": "A title: 1 to 200 UTF-8 bytes, enforced by admission; JSON Schema\nlength counts characters. Holds at least one alphanumeric character,\nno control character, and no bidi control character (`U+061C`,\n`U+200E`, `U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`).",
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.question.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "asked_on": {
+      "$ref": "#/$defs/Date"
+    },
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "depends": {
+      "items": {
+        "$ref": "#/$defs/Line"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "label": {
+      "$ref": "#/$defs/Label"
+    },
+    "options": {
+      "items": {
+        "$ref": "#/$defs/QuestionOption"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "question": {
+      "$ref": "#/$defs/Para"
+    },
+    "raised_in": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PipelineRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "recommended": {
+      "$ref": "#/$defs/Label"
+    },
+    "title": {
+      "$ref": "#/$defs/Title"
+    }
+  },
+  "required": [
+    "campaign",
+    "label",
+    "title",
+    "question",
+    "options",
+    "recommended",
+    "depends",
+    "asked_on"
+  ],
+  "title": "PipelineQuestion",
+  "type": "object"
+}

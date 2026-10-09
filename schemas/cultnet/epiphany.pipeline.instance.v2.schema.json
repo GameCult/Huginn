@@ -1,0 +1,44 @@
+{
+  "$defs": {
+    "Date": {
+      "description": "A calendar date, `YYYY-MM-DD`.",
+      "maxLength": 10,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.instance.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A mind's identity document. A store is canonical to exactly one\ninstance, and this says which; identity lives in the state, not in a\npath.",
+  "properties": {
+    "created_at": {
+      "$ref": "#/$defs/Date"
+    },
+    "display_name": {
+      "$ref": "#/$defs/Short"
+    },
+    "host": {
+      "$ref": "#/$defs/Short"
+    },
+    "instance": {
+      "$ref": "#/$defs/Slug"
+    }
+  },
+  "required": [
+    "instance",
+    "display_name",
+    "created_at",
+    "host"
+  ],
+  "title": "PipelineInstance",
+  "type": "object"
+}

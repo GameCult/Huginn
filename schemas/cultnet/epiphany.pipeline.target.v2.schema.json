@@ -1,0 +1,117 @@
+{
+  "$defs": {
+    "DocRef": {
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/Sha"
+        },
+        "end_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        },
+        "start_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line",
+        "commit"
+      ],
+      "type": "object"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "Sha": {
+      "description": "A git commit id: 7-40 lowercase hex characters.",
+      "maxLength": 40,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "TargetInvariant": {
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "statement": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "label",
+        "statement"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.target.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "canonical_implementations": {
+      "items": {
+        "$ref": "#/$defs/Line"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "doc": {
+      "$ref": "#/$defs/DocRef"
+    },
+    "invariants": {
+      "items": {
+        "$ref": "#/$defs/TargetInvariant"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "not_in_scope": {
+      "items": {
+        "$ref": "#/$defs/Line"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "revision": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "campaign",
+    "revision",
+    "invariants",
+    "not_in_scope",
+    "canonical_implementations",
+    "doc"
+  ],
+  "title": "PipelineTarget",
+  "type": "object"
+}
