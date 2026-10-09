@@ -484,7 +484,7 @@ mod unsafe_installs {
             ("group-writable directory", 0o775, None, None, ""),
             ("world-writable lock", 0o755, Some(0o666), None, "control.cc.lock"),
             ("group-writable store", 0o755, Some(0o644), Some(0o664), "control.cc"),
-            ("world-writable store", 0o755, None, Some(0o666), "control.cc"),
+            ("world-writable store", 0o755, Some(0o644), Some(0o666), "control.cc"),
         ];
         for (what, dir_mode, lock_mode, store_mode, culprit) in cases {
             let (_root, instance) = install(dir_mode, lock_mode, store_mode);
