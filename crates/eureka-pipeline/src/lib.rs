@@ -2772,6 +2772,18 @@ mod tests {
         Ok(())
     }
 
+    /// A refusal read as text names its variant and its parts, so an operator
+    /// who sees only the message (a log line, an `anyhow` chain) can tell which
+    /// field was refused and why.
+    #[test]
+    fn a_refusal_read_as_text_names_its_variant_and_parts() {
+        let text = PipelineRefusal::FieldBound { field: "title".into(), limit: 200, actual: 201 }.to_string();
+        assert!(text.starts_with("pipeline refusal: "), "{text}");
+        for part in ["FieldBound", "title", "200", "201"] {
+            assert!(text.contains(part), "{part} is missing from {text}");
+        }
+    }
+
     /// The catalogue is exactly the files beside it: every entry's `path` is a
     /// schema file in the directory, and every schema file in the directory
     /// has an entry, so a schema removed from the catalogue (or a file left
