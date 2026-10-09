@@ -1219,6 +1219,21 @@ mod tests {
         }
     }
 
+    /// The alias domain and the enum agree: a Mind-authority ruling is
+    /// selectable by its own word, and only by it.
+    #[test]
+    fn a_query_for_mind_authority_is_answered() {
+        let mut mind = seeded();
+        let mut own = ruling("R1");
+        own.authority = RulingAuthority::Mind;
+        committed(admit(&mut mind, vec![D::Ruling(own), D::Ruling(ruling("R2"))]));
+        let by = |word: &str| mind.query(&with(of_kinds(&[K::Ruling]), any_of("authority", &[word]))).unwrap();
+        assert_eq!(by("Mind").matched, 1);
+        assert_eq!(by("Standing").matched, 1);
+        let misspelt = with(of_kinds(&[K::Ruling]), any_of("authority", &["Minds"]));
+        assert!(matches!(refused(&mind, &misspelt), MindRefusal::SelectionInvalid { value: Some(v), .. } if v == "Minds"));
+    }
+
     #[test]
     fn an_unknown_schema_or_malformed_key_is_refused() {
         let mind = worked();

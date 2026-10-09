@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use cultnet_rs::{Row, RowSet, Selection};
-use eureka_pipeline::{OrgRepo, Label, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, Slug};
+use eureka_pipeline::{OrgRepo, Label, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RulingAuthority, Slug};
 
 use crate::docs::{CitationRole, Held, kind_of_id, kind_of_type};
 use crate::query::PipelineDocumentView;
@@ -43,7 +43,6 @@ const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Li
 const SEVERITIES: [&str; 4] = ["Blocker", "High", "Medium", "Low"];
 const CONFIDENCES: [&str; 2] = ["Confirmed", "Plausible"];
 const ORIGINS: [&str; 2] = ["Introduced", "PreExisting"];
-const AUTHORITIES: [&str; 3] = ["Operator", "Standing", "Defaulted"];
 const CLAIM_OUTCOMES: [&str; 3] = ["Holds", "Falsified", "Unproven"];
 const OUTCOMES: [&str; 6] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn"];
 const BOOLEANS: [&str; 2] = ["true", "false"];
@@ -106,7 +105,7 @@ impl Alias {
             Self::Severity => Some(&SEVERITIES),
             Self::Confidence => Some(&CONFIDENCES),
             Self::Origin => Some(&ORIGINS),
-            Self::Authority => Some(&AUTHORITIES),
+            Self::Authority => Some(RulingAuthority::NAMES),
             Self::ClaimOutcome => Some(&CLAIM_OUTCOMES),
             Self::Outcome => Some(&OUTCOMES),
             Self::Root | Self::Repo | Self::Cut => None,
