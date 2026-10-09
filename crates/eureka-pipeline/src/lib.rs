@@ -2449,16 +2449,24 @@ mod tests {
         assert!(!Sha("5f98228a".into()).names_same_commit(&Sha("5f98228b".into())), "equal length, differing");
     }
 
-    /// stored-documents-valid, on the real mind. `HUGINN_MIND_SNAPSHOT` is a
-    /// writable copy of a state root holding `minds/eureka/mind.redb` (the
-    /// store opens read-write). Read through cultcache-rs's own store.
+    /// stored-documents-valid and stored-bytes-reproduce, on the real mind.
+    /// `HUGINN_MIND_SNAPSHOT` is a copy of a state root holding
+    /// `minds/eureka/mind.redb`; the test copies the store file into a scratch
+    /// directory first (redb opens read-write), so the snapshot may be
+    /// read-only. Read through cultcache-rs's own store. Each pipeline
+    /// document must re-prepare to its stored envelope: key, type and payload
+    /// bytes.
     #[test]
-    #[ignore = "needs HUGINN_MIND_SNAPSHOT, a writable copy of a Huginn state root"]
+    #[ignore = "needs HUGINN_MIND_SNAPSHOT, a copy of a Huginn state root; see the crate README"]
     fn stored_documents_read_back() {
         use cultcache_rs::{CacheBackingStore, OwnedRedbMessagePackBackingStore};
         let root = std::env::var("HUGINN_MIND_SNAPSHOT").expect("HUGINN_MIND_SNAPSHOT names the snapshot state root");
-        let store = OwnedRedbMessagePackBackingStore::new(Path::new(&root).join("minds").join("eureka").join("mind.redb"))
-            .expect("the snapshot opens");
+        let scratch = std::env::temp_dir().join(format!("eureka-pipeline-readback-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch directory");
+        let working = scratch.join("mind.redb");
+        std::fs::copy(Path::new(&root).join("minds").join("eureka").join("mind.redb"), &working).expect("the snapshot copies");
+        let store = OwnedRedbMessagePackBackingStore::new(&working).expect("the snapshot opens");
+        let cache = schema_cache().expect("the registrar registers");
         let envelopes = store.pull_all().expect("the snapshot reads");
         let mut stored = Vec::new();
         for envelope in &envelopes {
@@ -2466,6 +2474,13 @@ mod tests {
                 Ok(document) => {
                     assert_eq!(document.validate(), Ok(()), "{}: valid", envelope.key);
                     assert_eq!(pipeline_key(&document).as_deref(), Ok(envelope.key.as_str()), "{}: key derives byte for byte", envelope.key);
+                    let again = document.prepare(&cache).unwrap_or_else(|error| panic!("{}: does not re-prepare: {error}", envelope.key));
+                    assert_eq!(
+                        (&again.key, &again.r#type, &again.payload),
+                        (&envelope.key, &envelope.r#type, &envelope.payload),
+                        "{}: re-encodes to the stored bytes",
+                        envelope.key
+                    );
                     stored.push((document.kind(), envelope.key.clone()));
                 }
                 Err(PipelineRefusal::ForeignStore { .. }) => {}
@@ -2504,6 +2519,7 @@ mod tests {
             assert!(one.split(':').nth(2).is_some_and(|local| local.len() > SUBJECT_LOCAL_MAX), "{label}: the old bound refused it");
         }
         eprintln!("read back {} pipeline documents, {subjects} subjects", stored.len());
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// The total bound, in the one place it lives: parts that are each a legal
