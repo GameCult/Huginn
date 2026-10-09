@@ -1375,27 +1375,27 @@
             "AlreadyClaimed"
           ]
         },
-          {
-            "description": "A run of hers opens, or is reinstated, while another in-force run of\nhers of the same instance and turn is live: `run` is the holder's id\n(ruling one-live-self-run).",
-            "type": "object",
-            "properties": {
-              "AlreadyLive": {
-                "type": "object",
-                "properties": {
-                  "run": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "run"
-                ]
-              }
-            },
-            "additionalProperties": false,
-            "required": [
-              "AlreadyLive"
-            ]
+        {
+          "description": "A run of hers opens, or is reinstated, while another in-force run of\nhers of the same instance and turn is live: `run` is the holder's id\n(ruling one-live-self-run).",
+          "type": "object",
+          "properties": {
+            "AlreadyLive": {
+              "type": "object",
+              "properties": {
+                "run": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "run"
+              ]
+            }
           },
+          "additionalProperties": false,
+          "required": [
+            "AlreadyLive"
+          ]
+        },
         {
           "description": "The one refusal a mind never raises: the answer exceeds the largest\nbody the organ will deliver by any plane, one send or a deferred body.\nIt lives here because a refusal rides the response schema and there is\none of those, so a client reads it the way it reads every other refusal\nrather than parsing a second vocabulary. `bytes` is the encoded answer\n(the payload, not its envelope) and `limit` is the largest body the\ndaemon defers, both so a caller can narrow its own request; nothing is\ntruncated or paginated on its behalf. The daemon owns it and its\ndeferral bound decides it; no rule of the mind is involved.",
           "type": "object",
