@@ -711,6 +711,11 @@ macro_rules! pipeline_kinds {
             }
 
             #[cfg(test)]
+            pub(crate) fn schema_name(self) -> &'static str {
+                match self { $(Self::$variant => <$document as DatabaseEntry>::SCHEMA_NAME),* }
+            }
+
+            #[cfg(test)]
             pub(crate) fn derived_schema(self) -> schemars::Schema {
                 match self { $(Self::$variant => schemars::schema_for!($value)),* }
             }
@@ -1282,6 +1287,107 @@ mod tests {
     fn resolution_sample() -> PipelineResolution {
         let PipelineDocument::Resolution(resolution) = samples().remove(9).0 else { unreachable!() };
         resolution
+    }
+
+    /// The golden corpus: every sample plus one document per encoding-relevant
+    /// variant (every enum variant, every Option both ways), each under a
+    /// unique label that names what it varies.
+    fn golden_documents() -> Vec<(String, PipelineDocument)> {
+        use PipelineDocument as D;
+        let mut out: Vec<(String, PipelineDocument)> =
+            samples().into_iter().map(|(d, _)| (format!("sample.{}", d.kind().name()), d)).collect();
+        let by = |kind: PipelineKind, kind_name: &str, local: &str| PipelineRef { kind, id: id(kind_name, local) };
+        let resolution = |outcome: ResolutionOutcome| {
+            let mut r = resolution_sample();
+            r.outcome = outcome;
+            D::Resolution(r)
+        };
+        let ruling_ref = || by(PipelineKind::Ruling, "ruling", "R8");
+        out.push(("resolution.superseded".into(), resolution(ResolutionOutcome::Superseded { by: vec![ruling_ref(), by(PipelineKind::Question, "question", "Q1")] })));
+        out.push(("resolution.fixed-by-none".into(), resolution(ResolutionOutcome::Fixed { commit: sha(), by: None })));
+        out.push(("resolution.fixed-by-some".into(), resolution(ResolutionOutcome::Fixed { commit: sha(), by: Some(by(PipelineKind::CutReport, "cut_report", "cut-3a.h1")) })));
+        out.push(("resolution.deferred".into(), resolution(ResolutionOutcome::Deferred { to: by(PipelineKind::FollowUp, "follow_up", "FU-4") })));
+        out.push(("resolution.recorded".into(), resolution(ResolutionOutcome::Recorded { reason: "Noted.".into() })));
+        out.push(("resolution.withdrawn".into(), resolution(ResolutionOutcome::Withdrawn { reason: "Mistaken.".into() })));
+        for (name, authority) in [("standing", RulingAuthority::Standing), ("defaulted", RulingAuthority::Defaulted)] {
+            let mut r = ruling_sample();
+            r.authority = authority;
+            out.push((format!("ruling.authority-{name}"), D::Ruling(r)));
+        }
+        let mut r = ruling_sample();
+        (r.answers, r.choice, r.operator_quote, r.precedents) = (None, None, None, vec![]);
+        out.push(("ruling.options-none".into(), D::Ruling(r)));
+        let mut q = question_sample();
+        q.raised_in = None;
+        out.push(("question.raised-in-none".into(), D::Question(q)));
+        let PipelineDocument::CutSpec(mut spec) = samples().remove(4).0 else { unreachable!() };
+        spec.authority_map = None;
+        out.push(("cut_spec.authority-map-none".into(), D::CutSpec(spec)));
+        for (name, outcome) in [("holds", ClaimOutcome::Holds), ("unproven", ClaimOutcome::Unproven)] {
+            let mut v = verdict_sample();
+            v.claims[0].outcome = outcome;
+            v.claims[0].promise = None;
+            out.push((format!("verdict.claim-{name}-promise-none"), D::Verdict(v)));
+        }
+        let mut f = finding_sample();
+        (f.confidence, f.severity, f.origin) = (FindingConfidence::Plausible, FindingSeverity::Blocker, FindingOrigin::PreExisting);
+        f.locations[0].end_line = None;
+        f.evidence = [EvidenceKind::Command, EvidenceKind::Mutation, EvidenceKind::Probe, EvidenceKind::SourceRead, EvidenceKind::Capture]
+            .into_iter().map(|kind| Evidence { kind, locator: "x".into(), result: "y".into() }).collect();
+        out.push(("finding.plausible-blocker-preexisting-kinds".into(), D::Finding(f)));
+        for (name, severity) in [("medium", FindingSeverity::Medium), ("low", FindingSeverity::Low)] {
+            let mut f = finding_sample();
+            f.severity = severity;
+            out.push((format!("finding.severity-{name}"), D::Finding(f)));
+        }
+        out
+    }
+
+    /// One line per document: `label key type schema payload-hex`.
+    fn golden_lines() -> Result<Vec<String>> {
+        let cache = schema_cache()?;
+        golden_documents()
+            .into_iter()
+            .map(|(label, document)| {
+                document.validate()?;
+                let envelope = document.prepare(&cache)?;
+                let hex: String = envelope.payload.iter().map(|b| format!("{b:02x}")).collect();
+                Ok(format!("{label} {} {} {} {hex}", envelope.key, envelope.r#type, document.kind().schema_name()))
+            })
+            .collect()
+    }
+
+    /// The wire is pinned to bytes. `golden/envelopes.txt` was derived once
+    /// from this crate at its copy of Epiphany ef956865 (huginn 87b6455), which
+    /// was proved byte-identical to the live mind store and to Epiphany; see
+    /// its header. Payload bytes are load-bearing (`ForeignRef.payload_sha256`
+    /// hashes them), and the cultcache type id and schema name are how a store
+    /// resolves a persisted entry. A deliberate wire change re-derives the file
+    /// with `golden_dump` below, in the same commit as a ruling that allows it.
+    #[test]
+    fn encoded_envelopes_match_the_committed_golden() -> Result<()> {
+        let golden = include_str!("../golden/envelopes.txt");
+        let expected: Vec<&str> = golden.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).collect();
+        let actual = golden_lines()?;
+        assert_eq!(actual.len(), expected.len(), "the corpus and the golden file have the same documents");
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual, expected);
+        }
+        let kinds: BTreeSet<&str> = actual.iter().filter_map(|line| line.split(' ').nth(2)).collect();
+        assert_eq!(kinds.len(), PipelineKind::ALL.len(), "every kind's type id is in the golden");
+        Ok(())
+    }
+
+    /// Prints the golden body to the file named by `GOLDEN_OUT`. Not a check:
+    /// run only for a deliberate wire change, then paste under the header.
+    #[test]
+    #[ignore = "re-derives golden/envelopes.txt; run only for a ruled wire change"]
+    fn golden_dump() -> Result<()> {
+        let out = std::env::var("GOLDEN_OUT").expect("GOLDEN_OUT names the output file");
+        std::fs::write(out, golden_lines()?.join("
+") + "
+")?;
+        Ok(())
     }
 
     /// The live registrar plus the foreign stand-in, which only the tests
