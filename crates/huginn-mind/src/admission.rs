@@ -746,7 +746,7 @@ mod tests {
     use crate::receipt::{DocumentVersion, Faculty, HuginnCommitReceipt};
     use crate::store::test_stores::{MemoryStore, RefusingStore, SwapCommand};
     use cultcache_rs::DatabaseEntry;
-    use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument as D, PipelineKind as K};
+    use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument as D, PipelineKind as K, RunTurn};
     use sha2::{Digest, Sha256};
 
     fn receipt_count<S: MindStore>(mind: &Mind<S>) -> usize {
