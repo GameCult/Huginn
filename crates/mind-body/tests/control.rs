@@ -293,3 +293,124 @@ fn the_control_path_is_derived_from_a_valid_instance_only() {
         assert!(control_path(root, &Slug(bad.into())).is_err(), "{bad:?}");
     }
 }
+
+/// A dial document under the dial's type id whose payload is not a dial.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "eureka.control.burn_rate.v1", schema = "ControlBurnRate")]
+struct WrongDial {
+    #[cultcache(key = 0)]
+    heat: String,
+}
+
+fn write_wrong_dial(path: &Path, heat: &str) {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<WrongDial>().unwrap();
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(path)).unwrap();
+    cache.pull_all_backing_stores().unwrap();
+    cache.put(mind_body::control::DIAL_KEY, &WrongDial { heat: heat.into() }).unwrap();
+}
+
+#[test]
+fn a_dial_that_does_not_decode_reads_held_whatever_the_brake_says() {
+    for brake_released in [true, false] {
+        for heat in ["not a number", "NaN", ""] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = store_path(dir.path());
+            ControlWriter::open(&path).unwrap().set_brake(brake_released, at(0), "op").unwrap();
+            write_wrong_dial(&path, heat);
+            assert_eq!(
+                effective(&path),
+                held(HeldReason::Undecodable),
+                "brake released={brake_released}, dial heat {heat:?}: a dial that cannot be read is never replaced by a default"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+mod modes {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    const CHILD: &str = "MIND_BODY_MODE_CHILD";
+    const ROOT: &str = "MIND_BODY_MODE_ROOT";
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// The body of the two re-executed children; with no CHILD set it does
+    /// nothing, so a plain run of the suite passes it vacuously.
+    #[test]
+    fn mode_child() {
+        let Ok(role) = std::env::var(CHILD) else { return };
+        let path = Path::new(&std::env::var(ROOT).unwrap()).join("eureka").join("control.cc");
+        match role.as_str() {
+            "write" => {
+                let mut writer = ControlWriter::open(&path).unwrap();
+                writer.set_brake(true, at(0), "op").unwrap();
+                writer.set_dial(dial("1", 3600, "1")).unwrap();
+            }
+            "intruder" => {
+                assert!(ControlWriter::open(&path).and_then(|mut writer| writer.set_brake(false, at(1), "intruder")).is_err());
+                assert!(ControlWriter::open(Path::new(&std::env::var(ROOT).unwrap()).join("ghost").join("control.cc"))
+                    .and_then(|mut writer| writer.set_brake(true, at(1), "intruder"))
+                    .is_err());
+                assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+                assert!(std::fs::OpenOptions::new().write(true).open(path.with_file_name("control.cc.lock")).is_err());
+                assert!(matches!(effective(&path), Effective::Released { .. }), "a non-root user can still read the store");
+            }
+            other => panic!("unknown role {other}"),
+        }
+    }
+
+    fn spawn_child(role: &str, root: &Path, exe: &Path, prefix: &[&str], umask: &str) -> std::process::ExitStatus {
+        let script = format!("umask {umask}; exec \"$@\" --exact modes::mode_child --nocapture");
+        let mut command = Command::new(prefix.first().copied().unwrap_or("sh"));
+        if prefix.is_empty() {
+            command.args(["-c", &script, "sh"]).arg(exe);
+        } else {
+            command.args(&prefix[1..]).args(["sh", "-c", &script, "sh"]).arg(exe);
+        }
+        command.env(CHILD, role).env(ROOT, root).status().unwrap()
+    }
+
+    fn written_under(umask: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        assert!(spawn_child("write", dir.path(), &exe, &[], umask).success());
+        let control = dir.path().join("eureka");
+        (dir, control)
+    }
+
+    #[test]
+    fn the_store_is_created_0755_and_0644_whatever_the_operators_umask() {
+        for umask in ["000", "022", "077"] {
+            let (_dir, control) = written_under(umask);
+            assert_eq!(mode(&control), 0o755, "directory under umask {umask}");
+            assert_eq!(mode(&control.join("control.cc")), 0o644, "store under umask {umask}");
+            assert_eq!(mode(&control.join("control.cc.lock")), 0o644, "lock under umask {umask}");
+        }
+    }
+
+    fn running_as_root() -> bool {
+        Command::new("id").arg("-u").output().map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0").unwrap_or(false)
+    }
+
+    #[test]
+    fn a_non_root_user_cannot_write_the_store_but_can_read_it() {
+        if !running_as_root() || Command::new("setpriv").arg("--version").output().is_err() {
+            eprintln!("SKIPPED: needs root and setpriv (the verify container has both) to become uid 65534");
+            return;
+        }
+        let (dir, _control) = written_under("000");
+        // A copy of the test binary the unprivileged user can execute.
+        let exe = dir.path().join("test-bin");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = spawn_child("intruder", dir.path(), &exe, &["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups"], "022");
+        assert!(status.success(), "the intruder child asserted a refusal that did not happen");
+    }
+}
