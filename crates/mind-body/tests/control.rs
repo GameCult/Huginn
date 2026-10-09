@@ -353,6 +353,9 @@ mod modes {
                 writer.set_brake(true, at(0), "op").unwrap();
                 writer.set_dial(dial("1", 3600, "1")).unwrap();
             }
+            "brake" => {
+                ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").unwrap();
+            }
             "intruder" => {
                 assert!(ControlWriter::open(&path).and_then(|mut writer| writer.set_brake(false, at(1), "intruder")).is_err());
                 assert!(ControlWriter::open(Path::new(&std::env::var(ROOT).unwrap()).join("ghost").join("control.cc"))
@@ -377,11 +380,11 @@ mod modes {
         command.env(CHILD, role).env(ROOT, root).status().unwrap()
     }
 
-    fn written_under(umask: &str) -> (tempfile::TempDir, PathBuf) {
+    fn written_under(role: &str, umask: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let exe = std::env::current_exe().unwrap();
-        assert!(spawn_child("write", dir.path(), &exe, &[], umask).success());
+        assert!(spawn_child(role, dir.path(), &exe, &[], umask).success());
         let control = dir.path().join("eureka");
         (dir, control)
     }
@@ -389,7 +392,8 @@ mod modes {
     #[test]
     fn the_store_is_created_0755_and_0644_whatever_the_operators_umask() {
         for umask in ["000", "022", "077"] {
-            let (_dir, control) = written_under(umask);
+            let (_dir, control) = written_under("brake", umask);
+            // One write only: a second write would set what the first left.
             assert_eq!(mode(&control), 0o755, "directory under umask {umask}");
             assert_eq!(mode(&control.join("control.cc")), 0o644, "store under umask {umask}");
             assert_eq!(mode(&control.join("control.cc.lock")), 0o644, "lock under umask {umask}");
@@ -406,7 +410,7 @@ mod modes {
             eprintln!("SKIPPED: needs root and setpriv (the verify container has both) to become uid 65534");
             return;
         }
-        let (dir, _control) = written_under("000");
+        let (dir, _control) = written_under("write", "000");
         // A copy of the test binary the unprivileged user can execute.
         let exe = dir.path().join("test-bin");
         std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
