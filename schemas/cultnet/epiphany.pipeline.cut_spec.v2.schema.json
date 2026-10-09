@@ -72,6 +72,16 @@
         },
         "path": {
           "$ref": "#/$defs/Short"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Symbol"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -185,6 +195,22 @@
       "maxLength": 140,
       "type": "string"
     },
+    "ReadAnchor": {
+      "description": "Code Hands must see but not change, in the spec's repo at the spec's base.",
+      "properties": {
+        "location": {
+          "$ref": "#/$defs/CodeLocation"
+        },
+        "why": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "location",
+        "why"
+      ],
+      "type": "object"
+    },
     "Sha": {
       "description": "A git commit id: 7-40 lowercase hex characters.",
       "maxLength": 40,
@@ -266,6 +292,12 @@
         "targets_removed"
       ],
       "type": "object"
+    },
+    "Symbol": {
+      "description": "A name the location's lines must contain as written there (an\nidentifier or a YAML `&fileID`); not an identity. 1 to 128 bytes, no\nwhitespace and no control character.",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
     },
     "Title": {
       "description": "A title: 1 to 200 UTF-8 bytes, enforced by admission; JSON Schema\nlength counts characters. Holds at least one alphanumeric character,\nno control character, and no bidi control character (`U+061C`,\n`U+200E`, `U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`).",
@@ -362,6 +394,13 @@
     "questions": {
       "items": {
         "$ref": "#/$defs/Short"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "reads": {
+      "items": {
+        "$ref": "#/$defs/ReadAnchor"
       },
       "maxItems": 16,
       "type": "array"
