@@ -70,7 +70,6 @@ fn parse_dial(flags: &[&str], now: DateTime<Utc>, set_by: &str) -> Result<BurnRa
             bail!("{flag} given twice");
         }
     }
-    let need = |value: Option<&str>, name: &str| value.ok_or_else(|| anyhow!("{name} is required"));
     Ok(BurnRate {
         heat: Decimal::from_str(need(heat, "--heat")?).context("--heat is not a decimal")?,
         base_cooldown_s: need(cooldown, "--base-cooldown-s")?
@@ -80,6 +79,10 @@ fn parse_dial(flags: &[&str], now: DateTime<Utc>, set_by: &str) -> Result<BurnRa
         set_at: now,
         set_by: set_by.to_string(),
     })
+}
+
+fn need<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str> {
+    value.ok_or_else(|| anyhow!("{name} is required"))
 }
 
 fn show(path: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {
