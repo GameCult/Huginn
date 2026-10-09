@@ -353,11 +353,12 @@ pub(crate) mod tests {
     /// roughly a megabyte of field content, which is what a real-sized answer
     /// looks like at the leaf's bounds rather than at a fixture's convenience.
     /// `depends_on`, `rulings` and `questions` stay empty because each is a
-    /// reference admission resolves.
+    /// reference admission resolves. `reads` and location symbols stay absent:
+    /// `FITTING_CHANGES` is calibrated to `MAX_RESPONSE_BYTES` without them.
     pub(crate) fn cut_spec(cut: &str, file_changes: usize) -> PipelineDocument {
         let lines = |count: usize| (0..count).map(line).collect::<Vec<_>>();
         let shorts = |count: usize| (0..count).map(short).collect::<Vec<_>>();
-        let location = |n: usize| CodeLocation { path: short(n), line: 1, end_line: Some(9) };
+        let location = |n: usize| CodeLocation { path: short(n), line: 1, end_line: Some(9), symbol: None };
         PipelineDocument::CutSpec(PipelineCutSpec {
             campaign: slug(CAMPAIGN),
             cut: cut.into(),
@@ -372,6 +373,7 @@ pub(crate) mod tests {
             keeps_moves: lines(64),
             adds: lines(64),
             file_changes: (0..file_changes).map(|n| FileChange { location: location(n), change: line(n) }).collect(),
+            reads: vec![],
             authority_map: Some(AuthorityMap {
                 owner: line(0),
                 inputs: lines(16),

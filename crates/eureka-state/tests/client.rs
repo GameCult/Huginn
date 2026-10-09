@@ -56,10 +56,11 @@ fn cut_spec(cut: &str, file_changes: usize) -> PipelineDocument {
         adds: lines(64),
         file_changes: (0..file_changes)
             .map(|n| FileChange {
-                location: CodeLocation { path: short(n), line: 1, end_line: Some(9) },
+                location: CodeLocation { path: short(n), line: 1, end_line: Some(9), symbol: None },
                 change: line(n),
             })
             .collect(),
+        reads: vec![],
         authority_map: Some(AuthorityMap {
             owner: line(0),
             inputs: lines(16),
