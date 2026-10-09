@@ -603,7 +603,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
     use PipelineKind as K;
     use ResolutionOutcome as O;
     let all = |by: &[PipelineRef], kind: K| by.iter().all(|supersessor| supersessor.kind == kind);
-    let fits = match (subject, outcome) {
+    match (subject, outcome) {
         (K::Target, O::Superseded { by }) => all(by, K::Target),
         (K::Question, O::Answered { by }) => by.kind == K::Ruling,
         (K::Question, O::Withdrawn { .. }) => true,
@@ -621,8 +621,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Run, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::Resolution, O::Withdrawn { .. }) => true,
         _ => false,
-    };
-    fits
+    }
 }
 
 /// The resolution row: the sequence, the in-force subject, the matrix, the
