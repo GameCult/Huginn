@@ -12,8 +12,9 @@ compares file to derivation byte for byte.
 
 ## The pipeline catalogue
 
-`index.json` is the publication manifest for the thirteen
-`epiphany.pipeline.*.v2` schemas and `gamecult.persona_state.v0`. The pipeline
+`index.json` is the publication manifest for every schema here: the thirteen
+`epiphany.pipeline.*.v2` schemas, `gamecult.persona_state.v0` and the two
+`huginn.mind_*` wire schemas. The pipeline
 schemas are derived from the value types in `crates/eureka-pipeline` and checked
 byte for byte by its `pipeline_published_schemas_match_derivation` test. Each
 document payload is `[value]`, a one-element MessagePack array whose element is

@@ -2910,8 +2910,8 @@ mod tests {
     /// schema file in the directory, and every schema file in the directory
     /// has an entry, so a schema removed from the catalogue (or a file left
     /// behind by a move) fails here instead of publishing a dangling or
-    /// unlisted contract. Schemas whose owner is another crate (`huginn.*`)
-    /// are published by that crate, not listed here.
+    /// unlisted contract. The one rule: every `*.schema.json` in the directory,
+    /// Huginn's own wire schemas included, is listed.
     #[test]
     fn the_catalogue_lists_exactly_the_schema_files_it_publishes() -> Result<()> {
         let published = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/cultnet");
@@ -2928,7 +2928,7 @@ mod tests {
         let mut files = std::collections::BTreeSet::new();
         for entry in std::fs::read_dir(&published)? {
             let name = entry?.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".schema.json") && !name.starts_with("huginn.") {
+            if name.ends_with(".schema.json") {
                 files.insert(name);
             }
         }

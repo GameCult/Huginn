@@ -69,12 +69,11 @@ method plus `whoami`, whose payload is the mind's own types as named
 MessagePack. A refusal is an answer with a `rejected` status, never a
 transport error; an envelope that does not decode is answered with a typed
 failure and reaches no mind. The two schemas it publishes live in
-`schemas/cultnet/` and are pinned to their derivation by a test. There is no
-index yet.
+`schemas/cultnet/`, listed in its `index.json`, and are pinned to their
+derivation by a test.
 
-`eureka-state` has no MCP surface yet; the campaign's cut map in
-`Epiphany/notes/eureka-pipeline-state-cut.md` owns what each crate must do
-next.
+The campaign's cut specs in the mind (`eureka-body`) and
+`docs/eureka-body-map.md` own what each crate does next.
 
 ```powershell
 cargo check --workspace

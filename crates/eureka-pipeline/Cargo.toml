@@ -1,9 +1,15 @@
 [package]
 name = "eureka-pipeline"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 publish = false
 autobins = false
+
+# Provenance: this crate was copied once from GameCult/Epiphany at ef956865,
+# where it was licensed PolyForm Noncommercial. Its sole copyright holder
+# relicensed it AGPL-3.0-only on 2026-10-09, as the rest of the workspace is
+# (ruling eureka-body:ruling:leaf-relicensed-agpl).
 
 [lib]
 name = "eureka_pipeline"
@@ -17,7 +23,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 chrono = "0.4.44"
-cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultcache-rs" }
+cultcache-rs.workspace = true
 rmp-serde = "1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

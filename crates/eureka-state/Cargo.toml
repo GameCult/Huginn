@@ -15,7 +15,7 @@ publish.workspace = true
 # consumer: four tools over stdio, one per wire operation, holding no state.
 [dependencies]
 anyhow = "1"
-cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultnet-rs" }
+cultnet-rs.workspace = true
 huginn-mind = { path = "../huginn-mind" }
 rmcp = { version = "2.2.0", default-features = false, features = ["server", "macros", "transport-io"] }
 rmp-serde = "1"

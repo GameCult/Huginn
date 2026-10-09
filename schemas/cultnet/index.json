@@ -154,6 +154,26 @@
       "documentType": "epiphany.pipeline.hand_off.v2",
       "title": "Epiphany Pipeline HandOff v2",
       "path": "epiphany.pipeline.hand_off.v2.schema.json"
+    },
+    {
+      "schemaId": "huginn.mind_request.v1",
+      "kind": "wire_message",
+      "wireContracts": [
+        "cultnet.schema.v0"
+      ],
+      "schemaVersion": "huginn.mind_request.v1",
+      "title": "Huginn mind request",
+      "path": "huginn.mind_request.v1.schema.json"
+    },
+    {
+      "schemaId": "huginn.mind_response.v1",
+      "kind": "wire_message",
+      "wireContracts": [
+        "cultnet.schema.v0"
+      ],
+      "schemaVersion": "huginn.mind_response.v1",
+      "title": "Huginn mind response",
+      "path": "huginn.mind_response.v1.schema.json"
     }
   ]
 }
