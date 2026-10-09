@@ -1,0 +1,126 @@
+{
+  "$defs": {
+    "Date": {
+      "description": "A calendar date, `YYYY-MM-DD`.",
+      "maxLength": 10,
+      "type": "string"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "PipelineKind": {
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff",
+        "Run"
+      ],
+      "type": "string"
+    },
+    "PipelineRef": {
+      "description": "A reference to another document. The id is parsed as a full pipeline id of\nthe declared `kind`, so the kind and the id's kind segment cannot disagree.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "RunOperator": {
+      "enum": [
+        "Operator",
+        "Mind"
+      ],
+      "type": "string"
+    },
+    "RunTurn": {
+      "enum": [
+        "PersonaTurn",
+        "SelfRun"
+      ],
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.run.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One launch of a Self or a Persona turn: the one record of what it took\non. `claims` are the work it holds, and a claim is live while its run\nhas no resolution in force. `budget_usd` is a canonical decimal string,\n`0` for an interactive run. Instance-rooted like stewardship: the key\nis `<instance>:run:<label>`. Whether a claim is free is admission's rule.",
+  "properties": {
+    "budget_usd": {
+      "$ref": "#/$defs/Short"
+    },
+    "campaigns": {
+      "items": {
+        "$ref": "#/$defs/Slug"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "claims": {
+      "items": {
+        "$ref": "#/$defs/PipelineRef"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "host": {
+      "$ref": "#/$defs/Short"
+    },
+    "instance": {
+      "$ref": "#/$defs/Slug"
+    },
+    "label": {
+      "$ref": "#/$defs/Label"
+    },
+    "operated_by": {
+      "$ref": "#/$defs/RunOperator"
+    },
+    "started_on": {
+      "$ref": "#/$defs/Date"
+    },
+    "turn": {
+      "$ref": "#/$defs/RunTurn"
+    }
+  },
+  "required": [
+    "instance",
+    "label",
+    "operated_by",
+    "turn",
+    "host",
+    "started_on",
+    "budget_usd",
+    "claims",
+    "campaigns"
+  ],
+  "title": "PipelineRun",
+  "type": "object"
+}

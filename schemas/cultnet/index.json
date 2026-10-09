@@ -156,6 +156,17 @@
       "path": "epiphany.pipeline.hand_off.v2.schema.json"
     },
     {
+      "schemaId": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.run.v2.schema.json",
+      "kind": "document_payload",
+      "wireContracts": [
+        "cultnet.schema.v0"
+      ],
+      "schemaVersion": "epiphany.pipeline.run.v2",
+      "documentType": "epiphany.pipeline.run.v2",
+      "title": "Epiphany Pipeline Run v2",
+      "path": "epiphany.pipeline.run.v2.schema.json"
+    },
+    {
       "schemaId": "huginn.mind_request.v1",
       "kind": "wire_message",
       "wireContracts": [
