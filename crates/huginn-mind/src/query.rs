@@ -1293,7 +1293,7 @@ mod tests {
         let facts = headers(&page).iter().map(|header| header.facts.clone()).collect::<Vec<_>>();
         assert!(facts.iter().any(|fact| matches!(
             fact,
-            PipelineFacts::Run { label, turn: RunTurn::SelfRun, operated_by: RunOperator::Mind, claims, .. }
+            PipelineFacts::Run { label, turn: RunTurn::SelfRun, operated_by: RunOperator::Operator, claims, .. }
                 if label.0 == "a" && claims.len() == 1
         )), "{facts:?}");
     }

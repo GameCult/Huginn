@@ -327,13 +327,23 @@ pub(crate) fn hand_off(from: &str, to: &str, repo_name: &str, documents: &[&str]
     })
 }
 
-/// A Self run of this mind that claims `claims`.
+/// An operator's Self run on this mind that claims `claims`, which the one-live
+/// rule never counts.
 pub(crate) fn run(label: &str, claims: &[PipelineRef]) -> PipelineDocument {
+    run_of(label, RunOperator::Operator, RunTurn::SelfRun, claims)
+}
+
+/// A run of hers (operated_by Mind) of `turn` that claims `claims`.
+pub(crate) fn mind_run(label: &str, turn: RunTurn, claims: &[PipelineRef]) -> PipelineDocument {
+    run_of(label, RunOperator::Mind, turn, claims)
+}
+
+fn run_of(label: &str, operated_by: RunOperator, turn: RunTurn, claims: &[PipelineRef]) -> PipelineDocument {
     PipelineDocument::Run(PipelineRun {
         instance: slug(INSTANCE),
         label: l(label),
-        operated_by: RunOperator::Mind,
-        turn: RunTurn::SelfRun,
+        operated_by,
+        turn,
         host: s("yggdrasil"),
         started_on: date(),
         budget_usd: s("5"),

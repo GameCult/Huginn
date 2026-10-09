@@ -522,19 +522,21 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
         // be in force, and no other run in force may hold it. A run already in
         // the image under this key, byte for byte, is a replay and owes its
         // claims no fresh freedom, so the replay still answers AlreadyAdmitted
-        // after the work it claimed has moved on.
+        // after the work it claimed has moved on. One live run of hers
+        // per instance and turn (ruling one-live-self-run) is decided by the same
+        // rule.
         D::Run(run) => {
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
-            run_claims_rule(docs, key, run, replay)
+            run_rule(docs, key, run, replay)
         }
         D::FollowUp(_) | D::Instance(_) => Ok(()),
     }
 }
 
-/// The one rule for a run holding claims, whether it is opened or reinstated
-/// by withdrawing its close: every claim in force (a replay of an admitted run
-/// owes none) and held by no other live run.
-fn run_claims_rule(docs: &Docs, run_key: &str, run: &PipelineRun, replay: bool) -> Result<(), MindRefusal> {
+/// The one rule for a run opening or reinstated by withdrawing its close: every
+/// claim in force (a replay of an admitted run owes none) and held by no other
+/// live run, then at most one live run of hers per instance and turn.
+fn run_rule(docs: &Docs, run_key: &str, run: &PipelineRun, replay: bool) -> Result<(), MindRefusal> {
     for claim in &run.claims {
         if !replay && !docs.in_force(claim.kind, &claim.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: claim.kind, id: claim.id.0.clone() });
@@ -542,6 +544,9 @@ fn run_claims_rule(docs: &Docs, run_key: &str, run: &PipelineRun, replay: bool) 
         if let Some(holder) = docs.claim_holder(run_key, claim) {
             return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: holder.into() });
         }
+    }
+    if !replay && let Some(holder) = docs.live_holder(run_key, run) {
+        return Err(MindRefusal::AlreadyLive { run: holder.into() });
     }
     Ok(())
 }
@@ -683,14 +688,15 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         });
     }
     // Withdrawing a run's closure puts the run back in force, and a run in
-    // force holds its claims: refuse while another run in force holds one.
+    // force holds its claims and its turn's slot: refuse while another run in force
+    // holds one of the claims or another run of hers of its turn is live.
     if matches!(resolution.outcome, ResolutionOutcome::Withdrawn { .. })
         && subject_kind == K::Resolution
         && let Some(D::Resolution(reinstating)) = docs.find(K::Resolution, subject_id)
         && reinstating.subject.kind == K::Run
         && let Some(D::Run(run)) = docs.find(K::Run, &reinstating.subject.id.0)
     {
-        run_claims_rule(docs, &reinstating.subject.id.0, run, false)?;
+        run_rule(docs, &reinstating.subject.id.0, run, false)?;
     }
     for (_, referent) in outcome_citations(&resolution.outcome) {
         if !docs.in_force(referent.kind, &referent.id.0) {
@@ -2001,6 +2007,94 @@ mod tests {
         let closure = r(K::Resolution, &format!("{INSTANCE}:resolution:run.a.n1"));
         committed(admit(&mut reopened, vec![resolution(closure, withdrawn())]));
         assert_eq!(refusal(admit(&mut reopened, vec![run("d", &[spec_ref("1")])])), claimed);
+    }
+
+    /// one-live-self-run at admission: a second run of hers of one turn is
+    /// AlreadyLive naming the holder, whether the holder is claimless or
+    /// claiming, and a claim the holder holds is still AlreadyClaimed first.
+    #[test]
+    fn a_second_live_run_of_hers_of_one_turn_is_already_live() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![mind_run("a", RunTurn::SelfRun, &[])]));
+        let live_a = MindRefusal::AlreadyLive { run: run_key("a") };
+        assert_eq!(refusal(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[])])), live_a, "a claimless holder");
+        assert_eq!(refusal(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[spec_ref("1")])])), live_a);
+        committed(admit(&mut mind, vec![recorded("a")]));
+        committed(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[spec_ref("1")])]));
+        let live_b = MindRefusal::AlreadyLive { run: run_key("b") };
+        assert_eq!(refusal(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[spec_ref("2")])])), live_b, "a claiming holder");
+        let claimed = MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: run_key("b") };
+        assert_eq!(refusal(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[spec_ref("1")])])), claimed, "claims answer first");
+    }
+
+    /// The rule counts only in-force runs of hers of the same turn: an
+    /// operator's run, a run of the other turn and a run after the holder is
+    /// Recorded are admitted, and one live PersonaTurn and one live SelfRun of
+    /// hers coexist.
+    #[test]
+    fn an_operators_run_another_turn_and_a_run_after_the_holder_closed_are_admitted() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![mind_run("a", RunTurn::SelfRun, &[])]));
+        committed(admit(&mut mind, vec![run("op1", &[])]));
+        committed(admit(&mut mind, vec![run("op2", &[])]));
+        committed(admit(&mut mind, vec![mind_run("p", RunTurn::PersonaTurn, &[])]));
+        let live_p = MindRefusal::AlreadyLive { run: run_key("p") };
+        assert_eq!(refusal(admit(&mut mind, vec![mind_run("p2", RunTurn::PersonaTurn, &[])])), live_p);
+        committed(admit(&mut mind, vec![recorded("a")]));
+        committed(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[])]));
+        committed(admit(&mut mind, vec![recorded("b")]));
+        committed(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[])]));
+
+        let mut operator_only = with_specs();
+        committed(admit(&mut operator_only, vec![run("op", &[])]));
+        committed(admit(&mut operator_only, vec![mind_run("a", RunTurn::SelfRun, &[])]));
+    }
+
+    /// Two runs of hers of one turn in one batch hold nothing: the batch is
+    /// checked against itself, refused whole, and nothing is written.
+    #[test]
+    fn two_live_runs_of_hers_in_one_batch_are_already_live_and_nothing_commits() {
+        let mut mind = with_specs();
+        let refused = refusal(admit(&mut mind, vec![mind_run("a", RunTurn::SelfRun, &[]), mind_run("b", RunTurn::SelfRun, &[])]));
+        assert!(matches!(refused, MindRefusal::AlreadyLive { .. }), "{refused:?}");
+        assert!(mind.envelope(K::Run, &run_key("a")).is_none() && mind.envelope(K::Run, &run_key("b")).is_none());
+    }
+
+    /// Withdrawing the close of a run of hers reinstates it, and a reinstated
+    /// run is a live one: refused while another run of its turn is live,
+    /// allowed when none is.
+    #[test]
+    fn reinstating_a_run_of_hers_over_a_live_holder_is_already_live() {
+        let closure = r(K::Resolution, &format!("{INSTANCE}:resolution:run.a.n1"));
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![mind_run("a", RunTurn::SelfRun, &[])]));
+        committed(admit(&mut mind, vec![recorded("a")]));
+        committed(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[])]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(closure.clone(), withdrawn())])),
+            MindRefusal::AlreadyLive { run: run_key("b") }
+        );
+        committed(admit(&mut mind, vec![recorded("b")]));
+        committed(admit(&mut mind, vec![resolution(closure, withdrawn())]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[])])),
+            MindRefusal::AlreadyLive { run: run_key("a") },
+            "the reinstated run holds the slot"
+        );
+    }
+
+    /// A retry of an admitted run answers AlreadyAdmitted even when another
+    /// run of its turn has since become the live one.
+    #[test]
+    fn replaying_an_admitted_run_of_hers_after_another_took_the_turn_is_already_admitted() {
+        let mut mind = with_specs();
+        let (first, _) = committed(admit(&mut mind, vec![mind_run("a", RunTurn::SelfRun, &[])]));
+        committed(admit(&mut mind, vec![recorded("a")]));
+        committed(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[])]));
+        assert_eq!(
+            admit(&mut mind, vec![mind_run("a", RunTurn::SelfRun, &[])]),
+            PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: first }
+        );
     }
 
     /// Two openers on one claim in one batch: the claim is held by neither, so

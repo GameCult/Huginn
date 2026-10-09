@@ -7,8 +7,8 @@
 
 use cultcache_rs::CultCacheEnvelope;
 use eureka_pipeline::{
-    OrgRepo, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineStewardship, ResolutionOutcome,
-    Short, Slug,
+    OrgRepo, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
+    RunOperator, Short, Slug,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -222,6 +222,29 @@ impl Docs {
         self.of_kind(PipelineKind::Run).find_map(|(other_key, document)| match document {
             PipelineDocument::Run(other)
                 if other_key != run_key && other.claims.contains(claim) && self.in_force(PipelineKind::Run, other_key) =>
+            {
+                Some(other_key)
+            }
+            _ => None,
+        })
+    }
+
+    /// The in-force run of hers, other than `run_key`, that holds the slot of
+    /// the turn `run` is of: ruling one-live-self-run's one live run per
+    /// instance and turn, asked by a run's opening and by the withdrawal that
+    /// would put a closed run back in force. An operator's run neither holds
+    /// the slot nor is refused for it.
+    pub(crate) fn live_holder(&self, run_key: &str, run: &PipelineRun) -> Option<&str> {
+        if run.operated_by == RunOperator::Operator {
+            return None;
+        }
+        self.of_kind(PipelineKind::Run).find_map(|(other_key, document)| match document {
+            PipelineDocument::Run(other)
+                if other_key != run_key
+                    && other.instance == run.instance
+                    && other.turn == run.turn
+                    && other.operated_by == RunOperator::Mind
+                    && self.in_force(PipelineKind::Run, other_key) =>
             {
                 Some(other_key)
             }

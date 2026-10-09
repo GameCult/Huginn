@@ -58,6 +58,10 @@ pub enum MindRefusal {
     /// A run claims work another run in force already holds: `item` is the
     /// claimed document's id and `run` the id of the run that holds it.
     AlreadyClaimed { item: String, run: String },
+    /// A run of hers opens, or is reinstated, while another in-force run of
+    /// hers of the same instance and turn is live: `run` is the holder's id
+    /// (ruling one-live-self-run).
+    AlreadyLive { run: String },
     /// The one refusal a mind never raises: the answer exceeds the largest
     /// body the organ will deliver by any plane, one send or a deferred body.
     /// It lives here because a refusal rides the response schema and there is
