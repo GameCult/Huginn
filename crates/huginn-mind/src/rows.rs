@@ -12,7 +12,10 @@
 use std::collections::BTreeMap;
 
 use cultnet_rs::{Row, RowSet, Selection};
-use eureka_pipeline::{OrgRepo, Label, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RulingAuthority, Slug};
+use eureka_pipeline::{
+    FindingConfidence, FindingOrigin, FindingSeverity, Label, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome,
+    RulingAuthority, Slug,
+};
 
 use crate::docs::{CitationRole, Held, kind_of_id, kind_of_type};
 use crate::query::PipelineDocumentView;
@@ -40,10 +43,6 @@ pub(crate) enum Alias {
 }
 
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
-const SEVERITIES: [&str; 4] = ["Blocker", "High", "Medium", "Low"];
-const CONFIDENCES: [&str; 2] = ["Confirmed", "Plausible"];
-const ORIGINS: [&str; 2] = ["Introduced", "PreExisting"];
-const CLAIM_OUTCOMES: [&str; 3] = ["Holds", "Falsified", "Unproven"];
 const OUTCOMES: [&str; 6] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn"];
 const BOOLEANS: [&str; 2] = ["true", "false"];
 
@@ -102,11 +101,11 @@ impl Alias {
         match self {
             Self::InForce => Some(&BOOLEANS),
             Self::Faculty => Some(&FACULTIES),
-            Self::Severity => Some(&SEVERITIES),
-            Self::Confidence => Some(&CONFIDENCES),
-            Self::Origin => Some(&ORIGINS),
+            Self::Severity => Some(FindingSeverity::NAMES),
+            Self::Confidence => Some(FindingConfidence::NAMES),
+            Self::Origin => Some(FindingOrigin::NAMES),
             Self::Authority => Some(RulingAuthority::NAMES),
-            Self::ClaimOutcome => Some(&CLAIM_OUTCOMES),
+            Self::ClaimOutcome => Some(eureka_pipeline::ClaimOutcome::NAMES),
             Self::Outcome => Some(&OUTCOMES),
             Self::Root | Self::Repo | Self::Cut => None,
         }
