@@ -481,6 +481,9 @@ fn run_is_well_formed(run: &PipelineRun, at: &str) -> Result<(), PipelineRefusal
         if !matches!(claim.kind, PipelineKind::CutSpec | PipelineKind::Finding | PipelineKind::FollowUp) {
             return Err(format_error(&format!("{at}.claims[{index}].kind"), claim.kind.name()));
         }
+        if run.claims[..index].contains(claim) {
+            return Err(format_error(&format!("{at}.claims[{index}]"), &claim.id.0));
+        }
     }
     let (whole, fraction) = run.budget_usd.0.split_once('.').map_or((run.budget_usd.0.as_str(), None), |(whole, fraction)| (whole, Some(fraction)));
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
@@ -1523,6 +1526,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A run claims an item once: a repeated claim is refused at validate.
+    #[test]
+    fn a_run_cannot_claim_one_item_twice() {
+        let claim = PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "F1") };
+        let other = PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "F2") };
+        let mut run = run_sample();
+        run.claims = vec![claim.clone(), other.clone()];
+        assert_eq!(PipelineDocument::Run(run.clone()).validate(), Ok(()));
+        run.claims = vec![claim.clone(), other, claim];
+        assert!(matches!(PipelineDocument::Run(run).validate(), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "run.claims[2]"));
     }
 
     /// The budget has one spelling per amount.

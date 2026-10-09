@@ -215,6 +215,20 @@ impl Docs {
         self.of_kind(kind).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)
     }
 
+    /// The in-force run, other than `run_key`, that holds `claim`: the one
+    /// consumption fact run-is-the-grant rests on, asked by a run's opening
+    /// and by the withdrawal that would put a closed run back in force.
+    pub(crate) fn claim_holder(&self, run_key: &str, claim: &PipelineRef) -> Option<&str> {
+        self.of_kind(PipelineKind::Run).find_map(|(other_key, document)| match document {
+            PipelineDocument::Run(other)
+                if other_key != run_key && other.claims.contains(claim) && self.in_force(PipelineKind::Run, other_key) =>
+            {
+                Some(other_key)
+            }
+            _ => None,
+        })
+    }
+
     /// The stewardship of `(mind, repo)` a hand-off acts on: the one whose
     /// withdrawal already carries `hand_off_key`, when image or batch holds
     /// that withdrawal, so a replay derives the same withdrawal again and A9

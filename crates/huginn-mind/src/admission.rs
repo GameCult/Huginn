@@ -529,10 +529,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
                 if !replay && !docs.in_force(claim.kind, &claim.id.0) {
                     return Err(MindRefusal::CitesResolvedDocument { kind: claim.kind, id: claim.id.0.clone() });
                 }
-                let holder = docs.of_kind(K::Run).find_map(|(other_key, document)| match document {
-                    D::Run(other) if other_key != key && other.claims.contains(claim) && docs.in_force(K::Run, other_key) => Some(other_key),
-                    _ => None,
-                });
+                let holder = docs.claim_holder(key, claim);
                 if let Some(holder) = holder {
                     return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: holder.into() });
                 }
@@ -678,6 +675,20 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
             subject: reinstating.subject.id.0.clone(),
             later: later.into(),
         });
+    }
+    // Withdrawing a run's closure puts the run back in force, and a run in
+    // force holds its claims: refuse while another run in force holds one.
+    if matches!(resolution.outcome, ResolutionOutcome::Withdrawn { .. })
+        && subject_kind == K::Resolution
+        && let Some(D::Resolution(reinstating)) = docs.find(K::Resolution, subject_id)
+        && reinstating.subject.kind == K::Run
+        && let Some(D::Run(run)) = docs.find(K::Run, &reinstating.subject.id.0)
+    {
+        for claim in &run.claims {
+            if let Some(holder) = docs.claim_holder(&reinstating.subject.id.0, claim) {
+                return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: holder.into() });
+            }
+        }
     }
     for (_, referent) in outcome_citations(&resolution.outcome) {
         if !docs.in_force(referent.kind, &referent.id.0) {
@@ -2029,6 +2040,57 @@ mod tests {
         assert_eq!(
             refusal(admit(&mut mind, vec![run("b", &[spec_ref("1")])])),
             MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: spec_ref("1").id.0 }
+        );
+    }
+
+    /// Withdrawing a run's Recorded resolution puts the run back in force, so
+    /// it goes through the same exclusivity as an opening: refused while
+    /// another live run holds one of its claims, allowed when none does.
+    #[test]
+    fn reinstating_a_run_over_a_live_holder_is_already_claimed() {
+        let closure = r(K::Resolution, &format!("{INSTANCE}:resolution:run.a.n1"));
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![run("a", &[spec_ref("1")])]));
+        committed(admit(&mut mind, vec![recorded("a")]));
+        committed(admit(&mut mind, vec![run("c", &[spec_ref("1")])]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(closure.clone(), withdrawn())])),
+            MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: run_key("c") }
+        );
+
+        let mut free = with_specs();
+        committed(admit(&mut free, vec![run("a", &[spec_ref("1")])]));
+        committed(admit(&mut free, vec![recorded("a")]));
+        committed(admit(&mut free, vec![resolution(closure, withdrawn())]));
+    }
+
+    /// A holder is found by any of its claims, not only the first.
+    #[test]
+    fn a_holder_is_found_by_its_second_claim() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![run("a", &[spec_ref("2"), spec_ref("1")])]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![run("b", &[spec_ref("1")])])),
+            MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: run_key("a") }
+        );
+    }
+
+    /// A key already holding a run is taken: the same key with different
+    /// content is an IdentityCollision, never a replay; only byte-identical
+    /// content answers AlreadyAdmitted.
+    #[test]
+    fn a_run_key_reused_with_different_content_is_an_identity_collision() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![run("a", &[spec_ref("1")])]));
+        let D::Run(mut changed) = run("a", &[spec_ref("1")]) else { panic!() };
+        changed.budget_usd = "6".into();
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Run(changed)])),
+            MindRefusal::IdentityCollision { kind: K::Run, id: run_key("a") }
+        );
+        assert_eq!(
+            refusal(admit(&mut mind, vec![run("a", &[spec_ref("2")])])),
+            MindRefusal::IdentityCollision { kind: K::Run, id: run_key("a") }
         );
     }
 
