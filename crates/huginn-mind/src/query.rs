@@ -1298,6 +1298,41 @@ mod tests {
         )), "{facts:?}");
     }
 
+    /// The run aliases read the run's own fields, so a launcher can ask for the
+    /// live Self runs of hers; their domains are the leaf's closed sets.
+    #[test]
+    fn the_turn_and_operated_by_aliases_select_runs_by_their_fields() {
+        let mut mind = seeded();
+        let variant = |label: &str, turn: RunTurn, operated_by: RunOperator| {
+            let D::Run(mut value) = run(label, &[]) else { panic!() };
+            (value.turn, value.operated_by) = (turn, operated_by);
+            D::Run(value)
+        };
+        committed(admit(
+            &mut mind,
+            vec![
+                variant("self-mind", RunTurn::SelfRun, RunOperator::Mind),
+                variant("self-op", RunTurn::SelfRun, RunOperator::Operator),
+                variant("persona-mind", RunTurn::PersonaTurn, RunOperator::Mind),
+                variant("persona-op", RunTurn::PersonaTurn, RunOperator::Operator),
+            ],
+        ));
+        let asking = |turn: &[&str], operated_by: &[&str]| {
+            let selection = with(with(of_kinds(&[K::Run]), any_of("turn", turn)), any_of("operated_by", operated_by));
+            ids(&mind.query(&selection).unwrap())
+        };
+        let run_id = |label: &str| format!("{INSTANCE}:run:{label}");
+        assert_eq!(asking(&["PersonaTurn"], &["Mind"]), vec![run_id("persona-mind")]);
+        assert_eq!(asking(&["SelfRun"], &["Operator"]), vec![run_id("self-op")]);
+        assert_eq!(asking(&["SelfRun", "PersonaTurn"], &["Mind"]).len(), 2);
+        let outside = with(of_kinds(&[K::Run]), any_of("turn", &["Waker"]));
+        assert!(invalid("fields[0].values", "Waker")(&refused(&mind, &outside)));
+        let outside = with(of_kinds(&[K::Run]), any_of("operated_by", &["Root"]));
+        assert!(invalid("fields[0].values", "Root")(&refused(&mind, &outside)));
+        let other_kind = with(of_kinds(&[K::Ruling]), any_of("turn", &["SelfRun"]));
+        assert!(matches!(mind.query(&other_kind), Err(MindRefusal::SelectionInvalid { .. })));
+    }
+
     /// The substrate's own refusals cross as themselves: an undeclared alias
     /// is a `SelectionInvalid` from the substrate's door, before the organ's.
     #[test]

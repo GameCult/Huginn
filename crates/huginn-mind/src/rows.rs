@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use cultnet_rs::{Row, RowSet, Selection};
 use eureka_pipeline::{
     FindingConfidence, FindingOrigin, FindingSeverity, Label, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome,
-    RulingAuthority, Slug,
+    RulingAuthority, RunOperator, RunTurn, Slug,
 };
 
 use crate::docs::{CitationRole, Held, kind_of_id, kind_of_type};
@@ -40,6 +40,10 @@ pub(crate) enum Alias {
     Authority,
     ClaimOutcome,
     Outcome,
+    /// A run's `turn`, read from its fields.
+    Turn,
+    /// A run's `operated_by`, read from its fields.
+    OperatedBy,
 }
 
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
@@ -47,7 +51,7 @@ const OUTCOMES: [&str; 6] = ["Superseded", "Answered", "Fixed", "Deferred", "Rec
 const BOOLEANS: [&str; 2] = ["true", "false"];
 
 impl Alias {
-    const ALL: [Alias; 11] = [
+    const ALL: [Alias; 13] = [
         Self::Root,
         Self::InForce,
         Self::Faculty,
@@ -59,6 +63,8 @@ impl Alias {
         Self::Authority,
         Self::ClaimOutcome,
         Self::Outcome,
+        Self::Turn,
+        Self::OperatedBy,
     ];
 
     fn name(self) -> &'static str {
@@ -74,6 +80,8 @@ impl Alias {
             Self::Authority => "authority",
             Self::ClaimOutcome => "claim_outcome",
             Self::Outcome => "outcome",
+            Self::Turn => "turn",
+            Self::OperatedBy => "operated_by",
         }
     }
 
@@ -93,6 +101,7 @@ impl Alias {
             Self::Authority => kind == K::Ruling,
             Self::ClaimOutcome => kind == K::Verdict,
             Self::Outcome => kind == K::Resolution,
+            Self::Turn | Self::OperatedBy => kind == K::Run,
         }
     }
 
@@ -107,6 +116,8 @@ impl Alias {
             Self::Authority => Some(RulingAuthority::NAMES),
             Self::ClaimOutcome => Some(eureka_pipeline::ClaimOutcome::NAMES),
             Self::Outcome => Some(&OUTCOMES),
+            Self::Turn => Some(RunTurn::NAMES),
+            Self::OperatedBy => Some(RunOperator::NAMES),
             Self::Root | Self::Repo | Self::Cut => None,
         }
     }
@@ -208,6 +219,10 @@ impl SelectionRow {
                 put(Alias::ClaimOutcome, verdict.claims.iter().map(|claim| format!("{:?}", claim.outcome)).collect())
             }
             D::Resolution(resolution) => put(Alias::Outcome, vec![outcome_name(&resolution.outcome).to_string()]),
+            D::Run(run) => {
+                put(Alias::Turn, vec![format!("{:?}", run.turn)]);
+                put(Alias::OperatedBy, vec![format!("{:?}", run.operated_by)]);
+            }
             _ => {}
         }
         Self { kind: held.kind, key: held.key.clone(), ordinal: view.admission.ordinal, values, refs, view }
@@ -367,7 +382,7 @@ mod tests {
             (K::Instance, &[]),
             (K::Stewardship, &["repo"]),
             (K::HandOff, &["repo"]),
-            (K::Run, &[]),
+            (K::Run, &["turn", "operated_by"]),
         ];
         for (kind, extra) in table {
             let want = [&["root", "in_force", "faculty"][..], extra].concat();

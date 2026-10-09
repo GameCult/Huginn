@@ -9,7 +9,9 @@ publish.workspace = true
 # operator's brake and burn-rate dial today: a root-owned per-instance CultCache
 # store (`control`), the operator's CLI over it (`cli`, the `mind-control`
 # binary) and the one fail-closed reader every acting organ calls
-# (`control::read_effective`). The waker joins this crate in cut mind-wake.
+# (`control::read_effective`). It also holds the launch primitive (`launch`,
+# `queue`): the one way her organs open a run and start its unit. The waker
+# joins this crate in cut mind-wake.
 #
 # `rust_decimal` is the dial's number type: heat, cadence and the run cap are
 # money-adjacent and the tests pin exact products, which a float would blur. It
@@ -18,7 +20,10 @@ publish.workspace = true
 anyhow = "1"
 chrono = { version = "0.4.44", features = ["serde"] }
 cultcache-rs.workspace = true
+cultnet-rs.workspace = true
 eureka-pipeline = { path = "../eureka-pipeline" }
+eureka-state = { path = "../eureka-state" }
+huginn-mind = { path = "../huginn-mind" }
 rust_decimal = { version = "1", default-features = false, features = ["std", "serde"] }
 serde = { version = "1", features = ["derive"] }
 
