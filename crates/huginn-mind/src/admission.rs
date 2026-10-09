@@ -2094,6 +2094,22 @@ mod tests {
         );
     }
 
+    /// The replay clause is byte identity, not the key: a changed run under an
+    /// admitted key whose claim has since closed is not a replay, so the closed
+    /// claim refuses it.
+    #[test]
+    fn a_changed_run_under_an_admitted_key_is_not_a_replay() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![run("a", &[spec_ref("1")])]));
+        committed(admit(&mut mind, vec![resolution(spec_ref("1"), withdrawn())]));
+        let D::Run(mut changed) = run("a", &[spec_ref("1")]) else { panic!() };
+        changed.budget_usd = "6".into();
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Run(changed)])),
+            MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: spec_ref("1").id.0 }
+        );
+    }
+
     /// A5 for runs: a run of another instance is a ForeignInstance.
     #[test]
     fn a_run_of_another_mind_is_a_foreign_instance() {
