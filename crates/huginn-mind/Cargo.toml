@@ -6,9 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 # The organ's rule engine: storage, identity and admission of one instance's
-# mind. Document shape, bounds, formats and keys come from `epiphany-pipeline`;
-# the store comes from CultLib's Rust CultCache at the same rev Epiphany pins,
-# so the leaf's wrappers and this crate's cache are one `cultcache-rs`. The
+# mind. Document shape, bounds, formats and keys come from this workspace's
+# `eureka-pipeline` (crates/eureka-pipeline, copied once from Epiphany ef956865);
+# the store comes from CultLib's Rust CultCache at the rev `eureka-pipeline`
+# also uses, so the leaf's wrappers and this crate's cache are one `cultcache-rs`. The
 # read side selects through CultNet's typed selection (`cultnet-rs`, the same
 # rev the daemon pins): the selection's vocabulary and evaluator are the
 # substrate's, this crate supplies the rows. No socket, no index: those are the
@@ -19,7 +20,7 @@ base64 = "0.22"
 chrono = "0.4.44"
 cultcache-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultcache-rs" }
 cultnet-rs = { git = "https://github.com/GameCult/CultLib.git", rev = "8fc74c709444b884a2bd339e0c306bf9484d99d2", package = "cultnet-rs" }
-epiphany-pipeline = { git = "https://github.com/GameCult/Epiphany.git", rev = "ef9568655e75bb6cb362a038e2739a5ac5e777ee", package = "epiphany-pipeline" }
+eureka-pipeline = { path = "../eureka-pipeline" }
 rmp-serde = "1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

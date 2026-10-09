@@ -373,19 +373,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "epiphany-pipeline"
-version = "0.1.0"
-source = "git+https://github.com/GameCult/Epiphany.git?rev=ef9568655e75bb6cb362a038e2739a5ac5e777ee#ef9568655e75bb6cb362a038e2739a5ac5e777ee"
-dependencies = [
- "anyhow",
- "chrono",
- "cultcache-rs",
- "rmp-serde",
- "schemars",
- "serde",
-]
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -393,6 +380,19 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "eureka-pipeline"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cultcache-rs",
+ "rmp-serde",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -644,7 +644,7 @@ dependencies = [
  "chrono",
  "cultcache-rs",
  "cultnet-rs",
- "epiphany-pipeline",
+ "eureka-pipeline",
  "rmp-serde",
  "schemars",
  "serde",

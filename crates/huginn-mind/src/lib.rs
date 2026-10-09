@@ -18,7 +18,7 @@
 //! so the daemon and the client share one set
 //! of types.
 //!
-//! Document shape, bounds, formats and keys are `epiphany-pipeline`'s; the
+//! Document shape, bounds, formats and keys are `eureka-pipeline`'s; the
 //! organ registers, prepares, decodes and validates through the leaf's four
 //! doors and never re-derives a key. The store is CultLib's owned redb
 //! CultCache, whose lifetime-long exclusive lock is the single-writer
@@ -59,4 +59,4 @@ pub use wire::{
 /// The leaf, whole, through the one crate that pins its rev: the daemon and
 /// the client name `Slug`, `PipelineRef` and the document types from here, so
 /// one `[dependencies]` entry decides which revision the workspace speaks.
-pub use epiphany_pipeline;
+pub use eureka_pipeline;

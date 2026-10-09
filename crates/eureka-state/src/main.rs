@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use cultnet_rs::Selection;
 use eureka_state::{ClientError, HuginnClient};
-use huginn_mind::epiphany_pipeline::{PipelineDocument, PipelineRef, Short, Slug};
+use huginn_mind::eureka_pipeline::{PipelineDocument, PipelineRef, Short, Slug};
 use huginn_mind::{
     Faculty, HuginnMindRequest, HuginnMindResponse, PipelineAdmissionBatch, PipelineProvenance, SemanticQuery,
 };

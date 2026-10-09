@@ -61,7 +61,7 @@ It reads them back the same way: a document with the facts of its admission
 joined from that receipt and its status derived at read time, and typed
 queries over one mind. Status is never stored, and the views derive it
 through the same rules admission does. Document shape and keys come from
-`epiphany-pipeline`; the store is CultLib's Rust CultCache.
+`eureka-pipeline` (`crates/eureka-pipeline`); the store is CultLib's Rust CultCache.
 
 `huginn-daemon` opens one mind, binds one UDP socket in that order, and
 answers every frame on the session it arrived on: one operation per `Mind`

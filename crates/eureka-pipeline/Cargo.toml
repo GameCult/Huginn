@@ -1,13 +1,12 @@
 [package]
-name = "epiphany-pipeline"
+name = "eureka-pipeline"
 version = "0.1.0"
 edition = "2024"
 publish = false
 autobins = false
-license-file = "../LICENSE"
 
 [lib]
-name = "epiphany_pipeline"
+name = "eureka_pipeline"
 path = "src/lib.rs"
 
 # A leaf type library. Every dependency here is one the document types or the

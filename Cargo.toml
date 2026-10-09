@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/eureka-pipeline",
     "crates/huginn-mind",
     "crates/huginn-daemon",
     "crates/eureka-state",

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use cultnet_rs::{CULTNET_OPERATION_CONNECTION_ID, CultMesh, CultMeshRudpSocketOptions, FieldPredicate, Selection};
-use huginn_mind::epiphany_pipeline::{
+use huginn_mind::eureka_pipeline::{
     Date, PipelineDocument, PipelineKind, PipelineQuestion, PipelineResolution, PipelineRef, PipelineRuling,
     QuestionOption, ResolutionOutcome, RulingAuthority, Short, Title,
 };

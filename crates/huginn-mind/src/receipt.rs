@@ -16,7 +16,7 @@
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use cultcache_rs::{CultCacheEnvelope, DatabaseEntry};
-use epiphany_pipeline::{PipelineKind, PipelineRef, Short, Slug};
+use eureka_pipeline::{PipelineKind, PipelineRef, Short, Slug};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -47,9 +47,9 @@ pub enum Faculty {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PipelineProvenance {
     pub faculty: Faculty,
-    pub agent: epiphany_pipeline::Short,
-    pub session: epiphany_pipeline::Short,
-    pub tool: epiphany_pipeline::Short,
+    pub agent: eureka_pipeline::Short,
+    pub session: eureka_pipeline::Short,
+    pub tool: eureka_pipeline::Short,
 }
 
 /// The exact bytes of one stored document, as read or as written.
@@ -311,7 +311,7 @@ mod tests {
     use crate::mind::schema_cache;
     use crate::store::test_stores::MemoryStore;
     use cultcache_rs::{CacheBackingStore, PushAllOptions};
-    use epiphany_pipeline::{PipelineDocument, PipelineKind, PipelineRefusal};
+    use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRefusal};
 
     /// A memory store that keeps the replacement set of every swap it was
     /// asked for, so a test can count the commit's calls as well as read

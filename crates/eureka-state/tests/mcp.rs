@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use huginn_mind::envelope::{OperationFailure, encode_failure, encode_response};
 use huginn_mind::{HuginnMindRequest, HuginnMindResponse};
-use huginn_mind::epiphany_pipeline::{Date, PipelineDocument, PipelineKind, PipelineRef, Short};
+use huginn_mind::eureka_pipeline::{Date, PipelineDocument, PipelineKind, PipelineRef, Short};
 use serde_json::{Value, json};
 
 mod common;
@@ -536,7 +536,7 @@ fn initialize_advertises_tools() {
 /// value `pipeline_key` computes for that document, never a re-built one.
 #[test]
 fn admit_carries_the_leaf_key_refusal_with_its_field_and_value() {
-    use huginn_mind::epiphany_pipeline::{PipelineResolution, ResolutionOutcome, pipeline_key};
+    use huginn_mind::eureka_pipeline::{PipelineResolution, ResolutionOutcome, pipeline_key};
 
     let (root, daemon) = mind(vec![vec![stewardship()]]);
     let server = serve(root, daemon);

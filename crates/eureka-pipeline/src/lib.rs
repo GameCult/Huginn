@@ -1094,7 +1094,7 @@ mod tests {
     }
 
     fn location() -> CodeLocation {
-        CodeLocation { path: s("epiphany-pipeline/src/lib.rs"), line: 1, end_line: Some(9) }
+        CodeLocation { path: s("crates/eureka-pipeline/src/lib.rs"), line: 1, end_line: Some(9) }
     }
 
     fn evidence() -> Evidence {
@@ -1187,7 +1187,7 @@ mod tests {
                     dependencies_removed: vec![], formats_added: vec![s("epiphany.pipeline.*.v1")],
                     formats_removed: vec![], targets_added: vec![], targets_removed: vec![],
                 },
-                landed_names: vec![LandedName { name: s("PipelineDocument"), path: s("epiphany-pipeline/src/lib.rs") }],
+                landed_names: vec![LandedName { name: s("PipelineDocument"), path: s("crates/eureka-pipeline/src/lib.rs") }],
                 undone: vec!["admission".into()],
                 promises: vec![Promise { label: l("P1"), text: "One derived key per document.".into() }],
             }), format!("{CAMPAIGN}:cut_report:cut-3a.h1")),
@@ -2722,7 +2722,7 @@ mod tests {
 
     #[test]
     fn pipeline_published_schemas_match_derivation() -> Result<()> {
-        let published = Path::new(env!("CARGO_MANIFEST_DIR")).join("../schemas/cultnet");
+        let published = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/cultnet");
         let index: serde_json::Value = serde_json::from_slice(&std::fs::read(published.join("index.json"))?)?;
         // A directory this run alone writes, so everything in it is what this
         // run derived. A previous run's leftovers -- a mutation run's
@@ -2739,7 +2739,7 @@ mod tests {
         // they outlive the run that wrote them. Whoever reads the failure is
         // the one who deletes them.
         let derived_dir = std::env::temp_dir().join(format!(
-            "epiphany-pipeline-schemas-{}-{}",
+            "eureka-pipeline-schemas-{}-{}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
         ));
@@ -2769,6 +2769,36 @@ mod tests {
             );
         }
         assert!(stale.is_empty(), "published pipeline schemas differ from the Rust derivation; derived copies: {stale:?}");
+        Ok(())
+    }
+
+    /// The catalogue is exactly the files beside it: every entry's `path` is a
+    /// schema file in the directory, and every schema file in the directory
+    /// has an entry, so a schema removed from the catalogue (or a file left
+    /// behind by a move) fails here instead of publishing a dangling or
+    /// unlisted contract. Schemas whose owner is another crate (`huginn.*`)
+    /// are published by that crate, not listed here.
+    #[test]
+    fn the_catalogue_lists_exactly_the_schema_files_it_publishes() -> Result<()> {
+        let published = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/cultnet");
+        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(published.join("index.json"))?)?;
+        let listed = index["schemas"]
+            .as_array()
+            .expect("index.json carries a schemas array")
+            .iter()
+            .map(|entry| entry["path"].as_str().expect("every entry names its file").to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        for path in &listed {
+            assert!(published.join(path).is_file(), "index.json lists {path}, which is not in the directory");
+        }
+        let mut files = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&published)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".schema.json") && !name.starts_with("huginn.") {
+                files.insert(name);
+            }
+        }
+        assert_eq!(listed, files, "the catalogue and the schema files beside it disagree");
         Ok(())
     }
 

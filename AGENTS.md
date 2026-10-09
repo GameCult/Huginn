@@ -11,15 +11,17 @@ Studio's job, not Huginn's.
 
 - Project root: `F:\Projects\Huginn`
 - Upstream: `https://github.com/GameCult/Huginn.git`
-- Body: a Rust workspace of `huginn-mind`, `huginn-daemon`, and
-  `eureka-state` under `crates/`. Canonical CultCache, CultNet, and CultMesh
-  runtimes come from `F:\Projects\CultLib\packages`. `huginn-mind` is live:
-  it persists, admits and reads back an instance's mind, queries and derived
-  status included, over `cultcache-rs` and `epiphany-pipeline` pinned by git
-  rev. `huginn-daemon` serves one mind over CultNet RUDP through `cultnet-rs`
-  at the same rev, and reaches the leaf and the store type through
-  `huginn-mind` so one crate pins each revision. `eureka-state` is the client
-  core: one call to a daemon over CultNet, holding no state.
+- Body: a Rust workspace of `eureka-pipeline`, `huginn-mind`, `huginn-daemon`,
+  and `eureka-state` under `crates/`. Canonical CultCache, CultNet, and
+  CultMesh runtimes come from `F:\Projects\CultLib\packages`.
+  `eureka-pipeline` is the pipeline leaf: document shapes, bounds, formats,
+  keys and the schemas published under `schemas/cultnet`. `huginn-mind` is
+  live: it persists, admits and reads back an instance's mind, queries and
+  derived status included, over `cultcache-rs` and `eureka-pipeline`.
+  `huginn-daemon` serves one mind over CultNet RUDP through `cultnet-rs` at
+  the same rev, and reaches the leaf and the store type through `huginn-mind`
+  so one crate pins each revision. `eureka-state` is the client core: one call
+  to a daemon over CultNet, holding no state.
 - Owned: an instance's memory documents, their admission and the read side
   that derives their status, in `huginn-mind`,
   over a redb CultCache store at `<state_root>/minds/<instance>/mind.redb`;

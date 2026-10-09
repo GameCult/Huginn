@@ -13,7 +13,7 @@ use chrono::Utc;
 use cultnet_rs::{CultNetMessage, CultNetRudpServerEvent, CultNetWireContract, decode_cultnet_message_from_slice};
 use huginn_daemon::serve::{bind, run, schema_registry};
 use huginn_daemon::{Daemon, Handled, Hits, IndexSink, SearchTicket, ServeOptions};
-use huginn_mind::epiphany_pipeline::{
+use huginn_mind::eureka_pipeline::{
     Date, DocRef, OrgRepo, PipelineCampaign, PipelineDocument, PipelineInstance, PipelineRef, PipelineStewardship, Sha, Short, Slug,
     Title,
 };

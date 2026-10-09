@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
-use huginn_mind::epiphany_pipeline::{PipelineRef, Slug};
+use huginn_mind::eureka_pipeline::{PipelineRef, Slug};
 use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, IndexStatus};
 use huginn_mind::{Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery};
 
@@ -217,7 +217,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
 pub(crate) mod tests {
     use super::*;
     use chrono::TimeZone;
-    use huginn_mind::epiphany_pipeline::{
+    use huginn_mind::eureka_pipeline::{
         AuthorityMap, CodeLocation, CutDelete, CutVerification, Date, DocRef, FileChange, Line, NegativeCheck,
         OrgRepo, PipelineCampaign, PipelineCutSpec, PipelineDocument, PipelineInstance, PipelineKind,
         PipelineQuestion, PipelineRuling, PipelineStewardship, QuestionOption, RulingAuthority, Sha, Short,
@@ -685,7 +685,7 @@ pub(crate) mod tests {
         assert_ne!(fullwidth, INSTANCE, "not the mind's own bytes");
         assert!(!fullwidth.is_ascii(), "outside the grammar: a Slug is dot-joined ASCII labels");
 
-        let expected = MindRefusal::Document(huginn_mind::epiphany_pipeline::PipelineRefusal::InvalidFormat {
+        let expected = MindRefusal::Document(huginn_mind::eureka_pipeline::PipelineRefusal::InvalidFormat {
             field: "declared".into(),
             value: fullwidth.into(),
         });
@@ -715,7 +715,7 @@ pub(crate) mod tests {
         let (_root, mut daemon) = seeded();
         let fullwidth = "\u{FF59}ggdrasil";
 
-        let expected = MindRefusal::Document(huginn_mind::epiphany_pipeline::PipelineRefusal::InvalidFormat {
+        let expected = MindRefusal::Document(huginn_mind::eureka_pipeline::PipelineRefusal::InvalidFormat {
             field: "declared".into(),
             value: fullwidth.into(),
         });
@@ -744,7 +744,7 @@ pub(crate) mod tests {
         // A reference whose kind and id disagree names no document any writer
         // could have composed; the leaf's own refusal says so.
         let invalid = PipelineRef { kind: PipelineKind::Question, id: "not a reference".into() };
-        let malformed = MindRefusal::Document(huginn_mind::epiphany_pipeline::PipelineRefusal::InvalidFormat {
+        let malformed = MindRefusal::Document(huginn_mind::eureka_pipeline::PipelineRefusal::InvalidFormat {
             field: "ref.id".into(),
             value: "not a reference".into(),
         });

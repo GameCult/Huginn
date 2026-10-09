@@ -7,7 +7,7 @@
 //! how a change to it makes every projection rebuild. No network, no JSON, no
 //! store handle: the daemon owns the vector store and the embedder.
 
-use epiphany_pipeline::{PipelineDocument, PipelineKind, PipelineRef};
+use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef};
 use sha2::{Digest, Sha256};
 
 use crate::docs::Docs;
@@ -154,7 +154,7 @@ mod tests {
     use crate::fixtures::*;
     use crate::receipt::Faculty;
     use crate::store::test_stores::MemoryStore;
-    use epiphany_pipeline::{
+    use eureka_pipeline::{
         ClaimOutcome, Deviation, FindingConfidence, PipelineDocument as D, PipelineKind as K, RulingAuthority,
     };
     use std::collections::BTreeMap;
