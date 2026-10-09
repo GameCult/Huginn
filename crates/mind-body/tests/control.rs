@@ -365,9 +365,17 @@ mod modes {
                 let stop = std::env::var("MIND_BODY_STOP").unwrap();
                 let started = std::time::Instant::now();
                 while !Path::new(&stop).exists() && started.elapsed() < Duration::from_secs(120) {
-                    for _ in 0..2000 {
-                        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
-                            std::process::exit(3);
+                    // The live store, and anything else in its directory (the staged
+                    // file CultCache writes before its rename is the wider window).
+                    for _ in 0..200 {
+                        let mut targets = vec![path.clone()];
+                        if let Ok(entries) = std::fs::read_dir(path.parent().unwrap()) {
+                            targets.extend(entries.flatten().map(|entry| entry.path()));
+                        }
+                        for target in targets {
+                            if std::fs::OpenOptions::new().write(true).open(&target).is_ok() {
+                                std::process::exit(3);
+                            }
                         }
                     }
                 }
@@ -555,7 +563,7 @@ mod unsafe_installs {
             .spawn()
             .unwrap();
         let bin = env!("CARGO_BIN_EXE_mind-control");
-        for round in 0..60 {
+        for round in 0..100 {
             let verb = if round % 2 == 0 { "release" } else { "hold" };
             let status = Command::new("sh")
                 .args(["-c", "umask 000; exec \"$@\"", "sh", bin, "--instance", &instance, "brake", verb])
