@@ -4,6 +4,7 @@ members = [
     "crates/huginn-mind",
     "crates/huginn-daemon",
     "crates/eureka-state",
+    "crates/mind-body",
 ]
 resolver = "3"
 

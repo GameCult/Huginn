@@ -1,0 +1,37 @@
+[package]
+name = "mind-body"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# One crate for her organs (rationale "One crate for her organs"). It holds the
+# operator's brake and burn-rate dial today: a root-owned per-instance CultCache
+# store (`control`), the operator's CLI over it (`cli`, the `mind-control`
+# binary) and the one fail-closed reader every acting organ calls
+# (`control::read_effective`). The waker joins this crate in cut mind-wake.
+#
+# `rust_decimal` is the dial's number type: heat, cadence and the run cap are
+# money-adjacent and the tests pin exact products, which a float would blur. It
+# serialises as a string, so the stored document carries no float.
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4.44", features = ["serde"] }
+cultcache-rs.workspace = true
+eureka-pipeline = { path = "../eureka-pipeline" }
+rust_decimal = { version = "1", default-features = false, features = ["std", "serde"] }
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+name = "mind_body"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mind-control"
+path = "src/main.rs"
