@@ -3702,7 +3702,8 @@
       "enum": [
         "Operator",
         "Standing",
-        "Defaulted"
+        "Defaulted",
+        "Mind"
       ]
     },
     "Sha": {

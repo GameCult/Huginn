@@ -439,6 +439,11 @@ macro_rules! unit_enums {
     ($($name:ident { $($variant:ident),* $(,)? })*) => {$(
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
         pub enum $name { $($variant),* }
+        impl $name {
+            /// The variants' spellings, in declaration order: the names the wire and
+            /// `Debug` use.
+            pub const NAMES: &'static [&'static str] = &[$(stringify!($variant)),*];
+        }
         impl Bounded for $name {
             fn validate(&self, _field: &str) -> Result<(), PipelineRefusal> {
                 Ok(())
@@ -472,7 +477,7 @@ unit_enums! {
     ClaimOutcome { Holds, Falsified, Unproven }
     FindingConfidence { Confirmed, Plausible }
     FindingSeverity { Blocker, High, Medium, Low }
-    RulingAuthority { Operator, Standing, Defaulted }
+    RulingAuthority { Operator, Standing, Defaulted, Mind }
     FindingOrigin { Introduced, PreExisting }
 }
 
@@ -1269,6 +1274,39 @@ mod tests {
         ruling
     }
 
+    /// A ruling the Mind's own Self made: authority Mind, no operator quote,
+    /// no question answered. Built from the ruling sample, not inserted into
+    /// `samples()`, whose tests pick kinds by index.
+    fn mind_ruling() -> PipelineRuling {
+        let mut ruling = ruling_sample();
+        (ruling.authority, ruling.operator_quote, ruling.answers, ruling.choice) = (RulingAuthority::Mind, None, None, None);
+        ruling
+    }
+
+    #[test]
+    fn a_ruling_with_authority_mind_keys_encodes_and_round_trips_like_any_ruling() -> Result<()> {
+        let cache = schema_cache()?;
+        let document = PipelineDocument::Ruling(mind_ruling());
+        document.validate()?;
+        let envelope = document.prepare(&cache)?;
+        assert!(envelope.key.starts_with("eureka-state:ruling:"), "{}", envelope.key);
+        assert_eq!(PipelineDocument::decode(&envelope)?, document);
+        let json = serde_json::to_value(&document)?;
+        assert_eq!(json["value"]["authority"], "Mind");
+        assert_eq!(serde_json::from_value::<PipelineDocument>(json)?, document);
+        let packed = rmp_serde::to_vec_named(&document)?;
+        assert_eq!(rmp_serde::from_slice::<PipelineDocument>(&packed)?, document);
+        let standing = PipelineDocument::Ruling(ruling_sample());
+        assert_ne!(standing.prepare(&cache)?.payload, envelope.payload, "Mind is not a spelling of another authority");
+        Ok(())
+    }
+
+    #[test]
+    fn unit_enum_names_are_the_variants_in_declaration_order() {
+        assert_eq!(RulingAuthority::NAMES, ["Operator", "Standing", "Defaulted", "Mind"]);
+        assert_eq!(FindingOrigin::NAMES, ["Introduced", "PreExisting"]);
+    }
+
     fn report_sample() -> PipelineCutReport {
         let PipelineDocument::CutReport(report) = samples().remove(5).0 else { unreachable!() };
         report
@@ -1340,6 +1378,7 @@ mod tests {
             f.severity = severity;
             out.push((format!("finding.severity-{name}"), D::Finding(f)));
         }
+        out.push(("ruling.authority-mind".into(), D::Ruling(mind_ruling())));
         out
     }
 

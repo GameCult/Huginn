@@ -1859,8 +1859,19 @@ mod tests {
         let mut quoted = ruling("R1");
         quoted.operator_quote = Some("all recommendations, go ahead".into());
         assert_eq!(refusal(admit(&mut mind, vec![D::Ruling(quoted.clone())])), MindRefusal::QuoteWithoutOperator { ruling: id("ruling", "R1") });
+        quoted.authority = RulingAuthority::Mind;
+        assert_eq!(refusal(admit(&mut mind, vec![D::Ruling(quoted.clone())])), MindRefusal::QuoteWithoutOperator { ruling: id("ruling", "R1") });
+        assert!(mind.get(K::Ruling, &id("ruling", "R1")).unwrap().is_none(), "a refused batch leaves the store unchanged");
         quoted.authority = RulingAuthority::Operator;
         committed(admit(&mut mind, vec![D::Ruling(quoted)]));
+    }
+
+    #[test]
+    fn a_mind_ruling_without_a_quote_is_admitted() {
+        let mut mind = seeded();
+        let mut own = ruling("R1");
+        own.authority = RulingAuthority::Mind;
+        committed(admit(&mut mind, vec![D::Ruling(own)]));
     }
 
     #[test]
