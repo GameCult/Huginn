@@ -12,7 +12,7 @@ compares file to derivation byte for byte.
 
 ## The pipeline catalogue
 
-`index.json` is the publication manifest for every schema here: the thirteen
+`index.json` is the publication manifest for every schema here: the fourteen
 `epiphany.pipeline.*.v2` schemas, `gamecult.persona_state.v0` and the two
 `huginn.mind_*` wire schemas. The pipeline
 schemas are derived from the value types in `crates/eureka-pipeline` and checked

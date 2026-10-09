@@ -86,7 +86,7 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
         }
         D::Resolution(resolution) => lines.push(&resolution.rationale.0),
         D::HandOff(hand_off) => lines.push(&hand_off.reason.0),
-        D::Instance(_) | D::Stewardship(_) => {}
+        D::Instance(_) | D::Stewardship(_) | D::Run(_) => {}
     }
     lines.retain(|line| !line.is_empty());
     if lines.is_empty() {

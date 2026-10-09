@@ -472,6 +472,31 @@ fn campaign_repos_are_distinct(campaign: &PipelineCampaign, at: &str) -> Result<
     Ok(())
 }
 
+/// A run claims work, never runs, rulings or campaigns: its claims are cut
+/// specs, findings and follow-ups, the three kinds a Self takes on. And its
+/// budget is a canonical decimal (`0`, `12`, `7.5`: no sign, no leading or
+/// trailing zeros, no exponent), so one spend has one spelling.
+fn run_is_well_formed(run: &PipelineRun, at: &str) -> Result<(), PipelineRefusal> {
+    for (index, claim) in run.claims.iter().enumerate() {
+        if !matches!(claim.kind, PipelineKind::CutSpec | PipelineKind::Finding | PipelineKind::FollowUp) {
+            return Err(format_error(&format!("{at}.claims[{index}].kind"), claim.kind.name()));
+        }
+        if run.claims[..index].contains(claim) {
+            return Err(format_error(&format!("{at}.claims[{index}]"), &claim.id.0));
+        }
+    }
+    let (whole, fraction) = run.budget_usd.0.split_once('.').map_or((run.budget_usd.0.as_str(), None), |(whole, fraction)| (whole, Some(fraction)));
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let canonical = digits(whole)
+        && (whole == "0" || !whole.starts_with('0'))
+        && fraction.is_none_or(|fraction| digits(fraction) && !fraction.ends_with('0'));
+    if canonical {
+        Ok(())
+    } else {
+        Err(format_error(&format!("{at}.budget_usd"), &run.budget_usd.0))
+    }
+}
+
 unit_enums! {
     EvidenceKind { Command, Test, Mutation, Probe, SourceRead, Capture }
     ClaimOutcome { Holds, Falsified, Unproven }
@@ -479,6 +504,8 @@ unit_enums! {
     FindingSeverity { Blocker, High, Medium, Low }
     RulingAuthority { Operator, Standing, Defaulted, Mind }
     FindingOrigin { Introduced, PreExisting }
+    RunOperator { Operator, Mind }
+    RunTurn { PersonaTurn, SelfRun }
 }
 
 value_types! {
@@ -595,6 +622,15 @@ value_types! {
         from_instance: Slug, to_instance: Slug, repo: OrgRepo, documents: Vec<Short>[256],
         reason: Para, handed_on: Date,
     }
+    /// One launch of a Self or a Persona turn: the one record of what it took
+    /// on. `claims` are the work it holds, and a claim is live while its run
+    /// has no resolution in force. `budget_usd` is a canonical decimal string,
+    /// `0` for an interactive run. Instance-rooted like stewardship: the key
+    /// is `<instance>:run:<label>`. Whether a claim is free is admission's rule.
+    pub struct PipelineRun {
+        instance: Slug, label: Label, operated_by: RunOperator, turn: RunTurn, host: Short, started_on: Date,
+        budget_usd: Short, claims: Vec<PipelineRef>[64], campaigns: Vec<Slug>[8],
+    } => run_is_well_formed
 }
 
 /// A reference to another document. The id is parsed as a full pipeline id of
@@ -697,7 +733,7 @@ macro_rules! pipeline_kinds {
         /// because a value is a named map of its own and an internal tag would
         /// have to be merged into it; the tag stays beside the value instead.
         /// This is not a published schema: `schemas/cultnet` publishes the
-        /// thirteen per-kind value documents, and the envelope is the wire's
+        /// fourteen per-kind value documents, and the envelope is the wire's
         /// shape, not a document's.
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -813,6 +849,8 @@ pipeline_kinds! {
         "epiphany.pipeline.stewardship.v2", "EpiphanyPipelineStewardshipDocument";
     HandOff(PipelineHandOff) => EpiphanyPipelineHandOffDocument, "hand_off",
         "epiphany.pipeline.hand_off.v2", "EpiphanyPipelineHandOffDocument";
+    Run(PipelineRun) => EpiphanyPipelineRunDocument, "run",
+        "epiphany.pipeline.run.v2", "EpiphanyPipelineRunDocument";
 }
 
 /// Parses a full document id: the grammar read backwards. A key and an id are
@@ -952,7 +990,7 @@ fn local(field: &str, kind: PipelineKind, parts: &[&str]) -> Result<String, Pipe
 }
 
 /// Derives a document's identity key (D1, "Keys: identity, not convenience").
-/// Thirteen arms, one exit: every arm names its root and composes its local
+/// Fourteen arms, one exit: every arm names its root and composes its local
 /// through `local`, and the key is formatted here and nowhere else.
 pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefusal> {
     use PipelineDocument as D;
@@ -1005,6 +1043,8 @@ pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefus
                 )?,
             )
         }
+        // A run hangs off its instance too: its label is its whole local.
+        D::Run(value) => ("run.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Target(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&format!("r{}", value.revision)])?),
         D::Question(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Ruling(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
@@ -1242,6 +1282,12 @@ mod tests {
                 documents: vec![s(CAMPAIGN), id("ruling", "R8")],
                 reason: "The workstation mind takes the campaign.".into(), handed_on: date(),
             }), format!("{INSTANCE}:hand_off:thought-cage.gamecult_-epiphany.{}", date().0)),
+            (D::Run(PipelineRun {
+                instance: slug(INSTANCE), label: l("mind-2026-10-09-1"), operated_by: RunOperator::Mind, turn: RunTurn::SelfRun,
+                host: s("yggdrasil"), started_on: date(), budget_usd: s("7.5"),
+                claims: vec![PipelineRef { kind: PipelineKind::CutSpec, id: id("cut_spec", "cut-run-kind.r2") }],
+                campaigns: vec![slug(CAMPAIGN)],
+            }), format!("{INSTANCE}:run:mind-2026-10-09-1")),
         ]
     }
 
@@ -1426,6 +1472,124 @@ mod tests {
         std::fs::write(out, golden_lines()?.join("
 ") + "
 ")?;
+        Ok(())
+    }
+
+    fn run_sample() -> PipelineRun {
+        let PipelineDocument::Run(run) = samples().remove(13).0 else { unreachable!() };
+        run
+    }
+
+    fn run_key(run: PipelineRun) -> Result<String, PipelineRefusal> {
+        pipeline_key(&PipelineDocument::Run(run))
+    }
+
+    /// Identity: a run is its instance and its label, and no other field moves
+    /// its key, so two launches under one label are one key.
+    #[test]
+    fn a_run_keys_off_its_instance_and_label_and_nothing_else() -> Result<()> {
+        let base = run_sample();
+        let key = run_key(base.clone())?;
+        assert_eq!(key, format!("{INSTANCE}:run:mind-2026-10-09-1"));
+        let mut varied = base.clone();
+        varied.operated_by = RunOperator::Operator;
+        varied.turn = RunTurn::PersonaTurn;
+        varied.host = s("starfire");
+        varied.started_on = Date("2026-10-10".into());
+        varied.budget_usd = s("0");
+        varied.claims = vec![];
+        varied.campaigns = vec![];
+        assert_eq!(run_key(varied)?, key, "no other field is part of the key");
+        let mut relabelled = base.clone();
+        relabelled.label = l("mind-2026-10-09-2");
+        assert_ne!(run_key(relabelled)?, key);
+        let mut moved = base;
+        moved.instance = slug("thought-cage");
+        assert_ne!(run_key(moved)?, key);
+        Ok(())
+    }
+
+    /// Claims name work: a cut spec, a finding or a follow-up, and every other
+    /// kind is refused at validate, whatever its id.
+    #[test]
+    fn a_run_claims_only_a_cut_spec_a_finding_or_a_follow_up() {
+        for kind in PipelineKind::ALL.iter().copied() {
+            let mut run = run_sample();
+            run.claims = vec![PipelineRef { kind, id: id(kind.name(), "x") }];
+            let outcome = PipelineDocument::Run(run).validate();
+            if matches!(kind, PipelineKind::CutSpec | PipelineKind::Finding | PipelineKind::FollowUp) {
+                assert_eq!(outcome, Ok(()), "{kind:?} is claimable");
+            } else {
+                assert!(
+                    matches!(&outcome, Err(PipelineRefusal::InvalidFormat { field, value }) if field == "run.claims[0].kind" && value == kind.name()),
+                    "{kind:?} is not claimable, got {outcome:?}"
+                );
+            }
+        }
+    }
+
+    /// A run claims an item once: a repeated claim is refused at validate.
+    #[test]
+    fn a_run_cannot_claim_one_item_twice() {
+        let claim_one = || PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "F1") };
+        let claim = claim_one();
+        let other = PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "F2") };
+        let mut run = run_sample();
+        run.claims = vec![claim.clone(), other.clone()];
+        assert_eq!(PipelineDocument::Run(run.clone()).validate(), Ok(()));
+        run.claims = vec![claim.clone(), other, claim];
+        assert!(matches!(PipelineDocument::Run(run).validate(), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "run.claims[2]"));
+        let third = PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "F3") };
+        let mut run = run_sample();
+        run.claims = vec![claim_one(), third.clone(), third];
+        assert!(matches!(PipelineDocument::Run(run).validate(), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "run.claims[2]"));
+    }
+
+    /// The budget has one spelling per amount.
+    #[test]
+    fn a_runs_budget_is_a_canonical_decimal() {
+        let validated = |budget: &str| {
+            let mut run = run_sample();
+            run.budget_usd = s(budget);
+            PipelineDocument::Run(run).validate()
+        };
+        for good in ["0", "1", "12", "7.5", "0.25", "100.001"] {
+            assert_eq!(validated(good), Ok(()), "{good}");
+        }
+        for bad in ["", "00", "01", "1.", "1.0", "7.50", "0.0", ".5", "-1", "+1", "1e3", "1,5", " 1", "1 ", "1.2.3"] {
+            assert!(
+                matches!(validated(bad), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "run.budget_usd"),
+                "{bad:?} is refused"
+            );
+        }
+    }
+
+    /// Bounds: a run's campaigns and claims stop at their maximums.
+    #[test]
+    fn a_runs_lists_are_bounded() {
+        let mut run = run_sample();
+        run.campaigns = (0..9).map(|n| slug(&format!("c{n}"))).collect();
+        assert!(matches!(PipelineDocument::Run(run).validate(), Err(PipelineRefusal::FieldBound { limit: 8, .. })));
+        let mut run = run_sample();
+        run.claims = (0..65).map(|n| PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", &format!("F{n}")) }).collect();
+        assert!(matches!(PipelineDocument::Run(run).validate(), Err(PipelineRefusal::FieldBound { limit: 64, .. })));
+    }
+
+    /// every-subject-resolvable (ruling key-bound): at the widest instance and
+    /// label a run's id fits a `Short`, and its resolution, and that
+    /// resolution's withdrawal, key within the 111-byte resolution local.
+    #[test]
+    fn the_widest_run_id_fits_a_short_and_resolves_two_deep() -> Result<()> {
+        let mut run = run_sample();
+        run.instance = slug(&"i".repeat(64));
+        run.label = l(&"a".repeat(64));
+        let run_id = run_key(run)?;
+        assert_eq!(run_id.len(), 64 + ":run:".len() + 64);
+        assert!(run_id.len() <= 200);
+        PipelineRef { kind: PipelineKind::Run, id: Short(run_id.clone()) }.validate_ref()?;
+        let one = resolved_at(PipelineKind::Run, &run_id, u32::MAX)?;
+        let two = resolved_at(PipelineKind::Resolution, &one, u32::MAX)?;
+        assert!(two.len() <= 200);
         Ok(())
     }
 
@@ -2859,11 +3023,11 @@ mod tests {
         };
         let document_schema = serde_json::to_value(schemars::schema_for!(PipelineDocument))?;
         let variants = document_schema["oneOf"].as_array().expect("the document schema is a oneOf");
-        assert_eq!(PipelineKind::ALL.len(), 13, "thirteen kinds");
+        assert_eq!(PipelineKind::ALL.len(), 14, "fourteen kinds");
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
-            "the document schema lists exactly the thirteen kinds, by name"
+            "the document schema lists exactly the fourteen kinds, by name"
         );
 
         let refusal_schema = serde_json::to_value(schemars::schema_for!(PipelineRefusal))?;

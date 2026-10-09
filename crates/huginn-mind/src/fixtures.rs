@@ -9,8 +9,8 @@ use eureka_pipeline::{
     FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MutationRecord, OrgRepo, PipelineCampaign,
     PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFinding, PipelineFollowUp, PipelineHandOff,
     PipelineInstance, PipelineKind, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling,
-    PipelineStewardship, PipelineTarget, PipelineVerdict, Promise, QuestionOption, ReportCommit, ResolutionOutcome,
-    RulingAuthority, Sha, Short, Slug, StructuralDelta, TargetInvariant, VerdictClaim,
+    PipelineRun, PipelineStewardship, PipelineTarget, PipelineVerdict, Promise, QuestionOption, ReportCommit,
+    ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Short, Slug, StructuralDelta, TargetInvariant, VerdictClaim,
 };
 
 use crate::admission::{PipelineAdmissionBatch, PipelineAdmissionOutcome};
@@ -324,6 +324,21 @@ pub(crate) fn hand_off(from: &str, to: &str, repo_name: &str, documents: &[&str]
         documents: documents.iter().map(|document| s(document)).collect(),
         reason: "The workstation mind takes the campaign.".into(),
         handed_on: date(),
+    })
+}
+
+/// A Self run of this mind that claims `claims`.
+pub(crate) fn run(label: &str, claims: &[PipelineRef]) -> PipelineDocument {
+    PipelineDocument::Run(PipelineRun {
+        instance: slug(INSTANCE),
+        label: l(label),
+        operated_by: RunOperator::Mind,
+        turn: RunTurn::SelfRun,
+        host: s("yggdrasil"),
+        started_on: date(),
+        budget_usd: s("5"),
+        claims: claims.to_vec(),
+        campaigns: vec![slug(CAMPAIGN)],
     })
 }
 

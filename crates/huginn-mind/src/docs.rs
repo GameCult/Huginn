@@ -215,6 +215,20 @@ impl Docs {
         self.of_kind(kind).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)
     }
 
+    /// The in-force run, other than `run_key`, that holds `claim`: the one
+    /// consumption fact run-is-the-grant rests on, asked by a run's opening
+    /// and by the withdrawal that would put a closed run back in force.
+    pub(crate) fn claim_holder(&self, run_key: &str, claim: &PipelineRef) -> Option<&str> {
+        self.of_kind(PipelineKind::Run).find_map(|(other_key, document)| match document {
+            PipelineDocument::Run(other)
+                if other_key != run_key && other.claims.contains(claim) && self.in_force(PipelineKind::Run, other_key) =>
+            {
+                Some(other_key)
+            }
+            _ => None,
+        })
+    }
+
     /// The stewardship of `(mind, repo)` a hand-off acts on: the one whose
     /// withdrawal already carries `hand_off_key`, when image or batch holds
     /// that withdrawal, so a replay derives the same withdrawal again and A9
@@ -286,10 +300,11 @@ pub enum CitationRole {
     ResolvedBy,
     DeferredTo,
     Documents,
+    Claims,
 }
 
 impl CitationRole {
-    pub const ALL: [CitationRole; 15] = [
+    pub const ALL: [CitationRole; 16] = [
         Self::RaisedIn,
         Self::Answers,
         Self::Rulings,
@@ -305,6 +320,7 @@ impl CitationRole {
         Self::ResolvedBy,
         Self::DeferredTo,
         Self::Documents,
+        Self::Claims,
     ];
 
     /// The wire spelling, equal to the referring field's name.
@@ -325,6 +341,7 @@ impl CitationRole {
             Self::ResolvedBy => "resolved_by",
             Self::DeferredTo => "deferred_to",
             Self::Documents => "documents",
+            Self::Claims => "claims",
         }
     }
 
@@ -345,12 +362,13 @@ impl CitationRole {
             Self::Source => K::FollowUp,
             Self::Subject | Self::SupersededBy | Self::ResolvedBy | Self::DeferredTo => K::Resolution,
             Self::Documents => K::HandOff,
+            Self::Claims => K::Run,
         }
     }
 
     /// The kinds a referent of this field may be: the one kind the field is
     /// typed to, or every kind for the fields typed `PipelineRef` or a full
-    /// id of any kind. "Any" is spelled as all thirteen, never as none.
+    /// id of any kind. "Any" is spelled as every kind, never as none.
     pub fn target_kinds(self) -> Vec<PipelineKind> {
         use PipelineKind as K;
         match self {
@@ -360,6 +378,7 @@ impl CitationRole {
             Self::CutReport => vec![K::CutReport],
             Self::Findings => vec![K::Finding],
             Self::Verdict => vec![K::Verdict],
+            Self::Claims => vec![K::CutSpec, K::Finding, K::FollowUp],
             Self::RaisedIn
             | Self::Source
             | Self::Subject
@@ -437,6 +456,7 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
         D::HandOff(hand_off) => edges.extend(
             hand_off.documents.iter().filter_map(|to| kind_of_id(&to.0).map(|kind| (R::Documents, cited(kind, to)))),
         ),
+        D::Run(run) => edges.extend(run.claims.iter().map(|to| (R::Claims, to.clone()))),
         D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) => {}
     }
     edges
