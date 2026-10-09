@@ -805,6 +805,7 @@ macro_rules! pipeline_kinds {
         /// shape, not a document's.
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+        #[allow(clippy::large_enum_variant, reason = "a document is a transient wrapper around one value; boxing a variant would change every construction site")]
         pub enum PipelineDocument { $($variant($value)),* }
 
         impl PipelineKind {
