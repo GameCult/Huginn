@@ -148,15 +148,15 @@ fn keys_below_root(schema: &Value, key: &str) -> usize {
     schema.as_object().unwrap().values().map(|inner| count(inner, key)).sum()
 }
 
-/// Four tools, each input schema a self-contained document: every `$ref` is
+/// Six tools, each input schema a self-contained document: every `$ref` is
 /// internal and resolves, and the selection's definitions are bundled in.
 #[test]
-fn tools_list_offers_four_tools_with_self_contained_schemas() {
+fn tools_list_offers_six_tools_with_self_contained_schemas() {
     let mut mcp = Mcp::at(INSTANCE, closed_port());
     let listed = mcp.rpc("tools/list", json!({}));
     let tools = listed["result"]["tools"].as_array().expect("tools");
     let names: BTreeSet<&str> = tools.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
-    assert_eq!(names, BTreeSet::from(["whoami", "admit", "view", "query"]));
+    assert_eq!(names, BTreeSet::from(["whoami", "admit", "view", "query", "persona_get", "persona_put"]));
     for tool in tools {
         let schema = &tool["inputSchema"];
         let mut found = Vec::new();
@@ -246,6 +246,49 @@ fn every_tool_round_trips_against_a_live_daemon() {
 
     let (_, counted) = mcp.call("whoami", json!({}));
     assert_eq!(counted["status"]["receipts"], json!(3));
+}
+
+/// The persona tools against a live daemon: the document, the stale answer,
+/// and `whoami` showing the stored `updatedAt`. The server fills in the
+/// instance and the tool, so the asker names neither.
+#[test]
+fn the_persona_tools_round_trip_against_a_live_daemon() {
+    const T1: &str = "2026-10-10T10:00:00Z";
+    const T2: &str = "2026-10-10T10:00:01Z";
+    let (root, daemon) = mind(vec![]);
+    let server = serve(root, daemon);
+    let mut mcp = Mcp::at(INSTANCE, server.addr);
+    let put = |state: Value, expected: Option<&str>| {
+        let mut arguments = json!({ "faculty": "SelfFaculty", "agent": "claude", "session": "session-7", "state": state });
+        if let Some(expected) = expected {
+            arguments["expected_updated_at"] = json!(expected);
+        }
+        arguments
+    };
+
+    let (error, nothing) = mcp.call("persona_get", json!({}));
+    assert!(!error);
+    assert_eq!(nothing, Value::Null);
+    let (_, whoami) = mcp.call("whoami", json!({}));
+    assert_eq!(whoami["status"]["persona"], Value::Null);
+
+    let (error, committed) = mcp.call("persona_put", put(persona(INSTANCE, T1), None));
+    assert!(!error);
+    let receipt = committed["Committed"]["receipt_id"].as_str().expect("committed").to_string();
+
+    let (error, view) = mcp.call("persona_get", json!({}));
+    assert!(!error);
+    assert_eq!(view["value"], persona(INSTANCE, T1));
+    assert_eq!((view["updated_at"].as_str(), view["receipt_id"].as_str()), (Some(T1), Some(receipt.as_str())));
+    let (_, whoami) = mcp.call("whoami", json!({}));
+    assert_eq!(whoami["status"]["persona"], json!(T1));
+
+    let (error, stale) = mcp.call("persona_put", put(persona(INSTANCE, T2), None));
+    assert!(!error, "a stale put is an answer");
+    assert_eq!(stale["Refused"]["PersonaStale"]["stored"], json!(T1));
+
+    let (_, page) = mcp.call("query", json!({ "selection": { "schemas": ["epiphany.pipeline.instance.v2"] } }));
+    assert_eq!(page["matched"], json!(1), "the persona is not a pipeline document");
 }
 
 /// Declared identity is configuration, not a per-call argument. Input that
@@ -367,6 +410,8 @@ fn bad_configuration_is_served_and_reported() {
             ("view", json!({ "id": absent() })),
             ("query", json!({ "selection": {} })),
             ("admit", faculty_args(vec![])),
+            ("persona_get", json!({})),
+            ("persona_put", json!({ "faculty": "Hands", "agent": "claude", "session": "s", "state": {} })),
         ] {
             let (error, refusal) = mcp.call(tool, arguments);
             assert!(error, "{tool}: {expected}");

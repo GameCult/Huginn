@@ -27,7 +27,8 @@ use cultnet_rs::{
 };
 use huginn_mind::envelope::{OperationFailure, decode_response, encode_request};
 use huginn_mind::eureka_pipeline::Slug;
-use huginn_mind::{HuginnMindRequest, HuginnMindResponse, MAX_DEFERRED_BODY_BYTES};
+use huginn_mind::{HuginnMindRequest, HuginnMindResponse, MAX_DEFERRED_BODY_BYTES, PipelineProvenance};
+use serde_json::Value;
 
 /// The correlation key of the one request a session carries.
 const MESSAGE_ID: &str = "eureka-state-call";
@@ -106,6 +107,28 @@ impl HuginnClient {
     /// this is the one the caller's tools fill in.
     pub fn instance(&self) -> &Slug {
         &self.instance
+    }
+
+    /// The mind's persona document: `Persona(None)` until the first put.
+    pub fn persona_get(&self) -> Result<HuginnMindResponse, ClientError> {
+        self.call(HuginnMindRequest::PersonaGet { instance: self.instance.clone() })
+    }
+
+    /// Replaces the mind's persona document whole. `expected_updated_at` is
+    /// the stored document's `updatedAt`, none for the first put; a stale one
+    /// comes back as `PersonaPut(Refused(PersonaStale { .. }))`, an answer.
+    pub fn persona_put(
+        &self,
+        provenance: PipelineProvenance,
+        state: Value,
+        expected_updated_at: Option<String>,
+    ) -> Result<HuginnMindResponse, ClientError> {
+        self.call(HuginnMindRequest::PersonaPut {
+            instance: self.instance.clone(),
+            provenance,
+            state,
+            expected_updated_at,
+        })
     }
 
     pub fn call(&self, request: HuginnMindRequest) -> Result<HuginnMindResponse, ClientError> {

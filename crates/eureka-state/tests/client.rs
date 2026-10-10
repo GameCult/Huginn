@@ -19,7 +19,9 @@ use huginn_mind::eureka_pipeline::{
     PipelineCutSpec, PipelineDocument, PipelineKind, PipelineRef, Short, StructuralDelta, Title,
     VerificationTest,
 };
-use huginn_mind::{DeferredAnswer, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionOutcome};
+use huginn_mind::{
+    DeferredAnswer, HuginnMindRequest, HuginnMindResponse, MindRefusal, PersonaPutOutcome, PipelineAdmissionOutcome,
+};
 
 mod common;
 use common::*;
@@ -193,6 +195,50 @@ fn every_operation_round_trips_against_a_live_daemon() {
     let viewed = client.call(HuginnMindRequest::View { instance: slug(INSTANCE), id: campaign_ref.clone() }).unwrap();
     let HuginnMindResponse::View(Some(view)) = viewed else { panic!("the campaign is viewable, got {viewed:?}") };
     assert_eq!(view.id, campaign_ref);
+}
+
+/// The persona methods against a live daemon over the socket: put then get
+/// returns the value and the receipt, and a stale put or another mind's name is
+/// an answer, not an error.
+#[test]
+fn client_persona_round_trip_against_a_live_daemon() {
+    const T1: &str = "2026-10-10T10:00:00Z";
+    const T2: &str = "2026-10-10T10:00:01Z";
+    let (root, daemon) = mind(vec![]);
+    let server = serve(root, daemon);
+    let client = client(server.addr);
+
+    assert_eq!(client.persona_get().unwrap(), HuginnMindResponse::Persona(None));
+    let HuginnMindResponse::PersonaPut(PersonaPutOutcome::Committed { receipt_id }) =
+        client.persona_put(provenance(), persona(INSTANCE, T1), None).unwrap()
+    else {
+        panic!("the first put commits");
+    };
+    let HuginnMindResponse::Persona(Some(view)) = client.persona_get().unwrap() else { panic!("the persona is stored") };
+    assert_eq!(view.value, persona(INSTANCE, T1));
+    assert_eq!((view.updated_at.as_str(), view.receipt_id.as_str()), (T1, receipt_id.as_str()));
+    let HuginnMindResponse::Whoami(status) = client.call(HuginnMindRequest::Whoami).unwrap() else { panic!("a status") };
+    assert_eq!(status.persona.as_deref(), Some(T1));
+
+    // A stale put is an answer.
+    assert_eq!(
+        client.persona_put(provenance(), persona(INSTANCE, T2), None).unwrap(),
+        HuginnMindResponse::PersonaPut(PersonaPutOutcome::Refused(MindRefusal::PersonaStale { stored: Some(T1.into()) }))
+    );
+    let HuginnMindResponse::PersonaPut(PersonaPutOutcome::Committed { .. }) =
+        client.persona_put(provenance(), persona(INSTANCE, T2), Some(T1.into())).unwrap()
+    else {
+        panic!("a put that read the stored document commits");
+    };
+
+    // Another mind's name is an answer too.
+    let other = HuginnClient::new(server.addr, slug(OTHER), TIMEOUT);
+    let foreign = MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() };
+    assert_eq!(other.persona_get().unwrap(), HuginnMindResponse::Refused(foreign.clone()));
+    assert_eq!(
+        other.persona_put(provenance(), persona(INSTANCE, "2026-10-10T10:00:02Z"), Some(T2.into())).unwrap(),
+        HuginnMindResponse::Refused(foreign)
+    );
 }
 
 /// A refusal is data. A read that names another mind, a write that declares

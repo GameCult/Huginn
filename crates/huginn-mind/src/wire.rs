@@ -9,11 +9,13 @@ use cultnet_rs::{CultMeshCdnArtifactManifest, Selection};
 use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Slug};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::admission::{PipelineAdmissionBatch, PipelineAdmissionOutcome};
 use crate::mind::Mind;
+use crate::persona::{PersonaPutOutcome, PersonaStateView};
 use crate::query::{PipelineDocumentView, PipelineSelectionPage, SemanticQuery};
-use crate::receipt::HuginnCommitReceipt;
+use crate::receipt::{HuginnCommitReceipt, PipelineProvenance};
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
 
@@ -75,6 +77,17 @@ pub enum HuginnMindRequest {
         selection: Selection,
         semantic: Option<SemanticQuery>,
     },
+    /// The mind's persona document, if one is stored.
+    PersonaGet { instance: Slug },
+    /// Replaces the mind's persona document whole. `expected_updated_at` is
+    /// the stored document's `updatedAt`, none for the first put. The
+    /// provenance is the asker's, as for `Admit`.
+    PersonaPut {
+        instance: Slug,
+        provenance: PipelineProvenance,
+        state: Value,
+        expected_updated_at: Option<String>,
+    },
 }
 
 impl HuginnMindRequest {
@@ -85,6 +98,8 @@ impl HuginnMindRequest {
             Self::Admit(_) => "admit",
             Self::View { .. } => "view",
             Self::Query { .. } => "query",
+            Self::PersonaGet { .. } => "persona_get",
+            Self::PersonaPut { .. } => "persona_put",
         }
     }
 
@@ -93,7 +108,10 @@ impl HuginnMindRequest {
         match self {
             Self::Whoami => None,
             Self::Admit(batch) => Some(&batch.instance),
-            Self::View { instance, .. } | Self::Query { instance, .. } => Some(instance),
+            Self::View { instance, .. }
+            | Self::Query { instance, .. }
+            | Self::PersonaGet { instance }
+            | Self::PersonaPut { instance, .. } => Some(instance),
         }
     }
 }
@@ -109,6 +127,8 @@ pub enum HuginnMindResponse {
     View(Option<PipelineDocumentView>),
     Query(PipelineSelectionPage),
     Refused(MindRefusal),
+    Persona(Option<PersonaStateView>),
+    PersonaPut(PersonaPutOutcome),
     /// The answer did not fit one send and is being held for the client to
     /// fetch. Nothing in a mind produces this: the daemon's serve module does,
     /// in place of an answer, and the answer it stands for is the named
@@ -135,7 +155,9 @@ impl HuginnMindResponse {
     /// envelope of a deferred answer to the status of the answer it stands for.
     pub fn status(&self) -> &'static str {
         match self {
-            Self::Refused(_) | Self::Admit(PipelineAdmissionOutcome::Refused(_)) => "rejected",
+            Self::Refused(_)
+            | Self::Admit(PipelineAdmissionOutcome::Refused(_))
+            | Self::PersonaPut(PersonaPutOutcome::Refused(_)) => "rejected",
             _ => "accepted",
         }
     }
@@ -171,6 +193,8 @@ pub struct MindStatus {
     pub documents: u32,
     pub receipts: u32,
     pub index: IndexStatus,
+    /// The stored persona document's `updatedAt`; none until the first put.
+    pub persona: Option<String>,
 }
 
 impl<S: MindStore> Mind<S> {
@@ -192,6 +216,7 @@ impl<S: MindStore> Mind<S> {
             documents,
             receipts,
             index,
+            persona: self.stored_updated_at().ok().flatten(),
         }
     }
 }
@@ -214,6 +239,13 @@ mod tests {
             HuginnMindRequest::Admit(batch),
             HuginnMindRequest::View { instance: slug(INSTANCE), id: r(PipelineKind::Campaign, CAMPAIGN) },
             HuginnMindRequest::Query { instance: slug(OTHER_INSTANCE), selection: Selection::default(), semantic: None },
+            HuginnMindRequest::PersonaGet { instance: slug(INSTANCE) },
+            HuginnMindRequest::PersonaPut {
+                instance: slug(INSTANCE),
+                provenance: provenance(Faculty::Hands),
+                state: serde_json::json!({ "updatedAt": "2026-10-10T10:00:00Z", "n": [1, 2.5, null, "x"] }),
+                expected_updated_at: Some("2026-10-10T09:00:00Z".into()),
+            },
         ]
     }
 
@@ -233,6 +265,14 @@ mod tests {
                 edges: None,
             }),
             HuginnMindResponse::Refused(refusal),
+            HuginnMindResponse::Persona(None),
+            HuginnMindResponse::Persona(Some(PersonaStateView {
+                value: serde_json::json!({ "personaId": INSTANCE }),
+                updated_at: "2026-10-10T10:00:00Z".into(),
+                receipt_id: "mind-commit-1".into(),
+            })),
+            HuginnMindResponse::PersonaPut(PersonaPutOutcome::Committed { receipt_id: "mind-commit-2".into() }),
+            HuginnMindResponse::PersonaPut(PersonaPutOutcome::Refused(MindRefusal::PersonaNotCanonical)),
             HuginnMindResponse::Deferred(DeferredAnswer {
                 manifest: cultnet_rs::pack_content("huginn.mind_response", "package", "", "", "", b"body", 4)
                     .unwrap()
@@ -247,7 +287,7 @@ mod tests {
     #[test]
     fn the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response() {
         let names: Vec<&str> = requests().iter().map(|request| request.operation()).collect();
-        assert_eq!(names, ["whoami", "admit", "view", "query"]);
+        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put"]);
         for request in requests() {
             let declared = request.instance().is_none();
             assert_eq!(declared, matches!(request, HuginnMindRequest::Whoami), "{request:?}");
@@ -263,7 +303,9 @@ mod tests {
         for response in responses() {
             let rejected = matches!(
                 response,
-                HuginnMindResponse::Refused(_) | HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(_))
+                HuginnMindResponse::Refused(_)
+                    | HuginnMindResponse::Admit(PipelineAdmissionOutcome::Refused(_))
+                    | HuginnMindResponse::PersonaPut(PersonaPutOutcome::Refused(_))
             );
             assert_eq!(response.status(), if rejected { "rejected" } else { "accepted" }, "{response:?}");
             let bytes = rmp_serde::to_vec_named(&response).unwrap();

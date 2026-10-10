@@ -30,6 +30,7 @@ mod docs;
 pub mod envelope;
 pub mod index;
 pub mod mind;
+pub mod persona;
 mod rows;
 pub mod query;
 pub mod receipt;
@@ -44,6 +45,7 @@ pub use docs::CitationRole;
 pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
 pub use mind::{HuginnMindEpoch, Mind};
+pub use persona::{PersonaPutOutcome, PersonaStateView};
 pub use query::{
     AdmissionFacts, PipelineDocumentSummary, PipelineDocumentView, PipelineEdge, PipelineFacts, PipelinePageItems,
     PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, Ranked, SUMMARY_MAX_BYTES, SemanticQuery,

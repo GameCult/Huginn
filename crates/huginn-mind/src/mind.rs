@@ -15,6 +15,7 @@ use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, OwnedRedbMessage
 use cultnet_rs::CursorKey;
 use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineKind, Slug, register_pipeline_document_types};
 
+use crate::persona::HuginnPersonaEntry;
 use crate::receipt::HuginnCommitReceipt;
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
@@ -71,20 +72,22 @@ fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefu
     })
 }
 
-/// A cache that knows the sixteen types a mind's store may hold: the leaf's
-/// fourteen through its registrar, the epoch record and the commit receipt.
-/// It is the cache every envelope is prepared against.
+/// A cache that knows the seventeen types a mind's store may hold: the leaf's
+/// fourteen through its registrar, the epoch record, the commit receipt and
+/// the persona entry. It is the cache every envelope is prepared against.
 pub(crate) fn schema_cache() -> Result<CultCache, MindRefusal> {
     let mut cache = CultCache::new();
     register_pipeline_document_types(&mut cache).map_err(unavailable)?;
     cache.register_entry_type::<HuginnMindEpoch>().map_err(unavailable)?;
     cache.register_entry_type::<HuginnCommitReceipt>().map_err(unavailable)?;
+    cache.register_entry_type::<HuginnPersonaEntry>().map_err(unavailable)?;
     Ok(cache)
 }
 
 fn is_known_type(type_id: &str) -> bool {
     type_id == HuginnMindEpoch::TYPE
         || type_id == HuginnCommitReceipt::TYPE
+        || type_id == HuginnPersonaEntry::TYPE
         || PipelineKind::ALL.iter().any(|kind| kind.type_id() == type_id)
 }
 
@@ -168,7 +171,7 @@ impl<S: MindStore> Mind<S> {
 
     /// Fail-closed, in this order, nothing attached until every step passes:
     /// pull the raw envelopes; if anything is stored, exactly one epoch
-    /// record at the current epoch; every type is one of the sixteen; and
+    /// record at the current epoch; every type is one of the seventeen; and
     /// exactly one `instance` document naming the declared instance; then
     /// register, attach and pull. The epoch gate runs first so a store
     /// written at a foreign epoch is refused as `ForeignEpoch`, never as
@@ -276,10 +279,14 @@ impl<S: MindStore> Mind<S> {
 }
 
 /// Step 3: a runtime store, a Mind store or any other file passed by mistake
-/// dies on its first foreign type.
+/// dies on its first foreign type, and a second persona envelope is no mind's:
+/// a mind holds one.
 fn refuse_foreign_types(raw: &[CultCacheEnvelope]) -> Result<(), MindRefusal> {
     if let Some(foreign) = raw.iter().find(|envelope| !is_known_type(&envelope.r#type)) {
         return Err(MindRefusal::ForeignStore { r#type: foreign.r#type.clone() });
+    }
+    if raw.iter().filter(|envelope| envelope.r#type == HuginnPersonaEntry::TYPE).count() > 1 {
+        return Err(MindRefusal::ForeignStore { r#type: HuginnPersonaEntry::TYPE.into() });
     }
     Ok(())
 }

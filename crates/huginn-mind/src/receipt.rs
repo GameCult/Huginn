@@ -256,9 +256,15 @@ pub(crate) fn commit<S: MindStore>(
         .map(|(envelope, _)| envelope)
         .map_err(unavailable)?;
     // The store requires every expected identity to be replaced, so each
-    // strong read is re-inserted unchanged beside the writes.
+    // strong read is re-inserted unchanged beside the writes, unless a write
+    // replaces it (a persona put reads the document it overwrites).
     let mut replacements = writes.clone();
-    replacements.extend(strong_reads.iter().cloned());
+    replacements.extend(
+        strong_reads
+            .iter()
+            .filter(|read| !writes.iter().any(|write| write.r#type == read.r#type && write.key == read.key))
+            .cloned(),
+    );
     replacements.push(receipt_envelope);
     let expected: &[CultCacheEnvelope] = &strong_reads;
     let landed = MindStore::compare_and_swap_batch(mind.store(), expected, replacements).map_err(unavailable)?;

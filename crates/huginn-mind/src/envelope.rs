@@ -184,6 +184,7 @@ mod tests {
                     documents: 0,
                     receipts: 0,
                     index: crate::wire::IndexStatus::Current,
+                    persona: None,
                 }),
                 "accepted",
             ),

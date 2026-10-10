@@ -12,7 +12,7 @@ publish.workspace = true
 # verification are `cultnet-rs`'s.
 #
 # The MCP server (`main.rs`, the `eureka-state` binary) is the client's one
-# consumer: four tools over stdio, one per wire operation, holding no state.
+# consumer: six tools over stdio, one per wire operation, holding no state.
 [dependencies]
 anyhow = "1"
 cultnet-rs.workspace = true
