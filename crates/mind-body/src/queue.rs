@@ -335,6 +335,16 @@ mod tests {
     }
 
     #[test]
+    fn a_run_admitted_with_the_question_is_not_after_it() {
+        let (mind, item) = worked(&[]);
+        mind.committed(vec![question_in("fork", &item), run("h0", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item))]);
+        mind.committed(vec![close(run_ref("h0"), recorded())]);
+        ended_run(&mind, &item, "h", 1, false);
+        ended_run(&mind, &item, "h", 2, false);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear, "two empty runs after the question; the one beside it is not counted");
+    }
+
+    #[test]
     fn a_withdrawn_run_never_ran_and_is_no_boundary() {
         let withdrawn_between = |ruling_after: bool| {
             let (mind, item) = worked(&[E]);
