@@ -1751,7 +1751,7 @@ mod tests {
         let hand_off_ref = r(K::HandOff, &format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.gamecult_-huginn.2026-09-16"));
 
         // Accepted, one per resolvable kind.
-        committed(admit(&mut world(), vec![target(2, &[INVARIANT]), resolution(target_ref.clone(), superseded(&[target_r2.clone()]))]));
+        committed(admit(&mut world(), vec![target(2, &[INVARIANT]), resolution(target_ref.clone(), superseded(std::slice::from_ref(&target_r2)))]));
         committed(admit(&mut world(), vec![resolution(question_ref.clone(), withdrawn())]));
         committed(admit(&mut world(), vec![D::Ruling(ruling("R2")), resolution(ruling_ref.clone(), superseded(&[r(K::Ruling, &id("ruling", "R2"))]))]));
         committed(admit(&mut world(), vec![resolution(spec_ref.clone(), withdrawn())]));
@@ -1794,7 +1794,7 @@ mod tests {
             incompatible(K::CutSpec, "Superseded")
         );
         assert_eq!(
-            refusal(admit(&mut world(), vec![resolution(finding_ref.clone(), superseded(&[finding_ref.clone()]))])),
+            refusal(admit(&mut world(), vec![resolution(finding_ref.clone(), superseded(std::slice::from_ref(&finding_ref)))])),
             incompatible(K::Finding, "Superseded")
         );
         assert_eq!(
@@ -2294,7 +2294,7 @@ mod tests {
         committed(admit(&mut open(), vec![resolution(subject(), withdrawn())]));
         let other_run = r(K::Run, &run_key("z"));
         let refused = [
-            (superseded(&[other_run.clone()]), "Superseded"),
+            (superseded(std::slice::from_ref(&other_run)), "Superseded"),
             (ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) }, "Answered"),
             (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
             (ResolutionOutcome::Deferred { to: other_run }, "Deferred"),

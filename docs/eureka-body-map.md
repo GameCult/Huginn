@@ -29,6 +29,13 @@ F21. The run, Repetition breaker, Brake and Units rows changed, and the rational
 Specs: `cut-run-live-admission.r1`, `cut-mind-launch.r3`, `cut-mind-wake.r3`,
 `cut-brake-stop.r2`.
 
+Revised again on 2026-10-10 by Imagination (`imagination-mind-units`, session
+`self-2026-10-10-eureka`) at Huginn `0c6f6cb` and gamecult-ops `6b4a874`, for cut
+`mind-units-install`. New fact F22. New section "The mind units: identity, lifecycle and
+authority", written before the cut was mapped. Specs: `cut-mind-unit-gate.r1` (Huginn) and
+`cut-mind-units-install.r1` (gamecult-ops). Questions: `mind-unit-names` and
+`mind-unit-start-grant`.
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
@@ -217,6 +224,39 @@ Each line: what was run, where, result.
   - `Slug::validate_slug` and `Label::validate_label` are public
     (crates/eureka-pipeline/src/lib.rs:287, 386). `RunTurn` and `RunOperator` spell their
     variants through `Debug`, which is also their `NAMES` (lib.rs:436-452).
+- **F22 What the mind units would land on, 2026-10-10.** Read-only `ssh yggdrasil` as
+  `gamecultadmin` and an Eyes pass over Idunn `6667f0f` (Imagination `imagination-mind-units`).
+  - Still no unit, user or store of hers: `systemctl list-unit-files 'mind-*'` lists 0;
+    `getent passwd` has no `mind-*` user; `/etc/gamecult/minds` is absent; no `mind-control`
+    on PATH. `/opt/gamecult/huginn/current` is `releases/107552dc...` and holds only
+    `huginn-daemon` (0755 root). The Release step builds only `-p huginn-daemon`
+    (gamecult-ops `runbooks/huginn-yggdrasil.md:57`).
+  - systemd 257 (257.13-1~deb13u1): `ExecCondition=` (since 243) exists. Per
+    systemd.service(5), an ExecCondition exit of 1-254 skips the unit (inactive, not failed)
+    and 255 or a signal fails it; the `+` prefix runs that command with full privileges.
+  - **polkit is not installed:** `polkitd` "Installed: (none)", candidate 126-2;
+    `/etc/polkit-1/rules.d` absent (`/usr/share/polkit-1/actions` exists, from systemd).
+    Without polkitd, systemd refuses an unprivileged caller's `StartUnit`, so no user of hers
+    can start a unit today. `/etc/sudoers.d` holds only `90-gamecultadmin` and README.
+  - systemd cannot derive a per-instance user from a `<instance>:<label>` instance: no
+    specifier splits `%i`, and dash-truncated drop-ins truncate the unit prefix (the part
+    before `@`) and re-attach the whole instance (systemd v257 `src/shared/dropin.c`,
+    `unit_file_find_dirs`: `unit_name_to_prefix`, `strrchr(prefix, '-')`,
+    `unit_name_build_from_type(prefix, instance, ...)`). So `User=mind-%i` works only when
+    the instance is the mind's slug alone.
+  - `SystemdLauncher::alive` counts `active`, `activating` and `reloading` as alive
+    (mind-launch head `origin/eureka-body/mind-launch`, launch.rs:96-99), and starts with
+    `systemctl start --no-block`, calling `systemctl` directly (no sudo).
+  - Idunn has no target, binding or reference for huginn, mind-control or `mind-*`
+    (`/etc/gamecult/idunn/bindings/` holds ghostlight, heimdall, odin, raven-muninn and two
+    streampixels). Idunn supervises only workloads it admitted and launched itself as
+    transient `systemd-run` units (`Type=exec`, `Restart=no`, `DynamicUser=yes`; Idunn
+    `src/drivers.rs:3628-3650`); its continuity loop restarts an admitted workload that is not
+    running, up to 6 times an hour, unless its lifecycle brake is engaged
+    (`src/control_plane.rs` ~5880-6190, 7932-7956). It has no one-shot, timer or template
+    workload (`docs/watchdog-reporting-map.md` row C9) and installs no unit file, polkit rule,
+    sudoers file or system user (`src/drivers.rs:3620-3720`). A unit Idunn did not launch is
+    never observed or restarted by it.
 
 ## The model page (step 0b)
 
@@ -237,10 +277,34 @@ pipeline kinds are in Huginn `docs/eureka-substrate-map.md`.
 | Persona state | `gamecult.persona_state.v0`, one per mind, `personaId` = instance (cut-huginn-persona-state r2, eureka-substrate). | Replaced whole under CAS with a receipt; she may rewrite any field (`identity-write-all-visible`). | The Persona organ is the only writer. |
 | Identity diffs | The pair of receipts of two consecutive Persona puts whose identity fields (publicName, publicDescription, presentation, values) differ. Derived, not stored. | Composed by the Persona organ at put time and sent as one delivery request through the crossing; a failed post is retried by Bifrost's delivery journal, not by her. | Persona organ composes; Bifrost posts under the permit. No rate limit. |
 | Discord body surfaces | Outbound: crossing ids `epiphany.persona_discord_delivery_request.v0` and `..._permit.v0`, agent `epiphany.Persona`, runtime `epiphany-starfire` (F6), renamed to `eureka.*` and `eureka-yggdrasil` in the mouth rebinding (`mouth-crossing-on-yggdrasil`). Inbound: Bifrost persona-feedback deliveries for target `epiphany` (F6). Persona-session tools reach both (`body-includes-discord`). | Request, permit, post, receipt (Bifrost journal). Inbound deliveries: **unprobed** who records that a delivery was answered; `run-is-the-grant` forbids her organ from holding that fact. Blocks the Persona cuts only, not the cuts admitted today. | Bifrost owns posting and delivery records; her permit issuer grants while the brake is released. |
-| Units and instance templates | `mind-wake@<instance>.timer/.service`, `mind-self@<instance>:<label>.service`, `mind-persona@<instance>:<label>.service` (one-shot per Persona turn; `RuntimeMaxSec` set at install bounds a hung unit), `mind-permit@<instance>`; users `mind-<instance>` (organs) and `mind-<instance>-self` (Self runs); state `/var/lib/gamecult/minds/<instance>/`; control `/etc/gamecult/minds/<instance>/`. Instance `eureka`. | Hand-installed by gamecult-ops now; Idunn targets declared before the first hosted member, which deletes the hand install (`mind-units-templated-interim`). | gamecult-ops installs; Idunn later. Starting: `open_and_launch` through `SystemdLauncher::start`, as her users, who are granted start only. The instance in a unit name is always the mind's (`MindPort::instance`), passed to every `Launcher` call; `SystemdLauncher` holds none. The instance and label are validated by the leaf's grammar before any `systemctl` argv is built. Stopping: only the operator's `brake hold`, as root (cut brake-stop). The unit-level brake gate and the start-only grant are follow-up `mind-units-brake-gate`. None of this exists on Yggdrasil yet (F19). |
+| Units and instance templates | `mind-wake@<instance>.timer/.service`, `mind-self@<instance>:<label>.service`, `mind-persona@<instance>:<label>.service` (one-shot per Persona turn; `RuntimeMaxSec` set at install bounds a hung unit), `mind-permit@<instance>`; users `mind-<instance>` (organs) and `mind-<instance>-self` (Self runs); state `/var/lib/gamecult/minds/<instance>/`; control `/etc/gamecult/minds/<instance>/`. Instance `eureka`. | Hand-installed by gamecult-ops now; Idunn targets declared before the first hosted member, which deletes the hand install (`mind-units-templated-interim`). | gamecult-ops installs; Idunn later. Starting: `open_and_launch` through `SystemdLauncher::start`, as her users, who are granted start only. The instance in a unit name is always the mind's (`MindPort::instance`), passed to every `Launcher` call; `SystemdLauncher` holds none. The instance and label are validated by the leaf's grammar before any `systemctl` argv is built. Stopping: only the operator's `brake hold`, as root (cut brake-stop). The unit-level brake gate and the start-only grant are follow-up `mind-units-brake-gate`. None of this exists on Yggdrasil yet (F19, F22). Each piece's identity, lifecycle and authority: the section "The mind units" below (cut mind-units-install; unit names pending question `mind-unit-names`). |
 | Self-run credential | `CLAUDE_CODE_OAUTH_TOKEN` in a root-0600 EnvironmentFile per instance. | Created by `claude setup-token`; rotated by the operator. | **Open: question `self-run-token-reach`.** The Self run's `claude` process can read its own environment, so `token-out-of-her-reach` holds only if the operator names this unit (F4 of the prior-art file, follow-up `token-reach-two-units`). |
 | Wake frame | Fixed prompt frame (provenance, jurisdiction, brake obedience) in `/etc/gamecult/minds/<instance>/wake-frame.md`, root-owned. Composed by the Persona organ from host config; the waker passes the unit only the instance and the run label. | Changed only by an install. | Host config (ruling `self-waker` rider 2); never a file her runs merge into. |
 | Epiphany residue | F5, F8, F11, as they stood before the teardown. | Teardown landed (gamecult-ops `9c12adb`); what it did not name is follow-up `eureka-body:follow_up:epiphany-body-leftovers`; the repo is archived last. | gamecult-ops for host and repo tooling; Idunn for its legacy target list (follow-up). |
+
+## The mind units: identity, lifecycle and authority
+
+Written 2026-10-10 before cut `mind-units-install` was mapped (operator direction: settle
+ownership first). `<i>` is the mind's slug (`eureka` now). Unit names follow the
+recommended option of question `mind-unit-names` (`instance-only`): the instance is the slug
+alone, one unit per instance and turn, because admission already allows only one live run of
+hers per turn (`one-live-self-run`) and only then can `User=` name a per-instance user (F22).
+"Root" means the operator through `sudo`, or an agent under her deploy instruction.
+
+| Thing | Identity | Lifecycle | Who may start, stop, enable or change it |
+| --- | --- | --- | --- |
+| Waker template | `/etc/systemd/system/mind-wake@.service` and `mind-wake@.timer`, sources `systemd/` in gamecult-ops. Instance unit `mind-wake@<i>.service`, `User=mind-%i`. | Installed and replaced by `scripts/install-mind-units-yggdrasil.sh`. The timer is a fixed poll (1 min after the last cycle ends); it decides nothing: the cadence is the dial's, read by the waker from the newest Persona run (mind-wake r3). Schedules and rest (follow-up `burn-schedule-and-rest`) belong in the dial, so they need no unit change. Each tick runs one cycle, `Type=oneshot`, `TimeoutStartSec=5min`, `Restart=no`. Not gated at the unit: the waker reads the brake itself and returns `Held` before any consequence, and a second reading would protect nothing. | Install, change: root via the script. Enable or disable `mind-wake@<i>.timer`: root only, by hand in the runbook. The script never enables it, so installing starts nothing. Start the service: the timer (systemd as root). Her users have no grant on `mind-wake@`. |
+| Persona template | `/etc/systemd/system/mind-persona@.service`. Instance unit `mind-persona@<i>.service`, `User=mind-%i`, `Type=exec`, no `[Install]`, so it cannot be enabled. | Inactive until started for one Persona turn. Ends by its own exit, at `RuntimeMaxSec=30min`, or by the brake hold's stop (`TimeoutStopSec=30s`, then SIGKILL to the whole cgroup). `Restart=no`, and nothing else restarts it. Every start first runs the gate (below); while the brake is not Released the unit is skipped and ends inactive. `ExecStart` names the Persona organ's binary in the Huginn release; that cut ships the binary and owns the argv. Until then a released start fails at exec (203/EXEC), and the closing launch counts it as a dead run. | Start: `mind-<i>` only, through `open_and_launch` (the waker), by polkit's verb `start` on this one unit name. Stop, kill, restart: root only, which in practice means `mind-control brake hold` (cut brake-stop). Change: root via the script. Enable: nobody. |
+| Self template | `/etc/systemd/system/mind-self@.service`. Instance unit `mind-self@<i>.service`, `User=mind-%i-self`, `Type=exec`, no `[Install]`. | As the Persona unit, with `RuntimeMaxSec=4h`. `ExecStart` names the Self-run actuator's binary in the Huginn release; that cut adds the token `EnvironmentFile` (ruling `self-run-token-reach`), the state directory and the argv. | Start: `mind-<i>` only (the Persona's start-Self-run tool through `open_and_launch`), by polkit, verb `start`. Stop, kill, restart: root only. Change: root via the script. Enable: nobody. |
+| Organ user | `mind-<i>`: system user and group, shell `/usr/sbin/nologin`, home `/nonexistent`. | Created by the install script if absent and never modified by it after that. Deleted by root at the mind's retirement. Runs the waker and Persona units. | Root creates and deletes it. It may start `mind-persona@<i>` and `mind-self@<i>`, and nothing else. It cannot write the control store (root 0644, dir 0755) or stop a unit. It can signal its own processes with `kill(2)`, as any Unix user can. That only ends spend, and the ended run is closed Recorded by the next launch, so it adds no second stopper of her units. |
+| Self user | `mind-<i>-self`: system user and group, nologin, home `/nonexistent`. The install script refuses an instance slug ending in `-self`, so this name never collides with another mind's organ user. | As the organ user. | Root creates and deletes it. It starts no unit. Polkit refuses it every verb, and the rule refuses any subject whose name ends in `-self`. |
+| `mind-control` | `/opt/gamecult/huginn/releases/<sha>/mind-control`, root:root 0700, reached by the `current` symlink; `/usr/local/sbin/mind-control` links to `/opt/gamecult/huginn/current/mind-control`. | Built and installed with each Huginn release by the Release step of `runbooks/huginn-yggdrasil.md`. Replaced when `current` flips. The previous release is kept until the new one verifies. | Install, replace: root via the Release step. Run: root only (mode 0700), which covers the operator's verbs and the gate, which systemd runs as root through the `+` prefix. No user of hers can execute it. |
+| `mind-wake` | `/opt/gamecult/huginn/releases/<sha>/mind-wake`, root:root 0755. | Same release step and lifecycle as `mind-control`. | Install, replace: root. Run: the waker unit as `mind-<i>`. |
+| The gate | `ExecCondition=+/opt/gamecult/huginn/current/mind-control --instance %i check` in both spending templates. The verb is cut mind-unit-gate. | Runs at every start of a Persona or Self unit. It exits 0 only when `read_effective` is `Released`; held, absent, undecodable or out of bounds exit 2 (systemd skips on 1-254). It holds no state and writes nothing. | Owner: `read_effective`, the one derivation. Change: a Huginn release (the verb) or the script (the line). It closes the window in which a launch that read Released before a hold starts its unit after the hold's stop (follow-up `mind-units-brake-gate`). |
+| Polkit rule | `/etc/polkit-1/rules.d/60-mind-units.rules`, root 0644, source `polkit/60-mind-units.rules` in gamecult-ops. Needs package `polkitd` (absent today, F22; question `mind-unit-start-grant`). | Installed and replaced by the script. Instance-generic: one file serves every mind. | Root changes it. It grants exactly one thing: action `org.freedesktop.systemd1.manage-units`, verb `start`, unit `mind-persona@<i>.service` or `mind-self@<i>.service`, to subject `mind-<i>`. Every other request falls through to systemd's default, `auth_admin`, which an unattended caller cannot satisfy. |
+| Control store | `/etc/gamecult/minds/<i>/control.cc`, root:root 0644 in a 0755 dir (cut mind-control-store). | The install script writes `brake hold` once, if no store exists, so a fresh install reads `held` with a name and time rather than `absent`. Afterwards only the operator's verbs change it. | Operator only (`brake-dial-root-store-now`). |
+| A unit on a brake hold | The instance unit above. | `brake hold` writes the brake held, then stops both units of the instance and waits; the unit ends inactive, its run stays in force. A start after the hold is skipped by the gate and ends inactive (dead), not failed. The next `open_and_launch` of that turn after a release closes the run Recorded "unit not active" (mind-launch r3 step 0). Nothing restarts a stopped unit: `Restart=no`, the waker does not launch without a Grant, and Idunn does not know the unit. | Stopper: the hold only. Restarter: none. |
+| Idunn's view | No binding, no target. | Idunn observes and restarts only workloads it launched itself, and every Idunn workload is a resident service that continuity restarts. It has no one-shot, timer or template kind (F22). So today it never touches these units. The deletion line of the hand install (ruling `mind-units-templated-interim`: Idunn targets before the first hosted member) needs an Idunn job workload that is never continuity-restarted. That is follow-up `idunn-job-workload`. | Idunn: none until that follow-up lands. Its owner then may install and change the templates and users, and must never start or restart a spending unit. |
 
 ## Rationale
 

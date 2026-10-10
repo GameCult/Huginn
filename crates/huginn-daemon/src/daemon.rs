@@ -150,7 +150,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
                 HuginnMindResponse::Admit(outcome)
             }
             HuginnMindRequest::View { id, .. } => match self.mind.view(&id) {
-                Ok(view) => HuginnMindResponse::View(view),
+                Ok(view) => HuginnMindResponse::View(view.map(Box::new)),
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
             HuginnMindRequest::PersonaGet { .. } => match self.mind.persona() {
@@ -502,9 +502,11 @@ pub(crate) mod tests {
         Ok(Daemon::new(Mind::open(state_root, instance)?, NoIndex))
     }
 
+    type Seen = Vec<(Vec<String>, Vec<bool>)>;
+
     #[derive(Clone, Default)]
     struct RecordingIndex {
-        seen: Arc<Mutex<Vec<(Vec<String>, Vec<bool>)>>>,
+        seen: Arc<Mutex<Seen>>,
     }
 
     impl<S: MindStore> IndexSink<S> for RecordingIndex {
@@ -615,7 +617,7 @@ pub(crate) mod tests {
         let PipelinePageItems::Documents(views) = &page.items else { panic!("the document projection is the view") };
         assert_eq!(views[0].status, PipelineStatus::InForce);
         let view = daemon.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id: id.clone() }, now()).answered();
-        assert_eq!(view, HuginnMindResponse::View(Some(views[0].clone())));
+        assert_eq!(view, HuginnMindResponse::View(Some(Box::new(views[0].clone()))));
     }
 
     /// Ruling 14 across the transport, on both sides: the mind refuses a read
