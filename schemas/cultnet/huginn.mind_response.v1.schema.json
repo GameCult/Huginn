@@ -1608,11 +1608,8 @@
           "$ref": "#/$defs/Slug"
         },
         "persona": {
-          "description": "The stored persona document's `updatedAt`; none until the first put.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "The persona door as `PersonaGet` would find it.",
+          "$ref": "#/$defs/PersonaStatus"
         },
         "receipts": {
           "type": "integer",
@@ -1628,7 +1625,8 @@
         "schema_epoch",
         "documents",
         "receipts",
-        "index"
+        "index",
+        "persona"
       ]
     },
     "MutationRecord": {
@@ -1745,6 +1743,38 @@
         "value",
         "updated_at",
         "receipt_id"
+      ]
+    },
+    "PersonaStatus": {
+      "description": "What the persona door holds, in the one vocabulary the door itself answers\nin: nothing yet, a document with this `updatedAt`, or a stored document the\ndoor cannot read (`PersonaGet` and every put answer `Unavailable`).",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Absent",
+            "Unreadable"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Stored": {
+              "type": "object",
+              "properties": {
+                "updated_at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "updated_at"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Stored"
+          ]
+        }
       ]
     },
     "PipelineAdmissionOutcome": {
