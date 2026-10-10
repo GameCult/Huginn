@@ -1361,7 +1361,7 @@
                   "type": "string"
                 },
                 "run": {
-                  "type": "string"
+                  "$ref": "#/$defs/RunId"
                 }
               },
               "required": [
@@ -1383,7 +1383,7 @@
               "type": "object",
               "properties": {
                 "run": {
-                  "type": "string"
+                  "$ref": "#/$defs/RunId"
                 }
               },
               "required": [
@@ -3864,6 +3864,10 @@
         "Defaulted",
         "Mind"
       ]
+    },
+    "RunId": {
+      "description": "The id of a run: a full pipeline id of kind Run. A refusal that names a\nholder carries one, so a reader gets a run's id from the wire only if it\nparses as one; a peer cannot fill it with any other string. The only ways\nin are `TryFrom<String>`, which every deserialized value passes, and the\nadmission rules, which name a run the mind holds. The error is a fixed\nmessage: it never echoes the offered value.",
+      "type": "string"
     },
     "RunOperator": {
       "type": "string",
