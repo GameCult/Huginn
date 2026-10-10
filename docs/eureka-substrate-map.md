@@ -332,3 +332,52 @@ Rejected: renaming the crate to `huginn-client`, for the churn above. A whoami
 version field, for the reasons in the skew rule row. A config file for the
 endpoint, because env already serves both hosts. TOML or YAML as the input
 door: see the question.
+
+## A campaign's repo set changes by target revision (Imagination, 2026-10-10)
+
+Felt gap: `eureka-body:follow_up:body-campaign-repos`. eureka-body must change
+GameCult/Idunn and the connector kit repo (ruling
+`eureka-body:ruling:connector-kit-home`, not yet created), but `repos` lives on
+`<c>:campaign:self`, a fixed key with no revision and no resolution, and
+admission refuses a cut_spec whose repo is outside it (`admission.rs:405-415`,
+`RepoNotInCampaign`). The only workarounds were a sibling campaign (done once:
+`eureka-substrate:follow_up:epiphany-cuts-need-a-campaign`, closed by opening
+eureka-body) or a cross-campaign `first` line. Pinned at Huginn a7cc2ff.
+
+### Model page: the repo set (step 0b)
+
+| Question | Answer | Why |
+|---|---|---|
+| What names it | `target.repos: Vec<OrgRepo>[16] = absent` on `<c>:target:r<n>`. Empty means "no target in this chain has named repos": the campaign's own `repos` stands. Non-empty means this revision's list is the whole set. | Reuses the one revisable campaign-scoped record. The target already carries scope (`not_in_scope`, `canonical_implementations`); which repos a campaign may cut is scope. No new kind, key grammar, alias or refusal variant. |
+| Who owns it | The in-force target when it names repos; otherwise the campaign document. `campaign.repos` is demoted to the opening set: it decides only until the first target revision that names repos. | One owner at any moment, derived in one function (`Docs::repos_in_force`), read by the one rule that consumes it. |
+| Add or remove | Self admits target `r<n+1>` with the new whole list and the `Superseded` resolution of `r<n>`, in one batch (the existing revision rule). The target doc cited by `doc` says why. | Whole-list replacement, as Kubernetes replaces a whole spec per generation; no per-member add/remove events to fold. |
+| Silent revert | A target revision with empty `repos` whose predecessor named repos is refused `EmptyRepos { campaign: <target id> }`. | Otherwise omitting the field on an unrelated invariant edit would revert to the opening set. Reuses the existing variant: an empty repo set where one is required. |
+| Bound | 16 on the target; the campaign's 8 is unchanged. | eureka-body reaches 8 with the two repos it needs. 16 matches `canonical_implementations`. The campaign bound need not widen, since later sets live on targets. |
+| Specs on a removed repo | Membership is checked when a cut_spec (new or a revision) is admitted, against the set in force then. A spec already in force stays in force; its reports admit (they check the spec, not the campaign); it can be Withdrawn or Superseded as before. A new revision on the removed repo is refused `RepoNotInCampaign`. | Admission rules apply to new batches only (target invariant `stored-documents-valid`). Refusing the removal while specs name the repo would need a landed/open distinction the mind does not have (`gap-landing-untyped`), and would force withdrawing landed specs, which misstates them. Question `campaign-repo-removal`. |
+| Rename or transfer | A new `Org/Repo` spelling is a new repo: Self revises the target replacing the name. Old specs keep the old name as history; a spec revision may name the new repo (the revision rule does not compare `repo`). Case changes are no-ops (`OrgRepo` equality is by identity). The host (forge or GitHub, `body-repos-on-forge`) is not in `OrgRepo` and stays out of scope. | |
+| Who decides | Self admits targets. Admission checks the revision rule, distinctness by identity (the campaign's hook, shared), the bound, and the revert rule. It checks no stewardship (ruling `stewardship-rule`). | |
+| Epoch | Stays `epiphany.pipeline.epoch.v2`. The field is `= absent`: stored targets decode with it empty and re-encode byte for byte; one golden line is appended. | Precedent: cut leaf-read-anchors (`reads`, `symbol`). An old daemon reading a target that names repos drops them (serde ignores unknown keys), so after a repo revision is admitted a rollback narrows the set to the opening one; it does not fail to read. This lands with the upgrade rerun waiting on `snapshot-test-stale-and-quadratic`, daemon-first (`huginn-upgrade-daemon-first`). |
+
+### Authority map
+
+- Owner: Huginn admission (`check`, CutSpec arm) through `Docs::repos_in_force`.
+- Inputs: the campaign document; the campaign's targets and their resolutions (image and batch).
+- Outputs: `RepoNotInCampaign` or acceptance for a cut_spec; `EmptyRepos` for a reverting target.
+- Derived state: `campaign.repos` after a repo-naming target is display-only history (the campaign header's `repos` fact and its `repo` alias answer "opened with"). The skill's recipe reads the set in force from the target.
+- Forbidden writers: any second membership check (a `campaign.repos.contains` outside `repos_in_force`); editing or re-admitting `campaign:self`.
+- Shared paths: MCP admit, the CultNet wire and the stored payload decode `repos` through the same derived impls.
+- Deletion line: the direct `campaign.repos.contains(&spec.repo)` at `admission.rs:413`.
+
+### Rejected
+
+- A per-repo record kind (`<c>:campaign_repo:<repo>.n<seq>`, Withdrawn to remove), the stewardship pattern: a new kind, schema, key grammar, alias and refusals, and its key would inherit the opaque repo encoding of `gap-stewardship-id-opaque`.
+- A campaign revision (`<c>:campaign:r<n>`): re-keys every stored campaign or adds a second key grammar for one kind, and every `source` citing `<c>:campaign:self` would have to follow it.
+- Status quo (sibling campaigns): splits one target's work across two targets and two invariant sets.
+
+### Cut order
+
+campaign-repos (Huginn; independent of clippy-pin; textual overlaps with
+mind-launch in admission.rs, docs.rs and the response schema, so whichever
+merges second rebases and regenerates the schema) -> skill-campaign-repos
+(Eureka campaign-state.md). huginn-cli's campaigns recipe, if it prints repos,
+prints the opening set until it reads the target too.
