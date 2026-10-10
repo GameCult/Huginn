@@ -22,7 +22,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 cultcache-rs.workspace = true
 cultnet-rs.workspace = true
 eureka-pipeline = { path = "../eureka-pipeline" }
-eureka-state = { path = "../eureka-state" }
+eureka-state = { path = "../eureka-state", default-features = false }
 huginn-mind = { path = "../huginn-mind" }
 rust_decimal = { version = "1", default-features = false, features = ["std", "serde"] }
 serde = { version = "1", features = ["derive"] }
