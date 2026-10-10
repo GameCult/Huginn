@@ -70,26 +70,48 @@ pub fn decode_request(message: &CultNetMessage) -> Result<(String, HuginnMindReq
         ));
     };
     if service_id != MIND_SERVICE_ID {
-        return Err(OperationFailure::new("wrong-service", format!("{service_id} is not {MIND_SERVICE_ID}")));
+        return Err(OperationFailure::new("wrong-service", format!("the service is not {MIND_SERVICE_ID}")));
     }
     if payload_schema != MIND_REQUEST_SCHEMA {
         return Err(OperationFailure::new(
             "wrong-payload-schema",
-            format!("{payload_schema} is not {MIND_REQUEST_SCHEMA}"),
+            format!("the payload schema is not {MIND_REQUEST_SCHEMA}"),
         ));
     }
     let bytes = STANDARD
         .decode(payload)
-        .map_err(|error| OperationFailure::new("payload-not-base64", error.to_string()))?;
-    let request: HuginnMindRequest = rmp_serde::from_slice(&bytes)
-        .map_err(|error| OperationFailure::new("payload-not-a-request", error.to_string()))?;
+        .map_err(|_| OperationFailure::new("payload-not-base64", "the payload is not standard base64"))?;
+    let request = read_request(&bytes)?;
     if operation != request.operation() {
         return Err(OperationFailure::new(
             "operation-mismatch",
-            format!("the envelope says {operation} and the payload is {}", request.operation()),
+            format!("the envelope's operation is not the payload's {}", request.operation()),
         ));
     }
     Ok((message_id.clone(), request))
+}
+
+/// The payload as a request, or a failure naming the field path and the class
+/// of error and nothing the caller sent: a decoder's own text quotes the
+/// offending value (an unknown variant, an integer), so no decoder text
+/// leaves this function.
+fn read_request(bytes: &[u8]) -> Result<HuginnMindRequest, OperationFailure> {
+    use rmp_serde::decode::Error as Decode;
+    let mut decoder = rmp_serde::Deserializer::new(bytes);
+    serde_path_to_error::deserialize(&mut decoder).map_err(|error| {
+        let class = match error.inner() {
+            Decode::InvalidMarkerRead(_) | Decode::InvalidDataRead(_) => "truncated",
+            Decode::TypeMismatch(_) => "wrong-type",
+            Decode::OutOfRange => "out-of-range",
+            Decode::LengthMismatch(_) => "wrong-length",
+            Decode::Uncategorized(_) | Decode::Syntax(_) => "invalid-value",
+            Decode::Utf8Error(_) => "invalid-text",
+            Decode::DepthLimitExceeded => "too-deep",
+        };
+        let path = error.path().to_string();
+        let at = if path == "." { "the payload".to_string() } else { format!("field {path}") };
+        OperationFailure::new("payload-not-a-request", format!("{at}: {class}"))
+    })
 }
 
 /// One answer, whose status the response derives.
@@ -184,7 +206,7 @@ mod tests {
                     documents: 0,
                     receipts: 0,
                     index: crate::wire::IndexStatus::Current,
-                    persona: None,
+                    persona: crate::wire::PersonaStatus::Absent,
                 }),
                 "accepted",
             ),
@@ -208,6 +230,82 @@ mod tests {
         assert_eq!((status.as_str(), payload_schema.as_str()), ("rejected", FAILURE_SCHEMA));
         assert_eq!(diagnostics, &vec!["wrong-service".to_string()]);
         assert_eq!(decode_response(&message).unwrap(), ("m-2".into(), Err(failure)));
+    }
+
+    fn request_message(service_id: &str, operation: &str, schema: &str, payload: String) -> CultNetMessage {
+        CultNetMessage::OperationRequest {
+            message_id: "m-9".into(),
+            service_id: service_id.into(),
+            operation: operation.into(),
+            payload_schema: schema.into(),
+            payload_encoding: "messagepack-base64".into(),
+            payload,
+            source_runtime_id: None,
+            target_runtime_id: None,
+        }
+    }
+
+    /// The payload of `request` with the value at `path` replaced, encoded the
+    /// way a client does.
+    fn payload_with(request: &HuginnMindRequest, path: &[&str], bad: serde_json::Value) -> String {
+        let mut value = serde_json::to_value(request).unwrap();
+        let mut at = &mut value;
+        for key in path {
+            at = at.get_mut(*key).unwrap_or_else(|| panic!("no {key} in the request"));
+        }
+        *at = bad;
+        STANDARD.encode(rmp_serde::to_vec_named(&value).unwrap())
+    }
+
+    /// A refusal of the decoder names the field and the class of error and
+    /// nothing the caller sent: not an unknown variant, not an integer, not
+    /// an envelope field, not a byte of bad base64. Over the persona wire and
+    /// over the pipeline's, because the decoder is one.
+    #[test]
+    fn the_decoder_never_echoes_what_the_caller_sent() {
+        const CANARY: &str = "CANARY-5c0de1-do-not-echo";
+        const NUMBER: i64 = 90817263;
+        let put = HuginnMindRequest::PersonaPut {
+            instance: slug(INSTANCE),
+            provenance: provenance(Faculty::Hands),
+            state: serde_json::json!({}),
+            expected_updated_at: None,
+        };
+        let admit = HuginnMindRequest::Admit(PipelineAdmissionBatch {
+            instance: slug(INSTANCE),
+            provenance: provenance(Faculty::Hands),
+            documents: vec![instance(INSTANCE)],
+        });
+        let cases = [
+            (&put, vec!["PersonaPut", "provenance", "faculty"], serde_json::json!(CANARY), "provenance.faculty"),
+            (&put, vec!["PersonaPut", "provenance", "agent"], serde_json::json!(NUMBER), "provenance.agent"),
+            (&put, vec!["PersonaPut", "expected_updated_at"], serde_json::json!(NUMBER), "expected_updated_at"),
+            (&put, vec!["PersonaPut", "instance"], serde_json::json!(NUMBER), "instance"),
+            (&admit, vec!["Admit", "provenance", "faculty"], serde_json::json!(CANARY), "provenance.faculty"),
+            (&admit, vec!["Admit", "instance"], serde_json::json!(NUMBER), "instance"),
+        ];
+        for (request, path, bad, field) in cases {
+            let message = request_message(MIND_SERVICE_ID, request.operation(), MIND_REQUEST_SCHEMA, payload_with(request, &path, bad));
+            let failure = decode_request(&message).unwrap_err();
+            assert_eq!(failure.code, "payload-not-a-request");
+            assert!(failure.message.contains(field), "{field} is named: {}", failure.message);
+            assert!(failure.message.ends_with(": invalid-value"), "the class is named: {}", failure.message);
+            for echoed in [CANARY.to_string(), NUMBER.to_string()] {
+                assert!(!failure.message.contains(&echoed), "{echoed} came back: {}", failure.message);
+            }
+        }
+
+        let good = payload_with(&put, &["PersonaPut", "expected_updated_at"], serde_json::Value::Null);
+        let envelope_cases = [
+            request_message(CANARY, "persona_put", MIND_REQUEST_SCHEMA, good.clone()),
+            request_message(MIND_SERVICE_ID, "persona_put", CANARY, good.clone()),
+            request_message(MIND_SERVICE_ID, CANARY, MIND_REQUEST_SCHEMA, good),
+            request_message(MIND_SERVICE_ID, "persona_put", MIND_REQUEST_SCHEMA, format!("{CANARY}!!")),
+        ];
+        for message in envelope_cases {
+            let failure = decode_request(&message).unwrap_err();
+            assert!(!failure.message.contains(CANARY), "{} came back: {}", failure.code, failure.message);
+        }
     }
 
     /// The round trip the client and the daemon share, and the one code that

@@ -55,7 +55,7 @@ pub use refusal::MindRefusal;
 pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{
     DeferredAnswer, HuginnMindRequest, HuginnMindResponse, IndexStatus, MAX_DEFERRED_BODY_BYTES, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON,
-    MIND_RESPONSE_SCHEMA, MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus,
+    MIND_RESPONSE_SCHEMA, MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus, PersonaStatus,
 };
 
 /// The leaf, whole, through the one crate that pins its rev: the daemon and

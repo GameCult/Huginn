@@ -590,7 +590,7 @@ pub(crate) mod tests {
                 documents: 1,
                 receipts: 1,
                 index: IndexStatus::Current,
-                persona: None,
+                persona: huginn_mind::wire::PersonaStatus::Absent,
             }
         );
         assert_eq!(daemon.runtime_id(), "huginn-yggdrasil");
@@ -704,7 +704,7 @@ pub(crate) mod tests {
             expected_updated_at: None,
         };
         assert_eq!(daemon.handle(put, now()).answered(), HuginnMindResponse::Refused(foreign));
-        assert_eq!(status(&mut daemon).persona, None);
+        assert_eq!(status(&mut daemon).persona, huginn_mind::wire::PersonaStatus::Absent);
     }
 
     /// A declared instance outside `Slug`'s grammar is refused by its own

@@ -192,8 +192,18 @@ pub struct MindStatus {
     pub documents: u32,
     pub receipts: u32,
     pub index: IndexStatus,
-    /// The stored persona document's `updatedAt`; none until the first put.
-    pub persona: Option<String>,
+    /// The persona door as `PersonaGet` would find it.
+    pub persona: PersonaStatus,
+}
+
+/// What the persona door holds, in the one vocabulary the door itself answers
+/// in: nothing yet, a document with this `updatedAt`, or a stored document the
+/// door cannot read (`PersonaGet` and every put answer `Unavailable`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum PersonaStatus {
+    Absent,
+    Stored { updated_at: String },
+    Unreadable,
 }
 
 impl<S: MindStore> Mind<S> {
@@ -215,7 +225,11 @@ impl<S: MindStore> Mind<S> {
             documents,
             receipts,
             index,
-            persona: self.stored_updated_at().ok().flatten(),
+            persona: match self.stored_updated_at() {
+                Ok(None) => PersonaStatus::Absent,
+                Ok(Some(updated_at)) => PersonaStatus::Stored { updated_at },
+                Err(_) => PersonaStatus::Unreadable,
+            },
         }
     }
 }

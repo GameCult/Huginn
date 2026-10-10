@@ -243,7 +243,7 @@ mod tests {
         mind
     }
 
-    fn persona_in_status<S: MindStore>(mind: &Mind<S>) -> Option<String> {
+    fn persona_in_status<S: MindStore>(mind: &Mind<S>) -> crate::wire::PersonaStatus {
         mind.status(crate::wire::IndexStatus::Current).persona
     }
 
@@ -436,7 +436,7 @@ mod tests {
     fn a_put_is_a_compare_and_swap_on_updated_at() {
         let store = MemoryStore::new();
         let mut mind = seeded_over(&store);
-        assert_eq!(persona_in_status(&mind), None);
+        assert_eq!(persona_in_status(&mind), crate::wire::PersonaStatus::Absent);
         let receipts = |mind: &Mind<MemoryStore>| mind.receipts().unwrap().len();
         let base = receipts(&mind);
 
@@ -447,7 +447,7 @@ mod tests {
         let view = mind.persona().unwrap().unwrap();
         assert_eq!((view.updated_at.as_str(), view.receipt_id.as_str()), (T1, first.as_str()));
         assert_eq!(view.value, persona(INSTANCE, T1));
-        assert_eq!(persona_in_status(&mind).as_deref(), Some(T1));
+        assert_eq!(persona_in_status(&mind), crate::wire::PersonaStatus::Stored { updated_at: T1.into() });
 
         // Two puts that read the same stored document: the second loses.
         let second = committed(put(&mut mind, persona(INSTANCE, T2), Some(T1)));
@@ -521,7 +521,7 @@ mod tests {
         with_one.push(entry(INSTANCE, persona(INSTANCE, T1)));
         let mind = Mind::open_with(planted(with_one.clone()), &yggdrasil).unwrap();
         assert_eq!(mind.envelopes().len(), 3);
-        assert_eq!(persona_in_status(&mind).as_deref(), Some(T1));
+        assert_eq!(persona_in_status(&mind), crate::wire::PersonaStatus::Stored { updated_at: T1.into() });
 
         // Two are no mind's.
         with_one.push(entry("second", persona(INSTANCE, T2)));
@@ -535,6 +535,33 @@ mod tests {
         foreign.r#type = "gamecult.persona_state.v1".into();
         stranger.push(foreign);
         assert!(matches!(Mind::open_with(planted(stranger), &yggdrasil).err(), Some(MindRefusal::ForeignStore { .. })));
+    }
+
+    /// Status answers in the door's own terms: a stored persona the door
+    /// cannot read is `Unreadable`, not the `Absent` of a mind with none, while
+    /// `PersonaGet` answers `Unavailable` for the same bytes.
+    #[test]
+    fn status_says_unreadable_where_the_door_says_unavailable() {
+        let yggdrasil = slug(INSTANCE);
+        let cache = crate::mind::schema_cache().unwrap();
+        let readable = cache.prepare_entry_named(INSTANCE, &HuginnPersonaEntry { value: persona(INSTANCE, T1) }).unwrap().0;
+        let no_stamp = cache.prepare_entry_named(INSTANCE, &HuginnPersonaEntry { value: json!({}) }).unwrap().0;
+        let mut undecodable = readable.clone();
+        undecodable.payload = vec![0xc1];
+        for (row, status) in [
+            (readable, crate::wire::PersonaStatus::Stored { updated_at: T1.into() }),
+            (no_stamp, crate::wire::PersonaStatus::Unreadable),
+            (undecodable, crate::wire::PersonaStatus::Unreadable),
+        ] {
+            let store = MemoryStore::new();
+            store.plant(epoch());
+            store.plant(prepare(&instance(INSTANCE)));
+            store.plant(row);
+            let mind = Mind::open_with(store, &yggdrasil).unwrap();
+            assert_eq!(persona_in_status(&mind), status);
+            assert_eq!(mind.persona().is_err(), status == crate::wire::PersonaStatus::Unreadable);
+        }
+        assert_eq!(persona_in_status(&seeded_over(&MemoryStore::new())), crate::wire::PersonaStatus::Absent);
     }
 
     #[test]

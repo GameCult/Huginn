@@ -218,7 +218,7 @@ fn client_persona_round_trip_against_a_live_daemon() {
     assert_eq!(view.value, persona(INSTANCE, T1));
     assert_eq!((view.updated_at.as_str(), view.receipt_id.as_str()), (T1, receipt_id.as_str()));
     let HuginnMindResponse::Whoami(status) = client.call(HuginnMindRequest::Whoami).unwrap() else { panic!("a status") };
-    assert_eq!(status.persona.as_deref(), Some(T1));
+    assert_eq!(status.persona, huginn_mind::wire::PersonaStatus::Stored { updated_at: T1.into() });
 
     // A stale put is an answer.
     assert_eq!(
