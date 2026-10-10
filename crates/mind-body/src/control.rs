@@ -263,6 +263,19 @@ pub fn load_state(source: &impl ControlSource) -> Result<ControlState> {
 /// let _ = mind_body::control::Grant::for_test;
 /// ```
 ///
+/// ```compile_fail
+/// // the test seam that moves the root is not in the library build, public or not
+/// use mind_body::control::with_root;
+/// ```
+///
+/// ```compile_fail
+/// use mind_body::control::TEST_ROOT;
+/// ```
+///
+/// ```compile_fail
+/// use mind_body::control::control_root;
+/// ```
+///
 /// The same preamble with the real call compiles:
 ///
 /// ```
