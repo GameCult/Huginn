@@ -195,6 +195,7 @@ fn whoami(settings: &Settings) -> Result<u8, Trouble> {
                 render::index_state(&status.index),
                 status.schema_epoch
             ));
+            say(format_args!("persona {}", render::persona_state(&status.persona)));
             Ok(0)
         }
         Ok(other) => {
