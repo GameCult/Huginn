@@ -902,7 +902,8 @@ mod tests {
         // And more than one claim, of any mix: the refusal is "any claim", not "exactly one".
         let two = [spec_ref("x"), spec_ref("blocked")];
         let three = [spec_ref("x"), spec_ref("blocked"), reference(PipelineKind::Question, "no-such-document")];
-        for claims in [&two[..], &three[..], &[spec_ref("x"), spec_ref("x")][..]] {
+        let every_kind: Vec<PipelineRef> = PipelineKind::ALL.iter().map(|kind| reference(*kind, "no-such-document")).collect();
+        for claims in [&two[..], &three[..], &[spec_ref("x"), spec_ref("x")][..], &every_kind[..]] {
             let outcome = rig.launch(RunTurn::PersonaTurn, claims, five());
             assert_eq!(outcome, LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims), "{} claims", claims.len());
         }
