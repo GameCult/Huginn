@@ -33,6 +33,7 @@ pub const START_GRACE_S: i64 = 120;
 /// Starts the unit that carries a run, and says whether it is still running.
 /// Nothing here stops a unit.
 pub trait Launcher {
+    // The label names the run asked about; SystemdLauncher names its unit by instance and turn alone (ruling mind-unit-names).
     fn start(&self, instance: &Slug, turn: RunTurn, label: &Label) -> Result<()>;
     fn alive(&self, instance: &Slug, turn: RunTurn, label: &Label) -> bool;
 }
@@ -71,8 +72,9 @@ impl Systemctl for RealSystemctl {
 }
 
 /// Her units under systemd, templated by instance:
-/// `mind-persona@<instance>:<label>.service` and
-/// `mind-self@<instance>:<label>.service`. The launcher holds no instance: the
+/// `mind-persona@<instance>.service` and
+/// `mind-self@<instance>.service` (ruling mind-unit-names: one live run per
+/// instance and turn, so the run label names no unit). The launcher holds no instance: the
 /// caller names it on every call, and `open_and_launch` always names the
 /// mind's own.
 pub struct SystemdLauncher {
@@ -95,27 +97,26 @@ impl Default for SystemdLauncher {
     }
 }
 
-/// The unit of one run: the template by turn, then the instance and the label,
-/// both held to the leaf's grammar first so neither can escape the name. The
-/// error names neither value. Start and alive both name the unit here.
-pub(crate) fn unit(instance: &Slug, turn: RunTurn, label: &Label) -> Result<String> {
+/// The unit of one turn: the template by turn, then the instance, held to the
+/// leaf's grammar first so it cannot escape the name. The error names nothing
+/// of the value. Start and alive both name the unit here.
+pub(crate) fn unit(instance: &Slug, turn: RunTurn) -> Result<String> {
     instance.validate_slug().map_err(|_| anyhow!("the instance is not a unit name"))?;
-    label.validate_label().map_err(|_| anyhow!("the label is not a unit name"))?;
     let template = match turn {
         RunTurn::PersonaTurn => "mind-persona",
         RunTurn::SelfRun => "mind-self",
     };
-    Ok(format!("{template}@{}:{}.service", instance.0, label.0))
+    Ok(format!("{template}@{}.service", instance.0))
 }
 
 impl Launcher for SystemdLauncher {
-    fn start(&self, instance: &Slug, turn: RunTurn, label: &Label) -> Result<()> {
-        let reply = self.systemctl.run(&["start", "--no-block", &unit(instance, turn, label)?])?;
+    fn start(&self, instance: &Slug, turn: RunTurn, _label: &Label) -> Result<()> {
+        let reply = self.systemctl.run(&["start", "--no-block", &unit(instance, turn)?])?;
         if reply.success { Ok(()) } else { Err(anyhow!("systemctl did not start the unit")) }
     }
 
-    fn alive(&self, instance: &Slug, turn: RunTurn, label: &Label) -> bool {
-        let Ok(unit) = unit(instance, turn, label) else {
+    fn alive(&self, instance: &Slug, turn: RunTurn, _label: &Label) -> bool {
+        let Ok(unit) = unit(instance, turn) else {
             return false;
         };
         self.systemctl.run(&["is-active", &unit]).is_ok_and(|reply| matches!(reply.stdout.trim(), "active" | "activating" | "reloading"))
@@ -804,16 +805,13 @@ mod tests {
     fn units_are_templated_by_instance_and_turn() {
         let (launcher, spy) = spied();
         let l = label("mind-20261009T131500123Z");
-        assert_eq!(unit(&eureka(), RunTurn::PersonaTurn, &l).unwrap(), "mind-persona@eureka:mind-20261009T131500123Z.service");
-        assert_eq!(unit(&eureka(), RunTurn::SelfRun, &l).unwrap(), "mind-self@eureka:mind-20261009T131500123Z.service");
+        assert_eq!(unit(&eureka(), RunTurn::PersonaTurn).unwrap(), "mind-persona@eureka.service");
+        assert_eq!(unit(&eureka(), RunTurn::SelfRun).unwrap(), "mind-self@eureka.service");
         launcher.start(&eureka(), RunTurn::SelfRun, &l).unwrap();
         launcher.start(&Slug("eureka.test".into()), RunTurn::PersonaTurn, &l).unwrap();
         assert_eq!(
             *spy.calls.borrow(),
-            vec![
-                vec!["start", "--no-block", "mind-self@eureka:mind-20261009T131500123Z.service"],
-                vec!["start", "--no-block", "mind-persona@eureka.test:mind-20261009T131500123Z.service"],
-            ]
+            vec![vec!["start", "--no-block", "mind-self@eureka.service"], vec!["start", "--no-block", "mind-persona@eureka.test.service"],]
         );
     }
 
@@ -827,7 +825,7 @@ mod tests {
             *spy.stdout.borrow_mut() = said.to_string();
             assert_eq!(launcher.alive(&eureka(), RunTurn::SelfRun, &l), alive, "{said:?}");
         }
-        assert_eq!(spy.calls.borrow()[0], vec!["is-active", "mind-self@eureka:a.service"]);
+        assert_eq!(spy.calls.borrow()[0], vec!["is-active", "mind-self@eureka.service"]);
     }
 
     #[test]
@@ -840,18 +838,42 @@ mod tests {
     }
 
     #[test]
-    fn hostile_instances_and_labels_make_start_fail_and_alive_false_with_no_systemctl_call() {
+    fn hostile_instances_make_start_fail_and_alive_false_with_no_systemctl_call() {
         let (launcher, spy) = spied();
-        *spy.stdout.borrow_mut() = "active\n".into();
-        for hostile in ["", ".", "..", "a/b", "a@b", "a:b", "a b", "a\nb", "eureka/../x\n", "x\n--now", "canary/9"] {
-            let as_instance = Slug(hostile.into());
-            let error = launcher.start(&as_instance, RunTurn::SelfRun, &label("ok")).unwrap_err();
+        *spy.stdout.borrow_mut() = "active
+"
+        .into();
+        for hostile in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a@b",
+            "a:b",
+            "a b",
+            "a
+b",
+            "eureka/../x
+",
+            "x
+--now",
+            "canary/9",
+        ] {
+            let instance = Slug(hostile.into());
+            let error = launcher.start(&instance, RunTurn::SelfRun, &label("ok")).unwrap_err();
             assert!(!format!("{error:#}").contains("canary"), "{error:#}");
-            assert!(!launcher.alive(&as_instance, RunTurn::SelfRun, &label("ok")), "instance {hostile:?}");
-            let error = launcher.start(&eureka(), RunTurn::PersonaTurn, &label(hostile)).unwrap_err();
-            assert!(!format!("{error:#}").contains("canary"), "{error:#}");
-            assert!(!launcher.alive(&eureka(), RunTurn::PersonaTurn, &label(hostile)), "label {hostile:?}");
+            assert!(!launcher.alive(&instance, RunTurn::PersonaTurn, &label("ok")), "instance {hostile:?}");
         }
         assert!(spy.calls.borrow().is_empty(), "no hostile name reached systemctl: {:?}", spy.calls.borrow());
+    }
+
+    #[test]
+    fn a_unit_is_named_by_instance_and_turn_alone() {
+        let (launcher, spy) = spied();
+        launcher.start(&eureka(), RunTurn::SelfRun, &label("mind-20261009T131500001Z")).unwrap();
+        launcher.start(&eureka(), RunTurn::SelfRun, &label("mind-20261009T131500002Z")).unwrap();
+        let calls = spy.calls.borrow();
+        assert_eq!(calls[0], calls[1], "two runs of one turn share a unit name");
+        assert!(!calls[0][2].contains("mind-2026"), "{:?}", calls[0]);
     }
 }
