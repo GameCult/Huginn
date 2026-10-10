@@ -20,7 +20,7 @@ Studio's job, not Huginn's.
   derived status included, over `cultcache-rs` and `eureka-pipeline`.
   `huginn-daemon` serves one mind over CultNet RUDP through `cultnet-rs`, and reaches the leaf and the store type through `huginn-mind`
   so the workspace's one CultLib revision (root `[workspace.dependencies]`) decides both. `eureka-state` is the client core: one call
-  to a daemon over CultNet, holding no state.
+  to a daemon over CultNet, holding no state; its `huginn` binary is the CLI agents reach the mind through, and it holds no state either.
 - Owned: an instance's memory documents, their admission and the read side
   that derives their status, in `huginn-mind`,
   over a redb CultCache store at `<state_root>/minds/<instance>/mind.redb`;
