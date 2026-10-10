@@ -1037,7 +1037,8 @@ mod tests {
             sets.push((0..size).map(|i| reference(kinds[draw.below(kinds.len())], &format!("doc-{i}"))).collect());
         }
         for claims in sets {
-            let name = slug_of(&mut draw, LENGTH_EDGES[draw.below(LENGTH_EDGES.len())]);
+            let length = LENGTH_EDGES[draw.below(LENGTH_EDGES.len())];
+            let name = slug_of(&mut draw, length);
             let mind = Named::new(&name);
             let outcome = gated(&mind, &name, RunTurn::PersonaTurn, claims.clone()).unwrap();
             assert_eq!(outcome, LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims), "{} claims, first {:?}", claims.len(), claims.first());
