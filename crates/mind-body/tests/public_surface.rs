@@ -5,10 +5,12 @@
 //! passes on every route it does not name. This one reads the library's source
 //! the way a consumer sees it and compares everything a consumer could reach to
 //! `public_surface.txt`: every `pub` item with its signature, every `pub` field,
-//! the derives and the header of every impl, and every string literal that looks
-//! like a path. A new `pub static`, a new `pub fn` under any name, a `Clone` or
-//! `Default` derived onto `Grant`, a root read from a file other than the
-//! constant: each is a line this file does not have, and the test fails.
+//! the derives and the header of every impl, every string literal that looks like
+//! a path, and every `static` keyword (a process-global is the one channel
+//! through which an existing public function's body could carry a root). A new
+//! `pub static`, a new `pub fn` under any name, a `Clone` or `Default` derived
+//! onto `Grant`, a root read from a file other than the constant: each is a line
+//! this file does not have, and the test fails.
 //!
 //! Items under `#[cfg(test)]` are not the library and are skipped; `cfg(not(test))`
 //! and the `unix`/`windows` splits are the library and are read. Any other `cfg`, a `#[path]`, an item macro, a
@@ -86,6 +88,24 @@ fn path_literals(stream: TokenStream, out: &mut BTreeSet<String>) {
     }
 }
 
+/// How many `static` items or declarations `stream` holds (a `'static` lifetime is not one).
+/// A process-global is the one way an existing public function's body could carry a
+/// root from one call to another, so every one in the library is in the snapshot.
+fn static_keywords(stream: TokenStream) -> usize {
+    let mut count = 0;
+    let mut after_tick = false;
+    for token in stream {
+        let is_tick = matches!(&token, TokenTree::Punct(p) if p.as_char() == '\'');
+        match token {
+            TokenTree::Group(group) => count += static_keywords(group.stream()),
+            TokenTree::Ident(name) if name == "static" && !after_tick => count += 1,
+            _ => {}
+        }
+        after_tick = is_tick;
+    }
+    count
+}
+
 fn attributes(item: &Item) -> &[Attribute] {
     match item {
         Item::Const(i) => &i.attrs,
@@ -137,13 +157,31 @@ fn derives(attrs: &[Attribute]) -> String {
     attrs.iter().filter(|a| a.path().is_ident("derive") || a.path().is_ident("repr")).map(text).collect::<Vec<_>>().join(" ")
 }
 
+fn label(item: &Item) -> String {
+    match item {
+        Item::Fn(i) => i.sig.ident.to_string(),
+        Item::Const(i) => i.ident.to_string(),
+        Item::Static(i) => i.ident.to_string(),
+        Item::Struct(i) => i.ident.to_string(),
+        Item::Enum(i) => i.ident.to_string(),
+        Item::Trait(i) => i.ident.to_string(),
+        Item::Type(i) => i.ident.to_string(),
+        _ => "an item".to_string(),
+    }
+}
+
 fn walk(items: &[Item], path: &str, dir: &Path, out: &mut BTreeSet<String>) {
     for item in items {
         if !in_library(attributes(item), path) {
             continue;
         }
-        if !matches!(item, Item::Impl(_)) {
-            path_literals(without_docs(item.to_token_stream()), out);
+        if !matches!(item, Item::Impl(_) | Item::Mod(_)) {
+            let stream = without_docs(item.to_token_stream());
+            path_literals(stream.clone(), out);
+            let statics = static_keywords(stream);
+            if statics > 0 {
+                out.insert(format!("{path}: {statics} static keyword(s) in {}", label(item)));
+            }
         }
         match item {
             Item::Fn(f) if is_pub(&f.vis) => {
@@ -194,7 +232,12 @@ fn walk(items: &[Item], path: &str, dir: &Path, out: &mut BTreeSet<String>) {
                     if !in_library(attrs, path) {
                         continue;
                     }
-                    path_literals(without_docs(member.to_token_stream()), out);
+                    let stream = without_docs(member.to_token_stream());
+                    path_literals(stream.clone(), out);
+                    let statics = static_keywords(stream);
+                    if statics > 0 {
+                        out.insert(format!("{path}: {statics} static keyword(s) in a member of impl {}", text(&i.self_ty)));
+                    }
                     if i.trait_.is_none() {
                         match member {
                             ImplItem::Fn(f) if is_pub(&f.vis) => {
