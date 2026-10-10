@@ -2025,6 +2025,10 @@ mod tests {
         assert_eq!(refusal(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[spec_ref("2")])])), live_b, "a claiming holder");
         let claimed = MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: RunId::held(&run_key("b")) };
         assert_eq!(refusal(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[spec_ref("1")])])), claimed, "claims answer first");
+        // The holder is named by its literal key, not by the constructor that made the expectation above.
+        let MindRefusal::AlreadyLive { run } = refusal(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[])])) else { panic!("not live") };
+        assert_eq!(run.as_str(), format!("{INSTANCE}:run:b"));
+        assert_eq!(run.to_ref().id.0, format!("{INSTANCE}:run:b"));
     }
 
     /// The rule counts only in-force runs of hers of the same turn: an

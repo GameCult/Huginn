@@ -21,7 +21,7 @@ use eureka_pipeline::{
     Date, Label, PipelineDocument, PipelineKind, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRun, QuestionOption, ResolutionOutcome,
     RunOperator, RunTurn, Slug, pipeline_key,
 };
-use huginn_mind::{MindRefusal, PipelineAdmissionOutcome, PipelineFacts};
+use huginn_mind::{MindRefusal, PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts};
 
 use crate::control::Grant;
 use crate::queue::{Breaker, MindPort, any_of, breaker, citing, headers, in_force, of_kind, queue};
@@ -219,6 +219,17 @@ fn close_dead(mind: &dyn MindPort, run: &PipelineRef, now: DateTime<Utc>) -> Res
     }))
 }
 
+/// The in-force runs of hers (operated by the mind) of `turn` on `instance`,
+/// read from typed facts: the holders of that turn's slot. The one reader of
+/// the slot, for step 0 and for checking a holder admission names.
+fn holders(mind: &dyn MindPort, instance: &Slug, turn: RunTurn) -> Result<Vec<PipelineDocumentSummary>> {
+    let runs = headers(mind, &in_force(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0])))?;
+    Ok(runs
+        .into_iter()
+        .filter(|run| matches!(run.facts, PipelineFacts::Run { turn: held, operated_by: RunOperator::Mind, .. } if held == turn))
+        .collect())
+}
+
 pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOutcome> {
     let LaunchRequest { turn, claims, agent, grant } = request;
     let instance = ports.mind.instance().clone();
@@ -229,13 +240,8 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
     // in the batch that admits whatever comes next.
     let mut batch: Vec<PipelineDocument> = Vec::new();
     let mut ending: Vec<PipelineRef> = Vec::new();
-    for holder in headers(ports.mind, &in_force(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0])))? {
-        let PipelineFacts::Run { label: held, turn: held_turn, operated_by: RunOperator::Mind, .. } = &holder.facts else {
-            continue;
-        };
-        if *held_turn != turn {
-            continue;
-        }
+    for holder in holders(ports.mind, &instance, turn)? {
+        let PipelineFacts::Run { label: held, .. } = &holder.facts else { continue };
         if ports.launcher.alive(&instance, turn, held) || !past_grace(&holder.admission.admitted_at, now) {
             return Ok(LaunchOutcome::Busy { run: holder.id });
         }
@@ -282,8 +288,14 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
     let opened = PipelineRef { kind: PipelineKind::Run, id: key_of(&run)?.as_str().into() };
     batch.push(run);
     match ports.mind.admit(&agent, &label.0, batch)? {
-        PipelineAdmissionOutcome::Refused(MindRefusal::AlreadyLive { run: holder }) => {
-            return Ok(LaunchOutcome::Busy { run: holder.to_ref() });
+        // The holder is a claim until the mind shows it: a run of this instance's own, of this turn, in force.
+        PipelineAdmissionOutcome::Refused(MindRefusal::AlreadyLive { run: named }) => {
+            let held = named.to_ref();
+            return Ok(if holders(ports.mind, &instance, turn)?.iter().any(|holder| holder.id == held) {
+                LaunchOutcome::Busy { run: held }
+            } else {
+                LaunchOutcome::Refused(Declined::Admission(MindRefusal::AlreadyLive { run: named }))
+            });
         }
         answer => {
             if let Err(declined) = committed(answer) {
@@ -701,6 +713,53 @@ mod tests {
         let racing = Racing { inner: &rig.mind, raced: Cell::new(false) };
         assert_eq!(rig.launch_through(&racing, RunTurn::SelfRun, &[], five()), LaunchOutcome::Busy { run: run_ref("rival") });
         assert_eq!((rig.runs(), rig.started()), (1, 0));
+    }
+
+    #[test]
+    fn an_already_live_holder_the_mind_does_not_show_as_hers_is_refused_not_trusted() {
+        struct Forged<'a>(&'a TestMind, &'a str);
+        impl MindPort for Forged<'_> {
+            fn instance(&self) -> &Slug {
+                self.0.instance()
+            }
+
+            fn query(&self, selection: &Selection) -> Result<huginn_mind::PipelineSelectionPage> {
+                self.0.query(selection)
+            }
+
+            fn admit(&self, _agent: &str, _session: &str, _documents: Vec<PipelineDocument>) -> Result<Outcome> {
+                let run = huginn_mind::RunId::try_from(self.1.to_string()).unwrap();
+                Ok(Outcome::Refused(MindRefusal::AlreadyLive { run }))
+            }
+        }
+        let rig = Rig::new();
+        // A Persona turn of hers is live, and a Self run of hers is not: only a Self holder's name makes Busy.
+        rig.seed("persona", RunTurn::PersonaTurn, &[]);
+        for foreign in
+            ["other:run:mind-20261010T010203004Z", "eureka-body:run:mind-20261010T010203004Z", "yggdrasil:run:nobody", "yggdrasil:run:persona"]
+        {
+            let outcome = rig.launch_through(&Forged(&rig.mind, foreign), RunTurn::SelfRun, &[], five());
+            assert!(matches!(outcome, LaunchOutcome::Refused(Declined::Admission(MindRefusal::AlreadyLive { .. }))), "{foreign}: {outcome:?}");
+        }
+        rig.seed("self", RunTurn::SelfRun, &[]);
+        assert_eq!(
+            rig.launch_through(&Forged(&rig.mind, "yggdrasil:run:self"), RunTurn::SelfRun, &[], five()),
+            LaunchOutcome::Busy { run: run_ref("self") }
+        );
+        assert_eq!(rig.started(), 0);
+    }
+
+    #[test]
+    fn a_run_whose_unit_died_is_closed_by_the_next_launch_of_its_turn() {
+        let rig = Rig::new();
+        let LaunchOutcome::Launched { run: first } = rig.launch(RunTurn::SelfRun, &[], five()) else { panic!("not launched") };
+        let first_label = first.id.0.rsplit(':').next().unwrap().to_string();
+        rig.age(&first.id.0, 3600);
+        assert_eq!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Busy { run: first.clone() }, "its unit is still running");
+        rig.launcher.kill(&first_label);
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(!rig.in_force(&first_label));
+        assert_eq!(rig.started(), 2);
     }
 
     #[test]
