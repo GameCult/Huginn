@@ -10,7 +10,10 @@
 //! only after that batch commits. The run is the grant (target invariant
 //! run-is-the-grant), so there is no pressure file, lease or breaker state
 //! beside it, and a unit never starts without a committed run. A run opens
-//! only against a `Grant`, which `read_effective` alone makes. The primitive
+//! only against a `Grant`, which `read_effective` alone makes and which names
+//! the instance it was read for: a Grant of another instance is refused. A
+//! Persona turn's run opens with no claims, so a request that carries any is
+//! refused. The primitive
 //! owns no file and stops no unit: stopping her units is the operator's brake
 //! hold, which is another cut's.
 
@@ -33,9 +36,10 @@ pub const START_GRACE_S: i64 = 120;
 /// Starts the unit that carries a run, and says whether it is still running.
 /// Nothing here stops a unit.
 pub trait Launcher {
-    // The label names the run asked about; SystemdLauncher names its unit by instance and turn alone (ruling mind-unit-names).
-    fn start(&self, instance: &Slug, turn: RunTurn, label: &Label) -> Result<()>;
-    fn alive(&self, instance: &Slug, turn: RunTurn, label: &Label) -> bool;
+    /// Units are named by instance and turn alone (ruling mind-unit-names), so
+    /// liveness is keyed the same way.
+    fn start(&self, instance: &Slug, turn: RunTurn) -> Result<()>;
+    fn alive(&self, instance: &Slug, turn: RunTurn) -> bool;
 }
 
 /// The time the primitive reads: run labels, dates and receipts.
@@ -110,12 +114,12 @@ pub(crate) fn unit(instance: &Slug, turn: RunTurn) -> Result<String> {
 }
 
 impl Launcher for SystemdLauncher {
-    fn start(&self, instance: &Slug, turn: RunTurn, _label: &Label) -> Result<()> {
+    fn start(&self, instance: &Slug, turn: RunTurn) -> Result<()> {
         let reply = self.systemctl.run(&["start", "--no-block", &unit(instance, turn)?])?;
         if reply.success { Ok(()) } else { Err(anyhow!("systemctl did not start the unit")) }
     }
 
-    fn alive(&self, instance: &Slug, turn: RunTurn, _label: &Label) -> bool {
+    fn alive(&self, instance: &Slug, turn: RunTurn) -> bool {
         let Ok(unit) = unit(instance, turn) else {
             return false;
         };
@@ -157,6 +161,10 @@ pub enum Declined {
     AlreadyAdmitted,
     /// The run committed, its unit did not start, and the run was withdrawn.
     StartFailed,
+    /// The Grant was read for another instance than the mind's own.
+    GrantForOtherInstance,
+    /// A Persona turn's run opens with no claims (ruling wake-target).
+    PersonaRunTakesNoClaims,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,6 +241,12 @@ fn holders(mind: &dyn MindPort, instance: &Slug, turn: RunTurn) -> Result<Vec<Pi
 pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOutcome> {
     let LaunchRequest { turn, claims, agent, grant } = request;
     let instance = ports.mind.instance().clone();
+    if grant.instance() != &instance {
+        return Ok(LaunchOutcome::Refused(Declined::GrantForOtherInstance));
+    }
+    if turn == RunTurn::PersonaTurn && !claims.is_empty() {
+        return Ok(LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims));
+    }
     let now = ports.clock.now();
     let label = run_label(now);
 
@@ -241,8 +255,7 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
     let mut batch: Vec<PipelineDocument> = Vec::new();
     let mut ending: Vec<PipelineRef> = Vec::new();
     for holder in holders(ports.mind, &instance, turn)? {
-        let PipelineFacts::Run { label: held, .. } = &holder.facts else { continue };
-        if ports.launcher.alive(&instance, turn, held) || !past_grace(&holder.admission.admitted_at, now) {
+        if ports.launcher.alive(&instance, turn) || !past_grace(&holder.admission.admitted_at, now) {
             return Ok(LaunchOutcome::Busy { run: holder.id });
         }
         batch.push(close_dead(ports.mind, &holder.id, now)?);
@@ -303,7 +316,7 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
             }
         }
     }
-    if ports.launcher.start(&instance, turn, &label).is_err() {
+    if ports.launcher.start(&instance, turn).is_err() {
         let withdrawal = PipelineResolution {
             subject: opened,
             sequence: 1,
@@ -388,7 +401,7 @@ mod tests {
 
         fn try_launch_through(&self, mind: &dyn MindPort, turn: RunTurn, claims: &[PipelineRef], cap: Decimal) -> Result<LaunchOutcome> {
             let ports = Ports { mind, launcher: &self.launcher, clock: &self.clock, host: "yggdrasil-host" };
-            let grant = Grant::for_test(StdDuration::from_secs(60), cap);
+            let grant = Grant::for_test(Slug(INSTANCE.into()), StdDuration::from_secs(60), cap);
             open_and_launch(&ports, LaunchRequest { turn, claims: claims.to_vec(), agent: "agent-x".into(), grant })
         }
 
@@ -414,7 +427,7 @@ mod tests {
         /// A run of hers in force, with a unit that is running.
         fn seed(&self, label: &str, turn: RunTurn, claims: &[PipelineRef]) {
             self.mind.committed(vec![run(label, turn, RunOperator::Mind, claims)]);
-            self.launcher.revive(label);
+            self.launcher.revive(turn);
         }
 
         fn in_force(&self, run: &str) -> bool {
@@ -451,7 +464,7 @@ mod tests {
         assert_eq!(held.campaigns, vec![Slug(CAMPAIGN.into())]);
         assert_eq!(view.admission.provenance.agent.0, "agent-x");
         assert_eq!(view.admission.provenance.session.0, "mind-20261009T131500000Z");
-        assert_eq!(*rig.launcher.started.borrow(), vec![(Slug(INSTANCE.into()), RunTurn::SelfRun, label("mind-20261009T131500000Z"))]);
+        assert_eq!(*rig.launcher.started.borrow(), vec![(Slug(INSTANCE.into()), RunTurn::SelfRun)]);
     }
 
     #[test]
@@ -751,7 +764,7 @@ mod tests {
         let first_label = first.id.0.rsplit(':').next().unwrap().to_string();
         rig.age(&first.id.0, 3600);
         assert_eq!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Busy { run: first.clone() }, "its unit is still running");
-        rig.launcher.kill(&first_label);
+        rig.launcher.kill(RunTurn::SelfRun);
         assert!(matches!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Launched { .. }));
         assert!(!rig.in_force(&first_label));
         assert_eq!(rig.started(), 2);
@@ -833,6 +846,58 @@ mod tests {
         assert_eq!((rig.runs(), rig.started()), (3, 0));
     }
 
+    #[test]
+    fn a_grant_read_for_another_instance_opens_nothing_and_starts_nothing() {
+        let rig = Rig::new();
+        rig.mind.committed(vec![spec("x")]);
+        for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
+            let claims = if turn == RunTurn::SelfRun { vec![spec_ref("x")] } else { vec![] };
+            let ports = Ports { mind: &rig.mind, launcher: &rig.launcher, clock: &rig.clock, host: "yggdrasil-host" };
+            let grant = Grant::for_test(Slug("another-instance".into()), StdDuration::from_secs(60), five());
+            let outcome = open_and_launch(&ports, LaunchRequest { turn, claims, agent: "agent-x".into(), grant }).unwrap();
+            assert_eq!(outcome, LaunchOutcome::Refused(Declined::GrantForOtherInstance), "{turn:?}");
+        }
+        assert_eq!((rig.runs(), rig.started()), (0, 0));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()), LaunchOutcome::Launched { .. }), "the mind's own Grant launches");
+    }
+
+    #[test]
+    fn a_persona_turn_with_claims_is_refused_and_opens_nothing() {
+        let rig = Rig::new();
+        rig.mind.committed(vec![spec("x"), spec("blocked")]);
+        rig.mind.committed(vec![question_in("fork", &spec_ref("blocked"))]);
+        // A queued claim and a blocked one: neither opens a Persona run.
+        for item in ["x", "blocked"] {
+            let outcome = rig.launch(RunTurn::PersonaTurn, &[spec_ref(item)], five());
+            assert_eq!(outcome, LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims), "{item}");
+        }
+        assert_eq!((rig.runs(), rig.started()), (0, 0));
+        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
+    }
+
+    #[test]
+    fn a_persona_launch_closes_a_dead_persona_holder_past_the_grace() {
+        let rig = Rig::new();
+        rig.mind.committed(vec![run("pdead", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+        rig.age(&run_ref("pdead").id.0, START_GRACE_S - 1);
+        assert_eq!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Busy { run: run_ref("pdead") }, "inside the grace");
+        rig.age(&run_ref("pdead").id.0, START_GRACE_S);
+        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(!rig.in_force("pdead"));
+        assert_eq!(the_closure(&rig, "pdead", 1).0.outcome, ResolutionOutcome::Recorded { reason: "unit not active".into() });
+        assert_eq!((rig.runs(), rig.started()), (2, 1));
+    }
+
+    #[test]
+    fn a_live_self_run_does_not_make_a_persona_launch_busy_nor_does_a_dead_self_run_get_closed_by_it() {
+        let rig = Rig::new();
+        rig.seed("alive-self", RunTurn::SelfRun, &[]);
+        rig.mind.committed(vec![run("dead-self", RunTurn::SelfRun, RunOperator::Mind, &[])]);
+        rig.age(&run_ref("dead-self").id.0, 3600);
+        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(rig.in_force("alive-self") && rig.in_force("dead-self"), "a Persona launch reads and closes only Persona holders");
+    }
+
     struct Spy {
         calls: RefCell<Vec<Vec<String>>>,
         success: Cell<bool>,
@@ -858,11 +923,10 @@ mod tests {
     #[test]
     fn units_are_templated_by_instance_and_turn() {
         let (launcher, spy) = spied();
-        let l = label("mind-20261009T131500123Z");
         assert_eq!(unit(&eureka(), RunTurn::PersonaTurn).unwrap(), "mind-persona@eureka.service");
         assert_eq!(unit(&eureka(), RunTurn::SelfRun).unwrap(), "mind-self@eureka.service");
-        launcher.start(&eureka(), RunTurn::SelfRun, &l).unwrap();
-        launcher.start(&Slug("eureka.test".into()), RunTurn::PersonaTurn, &l).unwrap();
+        launcher.start(&eureka(), RunTurn::SelfRun).unwrap();
+        launcher.start(&Slug("eureka.test".into()), RunTurn::PersonaTurn).unwrap();
         assert_eq!(
             *spy.calls.borrow(),
             vec![vec!["start", "--no-block", "mind-self@eureka.service"], vec!["start", "--no-block", "mind-persona@eureka.test.service"],]
@@ -872,21 +936,20 @@ mod tests {
     #[test]
     fn a_unit_is_alive_while_active_activating_or_reloading() {
         let (launcher, spy) = spied();
-        let l = label("a");
         for (said, alive) in
             [("active\n", true), ("activating\n", true), ("reloading\n", true), ("inactive\n", false), ("failed\n", false), ("", false)]
         {
             *spy.stdout.borrow_mut() = said.to_string();
-            assert_eq!(launcher.alive(&eureka(), RunTurn::SelfRun, &l), alive, "{said:?}");
+            assert_eq!(launcher.alive(&eureka(), RunTurn::SelfRun), alive, "{said:?}");
         }
         assert_eq!(spy.calls.borrow()[0], vec!["is-active", "mind-self@eureka.service"]);
     }
 
     #[test]
-    fn a_failed_start_names_neither_instance_nor_label() {
+    fn a_failed_start_names_no_instance() {
         let (launcher, spy) = spied();
         spy.success.set(false);
-        let error = launcher.start(&Slug("canary-instance-7f3a91".into()), RunTurn::SelfRun, &label("canary-label-2c8d04")).unwrap_err();
+        let error = launcher.start(&Slug("canary-instance-7f3a91".into()), RunTurn::SelfRun).unwrap_err();
         let shown = format!("{error:#}");
         assert!(!shown.contains("canary"), "{shown}");
     }
@@ -914,9 +977,9 @@ b",
             "canary/9",
         ] {
             let instance = Slug(hostile.into());
-            let error = launcher.start(&instance, RunTurn::SelfRun, &label("ok")).unwrap_err();
+            let error = launcher.start(&instance, RunTurn::SelfRun).unwrap_err();
             assert!(!format!("{error:#}").contains("canary"), "{error:#}");
-            assert!(!launcher.alive(&instance, RunTurn::PersonaTurn, &label("ok")), "instance {hostile:?}");
+            assert!(!launcher.alive(&instance, RunTurn::PersonaTurn), "instance {hostile:?}");
         }
         assert!(spy.calls.borrow().is_empty(), "no hostile name reached systemctl: {:?}", spy.calls.borrow());
     }
@@ -924,10 +987,10 @@ b",
     #[test]
     fn a_unit_is_named_by_instance_and_turn_alone() {
         let (launcher, spy) = spied();
-        launcher.start(&eureka(), RunTurn::SelfRun, &label("mind-20261009T131500001Z")).unwrap();
-        launcher.start(&eureka(), RunTurn::SelfRun, &label("mind-20261009T131500002Z")).unwrap();
+        launcher.start(&eureka(), RunTurn::SelfRun).unwrap();
+        launcher.start(&eureka(), RunTurn::SelfRun).unwrap();
         let calls = spy.calls.borrow();
         assert_eq!(calls[0], calls[1], "two runs of one turn share a unit name");
-        assert!(!calls[0][2].contains("mind-2026"), "{:?}", calls[0]);
+        assert_eq!(calls[0][2], "mind-self@eureka.service");
     }
 }

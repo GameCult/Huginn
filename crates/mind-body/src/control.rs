@@ -2,7 +2,10 @@
 //!
 //! `Released` carries a `Grant`, the only value that hands a run cap to the
 //! launch: it cannot be built outside this module, so a cap exists only as the
-//! reading of a released brake and an in-bounds dial.
+//! reading of a released brake and an in-bounds dial. The Grant names the
+//! instance whose store was read, and that store's path is derived from the
+//! instance here, by the one reader: no caller supplies a path or a source, so
+//! a Grant is the proof that this instance's own root-owned store released.
 //!
 //! State is a CultCache single-file store at
 //! `/etc/gamecult/minds/<instance>/control.cc`, root-owned and world-readable.
@@ -121,16 +124,24 @@ pub enum Effective {
     Released(Grant),
 }
 
-/// The proof that the brake was released and the dial in bounds when read. Its
-/// fields are private and only `read_effective` makes one; `open_and_launch`
-/// takes it by value, so one reading opens at most one run.
+/// The proof that the brake was released and the dial in bounds when read, in
+/// the root-owned store of `instance`. Its fields are private and only
+/// `read_effective` makes one; `open_and_launch` takes it by value and refuses
+/// one read for another instance, so one reading opens at most one run, of the
+/// instance it was read for.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Grant {
+    instance: Slug,
     cadence: Duration,
     run_cap_usd: Decimal,
 }
 
 impl Grant {
+    /// The instance whose control store this was read from.
+    pub fn instance(&self) -> &Slug {
+        &self.instance
+    }
+
     /// How often she may wake.
     pub fn cadence(&self) -> Duration {
         self.cadence
@@ -141,9 +152,11 @@ impl Grant {
         self.run_cap_usd
     }
 
+    /// A Grant for a launch test that has no store. It names its instance like
+    /// any other, so the launch's instance check judges it.
     #[cfg(test)]
-    pub(crate) fn for_test(cadence: Duration, run_cap_usd: Decimal) -> Self {
-        Self { cadence, run_cap_usd }
+    pub(crate) fn for_test(instance: Slug, cadence: Duration, run_cap_usd: Decimal) -> Self {
+        Self { instance, cadence, run_cap_usd }
     }
 }
 
@@ -157,7 +170,7 @@ pub struct ControlState {
 impl ControlState {
     /// The one derivation. Order: brake first, then dial; each failing rung is
     /// its own reason.
-    fn effective(&self) -> Effective {
+    fn effective(&self, instance: &Slug) -> Effective {
         let held = |reason| Effective::Held { reason };
         let Some(brake) = &self.brake else {
             return held(HeldReason::BrakeAbsent);
@@ -172,7 +185,7 @@ impl ControlState {
             return held(HeldReason::DialOutOfBounds);
         }
         match (dial.cadence(), dial.run_cap_usd()) {
-            (Some(cadence), Some(run_cap_usd)) => Effective::Released(Grant { cadence, run_cap_usd }),
+            (Some(cadence), Some(run_cap_usd)) => Effective::Released(Grant { instance: instance.clone(), cadence, run_cap_usd }),
             _ => held(HeldReason::DialOutOfBounds),
         }
     }
@@ -220,11 +233,43 @@ pub fn load_state(source: &impl ControlSource) -> Result<ControlState> {
 }
 
 /// The only reader every organ uses (the waker now; the permit issuer and the
-/// Persona organ later).
-pub fn read_effective(source: &impl ControlSource) -> Effective {
-    match load_state(source) {
-        Ok(state) => state.effective(),
+/// Persona organ later). The store is `instance`'s own, at the path
+/// `control_path` derives under `root`; the caller supplies neither a path nor
+/// a source. An instance that is not a slug reads as held.
+pub fn read_effective(root: &Path, instance: &Slug) -> Effective {
+    match control_path(root, instance) {
+        Ok(path) => derive(&FileSource::new(path), instance),
         Err(_) => Effective::Held { reason: HeldReason::Undecodable },
+    }
+}
+
+fn derive(source: &impl ControlSource, instance: &Slug) -> Effective {
+    match load_state(source) {
+        Ok(state) => state.effective(instance),
+        Err(_) => Effective::Held { reason: HeldReason::Undecodable },
+    }
+}
+
+/// The same derivation over a fake store, for tests of the reader; the Grant it
+/// makes names the instance given, and the launch judges that like any other.
+#[cfg(test)]
+pub(crate) fn read_effective_from(source: &impl ControlSource, instance: &Slug) -> Effective {
+    derive(source, instance)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_source_that_fails_reads_as_held() {
+        struct Failing;
+        impl ControlSource for Failing {
+            fn snapshot(&self) -> Result<Vec<CultCacheEnvelope>> {
+                Err(anyhow::anyhow!("disk gone"))
+            }
+        }
+        assert_eq!(read_effective_from(&Failing, &Slug("eureka".into())), Effective::Held { reason: HeldReason::Undecodable });
     }
 }
 

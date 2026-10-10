@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{
-    CommitRange, CutVerification, Date, DocRef, Label, PipelineCampaign, PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
+    CommitRange, CutVerification, Date, DocRef, PipelineCampaign, PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
     PipelineInstance, PipelineKind, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, PipelineStewardship,
     PipelineTarget, QuestionOption, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Slug, StructuralDelta, TargetInvariant,
 };
@@ -37,38 +37,39 @@ impl Clock for Fixed {
     }
 }
 
-/// A launcher that records every start as (instance, turn, label), fails them
-/// on command, and answers `alive` from a set of labels: `start` fills it,
-/// `kill` empties it for a label and `revive` fills it for a seeded run.
+/// A launcher that records every start as (instance, turn), fails them on
+/// command, and answers `alive` per unit, which is what instance and turn name:
+/// `start` fills it, `kill` empties a turn's unit and `revive` fills it for a
+/// seeded run.
 #[derive(Default)]
 pub(crate) struct Recording {
-    pub(crate) started: RefCell<Vec<(Slug, RunTurn, Label)>>,
+    pub(crate) started: RefCell<Vec<(Slug, RunTurn)>>,
     pub(crate) fail: Cell<bool>,
-    running: RefCell<Vec<Label>>,
+    running: RefCell<Vec<(Slug, RunTurn)>>,
 }
 
 impl Recording {
-    pub(crate) fn kill(&self, run: &str) {
-        self.running.borrow_mut().retain(|label| label.0 != run);
+    pub(crate) fn kill(&self, turn: RunTurn) {
+        self.running.borrow_mut().retain(|unit| *unit != (Slug(INSTANCE.into()), turn));
     }
 
-    pub(crate) fn revive(&self, run: &str) {
-        self.running.borrow_mut().push(label(run));
+    pub(crate) fn revive(&self, turn: RunTurn) {
+        self.running.borrow_mut().push((Slug(INSTANCE.into()), turn));
     }
 }
 
 impl Launcher for Recording {
-    fn start(&self, instance: &Slug, turn: RunTurn, label: &Label) -> Result<()> {
+    fn start(&self, instance: &Slug, turn: RunTurn) -> Result<()> {
         if self.fail.get() {
             return Err(anyhow!("refused"));
         }
-        self.started.borrow_mut().push((instance.clone(), turn, label.clone()));
-        self.running.borrow_mut().push(label.clone());
+        self.started.borrow_mut().push((instance.clone(), turn));
+        self.running.borrow_mut().push((instance.clone(), turn));
         Ok(())
     }
 
-    fn alive(&self, _instance: &Slug, _turn: RunTurn, label: &Label) -> bool {
-        self.running.borrow().contains(label)
+    fn alive(&self, instance: &Slug, turn: RunTurn) -> bool {
+        self.running.borrow().contains(&(instance.clone(), turn))
     }
 }
 
@@ -379,10 +380,6 @@ pub(crate) fn history_as(mind: &TestMind, item: &PipelineRef, prefix: &str, runs
     for (n, leaves_something) in runs.iter().enumerate() {
         ended_run(mind, item, prefix, n, *leaves_something);
     }
-}
-
-pub(crate) fn label(value: &str) -> Label {
-    value.into()
 }
 
 /// A follow-up sourced from `source`: work a run may claim that the queue does

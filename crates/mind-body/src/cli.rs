@@ -49,7 +49,7 @@ pub fn run(args: &[String], root: &Path, set_by: &str, now: DateTime<Utc>, out: 
     let path = control_path(root, &instance)?;
     let words: Vec<&str> = command.iter().map(String::as_str).collect();
     match words.as_slice() {
-        ["show"] => show(&path, &instance, out),
+        ["show"] => show(root, &instance, out),
         ["brake", "hold"] => ControlWriter::open(&path)?.set_brake(false, now, set_by),
         ["brake", "release"] => ControlWriter::open(&path)?.set_brake(true, now, set_by),
         ["dial", "set", flags @ ..] => {
@@ -90,8 +90,8 @@ fn need<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str> {
     value.ok_or_else(|| anyhow!("{name} is required"))
 }
 
-fn show(path: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {
-    let source = FileSource::new(path);
+fn show(root: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {
+    let source = FileSource::new(control_path(root, instance)?);
     writeln!(out, "instance: {}", instance.0)?;
     match load_state(&source) {
         Ok(state) => {
@@ -120,6 +120,6 @@ fn show(path: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {
         }
         Err(error) => writeln!(out, "store: undecodable ({error:#})")?,
     }
-    writeln!(out, "effective: {:?}", read_effective(&source))?;
+    writeln!(out, "effective: {:?}", read_effective(root, instance))?;
     Ok(())
 }

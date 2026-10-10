@@ -286,6 +286,48 @@ mod tests {
     }
 
     #[test]
+    fn the_operators_self_runs_on_the_item_are_not_hers_to_count() {
+        let after_a_run_by = |operated_by: RunOperator| {
+            let (mind, item) = worked(&[E, E]);
+            mind.committed(vec![run("third", RunTurn::SelfRun, operated_by, std::slice::from_ref(&item))]);
+            mind.committed(vec![close(run_ref("third"), recorded())]);
+            breaker(&mind, &item, &[]).unwrap()
+        };
+        assert_eq!(after_a_run_by(RunOperator::Mind), Breaker::Trip, "hers, the third empty one");
+        assert_eq!(after_a_run_by(RunOperator::Operator), Breaker::Clear, "his, counted for nothing");
+    }
+
+    #[test]
+    fn the_fiftieth_newest_ended_run_is_counted() {
+        // Ten empty of exactly fifty, the tenth the oldest, never three in a row.
+        let mut runs = vec![E];
+        for _ in 0..9 {
+            runs.extend([E, N]);
+        }
+        runs.extend([N].repeat(31));
+        assert_eq!(runs.len(), WINDOW);
+        assert!(tripped(&runs));
+    }
+
+    #[test]
+    fn runs_born_closed_in_the_questions_batch_are_before_the_count() {
+        // One batch holds the question raised in x and two runs of hers on x, each closed at birth.
+        let (mind, item) = worked(&[]);
+        mind.committed(vec![
+            question_in("fork", &item),
+            run("pa", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)),
+            close(run_ref("pa"), recorded()),
+            run("pb", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)),
+            close(run_ref("pb"), recorded()),
+        ]);
+        // Then thirteen ended runs, nine of them empty and never three in a row.
+        let mut after: Vec<bool> = [E, E, N].repeat(4);
+        after.push(E);
+        history(&mind, &item, &after);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear, "the pair is not after the question, so the tenth empty run is not counted");
+    }
+
+    #[test]
     fn three_empty_runs_trip_after_any_history_of_non_empty_ones() {
         for before in [0usize, 1, 12, 20] {
             let mut runs = vec![N; before];

@@ -12,12 +12,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
 use chrono::{DateTime, TimeZone, Utc};
-use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore};
+use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
 use mind_body::control::{
-    BRAKE_KEY, BurnRate, ControlSource, ControlWriter, Effective, FileSource, HeldReason, control_path, load_state, read_effective,
+    BRAKE_KEY, BurnRate, ControlWriter, Effective, FileSource, HeldReason, control_path, load_state, read_effective,
 };
+use eureka_pipeline::Slug;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
@@ -33,8 +33,9 @@ fn dial(heat: &str, cooldown: u32, run_usd: &str) -> BurnRate {
     BurnRate { heat: dec(heat), base_cooldown_s: cooldown, base_run_usd: dec(run_usd), set_at: at(0), set_by: "op".into() }
 }
 
+/// The store of the instance `eureka` under the root `dir`.
 fn store_path(dir: &Path) -> PathBuf {
-    dir.join("control.cc")
+    dir.join("eureka").join("control.cc")
 }
 
 fn held(reason: HeldReason) -> Effective {
@@ -50,8 +51,12 @@ fn released_store(dir: &Path, dial: BurnRate) -> PathBuf {
     path
 }
 
+/// The reader's answer for the store at `<root>/<instance>/control.cc`: the
+/// reader derives that path itself from the root and the instance.
 fn effective(path: &Path) -> Effective {
-    read_effective(&FileSource::new(path))
+    let directory = path.parent().unwrap();
+    let instance = Slug(directory.file_name().unwrap().to_str().unwrap().into());
+    read_effective(directory.parent().unwrap(), &instance)
 }
 
 /// A dial written around the writer's bounds check, so the reader's own check
@@ -104,19 +109,8 @@ fn a_path_that_cannot_be_read_as_a_file_reads_as_held() {
     let dir = tempfile::tempdir().unwrap();
     // A directory sits where the store should be: it exists and cannot be read as a file.
     let path = store_path(dir.path());
-    std::fs::create_dir(&path).unwrap();
+    std::fs::create_dir_all(&path).unwrap();
     assert_eq!(effective(&path), held(HeldReason::Undecodable));
-}
-
-#[test]
-fn a_source_that_fails_reads_as_held() {
-    struct Failing;
-    impl ControlSource for Failing {
-        fn snapshot(&self) -> Result<Vec<CultCacheEnvelope>> {
-            Err(anyhow!("disk gone"))
-        }
-    }
-    assert_eq!(read_effective(&Failing), held(HeldReason::Undecodable));
 }
 
 #[test]
@@ -291,7 +285,6 @@ fn reading_writes_nothing_and_takes_no_lock_file() {
 
 #[test]
 fn the_control_path_is_derived_from_a_valid_instance_only() {
-    use eureka_pipeline::Slug;
     let root = Path::new(mind_body::control::CONTROL_ROOT);
     assert_eq!(control_path(root, &Slug("eureka".into())).unwrap(), root.join("eureka").join("control.cc"));
     for bad in ["", "../etc", "a/b", "A b", "eureka/.."] {
