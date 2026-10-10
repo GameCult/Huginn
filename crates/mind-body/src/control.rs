@@ -281,8 +281,8 @@ fn control_root() -> PathBuf {
     PathBuf::from(CONTROL_ROOT)
 }
 
-/// The test seam: this crate's own tests move the root for their thread. It
-/// does not exist in a library build, and it is not a cargo feature.
+// The test seam: this crate's own tests move the root for their thread. It
+// does not exist in a library build, and it is not a cargo feature.
 #[cfg(test)]
 thread_local! {
     static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
