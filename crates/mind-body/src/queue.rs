@@ -8,7 +8,7 @@
 
 use anyhow::{Result, anyhow, bail};
 use cultnet_rs::{Citation, FieldPredicate, Incoming, RecordRef, Selection};
-use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, Slug};
+use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
 use eureka_state::{ClientError, HuginnClient};
 use huginn_mind::{
     Faculty, HuginnMindRequest, HuginnMindResponse, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts,
@@ -113,41 +113,30 @@ pub(crate) fn in_force(selection: Selection) -> Selection {
     any_of(selection, "in_force", &["true"])
 }
 
-/// Every page of a selection, in the mind's order, handed to `visit` until it
-/// answers `false`. The one paging loop.
-fn scan(mind: &dyn MindPort, selection: &Selection, mut visit: impl FnMut(PipelineDocumentSummary) -> bool) -> Result<()> {
+/// Every page of a selection, in the mind's order. The one paging loop.
+pub(crate) fn headers(mind: &dyn MindPort, selection: &Selection) -> Result<Vec<PipelineDocumentSummary>> {
+    let mut all = Vec::new();
     let mut asking = selection.clone();
     loop {
         let page = mind.query(&asking)?;
         let PipelinePageItems::Headers(items) = page.items else { bail!("the mind answered documents to a header selection") };
-        for item in items {
-            if !visit(item) {
-                return Ok(());
-            }
-        }
+        all.extend(items);
         match page.next {
             Some(cursor) => asking.cursor = Some(cursor),
-            None => return Ok(()),
+            None => return Ok(all),
         }
     }
 }
 
-pub(crate) fn headers(mind: &dyn MindPort, selection: &Selection) -> Result<Vec<PipelineDocumentSummary>> {
-    let mut all = Vec::new();
-    scan(mind, selection, |header| {
-        all.push(header);
-        true
-    })?;
-    Ok(all)
-}
-
-/// The claims of the runs of `instance` that are still in force: the work
-/// someone holds.
-pub(crate) fn live_claims(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<PipelineRef>> {
+/// The claims of the runs of `instance` that are still in force and not in
+/// `ending`: the work someone holds.
+pub(crate) fn live_claims(mind: &dyn MindPort, instance: &Slug, ending: &[PipelineRef]) -> Result<Vec<PipelineRef>> {
     let runs = in_force(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]));
     let mut claims = Vec::new();
     for header in headers(mind, &runs)? {
-        if let PipelineFacts::Run { claims: held, .. } = header.facts {
+        if let PipelineFacts::Run { claims: held, .. } = header.facts
+            && !ending.contains(&header.id)
+        {
             claims.extend(held);
         }
     }
@@ -155,8 +144,10 @@ pub(crate) fn live_claims(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<Pi
 }
 
 /// What may be worked, oldest first: the cut specs in force that no report
-/// answers, that no open question blocks, and that no live run claims.
-pub fn queue(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<PipelineRef>> {
+/// answers, that no open question blocks, and that no live run claims. A run in
+/// `ending` is one the caller closes in the same admission that opens the next,
+/// so it claims nothing here.
+pub fn queue(mind: &dyn MindPort, instance: &Slug, ending: &[PipelineRef]) -> Result<Vec<PipelineRef>> {
     let unreported = Selection { cited: Some(Incoming { role: "cut_spec".into(), exists: false }), ..in_force(of_kind(PipelineKind::CutSpec)) };
     let mut blocked: Vec<PipelineRef> = Vec::new();
     for header in headers(mind, &in_force(of_kind(PipelineKind::Question)))? {
@@ -164,12 +155,8 @@ pub fn queue(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<PipelineRef>> {
             blocked.push(item);
         }
     }
-    let claimed = live_claims(mind, instance)?;
-    Ok(headers(mind, &unreported)?
-        .into_iter()
-        .map(|header| header.id)
-        .filter(|spec| !blocked.contains(spec) && !claimed.contains(spec))
-        .collect())
+    let claimed = live_claims(mind, instance, ending)?;
+    Ok(headers(mind, &unreported)?.into_iter().map(|header| header.id).filter(|spec| !blocked.contains(spec) && !claimed.contains(spec)).collect())
 }
 
 /// Whether an item may still be launched on.
@@ -179,44 +166,46 @@ pub enum Breaker {
     Trip,
 }
 
-/// The repetition breaker, derived from the item's Self runs and from what
-/// else the mind admitted.
+/// The repetition breaker, derived from the documents that cite the item.
 ///
-/// A run is a Self run of the item that claims it. A run that was withdrawn
-/// never ran and is no run here. An ended run is empty when no document other
-/// than a run of this item, or the resolution that closes one, was admitted
-/// from its own admission up to the next run's (or to now). Trip when the last
-/// `CONSECUTIVE` ended runs are empty, or `EMPTY_SHARE` of the last `WINDOW`.
-/// A document admitted after the last run, such as a ruling, makes that run
-/// non-empty, so reopening an item resets it.
-pub fn breaker(mind: &dyn MindPort, item: &PipelineRef) -> Result<Breaker> {
-    let claiming = Citation { target: RecordRef::new(item.kind.type_id(), item.id.0.clone()), role: Some("claims".into()) };
-    let runs = headers(mind, &Selection { cites: Some(claiming), ..any_of(of_kind(PipelineKind::Run), "turn", &["SelfRun"]) })?;
-    let withdrawn = |run: &PipelineDocumentSummary| {
-        matches!(run.status, PipelineStatusSummary::Resolved { outcome: ResolutionOutcome::Withdrawn { .. }, .. })
-    };
-    // (admission ordinal, ended) of each run that ran, oldest first.
-    let ran: Vec<(u64, bool)> = runs
+/// One role-less citation selection over every schema gives the set: the runs
+/// that claim the item, and whatever else points at it (a follow-up sourced
+/// from it, a report, a resolution, a question raised in it). The newest
+/// question raised in the item is the boundary: only runs admitted after it
+/// count, so answering a trip starts a fresh count. A counted run is a Self run
+/// of hers (typed `turn` and `operated_by`) that was not withdrawn; a
+/// withdrawn run never ran and is no run here. A counted run is ended when
+/// resolved or listed in `ending`, and is empty when no document of the set
+/// other than a run was admitted from its own admission up to the next counted
+/// run's (or to now). Trip when the last `CONSECUTIVE` ended runs are empty, or
+/// `EMPTY_SHARE` of the last `WINDOW`. What else the mind admitted, such as a
+/// Persona turn's run or an unrelated ruling, cites nothing here and counts for
+/// nothing.
+pub fn breaker(mind: &dyn MindPort, item: &PipelineRef, ending: &[PipelineRef]) -> Result<Breaker> {
+    let citing = Citation { target: RecordRef::new(item.kind.type_id(), item.id.0.clone()), role: None };
+    let mut set = headers(mind, &Selection { cites: Some(citing), ..Selection::default() })?;
+    set.sort_by_key(|header| header.admission.ordinal);
+    let boundary = set
         .iter()
-        .filter(|run| !withdrawn(run))
-        .map(|run| (run.admission.ordinal, matches!(run.status, PipelineStatusSummary::Resolved { .. })))
+        .filter(|header| matches!(&header.facts, PipelineFacts::Question { raised_in: Some(raised), .. } if raised == item))
+        .map(|header| header.admission.ordinal)
+        .max();
+    let after = |header: &&PipelineDocumentSummary| boundary.is_none_or(|boundary| header.admission.ordinal > boundary);
+    let withdrawn =
+        |run: &PipelineDocumentSummary| matches!(run.status, PipelineStatusSummary::Resolved { outcome: ResolutionOutcome::Withdrawn { .. }, .. });
+    // (admission ordinal, ended) of each counted run, oldest first.
+    let ran: Vec<(u64, bool)> = set
+        .iter()
+        .filter(after)
+        .filter(|header| {
+            matches!(header.facts, PipelineFacts::Run { turn: RunTurn::SelfRun, operated_by: RunOperator::Mind, .. }) && !withdrawn(header)
+        })
+        .map(|run| (run.admission.ordinal, matches!(run.status, PipelineStatusSummary::Resolved { .. }) || ending.contains(&run.id)))
         .collect();
     let ended: Vec<usize> = (0..ran.len()).filter(|index| ran[*index].1).collect();
     let considered: Vec<usize> = ended.iter().rev().take(WINDOW).copied().collect();
-    let Some(oldest) = considered.last().map(|index| ran[*index].0) else { return Ok(Breaker::Clear) };
-
-    let run_ids: Vec<&PipelineRef> = runs.iter().map(|run| &run.id).collect();
-    let mut admitted = Vec::new();
-    scan(mind, &Selection { descending: true, ..Selection::default() }, |header| {
-        if header.admission.ordinal < oldest {
-            return false;
-        }
-        let closes_a_run = matches!(&header.facts, PipelineFacts::Resolution { subject, .. } if run_ids.contains(&subject));
-        if !run_ids.contains(&&header.id) && !closes_a_run {
-            admitted.push(header.admission.ordinal);
-        }
-        true
-    })?;
+    let admitted: Vec<u64> =
+        set.iter().filter(|header| !matches!(header.facts, PipelineFacts::Run { .. })).map(|header| header.admission.ordinal).collect();
 
     // Newest first, like `considered`.
     let empty: Vec<bool> = considered
@@ -255,7 +244,7 @@ mod tests {
 
     fn tripped(runs: &[bool]) -> bool {
         let (mind, item) = worked(runs);
-        breaker(&mind, &item).unwrap() == Breaker::Trip
+        breaker(&mind, &item, &[]).unwrap() == Breaker::Trip
     }
 
     #[test]
@@ -293,17 +282,66 @@ mod tests {
     }
 
     #[test]
+    fn three_empty_runs_trip_after_any_history_of_non_empty_ones() {
+        for before in [0usize, 1, 12, 20] {
+            let mut runs = vec![N; before];
+            runs.extend([E, E, E]);
+            assert!(tripped(&runs), "{before} non-empty runs then three empty ones");
+            assert!(!tripped(&[vec![N; before], vec![E, E]].concat()), "two empty ones never trip");
+        }
+    }
+
+    #[test]
+    fn only_documents_that_cite_the_item_make_a_run_non_empty() {
+        let (mind, item) = worked(&[]);
+        mind.committed(vec![spec("other")]);
+        for n in 0..3 {
+            // A Persona turn's run, a ruling and a follow-up of another item all land in the window.
+            mind.committed(vec![run(&format!("p{n}"), RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+            mind.committed(vec![ruling(&format!("r{n}"), None), follow_up(&format!("o{n}"), &spec_ref("other"))]);
+            ended_run(&mind, &item, "h", n, false);
+            mind.committed(vec![close(run_ref(&format!("p{n}")), recorded())]);
+        }
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip);
+    }
+
+    #[test]
+    fn a_run_in_ending_is_an_ended_empty_run() {
+        let (mind, item) = worked(&[E, E]);
+        mind.committed(vec![run("dying", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item))]);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear, "open, it is not yet ended");
+        assert_eq!(breaker(&mind, &item, &[run_ref("dying")]).unwrap(), Breaker::Trip);
+        let instance = Slug(INSTANCE.into());
+        assert!(queue(&mind, &instance, &[]).unwrap().iter().all(|spec| *spec != item), "it claims the item");
+        assert!(queue(&mind, &instance, &[run_ref("dying")]).unwrap().contains(&item), "an ending run claims nothing");
+    }
+
+    #[test]
+    fn the_newest_question_in_the_item_starts_a_fresh_count() {
+        // Nine empty of the last fifty, then a question about the item is raised and answered.
+        let (mind, item) = worked(&[E, E, N, E, E, N, E, E, N, E, E, N, E]);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear);
+        mind.committed(vec![question_in("fork", &item)]);
+        mind.committed(vec![ruling("answer", Some((&id("question", "fork"), "A")))]);
+        ended_run(&mind, &item, "g", 0, false);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear, "the tenth empty run, but nine of them are before the question");
+        ended_run(&mind, &item, "g", 1, false);
+        ended_run(&mind, &item, "g", 2, false);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip, "three empty runs after it");
+    }
+
+    #[test]
     fn a_withdrawn_run_never_ran_and_is_no_boundary() {
         let withdrawn_between = |ruling_after: bool| {
             let (mind, item) = worked(&[E]);
             mind.committed(vec![run("w", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item))]);
             mind.committed(vec![close(run_ref("w"), withdrawn())]);
             if ruling_after {
-                mind.committed(vec![ruling("after", None)]);
+                mind.committed(vec![follow_up("after", &item)]);
             }
             ended_run(&mind, &item, "h", 1, false);
             ended_run(&mind, &item, "h", 2, false);
-            breaker(&mind, &item).unwrap()
+            breaker(&mind, &item, &[]).unwrap()
         };
         assert_eq!(withdrawn_between(false), Breaker::Trip, "the withdrawn run is neither counted nor does it break the streak");
         assert_eq!(withdrawn_between(true), Breaker::Clear, "a document after the withdrawn run still lands in the first run's window");
@@ -313,13 +351,13 @@ mod tests {
     fn a_runs_window_includes_its_own_batch_and_stops_before_the_next_runs() {
         let (mind, item) = worked(&[E, E]);
         // The third run opens with a ruling in its batch; it is still open.
-        mind.committed(vec![run("h2", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)), ruling("with-run", None)]);
+        mind.committed(vec![run("h2", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)), follow_up("with-run", &item)]);
         mind.committed(vec![close(run_ref("h2"), recorded())]);
-        assert_eq!(breaker(&mind, &item).unwrap(), Breaker::Clear, "the ruling in its own batch is in its window");
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear, "the ruling in its own batch is in its window");
 
         let (mind, item) = worked(&[E, E, E]);
-        mind.committed(vec![run("live", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)), ruling("with-next", None)]);
-        assert_eq!(breaker(&mind, &item).unwrap(), Breaker::Trip, "the next run's batch is not the previous run's window");
+        mind.committed(vec![run("live", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)), follow_up("with-next", &item)]);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip, "the next run's batch is not the previous run's window");
     }
 
     /// The adapter over the wire vocabulary, answered by a real mind.
@@ -329,11 +367,14 @@ mod tests {
         mind.committed(vec![spec("x")]);
         let port = HuginnMind::over(Slug(INSTANCE.into()), Box::new(|request| Ok(mind.answer(request))));
         assert_eq!(port.instance().0, INSTANCE);
-        assert_eq!(queue(&port, port.instance()).unwrap(), vec![spec_ref("x")]);
+        assert_eq!(queue(&port, port.instance(), &[]).unwrap(), vec![spec_ref("x")]);
         let outcome = port.admit("agent-x", "session-y", vec![run("p", RunTurn::PersonaTurn, RunOperator::Mind, &[])]).unwrap();
         assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
         let facts = mind.view(PipelineKind::Run, &run_ref("p").id.0).unwrap().admission.provenance;
-        assert_eq!((facts.faculty, facts.agent.0.as_str(), facts.session.0.as_str(), facts.tool.0.as_str()), (Faculty::SelfFaculty, "agent-x", "session-y", "mind-body"));
+        assert_eq!(
+            (facts.faculty, facts.agent.0.as_str(), facts.session.0.as_str(), facts.tool.0.as_str()),
+            (Faculty::SelfFaculty, "agent-x", "session-y", "mind-body")
+        );
         let refused = port.query(&any_of(of_kind(PipelineKind::Ruling), "turn", &["canary-turn-5d2e"])).unwrap_err();
         assert!(format!("{refused:#}").contains("refused the query"));
         assert!(!format!("{refused:#}").contains("canary"), "{refused:#}");
@@ -345,18 +386,18 @@ mod tests {
         mind.committed(vec![spec("x"), spec("y")]);
         history_as(&mind, &spec_ref("x"), "x", &[E, E]);
         history_as(&mind, &spec_ref("y"), "y", &[E, E, E]);
-        assert_eq!(breaker(&mind, &spec_ref("x")).unwrap(), Breaker::Clear);
-        assert_eq!(breaker(&mind, &spec_ref("y")).unwrap(), Breaker::Trip);
+        assert_eq!(breaker(&mind, &spec_ref("x"), &[]).unwrap(), Breaker::Clear);
+        assert_eq!(breaker(&mind, &spec_ref("y"), &[]).unwrap(), Breaker::Trip);
     }
 
     #[test]
     fn the_oldest_counted_runs_own_batch_is_in_its_window() {
         let (mind, item) = worked(&[]);
-        mind.committed(vec![run("h0", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)), ruling("with-oldest", None)]);
+        mind.committed(vec![run("h0", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)), follow_up("with-oldest", &item)]);
         mind.committed(vec![close(run_ref("h0"), recorded())]);
         ended_run(&mind, &item, "h", 1, false);
         ended_run(&mind, &item, "h", 2, false);
-        assert_eq!(breaker(&mind, &item).unwrap(), Breaker::Clear);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear);
     }
 
     #[test]
@@ -365,18 +406,18 @@ mod tests {
         mind.committed(vec![spec("a"), spec("b"), spec("c"), spec("d"), spec("e")]);
         let instance = Slug(INSTANCE.into());
         let all: Vec<PipelineRef> = ["a", "b", "c", "d", "e"].iter().map(|cut| spec_ref(cut)).collect();
-        assert_eq!(queue(&mind, &instance).unwrap(), all);
+        assert_eq!(queue(&mind, &instance, &[]).unwrap(), all);
 
         mind.committed(vec![report("b")]);
         mind.committed(vec![question_in("fork", &spec_ref("c"))]);
         mind.committed(vec![run("held", RunTurn::SelfRun, RunOperator::Operator, &[spec_ref("d")])]);
-        assert_eq!(queue(&mind, &instance).unwrap(), vec![spec_ref("a"), spec_ref("e")]);
+        assert_eq!(queue(&mind, &instance, &[]).unwrap(), vec![spec_ref("a"), spec_ref("e")]);
 
         mind.committed(vec![close(run_ref("held"), recorded())]);
-        assert_eq!(queue(&mind, &instance).unwrap(), vec![spec_ref("a"), spec_ref("d"), spec_ref("e")], "a closed run claims nothing");
+        assert_eq!(queue(&mind, &instance, &[]).unwrap(), vec![spec_ref("a"), spec_ref("d"), spec_ref("e")], "a closed run claims nothing");
         let other = Slug("another-instance".into());
         mind.committed(vec![run("again", RunTurn::SelfRun, RunOperator::Operator, &[spec_ref("a")])]);
-        assert_eq!(queue(&mind, &other).unwrap().len(), 3, "claims are read for the instance asked");
+        assert_eq!(queue(&mind, &other, &[]).unwrap().len(), 3, "claims are read for the instance asked");
     }
 
     /// A daemon that is not there: the failure names no input, endpoint or
@@ -386,7 +427,7 @@ mod tests {
         let canary = "canary-instance-7f3a91";
         let endpoint: SocketAddr = "127.0.0.1:9".parse().unwrap();
         let port = HuginnMind::new(HuginnClient::new(endpoint, Slug(canary.into()), Duration::from_millis(300)));
-        let error = queue(&port, &Slug(canary.into())).unwrap_err();
+        let error = queue(&port, &Slug(canary.into()), &[]).unwrap_err();
         let shown = format!("{error:#}");
         assert!(shown.contains("unavailable"), "{shown}");
         assert!(!shown.contains(canary) && !shown.contains("127.0.0.1"), "{shown}");

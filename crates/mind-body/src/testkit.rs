@@ -8,13 +8,13 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{
-    CommitRange, CutVerification, Date, DocRef, Label, PipelineCampaign, PipelineCutReport, PipelineCutSpec, PipelineDocument,
-    PipelineFollowUp, PipelineInstance, PipelineKind, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, PipelineStewardship,
+    CommitRange, CutVerification, Date, DocRef, Label, PipelineCampaign, PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
+    PipelineInstance, PipelineKind, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, PipelineStewardship,
     PipelineTarget, QuestionOption, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Slug, StructuralDelta, TargetInvariant,
 };
 use huginn_mind::{
-    Faculty, HuginnMindRequest, HuginnMindResponse, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineDocumentView, PipelineProvenance,
-    PipelineSelectionPage,
+    Faculty, HuginnMindRequest, HuginnMindResponse, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome,
+    PipelineDocumentView, PipelineProvenance, PipelineSelectionPage,
 };
 use tempfile::TempDir;
 
@@ -37,24 +37,38 @@ impl Clock for Fixed {
     }
 }
 
-/// A launcher that records every start, and fails them on command.
+/// A launcher that records every start as (instance, turn, label), fails them
+/// on command, and answers `alive` from a set of labels: `start` fills it,
+/// `kill` empties it for a label and `revive` fills it for a seeded run.
 #[derive(Default)]
 pub(crate) struct Recording {
-    pub(crate) started: RefCell<Vec<(RunTurn, Label)>>,
+    pub(crate) started: RefCell<Vec<(Slug, RunTurn, Label)>>,
     pub(crate) fail: Cell<bool>,
+    running: RefCell<Vec<Label>>,
+}
+
+impl Recording {
+    pub(crate) fn kill(&self, run: &str) {
+        self.running.borrow_mut().retain(|label| label.0 != run);
+    }
+
+    pub(crate) fn revive(&self, run: &str) {
+        self.running.borrow_mut().push(label(run));
+    }
 }
 
 impl Launcher for Recording {
-    fn start(&self, turn: RunTurn, label: &Label) -> Result<()> {
+    fn start(&self, instance: &Slug, turn: RunTurn, label: &Label) -> Result<()> {
         if self.fail.get() {
             return Err(anyhow!("refused"));
         }
-        self.started.borrow_mut().push((turn, label.clone()));
+        self.started.borrow_mut().push((instance.clone(), turn, label.clone()));
+        self.running.borrow_mut().push(label.clone());
         Ok(())
     }
 
-    fn alive(&self, _turn: RunTurn, _label: &Label) -> bool {
-        false
+    fn alive(&self, _instance: &Slug, _turn: RunTurn, label: &Label) -> bool {
+        self.running.borrow().contains(label)
     }
 }
 
@@ -341,14 +355,14 @@ pub(crate) fn withdrawn() -> ResolutionOutcome {
 }
 
 /// Her Self run on `item`, ended, as `n` in a history: opened, closed, and
-/// followed by a ruling when `leaves_something` (the one document that makes it
-/// non-empty).
+/// followed by a follow-up sourced from `item` when `leaves_something` (the
+/// document that cites the item, which makes the run non-empty).
 pub(crate) fn ended_run(mind: &TestMind, item: &PipelineRef, prefix: &str, n: usize, leaves_something: bool) {
     let label = format!("{prefix}{n}");
     mind.committed(vec![run(&label, RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(item))]);
     let mut closing = vec![close(run_ref(&label), recorded())];
     if leaves_something {
-        closing.push(ruling(&format!("left{n}"), None));
+        closing.push(follow_up(&format!("{prefix}left{n}"), item));
     }
     mind.committed(closing);
 }
