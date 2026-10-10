@@ -104,3 +104,24 @@ fn scalar(value: &Value) -> Option<String> {
         Value::String(_) | Value::Null => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_fact_is_one_token_or_nothing() {
+        assert_eq!(scalar(&json!("")), None);
+        assert_eq!(scalar(&json!("a b")), Some("a b".to_string()));
+        assert_eq!(scalar(&json!(3)), Some("3".to_string()));
+        assert_eq!(scalar(&json!(true)), Some("true".to_string()));
+        assert_eq!(scalar(&json!(["a", "", "b"])), Some("a,b".to_string()));
+        assert_eq!(scalar(&json!([])), None);
+        assert_eq!(scalar(&json!(null)), None);
+        assert_eq!(scalar(&json!({ "kind": "Ruling", "id": "c:ruling:R1" })), Some("c:ruling:R1".to_string()));
+        assert_eq!(scalar(&json!({ "id": 3 })), None);
+        assert_eq!(scalar(&json!({ "Withdrawn": { "reason": "moot" } })), None);
+    }
+}

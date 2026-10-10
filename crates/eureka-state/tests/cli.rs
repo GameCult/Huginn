@@ -268,7 +268,7 @@ fn whoami_reads_the_live_mind() {
     let lines: Vec<&str> = ran.out.lines().collect();
     assert_eq!(lines[0], format!("instance {INSTANCE}"));
     assert_eq!(lines[1], format!("endpoint rudp://{}", server.addr));
-    assert!(lines[2].starts_with("client "), "{lines:?}");
+    assert_eq!(lines[2], format!("client {}", option_env!("HUGINN_BUILD_SHA").unwrap_or("unknown")));
     assert_eq!(lines[3], "reachable yes");
     assert_eq!(lines[4], "documents 2 receipts 2 index Current epoch epiphany.pipeline.epoch.v2");
     assert_eq!(lines.len(), 5);
@@ -491,18 +491,40 @@ fn a_field_the_mind_dropped_is_reported_with_the_receipt_printed() {
 #[test]
 fn a_difference_deep_in_a_list_names_its_path() {
     let dir = tempfile::tempdir().unwrap();
-    let sent = serde_json::from_value::<PipelineDocument>(spec("A")).unwrap();
+    let mut sent = serde_json::from_value::<PipelineDocument>(spec("A")).unwrap();
+    let rulings = |document: &mut PipelineDocument, ids: &[&str]| {
+        if let PipelineDocument::CutSpec(value) = document {
+            value.rulings = ids.iter().map(|id| Short(format!("{CAMPAIGN}:ruling:{id}"))).collect();
+        }
+    };
+    rulings(&mut sent, &["R1"]);
+    let file = write(&dir, "spec.json", &json!([sent]));
+
     let mut stored = sent.clone();
+    rulings(&mut stored, &["R2"]);
     if let PipelineDocument::CutSpec(value) = &mut stored {
-        value.rulings = vec![Short("x:ruling:R1".into())];
         value.title = "Another".into();
     }
-    let file = write(&dir, "spec.json", &json!([sent]));
     let server = committing(vec![view_of(&stored)]);
     let ran = at(server.addr, &admit_args(&file), None);
     assert_eq!(ran.code, 5);
-    assert!(ran.err.contains("value.rulings[0]") || ran.err.contains("value.rulings"), "{}", ran.err);
-    assert!(ran.err.contains("value.title"), "{}", ran.err);
+    assert!(ran.err.contains("value.rulings[0], value.title;"), "{}", ran.err);
+
+    let mut longer = sent.clone();
+    rulings(&mut longer, &["R1", "R2"]);
+    let server = committing(vec![view_of(&longer)]);
+    let ran = at(server.addr, &admit_args(&file), None);
+    assert_eq!(ran.code, 5);
+    assert!(ran.err.contains("value.rulings;"), "{}", ran.err);
+    assert!(!ran.err.contains("rulings["), "{}", ran.err);
+}
+
+#[test]
+fn a_full_batch_passes_the_door() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "full.json", &json!((0..64).map(|_| campaign_json()).collect::<Vec<_>>()));
+    let ran = at(closed_port(), &admit_args(&file), None);
+    assert_eq!(ran.code, 3, "64 documents are a batch; the daemon is what is down: {}", ran.err);
 }
 
 #[test]
@@ -788,7 +810,8 @@ fn recipes_list_what_the_mind_holds() {
     let whole = at(server.addr, &["ledger", CAMPAIGN], None);
     assert_eq!(whole.code, 0, "{}", whole.err);
     assert_eq!(whole.out.matches("admitted ").count(), 3, "{}", whole.out);
-    assert!(whole.out.contains("\n\n"), "documents are separated by a blank line: {}", whole.out);
+    assert!(!whole.out.starts_with('\n'), "{}", whole.out);
+    assert_eq!(whole.out.matches("\n\n").count(), 2, "documents are separated by one blank line: {}", whole.out);
 
     let documents = at(server.addr, &["campaigns", "--documents"], None);
     assert!(documents.out.contains("\nadmitted "), "{}", documents.out);
@@ -916,7 +939,8 @@ fn help_is_the_schema_surface() {
 
     let version = run(&[], &["--version"], None);
     assert_eq!(version.code, 0);
-    assert!(version.out.starts_with(&format!("huginn {} (", env!("CARGO_PKG_VERSION"))), "{}", version.out);
+    let sha = option_env!("HUGINN_BUILD_SHA").unwrap_or("unknown");
+    assert_eq!(version.out, format!("huginn {} ({sha})\n", env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
