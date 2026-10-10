@@ -46,7 +46,9 @@ A Cargo workspace of three crates:
   the process, and no rule. The operation envelope both sides speak is
   `huginn-mind`'s.
 - `crates/eureka-state`: the client core, `HuginnClient::call`: one request to a
-  daemon over CultNet RUDP, a deferred answer resolved, and no state.
+  daemon over CultNet RUDP, a deferred answer resolved, and no state. Its
+  `huginn` binary is the agents' CLI: whoami, view, query and named recipes,
+  admit with read-back, schema.
 
 `huginn-mind` is live: it opens one instance's store (an owned redb CultCache
 at `<state_root>/minds/<instance>/mind.redb`, locked for the mind's lifetime),
