@@ -899,7 +899,7 @@ mod tests {
                 out.insert(format!("{name}{}", pad.to_string().repeat(width - chars.len())));
             }
         }
-        for copies in [2, 3, 8, 40] {
+        for copies in [2, 3, 8, 40, 400, 4000] {
             out.insert(name.repeat(copies));
         }
         out.insert(name.to_uppercase());
