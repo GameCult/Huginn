@@ -1,0 +1,21 @@
+# The brake's root is a constant: no function, argument, variable or flag lets a
+# caller choose it (control.rs). The strongest form of "no variable" is that no
+# code in this crate can read the process's environment at all, whatever name it
+# would read, so the rule is a lint on the readers and not a list of names.
+# `#![forbid(clippy::disallowed_methods)]` in lib.rs keeps the library from
+# allowing them back; the binary (main.rs) and the one integration test that
+# spawns itself (tests/control.rs) carry the only allows, each with its reason.
+disallowed-methods = [
+    { path = "std::env::var", reason = "the process environment is caller-chosen input; the brake's root is CONTROL_ROOT" },
+    { path = "std::env::var_os", reason = "the process environment is caller-chosen input; the brake's root is CONTROL_ROOT" },
+    { path = "std::env::vars", reason = "the process environment is caller-chosen input; the brake's root is CONTROL_ROOT" },
+    { path = "std::env::vars_os", reason = "the process environment is caller-chosen input; the brake's root is CONTROL_ROOT" },
+    { path = "std::env::set_var", reason = "the process environment is caller-chosen input; the brake's root is CONTROL_ROOT" },
+    { path = "std::env::remove_var", reason = "the process environment is caller-chosen input; the brake's root is CONTROL_ROOT" },
+    { path = "std::env::args", reason = "the command line is caller-chosen input; only main.rs reads it" },
+    { path = "std::env::args_os", reason = "the command line is caller-chosen input; only main.rs reads it" },
+    { path = "std::env::current_exe", reason = "the executable's location is caller-chosen; the brake's root is CONTROL_ROOT" },
+    { path = "std::env::temp_dir", reason = "reads TMPDIR; the brake's root is CONTROL_ROOT" },
+    { path = "std::env::home_dir", reason = "reads HOME; the brake's root is CONTROL_ROOT" },
+    { path = "libc::getenv", reason = "the process environment is caller-chosen input; the brake's root is CONTROL_ROOT" },
+]

@@ -19,6 +19,9 @@ fn restrict_umask() {
 #[cfg(not(unix))]
 fn restrict_umask() {}
 
+// The binary is the one place that reads the process: its arguments and the
+// operator's name. The library reads neither (clippy.toml, `#![forbid]` in lib.rs).
+#[allow(clippy::disallowed_methods, reason = "the binary reads its own arguments and the operator's name, and hands them to the library")]
 fn main() {
     restrict_umask();
     let args: Vec<String> = std::env::args().skip(1).collect();

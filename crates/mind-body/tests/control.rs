@@ -9,6 +9,11 @@
 //! as root (the verify container does); the tests that need a second user become
 //! uid 65534 with setpriv and skip with a message when they cannot.
 
+// The suite re-executes its own test binary as the writer children, and passes
+// each child its role and paths through the environment. That is test plumbing in
+// its own crate: it reaches no library code, which `#![forbid]`s these readers.
+#![allow(clippy::disallowed_methods, reason = "the suite re-executes itself and hands each child its role through the environment")]
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

@@ -1,12 +1,13 @@
 //! The brake-grant rule seen from outside the crate: the only reader takes the
 //! instance, so whatever a caller builds elsewhere (a store in a temporary
 //! directory, a symlink to another instance's directory, a copy of another
-//! instance's store, the relative root `.`, a tree that every environment
-//! variable points at) is never what a Grant is made from.
-//! The signature half of the rule (no root argument, no source reader, no
-//! struct literal, no test constructor) is the `compile_fail` examples on
-//! `read_effective`; this is the behavioural half, committed because it is the
-//! only defence of the rule against a forged store.
+//! instance's store, the relative root `.`) is never what a Grant is made from.
+//! The rest of the rule is held where it is decided, not here: the library's
+//! public surface is pinned as a whole (tests/public_surface.rs: no new public
+//! way to set a root or build a Grant), the process environment and command line
+//! are unreadable by library code (clippy.toml, `#![forbid]` in lib.rs), and the
+//! `compile_fail` examples on `read_effective` show the signature half. This is
+//! the behavioural half against a forged store.
 
 #![cfg(unix)]
 
@@ -64,60 +65,4 @@ fn no_forged_store_yields_a_grant() {
     let relative = reads(FORGED);
     std::env::set_current_dir(before).unwrap();
     assert!(matches!(relative, Effective::Held { .. }), "relative root");
-
-    // A root named by the environment. The forged tree is laid out for a value
-    // used as the root itself and for one with `minds` joined on, and every
-    // variable the process has, with the names an implementation would likely
-    // read, is pointed at it. A variable of a name neither list holds is not
-    // reached; the library build having no `std::env` reader is the rest of it.
-    let environed = tempfile::tempdir().unwrap();
-    release(environed.path(), FORGED);
-    std::fs::create_dir_all(environed.path().join("minds")).unwrap();
-    release(&environed.path().join("minds"), FORGED);
-    let value = environed.path().as_os_str().to_owned();
-    let mut names: Vec<std::ffi::OsString> = std::env::vars_os().map(|(name, _)| name).collect();
-    names.extend(GUESSED_ROOT_VARIABLES.iter().map(Into::into));
-    let saved: Vec<_> = names.iter().map(|name| (name.clone(), std::env::var_os(name))).collect();
-    // SAFETY: this file's one test is the only thread touching the environment.
-    unsafe {
-        for name in &names {
-            std::env::set_var(name, &value);
-        }
-    }
-    let through_environment = reads(FORGED);
-    unsafe {
-        for (name, before) in saved {
-            match before {
-                Some(before) => std::env::set_var(name, before),
-                None => std::env::remove_var(name),
-            }
-        }
-    }
-    assert!(matches!(through_environment, Effective::Held { .. }), "root from an environment variable");
 }
-
-/// Names a caller-chosen root would plausibly be read from.
-const GUESSED_ROOT_VARIABLES: [&str; 22] = [
-    "MIND_CONTROL_ROOT",
-    "MIND_BODY_ROOT",
-    "MIND_ROOT",
-    "MINDS_ROOT",
-    "MINDS_DIR",
-    "CONTROL_ROOT",
-    "CONTROL_DIR",
-    "GAMECULT_MINDS",
-    "GAMECULT_ROOT",
-    "HUGINN_ROOT",
-    "HUGINN_HOME",
-    "EUREKA_ROOT",
-    "EUREKA_HOME",
-    "EUREKA_INSTANCE_ROOT",
-    "STATE_DIRECTORY",
-    "CONFIGURATION_DIRECTORY",
-    "RUNTIME_DIRECTORY",
-    "XDG_CONFIG_HOME",
-    "XDG_STATE_HOME",
-    "XDG_DATA_HOME",
-    "HOME",
-    "TMPDIR",
-];

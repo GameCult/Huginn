@@ -9,6 +9,11 @@
 //! repetition breaker, the one-live-Self-run rule, and the single path that
 //! opens a run in the mind and only then starts its unit.
 
+// The control root is a constant, so the library reads no part of the process
+// environment (clippy.toml lists the readers); `forbid` keeps an `allow` from
+// putting one back.
+#![forbid(clippy::disallowed_methods)]
+
 pub mod cli;
 pub mod control;
 pub mod launch;
