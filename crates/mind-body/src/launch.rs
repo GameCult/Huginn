@@ -338,7 +338,20 @@ mod tests {
             // One live Persona turn of hers at a time (admission): end this one.
             rig.mind.committed(vec![close(run, recorded())]);
         }
-        assert_eq!(rig.started(), 3, "a Persona turn is never Busy");
+        assert_eq!(rig.started(), 3, "each Persona turn ended before the next opened, so none was refused");
+    }
+
+    #[test]
+    fn a_second_live_persona_turn_is_refused_by_admission_and_starts_nothing() {
+        let rig = Rig::new();
+        let LaunchOutcome::Launched { run } = rig.launch(RunTurn::PersonaTurn, &[], five()) else { panic!("not launched") };
+        rig.at(1);
+        let second = rig.launch(RunTurn::PersonaTurn, &[], five());
+        let LaunchOutcome::Refused(Declined::Admission(MindRefusal::AlreadyLive { run: holder })) = second else {
+            panic!("not refused as live: {second:?}")
+        };
+        assert_eq!(holder.to_ref(), run);
+        assert_eq!((rig.runs(), rig.started()), (1, 1));
     }
 
     #[test]

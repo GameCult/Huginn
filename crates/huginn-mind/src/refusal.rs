@@ -3,7 +3,7 @@
 //! serialises it, the tools (Cut 13) show it.
 
 use cultnet_rs::SelectionRefusal;
-use eureka_pipeline::{PipelineKind, PipelineRefusal};
+use eureka_pipeline::{PipelineKind, PipelineRef, PipelineRefusal, Short};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -57,11 +57,11 @@ pub enum MindRefusal {
     NotStewarded { repo: String },
     /// A run claims work another run in force already holds: `item` is the
     /// claimed document's id and `run` the id of the run that holds it.
-    AlreadyClaimed { item: String, run: String },
+    AlreadyClaimed { item: String, run: RunId },
     /// A run of hers opens, or is reinstated, while another in-force run of
     /// hers of the same instance and turn is live: `run` is the holder's id
     /// (ruling one-live-self-run).
-    AlreadyLive { run: String },
+    AlreadyLive { run: RunId },
     /// The one refusal a mind never raises: the answer exceeds the largest
     /// body the organ will deliver by any plane, one send or a deferred body.
     /// It lives here because a refusal rides the response schema and there is
@@ -118,6 +118,50 @@ impl From<SelectionRefusal> for MindRefusal {
     }
 }
 
+/// The id of a run: a full pipeline id of kind Run. A refusal that names a
+/// holder carries one, so a reader gets a run's id from the wire only if it
+/// parses as one; a peer cannot fill it with any other string. The only ways
+/// in are `TryFrom<String>`, which every deserialized value passes, and the
+/// admission rules, which name a run the mind holds. The error is a fixed
+/// message: it never echoes the offered value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct RunId(String);
+
+impl RunId {
+    /// The id as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The reference to the run this id names.
+    pub fn to_ref(&self) -> PipelineRef {
+        PipelineRef { kind: PipelineKind::Run, id: Short(self.0.clone()) }
+    }
+
+    /// The key of a run the mind holds, which admission already held to the
+    /// grammar when it admitted the run.
+    pub(crate) fn held(key: &str) -> Self {
+        Self(key.into())
+    }
+}
+
+impl TryFrom<String> for RunId {
+    type Error = &'static str;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        let candidate = PipelineRef { kind: PipelineKind::Run, id: Short(id) };
+        candidate.validate_ref().map_err(|_| "not a run id")?;
+        Ok(Self(candidate.id.0))
+    }
+}
+
+impl From<RunId> for String {
+    fn from(id: RunId) -> Self {
+        id.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +194,21 @@ mod tests {
             to_key: "j".into(),
         };
         assert!(matches!(MindRefusal::from(outside), MindRefusal::Unavailable { .. }));
+    }
+
+    /// A run id from the wire is a run's id or nothing: other kinds' ids and
+    /// arbitrary strings are refused, and the refusal never repeats the text.
+    #[test]
+    fn a_run_id_is_a_run_key_and_never_any_other_string() {
+        let held = "eureka:run:mind-1";
+        let id: RunId = serde_json::from_str(&format!("\"{held}\"")).unwrap();
+        assert_eq!((id.as_str(), serde_json::to_string(&id).unwrap()), (held, format!("\"{held}\"")));
+        assert_eq!(id.to_ref(), PipelineRef { kind: PipelineKind::Run, id: Short(held.into()) });
+        for bad in ["not even a key", "eureka:cut_spec:cut-x.r1", "eureka:run:", "eureka:run:a:b", ""] {
+            let error = serde_json::from_str::<RunId>(&format!("\"{bad}\"")).unwrap_err().to_string();
+            assert!(error.contains("not a run id") && (bad.is_empty() || !error.contains(bad)), "{error}");
+        }
+        let wire = serde_json::from_str::<MindRefusal>(r#"{"AlreadyLive":{"run":"not even a key"}}"#);
+        assert!(wire.is_err());
     }
 }

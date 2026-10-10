@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use crate::docs::{CitationRole, Docs, Staged, citations, kind_of_id, outcome_citations};
 use crate::mind::{HuginnMindEpoch, Mind, unavailable};
 use crate::receipt::{self, CommitOutcome, PipelineProvenance};
-use crate::refusal::MindRefusal;
+use crate::refusal::{MindRefusal, RunId};
 use crate::store::MindStore;
 
 /// The most envelopes one batch may carry.
@@ -542,11 +542,11 @@ fn run_rule(docs: &Docs, run_key: &str, run: &PipelineRun, replay: bool) -> Resu
             return Err(MindRefusal::CitesResolvedDocument { kind: claim.kind, id: claim.id.0.clone() });
         }
         if let Some(holder) = docs.claim_holder(run_key, claim) {
-            return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: holder.into() });
+            return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: RunId::held(holder) });
         }
     }
-    if !replay && let Some(holder) = docs.live_holder(run_key, run) {
-        return Err(MindRefusal::AlreadyLive { run: holder.into() });
+    if !replay && docs.in_force(K::Run, run_key) && let Some(holder) = docs.live_holder(run_key, run) {
+        return Err(MindRefusal::AlreadyLive { run: RunId::held(holder) });
     }
     Ok(())
 }
@@ -1994,7 +1994,7 @@ mod tests {
     fn a_second_run_on_a_live_claim_is_already_claimed() {
         let mut mind = with_specs();
         committed(admit(&mut mind, vec![run("a", &[spec_ref("1")])]));
-        let claimed = MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: run_key("a") };
+        let claimed = MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: RunId::held(&run_key("a")) };
         assert_eq!(refusal(admit(&mut mind, vec![run("b", &[spec_ref("1")])])), claimed);
         assert_eq!(refusal(admit(&mut mind, vec![run("b", &[spec_ref("2"), spec_ref("1")])])), claimed, "any one held claim refuses the run");
         committed(admit(&mut mind, vec![run("b", &[spec_ref("2")])]));
@@ -2016,14 +2016,14 @@ mod tests {
     fn a_second_live_run_of_hers_of_one_turn_is_already_live() {
         let mut mind = with_specs();
         committed(admit(&mut mind, vec![mind_run("a", RunTurn::SelfRun, &[])]));
-        let live_a = MindRefusal::AlreadyLive { run: run_key("a") };
+        let live_a = MindRefusal::AlreadyLive { run: RunId::held(&run_key("a")) };
         assert_eq!(refusal(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[])])), live_a, "a claimless holder");
         assert_eq!(refusal(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[spec_ref("1")])])), live_a);
         committed(admit(&mut mind, vec![recorded("a")]));
         committed(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[spec_ref("1")])]));
-        let live_b = MindRefusal::AlreadyLive { run: run_key("b") };
+        let live_b = MindRefusal::AlreadyLive { run: RunId::held(&run_key("b")) };
         assert_eq!(refusal(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[spec_ref("2")])])), live_b, "a claiming holder");
-        let claimed = MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: run_key("b") };
+        let claimed = MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: RunId::held(&run_key("b")) };
         assert_eq!(refusal(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[spec_ref("1")])])), claimed, "claims answer first");
     }
 
@@ -2038,7 +2038,7 @@ mod tests {
         committed(admit(&mut mind, vec![run("op1", &[])]));
         committed(admit(&mut mind, vec![run("op2", &[])]));
         committed(admit(&mut mind, vec![mind_run("p", RunTurn::PersonaTurn, &[])]));
-        let live_p = MindRefusal::AlreadyLive { run: run_key("p") };
+        let live_p = MindRefusal::AlreadyLive { run: RunId::held(&run_key("p")) };
         assert_eq!(refusal(admit(&mut mind, vec![mind_run("p2", RunTurn::PersonaTurn, &[])])), live_p);
         committed(admit(&mut mind, vec![recorded("a")]));
         committed(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[])]));
@@ -2048,6 +2048,33 @@ mod tests {
         let mut operator_only = with_specs();
         committed(admit(&mut operator_only, vec![run("op", &[])]));
         committed(admit(&mut operator_only, vec![mind_run("a", RunTurn::SelfRun, &[])]));
+    }
+
+    /// The slot is keyed on instance and turn alone: a holder that started
+    /// earlier, on another host and under another budget still blocks.
+    #[test]
+    fn a_holder_that_differs_in_start_host_and_budget_still_holds_the_slot() {
+        let mut mind = with_specs();
+        let D::Run(mut holder) = mind_run("a", RunTurn::SelfRun, &[]) else { unreachable!() };
+        holder.started_on = eureka_pipeline::Date("2026-01-01".into());
+        holder.host = s("elsewhere");
+        holder.budget_usd = s("9");
+        committed(admit(&mut mind, vec![D::Run(holder)]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[])])),
+            MindRefusal::AlreadyLive { run: RunId::held(&run_key("a")) }
+        );
+    }
+
+    /// A run opened and closed in one batch is never live, so a live holder
+    /// of its turn does not refuse it; it holds no slot afterwards either.
+    #[test]
+    fn a_run_born_closed_beside_a_live_holder_is_admitted() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![mind_run("a", RunTurn::SelfRun, &[])]));
+        committed(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[]), recorded("b")]));
+        committed(admit(&mut mind, vec![recorded("a")]));
+        committed(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[])]));
     }
 
     /// Two runs of hers of one turn in one batch hold nothing: the batch is
@@ -2072,13 +2099,13 @@ mod tests {
         committed(admit(&mut mind, vec![mind_run("b", RunTurn::SelfRun, &[])]));
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution(closure.clone(), withdrawn())])),
-            MindRefusal::AlreadyLive { run: run_key("b") }
+            MindRefusal::AlreadyLive { run: RunId::held(&run_key("b")) }
         );
         committed(admit(&mut mind, vec![recorded("b")]));
         committed(admit(&mut mind, vec![resolution(closure, withdrawn())]));
         assert_eq!(
             refusal(admit(&mut mind, vec![mind_run("c", RunTurn::SelfRun, &[])])),
-            MindRefusal::AlreadyLive { run: run_key("a") },
+            MindRefusal::AlreadyLive { run: RunId::held(&run_key("a")) },
             "the reinstated run holds the slot"
         );
     }
@@ -2151,7 +2178,7 @@ mod tests {
         committed(admit(&mut mind, vec![run("c", &[spec_ref("1")])]));
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution(closure.clone(), withdrawn())])),
-            MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: run_key("c") }
+            MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: RunId::held(&run_key("c")) }
         );
 
         let mut free = with_specs();
@@ -2173,7 +2200,7 @@ mod tests {
             committed(admit(&mut mind, vec![run("c", &[spec_ref(held)])]));
             assert_eq!(
                 refusal(admit(&mut mind, vec![resolution(closure.clone(), withdrawn())])),
-                MindRefusal::AlreadyClaimed { item: spec_ref(expected).id.0, run: run_key("c") }
+                MindRefusal::AlreadyClaimed { item: spec_ref(expected).id.0, run: RunId::held(&run_key("c")) }
             );
         }
     }
@@ -2206,7 +2233,7 @@ mod tests {
         committed(admit(&mut mind, vec![run("a", &[spec_ref("2"), spec_ref("1")])]));
         assert_eq!(
             refusal(admit(&mut mind, vec![run("b", &[spec_ref("1")])])),
-            MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: run_key("a") }
+            MindRefusal::AlreadyClaimed { item: spec_ref("1").id.0, run: RunId::held(&run_key("a")) }
         );
     }
 

@@ -49,7 +49,7 @@ pub use query::{
     PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, Ranked, SUMMARY_MAX_BYTES, SemanticQuery,
 };
 pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
-pub use refusal::MindRefusal;
+pub use refusal::{MindRefusal, RunId};
 pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{
     DeferredAnswer, HuginnMindRequest, HuginnMindResponse, IndexStatus, MAX_DEFERRED_BODY_BYTES, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON,
