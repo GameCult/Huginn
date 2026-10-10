@@ -48,11 +48,15 @@ pub fn documents(text: &str) -> Result<Vec<PipelineDocument>, Trouble> {
         object @ Value::Object(_) => vec![object],
         _ => return Err(Trouble::invalid("the documents must be a JSON array of {kind, value} objects")),
     };
-    items
-        .into_iter()
-        .enumerate()
-        .map(|(index, item)| strict(item, &format!("documents[{index}]")))
-        .collect()
+    let mut typed = Vec::with_capacity(items.len());
+    let mut lost = Vec::new();
+    for (index, item) in items.into_iter().enumerate() {
+        let (document, paths) = decode(item, &format!("documents[{index}]"))?;
+        typed.push(document);
+        lost.extend(paths);
+    }
+    refuse_lost(&lost)?;
+    Ok(typed)
 }
 
 pub fn selection(text: &str) -> Result<Selection, Trouble> {
@@ -60,7 +64,9 @@ pub fn selection(text: &str) -> Result<Selection, Trouble> {
 }
 
 pub fn selection_value(value: Value) -> Result<Selection, Trouble> {
-    strict(value, "selection")
+    let (selection, lost) = decode(value, "selection")?;
+    refuse_lost(&lost)?;
+    Ok(selection)
 }
 
 /// The kind a pipeline id names in its middle segment (`<root>:<kind>:<local>`).
@@ -80,13 +86,23 @@ fn parse(text: &str) -> Result<Value, Trouble> {
     serde_json::from_str(text).map_err(|error| Trouble::invalid(format!("not JSON: {error}")))
 }
 
-fn strict<T: Serialize + DeserializeOwned>(input: Value, at: &str) -> Result<T, Trouble> {
+/// The typed value of one JSON object and the paths its decode lost. Serde
+/// would also read a struct from an array, positionally, so only an object
+/// is a document or a selection.
+fn decode<T: Serialize + DeserializeOwned>(input: Value, at: &str) -> Result<(T, Vec<String>), Trouble> {
+    if !input.is_object() {
+        return Err(Trouble::invalid(format!("{at} must be a JSON object")));
+    }
     let typed: T = serde_json::from_value(input.clone()).map_err(|error| Trouble::invalid(format!("{at} does not decode: {error}")))?;
     let kept = serde_json::to_value(&typed).map_err(|error| Trouble::Internal(format!("{at} does not re-serialise: {error}")))?;
     let mut paths = Vec::new();
     dropped(&input, &kept, at, &mut paths);
+    Ok((typed, paths))
+}
+
+fn refuse_lost(paths: &[String]) -> Result<(), Trouble> {
     if paths.is_empty() {
-        Ok(typed)
+        Ok(())
     } else {
         Err(Trouble::invalid(format!("keys the schema does not know (`huginn schema` prints it): {}", paths.join(", "))))
     }

@@ -394,6 +394,7 @@ fn a_document_that_does_not_decode_is_invalid_input() {
     let cases = [
         (json!([{ "kind": "nonsense", "value": {} }]), "documents[0] does not decode"),
         (json!("text"), "JSON array"),
+        (json!([[]]), "documents[0] must be a JSON object"),
         (json!([]), "1 to 64"),
         (json!((0..65).map(|_| campaign_json()).collect::<Vec<_>>()), "1 to 64"),
     ];
@@ -832,7 +833,7 @@ fn a_resolved_document_shows_its_closing_record() {
     let resolution = json!({
         "kind": "resolution",
         "value": {
-            "subject": { "kind": "question", "id": format!("{CAMPAIGN}:question:Q1") },
+            "subject": { "kind": "Question", "id": format!("{CAMPAIGN}:question:Q1") },
             "sequence": 1,
             "outcome": { "Withdrawn": { "reason": "moot" } },
             "rationale": "Resolved.",
