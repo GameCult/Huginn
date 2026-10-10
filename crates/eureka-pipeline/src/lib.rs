@@ -805,7 +805,7 @@ macro_rules! pipeline_kinds {
         /// shape, not a document's.
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-        #[allow(clippy::large_enum_variant, reason = "a document is a transient wrapper around one value; boxing a variant would change every construction site")]
+        #[allow(clippy::large_enum_variant, reason = "one value per request or per batch of at most 64; boxing a variant would buy no memory and change every construction site")]
         pub enum PipelineDocument { $($variant($value)),* }
 
         impl PipelineKind {
@@ -1908,7 +1908,7 @@ mod tests {
         // refuses this one: the digits rule is satisfied either way.
         refused(&format!("{CAMPAIGN}:cut_spec:cut-3a.1"));
         refused(&format!("{CAMPAIGN}:CUT_SPEC:cut-3a.r1"));
-        refused(&format!("EUREKA-STATE:cut_spec:cut-3a.r1"));
+        refused("EUREKA-STATE:cut_spec:cut-3a.r1");
         refused(&format!("{CAMPAIGN}:cut_spec:cut-3a.r1:"));
         refused(&format!("{CAMPAIGN}::cut-3a.r1"));
         refused("cut-3a.r1");

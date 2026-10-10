@@ -102,11 +102,10 @@ impl HuginnMindRequest {
 /// transport failure: the read side carries `Refused`, the write side carries
 /// the outcome's own `Refused`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[allow(clippy::large_enum_variant, reason = "one answer per request; a document view is the answer a reader asked for")]
 pub enum HuginnMindResponse {
     Whoami(MindStatus),
     Admit(PipelineAdmissionOutcome),
-    View(Option<PipelineDocumentView>),
+    View(Option<Box<PipelineDocumentView>>),
     Query(PipelineSelectionPage),
     Refused(MindRefusal),
     /// The answer did not fit one send and is being held for the client to
