@@ -889,13 +889,20 @@ mod tests {
     }
 
     #[test]
-    fn a_live_self_run_does_not_make_a_persona_launch_busy_nor_does_a_dead_self_run_get_closed_by_it() {
+    fn a_live_self_run_does_not_make_a_persona_launch_busy() {
         let rig = Rig::new();
         rig.seed("alive-self", RunTurn::SelfRun, &[]);
+        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(rig.in_force("alive-self"));
+    }
+
+    #[test]
+    fn a_dead_self_run_is_not_closed_by_a_persona_launch() {
+        let rig = Rig::new();
         rig.mind.committed(vec![run("dead-self", RunTurn::SelfRun, RunOperator::Mind, &[])]);
         rig.age(&run_ref("dead-self").id.0, 3600);
         assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
-        assert!(rig.in_force("alive-self") && rig.in_force("dead-self"), "a Persona launch reads and closes only Persona holders");
+        assert!(rig.in_force("dead-self"), "a Persona launch closes only Persona holders");
     }
 
     struct Spy {
