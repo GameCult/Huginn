@@ -516,12 +516,13 @@ mod tests {
         // A store written before this type existed opens unchanged.
         assert!(Mind::open_with(planted(base()), &yggdrasil).is_ok());
 
-        // One persona opens and reads back.
+        // One persona opens; a planted row has no writing receipt, so the door and the status both call it unreadable.
         let mut with_one = base();
         with_one.push(entry(INSTANCE, persona(INSTANCE, T1)));
         let mind = Mind::open_with(planted(with_one.clone()), &yggdrasil).unwrap();
         assert_eq!(mind.envelopes().len(), 3);
-        assert_eq!(persona_in_status(&mind), crate::wire::PersonaStatus::Stored { updated_at: T1.into() });
+        assert_eq!(persona_in_status(&mind), crate::wire::PersonaStatus::Unreadable);
+        assert!(mind.persona().is_err());
 
         // Two are no mind's.
         with_one.push(entry("second", persona(INSTANCE, T2)));
