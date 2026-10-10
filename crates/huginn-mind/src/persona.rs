@@ -13,7 +13,8 @@ use std::sync::OnceLock;
 
 use cultcache_rs::{CultCacheEnvelope, DatabaseEntry};
 use jsonschema::paths::LocationSegment;
-use jsonschema::{ValidationErrorKind, Validator};
+use jsonschema::error::ValidationErrorKind;
+use jsonschema::Validator;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

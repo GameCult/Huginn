@@ -260,7 +260,7 @@ impl EurekaState {
         description = "Admit one batch of pipeline documents into the mind, whole or not at all. Returns the outcome: committed with a receipt, already admitted, conflict, or a typed refusal. The instance is this server's configuration; do not pass one."
     )]
     async fn admit(&self, Parameters(input): Parameters<AdmitInput>) -> CallToolResult {
-        self.answer(|instance| {
+        self.answer(move |instance| {
             HuginnMindRequest::Admit(PipelineAdmissionBatch {
                 instance,
                 provenance: PipelineProvenance {
@@ -277,14 +277,14 @@ impl EurekaState {
 
     #[tool(description = "Read one document by id, with its admission facts and status. null when the mind has no such document.")]
     async fn view(&self, Parameters(input): Parameters<ViewInput>) -> CallToolResult {
-        self.answer(|instance| HuginnMindRequest::View { instance, id: input.id }).await
+        self.answer(move |instance| HuginnMindRequest::View { instance, id: input.id }).await
     }
 
     #[tool(
         description = "Query the mind with a CultNet typed selection, optionally ranked by semantic nearness. Returns one page; pass its cursor back in the selection for the next."
     )]
     async fn query(&self, Parameters(input): Parameters<QueryInput>) -> CallToolResult {
-        self.answer(|instance| HuginnMindRequest::Query {
+        self.answer(move |instance| HuginnMindRequest::Query {
             instance,
             selection: input.selection,
             semantic: input.semantic,

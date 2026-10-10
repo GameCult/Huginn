@@ -78,6 +78,60 @@
       "required": [
         "Query"
       ]
+    },
+    {
+      "description": "The mind's persona document, if one is stored.",
+      "type": "object",
+      "properties": {
+        "PersonaGet": {
+          "type": "object",
+          "properties": {
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            }
+          },
+          "required": [
+            "instance"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "PersonaGet"
+      ]
+    },
+    {
+      "description": "Replaces the mind's persona document whole. `expected_updated_at` is\nthe stored document's `updatedAt`, none for the first put. The\nprovenance is the asker's, as for `Admit`.",
+      "type": "object",
+      "properties": {
+        "PersonaPut": {
+          "type": "object",
+          "properties": {
+            "expected_updated_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            },
+            "provenance": {
+              "$ref": "#/$defs/PipelineProvenance"
+            },
+            "state": true
+          },
+          "required": [
+            "instance",
+            "provenance",
+            "state"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "PersonaPut"
+      ]
     }
   ],
   "$defs": {
