@@ -271,6 +271,28 @@ mod tests {
         assert_eq!(names, BTreeSet::from(["a", "b", "c", "e"].map(String::from)));
     }
 
+    /// `identity-write-all-visible`: a put may change any field, the identity
+    /// fields included, and a change the next second is no less admissible.
+    #[test]
+    fn a_put_may_rewrite_identity_fields_and_every_change_lands() {
+        let store = MemoryStore::new();
+        let mut mind = seeded_over(&store);
+        committed(put(&mut mind, persona(INSTANCE, T1), None));
+
+        let mut renamed = persona(INSTANCE, T2);
+        renamed["publicName"] = json!("A New Name");
+        renamed["publicDescription"] = json!("who she says she is");
+        renamed["presentation"] = json!({ "voiceSummary": "warmer", "pronouns": "she/her" });
+        renamed["values"] = json!([{ "id": "v1", "label": "candor", "priority": 0.9 }]);
+        committed(put(&mut mind, renamed.clone(), Some(T1)));
+        assert_eq!(mind.persona().unwrap().unwrap().value, renamed);
+
+        let mut again = persona(INSTANCE, T3);
+        again["publicName"] = json!("Another Name");
+        committed(put(&mut mind, again.clone(), Some(T2)));
+        assert_eq!(mind.persona().unwrap().unwrap().value, again);
+    }
+
     #[test]
     fn the_view_names_the_receipt_of_the_latest_put() {
         let store = MemoryStore::new();
