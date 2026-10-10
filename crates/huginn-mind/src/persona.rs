@@ -559,7 +559,9 @@ mod tests {
             store.plant(row);
             let mind = Mind::open_with(store, &yggdrasil).unwrap();
             assert_eq!(persona_in_status(&mind), status);
-            assert_eq!(mind.persona().is_err(), status == crate::wire::PersonaStatus::Unreadable);
+            if status == crate::wire::PersonaStatus::Unreadable {
+                assert!(matches!(mind.persona(), Err(MindRefusal::Unavailable { .. })), "the door answers what the status says");
+            }
         }
         assert_eq!(persona_in_status(&seeded_over(&MemoryStore::new())), crate::wire::PersonaStatus::Absent);
     }

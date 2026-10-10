@@ -270,7 +270,7 @@ fn the_persona_tools_round_trip_against_a_live_daemon() {
     assert!(!error);
     assert_eq!(nothing, Value::Null);
     let (_, whoami) = mcp.call("whoami", json!({}));
-    assert_eq!(whoami["status"]["persona"], Value::Null);
+    assert_eq!(whoami["status"]["persona"], json!("Absent"));
 
     let (error, committed) = mcp.call("persona_put", put(persona(INSTANCE, T1), None));
     assert!(!error);
@@ -281,7 +281,7 @@ fn the_persona_tools_round_trip_against_a_live_daemon() {
     assert_eq!(view["value"], persona(INSTANCE, T1));
     assert_eq!((view["updated_at"].as_str(), view["receipt_id"].as_str()), (Some(T1), Some(receipt.as_str())));
     let (_, whoami) = mcp.call("whoami", json!({}));
-    assert_eq!(whoami["status"]["persona"], json!(T1));
+    assert_eq!(whoami["status"]["persona"], json!({ "Stored": { "updated_at": T1 } }));
 
     let (error, stale) = mcp.call("persona_put", put(persona(INSTANCE, T2), None));
     assert!(!error, "a stale put is an answer");
