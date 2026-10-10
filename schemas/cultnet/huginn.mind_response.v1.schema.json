@@ -71,6 +71,37 @@
       ]
     },
     {
+      "type": "object",
+      "properties": {
+        "Persona": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PersonaStateView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Persona"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "PersonaPut": {
+          "$ref": "#/$defs/PersonaPutOutcome"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "PersonaPut"
+      ]
+    },
+    {
       "description": "The answer did not fit one send and is being held for the client to\nfetch. Nothing in a mind produces this: the daemon's serve module does,\nin place of an answer, and the answer it stands for is the named\nMessagePack of the `HuginnMindResponse` the mind gave.",
       "type": "object",
       "properties": {
@@ -1361,6 +1392,78 @@
           ]
         },
         {
+          "description": "The persona document fails the published schema: `path` is the\ndocument location (a key the schema does not declare is `*`) and\n`message` the schema keyword that failed. Never the offending value.",
+          "type": "object",
+          "properties": {
+            "PersonaInvalid": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "message"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "PersonaInvalid"
+          ]
+        },
+        {
+          "description": "The document's `personaId` is not this mind's instance, which is\n`instance`.",
+          "type": "object",
+          "properties": {
+            "PersonaForeign": {
+              "type": "object",
+              "properties": {
+                "instance": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "instance"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "PersonaForeign"
+          ]
+        },
+        {
+          "description": "The put's `expected_updated_at` is not the stored document's\n`updatedAt`, which is `stored` (none when no persona is stored).",
+          "type": "object",
+          "properties": {
+            "PersonaStale": {
+              "type": "object",
+              "properties": {
+                "stored": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "PersonaStale"
+          ]
+        },
+        {
+          "description": "The document's `provenance.authority` is not `canonical`: a projection\nor an import is not the mind's persona.",
+          "type": "string",
+          "const": "PersonaNotCanonical"
+        },
+        {
           "description": "A run claims work another run in force already holds: `item` is the\nclaimed document's id and `run` the id of the run that holds it.",
           "type": "object",
           "properties": {
@@ -1525,6 +1628,10 @@
         "instance": {
           "$ref": "#/$defs/Slug"
         },
+        "persona": {
+          "description": "The persona door as `PersonaGet` would find it.",
+          "$ref": "#/$defs/PersonaStatus"
+        },
         "receipts": {
           "type": "integer",
           "format": "uint32",
@@ -1539,7 +1646,8 @@
         "schema_epoch",
         "documents",
         "receipts",
-        "index"
+        "index",
+        "persona"
       ]
     },
     "MutationRecord": {
@@ -1602,6 +1710,93 @@
       "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
       "type": "string",
       "maxLength": 4000
+    },
+    "PersonaPutOutcome": {
+      "description": "How a put ended. A refusal is an answer, as for `admit`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Committed": {
+              "type": "object",
+              "properties": {
+                "receipt_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "receipt_id"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Committed"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Refused": {
+              "$ref": "#/$defs/MindRefusal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Refused"
+          ]
+        }
+      ]
+    },
+    "PersonaStateView": {
+      "description": "What `PersonaGet` answers: the stored document, its `updatedAt`, and the\nreceipt of the put that wrote it.",
+      "type": "object",
+      "properties": {
+        "receipt_id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "value": true
+      },
+      "required": [
+        "value",
+        "updated_at",
+        "receipt_id"
+      ]
+    },
+    "PersonaStatus": {
+      "description": "What the persona door holds, in the one vocabulary the door itself answers\nin: nothing yet, a document with this `updatedAt`, or a stored document the\ndoor cannot read (`PersonaGet` and every put answer `Unavailable`).",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Absent",
+            "Unreadable"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Stored": {
+              "type": "object",
+              "properties": {
+                "updated_at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "updated_at"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Stored"
+          ]
+        }
+      ]
     },
     "PipelineAdmissionOutcome": {
       "description": "How admission ended. `Committed.writes` names every document the batch\nlanded, derived writes included; Cut 11 indexes from it after `admit`\nreturns, and never inside it.",

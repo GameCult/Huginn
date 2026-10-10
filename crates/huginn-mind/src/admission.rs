@@ -37,9 +37,11 @@ use eureka_pipeline::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::docs::{CitationRole, Docs, Staged, citations, kind_of_id, outcome_citations};
 use crate::mind::{HuginnMindEpoch, Mind, unavailable};
+use crate::persona::{self, HuginnPersonaEntry, PersonaPutOutcome};
 use crate::receipt::{self, CommitOutcome, PipelineProvenance};
 use crate::refusal::{MindRefusal, RunId};
 use crate::store::MindStore;
@@ -176,6 +178,86 @@ impl<S: MindStore> Mind<S> {
                 writes: landed,
             }),
             CommitOutcome::Conflict(identities) => Ok(PipelineAdmissionOutcome::Conflict { identities }),
+        }
+    }
+
+    /// Replaces the mind's persona document whole, or refuses. One door for
+    /// the one document a mind holds, outside every pipeline batch: the same
+    /// instance and provenance checks as `admit`, then the persona's five
+    /// rules in order (schema-valid, `personaId` is this mind, canonical
+    /// provenance, `expected_updated_at` is the stored `updatedAt`, the new
+    /// `updatedAt` is later), then the same commit primitive. The stored
+    /// document is the commit's strong read, so the swap fails if it changed.
+    pub fn put_persona(
+        &mut self,
+        instance: &Slug,
+        state: Value,
+        expected_updated_at: Option<String>,
+        provenance: PipelineProvenance,
+        now: DateTime<Utc>,
+    ) -> PersonaPutOutcome {
+        match self.persona_steps(instance, state, expected_updated_at, provenance, now) {
+            Ok(receipt_id) => PersonaPutOutcome::Committed { receipt_id },
+            Err(refusal) => PersonaPutOutcome::Refused(refusal),
+        }
+    }
+
+    fn persona_steps(
+        &mut self,
+        instance: &Slug,
+        state: Value,
+        expected_updated_at: Option<String>,
+        provenance: PipelineProvenance,
+        now: DateTime<Utc>,
+    ) -> Result<String, MindRefusal> {
+        self.require_instance(instance)?;
+        refuse_provenance(&provenance)?;
+        // The persona rides a mind that has its identity (A6's analogue).
+        if self.is_empty() {
+            return Err(MindRefusal::MissingIdentity);
+        }
+        // P1
+        persona::validate_shape(&state)?;
+        // P2
+        let mind = self.instance().clone();
+        if state.get("personaId").and_then(Value::as_str) != Some(mind.0.as_str()) {
+            return Err(MindRefusal::PersonaForeign { instance: mind.0 });
+        }
+        // P3
+        if state.pointer("/provenance/authority").and_then(Value::as_str) != Some("canonical") {
+            return Err(MindRefusal::PersonaNotCanonical);
+        }
+        // P4
+        let stored = self.stored_updated_at()?;
+        if stored != expected_updated_at {
+            return Err(MindRefusal::PersonaStale { stored });
+        }
+        // P5
+        if let Some(stored) = &stored {
+            let instant = |stamp: &str| {
+                DateTime::parse_from_rfc3339(stamp).map_err(|_| MindRefusal::PersonaInvalid {
+                    path: "/updatedAt".into(),
+                    message: "is not an RFC 3339 date-time".into(),
+                })
+            };
+            let offered = state.get("updatedAt").and_then(Value::as_str).map(instant).transpose()?;
+            if offered <= Some(instant(stored)?) {
+                return Err(MindRefusal::PersonaInvalid {
+                    path: "/updatedAt".into(),
+                    message: "must be later than the stored updatedAt".into(),
+                });
+            }
+        }
+        let (envelope, _) = self
+            .cache()
+            .prepare_entry_named(mind.0.clone(), &HuginnPersonaEntry { value: state })
+            .map_err(unavailable)?;
+        let strong_reads = self.persona_envelope().cloned().into_iter().collect::<Vec<_>>();
+        let writes = vec![envelope];
+        let candidate = receipt::candidate(&mind, provenance, &strong_reads, &writes, receipt::head(self)? + 1, now)?;
+        match receipt::commit(self, candidate, strong_reads, writes)? {
+            CommitOutcome::Committed(receipt) => Ok(receipt.receipt_id),
+            CommitOutcome::Conflict(_) => Err(MindRefusal::PersonaStale { stored: self.stored_updated_at()? }),
         }
     }
 }

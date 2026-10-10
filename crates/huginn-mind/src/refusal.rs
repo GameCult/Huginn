@@ -55,6 +55,19 @@ pub enum MindRefusal {
     FindingWithoutEvidence,
     UnknownInvariant { label: String },
     NotStewarded { repo: String },
+    /// The persona document fails the published schema: `path` is the
+    /// document location (a key the schema does not declare is `*`) and
+    /// `message` the schema keyword that failed. Never the offending value.
+    PersonaInvalid { path: String, message: String },
+    /// The document's `personaId` is not this mind's instance, which is
+    /// `instance`.
+    PersonaForeign { instance: String },
+    /// The put's `expected_updated_at` is not the stored document's
+    /// `updatedAt`, which is `stored` (none when no persona is stored).
+    PersonaStale { stored: Option<String> },
+    /// The document's `provenance.authority` is not `canonical`: a projection
+    /// or an import is not the mind's persona.
+    PersonaNotCanonical,
     /// A run claims work another run in force already holds: `item` is the
     /// claimed document's id and `run` the id of the run that holds it.
     AlreadyClaimed { item: String, run: RunId },

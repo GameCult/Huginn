@@ -1,7 +1,7 @@
-//! `eureka-state`: Huginn's mind as four MCP tools over stdio.
+//! `eureka-state`: Huginn's mind as six MCP tools over stdio.
 //!
-//! One tool per wire operation (`whoami`, `admit`, `view`, `query`), each a
-//! `HuginnClient` call and nothing else. The declared identity is this
+//! One tool per wire operation (`whoami`, `admit`, `view`, `query`,
+//! `persona_get`, `persona_put`), each a `HuginnClient` call and nothing else. The declared identity is this
 //! process's configuration, not a per-call argument: `EUREKA_INSTANCE` names
 //! the mind and `HUGINN_ENDPOINT` (`rudp://host:port`) the daemon that holds
 //! it. The server fills in `instance` and `provenance.tool`, so a caller can
@@ -71,6 +71,21 @@ struct AdmitInput {
     session: Short,
     /// The documents to admit as one batch. The mind admits them whole or refuses them.
     documents: Vec<PipelineDocument>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct PersonaPutInput {
+    /// The faculty the put is attributed to. Attribution, not authority.
+    faculty: Faculty,
+    /// The putting agent's name.
+    agent: Short,
+    /// The putting session, recorded on the receipt.
+    session: Short,
+    /// The whole `gamecult.persona_state.v0` document. It replaces the stored
+    /// one; there is no partial write.
+    state: Value,
+    /// The stored document's `updatedAt`; omit it for the first put.
+    expected_updated_at: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -166,17 +181,32 @@ impl EurekaState {
 
     /// One wire call for the configured instance. The request is built from
     /// that instance, never from anything the caller sent.
-    async fn call(&self, request: impl FnOnce(Slug) -> HuginnMindRequest) -> Result<HuginnMindResponse, Trouble> {
+    async fn call(
+        &self,
+        request: impl FnOnce(Slug) -> HuginnMindRequest + Send + 'static,
+    ) -> Result<HuginnMindResponse, Trouble> {
+        self.ask(move |client| client.call(request(client.instance().clone()))).await
+    }
+
+    /// One `HuginnClient` call for the configured instance, off the async
+    /// thread.
+    async fn ask(
+        &self,
+        call: impl FnOnce(&HuginnClient) -> Result<HuginnMindResponse, ClientError> + Send + 'static,
+    ) -> Result<HuginnMindResponse, Trouble> {
         let client = self.settings.client.as_ref().map_err(|detail| Trouble::Misconfigured(detail.clone()))?.clone();
-        let request = request(client.instance().clone());
-        tokio::task::spawn_blocking(move || client.call(request))
+        tokio::task::spawn_blocking(move || call(&client))
             .await
             .map_err(|error| Trouble::Internal(error.to_string()))?
             .map_err(Trouble::Client)
     }
 
-    async fn answer(&self, request: impl FnOnce(Slug) -> HuginnMindRequest) -> CallToolResult {
-        match self.call(request).await {
+    async fn answer(&self, request: impl FnOnce(Slug) -> HuginnMindRequest + Send + 'static) -> CallToolResult {
+        Self::replied(self.call(request).await)
+    }
+
+    fn replied(result: Result<HuginnMindResponse, Trouble>) -> CallToolResult {
+        match result {
             Ok(response) => reply(payload(response), false),
             Err(trouble) => reply(trouble.body(), true),
         }
@@ -191,6 +221,8 @@ fn payload(response: HuginnMindResponse) -> Value {
         HuginnMindResponse::Admit(outcome) => serde_json::to_value(outcome),
         HuginnMindResponse::View(view) => serde_json::to_value(view),
         HuginnMindResponse::Query(page) => serde_json::to_value(page),
+        HuginnMindResponse::Persona(view) => serde_json::to_value(view),
+        HuginnMindResponse::PersonaPut(outcome) => serde_json::to_value(outcome),
         other => serde_json::to_value(other),
     };
     value.expect("wire types serialize")
@@ -228,7 +260,7 @@ impl EurekaState {
         description = "Admit one batch of pipeline documents into the mind, whole or not at all. Returns the outcome: committed with a receipt, already admitted, conflict, or a typed refusal. The instance is this server's configuration; do not pass one."
     )]
     async fn admit(&self, Parameters(input): Parameters<AdmitInput>) -> CallToolResult {
-        self.answer(|instance| {
+        self.answer(move |instance| {
             HuginnMindRequest::Admit(PipelineAdmissionBatch {
                 instance,
                 provenance: PipelineProvenance {
@@ -245,19 +277,41 @@ impl EurekaState {
 
     #[tool(description = "Read one document by id, with its admission facts and status. null when the mind has no such document.")]
     async fn view(&self, Parameters(input): Parameters<ViewInput>) -> CallToolResult {
-        self.answer(|instance| HuginnMindRequest::View { instance, id: input.id }).await
+        self.answer(move |instance| HuginnMindRequest::View { instance, id: input.id }).await
     }
 
     #[tool(
         description = "Query the mind with a CultNet typed selection, optionally ranked by semantic nearness. Returns one page; pass its cursor back in the selection for the next."
     )]
     async fn query(&self, Parameters(input): Parameters<QueryInput>) -> CallToolResult {
-        self.answer(|instance| HuginnMindRequest::Query {
+        self.answer(move |instance| HuginnMindRequest::Query {
             instance,
             selection: input.selection,
             semantic: input.semantic,
         })
         .await
+    }
+
+    #[tool(
+        description = "The mind's persona document (gamecult.persona_state.v0) with its updatedAt and the receipt of the put that wrote it. null until the first put."
+    )]
+    async fn persona_get(&self) -> CallToolResult {
+        Self::replied(self.ask(HuginnClient::persona_get).await)
+    }
+
+    #[tool(
+        description = "Replace the mind's persona document whole. The document must pass the published schema, name this instance as personaId, carry provenance.authority canonical, and have an updatedAt later than the stored one; expected_updated_at must be the stored updatedAt (omit it for the first put). A refusal is an answer; a stale put names the stored updatedAt to retry against."
+    )]
+    async fn persona_put(&self, Parameters(input): Parameters<PersonaPutInput>) -> CallToolResult {
+        let provenance = PipelineProvenance {
+            faculty: input.faculty,
+            agent: input.agent,
+            session: input.session,
+            tool: Short(TOOL.into()),
+        };
+        Self::replied(
+            self.ask(move |client| client.persona_put(provenance, input.state, input.expected_updated_at)).await,
+        )
     }
 }
 
@@ -289,7 +343,7 @@ impl ServerHandler for EurekaState {
 
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Huginn's typed mind for this instance: whoami, admit, view, query. Refusals are answers; isError means the daemon could not be reached or rejected the request.",
+            "Huginn's typed mind for this instance: whoami, admit, view, query, persona_get, persona_put. Refusals are answers; isError means the daemon could not be reached or rejected the request.",
         )
     }
 }
