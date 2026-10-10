@@ -1,27 +1,29 @@
-//! The library's public surface, pinned as a whole.
+//! The library's public surface, pinned as a tripwire.
 //!
-//! The brake's rule is that no caller can name a root, a source or a way to make
-//! a `Grant`. A test that names the routes it knows (`with_root`, `TEST_ROOT`)
-//! passes on every route it does not name. This one reads the library's source
-//! the way a consumer sees it and compares everything a consumer could reach to
-//! `public_surface.txt`: every `pub` item with its signature, every `pub` field,
-//! the derives and the header of every impl, every string literal that looks like
-//! a path, and every `static` keyword (a process-global is the one channel
-//! through which an existing public function's body could carry a root). A new
-//! `pub static`, a new `pub fn` under any name, a `Clone` or `Default` derived
-//! onto `Grant`, a root read from a file other than the constant: each is a line
-//! this file does not have, and the test fails.
+//! This reads the library's source the way a consumer sees it and compares
+//! every `pub` item with its signature, every `pub` field, the derives and the
+//! header of every impl, to `public_surface.txt`. A new `pub fn` under any name,
+//! a `pub static`, a `Clone` or `Default` derived onto `Grant`, a new way to
+//! reach the brake from outside: each is a line the snapshot does not have, and
+//! the test fails. A deliberate change is a change to `public_surface.txt` in the
+//! same commit, where a reviewer sees it; the failure prints the full current
+//! surface to copy from.
 //!
-//! Items under `#[cfg(test)]` are not the library and are skipped; `cfg(not(test))`
-//! and the `unix`/`windows` splits are the library and are read. Any other `cfg`, a `#[path]`, an item macro, a
-//! `macro_rules!`, an `extern` block or an exported symbol attribute would hide
-//! an item from this reader, so each fails the test outright. A seam that is
-//! `pub(crate)` and not `cfg(test)` is outside this reader's concern and inside
-//! clippy's: it is dead code in the library build, and `-D warnings` refuses it.
+//! What it sees: items reached through `mod` declarations and module files,
+//! `cfg(test)` skipped (a test-only item is not the library), the `unix` and
+//! `windows` splits read on both sides. An item macro, `macro_rules!`, `extern`
+//! block, `#[path]`, an exported-symbol attribute or any other `cfg` fails the
+//! test outright, because each would hide an item from this reader.
 //!
-//! A deliberate change to the surface is a change to `public_surface.txt` in the
-//! same commit, which is where a reviewer sees it. The failure prints the full
-//! current surface to copy from.
+//! What it cannot see, by design: items nested in function or `const _` bodies
+//! (an `impl Grant` inside a const block), and what a function body does. It
+//! proves nothing about how the control root is derived, and it does not defend
+//! the crate against edits to its own source. That bound is ruling
+//! `eureka-body:ruling:mind-launch-forge-scanner-bound`: the Grant is held by the
+//! type system (private fields, no constructor, the `compile_fail` examples on
+//! `Grant`), unsafe code is forbidden in the library, and changes to
+//! `control.rs` and `launch.rs` are defended by review and by the root-owned
+//! brake check at the unit. Do not extend this file into a walker of bodies.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -70,40 +72,6 @@ fn without_docs(stream: TokenStream) -> TokenStream {
 
 fn text(node: impl ToTokens) -> String {
     without_docs(node.to_token_stream()).to_string()
-}
-
-/// The string literals in `stream` that look like a path.
-fn path_literals(stream: TokenStream, out: &mut BTreeSet<String>) {
-    for token in stream {
-        match token {
-            TokenTree::Group(group) => path_literals(group.stream(), out),
-            TokenTree::Literal(literal) => {
-                let rendered = literal.to_string();
-                if rendered.starts_with('"') && rendered.contains('/') {
-                    out.insert(format!("path-literal {rendered}"));
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// How many `static` items or declarations `stream` holds (a `'static` lifetime is not one).
-/// A process-global is the one way an existing public function's body could carry a
-/// root from one call to another, so every one in the library is in the snapshot.
-fn static_keywords(stream: TokenStream) -> usize {
-    let mut count = 0;
-    let mut after_tick = false;
-    for token in stream {
-        let is_tick = matches!(&token, TokenTree::Punct(p) if p.as_char() == '\'');
-        match token {
-            TokenTree::Group(group) => count += static_keywords(group.stream()),
-            TokenTree::Ident(name) if name == "static" && !after_tick => count += 1,
-            _ => {}
-        }
-        after_tick = is_tick;
-    }
-    count
 }
 
 fn attributes(item: &Item) -> &[Attribute] {
@@ -157,31 +125,10 @@ fn derives(attrs: &[Attribute]) -> String {
     attrs.iter().filter(|a| a.path().is_ident("derive") || a.path().is_ident("repr")).map(text).collect::<Vec<_>>().join(" ")
 }
 
-fn label(item: &Item) -> String {
-    match item {
-        Item::Fn(i) => i.sig.ident.to_string(),
-        Item::Const(i) => i.ident.to_string(),
-        Item::Static(i) => i.ident.to_string(),
-        Item::Struct(i) => i.ident.to_string(),
-        Item::Enum(i) => i.ident.to_string(),
-        Item::Trait(i) => i.ident.to_string(),
-        Item::Type(i) => i.ident.to_string(),
-        _ => "an item".to_string(),
-    }
-}
-
 fn walk(items: &[Item], path: &str, dir: &Path, out: &mut BTreeSet<String>) {
     for item in items {
         if !in_library(attributes(item), path) {
             continue;
-        }
-        if !matches!(item, Item::Impl(_) | Item::Mod(_)) {
-            let stream = without_docs(item.to_token_stream());
-            path_literals(stream.clone(), out);
-            let statics = static_keywords(stream);
-            if statics > 0 {
-                out.insert(format!("{path}: {statics} static keyword(s) in {}", label(item)));
-            }
         }
         match item {
             Item::Fn(f) if is_pub(&f.vis) => {
@@ -220,7 +167,6 @@ fn walk(items: &[Item], path: &str, dir: &Path, out: &mut BTreeSet<String>) {
                     None => format!("impl{} {}", text(&i.generics), text(&i.self_ty)),
                 };
                 out.insert(format!("{path}: {header}"));
-                path_literals(without_docs(i.generics.to_token_stream()), out);
                 for member in &i.items {
                     let attrs = match member {
                         ImplItem::Const(m) => &m.attrs,
@@ -231,12 +177,6 @@ fn walk(items: &[Item], path: &str, dir: &Path, out: &mut BTreeSet<String>) {
                     };
                     if !in_library(attrs, path) {
                         continue;
-                    }
-                    let stream = without_docs(member.to_token_stream());
-                    path_literals(stream.clone(), out);
-                    let statics = static_keywords(stream);
-                    if statics > 0 {
-                        out.insert(format!("{path}: {statics} static keyword(s) in a member of impl {}", text(&i.self_ty)));
                     }
                     if i.trait_.is_none() {
                         match member {
@@ -308,7 +248,7 @@ fn the_librarys_public_surface_is_the_committed_one() {
 fn the_reader_sees_what_it_claims_to() {
     // The snapshot must hold the brake's own names, or the reader is blind to them.
     let actual = surface();
-    for needle in ["mind_body::control: fn read_effective", "mind_body::control: struct Grant", "path-literal \"/etc/gamecult/minds\""] {
+    for needle in ["mind_body::control: fn read_effective", "mind_body::control: struct Grant"] {
         assert!(actual.iter().any(|line| line.contains(needle)), "{needle} is not in the surface");
     }
     // And nothing under cfg(test) leaked in.

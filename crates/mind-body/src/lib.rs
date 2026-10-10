@@ -11,8 +11,11 @@
 
 // The control root is a constant, so the library reads no part of the process
 // environment (clippy.toml lists the readers); `forbid` keeps an `allow` from
-// putting one back.
+// putting one back. `forbid(unsafe_code)` closes the readers the list cannot
+// name: a foreign `getenv` or any other FFI call needs `unsafe`. The rest of the
+// Grant rule is ruling `eureka-body:ruling:mind-launch-forge-scanner-bound`.
 #![forbid(clippy::disallowed_methods)]
+#![forbid(unsafe_code)]
 
 pub mod cli;
 pub mod control;

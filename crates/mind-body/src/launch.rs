@@ -371,11 +371,10 @@ fn breaker_question(item: &PipelineRef, label: &Label, now: DateTime<Utc>) -> Pi
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
-    use std::collections::BTreeSet;
     use std::time::Duration as StdDuration;
 
     use eureka_pipeline::PipelineKind as K;
-    use huginn_mind::{PipelineAdmissionOutcome as Outcome, PipelineStatus};
+    use huginn_mind::{PipelineAdmissionOutcome as Outcome, PipelineSelectionPage, PipelineStatus};
     use rust_decimal::Decimal;
 
     use super::*;
@@ -847,155 +846,206 @@ mod tests {
         assert_eq!((rig.runs(), rig.started()), (3, 0));
     }
 
-    /// Every name that differs from `name` and is shaped to pass a compare weaker
-    /// than equality. The set is generated from the real name, not listed: every
-    /// single-character substitution (over ASCII and some wide characters), deletion
-    /// and insertion; every transposition; every permutation; rotations; every
-    /// prefix and suffix; case flips; whitespace and NUL padding at either end;
-    /// repetitions past any plausible length bound; and seeded random names of the
-    /// same length and of other lengths. A compare that agrees with equality on all
-    /// of them, and so passes the gate test, is equality for every name a caller
-    /// can plausibly build.
-    fn near_misses(name: &str) -> Vec<String> {
+    /// The one source of every drawn case: splitmix64 from a fixed seed, so a
+    /// failure names a case that runs again.
+    struct Draw(u64);
+
+    impl Draw {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+    }
+
+    const LENGTH_EDGES: [usize; 13] = [1, 2, 3, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64];
+    const ALPHABETS: [&str; 6] = [
+        "abcdefghijklmnopqrstuvwxyz",
+        "abcdefghijklmnopqrstuvwxyz0123456789",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+        "ab-_",
+        "a-b_c-d_e0",
+        "abcdefghijklmnopqrstuvwxyz-_",
+    ];
+
+    /// A valid slug of `length` characters, over an alphabet the draw picks, with
+    /// both separators (`-`, `_`) mixed in at random positions.
+    fn slug_of(draw: &mut Draw, length: usize) -> String {
+        loop {
+            let alphabet: Vec<char> = ALPHABETS[draw.below(ALPHABETS.len())].chars().collect();
+            let name: String = (0..length)
+                .map(|_| match draw.below(6) {
+                    0 => '-',
+                    1 => '_',
+                    _ => alphabet[draw.below(alphabet.len())],
+                })
+                .collect();
+            if Slug(name.clone()).validate_slug().is_ok() {
+                return name;
+            }
+        }
+    }
+
+    /// Valid slugs that differ from `name`: edits of it at every position (a
+    /// drawn character, the other separator, the other case), its prefixes, the
+    /// same name with every separator swapped, and independent draws.
+    fn distinct_valid(name: &str, draw: &mut Draw) -> Vec<String> {
         let chars: Vec<char> = name.chars().collect();
-        let wide = ['é', 'ÿ', '\u{ffff}', '😀'];
-        let alphabet: Vec<char> = (0u8..128).map(char::from).chain(wide).collect();
-        let text = |parts: &[char]| parts.iter().collect::<String>();
-        let mut out: BTreeSet<String> = BTreeSet::new();
-        for i in 0..chars.len() {
-            for &c in &alphabet {
-                let mut changed = chars.clone();
-                changed[i] = c;
-                out.insert(text(&changed));
-            }
-            let mut deleted = chars.clone();
-            deleted.remove(i);
-            out.insert(text(&deleted));
-            for j in i + 1..chars.len() {
-                let mut swapped = chars.clone();
-                swapped.swap(i, j);
-                out.insert(text(&swapped));
-            }
-            out.insert(text(&chars[..i]));
-            out.insert(text(&chars[i + 1..]));
-            out.insert(text(&[&chars[i..], &chars[..i]].concat()));
-            let mut flipped = chars.clone();
-            flipped[i] = if chars[i].is_uppercase() { chars[i].to_ascii_lowercase() } else { chars[i].to_ascii_uppercase() };
-            out.insert(text(&flipped));
-        }
-        for i in 0..=chars.len() {
-            for &c in &alphabet {
-                let mut grown = chars.clone();
-                grown.insert(i, c);
-                out.insert(text(&grown));
-            }
-        }
-        for pad in ['\0', ' ', '\n', '\t', '\u{a0}'] {
-            for count in 1..=4 {
-                out.insert(format!("{name}{}", pad.to_string().repeat(count)));
-                out.insert(format!("{}{name}", pad.to_string().repeat(count)));
-            }
-            for width in [32, 64, 255] {
-                out.insert(format!("{name}{}", pad.to_string().repeat(width - chars.len())));
-            }
-        }
-        for copies in [2, 3, 8, 40, 400, 4000] {
-            out.insert(name.repeat(copies));
-        }
-        out.insert(name.to_uppercase());
-        out.insert(name.to_lowercase());
-        // Every permutation (Heap's algorithm).
-        let mut order = chars.clone();
-        let mut counters = vec![0usize; order.len()];
-        out.insert(text(&order));
-        let mut at = 0;
-        while at < order.len() {
-            if counters[at] < at {
-                order.swap(if at % 2 == 0 { 0 } else { counters[at] }, at);
-                out.insert(text(&order));
-                counters[at] += 1;
-                at = 0;
-            } else {
-                counters[at] = 0;
-                at += 1;
-            }
-        }
-        // Seeded random names: same length over the name's own alphabet, over all of
-        // ASCII, and of any length up to 300 over ASCII.
-        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
+        let pool: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_".chars().collect();
+        let swapped = |c: char| match c {
+            '-' => '_',
+            '_' => '-',
+            other => other,
         };
-        for _ in 0..4096 {
-            out.insert((0..chars.len()).map(|_| chars[(next() % chars.len() as u64) as usize]).collect());
-            out.insert((0..chars.len()).map(|_| char::from((next() % 128) as u8)).collect());
+        let mut out = Vec::new();
+        for i in 0..chars.len() {
+            let mut edited = chars.clone();
+            edited[i] = swapped(chars[i]);
+            out.push(edited.iter().collect::<String>());
+            let mut edited = chars.clone();
+            edited[i] = if chars[i].is_ascii_uppercase() { chars[i].to_ascii_lowercase() } else { chars[i].to_ascii_uppercase() };
+            out.push(edited.iter().collect::<String>());
+            for _ in 0..3 {
+                let mut edited = chars.clone();
+                edited[i] = pool[draw.below(pool.len())];
+                out.push(edited.iter().collect::<String>());
+            }
+            out.push(chars[..i].iter().collect::<String>());
         }
-        for _ in 0..1024 {
-            let length = (next() % 301) as usize;
-            out.insert((0..length).map(|_| char::from((next() % 128) as u8)).collect());
+        out.push(chars.iter().map(|&c| swapped(c)).collect::<String>());
+        out.push(name.to_uppercase());
+        out.push(name.to_lowercase());
+        if chars.len() < 64 {
+            out.push(format!("{name}-"));
+            out.push(format!("{name}_"));
+            out.push(format!("{name}0"));
         }
-        out.remove(name);
-        out.into_iter().collect()
+        for _ in 0..8 {
+            let length = 1 + draw.below(64);
+            out.push(slug_of(draw, length));
+        }
+        out.retain(|other| other != name && Slug(other.clone()).validate_slug().is_ok());
+        out
+    }
+
+    /// A mind that knows only its instance. Any read or write is an error that
+    /// says so and is counted, so a gate that lets a launch through is seen by
+    /// the error it gets back, and a gate that refuses is seen to have touched
+    /// nothing.
+    struct Named {
+        instance: Slug,
+        reads: Cell<usize>,
+    }
+
+    impl Named {
+        fn new(instance: &str) -> Self {
+            Self { instance: Slug(instance.into()), reads: Cell::new(0) }
+        }
+    }
+
+    impl MindPort for Named {
+        fn instance(&self) -> &Slug {
+            &self.instance
+        }
+
+        fn query(&self, _: &Selection) -> Result<PipelineSelectionPage> {
+            self.reads.set(self.reads.get() + 1);
+            Err(anyhow!("reached the mind"))
+        }
+
+        fn admit(&self, _: &str, _: &str, _: Vec<PipelineDocument>) -> Result<Outcome> {
+            self.reads.set(self.reads.get() + 1);
+            Err(anyhow!("reached the mind"))
+        }
+    }
+
+    /// One launch by `turn` on a mind named `mind`, holding a Grant read for `grant`.
+    fn gated(mind: &Named, grant: &str, turn: RunTurn, claims: Vec<PipelineRef>) -> Result<LaunchOutcome> {
+        let (launcher, clock) = (Recording::default(), Fixed(Cell::new(at(0))));
+        let ports = Ports { mind, launcher: &launcher, clock: &clock, host: "yggdrasil-host" };
+        let grant = Grant::for_test(Slug(grant.into()), StdDuration::from_secs(60), five());
+        let outcome = open_and_launch(&ports, LaunchRequest { turn, claims, agent: "agent-x".into(), grant });
+        assert!(launcher.started.borrow().is_empty());
+        outcome
     }
 
     #[test]
-    fn a_grant_read_for_any_other_instance_opens_nothing_and_starts_nothing() {
-        let rig = Rig::new();
-        rig.mind.committed(vec![spec("x")]);
-        let forged = near_misses(INSTANCE);
-        // The generator itself: wide enough to carry each family, and the mind's own name is not in it.
-        assert!(forged.len() > 100_000, "{}", forged.len());
-        for member in [format!("{}k", &INSTANCE[..INSTANCE.len() - 1]), INSTANCE.to_uppercase(), format!("{INSTANCE}\0"), INSTANCE.chars().rev().collect::<String>()] {
-            assert!(forged.contains(&member), "{member:?}");
+    fn a_grant_passes_for_exactly_the_minds_own_instance_and_for_no_other_valid_slug() {
+        let mut draw = Draw(0x6a09_e667_f3bc_c908);
+        let mut names: Vec<String> = Vec::new();
+        for i in 0..780 {
+            names.push(slug_of(&mut draw, LENGTH_EDGES[i % LENGTH_EDGES.len()]));
         }
-        assert!(!forged.iter().any(|name| name == INSTANCE));
-        for name in &forged {
+        for _ in 0..220 {
+            let length = 1 + draw.below(64);
+            names.push(slug_of(&mut draw, length));
+        }
+        let mut distinct = 0;
+        for name in &names {
             for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
                 let claims = if turn == RunTurn::SelfRun { vec![spec_ref("x")] } else { vec![] };
-                let ports = Ports { mind: &rig.mind, launcher: &rig.launcher, clock: &rig.clock, host: "yggdrasil-host" };
-                let grant = Grant::for_test(Slug(name.clone()), StdDuration::from_secs(60), five());
-                let outcome = open_and_launch(&ports, LaunchRequest { turn, claims, agent: "agent-x".into(), grant }).unwrap();
-                assert_eq!(outcome, LaunchOutcome::Refused(Declined::GrantForOtherInstance), "{name:?} {turn:?}");
+                let mind = Named::new(name);
+                let through = gated(&mind, name, turn, claims.clone()).unwrap_err();
+                assert_eq!(format!("{through:#}"), "reached the mind", "{name:?} {turn:?}: the mind's own Grant passes the gate");
+                for other in distinct_valid(name, &mut draw) {
+                    let mind = Named::new(name);
+                    let outcome = gated(&mind, &other, turn, claims.clone()).unwrap();
+                    assert_eq!(outcome, LaunchOutcome::Refused(Declined::GrantForOtherInstance), "mind {name:?}, grant {other:?}, {turn:?}");
+                    assert_eq!(mind.reads.get(), 0, "a refused launch reads nothing");
+                    distinct += 1;
+                }
             }
         }
-        assert_eq!((rig.runs(), rig.started()), (0, 0));
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()), LaunchOutcome::Launched { .. }), "the mind's own Grant launches");
+        assert!(distinct > 100_000, "{distinct}");
+        // The families the property exists for are in the draw: long names, and both separators.
+        assert!(names.iter().any(|n| n.len() > 32) && names.iter().any(|n| n.contains('-')) && names.iter().any(|n| n.contains('_')));
     }
 
     #[test]
-    fn a_persona_turn_with_any_claims_at_all_is_refused_and_opens_nothing() {
-        let rig = Rig::new();
-        rig.mind.committed(vec![spec("x"), spec("blocked")]);
-        rig.mind.committed(vec![question_in("fork", &spec_ref("blocked"))]);
+    fn a_persona_turn_with_any_claims_at_all_is_refused_and_touches_nothing() {
         let kinds = PipelineKind::ALL;
-        let refused = |claims: &[PipelineRef]| {
-            let outcome = rig.launch(RunTurn::PersonaTurn, claims, five());
-            assert_eq!(outcome, LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims), "{} claims", claims.len());
-        };
-        // Claim sets of every size from one to well past the number of kinds, built four ways:
-        // one queued spec repeated (duplicates), queued and blocked specs alternating, every kind
-        // in turn over one id, and every kind in turn over distinct ids.
-        for size in 1..=300 {
-            refused(&(0..size).map(|_| spec_ref("x")).collect::<Vec<_>>());
-            refused(&(0..size).map(|i| spec_ref(if i % 2 == 0 { "x" } else { "blocked" })).collect::<Vec<_>>());
-            refused(&(0..size).map(|i| reference(kinds[i % kinds.len()], "no-such-document")).collect::<Vec<_>>());
-            refused(&(0..size).map(|i| reference(kinds[i % kinds.len()], &format!("no-such-document-{i}"))).collect::<Vec<_>>());
-        }
-        // And sets far past any bound a refusal could plausibly be written with.
-        for size in [1_000, 10_000, 100_000] {
-            refused(&(0..size).map(|i| reference(kinds[i % kinds.len()], &format!("no-such-document-{i}"))).collect::<Vec<_>>());
-        }
-        // And every kind alone, repeated, whether or not the document exists.
-        for kind in kinds {
+        let mut draw = Draw(0xbb67_ae85_84ca_a73b);
+        let mut sets: Vec<Vec<PipelineRef>> = Vec::new();
+        // Every rotation of the kinds, so no kind or position is the one that starts, at every small size.
+        for start in 0..kinds.len() {
             for size in 1..=40 {
-                refused(&(0..size).map(|_| reference(*kind, "no-such-document")).collect::<Vec<_>>());
+                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], &format!("doc-{i}"))).collect());
+                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], "doc")).collect());
             }
         }
-        assert_eq!((rig.runs(), rig.started()), (0, 0));
-        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
+        // Every kind alone, repeated.
+        for kind in kinds {
+            for size in 1..=40 {
+                sets.push((0..size).map(|_| reference(*kind, "doc")).collect());
+            }
+        }
+        // Drawn: every position a kind and an id from a pool of any size (one id repeated, to all distinct),
+        // at sizes from one to well past any bound a refusal could be written with.
+        let sizes = [1, 2, 3, 4, 5, 12, 13, 14, 26, 27, 64, 65, 100, 255, 256, 300];
+        for round in 0..3_000 {
+            let size = if round < 600 { sizes[round % sizes.len()] } else { 1 + draw.below(300) };
+            let pool = 1 + draw.below(size);
+            sets.push((0..size).map(|_| reference(kinds[draw.below(kinds.len())], &format!("doc-{}", draw.below(pool)))).collect());
+        }
+        for size in [1_000, 10_000, 100_000] {
+            sets.push((0..size).map(|i| reference(kinds[draw.below(kinds.len())], &format!("doc-{i}"))).collect());
+        }
+        for claims in sets {
+            let name = slug_of(&mut draw, LENGTH_EDGES[draw.below(LENGTH_EDGES.len())]);
+            let mind = Named::new(&name);
+            let outcome = gated(&mind, &name, RunTurn::PersonaTurn, claims.clone()).unwrap();
+            assert_eq!(outcome, LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims), "{} claims, first {:?}", claims.len(), claims.first());
+            assert_eq!(mind.reads.get(), 0);
+        }
+        // Without claims the same launch goes on to the mind.
+        let mind = Named::new("yggdrasil");
+        assert_eq!(format!("{:#}", gated(&mind, "yggdrasil", RunTurn::PersonaTurn, vec![]).unwrap_err()), "reached the mind");
     }
 
     #[test]

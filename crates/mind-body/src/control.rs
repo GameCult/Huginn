@@ -131,6 +131,41 @@ pub enum Effective {
 /// `read_effective` makes one; `open_and_launch` takes it by value and refuses
 /// one read for another instance, so one reading opens at most one run, of the
 /// instance it was read for.
+///
+/// Outside this crate the type system leaves no way to make one: the fields are
+/// private, there is no public constructor, and the derives give no path (no
+/// `Default`, `Clone`, `Deserialize` or `From`). Each way is tried here and
+/// refused:
+///
+/// ```compile_fail,E0451
+/// use mind_body::control::Grant;
+/// // a struct literal
+/// let _ = Grant { instance: eureka_pipeline::Slug("eureka".into()), cadence: std::time::Duration::ZERO, run_cap_usd: rust_decimal::Decimal::ONE };
+/// ```
+///
+/// ```compile_fail,E0277
+/// // not Default
+/// let _: mind_body::control::Grant = Default::default();
+/// ```
+///
+/// ```compile_fail,E0599
+/// // not Clone, so a reading cannot be copied into a second run
+/// fn copy(grant: &mind_body::control::Grant) -> mind_body::control::Grant {
+///     grant.clone()
+/// }
+/// ```
+///
+/// ```compile_fail,E0277
+/// // not Deserialize
+/// fn read<T: serde::de::DeserializeOwned>() {}
+/// read::<mind_body::control::Grant>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// // not From its parts
+/// use mind_body::control::Grant;
+/// let _ = Grant::from((eureka_pipeline::Slug("eureka".into()), std::time::Duration::ZERO, rust_decimal::Decimal::ONE));
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct Grant {
     instance: Slug,
@@ -250,12 +285,6 @@ pub fn load_state(source: &impl ControlSource) -> Result<ControlState> {
 /// ```compile_fail
 /// // there is no reader over a source of the caller's
 /// let _ = mind_body::control::read_effective_from;
-/// ```
-///
-/// ```compile_fail
-/// use mind_body::control::Grant;
-/// // a Grant cannot be written out
-/// let _ = Grant { instance: eureka_pipeline::Slug("eureka".into()), cadence: std::time::Duration::ZERO, run_cap_usd: rust_decimal::Decimal::ONE };
 /// ```
 ///
 /// ```compile_fail
