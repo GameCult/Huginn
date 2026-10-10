@@ -266,21 +266,22 @@ fn the_writer_refuses_an_out_of_bounds_dial_and_leaves_the_store_unchanged() {
 fn reading_writes_nothing_and_takes_no_lock_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = released_store(dir.path(), dial("1", 3600, "1"));
+    let store_dir = path.parent().unwrap();
     let listing = |dir: &Path| {
         let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         names.sort();
         names
     };
     // The writer left its sibling lock file; remove it, so a reader that wants one has to create it.
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
+    for entry in std::fs::read_dir(store_dir).unwrap() {
         let entry = entry.unwrap().path();
         if entry != path {
             std::fs::remove_file(entry).unwrap();
         }
     }
-    let before = (listing(dir.path()), std::fs::read(&path).unwrap());
+    let before = (listing(store_dir), std::fs::read(&path).unwrap());
     assert!(matches!(effective(&path), Effective::Released(_)));
-    assert_eq!((listing(dir.path()), std::fs::read(&path).unwrap()), before);
+    assert_eq!((listing(store_dir), std::fs::read(&path).unwrap()), before);
 }
 
 #[test]
