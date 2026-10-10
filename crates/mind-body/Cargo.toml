@@ -30,7 +30,13 @@ serde = { version = "1", features = ["derive"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# `syn`, `quote` and `proc-macro2` read the library's own source for
+# tests/public_surface.rs, which pins its public surface. All three are already
+# in the workspace's graph (serde's derive uses them); they are test-only.
 [dev-dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
 tempfile = "3"
 
 [lib]

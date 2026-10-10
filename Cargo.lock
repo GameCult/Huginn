@@ -1122,8 +1122,11 @@ dependencies = [
  "eureka-state",
  "huginn-mind",
  "libc",
+ "proc-macro2",
+ "quote",
  "rust_decimal",
  "serde",
+ "syn 2.0.119",
  "tempfile",
 ]
 

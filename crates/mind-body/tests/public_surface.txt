@@ -1,0 +1,72 @@
+mind_body: mod cli
+mind_body: mod control
+mind_body: mod launch
+mind_body: mod queue
+mind_body::cli: fn operator_name (sudo_user : Option < String > , user : Option < String >) -> String
+mind_body::cli: fn run (args : & [String] , root : & Path , set_by : & str , now : DateTime < Utc > , out : & mut impl Write) -> Result < () >
+mind_body::control: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum HeldReason { BrakeAbsent , BrakeHeld , DialAbsent , DialOutOfBounds , Undecodable , }
+mind_body::control: # [derive (Debug , PartialEq , Eq)] pub enum Effective { Held { reason : HeldReason } , Released (Grant) , }
+mind_body::control: const BRAKE_KEY : & str
+mind_body::control: const CONTROL_ROOT : & str
+mind_body::control: const DIAL_KEY : & str
+mind_body::control: fn control_path (root : & Path , instance : & Slug) -> Result < PathBuf >
+mind_body::control: fn heat_max () -> Decimal
+mind_body::control: fn heat_min () -> Decimal
+mind_body::control: fn load_state (source : & impl ControlSource) -> Result < ControlState >
+mind_body::control: fn read_effective (instance : & Slug) -> Effective
+mind_body::control: impl BurnRate
+mind_body::control: impl BurnRate: fn in_bounds (& self) -> bool
+mind_body::control: impl ControlSource for FileSource
+mind_body::control: impl ControlState
+mind_body::control: impl ControlWriter
+mind_body::control: impl ControlWriter: fn open (path : impl Into < PathBuf >) -> Result < Self >
+mind_body::control: impl ControlWriter: fn set_brake (& mut self , released : bool , set_at : DateTime < Utc > , set_by : & str) -> Result < () >
+mind_body::control: impl ControlWriter: fn set_dial (& mut self , dial : BurnRate) -> Result < () >
+mind_body::control: impl FileSource
+mind_body::control: impl FileSource: fn new (path : impl Into < PathBuf >) -> Self
+mind_body::control: impl Grant
+mind_body::control: impl Grant: fn cadence (& self) -> Duration
+mind_body::control: impl Grant: fn instance (& self) -> & Slug
+mind_body::control: impl Grant: fn run_cap_usd (& self) -> Decimal
+mind_body::control: impl std :: error :: Error for UnsafeStore
+mind_body::control: impl std :: fmt :: Display for UnsafeStore
+mind_body::control: pub trait ControlSource { fn snapshot (& self) -> Result < Vec < CultCacheEnvelope > > ; }
+mind_body::control: struct Brake # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[released: bool, set_at: DateTime < Utc >, set_by: String]
+mind_body::control: struct BurnRate # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[heat: Decimal, base_cooldown_s: u32, base_run_usd: Decimal, set_at: DateTime < Utc >, set_by: String]
+mind_body::control: struct ControlState # [derive (Clone , Debug , PartialEq , Eq , Default)] pub-fields[brake: Option < Brake >, dial: Option < BurnRate >]
+mind_body::control: struct ControlWriter  pub-fields[]
+mind_body::control: struct FileSource  pub-fields[]
+mind_body::control: struct Grant # [derive (Debug , PartialEq , Eq)] pub-fields[]
+mind_body::control: struct UnsafeStore # [derive (Debug)] pub-fields[path: PathBuf, mode: u32, uid: u32]
+mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Declined { Admission (MindRefusal) , Conflict , AlreadyAdmitted , StartFailed , GrantForOtherInstance , PersonaRunTakesNoClaims , }
+mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum LaunchOutcome { Launched { run : PipelineRef , } , NotQueued { item : PipelineRef , } , Tripped { item : PipelineRef , question : PipelineRef , } , Busy { run : PipelineRef , } , Refused (Declined) , }
+mind_body::launch: const START_GRACE_S : i64
+mind_body::launch: fn open_and_launch (ports : & Ports , request : LaunchRequest) -> Result < LaunchOutcome >
+mind_body::launch: fn run_label (now : DateTime < Utc >) -> Label
+mind_body::launch: impl Clock for SystemClock
+mind_body::launch: impl Default for SystemdLauncher
+mind_body::launch: impl Launcher for SystemdLauncher
+mind_body::launch: impl Systemctl for RealSystemctl
+mind_body::launch: impl SystemdLauncher
+mind_body::launch: impl SystemdLauncher: fn new () -> Self
+mind_body::launch: pub trait Clock { fn now (& self) -> DateTime < Utc > ; }
+mind_body::launch: pub trait Launcher { fn start (& self , instance : & Slug , turn : RunTurn) -> Result < () > ; fn alive (& self , instance : & Slug , turn : RunTurn) -> bool ; }
+mind_body::launch: pub trait Systemctl { fn run (& self , args : & [& str]) -> Result < SystemctlReply > ; }
+mind_body::launch: struct LaunchRequest  pub-fields[turn: RunTurn, claims: Vec < PipelineRef >, agent: String, grant: Grant]
+mind_body::launch: struct Ports< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str]
+mind_body::launch: struct SystemClock  pub-fields[]
+mind_body::launch: struct SystemctlReply  pub-fields[success: bool, stdout: String]
+mind_body::launch: struct SystemdLauncher  pub-fields[]
+mind_body::queue: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Breaker { Clear , Trip , }
+mind_body::queue: const CONSECUTIVE : usize
+mind_body::queue: const EMPTY_SHARE : usize
+mind_body::queue: const WINDOW : usize
+mind_body::queue: fn breaker (mind : & dyn MindPort , item : & PipelineRef , ending : & [PipelineRef]) -> Result < Breaker >
+mind_body::queue: fn queue (mind : & dyn MindPort , instance : & Slug , ending : & [PipelineRef]) -> Result < Vec < PipelineRef > >
+mind_body::queue: impl HuginnMind < 'static >
+mind_body::queue: impl HuginnMind < 'static >: fn new (client : HuginnClient) -> Self
+mind_body::queue: impl MindPort for HuginnMind < '_ >
+mind_body::queue: impl< 'a > HuginnMind < 'a >
+mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query (& self , selection : & Selection) -> Result < PipelineSelectionPage > ; fn admit (& self , agent : & str , session : & str , documents : Vec < PipelineDocument >) -> Result < PipelineAdmissionOutcome > ; }
+mind_body::queue: struct HuginnMind< 'a >  pub-fields[]
+path-literal "/etc/gamecult/minds"
