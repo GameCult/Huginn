@@ -96,7 +96,7 @@ fn an_undecodable_store_reads_as_held() {
 
     // The untouched store is still released, so the two reads above were the damage.
     std::fs::write(&path, &good).unwrap();
-    assert!(matches!(effective(&path), Effective::Released { .. }));
+    assert!(matches!(effective(&path), Effective::Released(_)));
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn dial_bounds_are_inclusive_at_both_ends() {
         let path = released_store_unchecked(dir.path(), dial(heat, 3600, "1"));
         let got = effective(&path);
         if expected_in {
-            assert!(matches!(got, Effective::Released { .. }), "heat {heat}: {got:?}");
+            assert!(matches!(got, Effective::Released(_)), "heat {heat}: {got:?}");
         } else {
             assert_eq!(got, held(HeldReason::DialOutOfBounds), "heat {heat}");
         }
@@ -196,7 +196,7 @@ fn a_zero_base_cooldown_or_a_non_positive_run_cost_is_out_of_bounds() {
     }
     let dir = tempfile::tempdir().unwrap();
     let smallest = released_store_unchecked(dir.path(), dial("1", 1, "0.000001"));
-    assert!(matches!(effective(&smallest), Effective::Released { .. }));
+    assert!(matches!(effective(&smallest), Effective::Released(_)));
 }
 
 fn released_store_unchecked(dir: &Path, bad: BurnRate) -> PathBuf {
@@ -218,7 +218,9 @@ fn cadence_and_run_cap_are_the_dial_divided_and_multiplied_by_heat() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = released_store(dir.path(), dial(heat, cooldown, run_usd));
-        assert_eq!(effective(&path), Effective::Released { cadence, run_cap_usd: cap }, "heat {heat} cooldown {cooldown} run {run_usd}");
+        let Effective::Released(grant) = effective(&path) else { panic!("heat {heat} cooldown {cooldown} run {run_usd}: not released") };
+        assert_eq!(grant.cadence(), cadence, "heat {heat} cooldown {cooldown} run {run_usd}");
+        assert_eq!(grant.run_cap_usd(), cap, "heat {heat} cooldown {cooldown} run {run_usd}");
     }
 }
 
@@ -226,7 +228,7 @@ fn cadence_and_run_cap_are_the_dial_divided_and_multiplied_by_heat() {
 fn the_operators_last_write_is_what_is_in_force_and_provenance_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let path = released_store(dir.path(), dial("1", 3600, "1"));
-    assert!(matches!(effective(&path), Effective::Released { .. }));
+    assert!(matches!(effective(&path), Effective::Released(_)));
 
     ControlWriter::open(&path).unwrap().set_brake(false, at(60), "alice").unwrap();
     assert_eq!(effective(&path), held(HeldReason::BrakeHeld));
@@ -237,7 +239,7 @@ fn the_operators_last_write_is_what_is_in_force_and_provenance_round_trips() {
     assert_eq!(state.dial.unwrap().set_by, "op");
 
     ControlWriter::open(&path).unwrap().set_brake(true, at(120), "bob").unwrap();
-    assert!(matches!(effective(&path), Effective::Released { .. }));
+    assert!(matches!(effective(&path), Effective::Released(_)));
     let brake = load_state(&FileSource::new(&path)).unwrap().brake.unwrap();
     assert_eq!((brake.released, brake.set_at, brake.set_by.as_str()), (true, at(120), "bob"));
 }
@@ -283,7 +285,7 @@ fn reading_writes_nothing_and_takes_no_lock_file() {
         }
     }
     let before = (listing(dir.path()), std::fs::read(&path).unwrap());
-    assert!(matches!(effective(&path), Effective::Released { .. }));
+    assert!(matches!(effective(&path), Effective::Released(_)));
     assert_eq!((listing(dir.path()), std::fs::read(&path).unwrap()), before);
 }
 
@@ -348,7 +350,9 @@ mod modes {
     /// nothing, so a plain run of the suite passes it vacuously.
     #[test]
     fn mode_child() {
-        let Ok(role) = std::env::var(CHILD) else { return };
+        let Ok(role) = std::env::var(CHILD) else {
+            return;
+        };
         let instance = std::env::var("MIND_BODY_INSTANCE").unwrap_or_else(|_| "eureka".into());
         let path = Path::new(&std::env::var(ROOT).unwrap()).join(instance).join("control.cc");
         match role.as_str() {
@@ -386,12 +390,14 @@ mod modes {
             }
             "intruder" => {
                 assert!(ControlWriter::open(&path).and_then(|mut writer| writer.set_brake(false, at(1), "intruder")).is_err());
-                assert!(ControlWriter::open(Path::new(&std::env::var(ROOT).unwrap()).join("ghost").join("control.cc"))
-                    .and_then(|mut writer| writer.set_brake(true, at(1), "intruder"))
-                    .is_err());
+                assert!(
+                    ControlWriter::open(Path::new(&std::env::var(ROOT).unwrap()).join("ghost").join("control.cc"))
+                        .and_then(|mut writer| writer.set_brake(true, at(1), "intruder"))
+                        .is_err()
+                );
                 assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
                 assert!(std::fs::OpenOptions::new().write(true).open(path.with_file_name("control.cc.lock")).is_err());
-                assert!(matches!(effective(&path), Effective::Released { .. }), "a non-root user can still read the store");
+                assert!(matches!(effective(&path), Effective::Released(_)), "a non-root user can still read the store");
             }
             other => panic!("unknown role {other}"),
         }

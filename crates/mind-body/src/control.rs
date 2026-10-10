@@ -1,5 +1,9 @@
 //! The operator's brake and burn-rate dial, and the one reader of them.
 //!
+//! `Released` carries a `Grant`, the only value that hands a run cap to the
+//! launch: it cannot be built outside this module, so a cap exists only as the
+//! reading of a released brake and an in-bounds dial.
+//!
 //! State is a CultCache single-file store at
 //! `/etc/gamecult/minds/<instance>/control.cc`, root-owned and world-readable.
 //! The operator's CLI replaces a document whole; every organ that acts calls
@@ -39,9 +43,7 @@ pub const DIAL_KEY: &str = "dial";
 /// `<root>/<instance>/control.cc`, after the leaf's slug grammar has passed, so
 /// an instance name cannot walk out of the root.
 pub fn control_path(root: &Path, instance: &Slug) -> Result<PathBuf> {
-    instance
-        .validate_slug()
-        .map_err(|refusal| anyhow::anyhow!("instance {:?} is not a slug: {refusal:?}", instance.0))?;
+    instance.validate_slug().map_err(|refusal| anyhow::anyhow!("instance {:?} is not a slug: {refusal:?}", instance.0))?;
     Ok(root.join(&instance.0).join("control.cc"))
 }
 
@@ -113,10 +115,36 @@ pub enum HeldReason {
 }
 
 /// What the operator's store allows right now.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Effective {
     Held { reason: HeldReason },
-    Released { cadence: Duration, run_cap_usd: Decimal },
+    Released(Grant),
+}
+
+/// The proof that the brake was released and the dial in bounds when read. Its
+/// fields are private and only `read_effective` makes one; `open_and_launch`
+/// takes it by value, so one reading opens at most one run.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Grant {
+    cadence: Duration,
+    run_cap_usd: Decimal,
+}
+
+impl Grant {
+    /// How often she may wake.
+    pub fn cadence(&self) -> Duration {
+        self.cadence
+    }
+
+    /// The most one run may spend.
+    pub fn run_cap_usd(&self) -> Decimal {
+        self.run_cap_usd
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(cadence: Duration, run_cap_usd: Decimal) -> Self {
+        Self { cadence, run_cap_usd }
+    }
 }
 
 /// The store's contents, decoded and not yet judged.
@@ -129,18 +157,22 @@ pub struct ControlState {
 impl ControlState {
     /// The one derivation. Order: brake first, then dial; each failing rung is
     /// its own reason.
-    pub fn effective(&self) -> Effective {
+    fn effective(&self) -> Effective {
         let held = |reason| Effective::Held { reason };
-        let Some(brake) = &self.brake else { return held(HeldReason::BrakeAbsent) };
+        let Some(brake) = &self.brake else {
+            return held(HeldReason::BrakeAbsent);
+        };
         if !brake.released {
             return held(HeldReason::BrakeHeld);
         }
-        let Some(dial) = &self.dial else { return held(HeldReason::DialAbsent) };
+        let Some(dial) = &self.dial else {
+            return held(HeldReason::DialAbsent);
+        };
         if !dial.in_bounds() {
             return held(HeldReason::DialOutOfBounds);
         }
         match (dial.cadence(), dial.run_cap_usd()) {
-            (Some(cadence), Some(run_cap_usd)) => Effective::Released { cadence, run_cap_usd },
+            (Some(cadence), Some(run_cap_usd)) => Effective::Released(Grant { cadence, run_cap_usd }),
             _ => held(HeldReason::DialOutOfBounds),
         }
     }
@@ -213,8 +245,7 @@ const FILE_MODE: u32 = 0o644;
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .with_context(|| format!("failed to set the mode of {}", path.display()))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).with_context(|| format!("failed to set the mode of {}", path.display()))
 }
 
 /// A control path the writer will not write through: it is not root's, or
@@ -326,11 +357,7 @@ impl ControlWriter {
     /// never holds one that the CLI put there.
     pub fn set_dial(&mut self, dial: BurnRate) -> Result<()> {
         if !dial.in_bounds() {
-            anyhow::bail!(
-                "dial refused: heat must be within {}..={}, base_cooldown_s above 0 and base_run_usd above 0",
-                heat_min(),
-                heat_max()
-            );
+            anyhow::bail!("dial refused: heat must be within {}..={}, base_cooldown_s above 0 and base_run_usd above 0", heat_min(), heat_max());
         }
         self.prepare()?;
         self.cache.put(DIAL_KEY, &dial)?;
