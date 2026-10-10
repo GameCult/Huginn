@@ -733,7 +733,7 @@ mod tests {
             }
         }
         let rig = Rig::new();
-        // A Persona turn of hers is live, and a Self run of hers is not: only a Self holder's name makes Busy.
+        // A Persona turn of hers is live, and a Self run of hers is not: a real Self holder named by admission is the race test's Busy.
         rig.seed("persona", RunTurn::PersonaTurn, &[]);
         for foreign in
             ["other:run:mind-20261010T010203004Z", "eureka-body:run:mind-20261010T010203004Z", "yggdrasil:run:nobody", "yggdrasil:run:persona"]
@@ -741,11 +741,6 @@ mod tests {
             let outcome = rig.launch_through(&Forged(&rig.mind, foreign), RunTurn::SelfRun, &[], five());
             assert!(matches!(outcome, LaunchOutcome::Refused(Declined::Admission(MindRefusal::AlreadyLive { .. }))), "{foreign}: {outcome:?}");
         }
-        rig.seed("self", RunTurn::SelfRun, &[]);
-        assert_eq!(
-            rig.launch_through(&Forged(&rig.mind, "yggdrasil:run:self"), RunTurn::SelfRun, &[], five()),
-            LaunchOutcome::Busy { run: run_ref("self") }
-        );
         assert_eq!(rig.started(), 0);
     }
 
