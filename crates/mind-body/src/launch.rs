@@ -850,10 +850,26 @@ mod tests {
     fn a_grant_read_for_another_instance_opens_nothing_and_starts_nothing() {
         let rig = Rig::new();
         rig.mind.committed(vec![spec("x")]);
-        // Forgeries shaped like the real name: the same length and prefix, differing only at the end;
-        // a prefix of it; and a name it is a prefix of. Each is checked whole.
-        let forged = [format!("{}k", &INSTANCE[..INSTANCE.len() - 1]), INSTANCE[..INSTANCE.len() - 1].to_string(), format!("{INSTANCE}-test"), "another-instance".to_string()];
+        // Forgeries shaped like the real name: its length and alphabet, differing at the start,
+        // at the end, or only in case; a prefix, a proper suffix, and names holding it at either end.
+        // Each is checked whole, so only an exact compare refuses all of them.
+        let upper = INSTANCE.to_uppercase();
+        let capitalised = format!("{}{}", INSTANCE[..1].to_uppercase(), &INSTANCE[1..]);
+        let forged = [
+            format!("{}k", &INSTANCE[..INSTANCE.len() - 1]),
+            format!("k{}", &INSTANCE[1..]),
+            upper,
+            capitalised,
+            INSTANCE[..INSTANCE.len() - 1].to_string(),
+            INSTANCE[1..].to_string(),
+            format!("other-{INSTANCE}"),
+            format!("{INSTANCE}-test"),
+            format!("x{INSTANCE}x"),
+            "another-instance".to_string(),
+        ];
+        assert!(forged.iter().all(|name| name != INSTANCE));
         assert_eq!(forged[0].len(), INSTANCE.len());
+        assert_eq!(forged[2].len(), INSTANCE.len());
         for name in forged {
             for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
                 let claims = if turn == RunTurn::SelfRun { vec![spec_ref("x")] } else { vec![] };
@@ -861,6 +877,7 @@ mod tests {
                 let grant = Grant::for_test(Slug(name.clone()), StdDuration::from_secs(60), five());
                 let outcome = open_and_launch(&ports, LaunchRequest { turn, claims, agent: "agent-x".into(), grant }).unwrap();
                 assert_eq!(outcome, LaunchOutcome::Refused(Declined::GrantForOtherInstance), "{name} {turn:?}");
+                assert!(!format!("{outcome:?}").to_lowercase().contains(&name.to_lowercase()), "the refusal echoes the name it refused");
             }
         }
         assert_eq!((rig.runs(), rig.started()), (0, 0));
@@ -881,6 +898,13 @@ mod tests {
         for kind in PipelineKind::ALL {
             let outcome = rig.launch(RunTurn::PersonaTurn, &[reference(*kind, "no-such-document")], five());
             assert_eq!(outcome, LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims), "{kind:?}");
+        }
+        // And more than one claim, of any mix: the refusal is "any claim", not "exactly one".
+        let two = [spec_ref("x"), spec_ref("blocked")];
+        let three = [spec_ref("x"), spec_ref("blocked"), reference(PipelineKind::Question, "no-such-document")];
+        for claims in [&two[..], &three[..], &[spec_ref("x"), spec_ref("x")][..]] {
+            let outcome = rig.launch(RunTurn::PersonaTurn, claims, five());
+            assert_eq!(outcome, LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims), "{} claims", claims.len());
         }
         assert_eq!((rig.runs(), rig.started()), (0, 0));
         assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
