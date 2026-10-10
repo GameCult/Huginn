@@ -545,7 +545,7 @@ fn run_rule(docs: &Docs, run_key: &str, run: &PipelineRun, replay: bool) -> Resu
             return Err(MindRefusal::AlreadyClaimed { item: claim.id.0.clone(), run: RunId::held(holder) });
         }
     }
-    if !replay && docs.in_force(K::Run, run_key) && let Some(holder) = docs.live_holder(run_key, run) {
+    if !replay && docs.in_force(PipelineKind::Run, run_key) && let Some(holder) = docs.live_holder(run_key, run) {
         return Err(MindRefusal::AlreadyLive { run: RunId::held(holder) });
     }
     Ok(())
