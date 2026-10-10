@@ -225,9 +225,9 @@ impl<S: MindStore> Mind<S> {
             documents,
             receipts,
             index,
-            persona: match self.stored_updated_at() {
+            persona: match self.persona() {
                 Ok(None) => PersonaStatus::Absent,
-                Ok(Some(updated_at)) => PersonaStatus::Stored { updated_at },
+                Ok(Some(view)) => PersonaStatus::Stored { updated_at: view.updated_at },
                 Err(_) => PersonaStatus::Unreadable,
             },
         }

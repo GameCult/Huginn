@@ -548,8 +548,9 @@ mod tests {
         let no_stamp = cache.prepare_entry_named(INSTANCE, &HuginnPersonaEntry { value: json!({}) }).unwrap().0;
         let mut undecodable = readable.clone();
         undecodable.payload = vec![0xc1];
+        // Planted rows have no writing receipt: the door cannot read them, so neither may the status.
         for (row, status) in [
-            (readable, crate::wire::PersonaStatus::Stored { updated_at: T1.into() }),
+            (readable, crate::wire::PersonaStatus::Unreadable),
             (no_stamp, crate::wire::PersonaStatus::Unreadable),
             (undecodable, crate::wire::PersonaStatus::Unreadable),
         ] {
@@ -559,10 +560,14 @@ mod tests {
             store.plant(row);
             let mind = Mind::open_with(store, &yggdrasil).unwrap();
             assert_eq!(persona_in_status(&mind), status);
-            if status == crate::wire::PersonaStatus::Unreadable {
-                assert!(matches!(mind.persona(), Err(MindRefusal::Unavailable { .. })), "the door answers what the status says");
-            }
+            assert!(matches!(mind.persona(), Err(MindRefusal::Unavailable { .. })), "the door answers what the status says");
         }
+        // A row a put wrote: status and door agree it is stored, with one stamp.
+        let store = MemoryStore::new();
+        let mut written = seeded_over(&store);
+        committed(put(&mut written, persona(INSTANCE, T1), None));
+        assert_eq!(persona_in_status(&written), crate::wire::PersonaStatus::Stored { updated_at: T1.into() });
+        assert_eq!(written.persona().unwrap().unwrap().updated_at, T1);
         assert_eq!(persona_in_status(&seeded_over(&MemoryStore::new())), crate::wire::PersonaStatus::Absent);
     }
 
