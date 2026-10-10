@@ -984,6 +984,10 @@ mod tests {
             refused(&(0..size).map(|i| reference(kinds[i % kinds.len()], "no-such-document")).collect::<Vec<_>>());
             refused(&(0..size).map(|i| reference(kinds[i % kinds.len()], &format!("no-such-document-{i}"))).collect::<Vec<_>>());
         }
+        // And sets far past any bound a refusal could plausibly be written with.
+        for size in [1_000, 10_000, 100_000] {
+            refused(&(0..size).map(|i| reference(kinds[i % kinds.len()], &format!("no-such-document-{i}"))).collect::<Vec<_>>());
+        }
         // And every kind alone, repeated, whether or not the document exists.
         for kind in kinds {
             for size in 1..=40 {
