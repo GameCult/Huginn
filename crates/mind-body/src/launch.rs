@@ -850,19 +850,25 @@ mod tests {
     fn a_grant_read_for_another_instance_opens_nothing_and_starts_nothing() {
         let rig = Rig::new();
         rig.mind.committed(vec![spec("x")]);
-        for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
-            let claims = if turn == RunTurn::SelfRun { vec![spec_ref("x")] } else { vec![] };
-            let ports = Ports { mind: &rig.mind, launcher: &rig.launcher, clock: &rig.clock, host: "yggdrasil-host" };
-            let grant = Grant::for_test(Slug("another-instance".into()), StdDuration::from_secs(60), five());
-            let outcome = open_and_launch(&ports, LaunchRequest { turn, claims, agent: "agent-x".into(), grant }).unwrap();
-            assert_eq!(outcome, LaunchOutcome::Refused(Declined::GrantForOtherInstance), "{turn:?}");
+        // Forgeries shaped like the real name: the same length and prefix, differing only at the end;
+        // a prefix of it; and a name it is a prefix of. Each is checked whole.
+        let forged = [format!("{}k", &INSTANCE[..INSTANCE.len() - 1]), INSTANCE[..INSTANCE.len() - 1].to_string(), format!("{INSTANCE}-test"), "another-instance".to_string()];
+        assert_eq!(forged[0].len(), INSTANCE.len());
+        for name in forged {
+            for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
+                let claims = if turn == RunTurn::SelfRun { vec![spec_ref("x")] } else { vec![] };
+                let ports = Ports { mind: &rig.mind, launcher: &rig.launcher, clock: &rig.clock, host: "yggdrasil-host" };
+                let grant = Grant::for_test(Slug(name.clone()), StdDuration::from_secs(60), five());
+                let outcome = open_and_launch(&ports, LaunchRequest { turn, claims, agent: "agent-x".into(), grant }).unwrap();
+                assert_eq!(outcome, LaunchOutcome::Refused(Declined::GrantForOtherInstance), "{name} {turn:?}");
+            }
         }
         assert_eq!((rig.runs(), rig.started()), (0, 0));
         assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()), LaunchOutcome::Launched { .. }), "the mind's own Grant launches");
     }
 
     #[test]
-    fn a_persona_turn_with_claims_is_refused_and_opens_nothing() {
+    fn a_persona_turn_with_a_claim_of_any_kind_is_refused_and_opens_nothing() {
         let rig = Rig::new();
         rig.mind.committed(vec![spec("x"), spec("blocked")]);
         rig.mind.committed(vec![question_in("fork", &spec_ref("blocked"))]);
@@ -870,6 +876,11 @@ mod tests {
         for item in ["x", "blocked"] {
             let outcome = rig.launch(RunTurn::PersonaTurn, &[spec_ref(item)], five());
             assert_eq!(outcome, LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims), "{item}");
+        }
+        // And a claim of every kind the leaf has, whether or not the document exists.
+        for kind in PipelineKind::ALL {
+            let outcome = rig.launch(RunTurn::PersonaTurn, &[reference(*kind, "no-such-document")], five());
+            assert_eq!(outcome, LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims), "{kind:?}");
         }
         assert_eq!((rig.runs(), rig.started()), (0, 0));
         assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));

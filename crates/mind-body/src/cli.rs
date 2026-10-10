@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use eureka_pipeline::Slug;
 use rust_decimal::Decimal;
 
-use crate::control::{BurnRate, ControlWriter, FileSource, control_path, load_state, read_effective};
+use crate::control::{BurnRate, ControlWriter, FileSource, control_path, derive, load_state};
 
 const USAGE: &str =
     "usage: mind-control [--root <dir>] --instance <slug> show | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U";
@@ -120,6 +120,6 @@ fn show(root: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {
         }
         Err(error) => writeln!(out, "store: undecodable ({error:#})")?,
     }
-    writeln!(out, "effective: {:?}", read_effective(root, instance))?;
+    writeln!(out, "effective: {:?}", derive(&source, instance))?;
     Ok(())
 }

@@ -3,9 +3,11 @@
 //! `Released` carries a `Grant`, the only value that hands a run cap to the
 //! launch: it cannot be built outside this module, so a cap exists only as the
 //! reading of a released brake and an in-bounds dial. The Grant names the
-//! instance whose store was read, and that store's path is derived from the
-//! instance here, by the one reader: no caller supplies a path or a source, so
-//! a Grant is the proof that this instance's own root-owned store released.
+//! instance whose store was read. The store is at a fixed place, `CONTROL_ROOT`,
+//! and the one reader takes the instance only: no function, argument, variable
+//! or flag lets a caller choose a root, a path or a source, so a Grant is the
+//! proof that this instance's own root-owned store released. Only a
+//! `#[cfg(test)]` override inside this crate moves the root.
 //!
 //! State is a CultCache single-file store at
 //! `/etc/gamecult/minds/<instance>/control.cc`, root-owned and world-readable.
@@ -35,8 +37,8 @@ use eureka_pipeline::Slug;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
-/// Where every instance's control directory lives. Tests and the library never
-/// touch it: the root is a parameter.
+/// Where every instance's control directory lives. The reader reads only here;
+/// the operator's CLI takes its own `--root` for writing and display.
 pub const CONTROL_ROOT: &str = "/etc/gamecult/minds";
 
 /// The one key each control document has in the store.
@@ -170,7 +172,7 @@ pub struct ControlState {
 impl ControlState {
     /// The one derivation. Order: brake first, then dial; each failing rung is
     /// its own reason.
-    fn effective(&self, instance: &Slug) -> Effective {
+    pub(crate) fn effective(&self, instance: &Slug) -> Effective {
         let held = |reason| Effective::Held { reason };
         let Some(brake) = &self.brake else {
             return held(HeldReason::BrakeAbsent);
@@ -233,45 +235,85 @@ pub fn load_state(source: &impl ControlSource) -> Result<ControlState> {
 }
 
 /// The only reader every organ uses (the waker now; the permit issuer and the
-/// Persona organ later). The store is `instance`'s own, at the path
-/// `control_path` derives under `root`; the caller supplies neither a path nor
-/// a source. An instance that is not a slug reads as held.
-pub fn read_effective(root: &Path, instance: &Slug) -> Effective {
-    match control_path(root, instance) {
+/// Persona organ later). The store is `instance`'s own at
+/// `CONTROL_ROOT/<instance>/control.cc`; the caller supplies neither a root, a
+/// path nor a source. An instance that is not a slug reads as held.
+///
+/// Nothing outside this crate can name another place:
+///
+/// ```compile_fail
+/// use eureka_pipeline::Slug;
+/// // a root is not an argument
+/// let _ = mind_body::control::read_effective(std::path::Path::new("/tmp"), &Slug("eureka".into()));
+/// ```
+///
+/// ```compile_fail
+/// // there is no reader over a source of the caller's
+/// let _ = mind_body::control::read_effective_from;
+/// ```
+///
+/// ```compile_fail
+/// use mind_body::control::Grant;
+/// // a Grant cannot be written out
+/// let _ = Grant { instance: eureka_pipeline::Slug("eureka".into()), cadence: std::time::Duration::ZERO, run_cap_usd: rust_decimal::Decimal::ONE };
+/// ```
+///
+/// ```compile_fail
+/// // and the test constructor is not in the library build
+/// let _ = mind_body::control::Grant::for_test;
+/// ```
+///
+/// The same preamble with the real call compiles:
+///
+/// ```
+/// use eureka_pipeline::Slug;
+/// let _ = mind_body::control::read_effective(&Slug("eureka".into()));
+/// ```
+pub fn read_effective(instance: &Slug) -> Effective {
+    match control_path(&control_root(), instance) {
         Ok(path) => derive(&FileSource::new(path), instance),
         Err(_) => Effective::Held { reason: HeldReason::Undecodable },
     }
 }
 
-fn derive(source: &impl ControlSource, instance: &Slug) -> Effective {
+#[cfg(not(test))]
+fn control_root() -> PathBuf {
+    PathBuf::from(CONTROL_ROOT)
+}
+
+/// The test seam: this crate's own tests move the root for their thread. It
+/// does not exist in a library build, and it is not a cargo feature.
+#[cfg(test)]
+thread_local! {
+    static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn control_root() -> PathBuf {
+    TEST_ROOT.with(|root| root.borrow().clone()).unwrap_or_else(|| PathBuf::from(CONTROL_ROOT))
+}
+
+/// Runs `body` with the reader pointed at `root` on this thread.
+#[cfg(test)]
+pub(crate) fn with_root<T>(root: &Path, body: impl FnOnce() -> T) -> T {
+    let before = TEST_ROOT.with(|cell| cell.replace(Some(root.to_path_buf())));
+    let result = body();
+    TEST_ROOT.with(|cell| cell.replace(before));
+    result
+}
+
+/// The derivation over any source. The reader and the CLI's `show` (display
+/// only: its output is text) are its callers; nothing public returns its result
+/// for a source of the caller's.
+pub(crate) fn derive(source: &impl ControlSource, instance: &Slug) -> Effective {
     match load_state(source) {
         Ok(state) => state.effective(instance),
         Err(_) => Effective::Held { reason: HeldReason::Undecodable },
     }
 }
 
-/// The same derivation over a fake store, for tests of the reader; the Grant it
-/// makes names the instance given, and the launch judges that like any other.
 #[cfg(test)]
-pub(crate) fn read_effective_from(source: &impl ControlSource, instance: &Slug) -> Effective {
-    derive(source, instance)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_source_that_fails_reads_as_held() {
-        struct Failing;
-        impl ControlSource for Failing {
-            fn snapshot(&self) -> Result<Vec<CultCacheEnvelope>> {
-                Err(anyhow::anyhow!("disk gone"))
-            }
-        }
-        assert_eq!(read_effective_from(&Failing, &Slug("eureka".into())), Effective::Held { reason: HeldReason::Undecodable });
-    }
-}
+mod tests;
 
 /// The operator's writer over one control file. Each setter replaces its
 /// document whole; the other document is untouched. The file is created on the
