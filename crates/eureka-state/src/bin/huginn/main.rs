@@ -170,7 +170,7 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
         }
         Command::Recipe(recipe) => {
             let ask = recipe.ask()?;
-            query(settings, door::selection_value(ask.selection)?, ask.semantic, ask.page.cursor, ask.page.documents)
+            query(settings, door::selection_value(&ask.selection)?, ask.semantic, ask.page.cursor, ask.page.documents)
         }
         Command::Admit { faculty, agent, session, file } => admit(settings, faculty, agent, session, &file),
         Command::Schema { name } => {
@@ -319,6 +319,7 @@ fn read_back(settings: &Settings, sent: &[PipelineDocument]) -> Result<u8, Troub
     };
     let page = match settings.ask(|instance| HuginnMindRequest::Query { instance: instance.clone(), selection, semantic: None })? {
         HuginnMindResponse::Query(page) => page,
+        HuginnMindResponse::Refused(refusal) => return Ok(refused(&refusal)),
         other => return Err(unexpected(&other)),
     };
     let PipelinePageItems::Documents(stored) = page.items else {

@@ -16,7 +16,7 @@ use huginn_mind::eureka_pipeline::{
     StructuralDelta, pipeline_key,
 };
 use huginn_mind::{
-    AdmissionFacts, HuginnMindRequest, HuginnMindResponse, IndexStatus, MindStatus, PipelineAdmissionOutcome, PipelineDocumentView,
+    AdmissionFacts, HuginnMindRequest, HuginnMindResponse, IndexStatus, MindRefusal, MindStatus, PipelineAdmissionOutcome, PipelineDocumentView,
     PipelinePageItems, PipelineProvenance, PipelineSelectionPage, PipelineStatus,
 };
 use serde_json::{Value, json};
@@ -392,7 +392,7 @@ fn a_falsy_unknown_value_is_still_a_loss() {
 fn a_document_that_does_not_decode_is_invalid_input() {
     let dir = tempfile::tempdir().unwrap();
     let cases = [
-        (json!([{ "kind": "nonsense", "value": {} }]), "documents[0] does not decode"),
+        (json!([{ "kind": "nonsense", "value": {} }]), "documents does not decode"),
         (json!("text"), "JSON array"),
         (json!([[]]), "documents[0] must be a JSON object"),
         (json!([]), "1 to 64"),
@@ -411,6 +411,60 @@ fn a_document_that_does_not_decode_is_invalid_input() {
     let missing = at(closed_port(), &admit_args("/no/such/file.json"), None);
     assert_eq!(missing.code, 2);
     assert!(missing.err.contains("cannot read /no/such/file.json"), "{}", missing.err);
+}
+
+#[test]
+fn a_document_that_does_not_decode_never_echoes_its_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut string_for_number = report("canary");
+    string_for_number["value"]["attempt"] = json!("CANARY-NUMBER");
+    let mut long_string_for_list = campaign_json();
+    long_string_for_list["value"]["repos"] = json!(format!("CANARY-LIST{}", "x".repeat(60_000)));
+    let unknown_kind = json!({ "kind": "CANARY-KIND", "value": {} });
+    let mut unknown_variant = serde_json::to_value(ruling(None)).unwrap();
+    unknown_variant["value"]["authority"] = json!("CANARY-VARIANT");
+    for (n, document) in [string_for_number, long_string_for_list, unknown_kind, unknown_variant].into_iter().enumerate() {
+        let file = write(&dir, &format!("canary{n}.json"), &json!([document]));
+        let ran = at(closed_port(), &admit_args(&file), None);
+        assert_eq!(ran.code, 2, "case {n}: {}", ran.err);
+        assert!(ran.err.starts_with("InvalidInput: documents does not decode: "), "case {n}: {}", ran.err);
+        assert!(ran.err.contains(" at line 1 column "), "case {n}: {}", ran.err);
+        assert!(!ran.err.contains("CANARY") && !ran.out.contains("CANARY"), "case {n}: {}", ran.err);
+        assert!(ran.err.len() < 300, "stderr is bounded whatever the input: {} bytes", ran.err.len());
+    }
+    let ran = at(closed_port(), &["query", r#"{"limit": "CANARY-LIMIT"}"#], None);
+    assert_eq!(ran.code, 2);
+    assert!(ran.err.starts_with("InvalidInput: selection does not decode: "), "{}", ran.err);
+    assert!(!ran.err.contains("CANARY") && ran.err.len() < 300, "{}", ran.err);
+    let ran = at(closed_port(), &admit_args("-"), Some(r#"[{"kind": "campaign", "value": CANARY-SYNTAX}]"#));
+    assert_eq!(ran.code, 2);
+    assert!(ran.err.starts_with("InvalidInput: not JSON: syntax at line 1 column "), "{}", ran.err);
+    assert!(!ran.err.contains("CANARY"), "{}", ran.err);
+}
+
+#[test]
+fn a_refused_read_back_is_the_minds_no_with_the_receipt_printed() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "ruling.json", &json!([ruling(None)]));
+    let server = scripted(|message| {
+        let (_, request) = decode_request(message).expect("a mind request");
+        match request {
+            HuginnMindRequest::Admit(_) => answer(
+                "admit",
+                &HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed {
+                    receipt_id: "mind-commit-x".into(),
+                    committed_at: "2026-10-10T00:00:00Z".into(),
+                    writes: vec![],
+                }),
+            ),
+            _ => answer("query", &HuginnMindResponse::Refused(MindRefusal::MissingIdentity)),
+        }
+    });
+    let ran = at(server.addr, &admit_args(&file), None);
+    assert_eq!(ran.code, 1, "{}", ran.err);
+    assert!(ran.out.starts_with("Committed mind-commit-x at "), "{}", ran.out);
+    assert!(ran.out.contains("Refused MissingIdentity"), "{}", ran.out);
+    assert_eq!(ran.err, "");
 }
 
 fn view_of(document: &PipelineDocument) -> PipelineDocumentView {

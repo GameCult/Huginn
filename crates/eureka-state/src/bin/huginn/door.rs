@@ -11,7 +11,7 @@ use cultnet_rs::Selection;
 use huginn_mind::eureka_pipeline::{PipelineDocument, PipelineKind};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, error::Category};
 
 use crate::trouble::Trouble;
 
@@ -43,30 +43,36 @@ fn stdin() -> Result<String, Trouble> {
 
 /// A batch: a JSON array of `{kind, value}` documents, or one such object.
 pub fn documents(text: &str) -> Result<Vec<PipelineDocument>, Trouble> {
-    let items = match parse(text)? {
-        Value::Array(items) => items,
-        object @ Value::Object(_) => vec![object],
+    let value = parse(text)?;
+    let (items, typed): (&[Value], Vec<PipelineDocument>) = match &value {
+        Value::Array(items) => (items.as_slice(), objects(items).and_then(|()| from_text(text, "documents"))?),
+        Value::Object(_) => (std::slice::from_ref(&value), vec![from_text(text, "documents[0]")?]),
         _ => return Err(Trouble::invalid("the documents must be a JSON array of {kind, value} objects")),
     };
-    let mut typed = Vec::with_capacity(items.len());
+    let kept = reserialise(&typed, "documents")?;
     let mut lost = Vec::new();
-    for (index, item) in items.into_iter().enumerate() {
-        let (document, paths) = decode(item, &format!("documents[{index}]"))?;
-        typed.push(document);
-        lost.extend(paths);
+    for (index, (given, held)) in items.iter().zip(&kept).enumerate() {
+        dropped(given, held, &format!("documents[{index}]"), &mut lost);
     }
     refuse_lost(&lost)?;
     Ok(typed)
 }
 
 pub fn selection(text: &str) -> Result<Selection, Trouble> {
-    selection_value(parse(text)?)
+    let value = parse(text)?;
+    if !value.is_object() {
+        return Err(Trouble::invalid("selection must be a JSON object"));
+    }
+    let typed: Selection = from_text(text, "selection")?;
+    let kept = reserialise(std::slice::from_ref(&typed), "selection")?;
+    let mut lost = Vec::new();
+    dropped(&value, &kept[0], "selection", &mut lost);
+    refuse_lost(&lost)?;
+    Ok(typed)
 }
 
-pub fn selection_value(value: Value) -> Result<Selection, Trouble> {
-    let (selection, lost) = decode(value, "selection")?;
-    refuse_lost(&lost)?;
-    Ok(selection)
+pub fn selection_value(value: &Value) -> Result<Selection, Trouble> {
+    selection(&value.to_string())
 }
 
 /// The kind a pipeline id names in its middle segment (`<root>:<kind>:<local>`).
@@ -83,21 +89,42 @@ pub fn kind_of(id: &str) -> Result<PipelineKind, Trouble> {
 }
 
 fn parse(text: &str) -> Result<Value, Trouble> {
-    serde_json::from_str(text).map_err(|error| Trouble::invalid(format!("not JSON: {error}")))
+    serde_json::from_str(text).map_err(|error| Trouble::invalid(format!("not JSON: {}", place(&error))))
 }
 
-/// The typed value of one JSON object and the paths its decode lost. Serde
-/// would also read a struct from an array, positionally, so only an object
-/// is a document or a selection.
-fn decode<T: Serialize + DeserializeOwned>(input: Value, at: &str) -> Result<(T, Vec<String>), Trouble> {
-    if !input.is_object() {
-        return Err(Trouble::invalid(format!("{at} must be a JSON object")));
+/// Where and what kind of failure a decode hit, never what the input said:
+/// serde's own message quotes the offending value whole.
+fn place(error: &serde_json::Error) -> String {
+    let category = match error.classify() {
+        Category::Io => "unreadable input",
+        Category::Syntax => "syntax",
+        Category::Data => "a value of the wrong type, an unknown variant or a missing field",
+        Category::Eof => "unexpected end",
+    };
+    format!("{category} at line {} column {}", error.line(), error.column())
+}
+
+/// Serde would also read a struct from an array, positionally, so only an
+/// object is a document or a selection.
+fn objects(items: &[Value]) -> Result<(), Trouble> {
+    match items.iter().position(|item| !item.is_object()) {
+        None => Ok(()),
+        Some(index) => Err(Trouble::invalid(format!("documents[{index}] must be a JSON object"))),
     }
-    let typed: T = serde_json::from_value(input.clone()).map_err(|error| Trouble::invalid(format!("{at} does not decode: {error}")))?;
-    let kept = serde_json::to_value(&typed).map_err(|error| Trouble::Internal(format!("{at} does not re-serialise: {error}")))?;
-    let mut paths = Vec::new();
-    dropped(&input, &kept, at, &mut paths);
-    Ok((typed, paths))
+}
+
+/// The typed value of the text, decoded from the text itself so the failure
+/// has a real line and column.
+fn from_text<T: DeserializeOwned>(text: &str, at: &str) -> Result<T, Trouble> {
+    serde_json::from_str(text).map_err(|error| Trouble::invalid(format!("{at} does not decode: {}", place(&error))))
+}
+
+/// What the typed values hold, as the JSON items to compare with the input.
+fn reserialise<T: Serialize>(typed: &[T], at: &str) -> Result<Vec<Value>, Trouble> {
+    typed
+        .iter()
+        .map(|item| serde_json::to_value(item).map_err(|_| Trouble::Internal(format!("{at} does not re-serialise"))))
+        .collect()
 }
 
 fn refuse_lost(paths: &[String]) -> Result<(), Trouble> {

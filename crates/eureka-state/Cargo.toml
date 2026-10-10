@@ -15,9 +15,24 @@ publish.workspace = true
 # (`src/bin/huginn/`), the shell door every agent uses, and until
 # delete-eureka-state-mcp the MCP server (`main.rs`, the `eureka-state` binary).
 # Both hold no state.
+# `cli` (default) is the `huginn` binary's argument parser; a library consumer
+# takes `default-features = false` and compiles none of it.
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+
+[[bin]]
+name = "huginn"
+path = "src/bin/huginn/main.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 cultnet-rs.workspace = true
 huginn-mind = { path = "../huginn-mind" }
 rmcp = { version = "2.2.0", default-features = false, features = ["server", "macros", "transport-io"] }
