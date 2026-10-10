@@ -95,6 +95,11 @@ fn client_error_code(error: &ClientError) -> &'static str {
     }
 }
 
+/// The documents that cite `target`, under `role` or any.
+pub(crate) fn citing(target: &PipelineRef, role: Option<&str>) -> Citation {
+    Citation { target: RecordRef::new(target.kind.type_id(), target.id.0.clone()), role: role.map(Into::into) }
+}
+
 pub(crate) fn of_kind(kind: PipelineKind) -> Selection {
     Selection { schemas: Some(vec![kind.type_id().to_string()]), ..Selection::default() }
 }
@@ -182,8 +187,7 @@ pub enum Breaker {
 /// Persona turn's run or an unrelated ruling, cites nothing here and counts for
 /// nothing.
 pub fn breaker(mind: &dyn MindPort, item: &PipelineRef, ending: &[PipelineRef]) -> Result<Breaker> {
-    let citing = Citation { target: RecordRef::new(item.kind.type_id(), item.id.0.clone()), role: None };
-    let mut set = headers(mind, &Selection { cites: Some(citing), ..Selection::default() })?;
+    let mut set = headers(mind, &Selection { cites: Some(citing(item, None)), ..Selection::default() })?;
     set.sort_by_key(|header| header.admission.ordinal);
     let boundary = set
         .iter()
