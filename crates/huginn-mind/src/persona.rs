@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::mind::Mind;
-use crate::receipt::HuginnCommitReceipt;
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
 
@@ -147,16 +146,12 @@ impl<S: MindStore> Mind<S> {
         let value = decode(envelope)?;
         let integrity = |detail: &str| MindRefusal::Unavailable { detail: detail.into() };
         let updated_at = updated_at(&value).ok_or_else(|| integrity("the stored persona has no updatedAt"))?.to_string();
+        let identity = (envelope.r#type.as_str(), envelope.key.as_str());
         let receipt_id = self
             .receipts()?
             .into_iter()
-            .find(|receipt: &HuginnCommitReceipt| {
-                receipt.writes.iter().any(|write| {
-                    write.document_type == envelope.r#type
-                        && write.document_key == envelope.key
-                        && write.payload_msgpack == envelope.payload
-                })
-            })
+            .filter(|receipt| receipt.writes.iter().any(|write| write.identity() == identity))
+            .max_by_key(|receipt| receipt.ordinal)
             .ok_or_else(|| integrity("the stored persona has no receipt"))?
             .receipt_id;
         Ok(Some(PersonaStateView { value, updated_at, receipt_id }))
@@ -260,6 +255,32 @@ mod tests {
         assert!(validator.is_valid(&document));
         for name in schema["required"].as_array().unwrap() {
             assert!(document.get(name.as_str().unwrap()).is_some(), "the fixture lacks {name}");
+        }
+    }
+
+    #[test]
+    fn declared_names_are_every_property_name_at_any_depth() {
+        let schema = json!({
+            "properties": { "a": { "properties": { "b": {} } } },
+            "allOf": [{ "properties": { "c": {} } }],
+            "definitions": { "d": { "properties": { "e": {} } } },
+            "required": ["not-a-property"]
+        });
+        let mut names = BTreeSet::new();
+        declared_names(&schema, &mut names);
+        assert_eq!(names, BTreeSet::from(["a", "b", "c", "e"].map(String::from)));
+    }
+
+    #[test]
+    fn the_view_names_the_receipt_of_the_latest_put() {
+        let store = MemoryStore::new();
+        let mut mind = seeded_over(&store);
+        let mut previous: Option<String> = None;
+        for second in 0..5 {
+            let stamp = format!("2026-10-10T10:00:0{second}Z");
+            let receipt = committed(put(&mut mind, persona(INSTANCE, &stamp), previous.as_deref()));
+            assert_eq!(mind.persona().unwrap().unwrap().receipt_id, receipt, "after put {second}");
+            previous = Some(stamp);
         }
     }
 
