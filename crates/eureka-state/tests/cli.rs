@@ -16,7 +16,7 @@ use huginn_mind::eureka_pipeline::{
     StructuralDelta, pipeline_key,
 };
 use huginn_mind::{
-    AdmissionFacts, HuginnMindRequest, HuginnMindResponse, IndexStatus, MindRefusal, MindStatus, PipelineAdmissionOutcome, PipelineDocumentView,
+    AdmissionFacts, HuginnMindRequest, HuginnMindResponse, IndexStatus, MindRefusal, MindStatus, PersonaStatus, PipelineAdmissionOutcome, PipelineDocumentView,
     PipelinePageItems, PipelineProvenance, PipelineSelectionPage, PipelineStatus,
 };
 use serde_json::{Value, json};
@@ -271,7 +271,8 @@ fn whoami_reads_the_live_mind() {
     assert_eq!(lines[2], format!("client {}", option_env!("HUGINN_BUILD_SHA").unwrap_or("unknown")));
     assert_eq!(lines[3], "reachable yes");
     assert_eq!(lines[4], "documents 2 receipts 2 index Current epoch epiphany.pipeline.epoch.v2");
-    assert_eq!(lines.len(), 5);
+    assert_eq!(lines[5], "persona absent");
+    assert_eq!(lines.len(), 6);
     assert_eq!(ran.err, "");
 }
 
@@ -283,11 +284,26 @@ fn an_index_that_is_behind_shows_its_count() {
         documents: 7,
         receipts: 9,
         index: IndexStatus::Behind { pending: 3 },
+        persona: PersonaStatus::Absent,
     };
     let (server, _) = counting(HuginnMindResponse::Whoami(status), "whoami");
     let ran = at(server.addr, &["whoami"], None);
     assert_eq!(ran.code, 0);
     assert!(ran.out.contains("documents 7 receipts 9 index Behind pending=3 epoch epoch"), "{}", ran.out);
+}
+
+#[test]
+fn whoami_shows_the_persona_door_state_and_nothing_of_the_document() {
+    for (persona, line) in [
+        (PersonaStatus::Stored { updated_at: "2026-10-10T10:00:00Z".into() }, "persona stored updatedAt=2026-10-10T10:00:00Z"),
+        (PersonaStatus::Unreadable, "persona unreadable"),
+    ] {
+        let status = MindStatus { instance: slug(INSTANCE), schema_epoch: "e".into(), documents: 1, receipts: 1, index: IndexStatus::Current, persona };
+        let (server, _) = counting(HuginnMindResponse::Whoami(status), "whoami");
+        let ran = at(server.addr, &["whoami"], None);
+        assert_eq!(ran.code, 0);
+        assert_eq!(ran.out.lines().last(), Some(line), "{}", ran.out);
+    }
 }
 
 #[test]
@@ -617,6 +633,7 @@ fn exit_codes_follow_the_answer() {
         documents: 0,
         receipts: 0,
         index: IndexStatus::Current,
+        persona: PersonaStatus::Absent,
     };
     let (odd, _) = counting(HuginnMindResponse::Whoami(status), "view");
     let internal = at(odd.addr, &["view", "eureka-state:campaign:self"], None);

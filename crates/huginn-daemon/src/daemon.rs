@@ -153,6 +153,13 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
                 Ok(view) => HuginnMindResponse::View(view.map(Box::new)),
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
+            HuginnMindRequest::PersonaGet { .. } => match self.mind.persona() {
+                Ok(view) => HuginnMindResponse::Persona(view),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
+            HuginnMindRequest::PersonaPut { instance, provenance, state, expected_updated_at } => {
+                HuginnMindResponse::PersonaPut(self.mind.put_persona(&instance, state, expected_updated_at, provenance, now))
+            }
             HuginnMindRequest::Query { selection, semantic: None, .. } => match self.mind.query(&selection) {
                 Ok(page) => HuginnMindResponse::Query(page),
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
@@ -583,6 +590,7 @@ pub(crate) mod tests {
                 documents: 1,
                 receipts: 1,
                 index: IndexStatus::Current,
+                persona: huginn_mind::wire::PersonaStatus::Absent,
             }
         );
         assert_eq!(daemon.runtime_id(), "huginn-yggdrasil");
@@ -672,6 +680,31 @@ pub(crate) mod tests {
         }
 
         assert_eq!(status(&mut daemon).documents, 1, "nothing landed");
+    }
+
+    /// The persona operations name an instance like every other read: another
+    /// mind's name is refused before the mind is asked, and a mind with no
+    /// persona answers `Persona(None)`.
+    #[test]
+    fn the_persona_operations_name_this_mind_and_an_empty_mind_has_none() {
+        let (_root, mut daemon) = seeded();
+        assert_eq!(
+            daemon.handle(HuginnMindRequest::PersonaGet { instance: slug(INSTANCE) }, now()).answered(),
+            HuginnMindResponse::Persona(None)
+        );
+        let foreign = MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() };
+        assert_eq!(
+            daemon.handle(HuginnMindRequest::PersonaGet { instance: slug(OTHER) }, now()).answered(),
+            HuginnMindResponse::Refused(foreign.clone())
+        );
+        let put = HuginnMindRequest::PersonaPut {
+            instance: slug(OTHER),
+            provenance: provenance(),
+            state: serde_json::Value::Null,
+            expected_updated_at: None,
+        };
+        assert_eq!(daemon.handle(put, now()).answered(), HuginnMindResponse::Refused(foreign));
+        assert_eq!(status(&mut daemon).persona, huginn_mind::wire::PersonaStatus::Absent);
     }
 
     /// A declared instance outside `Slug`'s grammar is refused by its own

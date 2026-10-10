@@ -21,6 +21,7 @@ use huginn_mind::{
     Faculty, HuginnMindRequest, HuginnMindResponse, IndexStatus, Mind, MindStore, OwnedRedbMessagePackBackingStore,
     PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineProvenance,
 };
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 pub const INSTANCE: &str = "eureka";
@@ -38,17 +39,44 @@ pub fn identity(name: &str) -> PipelineDocument {
     })
 }
 
-pub fn batch(instance: &str, documents: Vec<PipelineDocument>) -> PipelineAdmissionBatch {
-    PipelineAdmissionBatch {
-        instance: slug(instance),
-        provenance: PipelineProvenance {
-            faculty: Faculty::Hands,
-            agent: Short("claude".into()),
-            session: Short("session-1".into()),
-            tool: Short("admit".into()),
-        },
-        documents,
+pub fn provenance() -> PipelineProvenance {
+    PipelineProvenance {
+        faculty: Faculty::Hands,
+        agent: Short("claude".into()),
+        session: Short("session-1".into()),
+        tool: Short("admit".into()),
     }
+}
+
+pub fn batch(instance: &str, documents: Vec<PipelineDocument>) -> PipelineAdmissionBatch {
+    PipelineAdmissionBatch { instance: slug(instance), provenance: provenance(), documents }
+}
+
+/// A minimal `gamecult.persona_state.v0` document: the published schema's
+/// required fields and nothing else.
+pub fn persona(id: &str, updated_at: &str) -> Value {
+    json!({
+        "schemaVersion": "gamecult.persona_state.v0",
+        "provenance": {
+            "sourceSystem": "huginn", "sourceDocumentId": id, "sourceUpdatedAt": updated_at,
+            "exportedAt": updated_at, "authority": "canonical"
+        },
+        "personaId": id,
+        "publicName": "Test Persona",
+        "presentation": { "voiceSummary": "plain" },
+        "activationProfile": {
+            "underlyingOrganization": {}, "stableDispositions": {}, "behavioralDimensions": {},
+            "presentationStrategy": {}, "voiceStyle": {}, "situationalState": {}
+        },
+        "thoughtMemory": { "shortTerm": [], "memories": [], "incubation": [] },
+        "agencyPressure": { "pressures": [] },
+        "candidateActions": { "actions": [] },
+        "affect": {
+            "needs": [], "socialBonds": [], "statusReads": [], "moodDimensions": [],
+            "socialBiases": [], "doctrineStances": []
+        },
+        "updatedAt": updated_at
+    })
 }
 
 /// No index: the client's subject is the transport, not the projection.

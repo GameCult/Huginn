@@ -195,6 +195,7 @@ fn whoami(settings: &Settings) -> Result<u8, Trouble> {
                 render::index_state(&status.index),
                 status.schema_epoch
             ));
+            say(format_args!("persona {}", render::persona_state(&status.persona)));
             Ok(0)
         }
         Ok(other) => {
@@ -389,6 +390,8 @@ fn unexpected(answer: &HuginnMindResponse) -> Trouble {
         HuginnMindResponse::Admit(_) => "admit",
         HuginnMindResponse::View(_) => "view",
         HuginnMindResponse::Query(_) => "query",
+        HuginnMindResponse::Persona(_) => "a persona",
+        HuginnMindResponse::PersonaPut(_) => "a persona put",
         HuginnMindResponse::Refused(_) => "a refusal",
         HuginnMindResponse::Deferred(_) => "a deferral",
     };

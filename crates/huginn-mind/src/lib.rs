@@ -30,6 +30,7 @@ mod docs;
 pub mod envelope;
 pub mod index;
 pub mod mind;
+pub mod persona;
 mod rows;
 pub mod query;
 pub mod receipt;
@@ -44,6 +45,7 @@ pub use docs::CitationRole;
 pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
 pub use mind::{HuginnMindEpoch, Mind};
+pub use persona::{PersonaPutOutcome, PersonaStateView};
 pub use query::{
     AdmissionFacts, PipelineDocumentSummary, PipelineDocumentView, PipelineEdge, PipelineFacts, PipelinePageItems,
     PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, Ranked, SUMMARY_MAX_BYTES, SemanticQuery,
@@ -53,7 +55,7 @@ pub use refusal::MindRefusal;
 pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{
     DeferredAnswer, HuginnMindRequest, HuginnMindResponse, IndexStatus, MAX_DEFERRED_BODY_BYTES, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON,
-    MIND_RESPONSE_SCHEMA, MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus,
+    MIND_RESPONSE_SCHEMA, MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus, PersonaStatus,
 };
 
 /// The leaf, whole, through the one crate that pins its rev: the daemon and

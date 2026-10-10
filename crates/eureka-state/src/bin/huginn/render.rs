@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use huginn_mind::{IndexStatus, PipelineDocumentSummary, PipelineDocumentView, PipelineStatus, PipelineStatusSummary};
+use huginn_mind::{IndexStatus, PersonaStatus, PipelineDocumentSummary, PipelineDocumentView, PipelineStatus, PipelineStatusSummary};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -16,6 +16,16 @@ pub fn name_of<T: Serialize>(value: &T) -> String {
         Ok(Value::String(name)) => name,
         Ok(Value::Object(fields)) => fields.keys().next().cloned().unwrap_or_default(),
         _ => String::new(),
+    }
+}
+
+/// The persona door's state as one line: no value of the document, only the
+/// vocabulary the door answers in.
+pub fn persona_state(persona: &PersonaStatus) -> String {
+    match persona {
+        PersonaStatus::Absent => "absent".into(),
+        PersonaStatus::Stored { updated_at } => format!("stored updatedAt={updated_at}"),
+        PersonaStatus::Unreadable => "unreadable".into(),
     }
 }
 
