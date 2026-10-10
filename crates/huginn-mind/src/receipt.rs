@@ -155,6 +155,7 @@ impl HuginnCommitReceipt {
 /// How a commit ended. An exact replay is decided by admission before the
 /// commit is attempted, so it is not an exit of the primitive.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant, reason = "one outcome per commit, returned once and matched at once")]
 pub(crate) enum CommitOutcome {
     /// The batch and its receipt landed whole.
     Committed(HuginnCommitReceipt),

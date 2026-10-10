@@ -244,6 +244,7 @@ pub(crate) fn spec(cut: &str) -> PipelineDocument {
         keeps_moves: vec![],
         adds: vec![],
         file_changes: vec![],
+        reads: vec![],
         authority_map: None,
         verification: CutVerification { builds: vec![], tests: vec![], negative: vec![], operator: vec![] },
         estimate: delta(),

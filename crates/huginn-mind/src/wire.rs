@@ -105,7 +105,7 @@ impl HuginnMindRequest {
 pub enum HuginnMindResponse {
     Whoami(MindStatus),
     Admit(PipelineAdmissionOutcome),
-    View(Option<PipelineDocumentView>),
+    View(Option<Box<PipelineDocumentView>>),
     Query(PipelineSelectionPage),
     Refused(MindRefusal),
     /// The answer did not fit one send and is being held for the client to

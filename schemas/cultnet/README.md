@@ -19,6 +19,6 @@ schemas are derived from the value types in `crates/eureka-pipeline` and checked
 byte for byte by its `pipeline_published_schemas_match_derivation` test. Each
 document payload is `[value]`, a one-element MessagePack array whose element is
 the named map the schema describes. Text bounds are UTF-8 bytes and enforced by
-admission, not by the schema. A new named field with a serde default keeps
+admission, not by the schema. A new named field marked `= absent` (defaulted on read, omitted on write when empty) keeps
 `epiphany.pipeline.epoch.v2`; a breaking change bumps the epoch, and the new
 binary refuses the old store.

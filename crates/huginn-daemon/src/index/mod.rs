@@ -596,7 +596,7 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         let found = self.index.search(&self.collection, &vector, limit, budget.left()?)?;
         let mut hits = Vec::with_capacity(found.len());
         for hit in found {
-            match PipelineKind::ALL.into_iter().find(|kind| kind.name() == hit.kind) {
+            match PipelineKind::ALL.iter().find(|kind| kind.name() == hit.kind) {
                 Some(kind) => hits.push((PipelineRef { kind: *kind, id: Short(hit.doc_id) }, hit.score)),
                 None => eprintln!("huginn: the index returned {} under the unknown kind {:?}; it is left out", hit.doc_id, hit.kind),
             }

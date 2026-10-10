@@ -491,13 +491,15 @@ mod unsafe_installs {
         error.downcast::<UnsafeStore>().expect("the refusal is the typed UnsafeStore error")
     }
 
+    type Case = (&'static str, u32, Option<u32>, Option<u32>, &'static str);
+
     #[test]
     fn a_group_or_world_writable_directory_lock_or_store_is_refused_and_nothing_is_written() {
         if !running_as_root() {
             eprintln!("SKIPPED: needs root to own the fixtures");
             return;
         }
-        let cases: [(&str, u32, Option<u32>, Option<u32>, &str); 5] = [
+        let cases: [Case; 5] = [
             ("world-writable directory", 0o777, None, None, ""),
             ("group-writable directory", 0o775, None, None, ""),
             ("world-writable lock", 0o755, Some(0o666), None, "control.cc.lock"),

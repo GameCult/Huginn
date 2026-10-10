@@ -19,10 +19,13 @@ use super::*;
 use crate::daemon::Daemon;
 use crate::daemon::tests::{INSTANCE, OTHER, batch, campaign_seed, now, question_and_ruling, slug};
 
+type AfterAbsorb = Box<dyn FnOnce(&mut Shared)>;
+type Edit<T> = (&'static str, Box<dyn Fn(&mut T)>);
+
 thread_local! {
     /// Runs once, in the worker's own turn, between the inbox being absorbed
     /// and a search being taken, holding the guard `serve_search` holds.
-    static AFTER_ABSORB: std::cell::RefCell<Option<Box<dyn FnOnce(&mut Shared)>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_ABSORB: std::cell::RefCell<Option<AfterAbsorb>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The hook `serve_search` calls at the point where a second lock once left a
@@ -167,7 +170,7 @@ fn reconcile_indexes_exactly_the_indexable_documents_the_collection_lacks() {
 fn a_model_digest_change_rebuilds_the_collection() {
     let (_root, mind) = mind_with_documents();
     let entries = mind.index_entries(None).unwrap();
-    let changes: [(&str, Box<dyn Fn(&mut ModelIdentity)>); 3] = [
+    let changes: [Edit<ModelIdentity>; 3] = [
         ("digest", Box::new(|identity| identity.digest = "d2".into())),
         ("name", Box::new(|identity| identity.name = "other-model".into())),
         ("dimensions", Box::new(|identity| identity.dimensions = 8)),
@@ -1352,7 +1355,7 @@ fn a_model_changed_refusal_names_the_state_and_the_pending_count() {
 fn a_search_re_reads_the_collections_label() {
     let (_root, mind) = mind_with_documents();
     let entries = mind.index_entries(None).unwrap();
-    let cases: [(&str, Box<dyn Fn(&mut Stored)>); 3] = [
+    let cases: [Edit<Stored>; 3] = [
         (
             "another mind's label",
             Box::new(|stored| {

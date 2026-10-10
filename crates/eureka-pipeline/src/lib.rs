@@ -27,7 +27,9 @@
 //! cannot be declared without being validated. Format rules live in the field's
 //! type (`Label`, `Slug`, `OrgRepo`, `Sha`, `Sha256Hex`, `Date`), never in a
 //! hand-written impl that a later field can slip past. A `Vec` field must carry
-//! a maximum, because `Vec<T>` has no `Bounded` impl of its own.
+//! a maximum, because `Vec<T>` has no `Bounded` impl of its own. A field added
+//! at the epoch carries the `= absent` marker, which defaults it on read and
+//! omits it on write when empty.
 //!
 //! The wrappers are crate-private: outside code registers, prepares and
 //! decodes them through `register_pipeline_document_types`,
@@ -79,6 +81,24 @@ pub(crate) trait Bounded {
 impl<T: Bounded> Bounded for Option<T> {
     fn validate(&self, field: &str) -> Result<(), PipelineRefusal> {
         self.as_ref().map_or(Ok(()), |value| value.validate(field))
+    }
+}
+
+/// A value with an empty spelling. The `= absent` marker on a `value_types!`
+/// field requires it, and the field is then omitted on write when it is absent.
+pub(crate) trait Absent {
+    fn absent(&self) -> bool;
+}
+
+impl<T> Absent for Option<T> {
+    fn absent(&self) -> bool {
+        self.is_none()
+    }
+}
+
+impl<T> Absent for Vec<T> {
+    fn absent(&self) -> bool {
+        self.is_empty()
     }
 }
 
@@ -238,6 +258,14 @@ fn title_text(field: &str, value: &str) -> Result<(), PipelineRefusal> {
     within(200)(field, value)
 }
 
+/// A symbol is 1 to 128 bytes with no whitespace and no control character.
+fn symbol_text(field: &str, value: &str) -> Result<(), PipelineRefusal> {
+    if value.is_empty() || value.chars().any(|character| character.is_whitespace() || character.is_control()) {
+        return Err(format_error(field, value));
+    }
+    within(128)(field, value)
+}
+
 bounded_text! {
     /// Text of at most 200 UTF-8 bytes.
     Short = 200, |field, value| within(200)(field, value);
@@ -249,6 +277,11 @@ bounded_text! {
     Title = 200, title_text;
     /// Text of at most 1,000 UTF-8 bytes.
     Line = 1000, |field, value| within(1000)(field, value);
+    /// A name the location's lines must contain as written there (an
+    /// identifier or a YAML `&fileID`); not an identity. 1 to 128 bytes, no
+    /// whitespace and no control character.
+    #[schemars(extend("minLength" = 1))]
+    Symbol = 128, symbol_text;
     /// Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.
     Para = 4000, |field, value| within(4000)(field, value);
     /// A key label: `[A-Za-z0-9_-]{1,64}`.
@@ -415,19 +448,25 @@ macro_rules! bounded_field {
 /// The single field list: one invocation emits the value struct and its
 /// `Bounded` impl, so a field can never be left out of validation.
 macro_rules! value_types {
-    ($($(#[$attr:meta])* pub struct $name:ident { $($field:ident: $ty:ty $([$max:literal])?),* $(,)? } $(=> $extra:path)?)*) => {$(
+    ($($(#[$attr:meta])* pub struct $name:ident { $($field:ident: $ty:ty $([$max:literal])? $(= $marker:ident)?),* $(,)? } $(=> $extra:path)?)*) => {$(
         $(#[$attr])*
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         pub struct $name {
             $(
                 $(#[schemars(extend("maxItems" = $max))])?
+                // `= absent`: defaulted on read, omitted on write when absent.
+                // The `cfg_attr(any(), ..)` is a no-op that binds `$marker` to the group.
+                $(#[serde(default, skip_serializing_if = "Absent::absent")] #[cfg_attr(any(), $marker)])?
                 pub $field: $ty
             ),*
         }
 
         impl Bounded for $name {
             fn validate(&self, at: &str) -> Result<(), PipelineRefusal> {
-                $(bounded_field!(self.$field, &format!("{at}.{}", stringify!($field)) $(, $max)?);)*
+                $(
+                    $(let _: fn(&$ty) -> bool = <$ty as Absent>::$marker;)?
+                    bounded_field!(self.$field, &format!("{at}.{}", stringify!($field)) $(, $max)?);
+                )*
                 $($extra(self, at)?;)?
                 Ok(())
             }
@@ -472,6 +511,33 @@ fn campaign_repos_are_distinct(campaign: &PipelineCampaign, at: &str) -> Result<
     Ok(())
 }
 
+/// The most lines one read anchor may span.
+const READ_WINDOW_MAX_LINES: u32 = 100;
+
+/// A location starts at line 1 or later, ends no earlier than it starts, and a
+/// read anchor spans at most `READ_WINDOW_MAX_LINES`. The bounds are on
+/// `ReadAnchor` alone: `CodeLocation` elsewhere keeps its stored shape.
+fn read_window_is_bounded(anchor: &ReadAnchor, at: &str) -> Result<(), PipelineRefusal> {
+    let location = &anchor.location;
+    if location.line < 1 {
+        return Err(format_error(&format!("{at}.location.line"), &location.line.to_string()));
+    }
+    if let Some(end_line) = location.end_line {
+        if end_line < location.line {
+            return Err(format_error(&format!("{at}.location.end_line"), &end_line.to_string()));
+        }
+        let span = end_line - location.line + 1;
+        if span > READ_WINDOW_MAX_LINES {
+            return Err(PipelineRefusal::FieldBound {
+                field: format!("{at}.location.end_line"),
+                limit: READ_WINDOW_MAX_LINES,
+                actual: span,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// A run claims work, never runs, rulings or campaigns: its claims are cut
 /// specs, findings and follow-ups, the three kinds a Self takes on. And its
 /// budget is a canonical decimal (`0`, `12`, `7.5`: no sign, no leading or
@@ -509,7 +575,7 @@ unit_enums! {
 }
 
 value_types! {
-    pub struct CodeLocation { path: Short, line: u32, end_line: Option<u32> }
+    pub struct CodeLocation { path: Short, line: u32, end_line: Option<u32>, symbol: Option<Symbol> = absent }
     pub struct CommitRange { base: Sha, head: Sha }
     pub struct Evidence { kind: EvidenceKind, locator: Line, result: Line }
     /// A citation of a document in another repo's pipeline store (D6).
@@ -519,6 +585,8 @@ value_types! {
     pub struct QuestionOption { label: Label, text: Line }
     pub struct CutDelete { path: Short, lines: u32, note: Line }
     pub struct FileChange { location: CodeLocation, change: Line }
+    /// Code Hands must see but not change, in the spec's repo at the spec's base.
+    pub struct ReadAnchor { location: CodeLocation, why: Short } => read_window_is_bounded
     pub struct AuthorityMap {
         owner: Line, inputs: Vec<Line>[16], outputs: Vec<Line>[16], derived_state: Vec<Line>[16],
         forbidden_writers: Vec<Line>[16], shared_paths: Vec<Line>[16], deletion_line: Line,
@@ -572,7 +640,7 @@ value_types! {
     pub struct PipelineCutSpec {
         campaign: Slug, cut: Label, revision: u32, title: Title, repo: OrgRepo, branch: Short, base: Sha,
         depends_on: Vec<Short>[8], first: Vec<Line>[16], deletes: Vec<CutDelete>[64], keeps_moves: Vec<Line>[64],
-        adds: Vec<Line>[64], file_changes: Vec<FileChange>[256], authority_map: Option<AuthorityMap>,
+        adds: Vec<Line>[64], file_changes: Vec<FileChange>[256], reads: Vec<ReadAnchor>[16] = absent, authority_map: Option<AuthorityMap>,
         verification: CutVerification, estimate: StructuralDelta,
         rulings: Vec<Short>[32], questions: Vec<Short>[16],
     }
@@ -737,6 +805,7 @@ macro_rules! pipeline_kinds {
         /// shape, not a document's.
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+        #[allow(clippy::large_enum_variant, reason = "one value per request or per batch of at most 64; boxing a variant would buy no memory and change every construction site")]
         pub enum PipelineDocument { $($variant($value)),* }
 
         impl PipelineKind {
@@ -967,7 +1036,8 @@ fn local_max(kind: PipelineKind) -> usize {
 
 /// The schema epoch every pipeline store is written at, owned here with the
 /// schemas it names. Evolution is additive and keeps it: a new named field
-/// with a serde default, or a widened `PipelineKind`, since each reader ships
+/// with the `value_types!` `= absent` marker (a replayed batch re-encodes byte
+/// for byte, because an absent field is not written), or a widened `PipelineKind`, since each reader ships
 /// with the variants it knows and refuses an unknown kind on the kind, not on
 /// the epoch. A breaking change bumps it, so that a store written at the old
 /// one can be refused by whoever opens it; this crate owns no store and
@@ -1105,7 +1175,7 @@ pub fn validate_pipeline_write_envelope(envelope: &CultCacheEnvelope) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
     const CAMPAIGN: &str = "eureka-state";
@@ -1144,7 +1214,7 @@ mod tests {
     }
 
     fn location() -> CodeLocation {
-        CodeLocation { path: s("crates/eureka-pipeline/src/lib.rs"), line: 1, end_line: Some(9) }
+        CodeLocation { path: s("crates/eureka-pipeline/src/lib.rs"), line: 1, end_line: Some(9), symbol: None }
     }
 
     fn evidence() -> Evidence {
@@ -1196,6 +1266,7 @@ mod tests {
                 deletes: vec![CutDelete { path: s("old.rs"), lines: 3, note: "dead".into() }],
                 keeps_moves: vec!["commit owner".into()], adds: vec!["pipeline_documents.rs".into()],
                 file_changes: vec![FileChange { location: location(), change: "add".into() }],
+                reads: vec![],
                 authority_map: Some(AuthorityMap {
                     owner: "core".into(), inputs: vec!["typed documents".into()], outputs: vec!["envelopes".into()],
                     derived_state: vec!["derived keys".into()], forbidden_writers: vec!["MCP".into()],
@@ -1425,6 +1496,16 @@ mod tests {
             out.push((format!("finding.severity-{name}"), D::Finding(f)));
         }
         out.push(("ruling.authority-mind".into(), D::Ruling(mind_ruling())));
+        let PipelineDocument::CutSpec(mut spec) = samples().remove(4).0 else { unreachable!() };
+        spec.file_changes[0].location.symbol = Some("value_types".into());
+        spec.reads = vec![
+            ReadAnchor { location: CodeLocation { path: s("crates/eureka-pipeline/src/lib.rs"), line: 10, end_line: Some(20), symbol: Some("PipelineCutSpec".into()) }, why: "the document shape".into() },
+            ReadAnchor { location: CodeLocation { path: s("crates/eureka-pipeline/src/lib.rs"), line: 30, end_line: None, symbol: None }, why: "one line".into() },
+        ];
+        out.push(("cut_spec.reads-and-symbol".into(), D::CutSpec(spec)));
+        let mut f = finding_sample();
+        f.locations[0].symbol = Some("&1153090498".into());
+        out.push(("finding.location-symbol".into(), D::Finding(f)));
         out
     }
 
@@ -1827,7 +1908,7 @@ mod tests {
         // refuses this one: the digits rule is satisfied either way.
         refused(&format!("{CAMPAIGN}:cut_spec:cut-3a.1"));
         refused(&format!("{CAMPAIGN}:CUT_SPEC:cut-3a.r1"));
-        refused(&format!("EUREKA-STATE:cut_spec:cut-3a.r1"));
+        refused("EUREKA-STATE:cut_spec:cut-3a.r1");
         refused(&format!("{CAMPAIGN}:cut_spec:cut-3a.r1:"));
         refused(&format!("{CAMPAIGN}::cut-3a.r1"));
         refused("cut-3a.r1");
@@ -2962,6 +3043,133 @@ mod tests {
             format!("{INSTANCE}:stewardship:gamecult_-epiphany.n0"),
             "the leaf refuses no sequence value"
         );
+    }
+
+    fn read_anchor(line: u32, end_line: Option<u32>, symbol: Option<&str>) -> ReadAnchor {
+        ReadAnchor {
+            location: CodeLocation { path: s("crates/eureka-pipeline/src/lib.rs"), line, end_line, symbol: symbol.map(Symbol::from) },
+            why: "read".into(),
+        }
+    }
+
+    fn cut_spec_sample() -> PipelineCutSpec {
+        let PipelineDocument::CutSpec(spec) = samples().remove(4).0 else { unreachable!() };
+        spec
+    }
+
+    /// Every committed golden line decodes, from its committed payload bytes,
+    /// to the corpus document it was derived from. The pre-field lines carry no
+    /// `reads` or `symbol` key, so they decode to empty and `None` only
+    /// because both fields default on read.
+    #[test]
+    fn golden_payloads_decode_to_their_documents() -> Result<()> {
+        let cache = schema_cache()?;
+        let golden = include_str!("../golden/envelopes.txt");
+        let lines: BTreeMap<&str, &str> = golden
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .filter_map(|line| Some((line.split(' ').next()?, line.rsplit(' ').next()?)))
+            .collect();
+        let corpus = golden_documents();
+        assert_eq!(lines.len(), corpus.len());
+        for (label, document) in corpus {
+            let hex = lines[label.as_str()];
+            let mut envelope = document.prepare(&cache)?;
+            envelope.payload = (0..hex.len()).step_by(2).map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap()).collect();
+            assert_eq!(PipelineDocument::decode(&envelope)?, document, "{label} decodes to its document");
+        }
+        Ok(())
+    }
+
+    /// The MCP door: JSON with no `reads` key and locations with no `symbol`
+    /// key is the pre-field shape, and it decodes.
+    #[test]
+    fn pre_field_json_decodes() -> Result<()> {
+        let json = serde_json::to_value(PipelineDocument::CutSpec(cut_spec_sample()))?;
+        assert!(json["value"].get("reads").is_none(), "an empty reads is not written");
+        assert!(json["value"]["file_changes"][0]["location"].get("symbol").is_none(), "an absent symbol is not written");
+        let PipelineDocument::CutSpec(spec) = serde_json::from_value::<PipelineDocument>(json)? else { unreachable!() };
+        assert!(spec.reads.is_empty());
+        assert_eq!(spec.file_changes[0].location.symbol, None);
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_and_reads_round_trip() -> Result<()> {
+        let mut spec = cut_spec_sample();
+        spec.reads = (0..16).map(|index| read_anchor(index + 1, Some(index + 100), Some("value_types"))).collect();
+        let mut finding = finding_sample();
+        finding.locations[0].symbol = Some("&1153090498".into());
+        for document in [PipelineDocument::CutSpec(spec), PipelineDocument::Finding(finding)] {
+            document.validate()?;
+            let json = serde_json::to_value(&document)?;
+            assert_eq!(serde_json::from_value::<PipelineDocument>(json.clone())?, document);
+            let packed = rmp_serde::to_vec_named(&document)?;
+            assert_eq!(rmp_serde::from_slice::<PipelineDocument>(&packed)?, document);
+            assert!(packed.windows(6).any(|window| window == b"symbol"), "the symbol key is written");
+            assert_eq!(packed.windows(5).any(|window| window == b"reads"), matches!(document, PipelineDocument::CutSpec(_)));
+            assert!(json.to_string().contains("\"symbol\""));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn read_and_symbol_bounds() {
+        let with_reads = |reads: Vec<ReadAnchor>| {
+            let mut spec = cut_spec_sample();
+            spec.reads = reads;
+            PipelineDocument::CutSpec(spec).validate()
+        };
+        let with_symbol = |symbol: &str| {
+            let mut finding = finding_sample();
+            finding.locations[0].symbol = Some(symbol.into());
+            PipelineDocument::Finding(finding).validate()
+        };
+        assert_eq!(with_reads((0..16).map(|_| read_anchor(1, Some(100), None)).collect()), Ok(()));
+        assert_eq!(
+            with_reads((0..17).map(|_| read_anchor(1, Some(100), None)).collect()),
+            Err(PipelineRefusal::FieldBound { field: "cut_spec.reads".into(), limit: 16, actual: 17 })
+        );
+        assert_eq!(
+            with_reads(vec![read_anchor(5, Some(4), None)]),
+            Err(PipelineRefusal::InvalidFormat { field: "cut_spec.reads[0].location.end_line".into(), value: "4".into() })
+        );
+        assert_eq!(
+            with_reads(vec![read_anchor(0, None, None)]),
+            Err(PipelineRefusal::InvalidFormat { field: "cut_spec.reads[0].location.line".into(), value: "0".into() })
+        );
+        assert_eq!(with_reads(vec![read_anchor(7, Some(7), None)]), Ok(()), "a one-line span");
+        assert_eq!(with_reads(vec![read_anchor(10, Some(109), None)]), Ok(()), "a span of 100");
+        assert_eq!(
+            with_reads(vec![read_anchor(10, Some(110), None)]),
+            Err(PipelineRefusal::FieldBound { field: "cut_spec.reads[0].location.end_line".into(), limit: 100, actual: 101 })
+        );
+        assert_eq!(with_symbol(&"s".repeat(128)), Ok(()));
+        assert_eq!(
+            with_symbol(&"s".repeat(129)),
+            Err(PipelineRefusal::FieldBound { field: "finding.locations[0].symbol".into(), limit: 128, actual: 129 })
+        );
+        for bad in ["a b", "a\tb", "", "a\u{0}b", "a\u{3000}b"] {
+            assert_eq!(
+                with_symbol(bad),
+                Err(PipelineRefusal::InvalidFormat { field: "finding.locations[0].symbol".into(), value: bad.into() }),
+                "{bad:?}"
+            );
+        }
+        // A location outside a read anchor keeps its stored shape.
+        let mut finding = finding_sample();
+        finding.locations[0].line = 0;
+        finding.locations[0].end_line = Some(0);
+        assert_eq!(PipelineDocument::Finding(finding).validate(), Ok(()));
+    }
+
+    /// The marker needs an `Absent` spelling; the two impls say what absent is.
+    #[test]
+    fn absent_is_none_and_empty() {
+        assert!(Absent::absent(&None::<u32>));
+        assert!(!Absent::absent(&Some(0u32)));
+        assert!(Absent::absent(&Vec::<u32>::new()));
+        assert!(!Absent::absent(&vec![0u32]));
     }
 
     /// Cut 8: the leaf owns the serialisation of the shapes it owns, so a wire

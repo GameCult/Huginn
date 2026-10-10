@@ -1024,7 +1024,7 @@ mod tests {
             let message_id = format!("{stem}{}", "0".repeat(zeros));
             let at_probe = encoded_len(&reply_with_payload(&message_id, operation, runtime_id, "A".repeat(probe)));
             let payload_len = (probe as i64 + (target as i64 - at_probe as i64)) as usize;
-            if payload_len % 4 == 0 {
+            if payload_len.is_multiple_of(4) {
                 let message = reply_with_payload(&message_id, operation, runtime_id, "A".repeat(payload_len));
                 assert_eq!(encoded_len(&message), target);
                 return (message_id, message);

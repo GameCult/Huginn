@@ -85,7 +85,7 @@ fn range() -> CommitRange {
 }
 
 fn location() -> CodeLocation {
-    CodeLocation { path: s("crates/huginn-mind/src/admission.rs"), line: 1, end_line: None }
+    CodeLocation { path: s("crates/huginn-mind/src/admission.rs"), line: 1, end_line: None, symbol: None }
 }
 
 pub(crate) fn evidence() -> Evidence {
@@ -203,6 +203,7 @@ pub(crate) fn cut_spec(cut: &str, revision: u32) -> PipelineCutSpec {
         keeps_moves: vec![],
         adds: vec![],
         file_changes: vec![],
+        reads: vec![],
         authority_map: None::<AuthorityMap>,
         verification: CutVerification { builds: vec![], tests: vec![], negative: vec![], operator: vec![] },
         estimate: delta(),

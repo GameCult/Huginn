@@ -262,3 +262,122 @@ parse back. The test reads the path from `HUGINN_MIND_SNAPSHOT` and is
 `#[ignore]` by default, so CI never needs the file. Before code cuts, the
 copy is the 2026-10-01 nightly snapshot. The deploy takes a cold copy with the
 unit stopped.
+
+## huginn CLI replaces the eureka-state MCP server (Imagination, 2026-10-10)
+
+Follow-up `eureka-substrate:follow_up:huginn-cli-replaces-mcp`. Bases: Huginn
+180b08a, Eureka 278b881, gamecult-ops 1e95674. Live daemon 107552dc.
+
+### Body facts (probes, 2026-10-10, Starfire)
+
+- `~/.claude.json` top-level `mcpServers.eureka-state`: stdio,
+  `C:\Users\Meta\.eureka\bin\eureka-state.exe`, env `EUREKA_INSTANCE=eureka`,
+  `HUGINN_ENDPOINT=rudp://10.77.0.1:17872`. No `mcp__eureka-state` entries in
+  `~/.claude/settings.json` permissions. That file has an `env` block holding
+  one key (`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`).
+- `~/.cargo/bin` and `~/.local/bin` are on the Bash tool's PATH.
+  `~/.eureka/bin` is not.
+- `py -3` is 3.13.15 on Starfire and `python3` is 3.13.5 on Yggdrasil.
+- Yggdrasil has no eureka-state or huginn client binary installed. The daemon is
+  `/opt/gamecult/huginn/current/huginn-daemon`.
+- Huginn: `crates/eureka-state` is `lib.rs` (HuginnClient, 210 lines, transport
+  only) plus `main.rs` (the MCP server, 349 lines) and tests (`client.rs` 511,
+  `mcp.rs` 564, `common` 185). At main, nothing else in the workspace depends on
+  the crate. `eureka-body/mind-launch` (3b15c39) adds
+  `eureka-state = { path = "../eureka-state" }` to mind-body and calls
+  `HuginnClient` in-process.
+- Eureka: `tools/context-pack.py:115-201` hand-rolls an MCP stdio client that
+  reads the binding from `~/.claude.json`. `tools/test-tools.sh:346-381,509-513`
+  test it with `fixtures/context-pack/fake-eureka-state.py`. `agents/life.md:4`
+  is the only charter whose tool list names `mcp__eureka-state__*`.
+- Wire: `huginn-mind` encodes requests and answers with
+  `rmp_serde::to_vec_named` (named maps), so an added field is skipped by an old
+  reader. The leaf has no `deny_unknown_fields`.
+  `107552dc..main` adds the read anchors (an additive field), `RulingAuthority::Mind`
+  (an added variant) and the run kind.
+
+### Model page: the CLI (step 0b)
+
+| Question | Answer | Why |
+|---|---|---|
+| Binary | `huginn` | It is the mind's door, named for the organ. No name clash: the daemon's binary is `huginn-daemon` and the operator CLI is `mind-control`. |
+| Crate | `crates/eureka-state`, bin `src/bin/huginn.rs`. The crate is not renamed. | mind-launch already depends on the package by name. A rename is pure churn across two campaigns and protects no invariant. |
+| Library | `HuginnClient` (`lib.rs`) stays the one client and stays transport-only. | The CLI and mind-launch are its two consumers. Env parsing lives in the CLI, not the lib, because mind-launch builds clients from its own config. |
+| Install, Starfire | `C:\Users\Meta\.local\bin\huginn.exe` (already on PATH), with `.next` and `.prev` beside it per the runbook. Built at the merged sha with `HUGINN_BUILD_SHA` set. | No PATH or system edit is needed. |
+| Install, Yggdrasil | None until the first Claude session runs there (the Self-run unit). Then it goes in the release dir beside the daemon, linked from `current`, so it flips with the daemon. | Nothing on the host calls the mind through a shell yet. mind-launch links the lib. Follow-up `huginn-cli-on-yggdrasil`. |
+| Finding the mind | `EUREKA_INSTANCE` and `HUGINN_ENDPOINT` from the environment, exactly as the MCP server read them. On Starfire they are set in the `env` block of `~/.claude/settings.json`, which is operator-visible. On Yggdrasil they will go in the unit's `Environment=`. No `--instance` flag and no config file. | This keeps the MCP rule that the instance is the session's configuration, not a call argument. Env is how a systemd unit and a Claude session both configure a child. |
+| Version | `huginn --version` prints the crate version and the build sha. `whoami` prints `client <sha>`. | Lets an operator see skew. It is display-only. |
+| Lifecycle | Each call is a new process. Swapping the exe takes effect on the next call, with no session restart. | This removes runbook step 8's restart-every-session. |
+| Skew rule | After every Committed or AlreadyAdmitted batch, the CLI reads the batch back with one `keys` query (projection document) and compares each stored document with what it sent. A difference exits 5 and names the ids and field paths. No version negotiation is added. | This is the end-to-end argument (Saltzer, Reed and Clark 1984): only the end check covers every intermediate drop, whether it came from an old leaf at the CultNet door, a serde default or a future skew. A whoami version field would need a daemon deploy (blocked on the upgrade rerun), would cover only the skew it was taught, and would leave 107552dc unprotected. Cost: one extra call per admit. Limit: the document is already committed, so the agent supersedes it. That is loud, not silent. |
+| Authority | The CLI owns no state. It parses arguments, strictly decodes agent-written input into leaf types, names the recipe selections, renders text and derives the exit code. Admission and status stay Huginn's, and the transport stays HuginnClient's. | This is Brokkr's brokkr-command shape (A3, b451cdd): a caller whose exit code is derived from the answer and never from "the send succeeded". |
+| Input door | Agent-written JSON (question `huginn-cli-document-format`), decoded strictly. A key path that is present with a non-empty value and absent from the typed re-serialisation is refused as exit 2, naming paths, never values. | Closes `gap-admit-drops-unknown-keys` at the door. The store decode stays lenient for rollback (map B15). |
+| Recipes | Named subcommands in the CLI, each the exact selection campaign-state.md defines at Eureka 278b881. After cut skill-huginn-cli, the page names them and `--help` prints each selection. | One copy of the progress view, in code an agent runs, not JSON an agent retypes. |
+| Exit codes | 0 answered. 1 the mind said no (Refused, Conflict, view absent). 2 the call is wrong (usage, InvalidInput, TooLarge, Misconfigured). 3 Unavailable (retry once). 4 no answer and a retry cannot help (Rejected, Unencodable, Internal). 5 committed but the read-back differs. | These map one to one onto the skill's organ rule. |
+
+### Cut order
+
+huginn-cli (after clippy-pin) -> skill-huginn-cli, context-pack-huginn-cli,
+ops-huginn-cli (in parallel) -> delete-eureka-state-mcp.
+
+The deletion comes last, and it is the only cut that removes a door. Sessions
+in flight hold MCP server processes, and both doors reach one daemon, so the
+order lets every consumer move before the old door goes.
+
+Life's no-admit rule loses its tool-list guard, because Life keeps Bash. Its
+`mcp__eureka-state__*` read-only tool list was already soft: Bash could drive
+the stdio server, as context-pack.py does. That fork is question
+`life-mind-write-guard`.
+
+Rejected: renaming the crate to `huginn-client`, for the churn above. A whoami
+version field, for the reasons in the skew rule row. A config file for the
+endpoint, because env already serves both hosts. TOML or YAML as the input
+door: see the question.
+
+## A campaign's repo set changes by target revision (Imagination, 2026-10-10)
+
+Felt gap: `eureka-body:follow_up:body-campaign-repos`. eureka-body must change
+GameCult/Idunn and the connector kit repo (ruling
+`eureka-body:ruling:connector-kit-home`, not yet created), but `repos` lives on
+`<c>:campaign:self`, a fixed key with no revision and no resolution, and
+admission refuses a cut_spec whose repo is outside it (`admission.rs:405-415`,
+`RepoNotInCampaign`). The only workarounds were a sibling campaign (done once:
+`eureka-substrate:follow_up:epiphany-cuts-need-a-campaign`, closed by opening
+eureka-body) or a cross-campaign `first` line. Pinned at Huginn a7cc2ff.
+
+### Model page: the repo set (step 0b)
+
+| Question | Answer | Why |
+|---|---|---|
+| What names it | `target.repos: Vec<OrgRepo>[16] = absent` on `<c>:target:r<n>`. Empty means "no target in this chain has named repos": the campaign's own `repos` stands. Non-empty means this revision's list is the whole set. | Reuses the one revisable campaign-scoped record. The target already carries scope (`not_in_scope`, `canonical_implementations`); which repos a campaign may cut is scope. No new kind, key grammar, alias or refusal variant. |
+| Who owns it | The in-force target when it names repos; otherwise the campaign document. `campaign.repos` is demoted to the opening set: it decides only until the first target revision that names repos. | One owner at any moment, derived in one function (`Docs::repos_in_force`), read by the one rule that consumes it. |
+| Add or remove | Self admits target `r<n+1>` with the new whole list and the `Superseded` resolution of `r<n>`, in one batch (the existing revision rule). The target doc cited by `doc` says why. | Whole-list replacement, as Kubernetes replaces a whole spec per generation; no per-member add/remove events to fold. |
+| Silent revert | A target revision with empty `repos` whose predecessor named repos is refused `EmptyRepos { campaign: <target id> }`. | Otherwise omitting the field on an unrelated invariant edit would revert to the opening set. Reuses the existing variant: an empty repo set where one is required. |
+| Bound | 16 on the target; the campaign's 8 is unchanged. | eureka-body reaches 8 with the two repos it needs. 16 matches `canonical_implementations`. The campaign bound need not widen, since later sets live on targets. |
+| Specs on a removed repo | Membership is checked when a cut_spec (new or a revision) is admitted, against the set in force then. A spec already in force stays in force; its reports admit (they check the spec, not the campaign); it can be Withdrawn or Superseded as before. A new revision on the removed repo is refused `RepoNotInCampaign`. | Admission rules apply to new batches only (target invariant `stored-documents-valid`). Refusing the removal while specs name the repo would need a landed/open distinction the mind does not have (`gap-landing-untyped`), and would force withdrawing landed specs, which misstates them. Question `campaign-repo-removal`. |
+| Rename or transfer | A new `Org/Repo` spelling is a new repo: Self revises the target replacing the name. Old specs keep the old name as history; a spec revision may name the new repo (the revision rule does not compare `repo`). Case changes are no-ops (`OrgRepo` equality is by identity). The host (forge or GitHub, `body-repos-on-forge`) is not in `OrgRepo` and stays out of scope. | |
+| Who decides | Self admits targets. Admission checks the revision rule, distinctness by identity (the campaign's hook, shared), the bound, and the revert rule. It checks no stewardship (ruling `stewardship-rule`). | |
+| Epoch | Stays `epiphany.pipeline.epoch.v2`. The field is `= absent`: stored targets decode with it empty and re-encode byte for byte; one golden line is appended. | Precedent: cut leaf-read-anchors (`reads`, `symbol`). An old daemon reading a target that names repos drops them (serde ignores unknown keys), so after a repo revision is admitted a rollback narrows the set to the opening one; it does not fail to read. This lands with the upgrade rerun waiting on `snapshot-test-stale-and-quadratic`, daemon-first (`huginn-upgrade-daemon-first`). |
+
+### Authority map
+
+- Owner: Huginn admission (`check`, CutSpec arm) through `Docs::repos_in_force`.
+- Inputs: the campaign document; the campaign's targets and their resolutions (image and batch).
+- Outputs: `RepoNotInCampaign` or acceptance for a cut_spec; `EmptyRepos` for a reverting target.
+- Derived state: `campaign.repos` after a repo-naming target is display-only history (the campaign header's `repos` fact and its `repo` alias answer "opened with"). The skill's recipe reads the set in force from the target.
+- Forbidden writers: any second membership check (a `campaign.repos.contains` outside `repos_in_force`); editing or re-admitting `campaign:self`.
+- Shared paths: MCP admit, the CultNet wire and the stored payload decode `repos` through the same derived impls.
+- Deletion line: the direct `campaign.repos.contains(&spec.repo)` at `admission.rs:413`.
+
+### Rejected
+
+- A per-repo record kind (`<c>:campaign_repo:<repo>.n<seq>`, Withdrawn to remove), the stewardship pattern: a new kind, schema, key grammar, alias and refusals, and its key would inherit the opaque repo encoding of `gap-stewardship-id-opaque`.
+- A campaign revision (`<c>:campaign:r<n>`): re-keys every stored campaign or adds a second key grammar for one kind, and every `source` citing `<c>:campaign:self` would have to follow it.
+- Status quo (sibling campaigns): splits one target's work across two targets and two invariant sets.
+
+### Cut order
+
+campaign-repos (Huginn; independent of clippy-pin; textual overlaps with
+mind-launch in admission.rs, docs.rs and the response schema, so whichever
+merges second rebases and regenerates the schema) -> skill-campaign-repos
+(Eureka campaign-state.md). huginn-cli's campaigns recipe, if it prints repos,
+prints the opening set until it reads the target too.

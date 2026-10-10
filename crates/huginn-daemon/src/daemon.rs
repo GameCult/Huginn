@@ -150,7 +150,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
                 HuginnMindResponse::Admit(outcome)
             }
             HuginnMindRequest::View { id, .. } => match self.mind.view(&id) {
-                Ok(view) => HuginnMindResponse::View(view),
+                Ok(view) => HuginnMindResponse::View(view.map(Box::new)),
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
             HuginnMindRequest::Query { selection, semantic: None, .. } => match self.mind.query(&selection) {
@@ -353,11 +353,12 @@ pub(crate) mod tests {
     /// roughly a megabyte of field content, which is what a real-sized answer
     /// looks like at the leaf's bounds rather than at a fixture's convenience.
     /// `depends_on`, `rulings` and `questions` stay empty because each is a
-    /// reference admission resolves.
+    /// reference admission resolves. `reads` and location symbols stay absent:
+    /// `FITTING_CHANGES` is calibrated to `MAX_RESPONSE_BYTES` without them.
     pub(crate) fn cut_spec(cut: &str, file_changes: usize) -> PipelineDocument {
         let lines = |count: usize| (0..count).map(line).collect::<Vec<_>>();
         let shorts = |count: usize| (0..count).map(short).collect::<Vec<_>>();
-        let location = |n: usize| CodeLocation { path: short(n), line: 1, end_line: Some(9) };
+        let location = |n: usize| CodeLocation { path: short(n), line: 1, end_line: Some(9), symbol: None };
         PipelineDocument::CutSpec(PipelineCutSpec {
             campaign: slug(CAMPAIGN),
             cut: cut.into(),
@@ -372,6 +373,7 @@ pub(crate) mod tests {
             keeps_moves: lines(64),
             adds: lines(64),
             file_changes: (0..file_changes).map(|n| FileChange { location: location(n), change: line(n) }).collect(),
+            reads: vec![],
             authority_map: Some(AuthorityMap {
                 owner: line(0),
                 inputs: lines(16),
@@ -493,9 +495,11 @@ pub(crate) mod tests {
         Ok(Daemon::new(Mind::open(state_root, instance)?, NoIndex))
     }
 
+    type Seen = Vec<(Vec<String>, Vec<bool>)>;
+
     #[derive(Clone, Default)]
     struct RecordingIndex {
-        seen: Arc<Mutex<Vec<(Vec<String>, Vec<bool>)>>>,
+        seen: Arc<Mutex<Seen>>,
     }
 
     impl<S: MindStore> IndexSink<S> for RecordingIndex {
@@ -605,7 +609,7 @@ pub(crate) mod tests {
         let PipelinePageItems::Documents(views) = &page.items else { panic!("the document projection is the view") };
         assert_eq!(views[0].status, PipelineStatus::InForce);
         let view = daemon.handle(HuginnMindRequest::View { instance: slug(INSTANCE), id: id.clone() }, now()).answered();
-        assert_eq!(view, HuginnMindResponse::View(Some(views[0].clone())));
+        assert_eq!(view, HuginnMindResponse::View(Some(Box::new(views[0].clone()))));
     }
 
     /// Ruling 14 across the transport, on both sides: the mind refuses a read

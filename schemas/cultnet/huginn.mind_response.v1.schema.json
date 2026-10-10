@@ -214,6 +214,16 @@
         },
         "path": {
           "$ref": "#/$defs/Short"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Symbol"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1890,6 +1900,13 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/Short"
+          },
+          "maxItems": 16
+        },
+        "reads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReadAnchor"
           },
           "maxItems": 16
         },
@@ -3697,6 +3714,22 @@
         "text"
       ]
     },
+    "ReadAnchor": {
+      "description": "Code Hands must see but not change, in the spec's repo at the spec's base.",
+      "type": "object",
+      "properties": {
+        "location": {
+          "$ref": "#/$defs/CodeLocation"
+        },
+        "why": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "location",
+        "why"
+      ]
+    },
     "ReportCommit": {
       "type": "object",
       "properties": {
@@ -3969,6 +4002,12 @@
         "targets_added",
         "targets_removed"
       ]
+    },
+    "Symbol": {
+      "description": "A name the location's lines must contain as written there (an\nidentifier or a YAML `&fileID`); not an identity. 1 to 128 bytes, no\nwhitespace and no control character.",
+      "type": "string",
+      "maxLength": 128,
+      "minLength": 1
     },
     "TargetInvariant": {
       "type": "object",
