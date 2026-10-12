@@ -197,6 +197,19 @@ fn a_zero_base_cooldown_or_a_non_positive_run_cost_is_out_of_bounds() {
     assert!(matches!(effective(&smallest), Effective::Released(_)));
 }
 
+#[test]
+fn the_check_gate_refuses_a_released_brake_over_an_out_of_bounds_dial() {
+    // The writers refuse such a dial, so the store is built unchecked.
+    for bad in [dial("3", 3600, "1"), dial("1", 0, "1"), dial("1", 3600, "0")] {
+        let dir = tempfile::tempdir().unwrap();
+        released_store_unchecked(dir.path(), bad.clone());
+        let args: Vec<String> = ["--instance", "eureka", "check"].iter().map(|a| a.to_string()).collect();
+        let mut out = Vec::new();
+        let result = crate::cli::run(&args, dir.path(), "op", at(1), &mut out, &mut |_| Ok(()));
+        assert!(format!("{:#}", result.unwrap_err()).contains("DialOutOfBounds"), "{bad:?}");
+    }
+}
+
 fn released_store_unchecked(dir: &Path, bad: BurnRate) -> PathBuf {
     let path = store_path(dir);
     ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").unwrap();

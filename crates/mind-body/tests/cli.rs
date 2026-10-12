@@ -189,6 +189,12 @@ fn a_root_flag_without_a_directory_or_an_instance_is_refused_and_writes_nothing(
     assert!(!std::path::Path::new("/nonexistent-root-for-test").exists());
 }
 
+fn listing(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    names
+}
+
 fn check_out(root: &std::path::Path) -> (anyhow::Result<()>, String) {
     go(root, &["--instance", "eureka", "check"], "op", 0)
 }
@@ -207,10 +213,7 @@ fn check_refuses_every_reading_but_released() {
     held(root.path(), "BrakeHeld");
     go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 2).0.unwrap();
     held(root.path(), "DialAbsent");
-    go(root.path(), &["--instance", "eureka", "dial", "set", "--heat", "1000", "--base-cooldown-s", "3600", "--base-run-usd", "5"], "op", 3)
-        .0
-        .unwrap();
-    held(root.path(), "DialOutOfBounds");
+    // DialOutOfBounds cannot be written through the CLI: it is pinned in the crate's own tests.
     // An undecodable store is a held reading too.
     let broken = tempfile::tempdir().unwrap();
     std::fs::create_dir(broken.path().join("eureka")).unwrap();
@@ -242,10 +245,11 @@ fn check_writes_nothing_and_creates_no_directory() {
     go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 0).0.unwrap();
     let file = root.path().join("eureka").join("control.cc");
     let before = (std::fs::read(&file).unwrap(), std::fs::metadata(&file).unwrap().modified().unwrap());
+    let names_before = listing(&root.path().join("eureka"));
     let _ = check_out(root.path());
     let _ = check_out(root.path());
     assert_eq!((std::fs::read(&file).unwrap(), std::fs::metadata(&file).unwrap().modified().unwrap()), before);
-    assert_eq!(std::fs::read_dir(root.path().join("eureka")).unwrap().count(), 1);
+    assert_eq!(listing(&root.path().join("eureka")), names_before);
 }
 
 #[test]
