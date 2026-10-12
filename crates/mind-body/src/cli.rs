@@ -7,7 +7,11 @@
 //! mind-control --instance <slug> brake hold        (also stops her running units)
 //! mind-control --instance <slug> brake release
 //! mind-control --instance <slug> dial set --heat H --base-cooldown-s S --base-run-usd U
+//! mind-control [--root <dir>] --instance <slug> check
 //! ```
+//!
+//! `check` exits 0 only when the brake is released and the dial in bounds; a
+//! systemd unit runs it as its `ExecCondition`. It writes nothing.
 //!
 //! `brake hold` writes the brake held and then, whatever the write's outcome,
 //! stops the instance's running units through the `stop_units` parameter. It
@@ -22,11 +26,11 @@ use chrono::{DateTime, Utc};
 use eureka_pipeline::{RunTurn, Slug};
 use rust_decimal::Decimal;
 
-use crate::control::{BurnRate, ControlWriter, FileSource, control_path, derive, load_state};
+use crate::control::{BurnRate, ControlWriter, Effective, FileSource, control_path, derive, load_state};
 use crate::launch::unit;
 
 const USAGE: &str =
-    "usage: mind-control [--root <dir>] --instance <slug> show | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U";
+    "usage: mind-control [--root <dir>] --instance <slug> show | check | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U";
 
 /// Who made the change: `SUDO_USER`, else `USER`, else `unknown`. An empty
 /// variable counts as unset.
@@ -59,6 +63,7 @@ pub fn run(
     let words: Vec<&str> = command.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["show"] => show(root, &instance, out),
+        ["check"] => check(&path, &instance, out),
         ["brake", "hold"] => {
             let written = ControlWriter::open(&path).and_then(|mut writer| writer.set_brake(false, now, set_by));
             let stopped = stop_units(&instance);
@@ -107,6 +112,20 @@ fn parse_dial(flags: &[&str], now: DateTime<Utc>, set_by: &str) -> Result<BurnRa
 
 fn need<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str> {
     value.ok_or_else(|| anyhow!("{name} is required"))
+}
+
+/// The gate a unit runs before it starts: Ok only when the one derivation
+/// (`derive`, the reader behind `read_effective`) says Released. It is a pure
+/// read through `FileSource`: it opens no writer and creates no file or
+/// directory. Any other reading is an error, which `main` turns into exit 2,
+/// and systemd's `ExecCondition` skips the unit on 1-254.
+fn check(path: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {
+    let effective = derive(&FileSource::new(path), instance);
+    writeln!(out, "effective: {effective:?}")?;
+    match effective {
+        Effective::Released(_) => Ok(()),
+        Effective::Held { reason } => bail!("held: {reason:?}"),
+    }
 }
 
 fn show(root: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {

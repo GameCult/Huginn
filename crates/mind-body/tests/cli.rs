@@ -129,6 +129,43 @@ fn the_binary_exits_nonzero_with_the_usage_when_refused() {
 }
 
 #[test]
+fn the_binary_exits_2_for_check_while_held_and_0_after_release_with_a_dial() {
+    let root = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_mind-control"))
+            .arg("--root")
+            .arg(root.path())
+            .args(["--instance", "eureka"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    // Absent store: refused, and the gate wrote nothing.
+    let output = run(&["check"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("held: BrakeAbsent"));
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+
+    // Released with no dial is still refused; with a dial it opens.
+    assert!(run(&["brake", "release"]).status.success());
+    assert_eq!(run(&["check"]).status.code(), Some(2));
+    assert!(run(&["dial", "set", "--heat", "0.5", "--base-cooldown-s", "3600", "--base-run-usd", "5"]).status.success());
+    let open = run(&["check"]);
+    assert_eq!(open.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&open.stdout).contains("Released"));
+
+    // Holding closes it again. The brake is written through the library: the
+    // binary's `brake hold` would also ask systemd to stop units.
+    mind_body::control::ControlWriter::open(root.path().join("eureka").join("control.cc"))
+        .unwrap()
+        .set_brake(false, Utc.timestamp_opt(1_800_000_009, 0).unwrap(), "op")
+        .unwrap();
+    let closed = run(&["check"]);
+    assert_eq!(closed.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&closed.stderr).contains("held: BrakeHeld"));
+}
+
+#[test]
 fn a_leading_root_flag_replaces_the_default_root() {
     let default = tempfile::tempdir().unwrap();
     let chosen = tempfile::tempdir().unwrap();
@@ -150,6 +187,76 @@ fn a_root_flag_without_a_directory_or_an_instance_is_refused_and_writes_nothing(
     }
     assert_eq!(std::fs::read_dir(default.path()).unwrap().count(), 0);
     assert!(!std::path::Path::new("/nonexistent-root-for-test").exists());
+}
+
+fn check_out(root: &std::path::Path) -> (anyhow::Result<()>, String) {
+    go(root, &["--instance", "eureka", "check"], "op", 0)
+}
+
+#[test]
+fn check_refuses_every_reading_but_released() {
+    let root = tempfile::tempdir().unwrap();
+    let held = |root: &std::path::Path, reason: &str| {
+        let (result, out) = check_out(root);
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains(reason), "{reason}: {error}");
+        assert!(out.contains(reason), "{reason}: {out}");
+    };
+    held(root.path(), "BrakeAbsent");
+    go(root.path(), &["--instance", "eureka", "brake", "hold"], "op", 1).0.unwrap();
+    held(root.path(), "BrakeHeld");
+    go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 2).0.unwrap();
+    held(root.path(), "DialAbsent");
+    go(root.path(), &["--instance", "eureka", "dial", "set", "--heat", "1000", "--base-cooldown-s", "3600", "--base-run-usd", "5"], "op", 3)
+        .0
+        .unwrap();
+    held(root.path(), "DialOutOfBounds");
+    // An undecodable store is a held reading too.
+    let broken = tempfile::tempdir().unwrap();
+    std::fs::create_dir(broken.path().join("eureka")).unwrap();
+    std::fs::write(broken.path().join("eureka").join("control.cc"), b"not a store").unwrap();
+    held(broken.path(), "Undecodable");
+}
+
+#[test]
+fn check_opens_on_release_with_a_dial_and_is_per_instance() {
+    let root = tempfile::tempdir().unwrap();
+    go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 0).0.unwrap();
+    go(root.path(), &["--instance", "eureka", "dial", "set", "--heat", "0.5", "--base-cooldown-s", "3600", "--base-run-usd", "5"], "op", 1)
+        .0
+        .unwrap();
+    let (result, out) = check_out(root.path());
+    result.unwrap();
+    assert!(out.contains("Released"), "{out}");
+    // Another instance's store is a different file: still absent, still refused.
+    let (other, _) = go(root.path(), &["--instance", "other", "check"], "op", 2);
+    assert!(format!("{:#}", other.unwrap_err()).contains("BrakeAbsent"));
+}
+
+#[test]
+fn check_writes_nothing_and_creates_no_directory() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(check_out(root.path()).0.is_err());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+
+    go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 0).0.unwrap();
+    let file = root.path().join("eureka").join("control.cc");
+    let before = (std::fs::read(&file).unwrap(), std::fs::metadata(&file).unwrap().modified().unwrap());
+    let _ = check_out(root.path());
+    let _ = check_out(root.path());
+    assert_eq!((std::fs::read(&file).unwrap(), std::fs::metadata(&file).unwrap().modified().unwrap()), before);
+    assert_eq!(std::fs::read_dir(root.path().join("eureka")).unwrap().count(), 1);
+}
+
+#[test]
+fn check_takes_no_extra_word_and_needs_an_instance() {
+    let root = tempfile::tempdir().unwrap();
+    go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 0).0.unwrap();
+    for args in [&["--instance", "eureka", "check", "now"][..], &["--instance", "eureka", "check", "show"][..], &["check"][..]] {
+        let (result, out) = go(root.path(), args, "op", 1);
+        assert!(format!("{:#}", result.unwrap_err()).contains("usage: mind-control"), "{args:?}");
+        assert!(out.is_empty(), "{args:?}: {out}");
+    }
 }
 
 fn shown(root: &std::path::Path) -> String {
