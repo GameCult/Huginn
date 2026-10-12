@@ -328,9 +328,14 @@ mod unsafe_installs {
             .unwrap();
         let bin = env!("CARGO_BIN_EXE_mind-control");
         for round in 0..100 {
-            let verb = if round % 2 == 0 { "release" } else { "hold" };
+            let verb: &[&str] = if round % 2 == 0 {
+                &["brake", "release"]
+            } else {
+                &["dial", "set", "--heat", "1", "--base-cooldown-s", "60", "--base-run-usd", "1"]
+            };
             let status = Command::new("sh")
-                .args(["-c", "umask 000; exec \"$@\"", "sh", bin, "--root", minds.to_str().unwrap(), "--instance", &instance, "brake", verb])
+                .args(["-c", "umask 000; exec \"$@\"", "sh", bin, "--root", minds.to_str().unwrap(), "--instance", &instance])
+                .args(verb)
                 .status()
                 .unwrap();
             assert!(status.success());

@@ -14,8 +14,8 @@
 //! the instance it was read for: a Grant of another instance is refused. A
 //! Persona turn's run opens with no claims, so a request that carries any is
 //! refused. The primitive
-//! owns no file and stops no unit: stopping her units is the operator's brake
-//! hold, which is another cut's.
+//! owns no file and stops no unit through the `Launcher` port: stopping her
+//! units is the operator's brake hold, through `SystemdLauncher::stop_all`.
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
@@ -55,9 +55,11 @@ impl Clock for SystemClock {
     }
 }
 
-/// What `systemctl` answered: whether it succeeded, and what it printed.
+/// What `systemctl` answered: whether it succeeded, its exit code (none when a
+/// signal ended it), and what it printed.
 pub struct SystemctlReply {
     pub success: bool,
+    pub code: Option<i32>,
     pub stdout: String,
 }
 
@@ -71,7 +73,11 @@ struct RealSystemctl;
 impl Systemctl for RealSystemctl {
     fn run(&self, args: &[&str]) -> Result<SystemctlReply> {
         let output = std::process::Command::new("systemctl").args(args).output().map_err(|_| anyhow!("systemctl could not be run"))?;
-        Ok(SystemctlReply { success: output.status.success(), stdout: String::from_utf8_lossy(&output.stdout).into_owned() })
+        Ok(SystemctlReply {
+            success: output.status.success(),
+            code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        })
     }
 }
 
@@ -101,16 +107,50 @@ impl Default for SystemdLauncher {
     }
 }
 
+/// The unit template of one turn. Start, alive and stop all name units from
+/// these two.
+fn template(turn: RunTurn) -> &'static str {
+    match turn {
+        RunTurn::PersonaTurn => "mind-persona",
+        RunTurn::SelfRun => "mind-self",
+    }
+}
+
 /// The unit of one turn: the template by turn, then the instance, held to the
 /// leaf's grammar first so it cannot escape the name. The error names nothing
 /// of the value. Start and alive both name the unit here.
 pub(crate) fn unit(instance: &Slug, turn: RunTurn) -> Result<String> {
     instance.validate_slug().map_err(|_| anyhow!("the instance is not a unit name"))?;
-    let template = match turn {
-        RunTurn::PersonaTurn => "mind-persona",
-        RunTurn::SelfRun => "mind-self",
-    };
-    Ok(format!("{template}@{}.service", instance.0))
+    Ok(format!("{}@{}.service", template(turn), instance.0))
+}
+
+/// The arguments of the one synchronous stop: every unit of both turns of this
+/// instance, matched by glob. The `:` after the instance keeps `eureka` from
+/// matching `eureka-two`. No `--no-block`: `systemctl stop` returns when the
+/// units are down. The instance is not validated here; `stop_all` does.
+pub(crate) fn stop_args(instance: &Slug) -> Vec<String> {
+    let mut args = vec!["stop".to_string(), "--".to_string()];
+    args.extend([RunTurn::SelfRun, RunTurn::PersonaTurn].map(|turn| format!("{}@{}:*.service", template(turn), instance.0)));
+    args
+}
+
+impl SystemdLauncher {
+    /// Stops every unit of both turns of one instance and waits for them. An
+    /// inherent method, not on `Launcher`: only the operator's brake hold
+    /// calls it. A glob that matches no loaded unit is a success.
+    pub fn stop_all(&self, instance: &Slug) -> Result<()> {
+        instance.validate_slug().map_err(|_| anyhow!("the instance is not a unit name"))?;
+        let args = stop_args(instance);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let reply = self.systemctl.run(&args)?;
+        if reply.success {
+            return Ok(());
+        }
+        match reply.code {
+            Some(code) => Err(anyhow!("systemctl stop failed with exit status {code}")),
+            None => Err(anyhow!("systemctl stop was ended by a signal")),
+        }
+    }
 }
 
 impl Launcher for SystemdLauncher {
@@ -1082,18 +1122,20 @@ mod tests {
     struct Spy {
         calls: RefCell<Vec<Vec<String>>>,
         success: Cell<bool>,
+        code: Cell<Option<i32>>,
         stdout: RefCell<String>,
     }
 
     impl Systemctl for &'static Spy {
         fn run(&self, args: &[&str]) -> Result<SystemctlReply> {
             self.calls.borrow_mut().push(args.iter().map(|arg| arg.to_string()).collect());
-            Ok(SystemctlReply { success: self.success.get(), stdout: self.stdout.borrow().clone() })
+            Ok(SystemctlReply { success: self.success.get(), code: self.code.get(), stdout: self.stdout.borrow().clone() })
         }
     }
 
     fn spied() -> (SystemdLauncher, &'static Spy) {
-        let spy: &'static Spy = Box::leak(Box::new(Spy { calls: RefCell::default(), success: Cell::new(true), stdout: RefCell::default() }));
+        let spy: &'static Spy =
+            Box::leak(Box::new(Spy { calls: RefCell::default(), success: Cell::new(true), code: Cell::new(Some(0)), stdout: RefCell::default() }));
         (SystemdLauncher::over(Box::new(spy)), spy)
     }
 
@@ -1124,6 +1166,45 @@ mod tests {
             assert_eq!(launcher.alive(&eureka(), RunTurn::SelfRun), alive, "{said:?}");
         }
         assert_eq!(spy.calls.borrow()[0], vec!["is-active", "mind-self@eureka.service"]);
+    }
+
+    #[test]
+    fn stop_args_is_one_synchronous_stop_scoped_to_one_instance() {
+        let args = stop_args(&eureka());
+        assert_eq!(args, ["stop", "--", "mind-self@eureka:*.service", "mind-persona@eureka:*.service"]);
+        // The text before each glob star must not be a prefix of another instance's unit.
+        for (pattern, other) in [(&args[2], "mind-self@eureka-two:x.service"), (&args[3], "mind-persona@eureka-two:x.service")] {
+            assert!(!other.starts_with(pattern.split('*').next().unwrap()), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn stop_all_runs_the_one_stop_and_waits() {
+        let (launcher, spy) = spied();
+        launcher.stop_all(&eureka()).unwrap();
+        assert_eq!(*spy.calls.borrow(), vec![stop_args(&eureka())]);
+    }
+
+    #[test]
+    fn stop_all_with_an_invalid_instance_is_an_error_and_runs_no_systemctl() {
+        let (launcher, spy) = spied();
+        for bad in ["canary-../evil-7f3a91", "canary instance", "", "canary*"] {
+            let error = launcher.stop_all(&Slug(bad.into())).unwrap_err();
+            assert!(!format!("{error:#}").contains("canary"), "{error:#}");
+        }
+        assert!(spy.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_stop_is_an_error_naming_the_exit_status_and_no_instance() {
+        let (launcher, spy) = spied();
+        spy.success.set(false);
+        spy.code.set(Some(5));
+        let shown = format!("{:#}", launcher.stop_all(&Slug("canary-instance-7f3a91".into())).unwrap_err());
+        assert!(shown.contains("exit status 5") && !shown.contains("canary"), "{shown}");
+        spy.code.set(None);
+        let shown = format!("{:#}", launcher.stop_all(&eureka()).unwrap_err());
+        assert!(shown.contains("signal"), "{shown}");
     }
 
     #[test]

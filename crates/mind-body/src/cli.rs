@@ -4,10 +4,14 @@
 //!
 //! ```text
 //! mind-control [--root <dir>] --instance <slug> show
-//! mind-control --instance <slug> brake hold
+//! mind-control --instance <slug> brake hold        (also stops her running units)
 //! mind-control --instance <slug> brake release
 //! mind-control --instance <slug> dial set --heat H --base-cooldown-s S --base-run-usd U
 //! ```
+//!
+//! `brake hold` writes the brake held and then, whatever the write's outcome,
+//! stops the instance's running units through the `stop_units` parameter. It
+//! fails if either step failed. No other command stops anything.
 
 use std::io::Write;
 use std::path::Path;
@@ -26,18 +30,22 @@ const USAGE: &str =
 /// Who made the change: `SUDO_USER`, else `USER`, else `unknown`. An empty
 /// variable counts as unset.
 pub fn operator_name(sudo_user: Option<String>, user: Option<String>) -> String {
-    [sudo_user, user]
-        .into_iter()
-        .flatten()
-        .find(|name| !name.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    [sudo_user, user].into_iter().flatten().find(|name| !name.is_empty()).unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Runs one command against `<root>/<instance>/control.cc`. `root` is the
 /// default; a leading `--root <dir>` argument replaces it (argv, not environment,
-/// because `sudo -E` carries the environment). The operator's name, the clock and the output are parameters so a test drives
-/// the whole command without touching `/etc`.
-pub fn run(args: &[String], root: &Path, set_by: &str, now: DateTime<Utc>, out: &mut impl Write) -> Result<()> {
+/// because `sudo -E` carries the environment). The operator's name, the clock, the output and the stopper are parameters so a test drives
+/// the whole command without touching `/etc` or systemd. `stop_units` is
+/// called only by `brake hold`, after the write, whatever the write's outcome.
+pub fn run(
+    args: &[String],
+    root: &Path,
+    set_by: &str,
+    now: DateTime<Utc>,
+    out: &mut impl Write,
+    stop_units: &mut dyn FnMut(&Slug) -> Result<()>,
+) -> Result<()> {
     let (root, args) = match args {
         [flag, dir, rest @ ..] if flag == "--root" => (Path::new(dir), rest),
         _ => (root, args),
@@ -50,7 +58,19 @@ pub fn run(args: &[String], root: &Path, set_by: &str, now: DateTime<Utc>, out: 
     let words: Vec<&str> = command.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["show"] => show(root, &instance, out),
-        ["brake", "hold"] => ControlWriter::open(&path)?.set_brake(false, now, set_by),
+        ["brake", "hold"] => {
+            let written = ControlWriter::open(&path).and_then(|mut writer| writer.set_brake(false, now, set_by));
+            let stopped = stop_units(&instance);
+            match (written, stopped) {
+                (Ok(()), Ok(())) => {
+                    writeln!(out, "units: stopped mind-self@{0}:* mind-persona@{0}:*", instance.0)?;
+                    Ok(())
+                }
+                (Err(write), Ok(())) => Err(write.context("the brake was not written; the units were stopped")),
+                (Ok(()), Err(stop)) => Err(stop.context("the brake is held; the units were not stopped")),
+                (Err(write), Err(stop)) => Err(anyhow!("the brake was not written ({write:#}) and the units were not stopped ({stop:#})")),
+            }
+        }
         ["brake", "release"] => ControlWriter::open(&path)?.set_brake(true, now, set_by),
         ["dial", "set", flags @ ..] => {
             let dial = parse_dial(flags, now, set_by)?;
@@ -77,9 +97,7 @@ fn parse_dial(flags: &[&str], now: DateTime<Utc>, set_by: &str) -> Result<BurnRa
     }
     Ok(BurnRate {
         heat: Decimal::from_str(need(heat, "--heat")?).context("--heat is not a decimal")?,
-        base_cooldown_s: need(cooldown, "--base-cooldown-s")?
-            .parse()
-            .context("--base-cooldown-s is not a whole number of seconds")?,
+        base_cooldown_s: need(cooldown, "--base-cooldown-s")?.parse().context("--base-cooldown-s is not a whole number of seconds")?,
         base_run_usd: Decimal::from_str(need(run_usd, "--base-run-usd")?).context("--base-run-usd is not a decimal")?,
         set_at: now,
         set_by: set_by.to_string(),
