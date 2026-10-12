@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{PipelineDocument, PipelineKind as K, ResolutionOutcome, RunOperator, RunTurn, Slug};
-use huginn_mind::{MindRefusal, PipelineAdmissionOutcome, PipelineSelectionPage};
+use huginn_mind::{MindRefusal, PipelineAdmissionOutcome, PipelinePageItems, PipelineSelectionPage};
 use rust_decimal::Decimal;
 use tempfile::TempDir;
 
@@ -42,6 +42,8 @@ struct Counting<'a> {
     inner: &'a TestMind,
     queries: Cell<usize>,
     admits: Cell<usize>,
+    /// The header rows the queries brought back.
+    rows: Cell<usize>,
 }
 
 impl MindPort for Counting<'_> {
@@ -51,7 +53,11 @@ impl MindPort for Counting<'_> {
 
     fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage> {
         self.queries.set(self.queries.get() + 1);
-        self.inner.query(selection)
+        let page = self.inner.query(selection)?;
+        if let PipelinePageItems::Headers(headers) = &page.items {
+            self.rows.set(self.rows.get() + headers.len());
+        }
+        Ok(page)
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
@@ -159,7 +165,7 @@ fn with_the_brake_held_or_the_dial_absent_a_cycle_queries_nothing_admits_nothing
         // No Persona turn yet, so a released brake would launch one.
         let rig = Rig::new();
         prepare(&rig);
-        let counting = Counting { inner: &rig.mind, queries: Cell::new(0), admits: Cell::new(0) };
+        let counting = Counting { inner: &rig.mind, queries: Cell::new(0), admits: Cell::new(0), rows: Cell::new(0) };
         let outcome = rig.cycle_through(&counting).unwrap();
         assert_eq!(outcome, WakeOutcome::Held { reason }, "{name}");
         assert_eq!((counting.queries.get(), counting.admits.get(), rig.launcher.calls.get(), rig.runs()), (0, 0, 0, 0), "{name}");
@@ -231,13 +237,26 @@ fn an_ended_persona_turn_sets_the_boundary_whatever_ended_it_and_the_newest_wins
 }
 
 #[test]
+fn finding_the_newest_persona_turn_is_one_query_that_reads_one_row_however_many_there_are() {
+    let rig = Rig::new();
+    rig.release("1", 600, "5");
+    for label in ["p1", "p2", "p3"] {
+        rig.persona(label, recorded());
+    }
+    rig.clock.0.set(rig.admitted("p3") + Duration::seconds(1));
+    let counting = Counting { inner: &rig.mind, queries: Cell::new(0), admits: Cell::new(0), rows: Cell::new(0) };
+    assert!(matches!(rig.cycle_through(&counting).unwrap(), WakeOutcome::NotYet { .. }));
+    assert_eq!((counting.queries.get(), counting.rows.get()), (1, 1));
+}
+
+#[test]
 fn a_live_persona_turn_past_the_cadence_answers_busy_and_the_cycle_admits_nothing_itself() {
     let rig = Rig::new();
     rig.release("1", 600, "5");
     rig.mind.committed(vec![run("p1", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
     rig.launcher.rec.revive(RunTurn::PersonaTurn);
     rig.clock.0.set(rig.admitted("p1") + Duration::seconds(601));
-    let counting = Counting { inner: &rig.mind, queries: Cell::new(0), admits: Cell::new(0) };
+    let counting = Counting { inner: &rig.mind, queries: Cell::new(0), admits: Cell::new(0), rows: Cell::new(0) };
     assert_eq!(rig.cycle_through(&counting).unwrap(), WakeOutcome::Busy { run: run_ref("p1") });
     assert_eq!(counting.admits.get(), 0);
     assert!(rig.launcher.rec.started.borrow().is_empty());
