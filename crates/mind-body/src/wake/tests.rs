@@ -175,8 +175,17 @@ fn with_the_brake_held_or_the_dial_absent_a_cycle_queries_nothing_admits_nothing
 #[test]
 fn the_wait_is_the_grants_cadence_after_the_newest_persona_turn_and_ends_exactly_there() {
     // (heat, base cooldown, the cadence base_cooldown / heat): whole, halved,
-    // and one that carries nanoseconds, so a clamp, offset or scale shows.
-    let heats = [("1", 600, seconds(600, 0)), ("2", 600, seconds(300, 0)), ("1.5", 1000, seconds(666, 666_666_667)), ("0.05", 3600, seconds(72_000, 0))];
+    // and one that carries nanoseconds, so an offset or scale shows. The last
+    // two sit beyond a second below and a day above (the dial allows both), so
+    // a floor or a ceiling on the wait shows too.
+    let heats = [
+        ("1", 600, seconds(600, 0)),
+        ("2", 600, seconds(300, 0)),
+        ("1.5", 1000, seconds(666, 666_666_667)),
+        ("0.05", 3600, seconds(72_000, 0)),
+        ("2", 1, seconds(0, 500_000_000)),
+        ("0.05", 10_000, seconds(200_000, 0)),
+    ];
     for (heat, cooldown, cadence) in heats {
         let rig = Rig::new();
         rig.release(heat, cooldown, "5");
@@ -277,7 +286,7 @@ fn the_first_released_cycle_launches_a_persona_run_with_no_claims_and_the_grants
     assert!(held.claims.is_empty() && held.campaigns.is_empty());
     assert_eq!(held.budget_usd.0, "6.5", "base_run_usd x heat");
     assert_eq!(held.host.0, "yggdrasil-host");
-    assert_eq!(view.admission.provenance.agent.0, AGENT);
+    assert_eq!(view.admission.provenance.agent.0, "mind-wake");
     assert_eq!(*rig.launcher.rec.started.borrow(), vec![(Slug(INSTANCE.into()), RunTurn::PersonaTurn)]);
 }
 
@@ -321,6 +330,15 @@ fn an_outcome_prints_ids_and_codes_and_never_a_refusals_values() {
     let canary = "canary-8c1f";
     let refused = Declined::Admission(MindRefusal::RepoNotInCampaign { repo: canary.into() });
     assert_eq!(WakeOutcome::Refused(refused).to_string(), "refused: admission");
+    for (declined, code) in [
+        (Declined::Conflict, "conflict"),
+        (Declined::AlreadyAdmitted, "already_admitted"),
+        (Declined::StartFailed, "start_failed"),
+        (Declined::GrantForOtherInstance, "grant_for_other_instance"),
+        (Declined::PersonaRunTakesNoClaims, "persona_run_takes_claims"),
+    ] {
+        assert_eq!(WakeOutcome::Refused(declined).to_string(), format!("refused: {code}"));
+    }
     assert_eq!(WakeOutcome::Held { reason: HeldReason::BrakeHeld }.to_string(), "held: BrakeHeld");
     assert_eq!(WakeOutcome::Launched { run: run_ref("p1") }.to_string(), format!("launched: {INSTANCE}:run:p1"));
     assert_eq!(WakeOutcome::Busy { run: run_ref("p1") }.to_string(), format!("busy: {INSTANCE}:run:p1"));
