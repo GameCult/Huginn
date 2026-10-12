@@ -140,7 +140,8 @@ impl Rig {
 
 #[test]
 fn with_the_brake_held_or_the_dial_absent_a_cycle_queries_nothing_admits_nothing_and_calls_no_unit() {
-    let cases: [(&str, HeldReason, fn(&Rig)); 4] = [
+    type Prepare = fn(&Rig);
+    let cases: [(&str, HeldReason, Prepare); 4] = [
         ("no store", HeldReason::BrakeAbsent, |_| {}),
         ("brake held", HeldReason::BrakeHeld, |rig| {
             rig.release("1", 600, "5");
