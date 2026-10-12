@@ -19,10 +19,11 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use eureka_pipeline::Slug;
+use eureka_pipeline::{RunTurn, Slug};
 use rust_decimal::Decimal;
 
 use crate::control::{BurnRate, ControlWriter, FileSource, control_path, derive, load_state};
+use crate::launch::unit;
 
 const USAGE: &str =
     "usage: mind-control [--root <dir>] --instance <slug> show | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U";
@@ -63,7 +64,7 @@ pub fn run(
             let stopped = stop_units(&instance);
             match (written, stopped) {
                 (Ok(()), Ok(())) => {
-                    writeln!(out, "units: stopped mind-self@{0}:* mind-persona@{0}:*", instance.0)?;
+                    writeln!(out, "units: stopped {} {}", unit(&instance, RunTurn::SelfRun)?, unit(&instance, RunTurn::PersonaTurn)?)?;
                     Ok(())
                 }
                 (Err(write), Ok(())) => Err(write.context("the brake was not written; the units were stopped")),

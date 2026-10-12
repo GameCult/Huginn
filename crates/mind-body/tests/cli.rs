@@ -168,7 +168,7 @@ fn brake_hold_stops_once_with_the_instance_and_the_store_already_held() {
     result.unwrap();
     assert_eq!(calls, ["eureka"]);
     assert!(seen_at_stop.contains("BrakeHeld"), "the write comes before the stop: {seen_at_stop}");
-    assert!(out.contains("units: stopped mind-self@eureka:* mind-persona@eureka:*"), "{out}");
+    assert!(out.contains("units: stopped mind-self@eureka.service mind-persona@eureka.service"), "{out}");
 }
 
 #[test]
@@ -222,4 +222,45 @@ fn a_failing_write_still_stops_and_the_hold_fails() {
     let error = format!("{:#}", result.unwrap_err());
     assert_eq!(calls.len(), 1);
     assert!(error.contains("brake was not written") && error.contains("units were not stopped"), "{error}");
+}
+
+/// Runs the real binary's `brake hold` with a `systemctl` of ours first on
+/// PATH, so the stopper main.rs wires is the one under test. The fake records
+/// its arguments, one per line, and exits with `exit`.
+#[cfg(unix)]
+fn hold_through_the_binary(exit: i32) -> (std::process::Output, Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let record = bin.path().join("recorded");
+    let script = bin.path().join("systemctl");
+    std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\n' \"$@\" > '{}'\nexit {exit}\n", record.display())).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mind-control"))
+        .env("PATH", bin.path())
+        .args(["--root", root.path().to_str().unwrap(), "--instance", "eureka", "brake", "hold"])
+        .output()
+        .unwrap();
+    let recorded = std::fs::read_to_string(&record).map(|text| text.lines().map(str::to_string).collect()).unwrap_or_default();
+    (output, recorded)
+}
+
+#[cfg(unix)]
+#[test]
+fn the_binary_hold_runs_systemctl_stop_on_exactly_the_units_it_starts() {
+    let (output, recorded) = hold_through_the_binary(0);
+    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(recorded, ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service"]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("units: stopped mind-self@eureka.service mind-persona@eureka.service"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_binary_hold_fails_with_status_2_when_systemctl_does() {
+    let (output, recorded) = hold_through_the_binary(5);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(recorded.len(), 4, "systemctl was run: {recorded:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("units were not stopped") && stderr.contains("exit status 5"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("stopped"));
 }

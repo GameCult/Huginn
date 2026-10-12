@@ -107,8 +107,8 @@ impl Default for SystemdLauncher {
     }
 }
 
-/// The unit template of one turn. Start, alive and stop all name units from
-/// these two.
+/// The unit template of one turn, named only through `unit()`, which start,
+/// alive and stop all call.
 fn template(turn: RunTurn) -> &'static str {
     match turn {
         RunTurn::PersonaTurn => "mind-persona",
@@ -124,23 +124,27 @@ pub(crate) fn unit(instance: &Slug, turn: RunTurn) -> Result<String> {
     Ok(format!("{}@{}.service", template(turn), instance.0))
 }
 
-/// The arguments of the one synchronous stop: every unit of both turns of this
-/// instance, matched by glob. The `:` after the instance keeps `eureka` from
-/// matching `eureka-two`. No `--no-block`: `systemctl stop` returns when the
-/// units are down. The instance is not validated here; `stop_all` does.
-pub(crate) fn stop_args(instance: &Slug) -> Vec<String> {
+/// The arguments of the one synchronous stop: the exact unit `unit()` names
+/// for each turn of this instance, the same names start and alive use. No
+/// glob: a prefix glob also matches another instance (`eureka*` matches
+/// `eureka-two`) and a glob that matches no loaded unit exits 0. No
+/// `--no-block`: `systemctl stop` returns when the units are down. The
+/// instance is validated by `unit()`.
+pub(crate) fn stop_args(instance: &Slug) -> Result<Vec<String>> {
     let mut args = vec!["stop".to_string(), "--".to_string()];
-    args.extend([RunTurn::SelfRun, RunTurn::PersonaTurn].map(|turn| format!("{}@{}:*.service", template(turn), instance.0)));
-    args
+    for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
+        args.push(unit(instance, turn)?);
+    }
+    Ok(args)
 }
 
 impl SystemdLauncher {
     /// Stops every unit of both turns of one instance and waits for them. An
     /// inherent method, not on `Launcher`: only the operator's brake hold
-    /// calls it. A glob that matches no loaded unit is a success.
+    /// calls it. A unit that is not installed is systemctl's exit 5, and the
+    /// others still stop.
     pub fn stop_all(&self, instance: &Slug) -> Result<()> {
-        instance.validate_slug().map_err(|_| anyhow!("the instance is not a unit name"))?;
-        let args = stop_args(instance);
+        let args = stop_args(instance)?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let reply = self.systemctl.run(&args)?;
         if reply.success {
@@ -1169,20 +1173,28 @@ mod tests {
     }
 
     #[test]
-    fn stop_args_is_one_synchronous_stop_scoped_to_one_instance() {
-        let args = stop_args(&eureka());
-        assert_eq!(args, ["stop", "--", "mind-self@eureka:*.service", "mind-persona@eureka:*.service"]);
-        // The text before each glob star must not be a prefix of another instance's unit.
-        for (pattern, other) in [(&args[2], "mind-self@eureka-two:x.service"), (&args[3], "mind-persona@eureka-two:x.service")] {
-            assert!(!other.starts_with(pattern.split('*').next().unwrap()), "{pattern}");
+    fn stop_args_is_one_synchronous_stop_of_exactly_the_units_start_names() {
+        for name in ["eureka", "eureka.test", "eureka-two"] {
+            let instance = Slug(name.into());
+            let args = stop_args(&instance).unwrap();
+            assert_eq!(args[..2], ["stop", "--"], "one synchronous stop, no --no-block");
+            let (launcher, spy) = spied();
+            let mut started = Vec::new();
+            for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
+                launcher.start(&instance, turn).unwrap();
+                started.push(spy.calls.borrow().last().unwrap().last().unwrap().clone());
+            }
+            assert_eq!(args[2..], started[..], "stop names exactly the units start names, for both turns");
+            assert!(args[2..].iter().all(|unit| !unit.contains(['*', '?', '['])), "a glob can match another instance or none: {args:?}");
         }
+        assert_eq!(stop_args(&eureka()).unwrap(), ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service"]);
     }
 
     #[test]
     fn stop_all_runs_the_one_stop_and_waits() {
         let (launcher, spy) = spied();
         launcher.stop_all(&eureka()).unwrap();
-        assert_eq!(*spy.calls.borrow(), vec![stop_args(&eureka())]);
+        assert_eq!(*spy.calls.borrow(), vec![stop_args(&eureka()).unwrap()]);
     }
 
     #[test]
