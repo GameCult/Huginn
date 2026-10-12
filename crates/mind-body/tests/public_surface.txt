@@ -2,6 +2,7 @@ mind_body: mod cli
 mind_body: mod control
 mind_body: mod launch
 mind_body: mod queue
+mind_body: mod wake
 mind_body::cli: fn operator_name (sudo_user : Option < String > , user : Option < String >) -> String
 mind_body::cli: fn run (args : & [String] , root : & Path , set_by : & str , now : DateTime < Utc > , out : & mut impl Write , stop_units : & mut dyn FnMut (& Slug) -> Result < () > ,) -> Result < () >
 mind_body::control: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum HeldReason { BrakeAbsent , BrakeHeld , DialAbsent , DialOutOfBounds , Undecodable , }
@@ -70,3 +71,7 @@ mind_body::queue: impl MindPort for HuginnMind < '_ >
 mind_body::queue: impl< 'a > HuginnMind < 'a >
 mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query (& self , selection : & Selection) -> Result < PipelineSelectionPage > ; fn admit (& self , agent : & str , session : & str , documents : Vec < PipelineDocument >) -> Result < PipelineAdmissionOutcome > ; }
 mind_body::queue: struct HuginnMind< 'a >  pub-fields[]
+mind_body::wake: # [derive (Clone , Debug , PartialEq , Eq)] pub enum WakeOutcome { Held { reason : HeldReason } , NotYet { until : DateTime < Utc > } , Busy { run : PipelineRef } , Launched { run : PipelineRef } , Refused (Declined) , }
+mind_body::wake: const AGENT : & str
+mind_body::wake: fn cycle (ports : & Ports , control : & impl ControlSource) -> Result < WakeOutcome >
+mind_body::wake: impl fmt :: Display for WakeOutcome
