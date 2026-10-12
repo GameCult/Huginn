@@ -48,7 +48,7 @@ pub const DIAL_KEY: &str = "dial";
 /// `<root>/<instance>/control.cc`, after the leaf's slug grammar has passed, so
 /// an instance name cannot walk out of the root.
 pub fn control_path(root: &Path, instance: &Slug) -> Result<PathBuf> {
-    instance.validate_slug().map_err(|refusal| anyhow::anyhow!("instance {:?} is not a slug: {refusal:?}", instance.0))?;
+    instance.validate_slug().map_err(|_| anyhow::anyhow!("the instance is not a slug"))?;
     Ok(root.join(&instance.0).join("control.cc"))
 }
 

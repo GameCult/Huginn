@@ -8,6 +8,8 @@
 //! `launch` and `queue` are the launch primitive: the work queue, the
 //! repetition breaker, the one-live-Self-run rule, and the single path that
 //! opens a run in the mind and only then starts its unit.
+//!
+//! `wake` is the waker's one cycle over them: the `mind-wake` binary.
 
 // The control root is a constant, so the library reads no part of the process
 // environment (clippy.toml lists the readers); `forbid` keeps an `allow` from
@@ -21,6 +23,7 @@ pub mod cli;
 pub mod control;
 pub mod launch;
 pub mod queue;
+pub mod wake;
 
 #[cfg(test)]
 mod testkit;

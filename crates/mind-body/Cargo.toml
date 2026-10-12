@@ -11,7 +11,7 @@ publish.workspace = true
 # binary) and the one fail-closed reader every acting organ calls
 # (`control::read_effective`). It also holds the launch primitive (`launch`,
 # `queue`): the one way her organs open a run and start its unit. The waker
-# joins this crate in cut mind-wake.
+# (`wake`, the `mind-wake` binary) is one cycle over them.
 #
 # `rust_decimal` is the dial's number type: heat, cadence and the run cap are
 # money-adjacent and the tests pin exact products, which a float would blur. It
@@ -46,3 +46,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "mind-control"
 path = "src/main.rs"
+
+[[bin]]
+name = "mind-wake"
+path = "src/bin/mind-wake.rs"
