@@ -49,13 +49,14 @@ mind_body::launch: impl Launcher for SystemdLauncher
 mind_body::launch: impl Systemctl for RealSystemctl
 mind_body::launch: impl SystemdLauncher
 mind_body::launch: impl SystemdLauncher: fn new () -> Self
+mind_body::launch: impl SystemdLauncher: fn stop_all (& self , instance : & Slug) -> Result < () >
 mind_body::launch: pub trait Clock { fn now (& self) -> DateTime < Utc > ; }
 mind_body::launch: pub trait Launcher { fn start (& self , instance : & Slug , turn : RunTurn) -> Result < () > ; fn alive (& self , instance : & Slug , turn : RunTurn) -> bool ; }
 mind_body::launch: pub trait Systemctl { fn run (& self , args : & [& str]) -> Result < SystemctlReply > ; }
 mind_body::launch: struct LaunchRequest  pub-fields[turn: RunTurn, claims: Vec < PipelineRef >, agent: String, grant: Grant]
 mind_body::launch: struct Ports< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str]
 mind_body::launch: struct SystemClock  pub-fields[]
-mind_body::launch: struct SystemctlReply  pub-fields[success: bool, stdout: String]
+mind_body::launch: struct SystemctlReply  pub-fields[success: bool, code: Option < i32 >, stdout: String]
 mind_body::launch: struct SystemdLauncher  pub-fields[]
 mind_body::queue: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Breaker { Clear , Trip , }
 mind_body::queue: const CONSECUTIVE : usize
