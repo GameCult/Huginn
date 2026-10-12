@@ -3,7 +3,7 @@ mind_body: mod control
 mind_body: mod launch
 mind_body: mod queue
 mind_body::cli: fn operator_name (sudo_user : Option < String > , user : Option < String >) -> String
-mind_body::cli: fn run (args : & [String] , root : & Path , set_by : & str , now : DateTime < Utc > , out : & mut impl Write) -> Result < () >
+mind_body::cli: fn run (args : & [String] , root : & Path , set_by : & str , now : DateTime < Utc > , out : & mut impl Write , stop_units : & mut dyn FnMut (& Slug) -> Result < () > ,) -> Result < () >
 mind_body::control: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum HeldReason { BrakeAbsent , BrakeHeld , DialAbsent , DialOutOfBounds , Undecodable , }
 mind_body::control: # [derive (Debug , PartialEq , Eq)] pub enum Effective { Held { reason : HeldReason } , Released (Grant) , }
 mind_body::control: const BRAKE_KEY : & str
