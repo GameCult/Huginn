@@ -11,7 +11,7 @@ and asserts that the host a run records is the kernel's hostname. It writes
 `/etc/gamecult/minds`, so it runs in a container only (`/.dockerenv`), as root,
 with the daemon built beside the binary. A plain `cargo test` skips it, and so
 does `cargo mutants`, which therefore reports the three `host()` mutants in
-`src/wake.rs` as missed. The lane that kills them:
+`src/bin/mind-wake.rs` as missed. The lane that kills them:
 
 ```sh
 cargo build -p huginn-daemon -p mind-body --all-targets \
@@ -23,4 +23,5 @@ On Yggdrasil, run it through the verify stopgap in the Rust image
 
 Mutation testing of the waker needs the glob form, because `-f src/wake.rs`
 finds no mutants in this workspace: `cargo mutants -p mind-body -f
-"**/src/wake.rs"`.
+"**/src/wake.rs" -f "**/src/bin/mind-wake.rs"`. The second glob reaches
+`host()`, whose mutants only the container lane kills.
