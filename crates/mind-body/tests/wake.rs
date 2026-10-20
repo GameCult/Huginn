@@ -137,6 +137,10 @@ impl Drop for Daemon {
 /// daemon beside the binary. `PATH` is empty so no unit is ever reached: the
 /// run opens, its unit fails to start and the run is withdrawn, which is the
 /// outcome printed.
+///
+/// `cargo test` and `cargo mutants` skip it, so the `host()` mutants survive
+/// there. Run it in a container as root with the README's lane command
+/// (`crates/mind-body/README.md`).
 #[test]
 #[ignore = "container only: root, /etc/gamecult/minds and a built huginn-daemon beside the binary"]
 fn the_real_bin_against_the_real_daemon_opens_a_run_that_records_this_machines_host_and_the_agent() {

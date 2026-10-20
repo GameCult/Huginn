@@ -176,8 +176,8 @@ fn with_the_brake_held_or_the_dial_absent_a_cycle_queries_nothing_admits_nothing
 fn the_wait_is_the_grants_cadence_after_the_newest_persona_turn_and_ends_exactly_there() {
     // (heat, base cooldown, the cadence base_cooldown / heat): whole, halved,
     // and one that carries nanoseconds, so an offset or scale shows. The last
-    // two sit beyond a second below and a day above (the dial allows both), so
-    // a floor or a ceiling on the wait shows too.
+    // three sit beyond a second below, a day above and at the dial's maximum
+    // (the dial allows all three), so a floor or a ceiling on the wait shows too.
     let heats = [
         ("1", 600, seconds(600, 0)),
         ("2", 600, seconds(300, 0)),
@@ -185,6 +185,9 @@ fn the_wait_is_the_grants_cadence_after_the_newest_persona_turn_and_ends_exactly
         ("0.05", 3600, seconds(72_000, 0)),
         ("2", 1, seconds(0, 500_000_000)),
         ("0.05", 10_000, seconds(200_000, 0)),
+        // The dial's maximum (base cooldown u32::MAX at heat 0.05): a ceiling
+        // anywhere below it, a week or a year included, changes the wait.
+        ("0.05", 4_294_967_295, seconds(85_899_345_900, 0)),
     ];
     for (heat, cooldown, cadence) in heats {
         let rig = Rig::new();
