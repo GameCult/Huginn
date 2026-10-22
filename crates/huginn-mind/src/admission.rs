@@ -794,21 +794,11 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         }
     }
     match &resolution.outcome {
-        ResolutionOutcome::Superseded { by } if subject_kind == K::CutSpec => {
-            let Some(D::CutSpec(subject)) = docs.find(K::CutSpec, subject_id) else { return Ok(()) };
+        ResolutionOutcome::Superseded { by } => {
+            let Some(subject) = docs.find(subject_kind, subject_id) else { return Ok(()) };
             for supersessor in by {
-                if let Some(D::CutSpec(spec)) = docs.find(K::CutSpec, &supersessor.id.0)
-                    && spec.cut != subject.cut
-                {
-                    return Err(incompatible());
-                }
-            }
-        }
-        ResolutionOutcome::Superseded { by } if subject_kind == K::Target => {
-            let Some(D::Target(subject)) = docs.find(K::Target, subject_id) else { return Ok(()) };
-            for supersessor in by {
-                if let Some(D::Target(target)) = docs.find(K::Target, &supersessor.id.0)
-                    && target.campaign != subject.campaign
+                if let Some(next) = docs.find(subject_kind, &supersessor.id.0)
+                    && !same_lineage(subject, next)
                 {
                     return Err(incompatible());
                 }
@@ -823,6 +813,17 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         _ => {}
     }
     Ok(())
+}
+
+/// The one supersession lineage rule (ruling `supersession-lineage`). A target is
+/// superseded only by a target of its campaign, a cut_spec only by a cut_spec of its
+/// campaign and cut, and a ruling by any ruling: operator directions cut across campaigns.
+fn same_lineage(subject: &D, supersessor: &D) -> bool {
+    match (subject, supersessor) {
+        (D::Target(old), D::Target(new)) => old.campaign == new.campaign,
+        (D::CutSpec(old), D::CutSpec(new)) => old.campaign == new.campaign && old.cut == new.cut,
+        _ => true,
+    }
 }
 
 /// A10: a write whose identity the image already holds. Every kind answers
@@ -2829,6 +2830,76 @@ mod tests {
         // Nothing was written: r2 still names the repos, and its own revision still lands.
         committed(admit(&mut mind, vec![spec_on("1", OTHER_REPO)]));
         committed(admit(&mut mind, repo_revision(3, &[REPO, OTHER_REPO])));
+    }
+
+    /// A target of the first campaign (`CAMPAIGN`) at `revision`, naming no repos.
+    fn own_target(revision: u32) -> D {
+        target(revision, &[INVARIANT])
+    }
+
+    const FOREIGN_TARGET: &str = "other-campaign:target:r1";
+
+    fn supersession_refused(outcome: PipelineAdmissionOutcome, subject_kind: K) -> bool {
+        refusal(outcome) == MindRefusal::IncompatibleResolution { subject_kind, outcome: "Superseded".into() }
+    }
+
+    #[test]
+    fn a_foreign_target_in_the_same_batch_does_not_supersede() {
+        let mut mind = seeded();
+        let mut batch = other_campaign(&[REPO], &[]);
+        batch.push(resolution(r(K::Target, &id("target", "r1")), superseded(&[r(K::Target, FOREIGN_TARGET)])));
+        assert!(supersession_refused(admit(&mut mind, batch), K::Target));
+    }
+
+    #[test]
+    fn every_supersessor_of_a_target_is_checked_whichever_is_foreign() {
+        for foreign_first in [false, true] {
+            let mut mind = seeded();
+            committed(admit(&mut mind, other_campaign(&[REPO], &[])));
+            let own = r(K::Target, &id("target", "r2"));
+            let foreign = r(K::Target, FOREIGN_TARGET);
+            let by = if foreign_first { [foreign, own] } else { [own, foreign] };
+            let batch = vec![own_target(2), resolution(r(K::Target, &id("target", "r1")), superseded(&by))];
+            assert!(supersession_refused(admit(&mut mind, batch), K::Target), "foreign first: {foreign_first}");
+        }
+    }
+
+    #[test]
+    fn a_new_campaigns_target_in_its_own_batch_is_not_closed_by_a_foreign_one() {
+        let mut mind = seeded();
+        let mut batch = other_campaign(&[REPO], &[]);
+        batch.push(resolution(r(K::Target, FOREIGN_TARGET), superseded(&[r(K::Target, &id("target", "r1"))])));
+        assert!(supersession_refused(admit(&mut mind, batch), K::Target));
+    }
+
+    #[test]
+    fn a_cut_spec_is_superseded_only_within_its_campaign() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![spec_on("1", REPO)]));
+        let mut batch = other_campaign(&[REPO], &[]);
+        let D::CutSpec(mut foreign) = spec_on("1", REPO) else { panic!("a spec") };
+        foreign.campaign = "other-campaign".into();
+        batch.push(D::CutSpec(foreign));
+        committed(admit(&mut mind, batch));
+        let lone = vec![resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), superseded(&[r(K::CutSpec, "other-campaign:cut_spec:cut-1.r1")]))];
+        assert!(supersession_refused(admit(&mut mind, lone), K::CutSpec));
+        // Nothing was written: this campaign's own revision still lands.
+        let D::CutSpec(mut next) = spec_on("1", REPO) else { panic!("a spec") };
+        next.revision = 2;
+        let this = r(K::CutSpec, &id("cut_spec", "cut-1.r2"));
+        committed(admit(&mut mind, vec![D::CutSpec(next), resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), superseded(&[this]))]));
+    }
+
+    #[test]
+    fn a_ruling_is_superseded_by_a_ruling_of_any_campaign() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("old"))]));
+        let mut batch = other_campaign(&[REPO], &[]);
+        let mut foreign = ruling("new");
+        foreign.campaign = "other-campaign".into();
+        batch.push(D::Ruling(foreign));
+        batch.push(resolution(r(K::Ruling, &id("ruling", "old")), superseded(&[r(K::Ruling, "other-campaign:ruling:new")])));
+        committed(admit(&mut mind, batch));
     }
 
     #[test]
