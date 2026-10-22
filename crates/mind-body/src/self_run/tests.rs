@@ -252,6 +252,8 @@ fn go(steps: Vec<Step>) -> Ran {
     carry_with(&Seen::of(&mind), steps, Some(0), false)
 }
 
+type Seed = Box<dyn Fn(&TestMind)>;
+
 fn flushes(ran: &Ran) -> usize {
     ran.written().iter().filter(|text| text.as_str() == FLUSH_MESSAGE).count()
 }
@@ -260,7 +262,7 @@ fn flushes(ran: &Ran) -> usize {
 
 #[test]
 fn without_exactly_one_open_self_run_of_hers_it_is_no_run_and_no_child_is_spawned() {
-    let cases: Vec<(&str, Box<dyn Fn(&TestMind)>)> = vec![
+    let cases: Vec<(&str, Seed)> = vec![
         ("no run at all", Box::new(|_| {})),
         ("a Self run the operator operates", Box::new(|mind| mind.committed(vec![run("op", RunTurn::SelfRun, RunOperator::Operator, &[])]))),
         ("her Persona turn", Box::new(|mind| mind.committed(vec![run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]))),

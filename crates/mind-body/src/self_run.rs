@@ -229,12 +229,11 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, spawner: &dyn Spawner, out:
         };
         match child.next_line(wait) {
             Read::Line(line) => match read_usage(&line) {
-                Usage::Request { id, prefix: newest } => {
-                    if seen.insert(id) {
-                        requests += 1;
-                        prefix = newest;
-                        writeln!(out, "request {requests} prefix {prefix}")?;
-                    }
+                // A message id seen before is the same request again (F24).
+                Usage::Request { id, prefix: newest } if seen.insert(id.clone()) => {
+                    requests += 1;
+                    prefix = newest;
+                    writeln!(out, "request {requests} prefix {prefix}")?;
                 }
                 Usage::Result if !result_seen => {
                     result_seen = true;
