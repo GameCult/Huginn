@@ -625,7 +625,7 @@ fn a_result_before_any_request_closes_the_input_once_and_the_run_ends_with_a_typ
     let ran = carry_with(&Seen::of(&with_run()), vec![Out(result_line())], Some(1), false);
     assert_eq!(ran.count(&Event::InputClosed), 1);
     assert_eq!(ran.ended(), (Cause::Own, Some(1), 0, 0));
-    assert_eq!(ran.outcome.unwrap().exit_status(), 1);
+    assert_eq!(ran.outcome.as_ref().unwrap().exit_status(), 1);
     assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 0);
 }
 
