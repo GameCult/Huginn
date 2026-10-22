@@ -66,7 +66,8 @@ fn self_run(label: &str, budget: &str) -> PipelineDocument {
 enum Event {
     Wrote(String),
     InputClosed,
-    Interrupted,
+    /// A signal was attempted, delivered or not.
+    Stopped(Stop),
     Asked(StdDuration),
     Waited,
 }
@@ -85,7 +86,10 @@ struct Scripted {
     log: Rc<RefCell<Vec<Event>>>,
     clock: Rc<Fixed>,
     code: Option<i32>,
-    dies_on_interrupt: bool,
+    /// The weakest signal that ends it; weaker ones are ignored.
+    dies_on: Option<Stop>,
+    /// Signals that cannot be delivered (no `kill` program, say).
+    refuses: Vec<Stop>,
 }
 
 impl Child for Scripted {
@@ -109,11 +113,15 @@ impl Child for Scripted {
         }
     }
 
-    fn interrupt(&mut self) {
-        self.log.borrow_mut().push(Event::Interrupted);
-        if self.dies_on_interrupt {
+    fn stop(&mut self, how: Stop) -> bool {
+        self.log.borrow_mut().push(Event::Stopped(how));
+        if self.refuses.contains(&how) {
+            return false;
+        }
+        if self.dies_on.is_some_and(|weakest| how >= weakest) {
             self.steps.clear();
         }
+        true
     }
 
     fn wait(&mut self) -> Option<i32> {
@@ -221,11 +229,16 @@ impl Ran {
     }
 }
 
+/// `dies_on_interrupt`: the child ends at the first signal, else it ignores all.
 fn carry_with(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on_interrupt: bool) -> Ran {
+    carry_signalled(seen, steps, code, dies_on_interrupt.then_some(Stop::Interrupt), &[])
+}
+
+fn carry_signalled(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Option<Stop>, refuses: &[Stop]) -> Ran {
     let log = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(Fixed(Cell::new(at_start())));
     let fake = Fake {
-        child: RefCell::new(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on_interrupt })),
+        child: RefCell::new(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec() })),
         spawns: RefCell::new(Vec::new()),
         refuse: false,
     };
@@ -363,7 +376,8 @@ fn the_session_id_is_uuid_v5_of_the_run_id_and_differs_per_run() {
 
 #[test]
 fn the_child_is_started_for_her_run_with_the_runs_own_budget_verbatim() {
-    for budget in ["0.5", "5", "12.25"] {
+    // Trailing zeros are significant: "10" is ten dollars, not one.
+    for budget in ["0.5", "5", "12.25", "10", "100", "2.50"] {
         let mind = TestMind::seeded();
         mind.committed(vec![self_run("selfrun-b", budget)]);
         let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
@@ -463,7 +477,7 @@ fn below_the_ceiling_no_flush_is_written_and_at_it_exactly_one() {
     let at_it = go(vec![Out(at("m1", CEILING_TOKENS - 1)), Out(at("m2", CEILING_TOKENS)), Out(at("m3", CEILING_TOKENS + 10_000))]);
     assert_eq!(flushes(&at_it), 1, "{:?}", at_it.written());
     assert_eq!(at_it.written().len(), 2, "the start and the flush");
-    assert_eq!(at_it.ended().0, Cause::Flushed);
+    assert_eq!(at_it.ended().0, Cause::FlushRequested);
     assert_eq!(CEILING_TOKENS, 300_000);
 }
 
@@ -472,7 +486,7 @@ fn a_result_before_the_ceiling_means_no_flush_ever() {
     let ran = go(vec![Out(at("m1", 10)), Out(result_line()), Out(at("m2", CEILING_TOKENS + 1))]);
     assert_eq!(flushes(&ran), 0);
     assert_eq!(ran.ended().0, Cause::Own);
-    assert_eq!(ran.count(&Event::Interrupted), 0);
+    assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 0);
 }
 
 #[test]
@@ -500,21 +514,21 @@ fn after_the_flush_the_grace_interrupts_exactly_once_and_not_a_second_early() {
     let grace = FLUSH_GRACE_S;
     // Just short of the grace: no interrupt, and the child ended on its own.
     let early = go(vec![Out(at("m1", CEILING_TOKENS)), Idle(grace - 1)]);
-    assert_eq!(early.count(&Event::Interrupted), 0);
-    assert_eq!(early.ended().0, Cause::Flushed);
+    assert_eq!(early.count(&Event::Stopped(Stop::Interrupt)), 0);
+    assert_eq!(early.ended().0, Cause::FlushRequested);
 
     // At the grace, and long past it: one interrupt.
     let on_time = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Idle(grace), Idle(grace), Idle(grace)], Some(130), true);
-    assert_eq!(on_time.count(&Event::Interrupted), 1);
-    assert_eq!(on_time.ended().0, Cause::Interrupted);
+    assert_eq!(on_time.count(&Event::Stopped(Stop::Interrupt)), 1);
+    assert_eq!(on_time.ended().0, Cause::Signalled(Stop::Interrupt));
 
     // Exactly at the grace is the grace: the interrupt comes then, not on the next wait.
     let exact = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Idle(grace)], Some(130), true);
-    assert_eq!(exact.ended().0, Cause::Interrupted);
+    assert_eq!(exact.ended().0, Cause::Signalled(Stop::Interrupt));
 
     // A child that ignores it is interrupted once and still waited for.
     let stubborn = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Idle(grace), Idle(grace), Idle(grace)], Some(0), false);
-    assert_eq!(stubborn.count(&Event::Interrupted), 1);
+    assert_eq!(stubborn.count(&Event::Stopped(Stop::Interrupt)), 1);
     assert_eq!(stubborn.count(&Event::Waited), 1);
     assert_eq!(FLUSH_GRACE_S, 900);
 }
@@ -527,26 +541,144 @@ fn the_wait_for_the_child_never_passes_the_grace_deadline_and_never_spins_after_
 
 #[test]
 fn a_prefix_at_the_ceiling_plus_the_allowance_interrupts_at_once_and_one_short_of_it_does_not() {
-    let hard = CEILING_TOKENS + FLUSH_ALLOWANCE_TOKENS;
+    let hard = CEILING_TOKENS + FLUSH_HEADROOM_TOKENS;
     let short = go(vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", hard - 1))]);
-    assert_eq!(short.count(&Event::Interrupted), 0);
-    assert_eq!(short.ended().0, Cause::Flushed);
+    assert_eq!(short.count(&Event::Stopped(Stop::Interrupt)), 0);
+    assert_eq!(short.ended().0, Cause::FlushRequested);
 
     let at_hard = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", hard)), Out(at("m3", hard + 1))], Some(130), true);
-    assert_eq!(at_hard.count(&Event::Interrupted), 1);
-    assert_eq!(at_hard.ended().0, Cause::Interrupted);
-    assert_eq!(FLUSH_ALLOWANCE_TOKENS, 60_000);
+    assert_eq!(at_hard.count(&Event::Stopped(Stop::Interrupt)), 1);
+    assert_eq!(at_hard.ended().0, Cause::Signalled(Stop::Interrupt));
+    assert_eq!(FLUSH_HEADROOM_TOKENS, 60_000);
 
-    // The first request already past both: the flush is written, then the interrupt.
-    let jump = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", hard + 5))], Some(130), true);
-    assert_eq!((flushes(&jump), jump.count(&Event::Interrupted)), (1, 1));
+}
+
+#[test]
+fn a_jump_past_the_ceiling_plus_the_headroom_writes_the_flush_and_gives_it_a_turn_before_any_interrupt() {
+    let jump = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", 290_000)), Out(at("m2", 400_000)), Out(at("m3", 430_000)), Out(at("m4", 459_999)), Out(at("m5", 460_000)), Out(at("m6", 470_000))], Some(130), true);
+    let kinds: Vec<&str> = jump
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Wrote(line) if line.contains("context ceiling") => Some("flush"),
+            Event::Stopped(_) => Some("interrupt"),
+            Event::Asked(_) => Some("read"),
+            _ => None,
+        })
+        .collect();
+    // Reads: m1, m2 (the jump, which writes the flush), then a read after it before anything else.
+    assert_eq!(kinds[..4], ["read", "read", "flush", "read"], "{kinds:?}");
+    // The headroom is measured from the prefix the flush was asked at (400k), not from the ceiling:
+    // 430k is past 300k + 60k and does not interrupt; 459_999 does not; 460_000 does, once.
+    assert_eq!(jump.count(&Event::Stopped(Stop::Interrupt)), 1, "{kinds:?}");
+    assert_eq!(kinds.iter().filter(|kind| **kind == "read").count(), 6, "interrupted on m5, the sixth read ends the stream: {kinds:?}");
+    assert_eq!(jump.out, "request 1 prefix 290000\nrequest 2 prefix 400000\nrequest 3 prefix 430000\nrequest 4 prefix 459999\nrequest 5 prefix 460000\n");
+    assert_eq!(jump.ended().0, Cause::Signalled(Stop::Interrupt));
+    assert_eq!(flushes(&jump), 1);
 }
 
 #[test]
 fn a_child_that_ends_before_the_grace_is_never_interrupted() {
     let ran = go(vec![Out(at("m1", CEILING_TOKENS)), Out(result_line())]);
-    assert_eq!(ran.count(&Event::Interrupted), 0);
+    assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 0);
     assert_eq!(ran.count(&Event::Waited), 1);
+}
+
+#[test]
+fn the_grace_is_the_full_grace_from_the_moment_the_flush_was_asked_whichever_request_that_was() {
+    let grace = FLUSH_GRACE_S;
+    // Five requests, time passing before the ceiling, then the flush on the sixth.
+    let before: Vec<Step> = vec![Out(at("m1", 10)), Idle(500), Out(at("m2", 20)), Out(at("m3", 30)), Out(at("m4", 40)), Out(at("m5", 50)), Out(at("m6", CEILING_TOKENS))];
+    let early = carry_with(&Seen::of(&with_run()), [before.clone(), vec![Idle(grace - 1)]].concat(), Some(0), true);
+    assert_eq!((flushes(&early), early.count(&Event::Stopped(Stop::Interrupt))), (1, 0), "one second short of the grace, flush on request 6");
+    let on_time = carry_with(&Seen::of(&with_run()), [before, vec![Idle(grace - 1), Idle(1)]].concat(), Some(0), true);
+    assert_eq!(on_time.count(&Event::Stopped(Stop::Interrupt)), 1, "the grace is the same after six requests as after one");
+}
+
+#[test]
+fn the_message_ids_of_a_long_run_are_all_remembered() {
+    let ids: Vec<String> = (1..=12).map(|n| format!("m{n}")).collect();
+    let mut steps: Vec<Step> = ids.iter().map(|id| Out(at(id, 1_000))).collect();
+    // Every earlier request seen again, the oldest and the newest among them: none counts twice.
+    steps.extend(ids.iter().map(|id| Out(at(id, 2_000))));
+    let ran = go(steps);
+    let (_, _, requests, prefix) = ran.ended();
+    assert_eq!((requests, prefix), (12, 1_000));
+    assert_eq!(ran.out.lines().count(), 12);
+}
+
+#[test]
+fn a_usage_sum_that_overflows_is_at_or_over_the_ceiling_not_a_panic_or_a_wrap() {
+    let line = request("m", u64::MAX, 1, 0);
+    assert_eq!(read_usage(&line), Usage::Request { id: "m".into(), prefix: u64::MAX });
+    assert_eq!(read_usage(&request("m", u64::MAX, u64::MAX, u64::MAX)), Usage::Request { id: "m".into(), prefix: u64::MAX });
+    assert_eq!(read_usage(&request("m", 1, u64::MAX, 1)), Usage::Request { id: "m".into(), prefix: u64::MAX });
+    // Through the actuator: the flush is asked for, and the headroom beyond a saturated prefix does not overflow either.
+    let ran = go(vec![Out(request("m1", u64::MAX, 7, 0)), Out(request("m2", 0, 0, 0))]);
+    assert_eq!(flushes(&ran), 1);
+    assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 0);
+}
+
+#[test]
+fn a_result_before_any_request_closes_the_input_once_and_the_run_ends_with_a_typed_outcome() {
+    // The shape of an API or authentication failure: the child reports an error result and no request ever came.
+    let ran = carry_with(&Seen::of(&with_run()), vec![Out(result_line())], Some(1), false);
+    assert_eq!(ran.count(&Event::InputClosed), 1);
+    assert_eq!(ran.ended(), (Cause::Own, Some(1), 0, 0));
+    assert_eq!(ran.outcome.unwrap().exit_status(), 1);
+    assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 0);
+}
+
+#[test]
+fn without_a_flush_nothing_is_ever_signalled_however_large_the_prefix_grows() {
+    let ran = go(vec![Out(at("m1", 10)), Out(result_line()), Out(at("m2", 900_000)), Idle(100_000)]);
+    assert_eq!(ran.events.iter().filter(|event| matches!(event, Event::Stopped(_))).count(), 0);
+    assert_eq!(ran.ended().0, Cause::Own);
+}
+
+#[test]
+fn a_child_that_ignores_a_signal_gets_the_next_one_after_the_bound_and_the_outcome_names_the_one_that_ended_it() {
+    let hung = |dies_on: Option<Stop>, refuses: &[Stop], rest: Vec<Step>| {
+        carry_signalled(&Seen::of(&with_run()), [vec![Out(at("m1", CEILING_TOKENS)), Idle(FLUSH_GRACE_S)], rest].concat(), Some(0), dies_on, refuses)
+    };
+    let stops = |ran: &Ran| -> Vec<Event> { ran.events.iter().filter(|event| matches!(event, Event::Stopped(_))).cloned().collect() };
+    let after = ESCALATE_AFTER_S;
+
+    // Ignores SIGINT and SIGTERM: each next signal waits out the bound, SIGKILL ends it.
+    let killed = hung(Some(Stop::Kill), &[], vec![Idle(after - 1), Idle(1), Idle(after - 1), Idle(1), Idle(after)]);
+    assert_eq!(stops(&killed), [Event::Stopped(Stop::Interrupt), Event::Stopped(Stop::Terminate), Event::Stopped(Stop::Kill)]);
+    assert_eq!(killed.ended().0, Cause::Signalled(Stop::Kill));
+    assert_eq!(killed.count(&Event::Waited), 1);
+
+    // One second short of the bound there is no second signal.
+    let waiting = hung(None, &[], vec![Idle(after - 1)]);
+    assert_eq!(stops(&waiting), [Event::Stopped(Stop::Interrupt)]);
+
+    // SIGTERM ends it: the outcome says terminated, and nothing stronger is sent.
+    let terminated = hung(Some(Stop::Terminate), &[], vec![Idle(after), Idle(after)]);
+    assert_eq!(stops(&terminated), [Event::Stopped(Stop::Interrupt), Event::Stopped(Stop::Terminate)]);
+    assert_eq!(terminated.outcome.as_ref().unwrap().to_string(), "ended: terminated code 0 requests 1 prefix 300000");
+}
+
+#[test]
+fn a_signal_that_could_not_be_delivered_is_never_reported_as_sent() {
+    let hung = |refuses: &[Stop], rest: Vec<Step>| {
+        carry_signalled(&Seen::of(&with_run()), [vec![Out(at("m1", CEILING_TOKENS)), Idle(FLUSH_GRACE_S)], rest].concat(), Some(0), None, refuses)
+    };
+    // SIGINT is refused and the child ends by itself afterwards: the flush was requested, nothing interrupted it.
+    let refused = hung(&[Stop::Interrupt], vec![]);
+    assert_eq!(refused.count(&Event::Stopped(Stop::Interrupt)), 1, "it was attempted");
+    assert_eq!(refused.ended().0, Cause::FlushRequested);
+
+    // SIGINT delivered but ignored, SIGTERM refused, the child ends on its own: the strongest delivered is SIGINT.
+    let partly = hung(&[Stop::Terminate], vec![Idle(ESCALATE_AFTER_S)]);
+    assert_eq!(partly.ended().0, Cause::Signalled(Stop::Interrupt));
+
+    // Not even SIGKILL is delivered: the run ends at once, the child is not waited for, and the label says so.
+    let stuck = hung(&[Stop::Interrupt, Stop::Terminate, Stop::Kill], vec![Idle(ESCALATE_AFTER_S), Idle(ESCALATE_AFTER_S), Idle(ESCALATE_AFTER_S)]);
+    assert_eq!(stuck.ended(), (Cause::Unstoppable, None, 1, CEILING_TOKENS));
+    assert_eq!(stuck.count(&Event::Waited), 0);
+    assert_eq!(stuck.outcome.unwrap().exit_status(), 1);
 }
 
 // ---- how it ends --------------------------------------------------------------
@@ -559,14 +691,14 @@ fn the_outcome_names_how_it_ended_and_the_exit_status_follows_the_childs_code() 
     assert_eq!(own.outcome.unwrap().exit_status(), 0);
 
     let flushed = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Out(result_line())], Some(0), false);
-    assert_eq!(flushed.outcome.as_ref().unwrap().to_string(), "ended: flushed code 0 requests 1 prefix 300000");
+    assert_eq!(flushed.outcome.as_ref().unwrap().to_string(), "ended: flush-requested code 0 requests 1 prefix 300000");
     assert_eq!(flushed.outcome.unwrap().exit_status(), 0);
 
     let nonzero = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", 10))], Some(2), false);
     assert_eq!(nonzero.outcome.as_ref().unwrap().to_string(), "ended: own code 2 requests 1 prefix 10");
     assert_eq!(nonzero.outcome.unwrap().exit_status(), 1);
 
-    let signalled = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS + FLUSH_ALLOWANCE_TOKENS))], None, true);
+    let signalled = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS + FLUSH_HEADROOM_TOKENS))], None, true);
     assert_eq!(signalled.outcome.as_ref().unwrap().to_string(), "ended: interrupted signal requests 1 prefix 360000");
     assert_eq!(signalled.outcome.unwrap().exit_status(), 1, "a child killed by a signal has no code");
 
@@ -669,7 +801,7 @@ mod process {
         let quiet = script(&dir, "exec sleep 5");
         let mut child = start(&quiet, &[]);
         assert_eq!(child.next_line(StdDuration::from_millis(100)), Read::Timeout);
-        child.interrupt();
+        child.stop(Stop::Interrupt);
         assert_eq!(child.next_line(StdDuration::from_secs(20)), Read::Closed);
         assert_eq!(child.wait(), None, "SIGINT ended the unprepared child");
     }
@@ -680,7 +812,7 @@ mod process {
         let program = script(&dir, "trap 'echo interrupted; exit 130' INT\necho ready\nwhile :; do sleep 0.05; done");
         let mut child = start(&program, &[]);
         assert_eq!(child.next_line(StdDuration::from_secs(20)), Read::Line("ready".into()));
-        child.interrupt();
+        child.stop(Stop::Interrupt);
         assert_eq!(drain(&mut *child), ["interrupted"]);
         assert_eq!(child.wait(), Some(130));
     }
@@ -692,47 +824,103 @@ mod process {
         assert!(!format!("{error:#}").contains(canary) && !format!("{error:#}").contains("nonexistent"), "{error:#}");
     }
 
+    /// A read that times out here means the stream stopped, never a wait worth 60 s:
+    /// fail at once instead of hanging the suite.
+    struct Prompt(Box<dyn Child>);
+    impl Child for Prompt {
+        fn write_line(&mut self, line: &str) {
+            self.0.write_line(line)
+        }
+        fn close_input(&mut self) {
+            self.0.close_input()
+        }
+        fn next_line(&mut self, timeout: StdDuration) -> Read {
+            match self.0.next_line(StdDuration::from_secs(20).min(timeout)) {
+                Read::Timeout => panic!("the fake claude went quiet"),
+                read => read,
+            }
+        }
+        fn stop(&mut self, how: Stop) -> bool {
+            self.0.stop(how)
+        }
+        fn wait(&mut self) -> Option<i32> {
+            self.0.wait()
+        }
+    }
+
+    struct Spawn(PathBuf);
+    impl Spawner for Spawn {
+        fn spawn(&self, args: &[String]) -> Result<Box<dyn Child>> {
+            Ok(Box::new(Prompt(start(&self.0, args))))
+        }
+    }
+
     #[test]
     fn a_whole_run_through_the_real_child_flushes_at_the_ceiling_and_ends_on_the_result() {
         let dir = tempfile::tempdir().unwrap();
-        let lines = [at("m1", 10), at("m2", CEILING_TOKENS)].join("\n");
+        let lines = [at("m1", 10), at("m2", CEILING_TOKENS)].join("
+");
         let result = result_line();
         // Prints two requests, waits for the flush on stdin, then the result, as a stand-in for a Self that obeys.
-        let body = format!("cat <<'EOF'\n{lines}\nEOF\nread -t 5 start\nread -t 5 flush\ncat <<'EOF'\n{result}\nEOF\nwhile read more; do :; done\nexit 0");
+        let body = format!("cat <<'EOF'
+{lines}
+EOF
+read -t 5 start
+read -t 5 flush
+cat <<'EOF'
+{result}
+EOF
+while read more; do :; done
+exit 0");
         let program = script(&dir, &body);
         let mind = with_run();
-        // A read that times out here means the stream stopped, never a wait worth 60 s:
-        // fail at once instead of hanging the suite.
-        struct Prompt(Box<dyn Child>);
-        impl Child for Prompt {
-            fn write_line(&mut self, line: &str) {
-                self.0.write_line(line)
-            }
-            fn close_input(&mut self) {
-                self.0.close_input()
-            }
-            fn next_line(&mut self, timeout: StdDuration) -> Read {
-                match self.0.next_line(StdDuration::from_secs(20).min(timeout)) {
-                    Read::Timeout => panic!("the fake claude went quiet"),
-                    read => read,
-                }
-            }
-            fn interrupt(&mut self) {
-                self.0.interrupt()
-            }
-            fn wait(&mut self) -> Option<i32> {
-                self.0.wait()
-            }
-        }
-        struct Spawn(PathBuf);
-        impl Spawner for Spawn {
-            fn spawn(&self, args: &[String]) -> Result<Box<dyn Child>> {
-                Ok(Box::new(Prompt(start(&self.0, args))))
-            }
-        }
         let mut out = Vec::new();
         let outcome = carry(&Seen::of(&mind), &SystemClock, &Spawn(program), &mut out).unwrap();
-        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::Flushed, code: Some(0), requests: 2, prefix: 300_000 });
-        assert_eq!(String::from_utf8(out).unwrap(), "request 1 prefix 10\nrequest 2 prefix 300000\n");
+        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000 });
+        assert_eq!(String::from_utf8(out).unwrap(), "request 1 prefix 10
+request 2 prefix 300000
+");
+    }
+
+    #[test]
+    fn a_failure_result_before_any_request_closes_stdin_and_ends_the_run_promptly_through_the_real_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = result_line();
+        // An authentication or API failure: the error result is the first thing it prints, then it
+        // waits for its input to end, as `claude -p` over stream-json does, and exits 1.
+        let program = script(&dir, &format!("read -t 5 start
+cat <<'EOF'
+{result}
+EOF
+while read more; do :; done
+exit 1"));
+        let started = std::time::Instant::now();
+        let mut out = Vec::new();
+        let outcome = carry(&Seen::of(&with_run()), &SystemClock, &Spawn(program), &mut out).unwrap();
+        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::Own, code: Some(1), requests: 0, prefix: 0 });
+        assert_eq!(outcome.exit_status(), 1);
+        assert!(out.is_empty());
+        assert!(started.elapsed() < StdDuration::from_secs(20), "it ended promptly");
+    }
+
+    #[test]
+    fn each_signal_reaches_a_child_that_ignores_the_weaker_ones_and_one_for_a_gone_child_is_not_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(&dir, "trap '' INT TERM
+echo ready
+while :; do sleep 0.05; done");
+        let mut child = start(&program, &[]);
+        assert_eq!(child.next_line(StdDuration::from_secs(20)), Read::Line("ready".into()));
+        assert!(child.stop(Stop::Interrupt) && child.stop(Stop::Terminate), "delivered, and ignored");
+        assert_eq!(child.next_line(StdDuration::from_millis(300)), Read::Timeout, "still running");
+        assert!(child.stop(Stop::Kill));
+        assert_eq!(child.next_line(StdDuration::from_secs(20)), Read::Closed);
+        assert_eq!(child.wait(), None, "SIGKILL leaves no code");
+
+        let quick = script(&dir, "exit 0");
+        let mut gone = start(&quick, &[]);
+        assert_eq!(gone.next_line(StdDuration::from_secs(20)), Read::Closed);
+        assert_eq!(gone.wait(), Some(0));
+        assert!(!gone.stop(Stop::Interrupt), "no such process");
     }
 }

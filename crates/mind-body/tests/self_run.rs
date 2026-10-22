@@ -248,7 +248,7 @@ echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         assert_eq!(output.status.code(), Some(0), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 300000\nended: flushed code 0 requests 2 prefix 300000\n");
+        assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 300000\nended: flush-requested code 0 requests 2 prefix 300000\n");
         assert!(!all_output(&output).contains(ENV_CANARY), "the unit's environment is the child's, not the bin's output");
         assert!(String::from_utf8_lossy(&output.stderr).contains("journal-line"), "the child's stderr is the unit's journal");
 

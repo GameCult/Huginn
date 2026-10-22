@@ -7,8 +7,11 @@
 //! once when the context prefix reaches the ceiling (ruling
 //! `eureka-body:ruling:self-lifecycle-flush-rehydrate`: a Self run admits what
 //! the mind lacks and ends, it never summarises), closes the child's input at
-//! the first result, and interrupts at most once, after a grace or at the hard
-//! limit.
+//! the first result, and stops a child that outlives its flush: an interrupt
+//! after the grace, or once the prefix has grown by the headroom beyond the
+//! prefix the flush was asked at (ruling
+//! `eureka-body:ruling:flush-always-gets-a-turn`), then SIGTERM and SIGKILL if
+//! the child ignores that.
 //!
 //! The actuator admits nothing, reads neither the brake nor the environment and
 //! stops no unit: the gate and the brake hold own those. It never echoes an
@@ -37,10 +40,13 @@ use crate::queue::MindPort;
 
 /// The measured Self ceiling: at this prefix the flush is asked for.
 pub const CEILING_TOKENS: u64 = 300_000;
-/// What the flush may add to the prefix before the actuator interrupts.
-pub const FLUSH_ALLOWANCE_TOKENS: u64 = 60_000;
+/// What the prefix may grow by beyond the prefix the flush was asked at before
+/// the actuator interrupts. Relative to the flush, never an absolute limit.
+pub const FLUSH_HEADROOM_TOKENS: u64 = 60_000;
 /// How long the child may take over the flush before it is interrupted.
 pub const FLUSH_GRACE_S: i64 = 15 * 60;
+/// How long a child may ignore a signal before the next, stronger one.
+pub const ESCALATE_AFTER_S: i64 = 120;
 /// A backstop `claude` enforces; the ceiling is reached first.
 pub const MAX_TURNS: u32 = 500;
 /// The name the start message tells her to admit as.
@@ -115,7 +121,9 @@ pub fn read_usage(line: &str) -> Usage {
             let Some(id) = message.and_then(|message| message.get("id")).and_then(Value::as_str) else { return Usage::Other };
             let usage = message.and_then(|message| message.get("usage"));
             let field = |name: &str| usage.and_then(|usage| usage.get(name)).and_then(Value::as_u64).unwrap_or(0);
-            Usage::Request { id: id.to_string(), prefix: field("input_tokens") + field("cache_read_input_tokens") + field("cache_creation_input_tokens") }
+            // Saturating: a sum that overflows is at or over the ceiling, never a panic or a wrap.
+            let prefix = field("input_tokens").saturating_add(field("cache_read_input_tokens")).saturating_add(field("cache_creation_input_tokens"));
+            Usage::Request { id: id.to_string(), prefix }
         }
         _ => Usage::Other,
     }
@@ -138,10 +146,28 @@ pub trait Child {
     /// Closes its input; later writes go nowhere.
     fn close_input(&mut self);
     fn next_line(&mut self, timeout: StdDuration) -> Read;
-    /// Asks it to stop as an operator's Ctrl-C does.
-    fn interrupt(&mut self);
+    /// Sends it the signal; whether the signal was delivered.
+    fn stop(&mut self, how: Stop) -> bool;
     /// Its exit code, none when a signal ended it.
     fn wait(&mut self) -> Option<i32>;
+}
+
+/// The signals the actuator sends, weakest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Stop {
+    /// SIGINT, as an operator's Ctrl-C.
+    Interrupt,
+    Terminate,
+    Kill,
+}
+
+impl Stop {
+    fn next(self) -> Self {
+        match self {
+            Self::Interrupt => Self::Terminate,
+            Self::Terminate | Self::Kill => Self::Kill,
+        }
+    }
 }
 
 pub trait Spawner {
@@ -153,10 +179,13 @@ pub trait Spawner {
 pub enum Cause {
     /// The child ended with no flush asked for and no interrupt.
     Own,
-    /// The ceiling was reached and the flush asked for; the child ended itself.
-    Flushed,
-    /// The actuator interrupted the child, after the grace or at the hard limit.
-    Interrupted,
+    /// The ceiling was reached and the flush asked for; the child ended with no
+    /// signal. Whether it ran the flush is for the mind to say, not this label.
+    FlushRequested,
+    /// A signal was delivered, and this was the strongest one delivered.
+    Signalled(Stop),
+    /// Not even SIGKILL could be delivered: the child was not waited for.
+    Unstoppable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,8 +214,11 @@ impl fmt::Display for SelfRunOutcome {
             Self::Ended { cause, code, requests, prefix } => {
                 let cause = match cause {
                     Cause::Own => "own",
-                    Cause::Flushed => "flushed",
-                    Cause::Interrupted => "interrupted",
+                    Cause::FlushRequested => "flush-requested",
+                    Cause::Signalled(Stop::Interrupt) => "interrupted",
+                    Cause::Signalled(Stop::Terminate) => "terminated",
+                    Cause::Signalled(Stop::Kill) => "killed",
+                    Cause::Unstoppable => "unstoppable",
                 };
                 match code {
                     Some(code) => write!(f, "ended: {cause} code {code} requests {requests} prefix {prefix}"),
@@ -220,13 +252,20 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, spawner: &dyn Spawner, out:
     child.write_line(&user_line(&start_message(mind.instance(), &run)));
 
     let (mut seen, mut requests, mut prefix) = (HashSet::new(), 0u64, 0u64);
-    let (mut result_seen, mut flushed, mut interrupted) = (false, false, false);
-    let mut grace_ends: Option<DateTime<Utc>> = None;
+    let mut result_seen = false;
+    // The prefix and the grace deadline of the flush, once asked for.
+    let mut flush: Option<(u64, DateTime<Utc>)> = None;
+    // The last signal attempted and when, and the strongest one delivered.
+    let mut stopping: Option<(Stop, DateTime<Utc>)> = None;
+    let mut delivered: Option<Stop> = None;
     loop {
-        let wait = match grace_ends.filter(|_| !interrupted) {
-            Some(ends) => (ends - clock.now()).to_std().unwrap_or_default().min(POLL),
-            None => POLL,
+        // The one deadline the wait must not pass: the next escalation once a signal went out, else the grace.
+        let deadline = match (stopping, flush) {
+            (Some((_, sent)), _) => Some(sent + Duration::seconds(ESCALATE_AFTER_S)),
+            (None, Some((_, grace_ends))) => Some(grace_ends),
+            (None, None) => None,
         };
+        let wait = deadline.map_or(POLL, |ends| (ends - clock.now()).to_std().unwrap_or_default().min(POLL));
         match child.next_line(wait) {
             Read::Line(line) => match read_usage(&line) {
                 // A message id seen before is the same request again (F24).
@@ -244,23 +283,36 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, spawner: &dyn Spawner, out:
             Read::Timeout => {}
             Read::Closed => break,
         }
-        if !flushed && !result_seen && prefix >= CEILING_TOKENS {
+        if flush.is_none() && !result_seen && prefix >= CEILING_TOKENS {
             child.write_line(&user_line(FLUSH_MESSAGE));
-            flushed = true;
-            grace_ends = Some(clock.now() + Duration::seconds(FLUSH_GRACE_S));
+            flush = Some((prefix, clock.now() + Duration::seconds(FLUSH_GRACE_S)));
         }
-        if !interrupted && (prefix >= CEILING_TOKENS + FLUSH_ALLOWANCE_TOKENS || grace_ends.is_some_and(|ends| clock.now() >= ends)) {
-            child.interrupt();
-            interrupted = true;
+        // The backstop is relative to the flush point, so it cannot fire in the pass that wrote the flush.
+        let due = match (stopping, flush) {
+            (Some((_, sent)), _) => clock.now() >= sent + Duration::seconds(ESCALATE_AFTER_S),
+            (None, Some((at, grace_ends))) => clock.now() >= grace_ends || prefix >= at.saturating_add(FLUSH_HEADROOM_TOKENS),
+            (None, None) => false,
+        };
+        if due {
+            let how = stopping.map_or(Stop::Interrupt, |(last, _)| last.next());
+            if child.stop(how) {
+                delivered = Some(how);
+            }
+            stopping = Some((how, clock.now()));
+            if how == Stop::Kill {
+                // A grandchild can hold the stream open past a dead child: do not wait for its end.
+                break;
+            }
         }
     }
+    if matches!(stopping, Some((Stop::Kill, _))) && delivered != Some(Stop::Kill) {
+        return Ok(SelfRunOutcome::Ended { cause: Cause::Unstoppable, code: None, requests, prefix });
+    }
     let code = child.wait();
-    let cause = if interrupted {
-        Cause::Interrupted
-    } else if flushed {
-        Cause::Flushed
-    } else {
-        Cause::Own
+    let cause = match (delivered, flush) {
+        (Some(how), _) => Cause::Signalled(how),
+        (None, Some(_)) => Cause::FlushRequested,
+        (None, None) => Cause::Own,
     };
     Ok(SelfRunOutcome::Ended { cause, code, requests, prefix })
 }
@@ -316,9 +368,14 @@ impl Child for ClaudeProcess {
         }
     }
 
-    fn interrupt(&mut self) {
-        // `kill` the program, not a libc call: the library names no FFI.
-        let _ = Command::new("kill").args(["-INT", &self.process.id().to_string()]).status();
+    fn stop(&mut self, how: Stop) -> bool {
+        // The `kill` program, not a libc call: the library names no FFI.
+        let signal = match how {
+            Stop::Interrupt => "-INT",
+            Stop::Terminate => "-TERM",
+            Stop::Kill => return self.process.kill().is_ok(),
+        };
+        Command::new("kill").args([signal, &self.process.id().to_string()]).status().is_ok_and(|status| status.success())
     }
 
     fn wait(&mut self) -> Option<i32> {

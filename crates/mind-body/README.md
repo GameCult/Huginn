@@ -6,7 +6,7 @@ one-shot and the `mind-self-run` actuator.
 `mind-self-run --instance <slug> [--endpoint rudp://<ip>:<port>]` runs inside
 `mind-self@<instance>`. It finds her one open Self run, starts `claude` over
 stream-json with a fixed argument list, asks for the flush once at the context
-ceiling and interrupts after a grace. It exits 0 when the child exited 0, 1
+ceiling and stops a child that outlives the flush (SIGINT, then SIGTERM and SIGKILL). It exits 0 when the child exited 0, 1
 otherwise, 3 when she has no single open Self run and 2 when the arguments are
 wrong or the mind cannot be reached.
 
