@@ -36,6 +36,14 @@ authority", written before the cut was mapped. Specs: `cut-mind-unit-gate.r1` (H
 `cut-mind-units-install.r1` (gamecult-ops). Questions: `mind-unit-names` and
 `mind-unit-start-grant`.
 
+Revised again on 2026-10-22 by Imagination (`imagination-self-run`, session
+`self-2026-10-22-eureka-c2a`) at Huginn `70d0cef`, for cut `mind-self-run`. New facts F23-F25
+(Claude Code session ids, resume and stream usage, probed on Starfire; the live-request half was
+blocked by an expired CLI credential). The stale "Undone" list is replaced by "Cut sequence",
+and "How a Self run is carried" is new. Specs: `cut-mind-self-run.r1`,
+`cut-mind-body-riders.r1`. Questions: `first-self-run-starter`, `self-run-permissions`. Probe
+outputs: `F:\Projects\eureka-handoff-aux-2026-10-22\imag-self-run\`.
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
@@ -257,6 +265,58 @@ Each line: what was run, where, result.
     workload (`docs/watchdog-reporting-map.md` row C9) and installs no unit file, polkit rule,
     sudoers file or system user (`src/drivers.rs:3620-3720`). A unit Idunn did not launch is
     never observed or restarted by it.
+- **F23 Claude Code session ids and resume, probed 2026-10-22 on Starfire.** Claude Code
+  2.1.268 (Windows), `claude -p --output-format stream-json --verbose`, run with the desktop
+  host's `CLAUDE*`/`ANTHROPIC*` variables removed (Imagination `imagination-self-run`).
+  Every call ended `terminal_reason: api_error`, "OAuth session expired and could not be
+  refreshed": the CLI credential on Starfire is expired, so nothing below involved a model
+  request, and every claim about cache reads on resume is still unprobed (see F25).
+  - `--session-id <uuid>` is honoured: the `system/init` event, every event after it and the
+    transcript file carry exactly that id. The transcript is
+    `<config dir>/projects/<cwd with separators as '-'>/<id>.jsonl`, written even when the
+    request fails.
+  - `--session-id` of an id that already has a transcript is refused before any event:
+    "Error: Session ID ... is already in use.", exit 1. So a fresh run's id must be new.
+  - `--resume <id>` keeps the id: init and result carry the same id, and the resumed turns are
+    appended to the original transcript file, from another working directory as well (the
+    file found was under the first cwd's project dir; the appended lines record the new cwd).
+    `--resume <id> --fork-session` starts a new random id. `--resume <unknown id>` fails before
+    the stream with "No conversation found with session ID: ...", exit 1, one line on stdout.
+  - `--resume` together with `--session-id` is refused: "--session-id can only be used with
+    --continue or --resume if --fork-session is also specified." So a chain is: the first run
+    `--session-id <v5 of its own run key>`, every continuation `--resume <that id>`.
+  - Help text: `--input-format stream-json` (realtime streaming input, print only),
+    `--replay-user-messages`, `--max-budget-usd`, `--max-turns`, `--permission-prompts
+    host|none` ("none: anything that would prompt is denied automatically"),
+    `--no-session-persistence`, `--system-prompt-snapshot on` (default: the system prompt is
+    recorded on the first request and resent verbatim on every later request and resume).
+- **F24 What one request's usage looks like.** Read from a real Claude Code 2.1.268
+  transcript on Starfire (`~/.claude/projects/F--Projects-CultLib/<session>.jsonl`, 736 lines,
+  64 assistant messages) and from the probe's stream (F23), which carries the same `assistant`
+  records.
+  - One API request is one `message.id`. A response with several content blocks is written as
+    several `assistant` records with the same `message.id` and an identical `usage` (45 of 64
+    messages had 2 or more records; e.g. `thinking` then `tool_use`, both
+    `input 2 / cache_read 45175 / cache_write 39033 / output 73`). Summing records double
+    counts; a reader keys on `message.id`.
+  - `usage` fields: `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`,
+    `cache_creation.ephemeral_5m_input_tokens`, `cache_creation.ephemeral_1h_input_tokens`,
+    `output_tokens`, `iterations`, `service_tier`. The request's prefix is
+    `input + cache_read + cache_creation`; in that session it grew 84,210 to 287,837 over 64
+    requests.
+  - A record from a subagent carries `parent_tool_use_id` (set); the main thread's is null.
+    The `result` event carries `usage` (session totals), `modelUsage`, `total_cost_usd`,
+    `terminal_reason`, `num_turns`, `subagent_stats` and `queued_turn_count`.
+- **F25 What the stream-json input channel accepts, read from the binary.** Strings in
+  Claude Code 2.1.268's `bin/claude.exe` (npm `@anthropic-ai/claude-code`): 64 occurrences of
+  `"control_request"`; a handler `if(d.request.subtype==="interrupt")` that aborts the running
+  turn and snapshots the command queue; an option `cancel_queued` on interrupt; the result
+  schema's `queued_turn_count`. So, by source read only: user messages written while a turn
+  runs go to a command queue, and a control request `interrupt` ends the running turn.
+  Unprobed: whether a queued user message is delivered mid-turn or after the turn's `result`,
+  and whether closing stdin lets queued messages finish. The actuator spec is written so its
+  correctness holds under either delivery, and its operator verification probes both on
+  Yggdrasil with her token.
 
 ## The model page (step 0b)
 
@@ -434,30 +494,108 @@ Idunn's migration doc says Codex is dead (F9). The kit is lifted out of CodexCon
 and the Codex backend's existing tests are the only proof that the lift is behaviour
 neutral. Keeping the backend compiling costs nothing; deploying it is not proposed.
 
-### Undone (not mapped this pass)
+### How a Self run is carried (cut `mind-self-run`)
 
-In dependency order, with what blocks each:
+The run document is the grant (`open_and_launch`); the unit takes only `--instance`
+(`mind-units-install` r2). So the actuator learns which run it carries from the mind: the one
+in-force `operated_by Mind` Self run of its instance, which admission keeps unique
+(`run-live-admission`). No run, no `claude`: a unit started by hand carries nothing.
 
-1. eureka-substrate re-points, admitted 2026-10-09 against Huginn: `mind-authority` r2
-   (landed on branch `eureka-substrate/mind-authority`, Soul pending), `run-kind` r2
-   (absorbs `huginn-mind-self-kinds`: `AlreadyClaimed`, the run's resolution row, the
-   `claims` edge; question `persona-turn-run` is ruled by `every-wake-a-run`),
-   `huginn-persona-state` r3, `doctrine-persona-in-huginn` r3.
-   `leaf-key-bound` landed at Epiphany `ef956865` and came in with the leaf (F16).
-   `leaf-read-anchors` r2 (absorbs `huginn-read-anchors`, withdrawn), `ops-read-anchors-upgrade`
-   r2 and `context-pack-reads` r2 were admitted 2026-10-09; `leaf-read-anchors` depends on
-   `mind-authority` merging.
-2. `connector-kit-lift`, `connector-spend`, `connector-reasoning-item`,
-   `connector-contract-v3`, `claude-connector`, `openai-compatible-connector`: blocked
-   on the kit repo joining the campaign (follow-up `body-campaign-repos`).
-3. `self-run-unit` and `skill-mind-self` (Eureka): blocked on `self-run-token-reach`
-   and `wake-target`. `mind-launch` r2 (Huginn `df7507b`, unblocked: the
-   `one-live-self-run` ruling answered its question), then `brake-stop` r1 and
-   `mind-wake` r2, which both depend on it.
-4. `mind-units-install` (gamecult-ops): after 3; needs `body-repos-on-forge`.
-5. `mind-persona` and `mouth-rebinding` (Huginn, Bifrost): blocked on `wake-target`,
-   `persona-trace-retention`, the inbound-delivery cell, and the connector cuts.
-6. `doctrine-repoint` (Eureka, F12), `epiphany-archive` (last).
+- Owner: `mind_body::self_run::carry`, inside `mind-self@<i>`, decides the argv, the session
+  id, when to ask for the flush and when to interrupt.
+- Inputs: its run (budget, claims, id) from the mind; the child's stdout stream; the clock.
+- Outputs: one `claude` child; the start message; at most one flush message; stdin closed at
+  the first `result`; at most one interrupt; an outcome line and an exit status.
+- Derived: the request's prefix (F24, keyed on `message.id`, main thread only); the session id
+  (UUIDv5 of the run id, so the measure cut can find the transcript and resume it).
+- Not its decision: continuation (fresh only until `self-run-measure`), the brake (the unit's
+  gate), the stop (the hold), the budget (the run's `budget_usd`, from the dial at launch),
+  the environment, token and permissions (the unit and managed settings, gamecult-ops).
+- Robust to F25's open point: the flush is written only before the first `result`, stdin closes
+  at that `result`, and if the child has not exited `FLUSH_GRACE` after the flush, or the
+  prefix passes `CEILING_TOKENS + FLUSH_ALLOWANCE_TOKENS`, it is interrupted once. A queued
+  message that is never delivered costs the flush, never the stop.
+
+### Cut sequence (refreshed 2026-10-22, Imagination `imagination-self-run`)
+
+Landed on Huginn main `70d0cef`: leaf-into-huginn, mind-control-store, run-live-admission,
+mind-launch, brake-stop, mind-unit-gate, mind-wake, huginn-persona-state (`766cba4`). In flight:
+`mind-units-install` r2 (gamecult-ops, Hands now). One line per remaining cut: title (repo),
+then what it waits on. Ids without a prefix are `eureka-body:`.
+
+**A. To "Eureka runs a Self run on Yggdrasil"** (critical path: A2, then A5 with the
+operator's token, then A6 and the bring-up; A3, A4 and A1 run beside it):
+
+1. `mind-units-install` r2 (gamecult-ops): in flight; its host half waits on a Huginn release
+   that holds mind-wake (main `70d0cef` does).
+2. `mind-self-run` (Huginn): spec `cut_spec:cut-mind-self-run.r1`. Waits on nothing.
+3. `mind-body-riders` (Huginn): spec `cut_spec:cut-mind-body-riders.r1`, runs beside A2.
+   Waits on nothing.
+4. `skill-mind-self` (Eureka repo): the Self brief her run is told to use: rehydrate from the
+   mind, work the run's claims, flush (admit what the mind lacks, close her own run), end.
+   Waits on nothing but A2's message contract (the two prompt constants in
+   `cut-mind-self-run.r1`).
+5. `self-run-environment` (gamecult-ops): the `mind-self@` lines A2 leaves to ops (token
+   `EnvironmentFile`, `StateDirectory`, `WorkingDirectory`, `CLAUDE_CONFIG_DIR`,
+   `HUGINN_ENDPOINT`), Claude Code and the `huginn` CLI on Yggdrasil (follow-up
+   `eureka-substrate:follow_up:huginn-cli-on-yggdrasil`), the skill installed from A4, git and
+   forge reach for her work, the root-owned managed settings. Waits on A1, A2, question
+   `question:self-run-permissions`, and an operator action: her subscription token
+   (`claude setup-token`, ruling `self-run-token-reach`).
+6. `mind-launch-self` (Huginn): the one binary that opens a Self run through
+   `open_and_launch`; the Persona's start-Self tool later, the operator's bring-up now.
+   Waits on question `question:first-self-run-starter`.
+7. Bring-up (Self and operator, not a cut): Huginn release with A2 and A6, the Release step
+   building them, install, brake release, dial set, one Self run started by A6.
+8. `self-run-measure` (Huginn, plus one gamecult-ops line): `runs.cc` and
+   `eureka.body.run_measure.v1`, the root `ExecStopPost` verb that reads the transcript (F24),
+   `$SERVICE_RESULT` and whether her run is closed, then the resume decision and the rental
+   rule in the actuator. Waits on A2 (ruling `run-measure-in-body-store`). Not on the path to
+   the first run: A2 runs every run fresh, which the ruling allows (a cold cache is fresh).
+
+**B. To "Eureka speaks a Persona turn"** (critical path: B1, B2, B3, B4, B5, B6):
+
+1. Self decision for follow-up `body-campaign-repos`. The mechanism is ruled
+   (`eureka-substrate:ruling:campaign-repo-set-home`) and mapped
+   (`eureka-substrate:cut_spec:cut-campaign-repos.r1`, Huginn, and `cut-skill-campaign-repos.r1`,
+   Eureka; both unreported). Self must decide three things: dispatch those two cuts now and
+   upgrade the daemon; the connector kit repo's name and host (the follow-up proposes
+   `GameCult/ModelConnector`; no `body-repos-on-forge` ruling exists in the mind, so either the
+   doctrine default, GitHub `GameCult`, or a question); and admit `target:r2` with the repo set
+   plus `GameCult/Idunn` and the kit. That fills the 8-repo bound (6 + 2).
+2. `connector-kit-lift` (kit repo): waits on B1 (ruling `connector-kit-home`).
+3. `connector-contract-v3` with `connector-reasoning-item` and `connector-spend` (kit): wait on
+   B2; rulings `connector-opaque-state-item`, `connector-owner`; follow-up
+   `connector-reasoning-state-cheap-providers`.
+4. `claude-connector` or `openai-compatible-connector` (kit): waits on B3, and on which
+   provider serves Persona turns first (rulings `no-return-to-openai-supplier`, follow-up
+   `connector-reasoning-state-cheap-providers`). Self raises that question when B3 is mapped.
+5. `mind-persona` (Huginn): the Persona organ, one connector request per turn
+   (`persona-turn-connector`), Persona state through Huginn (landed), the start-Self tool (A6),
+   traces with provenance from day one (`collect-with-provenance-gate-at-training`). Waits on
+   B4 and on where traces live (question `persona-trace-retention` was withdrawn to be re-asked
+   with the trace store; re-ask it when B5 is mapped).
+6. `persona-mouth` (Bifrost or gamecult-ops): where a turn is heard. Waits on B5 and on which
+   mouth first: Matrix (`chat-platform`, not yet deployed; follow-up
+   `identity-minting-moves-to-bifrost` precedes the chat rollout) or Discord
+   (`body-includes-discord`). Self raises it when B5 is mapped.
+
+**C. Beside both paths:**
+
+1. `fork-desk-web` (Huginn, or a repo Self names): a web UI over Huginn (ruling
+   `fork-desk-web-ui-on-huginn`). Waits on an identity-lifecycle-authority pass over the
+   Eyes facts at Huginn `70d0cef` (`docs/research/`, fork desk prior art) and on Self naming
+   its home.
+2. `first-autonomous-minds` (Huginn, gamecult-ops): one instance per shortlist mind
+   (`first-autonomous-minds-shortlist`). Waits on A7, A8, follow-up `weksa-mind` (multi-instance
+   and eureka-substrate Cut 12 leasing) and the swarm scheduler (C3).
+3. `swarm-ctb-scheduler` (Huginn): rulings `mind-scheduling-ctb`, `swarm-dial-one-budget`,
+   `swarm-scheduler-one-shot`, `turn-cost-measured`. Waits on A8 (its cost source).
+4. `idunn-job-workload` (Idunn): the deletion line of the hand install. Waits on B1 (Idunn
+   joins the campaign); due before the first hosted member (`mind-units-templated-interim`).
+5. `wire-names-rename` (Huginn, Eureka): before the first hosted mind
+   (`wire-names-rename-before-hosting`). Waits on nothing; schedule before C2.
+6. `doctrine-repoint` (Eureka, F12), then `epiphany-archive` (last).
 
 ## Admitted this pass (receipts in the mind)
 
