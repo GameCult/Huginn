@@ -2,7 +2,9 @@ mind_body: mod cli
 mind_body: mod control
 mind_body: mod launch
 mind_body: mod queue
+mind_body: mod self_run
 mind_body: mod wake
+mind_body::cli: fn instance_and_endpoint (args : & [String] , env_endpoint : Option < String > , usage : & str) -> Result < (Slug , SocketAddr) >
 mind_body::cli: fn operator_name (sudo_user : Option < String > , user : Option < String >) -> String
 mind_body::cli: fn run (args : & [String] , root : & Path , set_by : & str , now : DateTime < Utc > , out : & mut impl Write , stop_units : & mut dyn FnMut (& Slug) -> Result < () > ,) -> Result < () >
 mind_body::control: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum HeldReason { BrakeAbsent , BrakeHeld , DialAbsent , DialOutOfBounds , Undecodable , }
@@ -71,6 +73,34 @@ mind_body::queue: impl MindPort for HuginnMind < '_ >
 mind_body::queue: impl< 'a > HuginnMind < 'a >
 mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query (& self , selection : & Selection) -> Result < PipelineSelectionPage > ; fn admit (& self , agent : & str , session : & str , documents : Vec < PipelineDocument >) -> Result < PipelineAdmissionOutcome > ; }
 mind_body::queue: struct HuginnMind< 'a >  pub-fields[]
+mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq , PartialOrd , Ord)] pub enum Stop { Interrupt , Terminate , Kill , }
+mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Cause { Own , FlushRequested , Signalled (Stop) , Unstoppable , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Eof , Exited (Option < i32 >) , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 } , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 } , Result , Other , Unreadable , }
+mind_body::self_run: const AGENT : & str
+mind_body::self_run: const CEILING_TOKENS : u64
+mind_body::self_run: const ESCALATE_AFTER_S : i64
+mind_body::self_run: const EXIT_DRAIN_S : i64
+mind_body::self_run: const FLUSH_GRACE_S : i64
+mind_body::self_run: const FLUSH_HEADROOM_TOKENS : u64
+mind_body::self_run: const FLUSH_MESSAGE : & str
+mind_body::self_run: const MAX_TURNS : u32
+mind_body::self_run: const SESSION_NAMESPACE : Uuid
+mind_body::self_run: fn carry (mind : & dyn MindPort , clock : & dyn Clock , spawner : & dyn Spawner , out : & mut dyn Write) -> Result < SelfRunOutcome >
+mind_body::self_run: fn claude_args (session : Uuid , budget_usd : & str) -> Vec < String >
+mind_body::self_run: fn read_usage (line : & str) -> Usage
+mind_body::self_run: fn session_id (run : & PipelineRef) -> Uuid
+mind_body::self_run: fn start_message (instance : & Slug , run : & PipelineRef) -> String
+mind_body::self_run: impl Child for ClaudeProcess
+mind_body::self_run: impl SelfRunOutcome
+mind_body::self_run: impl SelfRunOutcome: fn exit_status (& self) -> i32
+mind_body::self_run: impl Spawner for ClaudeSpawner
+mind_body::self_run: impl Stop
+mind_body::self_run: impl fmt :: Display for SelfRunOutcome
+mind_body::self_run: pub trait Child { fn write_line (& mut self , line : & str) ; fn close_input (& mut self) ; fn next (& mut self , timeout : StdDuration) -> Read ; fn stop (& mut self , how : Stop) -> bool ; }
+mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String]) -> Result < Box < dyn Child > > ; }
+mind_body::self_run: struct ClaudeSpawner  pub-fields[]
 mind_body::wake: # [derive (Clone , Debug , PartialEq , Eq)] pub enum WakeOutcome { Held { reason : HeldReason } , NotYet { until : DateTime < Utc > } , Busy { run : PipelineRef } , Launched { run : PipelineRef } , Refused (Declined) , }
 mind_body::wake: const AGENT : & str
 mind_body::wake: fn cycle (ports : & Ports , control : & impl ControlSource) -> Result < WakeOutcome >

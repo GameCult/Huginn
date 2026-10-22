@@ -10,6 +10,10 @@
 //! opens a run in the mind and only then starts its unit.
 //!
 //! `wake` is the waker's one cycle over them: the `mind-wake` binary.
+//!
+//! `self_run` carries one Self run inside `mind-self@<instance>`: the
+//! `mind-self-run` binary runs `claude` over stream-json for her one open Self
+//! run, asks for the flush at the context ceiling and stops a child that outlives it.
 
 // The control root is a constant, so the library reads no part of the process
 // environment (clippy.toml lists the readers); `forbid` keeps an `allow` from
@@ -23,6 +27,7 @@ pub mod cli;
 pub mod control;
 pub mod launch;
 pub mod queue;
+pub mod self_run;
 pub mod wake;
 
 #[cfg(test)]
