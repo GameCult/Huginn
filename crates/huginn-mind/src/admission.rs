@@ -2962,23 +2962,26 @@ mod tests {
         ]));
     }
 
+    /// Re-homing work is how Self routes it (ruling `supersession-lineage-3`):
+    /// a gap follow-up of one campaign is superseded by its successor in the
+    /// campaign that owns the work now, and the typed edge survives.
     #[test]
-    fn a_follow_up_is_superseded_only_within_its_campaign() {
+    fn a_follow_up_is_superseded_by_one_re_homed_to_another_campaign() {
         let mut mind = seeded();
         let source = r(K::Target, &id("target", "r1"));
-        committed(admit(&mut mind, vec![follow_up("old", source.clone())]));
+        committed(admit(&mut mind, vec![follow_up("gap-session-id", source.clone())]));
         let mut batch = rival_revision(1);
-        let D::FollowUp(mut foreign) = follow_up("new", source.clone()) else { panic!("a follow-up") };
+        let D::FollowUp(mut foreign) = follow_up("gap-session-id", source) else { panic!("a follow-up") };
         foreign.campaign = RIVAL.into();
         batch.push(D::FollowUp(foreign));
+        batch.push(resolution(
+            r(K::FollowUp, &id("follow_up", "gap-session-id")),
+            superseded(&[r(K::FollowUp, &format!("{RIVAL}:follow_up:gap-session-id"))]),
+        ));
         committed(admit(&mut mind, batch));
-        let lone = vec![resolution(r(K::FollowUp, &id("follow_up", "old")), superseded(&[r(K::FollowUp, &format!("{RIVAL}:follow_up:new"))]))];
-        assert!(supersession_refused(admit(&mut mind, lone), K::FollowUp));
-        // Nothing was written: this campaign's own follow-up still supersedes it.
-        committed(admit(&mut mind, vec![
-            follow_up("own", source),
-            resolution(r(K::FollowUp, &id("follow_up", "old")), superseded(&[r(K::FollowUp, &id("follow_up", "own"))])),
-        ]));
+        let docs = docs_of(&mind);
+        assert!(!docs.in_force(K::FollowUp, &id("follow_up", "gap-session-id")));
+        assert!(docs.in_force(K::FollowUp, &format!("{RIVAL}:follow_up:gap-session-id")));
     }
 
     #[test]

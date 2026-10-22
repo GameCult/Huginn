@@ -299,20 +299,21 @@ impl Docs {
     }
 }
 
-/// The line a record belongs to (ruling `supersession-lineage-2`): the one place
+/// The line a record belongs to (rulings `supersession-lineage-2` and `-3`): the one place
 /// lineage is decided. A record supersedes, and is reinstated over, only a record
 /// of its own line. `None` is a kind the resolution matrix never lets be
 /// superseded; the match names every kind, so a new kind fails to compile until
 /// its line is stated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lineage<'a> {
-    /// A target, or a follow-up: the campaign.
+    /// A target: the campaign.
     Campaign(&'a Slug),
     /// A cut spec: the campaign and the cut.
     Cut(&'a Slug, &'a Label),
     /// A stewardship: the instance and the repo.
     Assignment(&'a Slug, &'a OrgRepo),
-    /// A ruling: operator directions cut across campaigns.
+    /// A ruling or a follow-up: operator directions and re-homed work cut
+    /// across campaigns.
     Global,
 }
 
@@ -321,9 +322,8 @@ pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
     match document {
         D::Target(target) => Some(Lineage::Campaign(&target.campaign)),
         D::CutSpec(spec) => Some(Lineage::Cut(&spec.campaign, &spec.cut)),
-        D::FollowUp(follow_up) => Some(Lineage::Campaign(&follow_up.campaign)),
         D::Stewardship(stewardship) => Some(Lineage::Assignment(&stewardship.instance, &stewardship.repo)),
-        D::Ruling(_) => Some(Lineage::Global),
+        D::Ruling(_) | D::FollowUp(_) => Some(Lineage::Global),
         D::Campaign(_)
         | D::Question(_)
         | D::CutReport(_)
