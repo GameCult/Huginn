@@ -237,6 +237,25 @@ fn check_opens_on_release_with_a_dial_and_is_per_instance() {
 }
 
 #[test]
+fn check_holds_for_the_named_instance_with_a_released_prefix_neighbour() {
+    let root = tempfile::tempdir().unwrap();
+    go(root.path(), &["--instance", "eureka", "brake", "hold"], "op", 0).0.unwrap();
+    // Neighbours that share the held instance's text as a prefix, or only an edge of it, are released with a dial.
+    for (i, neighbour) in ["eureka-two", "eureka2", "xeureka"].into_iter().enumerate() {
+        let at = 1 + 2 * i as i64;
+        go(root.path(), &["--instance", neighbour, "brake", "release"], "op", at).0.unwrap();
+        go(root.path(), &["--instance", neighbour, "dial", "set", "--heat", "0.5", "--base-cooldown-s", "3600", "--base-run-usd", "5"], "op", at + 1)
+            .0
+            .unwrap();
+        let (open, _) = go(root.path(), &["--instance", neighbour, "check"], "op", 10);
+        open.unwrap_or_else(|error| panic!("{neighbour} is released and must open: {error:#}"));
+    }
+    let (result, out) = check_out(root.path());
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("BrakeHeld") && out.contains("BrakeHeld"), "{error} / {out}");
+}
+
+#[test]
 fn check_writes_nothing_and_creates_no_directory() {
     let root = tempfile::tempdir().unwrap();
     assert!(check_out(root.path()).0.is_err());
