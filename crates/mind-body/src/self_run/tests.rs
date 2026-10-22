@@ -613,7 +613,7 @@ mod process {
     /// A fake `claude`: the shell script `body`, in a directory that outlives the child.
     fn script(dir: &tempfile::TempDir, body: &str) -> PathBuf {
         let path = dir.path().join("claude");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::write(&path, format!("#!/bin/bash\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
@@ -694,13 +694,36 @@ mod process {
         let lines = [at("m1", 10), at("m2", CEILING_TOKENS)].join("\n");
         let result = result_line();
         // Prints two requests, waits for the flush on stdin, then the result, as a stand-in for a Self that obeys.
-        let body = format!("cat <<'EOF'\n{lines}\nEOF\nread start\nread flush\ncat <<'EOF'\n{result}\nEOF\nwhile read more; do :; done\nexit 0");
+        let body = format!("cat <<'EOF'\n{lines}\nEOF\nread -t 5 start\nread -t 5 flush\ncat <<'EOF'\n{result}\nEOF\nwhile read more; do :; done\nexit 0");
         let program = script(&dir, &body);
         let mind = with_run();
+        // A read that times out here means the stream stopped, never a wait worth 60 s:
+        // fail at once instead of hanging the suite.
+        struct Prompt(Box<dyn Child>);
+        impl Child for Prompt {
+            fn write_line(&mut self, line: &str) {
+                self.0.write_line(line)
+            }
+            fn close_input(&mut self) {
+                self.0.close_input()
+            }
+            fn next_line(&mut self, timeout: StdDuration) -> Read {
+                match self.0.next_line(StdDuration::from_secs(20).min(timeout)) {
+                    Read::Timeout => panic!("the fake claude went quiet"),
+                    read => read,
+                }
+            }
+            fn interrupt(&mut self) {
+                self.0.interrupt()
+            }
+            fn wait(&mut self) -> Option<i32> {
+                self.0.wait()
+            }
+        }
         struct Spawn(PathBuf);
         impl Spawner for Spawn {
             fn spawn(&self, args: &[String]) -> Result<Box<dyn Child>> {
-                Ok(start(&self.0, args))
+                Ok(Box::new(Prompt(start(&self.0, args))))
             }
         }
         let mut out = Vec::new();

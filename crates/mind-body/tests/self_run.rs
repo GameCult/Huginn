@@ -182,7 +182,7 @@ mod lane {
             )
         };
         let script = format!(
-            "#!/bin/sh\necho \"$@\" > {record}\necho '{first}'\necho '{second}'\nread start\nread flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0\n",
+            "#!/bin/bash\necho \"$@\" > {record}\necho '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0\n",
             record = record.display(),
             first = request("msg_1", 100),
             second = request("msg_2", 299_999),
