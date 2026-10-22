@@ -804,6 +804,16 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
                 }
             }
         }
+        ResolutionOutcome::Superseded { by } if subject_kind == K::Target => {
+            let Some(D::Target(subject)) = docs.find(K::Target, subject_id) else { return Ok(()) };
+            for supersessor in by {
+                if let Some(D::Target(target)) = docs.find(K::Target, &supersessor.id.0)
+                    && target.campaign != subject.campaign
+                {
+                    return Err(incompatible());
+                }
+            }
+        }
         ResolutionOutcome::Answered { by } => {
             let Some(D::Ruling(ruling)) = docs.find(K::Ruling, &by.id.0) else { return Ok(()) };
             if ruling.answers.as_ref().map(|answers| answers.0.as_str()) != Some(subject_id) {
@@ -2787,6 +2797,38 @@ mod tests {
             PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: first }
         );
         committed(admit(&mut mind, vec![spec_on("1", OTHER_REPO)]));
+    }
+
+    /// Another campaign, opened with `repos`, and its own target revision 1 naming `named`.
+    fn other_campaign(repos: &[&str], named: &[&str]) -> Vec<D> {
+        let D::Campaign(mut campaign) = campaign(repos) else { panic!("a campaign") };
+        campaign.slug = "other-campaign".into();
+        let D::Target(mut target) = target(1, &[INVARIANT]) else { panic!("a target") };
+        target.campaign = "other-campaign".into();
+        target.repos = named.iter().map(|name| repo(name)).collect();
+        vec![D::Campaign(campaign), D::Target(target)]
+    }
+
+    #[test]
+    fn another_campaigns_target_does_not_widen_membership() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, other_campaign(&[REPO], &[REPO, OTHER_REPO])));
+        assert_eq!(refusal(admit(&mut mind, vec![spec_on("1", OTHER_REPO)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });
+    }
+
+    #[test]
+    fn a_target_is_superseded_only_within_its_campaign() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])));
+        committed(admit(&mut mind, other_campaign(&[REPO], &[])));
+        let foreign = r(K::Target, "other-campaign:target:r1");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(r(K::Target, &id("target", "r2")), superseded(&[foreign]))])),
+            MindRefusal::IncompatibleResolution { subject_kind: K::Target, outcome: "Superseded".into() }
+        );
+        // Nothing was written: r2 still names the repos, and its own revision still lands.
+        committed(admit(&mut mind, vec![spec_on("1", OTHER_REPO)]));
+        committed(admit(&mut mind, repo_revision(3, &[REPO, OTHER_REPO])));
     }
 
     #[test]
