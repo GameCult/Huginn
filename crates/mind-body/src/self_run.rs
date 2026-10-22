@@ -290,7 +290,7 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, spawner: &dyn Spawner, out:
         // The backstop is relative to the flush point, so it cannot fire in the pass that wrote the flush.
         let due = match (stopping, flush) {
             (Some((_, sent)), _) => clock.now() >= sent + Duration::seconds(ESCALATE_AFTER_S),
-            (None, Some((at, grace_ends))) => clock.now() >= grace_ends || prefix >= at.saturating_add(FLUSH_HEADROOM_TOKENS),
+            (None, Some((at, grace_ends))) => clock.now() >= grace_ends || at.checked_add(FLUSH_HEADROOM_TOKENS).is_some_and(|limit| prefix >= limit),
             (None, None) => false,
         };
         if due {

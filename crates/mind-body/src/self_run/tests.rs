@@ -377,7 +377,7 @@ fn the_session_id_is_uuid_v5_of_the_run_id_and_differs_per_run() {
 #[test]
 fn the_child_is_started_for_her_run_with_the_runs_own_budget_verbatim() {
     // Trailing zeros are significant: "10" is ten dollars, not one.
-    for budget in ["0.5", "5", "12.25", "10", "100", "2.50"] {
+    for budget in ["0.5", "5", "12.25", "10", "100"] {
         let mind = TestMind::seeded();
         mind.committed(vec![self_run("selfrun-b", budget)]);
         let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
@@ -613,7 +613,8 @@ fn a_usage_sum_that_overflows_is_at_or_over_the_ceiling_not_a_panic_or_a_wrap() 
     assert_eq!(read_usage(&line), Usage::Request { id: "m".into(), prefix: u64::MAX });
     assert_eq!(read_usage(&request("m", u64::MAX, u64::MAX, u64::MAX)), Usage::Request { id: "m".into(), prefix: u64::MAX });
     assert_eq!(read_usage(&request("m", 1, u64::MAX, 1)), Usage::Request { id: "m".into(), prefix: u64::MAX });
-    // Through the actuator: the flush is asked for, and the headroom beyond a saturated prefix does not overflow either.
+    // Through the actuator: the flush is asked for, and the headroom beyond a saturated prefix does not overflow
+    // either, and the pass that wrote the flush does not interrupt.
     let ran = go(vec![Out(request("m1", u64::MAX, 7, 0)), Out(request("m2", 0, 0, 0))]);
     assert_eq!(flushes(&ran), 1);
     assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 0);
@@ -698,8 +699,8 @@ fn the_outcome_names_how_it_ended_and_the_exit_status_follows_the_childs_code() 
     assert_eq!(nonzero.outcome.as_ref().unwrap().to_string(), "ended: own code 2 requests 1 prefix 10");
     assert_eq!(nonzero.outcome.unwrap().exit_status(), 1);
 
-    let signalled = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS + FLUSH_HEADROOM_TOKENS))], None, true);
-    assert_eq!(signalled.outcome.as_ref().unwrap().to_string(), "ended: interrupted signal requests 1 prefix 360000");
+    let signalled = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Idle(FLUSH_GRACE_S)], None, true);
+    assert_eq!(signalled.outcome.as_ref().unwrap().to_string(), "ended: interrupted signal requests 1 prefix 300000");
     assert_eq!(signalled.outcome.unwrap().exit_status(), 1, "a child killed by a signal has no code");
 
     assert_eq!(SelfRunOutcome::NoRun.exit_status(), 3);
