@@ -2892,6 +2892,140 @@ mod tests {
         committed(admit(&mut mind, batch));
     }
 
+    /// The slug that shares its dash prefix with `CAMPAIGN` (`eureka-state`).
+    const RIVAL: &str = "eureka-substrate";
+
+    /// Revision `revision` of the rival campaign's target, with its campaign when it is
+    /// the first and the supersession of its predecessor when it is not.
+    fn rival_revision(revision: u32) -> Vec<D> {
+        let D::Target(mut named) = target(revision, &[INVARIANT]) else { panic!("a target") };
+        named.campaign = RIVAL.into();
+        let mut batch = Vec::new();
+        if revision == 1 {
+            let D::Campaign(mut opened) = campaign(&[REPO]) else { panic!("a campaign") };
+            opened.slug = RIVAL.into();
+            batch.push(D::Campaign(opened));
+        }
+        batch.push(D::Target(named));
+        if revision > 1 {
+            let previous = r(K::Target, &format!("{RIVAL}:target:r{}", revision - 1));
+            batch.push(resolution(previous, superseded(&[r(K::Target, &format!("{RIVAL}:target:r{revision}"))])));
+        }
+        batch
+    }
+
+    /// Both campaigns at revision 3, so each one's target in force is above revision 1.
+    fn both_campaigns_at_revision_three() -> Mind<MemoryStore> {
+        let mut mind = seeded();
+        for revision in 2..=3 {
+            committed(admit(&mut mind, repo_revision(revision, &[REPO])));
+        }
+        for revision in 1..=3 {
+            committed(admit(&mut mind, rival_revision(revision)));
+        }
+        mind
+    }
+
+    #[test]
+    fn a_target_is_not_superseded_by_a_campaign_sharing_its_prefix_or_a_higher_revision() {
+        for (subject, supersessor) in [
+            (id("target", "r3"), format!("{RIVAL}:target:r3")),
+            (format!("{RIVAL}:target:r3"), id("target", "r3")),
+        ] {
+            let mut mind = both_campaigns_at_revision_three();
+            let lone = vec![resolution(r(K::Target, &subject), superseded(&[r(K::Target, &supersessor)]))];
+            assert!(supersession_refused(admit(&mut mind, lone), K::Target), "{subject} by {supersessor}");
+        }
+        // A foreign revision above the subject's is no likelier to pass.
+        let mut mind = seeded();
+        committed(admit(&mut mind, repo_revision(2, &[REPO])));
+        for revision in 1..=4 {
+            committed(admit(&mut mind, rival_revision(revision)));
+        }
+        let lone = vec![resolution(r(K::Target, &id("target", "r2")), superseded(&[r(K::Target, &format!("{RIVAL}:target:r4"))]))];
+        assert!(supersession_refused(admit(&mut mind, lone), K::Target));
+    }
+
+    #[test]
+    fn a_stewardship_is_superseded_only_on_its_own_instance_and_repo_line() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![stewardship(INSTANCE, OTHER_REPO)]));
+        let epiphany = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
+        let huginn = format!("{INSTANCE}:stewardship:gamecult_-huginn.n1");
+        let lone = vec![resolution(r(K::Stewardship, &epiphany), superseded(&[r(K::Stewardship, &huginn)]))];
+        assert!(supersession_refused(admit(&mut mind, lone), K::Stewardship));
+        // Nothing was written: the repo's own next assignment still supersedes it.
+        let next = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2");
+        committed(admit(&mut mind, vec![
+            stewardship_n(INSTANCE, REPO, 2),
+            resolution(r(K::Stewardship, &epiphany), superseded(&[r(K::Stewardship, &next)])),
+        ]));
+    }
+
+    #[test]
+    fn a_follow_up_is_superseded_only_within_its_campaign() {
+        let mut mind = seeded();
+        let source = r(K::Target, &id("target", "r1"));
+        committed(admit(&mut mind, vec![follow_up("old", source.clone())]));
+        let mut batch = rival_revision(1);
+        let D::FollowUp(mut foreign) = follow_up("new", source.clone()) else { panic!("a follow-up") };
+        foreign.campaign = RIVAL.into();
+        batch.push(D::FollowUp(foreign));
+        committed(admit(&mut mind, batch));
+        let lone = vec![resolution(r(K::FollowUp, &id("follow_up", "old")), superseded(&[r(K::FollowUp, &format!("{RIVAL}:follow_up:new"))]))];
+        assert!(supersession_refused(admit(&mut mind, lone), K::FollowUp));
+        // Nothing was written: this campaign's own follow-up still supersedes it.
+        committed(admit(&mut mind, vec![
+            follow_up("own", source),
+            resolution(r(K::FollowUp, &id("follow_up", "old")), superseded(&[r(K::FollowUp, &id("follow_up", "own"))])),
+        ]));
+    }
+
+    #[test]
+    fn supersession_on_its_own_line_commits_for_every_kind() {
+        let source = r(K::Target, &id("target", "r1"));
+        let mut mind = seeded();
+        committed(admit(&mut mind, repo_revision(2, &[REPO])));
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![spec_on("1", REPO)]));
+        let D::CutSpec(mut next) = spec_on("1", REPO) else { panic!("a spec") };
+        next.revision = 2;
+        committed(admit(&mut mind, vec![
+            D::CutSpec(next),
+            resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), superseded(&[r(K::CutSpec, &id("cut_spec", "cut-1.r2"))])),
+        ]));
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![follow_up("old", source.clone())]));
+        committed(admit(&mut mind, vec![
+            follow_up("new", source),
+            resolution(r(K::FollowUp, &id("follow_up", "old")), superseded(&[r(K::FollowUp, &id("follow_up", "new"))])),
+        ]));
+        let mut mind = seeded();
+        let epiphany = format!("{INSTANCE}:stewardship:gamecult_-epiphany");
+        committed(admit(&mut mind, vec![
+            stewardship_n(INSTANCE, REPO, 2),
+            resolution(r(K::Stewardship, &format!("{epiphany}.n1")), superseded(&[r(K::Stewardship, &format!("{epiphany}.n2"))])),
+        ]));
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("old"))]));
+        committed(admit(&mut mind, vec![
+            D::Ruling(ruling("new")),
+            resolution(r(K::Ruling, &id("ruling", "old")), superseded(&[r(K::Ruling, &id("ruling", "new"))])),
+        ]));
+    }
+
+    #[test]
+    fn a_ruling_of_one_campaign_is_superseded_by_a_ruling_of_a_prefix_sharing_campaign() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("old"))]));
+        let mut batch = rival_revision(1);
+        let mut foreign = ruling("new");
+        foreign.campaign = RIVAL.into();
+        batch.push(D::Ruling(foreign));
+        batch.push(resolution(r(K::Ruling, &id("ruling", "old")), superseded(&[r(K::Ruling, &format!("{RIVAL}:ruling:new"))])));
+        committed(admit(&mut mind, batch));
+    }
+
     #[test]
     fn a_hand_off_derives_this_minds_side_only() {
         let key = format!("{INSTANCE}:hand_off:{OTHER_INSTANCE}.gamecult_-epiphany.2026-09-16");
