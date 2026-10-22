@@ -501,3 +501,51 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
     }
     edges
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::*;
+    use PipelineDocument as D;
+    use PipelineKind as K;
+
+    fn held(kind: K, key: String, document: D) -> Held {
+        Held { kind, key, document }
+    }
+
+    fn named(campaign: &str, revision: u32, repos: &[&str]) -> (String, D) {
+        let D::Target(mut target) = target(revision, &[INVARIANT]) else { panic!("a target") };
+        target.campaign = campaign.into();
+        target.repos = repos.iter().map(|name| repo(name)).collect();
+        (format!("{campaign}:target:r{revision}"), D::Target(target))
+    }
+
+    /// Membership is the highest-revision target of this campaign that is in
+    /// force and names repos. The image is built by hand because admission
+    /// cannot reach it: a revision above 1 supersedes its predecessor in its
+    /// own batch, a target is superseded only within its campaign, and an
+    /// empty revision after a repo-naming one is refused, so through admission
+    /// a closed repo-naming target is always older than the in-force one.
+    ///
+    /// Taking the lowest revision instead of the highest changes nothing there
+    /// either (one target per campaign is in force), so that mutation is
+    /// equivalent and not pinned.
+    #[test]
+    fn repos_in_force_is_this_campaigns_in_force_naming_target() {
+        let D::Campaign(this) = campaign(&[REPO]) else { panic!("a campaign") };
+        let (in_force_key, in_force) = named(CAMPAIGN, 1, &[REPO, OTHER_REPO]);
+        let (closed_key, closed) = named(CAMPAIGN, 2, &["GameCult/Closed"]);
+        let (foreign_key, foreign) = named("other-campaign", 3, &["GameCult/Foreign"]);
+        let closing = resolution(r(K::Target, &closed_key), superseded(&[r(K::Target, &in_force_key)]));
+        let docs = Docs {
+            image: vec![
+                held(K::Target, in_force_key, in_force),
+                held(K::Target, closed_key, closed),
+                held(K::Target, foreign_key, foreign),
+                held(K::Resolution, id("resolution", "target.r2.n1"), closing),
+            ],
+            batch: Vec::new(),
+        };
+        assert_eq!(docs.repos_in_force(&this), [repo(REPO), repo(OTHER_REPO)], "neither the closed higher revision nor another campaign's higher target decides");
+    }
+}
