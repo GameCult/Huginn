@@ -273,8 +273,9 @@ fn close_dead(mind: &dyn MindPort, run: &PipelineRef, now: DateTime<Utc>) -> Res
 
 /// The in-force runs of hers (operated by the mind) of `turn` on `instance`,
 /// read from typed facts: the holders of that turn's slot. The one reader of
-/// the slot, for step 0 and for checking a holder admission names.
-fn holders(mind: &dyn MindPort, instance: &Slug, turn: RunTurn) -> Result<Vec<PipelineDocumentSummary>> {
+/// the slot, for step 0 and for checking a holder admission names. `self_run`
+/// reads her open Self run through it too.
+pub(crate) fn holders(mind: &dyn MindPort, instance: &Slug, turn: RunTurn) -> Result<Vec<PipelineDocumentSummary>> {
     let runs = headers(mind, &in_force(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0])))?;
     Ok(runs
         .into_iter()
