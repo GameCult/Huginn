@@ -236,7 +236,8 @@ mod lane {
             )
         };
         let body = format!(
-            "echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho \"$SELF_RUN_ENV_CANARY\" >> {record}\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0",
+            "echo journal-line >&2
+echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho \"$SELF_RUN_ENV_CANARY\" >> {record}\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0",
             first = request("msg_1", 100),
             second = request("msg_2", 299_999),
             record = bin.path().join("record").display(),
@@ -249,6 +250,7 @@ mod lane {
         assert_eq!(output.status.code(), Some(0), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 300000\nended: flushed code 0 requests 2 prefix 300000\n");
         assert!(!all_output(&output).contains(ENV_CANARY), "the unit's environment is the child's, not the bin's output");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("journal-line"), "the child's stderr is the unit's journal");
 
         let recorded = std::fs::read_to_string(&record).unwrap();
         let mut lines = recorded.lines();

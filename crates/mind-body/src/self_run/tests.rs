@@ -508,6 +508,10 @@ fn after_the_flush_the_grace_interrupts_exactly_once_and_not_a_second_early() {
     assert_eq!(on_time.count(&Event::Interrupted), 1);
     assert_eq!(on_time.ended().0, Cause::Interrupted);
 
+    // Exactly at the grace is the grace: the interrupt comes then, not on the next wait.
+    let exact = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Idle(grace)], Some(130), true);
+    assert_eq!(exact.ended().0, Cause::Interrupted);
+
     // A child that ignores it is interrupted once and still waited for.
     let stubborn = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Idle(grace), Idle(grace), Idle(grace)], Some(0), false);
     assert_eq!(stubborn.count(&Event::Interrupted), 1);
