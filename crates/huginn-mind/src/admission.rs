@@ -456,6 +456,15 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
         D::Target(target) => {
             let predecessor = D::Target(eureka_pipeline::PipelineTarget { revision: target.revision.wrapping_sub(1), ..target.clone() });
             revision_rule(docs, K::Target, key, target.revision, &predecessor)?;
+            // A revision past the first may not empty the repo set its predecessor
+            // named: empty means "keep the previous set", and that would silently
+            // narrow it to the campaign's opening set (ruling campaign-repo-set-home).
+            if target.repos.is_empty() && target.revision > 1 {
+                let named = matches!(docs.find(K::Target, &pipeline_key(&predecessor)?), Some(D::Target(previous)) if !previous.repos.is_empty());
+                if named {
+                    return Err(MindRefusal::EmptyRepos { campaign: key.into() });
+                }
+            }
             unique_labels("target.invariants", target.invariants.iter().map(|invariant| invariant.label.0.as_str()))
         }
         D::Question(question) => {
@@ -492,7 +501,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             let Some(campaign) = campaign else {
                 return Err(MindRefusal::MissingReference { kind: K::Campaign, id: spec.campaign.0.clone() });
             };
-            if !campaign.repos.contains(&spec.repo) {
+            if !docs.repos_in_force(campaign).contains(&spec.repo) {
                 return Err(MindRefusal::RepoNotInCampaign { repo: spec.repo.0.clone() });
             }
             for ruling in &spec.rulings {
@@ -2702,6 +2711,82 @@ mod tests {
         let mut spec = cut_spec("1", 1);
         spec.repo = repo(OTHER_REPO);
         assert_eq!(refusal(admit(&mut mind, vec![D::CutSpec(spec)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });
+    }
+
+    /// A target revision naming repos, and the supersession of its predecessor.
+    fn repo_revision(revision: u32, repos: &[&str]) -> Vec<D> {
+        let D::Target(mut named) = target(revision, &[INVARIANT]) else { panic!() };
+        named.repos = repos.iter().map(|name| repo(name)).collect();
+        let previous = r(K::Target, &id("target", &format!("r{}", revision - 1)));
+        let this = r(K::Target, &id("target", &format!("r{revision}")));
+        vec![D::Target(named), resolution(previous, superseded(&[this]))]
+    }
+
+    fn spec_on(cut: &str, repo_name: &str) -> D {
+        let mut spec = cut_spec(cut, 1);
+        spec.repo = repo(repo_name);
+        D::CutSpec(spec)
+    }
+
+    #[test]
+    fn a_target_revision_adds_a_repo_a_spec_may_name() {
+        let mut mind = seeded();
+        assert_eq!(refusal(admit(&mut mind, vec![spec_on("1", OTHER_REPO)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });
+        committed(admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])));
+        committed(admit(&mut mind, vec![spec_on("1", OTHER_REPO)]));
+
+        // The same revision, supersession and spec in one batch.
+        let mut fresh = seeded();
+        let mut batch = repo_revision(2, &[REPO, OTHER_REPO]);
+        batch.push(spec_on("1", OTHER_REPO));
+        committed(admit(&mut fresh, batch));
+    }
+
+    #[test]
+    fn a_target_revision_removes_a_repo() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![spec_on("1", REPO)]));
+        committed(admit(&mut mind, repo_revision(2, &[OTHER_REPO])));
+        let spec_id = id("cut_spec", "cut-1.r1");
+        let spec_view = mind.view(&r(K::CutSpec, &spec_id)).expect("a valid ref").expect("the spec is held");
+        assert_eq!(spec_view.status, crate::query::PipelineStatus::InForce, "spec 1 r1 stays in force");
+        committed(admit(&mut mind, vec![D::CutReport(cut_report("1", 1))]));
+        committed(admit(&mut mind, vec![resolution(r(K::CutSpec, &spec_id), withdrawn())]));
+
+        let mut second = cut_spec("1", 2);
+        second.repo = repo(REPO);
+        let revised = id("cut_spec", "cut-1.r2");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::CutSpec(second), resolution(r(K::CutSpec, &spec_id), superseded(&[r(K::CutSpec, &revised)]))])),
+            MindRefusal::RepoNotInCampaign { repo: REPO.into() }
+        );
+        committed(admit(&mut mind, vec![spec_on("2", OTHER_REPO)]));
+    }
+
+    #[test]
+    fn a_target_revision_cannot_silently_drop_its_repos() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])));
+        assert_eq!(
+            refusal(admit(&mut mind, repo_revision(3, &[]))),
+            MindRefusal::EmptyRepos { campaign: id("target", "r3") }
+        );
+        // Nothing was written: the restating revision takes the same key.
+        committed(admit(&mut mind, repo_revision(3, &[REPO, OTHER_REPO])));
+        // An empty revision whose predecessor named none keeps the campaign's set.
+        let mut plain = seeded();
+        committed(admit(&mut plain, repo_revision(2, &[])));
+    }
+
+    #[test]
+    fn a_repo_revision_replays_idempotently() {
+        let mut mind = seeded();
+        let (first, _) = committed(admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])));
+        assert_eq!(
+            admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])),
+            PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: first }
+        );
+        committed(admit(&mut mind, vec![spec_on("1", OTHER_REPO)]));
     }
 
     #[test]

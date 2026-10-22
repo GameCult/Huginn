@@ -7,7 +7,7 @@
 
 use cultcache_rs::CultCacheEnvelope;
 use eureka_pipeline::{
-    OrgRepo, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
+    OrgRepo, PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
     RunOperator, Short, Slug,
 };
 use schemars::JsonSchema;
@@ -180,6 +180,23 @@ impl Docs {
                 && !own(resolution)
                 && self.in_force(PipelineKind::Resolution, key)
         })
+    }
+
+    /// The repos a campaign's cuts may name: the repo set of the highest-revision
+    /// in-force target of `campaign.slug` that names one, else the campaign's own
+    /// opening set. The one owner of membership (ruling campaign-repo-set-home).
+    pub(crate) fn repos_in_force<'a>(&'a self, campaign: &'a PipelineCampaign) -> &'a [OrgRepo] {
+        self.of_kind(PipelineKind::Target)
+            .filter_map(|(key, document)| match document {
+                PipelineDocument::Target(target)
+                    if target.campaign == campaign.slug && !target.repos.is_empty() && self.in_force(PipelineKind::Target, key) =>
+                {
+                    Some(target)
+                }
+                _ => None,
+            })
+            .max_by_key(|target| target.revision)
+            .map_or(campaign.repos.as_slice(), |target| target.repos.as_slice())
     }
 
     /// The resolution that closes the document, if any: the views' status,

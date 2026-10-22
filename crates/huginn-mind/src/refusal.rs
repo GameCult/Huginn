@@ -41,6 +41,7 @@ pub enum MindRefusal {
     InvalidOptions { question: String },
     InvalidChoice { ruling: String, choice: String },
     QuoteWithoutOperator { ruling: String },
+    /// `campaign` names the refused document: a campaign, or a target revision that empties its predecessor's repos.
     EmptyRepos { campaign: String },
     RepoNotInCampaign { repo: String },
     UnknownDependency { cut: String },
