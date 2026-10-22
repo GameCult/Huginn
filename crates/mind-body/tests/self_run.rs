@@ -85,7 +85,7 @@ fn a_mind_that_cannot_be_reached_is_exit_2_before_any_child_and_names_no_value()
 mod lane {
     use std::net::UdpSocket;
     use std::path::Path;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Command, Output, Stdio};
     use std::time::Duration;
 
     use chrono::Utc;
@@ -95,6 +95,8 @@ mod lane {
     };
     use huginn_mind::{Faculty, Mind, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineProvenance};
     use mind_body::self_run::FLUSH_MESSAGE;
+
+    use super::all_output;
     use tempfile::TempDir;
 
     const INSTANCE: &str = "yggdrasil";
@@ -153,15 +155,9 @@ mod lane {
         }
     }
 
-    /// The real binary against the real daemon, with a fake `claude` first on `PATH`.
-    /// The fake prints two requests (the second reaches the ceiling), waits for the start
-    /// and the flush on stdin, records its argument list and what it read, prints a
-    /// result and exits 0. It needs a built `huginn-daemon` beside the binary
-    /// (`cargo build -p huginn-daemon`), so it runs in the container lane only; `cargo test` and
-    /// `cargo mutants` skip it. Run it with the README's lane command.
-    #[test]
-    #[ignore = "container only: a built huginn-daemon beside the binary, and a POSIX shell"]
-    fn the_real_bin_finds_her_run_starts_claude_for_it_asks_for_the_flush_and_exits_0() {
+    /// The daemon over a store seeded with `documents`, and the endpoint it listens on.
+    /// It needs a built `huginn-daemon` beside the binary (`cargo build -p huginn-daemon`).
+    fn serve(documents: Vec<PipelineDocument>) -> (Daemon, TempDir, String) {
         let slug = Slug(INSTANCE.into());
         let state = TempDir::new().unwrap();
         {
@@ -169,33 +165,11 @@ mod lane {
             let batch = PipelineAdmissionBatch {
                 instance: slug.clone(),
                 provenance: PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into() },
-                documents: seed(),
+                documents,
             };
             assert!(matches!(mind.admit(batch, Utc::now()), PipelineAdmissionOutcome::Committed { .. }));
         }
-
-        let bin = TempDir::new().unwrap();
-        let record = bin.path().join("record");
-        let request = |id: &str, tokens: u64| {
-            format!(
-                r#"{{"type":"assistant","parent_tool_use_id":null,"message":{{"id":"{id}","usage":{{"input_tokens":1,"cache_read_input_tokens":{tokens},"cache_creation_input_tokens":0}}}}}}"#
-            )
-        };
-        let script = format!(
-            "#!/bin/bash\necho \"$@\" > {record}\necho '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0\n",
-            record = record.display(),
-            first = request("msg_1", 100),
-            second = request("msg_2", 299_999),
-        );
-        let claude = bin.path().join("claude");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&claude, script).unwrap();
-            std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
         let port = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let endpoint = format!("rudp://127.0.0.1:{port}");
         let exe = Path::new(env!("CARGO_BIN_EXE_mind-self-run"));
         let daemon_exe = exe.with_file_name("huginn-daemon");
         assert!(daemon_exe.exists(), "build huginn-daemon first: {}", daemon_exe.display());
@@ -208,24 +182,73 @@ mod lane {
                 .spawn()
                 .unwrap(),
         );
+        (daemon, state, format!("rudp://127.0.0.1:{port}"))
+    }
 
-        let path = format!("{}:/usr/bin:/bin", bin.path().display());
-        let mut output = None;
+    /// The binary with `bin` first on `PATH`, until the daemon answers (exit 2 before that
+    /// has started nothing). `SELF_RUN_ENV_CANARY` is a variable of the unit's environment.
+    fn ask(endpoint: &str, bin: &Path) -> Output {
+        let exe = Path::new(env!("CARGO_BIN_EXE_mind-self-run"));
+        let path = format!("{}:/usr/bin:/bin", bin.display());
         for _ in 0..40 {
-            let attempt = Command::new(exe).args(["--instance", INSTANCE, "--endpoint", &endpoint]).env("PATH", &path).output().unwrap();
-            // Exit 2 before the daemon answers has started nothing; try again until it does.
+            let attempt = Command::new(exe)
+                .args(["--instance", INSTANCE, "--endpoint", endpoint])
+                .env("PATH", &path)
+                .env("SELF_RUN_ENV_CANARY", ENV_CANARY)
+                .output()
+                .unwrap();
             if attempt.status.code() != Some(2) {
-                output = Some(attempt);
-                break;
+                return attempt;
             }
             std::thread::sleep(Duration::from_millis(500));
         }
-        let output = output.expect("the daemon never answered");
+        panic!("the daemon never answered");
+    }
+
+    const ENV_CANARY: &str = "canary-unit-environment-b94e";
+
+    /// Writes an executable `claude` into `bin` and returns the path of the record it keeps.
+    fn fake_claude(bin: &Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let record = bin.join("record");
+        let script = format!("#!/bin/bash\necho \"$@\" > {record}\n{body}\n", record = record.display());
+        let claude = bin.join("claude");
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        record
+    }
+
+    /// The real binary against the real daemon, with a fake `claude` first on `PATH`.
+    /// The fake prints two requests (the second reaches the ceiling), waits for the start
+    /// and the flush on stdin, records its argument list, what it read and the unit
+    /// variable it inherited, prints a result and exits 0. The bin finds her run, starts
+    /// the child for it, asks for the flush and exits 0 without echoing the inherited
+    /// variable. It runs in the container lane only; `cargo test` and `cargo mutants`
+    /// skip it. Run it with the README's lane command.
+    #[test]
+    #[ignore = "container only: a built huginn-daemon beside the binary, and a POSIX shell"]
+    fn the_real_bin_finds_her_run_starts_claude_for_it_asks_for_the_flush_and_exits_0() {
+        let (daemon, _state, endpoint) = serve(seed());
+        let bin = TempDir::new().unwrap();
+        let request = |id: &str, tokens: u64| {
+            format!(
+                r#"{{"type":"assistant","parent_tool_use_id":null,"message":{{"id":"{id}","usage":{{"input_tokens":1,"cache_read_input_tokens":{tokens},"cache_creation_input_tokens":0}}}}}}"#
+            )
+        };
+        let body = format!(
+            "echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho \"$SELF_RUN_ENV_CANARY\" >> {record}\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0",
+            first = request("msg_1", 100),
+            second = request("msg_2", 299_999),
+            record = bin.path().join("record").display(),
+        );
+        let record = fake_claude(bin.path(), &body);
+        let output = ask(&endpoint, bin.path());
         drop(daemon);
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         assert_eq!(output.status.code(), Some(0), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
         assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 300000\nended: flushed code 0 requests 2 prefix 300000\n");
+        assert!(!all_output(&output).contains(ENV_CANARY), "the unit's environment is the child's, not the bin's output");
 
         let recorded = std::fs::read_to_string(&record).unwrap();
         let mut lines = recorded.lines();
@@ -235,5 +258,22 @@ mod lane {
         assert!(lines.next().unwrap().contains("yggdrasil:run:selfrun-lane"), "the start message names her run");
         let flush = lines.next().unwrap();
         assert!(flush.contains(FLUSH_MESSAGE) && flush.contains("\"type\":\"user\""), "the flush went to the child's stdin: {flush}");
+        assert_eq!(lines.next().unwrap(), ENV_CANARY, "the child inherits the unit's environment");
+    }
+
+    /// With no Self run of hers in the mind the bin starts no child and exits 3.
+    #[test]
+    #[ignore = "container only: a built huginn-daemon beside the binary, and a POSIX shell"]
+    fn the_real_bin_with_no_self_run_of_hers_exits_3_and_never_starts_claude() {
+        let mut documents = seed();
+        documents.pop();
+        let (daemon, _state, endpoint) = serve(documents);
+        let bin = TempDir::new().unwrap();
+        let record = fake_claude(bin.path(), "exit 0");
+        let output = ask(&endpoint, bin.path());
+        drop(daemon);
+        assert_eq!(output.status.code(), Some(3), "{}", all_output(&output));
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "no run: she has no single open Self run\n");
+        assert!(!record.exists(), "claude was started");
     }
 }

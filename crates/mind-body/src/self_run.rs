@@ -317,7 +317,7 @@ impl Child for ClaudeProcess {
     }
 
     fn interrupt(&mut self) {
-        // `kill` the program, not a libc call: the library forbids unsafe code.
+        // `kill` the program, not a libc call: the library names no FFI.
         let _ = Command::new("kill").args(["-INT", &self.process.id().to_string()]).status();
     }
 
