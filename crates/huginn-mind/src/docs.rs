@@ -7,7 +7,7 @@
 
 use cultcache_rs::CultCacheEnvelope;
 use eureka_pipeline::{
-    OrgRepo, PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
+    Label, OrgRepo, PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
     RunOperator, Short, Slug,
 };
 use schemars::JsonSchema;
@@ -299,22 +299,57 @@ impl Docs {
     }
 }
 
-/// Whether `other` is a later record than `base` in the scope `base` is
-/// sequenced in: `(instance, repo)` for a stewardship, the campaign for a
-/// target and the cut for a cut spec. Kinds that carry no sequence have no
-/// scope and no order, and a resolution is never a base here: the cap above
-/// refuses the withdrawal that would reinstate one before the question of a
-/// later record arises.
+/// The line a record belongs to (ruling `supersession-lineage-2`): the one place
+/// lineage is decided. A record supersedes, and is reinstated over, only a record
+/// of its own line. `None` is a kind the resolution matrix never lets be
+/// superseded; the match names every kind, so a new kind fails to compile until
+/// its line is stated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lineage<'a> {
+    /// A target, or a follow-up: the campaign.
+    Campaign(&'a Slug),
+    /// A cut spec: the campaign and the cut.
+    Cut(&'a Slug, &'a Label),
+    /// A stewardship: the instance and the repo.
+    Assignment(&'a Slug, &'a OrgRepo),
+    /// A ruling: operator directions cut across campaigns.
+    Global,
+}
+
+pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
+    use PipelineDocument as D;
+    match document {
+        D::Target(target) => Some(Lineage::Campaign(&target.campaign)),
+        D::CutSpec(spec) => Some(Lineage::Cut(&spec.campaign, &spec.cut)),
+        D::FollowUp(follow_up) => Some(Lineage::Campaign(&follow_up.campaign)),
+        D::Stewardship(stewardship) => Some(Lineage::Assignment(&stewardship.instance, &stewardship.repo)),
+        D::Ruling(_) => Some(Lineage::Global),
+        D::Campaign(_)
+        | D::Question(_)
+        | D::CutReport(_)
+        | D::Verdict(_)
+        | D::Finding(_)
+        | D::Resolution(_)
+        | D::Instance(_)
+        | D::HandOff(_)
+        | D::Run(_) => None,
+    }
+}
+
+/// Whether `other` is a later record than `base` on the line `base` is
+/// sequenced in. Kinds that carry no sequence have no order, and a resolution
+/// is never a base here: the cap above refuses the withdrawal that would
+/// reinstate one before the question of a later record arises.
 fn later_than(base: &PipelineDocument, other: &PipelineDocument) -> bool {
     use PipelineDocument as D;
+    let Some(line) = line_of(base) else { return false };
+    if line_of(other) != Some(line) {
+        return false;
+    }
     match (base, other) {
-        (D::Stewardship(base), D::Stewardship(other)) => {
-            other.instance == base.instance && other.repo == base.repo && other.sequence > base.sequence
-        }
-        (D::Target(base), D::Target(other)) => other.campaign == base.campaign && other.revision > base.revision,
-        (D::CutSpec(base), D::CutSpec(other)) => {
-            other.campaign == base.campaign && other.cut == base.cut && other.revision > base.revision
-        }
+        (D::Stewardship(base), D::Stewardship(other)) => other.sequence > base.sequence,
+        (D::Target(base), D::Target(other)) => other.revision > base.revision,
+        (D::CutSpec(base), D::CutSpec(other)) => other.revision > base.revision,
         _ => false,
     }
 }

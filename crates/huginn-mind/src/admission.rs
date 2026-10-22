@@ -39,7 +39,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::docs::{CitationRole, Docs, Staged, citations, kind_of_id, outcome_citations};
+use crate::docs::{CitationRole, Docs, Staged, citations, kind_of_id, line_of, outcome_citations};
 use crate::mind::{HuginnMindEpoch, Mind, unavailable};
 use crate::persona::{self, HuginnPersonaEntry, PersonaPutOutcome};
 use crate::receipt::{self, CommitOutcome, PipelineProvenance};
@@ -796,9 +796,10 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
     match &resolution.outcome {
         ResolutionOutcome::Superseded { by } => {
             let Some(subject) = docs.find(subject_kind, subject_id) else { return Ok(()) };
+            let line = line_of(subject);
             for supersessor in by {
                 if let Some(next) = docs.find(subject_kind, &supersessor.id.0)
-                    && !same_lineage(subject, next)
+                    && (line.is_none() || line != line_of(next))
                 {
                     return Err(incompatible());
                 }
@@ -813,18 +814,6 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         _ => {}
     }
     Ok(())
-}
-
-/// The one supersession lineage rule (ruling `supersession-lineage`). A target is
-/// superseded only by a target of its campaign, a cut_spec only by a cut_spec of its
-/// campaign and cut, and a ruling by any ruling: operator directions cut across campaigns.
-fn same_lineage(subject: &PipelineDocument, supersessor: &PipelineDocument) -> bool {
-    use PipelineDocument as D;
-    match (subject, supersessor) {
-        (D::Target(old), D::Target(new)) => old.campaign == new.campaign,
-        (D::CutSpec(old), D::CutSpec(new)) => old.campaign == new.campaign && old.cut == new.cut,
-        _ => true,
-    }
 }
 
 /// A10: a write whose identity the image already holds. Every kind answers
