@@ -18,6 +18,7 @@
 //! fails if either step failed. No other command stops anything.
 
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -31,6 +32,36 @@ use crate::launch::unit;
 
 const USAGE: &str =
     "usage: mind-control [--root <dir>] --instance <slug> show | check | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U";
+
+/// The arguments every organ binary shares: `--instance <slug>` and an optional
+/// `--endpoint rudp://<ip>:<port>`, which `env_endpoint` (the binary's reading of
+/// `HUGINN_ENDPOINT`) replaces when absent. A flag given twice, an unknown
+/// argument, a name that is not a slug or an endpoint that is not
+/// `rudp://<ip>:<port>` is refused with `usage` or a fixed message, and no
+/// value is echoed.
+pub fn instance_and_endpoint(args: &[String], env_endpoint: Option<String>, usage: &str) -> Result<(Slug, SocketAddr)> {
+    let (mut instance, mut endpoint) = (None, None);
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let slot = match flag.as_str() {
+            "--instance" => &mut instance,
+            "--endpoint" => &mut endpoint,
+            _ => bail!("{usage}"),
+        };
+        let value = rest.next().ok_or_else(|| anyhow!("{usage}"))?;
+        if slot.replace(value.clone()).is_some() {
+            bail!("{usage}");
+        }
+    }
+    let instance = Slug(instance.ok_or_else(|| anyhow!("{usage}"))?);
+    instance.validate_slug().map_err(|_| anyhow!("the instance is not a slug"))?;
+    let endpoint = endpoint.or(env_endpoint).ok_or_else(|| anyhow!("no daemon endpoint: --endpoint or HUGINN_ENDPOINT"))?;
+    let address = endpoint
+        .strip_prefix("rudp://")
+        .and_then(|address| address.parse::<SocketAddr>().ok())
+        .ok_or_else(|| anyhow!("the endpoint is not rudp://<ip>:<port>"))?;
+    Ok((instance, address))
+}
 
 /// Who made the change: `SUDO_USER`, else `USER`, else `unknown`. An empty
 /// variable counts as unset.

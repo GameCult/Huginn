@@ -375,3 +375,49 @@ fn the_binary_hold_fails_with_status_2_when_systemctl_does() {
     assert!(stderr.contains("units were not stopped") && stderr.contains("exit status 5"), "{stderr}");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("stopped"));
 }
+
+// ---- the arguments every organ binary shares ----
+
+mod shared_arguments {
+    use mind_body::cli::instance_and_endpoint;
+
+    const USAGE: &str = "usage: test-organ --instance <slug>";
+
+    fn parse(args: &[&str], env: Option<&str>) -> anyhow::Result<(eureka_pipeline::Slug, std::net::SocketAddr)> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        instance_and_endpoint(&args, env.map(str::to_string), USAGE)
+    }
+
+    #[test]
+    fn the_flag_names_the_endpoint_and_wins_over_the_environment_which_is_the_fallback() {
+        let (instance, address) = parse(&["--instance", "yggdrasil", "--endpoint", "rudp://10.77.0.1:17872"], Some("rudp://127.0.0.1:1")).unwrap();
+        assert_eq!((instance.0.as_str(), address.to_string().as_str()), ("yggdrasil", "10.77.0.1:17872"));
+        let (_, address) = parse(&["--endpoint", "rudp://10.77.0.1:17872", "--instance", "yggdrasil"], None).unwrap();
+        assert_eq!(address.to_string(), "10.77.0.1:17872", "flag order does not matter");
+        let (_, address) = parse(&["--instance", "yggdrasil"], Some("rudp://127.0.0.1:9")).unwrap();
+        assert_eq!(address.to_string(), "127.0.0.1:9");
+    }
+
+    #[test]
+    fn every_refusal_is_fixed_text_that_echoes_no_value() {
+        let canary = "canary-value-91e7";
+        let cases: Vec<(Vec<&str>, Option<&str>, &str)> = vec![
+            (vec![], Some("rudp://127.0.0.1:9"), USAGE),
+            (vec!["--instance"], None, USAGE),
+            (vec!["--instance", "a", "--instance", canary], Some("rudp://127.0.0.1:9"), USAGE),
+            (vec!["--instance", "a", "--endpoint", "rudp://127.0.0.1:9", "--endpoint", canary], None, USAGE),
+            (vec!["--instance", "a", canary], Some("rudp://127.0.0.1:9"), USAGE),
+            (vec!["--endpoint", "rudp://127.0.0.1:9"], None, USAGE),
+            (vec!["--instance", "Canary/../x"], Some("rudp://127.0.0.1:9"), "the instance is not a slug"),
+            (vec!["--instance", "a"], None, "no daemon endpoint: --endpoint or HUGINN_ENDPOINT"),
+            (vec!["--instance", "a", "--endpoint", canary], None, "the endpoint is not rudp://<ip>:<port>"),
+            (vec!["--instance", "a", "--endpoint", "http://127.0.0.1:9"], None, "the endpoint is not rudp://<ip>:<port>"),
+            (vec!["--instance", "a", "--endpoint", "rudp://not-an-address"], None, "the endpoint is not rudp://<ip>:<port>"),
+            (vec!["--instance", "a"], Some(canary), "the endpoint is not rudp://<ip>:<port>"),
+        ];
+        for (args, env, message) in cases {
+            let error = parse(&args, env).unwrap_err();
+            assert_eq!(format!("{error:#}"), message, "{args:?} {env:?}");
+        }
+    }
+}
