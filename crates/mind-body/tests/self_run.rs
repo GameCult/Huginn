@@ -225,7 +225,7 @@ mod lane {
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         assert_eq!(output.status.code(), Some(0), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 299999\nended: own code 0 requests 2 prefix 299999\n");
+        assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 300000\nended: flushed code 0 requests 2 prefix 300000\n");
 
         let recorded = std::fs::read_to_string(&record).unwrap();
         let mut lines = recorded.lines();
