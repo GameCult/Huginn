@@ -1542,6 +1542,7 @@
       ]
     },
     "PipelineTarget": {
+      "description": "`repos`, when non-empty, is the campaign's whole repo set from this\nrevision on; empty keeps the previous set (ruling campaign-repo-set-home).",
       "type": "object",
       "properties": {
         "campaign": {
@@ -1570,6 +1571,13 @@
             "$ref": "#/$defs/Line"
           },
           "maxItems": 32
+        },
+        "repos": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrgRepo"
+          },
+          "maxItems": 16
         },
         "revision": {
           "type": "integer",
