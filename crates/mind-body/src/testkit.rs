@@ -214,6 +214,7 @@ fn target() -> PipelineDocument {
         invariants: vec![TargetInvariant { label: "run-is-the-grant".into(), statement: "A run is the grant.".into() }],
         not_in_scope: vec![],
         canonical_implementations: vec![],
+        repos: vec![],
         doc: doc_ref(),
     })
 }

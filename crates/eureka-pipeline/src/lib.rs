@@ -491,16 +491,17 @@ macro_rules! unit_enums {
     )*};
 }
 
-/// RS-L closing fix 4: `campaign.repos` refuses two entries naming the same
+/// RS-L closing fix 4: a repo list refuses two entries naming the same
 /// repository by identity, not by raw spelling, so `GameCult/Epiphany` and
 /// `gamecult/epiphany` in one list refuse exactly as one entry twice would.
-/// This is a cross-element invariant on `PipelineCampaign` alone, not a
-/// per-type format rule any other `value_types!` struct shares, so it is
-/// wired in as that struct's one `=> extra` hook rather than folded into
-/// `Bounded for OrgRepo` or the list bound in `bounded_field!`.
-fn campaign_repos_are_distinct(campaign: &PipelineCampaign, at: &str) -> Result<(), PipelineRefusal> {
+/// This is a cross-element invariant on the lists alone, not a per-type format
+/// rule any other `value_types!` struct shares, so it is wired in as the
+/// `=> extra` hook of the two structs that carry a repo list
+/// (`PipelineCampaign.repos` and `PipelineTarget.repos`) rather than folded
+/// into `Bounded for OrgRepo` or the list bound in `bounded_field!`.
+fn repos_are_distinct(repos: &[OrgRepo], at: &str) -> Result<(), PipelineRefusal> {
     let mut seen = std::collections::HashSet::new();
-    for repo in &campaign.repos {
+    for repo in repos {
         if !seen.insert(repo.identity()) {
             return Err(PipelineRefusal::DuplicateRepo {
                 field: format!("{at}.repos"),
@@ -509,6 +510,14 @@ fn campaign_repos_are_distinct(campaign: &PipelineCampaign, at: &str) -> Result<
         }
     }
     Ok(())
+}
+
+fn campaign_repos_are_distinct(campaign: &PipelineCampaign, at: &str) -> Result<(), PipelineRefusal> {
+    repos_are_distinct(&campaign.repos, at)
+}
+
+fn target_repos_are_distinct(target: &PipelineTarget, at: &str) -> Result<(), PipelineRefusal> {
+    repos_are_distinct(&target.repos, at)
 }
 
 /// The most lines one read anchor may span.
@@ -625,10 +634,12 @@ value_types! {
     }
 
     pub struct PipelineCampaign { slug: Slug, title: Title, repos: Vec<OrgRepo>[8], working_branch: Short, target_doc: DocRef } => campaign_repos_are_distinct
+    /// `repos`, when non-empty, is the campaign's whole repo set from this
+    /// revision on; empty keeps the previous set (ruling campaign-repo-set-home).
     pub struct PipelineTarget {
         campaign: Slug, revision: u32, invariants: Vec<TargetInvariant>[32], not_in_scope: Vec<Line>[32],
-        canonical_implementations: Vec<Line>[16], doc: DocRef,
-    }
+        canonical_implementations: Vec<Line>[16], repos: Vec<OrgRepo>[16] = absent, doc: DocRef,
+    } => target_repos_are_distinct
     pub struct PipelineQuestion {
         campaign: Slug, label: Label, title: Title, question: Para, options: Vec<QuestionOption>[8], recommended: Label,
         depends: Vec<Line>[8], raised_in: Option<PipelineRef>, asked_on: Date,
@@ -1238,7 +1249,7 @@ mod tests {
             (D::Target(PipelineTarget {
                 campaign: slug(CAMPAIGN), revision: 2,
                 invariants: vec![TargetInvariant { label: l("mind-admits"), statement: "Only admission writes.".into() }],
-                not_in_scope: vec!["Eve browsing".into()], canonical_implementations: vec!["CultLib".into()], doc: doc_ref(),
+                not_in_scope: vec!["Eve browsing".into()], canonical_implementations: vec!["CultLib".into()], repos: vec![], doc: doc_ref(),
             }), format!("{CAMPAIGN}:target:r2")),
             (D::Question(PipelineQuestion {
                 campaign: slug(CAMPAIGN), label: l("Q1"), title: t("Who owns the state?"), question: "Who owns the state?".into(),
@@ -1506,6 +1517,9 @@ mod tests {
         let mut f = finding_sample();
         f.locations[0].symbol = Some("&1153090498".into());
         out.push(("finding.location-symbol".into(), D::Finding(f)));
+        let PipelineDocument::Target(mut target) = samples().remove(1).0 else { unreachable!() };
+        target.repos = vec![OrgRepo("GameCult/Epiphany".into()), OrgRepo("GameCult/Huginn".into())];
+        out.push(("target.repos".into(), D::Target(target)));
         out
     }
 
@@ -3161,6 +3175,47 @@ mod tests {
         finding.locations[0].line = 0;
         finding.locations[0].end_line = Some(0);
         assert_eq!(PipelineDocument::Finding(finding).validate(), Ok(()));
+    }
+
+    #[test]
+    fn target_repos_absent_decode_and_round_trip() -> Result<()> {
+        // The MCP door: a JSON target with no `repos` key decodes to an empty list.
+        let PipelineDocument::Target(sample) = samples().remove(1).0 else { unreachable!() };
+        let mut json = serde_json::to_value(PipelineDocument::Target(sample.clone()))?;
+        assert!(json["value"].get("repos").is_none(), "an empty repos is not written");
+        let PipelineDocument::Target(decoded) = serde_json::from_value::<PipelineDocument>(json.clone())? else { unreachable!() };
+        assert!(decoded.repos.is_empty());
+        assert!(!rmp_serde::to_vec_named(&PipelineDocument::Target(sample.clone()))?.windows(5).any(|window| window == b"repos"));
+
+        let mut named = sample;
+        named.repos = vec![OrgRepo("GameCult/Epiphany".into()), OrgRepo("GameCult/Huginn".into())];
+        let document = PipelineDocument::Target(named);
+        document.validate()?;
+        json = serde_json::to_value(&document)?;
+        assert_eq!(serde_json::from_value::<PipelineDocument>(json)?, document);
+        let packed = rmp_serde::to_vec_named(&document)?;
+        assert_eq!(rmp_serde::from_slice::<PipelineDocument>(&packed)?, document);
+        assert!(packed.windows(5).any(|window| window == b"repos"), "the repos key is written");
+        Ok(())
+    }
+
+    #[test]
+    fn target_repos_bounded_and_distinct() {
+        let with_repos = |repos: Vec<OrgRepo>| {
+            let PipelineDocument::Target(mut target) = samples().remove(1).0 else { unreachable!() };
+            target.repos = repos;
+            PipelineDocument::Target(target).validate()
+        };
+        let distinct = |count: usize| (0..count).map(|index| OrgRepo(format!("GameCult/Repo{index}"))).collect::<Vec<_>>();
+        assert_eq!(with_repos(distinct(16)), Ok(()));
+        assert_eq!(
+            with_repos(distinct(17)),
+            Err(PipelineRefusal::FieldBound { field: "target.repos".into(), limit: 16, actual: 17 })
+        );
+        assert_eq!(
+            with_repos(vec![OrgRepo("GameCult/Huginn".into()), OrgRepo("gamecult/huginn".into())]),
+            Err(PipelineRefusal::DuplicateRepo { field: "target.repos".into(), repo: "gamecult/huginn".into() })
+        );
     }
 
     /// The marker needs an `Absent` spelling; the two impls say what absent is.

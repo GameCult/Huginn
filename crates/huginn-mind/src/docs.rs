@@ -7,7 +7,7 @@
 
 use cultcache_rs::CultCacheEnvelope;
 use eureka_pipeline::{
-    OrgRepo, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
+    Label, OrgRepo, PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
     RunOperator, Short, Slug,
 };
 use schemars::JsonSchema;
@@ -182,6 +182,23 @@ impl Docs {
         })
     }
 
+    /// The repos a campaign's cuts may name: the repo set of the highest-revision
+    /// in-force target of `campaign.slug` that names one, else the campaign's own
+    /// opening set. The one owner of membership (ruling campaign-repo-set-home).
+    pub(crate) fn repos_in_force<'a>(&'a self, campaign: &'a PipelineCampaign) -> &'a [OrgRepo] {
+        self.of_kind(PipelineKind::Target)
+            .filter_map(|(key, document)| match document {
+                PipelineDocument::Target(target)
+                    if target.campaign == campaign.slug && !target.repos.is_empty() && self.in_force(PipelineKind::Target, key) =>
+                {
+                    Some(target)
+                }
+                _ => None,
+            })
+            .max_by_key(|target| target.revision)
+            .map_or(campaign.repos.as_slice(), |target| target.repos.as_slice())
+    }
+
     /// The resolution that closes the document, if any: the views' status,
     /// derived where admission derives whether there is one at all.
     pub(crate) fn closing_resolution(&self, kind: PipelineKind, id: &str) -> Option<(&str, &PipelineResolution)> {
@@ -207,12 +224,17 @@ impl Docs {
             .collect()
     }
 
-    /// The in-force record that stands later than `base` in the scope `base`
-    /// is sequenced in, if any: what a withdrawal that put `base` back in
-    /// force would leave standing beside it.
-    pub(crate) fn later_in_force(&self, base: &PipelineDocument) -> Option<&str> {
+    /// The in-force record, other than `base_key`, that cannot stand beside
+    /// `base` on its line: the one question "may this record be in force"
+    /// asks, whether `base` is being admitted (a stewardship's
+    /// `AlreadyStewarded`) or put back in force by a withdrawal. A line holds
+    /// one stewardship at a time, so any other stands in its way; a revision
+    /// is only displaced by a later one.
+    pub(crate) fn rival_in_force(&self, base_key: &str, base: &PipelineDocument) -> Option<&str> {
         let kind = base.kind();
-        self.of_kind(kind).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)
+        self.of_kind(kind)
+            .find(|(key, other)| *key != base_key && rivals(base, other) && self.in_force(kind, key))
+            .map(|(key, _)| key)
     }
 
     /// The in-force run, other than `run_key`, that holds `claim`: the one
@@ -282,22 +304,57 @@ impl Docs {
     }
 }
 
-/// Whether `other` is a later record than `base` in the scope `base` is
-/// sequenced in: `(instance, repo)` for a stewardship, the campaign for a
-/// target and the cut for a cut spec. Kinds that carry no sequence have no
-/// scope and no order, and a resolution is never a base here: the cap above
-/// refuses the withdrawal that would reinstate one before the question of a
-/// later record arises.
-fn later_than(base: &PipelineDocument, other: &PipelineDocument) -> bool {
+/// The line a record belongs to (rulings `supersession-lineage-2` and `-3`): the one place
+/// lineage is decided. A record supersedes, and is reinstated over, only a record
+/// of its own line. `None` is a kind the resolution matrix never lets be
+/// superseded; the match names every kind, so a new kind fails to compile until
+/// its line is stated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lineage<'a> {
+    /// A target: the campaign.
+    Campaign(&'a Slug),
+    /// A cut spec: the campaign and the cut.
+    Cut(&'a Slug, &'a Label),
+    /// A stewardship: the instance and the repo.
+    Assignment(&'a Slug, &'a OrgRepo),
+    /// A ruling or a follow-up: operator directions and re-homed work cut
+    /// across campaigns.
+    Global,
+}
+
+pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
     use PipelineDocument as D;
+    match document {
+        D::Target(target) => Some(Lineage::Campaign(&target.campaign)),
+        D::CutSpec(spec) => Some(Lineage::Cut(&spec.campaign, &spec.cut)),
+        D::Stewardship(stewardship) => Some(Lineage::Assignment(&stewardship.instance, &stewardship.repo)),
+        D::Ruling(_) | D::FollowUp(_) => Some(Lineage::Global),
+        D::Campaign(_)
+        | D::Question(_)
+        | D::CutReport(_)
+        | D::Verdict(_)
+        | D::Finding(_)
+        | D::Resolution(_)
+        | D::Instance(_)
+        | D::HandOff(_)
+        | D::Run(_) => None,
+    }
+}
+
+/// Whether `other` cannot stand in force beside `base`, being on `base`'s line:
+/// any other stewardship of an instance and repo, a later revision of a target
+/// or cut spec. A resolution is never a base here: the cap in `resolution_rule`
+/// refuses the withdrawal that would reinstate one first.
+fn rivals(base: &PipelineDocument, other: &PipelineDocument) -> bool {
+    use PipelineDocument as D;
+    let Some(line) = line_of(base) else { return false };
+    if line_of(other) != Some(line) {
+        return false;
+    }
     match (base, other) {
-        (D::Stewardship(base), D::Stewardship(other)) => {
-            other.instance == base.instance && other.repo == base.repo && other.sequence > base.sequence
-        }
-        (D::Target(base), D::Target(other)) => other.campaign == base.campaign && other.revision > base.revision,
-        (D::CutSpec(base), D::CutSpec(other)) => {
-            other.campaign == base.campaign && other.cut == base.cut && other.revision > base.revision
-        }
+        (D::Stewardship(_), D::Stewardship(_)) => true,
+        (D::Target(base), D::Target(other)) => other.revision > base.revision,
+        (D::CutSpec(base), D::CutSpec(other)) => other.revision > base.revision,
         _ => false,
     }
 }
@@ -483,4 +540,52 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
         D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) => {}
     }
     edges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::*;
+    use PipelineDocument as D;
+    use PipelineKind as K;
+
+    fn held(kind: K, key: String, document: D) -> Held {
+        Held { kind, key, document }
+    }
+
+    fn named(campaign: &str, revision: u32, repos: &[&str]) -> (String, D) {
+        let D::Target(mut target) = target(revision, &[INVARIANT]) else { panic!("a target") };
+        target.campaign = campaign.into();
+        target.repos = repos.iter().map(|name| repo(name)).collect();
+        (format!("{campaign}:target:r{revision}"), D::Target(target))
+    }
+
+    /// Membership is the highest-revision target of this campaign that is in
+    /// force and names repos. The image is built by hand because admission
+    /// cannot reach it: a revision above 1 supersedes its predecessor in its
+    /// own batch, a target is superseded only within its campaign, and an
+    /// empty revision after a repo-naming one is refused, so through admission
+    /// a closed repo-naming target is always older than the in-force one.
+    ///
+    /// Taking the lowest revision instead of the highest changes nothing there
+    /// either (one target per campaign is in force), so that mutation is
+    /// equivalent and not pinned.
+    #[test]
+    fn repos_in_force_is_this_campaigns_in_force_naming_target() {
+        let D::Campaign(this) = campaign(&[REPO]) else { panic!("a campaign") };
+        let (in_force_key, in_force) = named(CAMPAIGN, 1, &[REPO, OTHER_REPO]);
+        let (closed_key, closed) = named(CAMPAIGN, 2, &["GameCult/Closed"]);
+        let (foreign_key, foreign) = named("other-campaign", 3, &["GameCult/Foreign"]);
+        let closing = resolution(r(K::Target, &closed_key), superseded(&[r(K::Target, &in_force_key)]));
+        let docs = Docs {
+            image: vec![
+                held(K::Target, in_force_key, in_force),
+                held(K::Target, closed_key, closed),
+                held(K::Target, foreign_key, foreign),
+                held(K::Resolution, id("resolution", "target.r2.n1"), closing),
+            ],
+            batch: Vec::new(),
+        };
+        assert_eq!(docs.repos_in_force(&this), [repo(REPO), repo(OTHER_REPO)], "neither the closed higher revision nor another campaign's higher target decides");
+    }
 }

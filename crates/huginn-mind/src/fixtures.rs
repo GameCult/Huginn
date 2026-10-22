@@ -155,6 +155,7 @@ pub(crate) fn target(revision: u32, invariants: &[&str]) -> PipelineDocument {
             .collect(),
         not_in_scope: vec![],
         canonical_implementations: vec![],
+        repos: vec![],
         doc: doc_ref(),
     })
 }

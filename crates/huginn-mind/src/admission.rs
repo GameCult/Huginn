@@ -39,7 +39,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::docs::{CitationRole, Docs, Staged, citations, kind_of_id, outcome_citations};
+use crate::docs::{CitationRole, Docs, Staged, citations, kind_of_id, line_of, outcome_citations};
 use crate::mind::{HuginnMindEpoch, Mind, unavailable};
 use crate::persona::{self, HuginnPersonaEntry, PersonaPutOutcome};
 use crate::receipt::{self, CommitOutcome, PipelineProvenance};
@@ -456,6 +456,15 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
         D::Target(target) => {
             let predecessor = D::Target(eureka_pipeline::PipelineTarget { revision: target.revision.wrapping_sub(1), ..target.clone() });
             revision_rule(docs, K::Target, key, target.revision, &predecessor)?;
+            // A revision past the first may not empty the repo set its predecessor
+            // named: empty means "keep the previous set", and that would silently
+            // narrow it to the campaign's opening set (ruling campaign-repo-set-home).
+            if target.repos.is_empty() && target.revision > 1 {
+                let named = matches!(docs.find(K::Target, &pipeline_key(&predecessor)?), Some(D::Target(previous)) if !previous.repos.is_empty());
+                if named {
+                    return Err(MindRefusal::EmptyRepos { campaign: key.into() });
+                }
+            }
             unique_labels("target.invariants", target.invariants.iter().map(|invariant| invariant.label.0.as_str()))
         }
         D::Question(question) => {
@@ -492,7 +501,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             let Some(campaign) = campaign else {
                 return Err(MindRefusal::MissingReference { kind: K::Campaign, id: spec.campaign.0.clone() });
             };
-            if !campaign.repos.contains(&spec.repo) {
+            if !docs.repos_in_force(campaign).contains(&spec.repo) {
                 return Err(MindRefusal::RepoNotInCampaign { repo: spec.repo.0.clone() });
             }
             for ruling in &spec.rulings {
@@ -589,7 +598,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
                     actual: stewardship.sequence,
                 });
             }
-            if docs.stewardships_of(mind, &stewardship.repo, None).iter().any(|(other, _)| *other != key) {
+            if docs.rival_in_force(key, &staged.document).is_some() {
                 return Err(MindRefusal::AlreadyStewarded { repo: stewardship.repo.0.clone() });
             }
             Ok(())
@@ -761,11 +770,16 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         && subject_kind == K::Resolution
         && let Some(D::Resolution(reinstating)) = docs.find(K::Resolution, subject_id)
         && let Some(base) = docs.find(reinstating.subject.kind, &reinstating.subject.id.0)
-        && let Some(later) = docs.later_in_force(base)
+        && let Some(rival) = docs.rival_in_force(&reinstating.subject.id.0, base)
     {
+        // The repo already has a steward, earlier or later: the admission
+        // refusal for the same fact, from the same owner.
+        if let D::Stewardship(base) = base {
+            return Err(MindRefusal::AlreadyStewarded { repo: base.repo.0.clone() });
+        }
         return Err(MindRefusal::WouldReinstateOverLater {
             subject: reinstating.subject.id.0.clone(),
-            later: later.into(),
+            later: rival.into(),
         });
     }
     // Withdrawing a run's closure puts the run back in force, and a run in
@@ -785,11 +799,12 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         }
     }
     match &resolution.outcome {
-        ResolutionOutcome::Superseded { by } if subject_kind == K::CutSpec => {
-            let Some(D::CutSpec(subject)) = docs.find(K::CutSpec, subject_id) else { return Ok(()) };
+        ResolutionOutcome::Superseded { by } => {
+            let Some(subject) = docs.find(subject_kind, subject_id) else { return Ok(()) };
+            let line = line_of(subject);
             for supersessor in by {
-                if let Some(D::CutSpec(spec)) = docs.find(K::CutSpec, &supersessor.id.0)
-                    && spec.cut != subject.cut
+                if let Some(next) = docs.find(subject_kind, &supersessor.id.0)
+                    && (line.is_none() || line != line_of(next))
                 {
                     return Err(incompatible());
                 }
@@ -1541,7 +1556,8 @@ mod tests {
     /// Q19 A's rationale, which the cap alone does not carry: a withdrawal
     /// never re-raises an earlier record over a later one. The repo went away
     /// and came back, so withdrawing the hand-off's withdrawal would put the
-    /// first assignment back in force beside the second.
+    /// first assignment back in force beside the second: the repo already has
+    /// a steward.
     #[test]
     fn a_withdrawal_does_not_reinstate_a_stewardship_over_a_later_one() {
         let mut mind = seeded();
@@ -1549,12 +1565,11 @@ mod tests {
         let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
         back.handed_on = eureka_pipeline::Date("2026-09-17".into());
         committed(admit(&mut mind, vec![D::HandOff(back)]));
-        let first = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
         let again = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2");
         let withdrawal = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1");
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())])),
-            MindRefusal::WouldReinstateOverLater { subject: first, later: again.clone() }
+            MindRefusal::AlreadyStewarded { repo: REPO.into() }
         );
         let docs = Docs::from_image(mind.envelopes()).unwrap();
         let in_force = docs.stewardships_of(&slug(INSTANCE), &repo(REPO), None).iter().map(|(key, _)| *key).collect::<Vec<_>>();
@@ -1672,6 +1687,33 @@ mod tests {
         assert_eq!(in_force, vec![stewardship_key(1)]);
     }
 
+    /// One assignment stands per repo, whichever record a withdrawal would put
+    /// back: reinstating the later of two withdrawn assignments while the
+    /// earlier is back in force is refused, and the next assignment then meets
+    /// exactly the one that stands.
+    #[test]
+    fn a_withdrawal_does_not_reinstate_a_stewardship_beside_an_earlier_one() {
+        let mut mind = seeded();
+        let n1 = stewardship_key(1);
+        let n2 = stewardship_key(2);
+        let first = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1");
+        let second = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n2.n1");
+        committed(admit(&mut mind, vec![resolution(r(K::Stewardship, &n1), withdrawn())]));
+        committed(admit(&mut mind, vec![stewardship_n(INSTANCE, REPO, 2)]));
+        committed(admit(&mut mind, vec![resolution(r(K::Stewardship, &n2), withdrawn())]));
+        committed(admit(&mut mind, vec![resolution(r(K::Resolution, &first), withdrawn())]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &second), withdrawn())])),
+            MindRefusal::AlreadyStewarded { repo: REPO.into() }
+        );
+        let in_force = docs_of(&mind).stewardships_of(&slug(INSTANCE), &repo(REPO), None).iter().map(|(key, _)| key.to_string()).collect::<Vec<_>>();
+        assert_eq!(in_force, vec![n1], "the reinstated assignment stands alone");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![stewardship_n(INSTANCE, REPO, 3)])),
+            MindRefusal::AlreadyStewarded { repo: REPO.into() }
+        );
+    }
+
     /// And it reads the batch: the assignment that stands later than the one
     /// a withdrawal would reinstate may be landing beside that withdrawal,
     /// derived by a hand-off in the same batch.
@@ -1685,7 +1727,7 @@ mod tests {
                 hand_off_on(OTHER_INSTANCE, INSTANCE, "2026-09-17"),
                 resolution(r(K::Resolution, &withdrawal), withdrawn()),
             ])),
-            MindRefusal::WouldReinstateOverLater { subject: stewardship_key(1), later: stewardship_key(2) }
+            MindRefusal::AlreadyStewarded { repo: REPO.into() }
         );
     }
 
@@ -2702,6 +2744,321 @@ mod tests {
         let mut spec = cut_spec("1", 1);
         spec.repo = repo(OTHER_REPO);
         assert_eq!(refusal(admit(&mut mind, vec![D::CutSpec(spec)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });
+    }
+
+    /// A target revision naming repos, and the supersession of its predecessor.
+    fn repo_revision(revision: u32, repos: &[&str]) -> Vec<D> {
+        let D::Target(mut named) = target(revision, &[INVARIANT]) else { panic!() };
+        named.repos = repos.iter().map(|name| repo(name)).collect();
+        let previous = r(K::Target, &id("target", &format!("r{}", revision - 1)));
+        let this = r(K::Target, &id("target", &format!("r{revision}")));
+        vec![D::Target(named), resolution(previous, superseded(&[this]))]
+    }
+
+    fn spec_on(cut: &str, repo_name: &str) -> D {
+        let mut spec = cut_spec(cut, 1);
+        spec.repo = repo(repo_name);
+        D::CutSpec(spec)
+    }
+
+    #[test]
+    fn a_target_revision_adds_a_repo_a_spec_may_name() {
+        let mut mind = seeded();
+        assert_eq!(refusal(admit(&mut mind, vec![spec_on("1", OTHER_REPO)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });
+        committed(admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])));
+        committed(admit(&mut mind, vec![spec_on("1", OTHER_REPO)]));
+
+        // The same revision, supersession and spec in one batch.
+        let mut fresh = seeded();
+        let mut batch = repo_revision(2, &[REPO, OTHER_REPO]);
+        batch.push(spec_on("1", OTHER_REPO));
+        committed(admit(&mut fresh, batch));
+    }
+
+    #[test]
+    fn a_target_revision_removes_a_repo() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![spec_on("1", REPO)]));
+        committed(admit(&mut mind, repo_revision(2, &[OTHER_REPO])));
+        let spec_id = id("cut_spec", "cut-1.r1");
+        let spec_view = mind.view(&r(K::CutSpec, &spec_id)).expect("a valid ref").expect("the spec is held");
+        assert_eq!(spec_view.status, crate::query::PipelineStatus::InForce, "spec 1 r1 stays in force");
+        committed(admit(&mut mind, vec![D::CutReport(cut_report("1", 1))]));
+        committed(admit(&mut mind, vec![resolution(r(K::CutSpec, &spec_id), withdrawn())]));
+
+        let mut second = cut_spec("1", 2);
+        second.repo = repo(REPO);
+        let revised = id("cut_spec", "cut-1.r2");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::CutSpec(second), resolution(r(K::CutSpec, &spec_id), superseded(&[r(K::CutSpec, &revised)]))])),
+            MindRefusal::RepoNotInCampaign { repo: REPO.into() }
+        );
+        committed(admit(&mut mind, vec![spec_on("2", OTHER_REPO)]));
+    }
+
+    #[test]
+    fn a_target_revision_cannot_silently_drop_its_repos() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])));
+        assert_eq!(
+            refusal(admit(&mut mind, repo_revision(3, &[]))),
+            MindRefusal::EmptyRepos { campaign: id("target", "r3") }
+        );
+        // Nothing was written: the restating revision takes the same key.
+        committed(admit(&mut mind, repo_revision(3, &[REPO, OTHER_REPO])));
+        // An empty revision whose predecessor named none keeps the campaign's set.
+        let mut plain = seeded();
+        committed(admit(&mut plain, repo_revision(2, &[])));
+    }
+
+    #[test]
+    fn a_repo_revision_replays_idempotently() {
+        let mut mind = seeded();
+        let (first, _) = committed(admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])));
+        assert_eq!(
+            admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])),
+            PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: first }
+        );
+        committed(admit(&mut mind, vec![spec_on("1", OTHER_REPO)]));
+    }
+
+    /// Another campaign, opened with `repos`, and its own target revision 1 naming `named`.
+    fn other_campaign(repos: &[&str], named: &[&str]) -> Vec<D> {
+        let D::Campaign(mut campaign) = campaign(repos) else { panic!("a campaign") };
+        campaign.slug = "other-campaign".into();
+        let D::Target(mut target) = target(1, &[INVARIANT]) else { panic!("a target") };
+        target.campaign = "other-campaign".into();
+        target.repos = named.iter().map(|name| repo(name)).collect();
+        vec![D::Campaign(campaign), D::Target(target)]
+    }
+
+    #[test]
+    fn another_campaigns_target_does_not_widen_membership() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, other_campaign(&[REPO], &[REPO, OTHER_REPO])));
+        assert_eq!(refusal(admit(&mut mind, vec![spec_on("1", OTHER_REPO)])), MindRefusal::RepoNotInCampaign { repo: OTHER_REPO.into() });
+    }
+
+    #[test]
+    fn a_target_is_superseded_only_within_its_campaign() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, repo_revision(2, &[REPO, OTHER_REPO])));
+        committed(admit(&mut mind, other_campaign(&[REPO], &[])));
+        let foreign = r(K::Target, "other-campaign:target:r1");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(r(K::Target, &id("target", "r2")), superseded(&[foreign]))])),
+            MindRefusal::IncompatibleResolution { subject_kind: K::Target, outcome: "Superseded".into() }
+        );
+        // Nothing was written: r2 still names the repos, and its own revision still lands.
+        committed(admit(&mut mind, vec![spec_on("1", OTHER_REPO)]));
+        committed(admit(&mut mind, repo_revision(3, &[REPO, OTHER_REPO])));
+    }
+
+    /// A target of the first campaign (`CAMPAIGN`) at `revision`, naming no repos.
+    fn own_target(revision: u32) -> D {
+        target(revision, &[INVARIANT])
+    }
+
+    const FOREIGN_TARGET: &str = "other-campaign:target:r1";
+
+    fn supersession_refused(outcome: PipelineAdmissionOutcome, subject_kind: K) -> bool {
+        refusal(outcome) == MindRefusal::IncompatibleResolution { subject_kind, outcome: "Superseded".into() }
+    }
+
+    #[test]
+    fn a_foreign_target_in_the_same_batch_does_not_supersede() {
+        let mut mind = seeded();
+        let mut batch = other_campaign(&[REPO], &[]);
+        batch.push(resolution(r(K::Target, &id("target", "r1")), superseded(&[r(K::Target, FOREIGN_TARGET)])));
+        assert!(supersession_refused(admit(&mut mind, batch), K::Target));
+    }
+
+    #[test]
+    fn every_supersessor_of_a_target_is_checked_whichever_is_foreign() {
+        for foreign_first in [false, true] {
+            let mut mind = seeded();
+            committed(admit(&mut mind, other_campaign(&[REPO], &[])));
+            let own = r(K::Target, &id("target", "r2"));
+            let foreign = r(K::Target, FOREIGN_TARGET);
+            let by = if foreign_first { [foreign, own] } else { [own, foreign] };
+            let batch = vec![own_target(2), resolution(r(K::Target, &id("target", "r1")), superseded(&by))];
+            assert!(supersession_refused(admit(&mut mind, batch), K::Target), "foreign first: {foreign_first}");
+        }
+    }
+
+    #[test]
+    fn a_new_campaigns_target_in_its_own_batch_is_not_closed_by_a_foreign_one() {
+        let mut mind = seeded();
+        let mut batch = other_campaign(&[REPO], &[]);
+        batch.push(resolution(r(K::Target, FOREIGN_TARGET), superseded(&[r(K::Target, &id("target", "r1"))])));
+        assert!(supersession_refused(admit(&mut mind, batch), K::Target));
+    }
+
+    #[test]
+    fn a_cut_spec_is_superseded_only_within_its_campaign() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![spec_on("1", REPO)]));
+        let mut batch = other_campaign(&[REPO], &[]);
+        let D::CutSpec(mut foreign) = spec_on("1", REPO) else { panic!("a spec") };
+        foreign.campaign = "other-campaign".into();
+        batch.push(D::CutSpec(foreign));
+        committed(admit(&mut mind, batch));
+        let lone = vec![resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), superseded(&[r(K::CutSpec, "other-campaign:cut_spec:cut-1.r1")]))];
+        assert!(supersession_refused(admit(&mut mind, lone), K::CutSpec));
+        // Nothing was written: this campaign's own revision still lands.
+        let D::CutSpec(mut next) = spec_on("1", REPO) else { panic!("a spec") };
+        next.revision = 2;
+        let this = r(K::CutSpec, &id("cut_spec", "cut-1.r2"));
+        committed(admit(&mut mind, vec![D::CutSpec(next), resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), superseded(&[this]))]));
+    }
+
+    #[test]
+    fn a_ruling_is_superseded_by_a_ruling_of_any_campaign() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("old"))]));
+        let mut batch = other_campaign(&[REPO], &[]);
+        let mut foreign = ruling("new");
+        foreign.campaign = "other-campaign".into();
+        batch.push(D::Ruling(foreign));
+        batch.push(resolution(r(K::Ruling, &id("ruling", "old")), superseded(&[r(K::Ruling, "other-campaign:ruling:new")])));
+        committed(admit(&mut mind, batch));
+    }
+
+    /// The slug that shares its dash prefix with `CAMPAIGN` (`eureka-state`).
+    const RIVAL: &str = "eureka-substrate";
+
+    /// Revision `revision` of the rival campaign's target, with its campaign when it is
+    /// the first and the supersession of its predecessor when it is not.
+    fn rival_revision(revision: u32) -> Vec<D> {
+        let D::Target(mut named) = target(revision, &[INVARIANT]) else { panic!("a target") };
+        named.campaign = RIVAL.into();
+        let mut batch = Vec::new();
+        if revision == 1 {
+            let D::Campaign(mut opened) = campaign(&[REPO]) else { panic!("a campaign") };
+            opened.slug = RIVAL.into();
+            batch.push(D::Campaign(opened));
+        }
+        batch.push(D::Target(named));
+        if revision > 1 {
+            let previous = r(K::Target, &format!("{RIVAL}:target:r{}", revision - 1));
+            batch.push(resolution(previous, superseded(&[r(K::Target, &format!("{RIVAL}:target:r{revision}"))])));
+        }
+        batch
+    }
+
+    /// Both campaigns at revision 3, so each one's target in force is above revision 1.
+    fn both_campaigns_at_revision_three() -> Mind<MemoryStore> {
+        let mut mind = seeded();
+        for revision in 2..=3 {
+            committed(admit(&mut mind, repo_revision(revision, &[REPO])));
+        }
+        for revision in 1..=3 {
+            committed(admit(&mut mind, rival_revision(revision)));
+        }
+        mind
+    }
+
+    #[test]
+    fn a_target_is_not_superseded_by_a_campaign_sharing_its_prefix_or_a_higher_revision() {
+        for (subject, supersessor) in [
+            (id("target", "r3"), format!("{RIVAL}:target:r3")),
+            (format!("{RIVAL}:target:r3"), id("target", "r3")),
+        ] {
+            let mut mind = both_campaigns_at_revision_three();
+            let lone = vec![resolution(r(K::Target, &subject), superseded(&[r(K::Target, &supersessor)]))];
+            assert!(supersession_refused(admit(&mut mind, lone), K::Target), "{subject} by {supersessor}");
+        }
+        // A foreign revision above the subject's is no likelier to pass.
+        let mut mind = seeded();
+        committed(admit(&mut mind, repo_revision(2, &[REPO])));
+        for revision in 1..=4 {
+            committed(admit(&mut mind, rival_revision(revision)));
+        }
+        let lone = vec![resolution(r(K::Target, &id("target", "r2")), superseded(&[r(K::Target, &format!("{RIVAL}:target:r4"))]))];
+        assert!(supersession_refused(admit(&mut mind, lone), K::Target));
+    }
+
+    #[test]
+    fn a_stewardship_is_superseded_only_on_its_own_instance_and_repo_line() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![stewardship(INSTANCE, OTHER_REPO)]));
+        let epiphany = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
+        let huginn = format!("{INSTANCE}:stewardship:gamecult_-huginn.n1");
+        let lone = vec![resolution(r(K::Stewardship, &epiphany), superseded(&[r(K::Stewardship, &huginn)]))];
+        assert!(supersession_refused(admit(&mut mind, lone), K::Stewardship));
+        // Nothing was written: the repo's own next assignment still supersedes it.
+        let next = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2");
+        committed(admit(&mut mind, vec![
+            stewardship_n(INSTANCE, REPO, 2),
+            resolution(r(K::Stewardship, &epiphany), superseded(&[r(K::Stewardship, &next)])),
+        ]));
+    }
+
+    /// Re-homing work is how Self routes it (ruling `supersession-lineage-3`):
+    /// a gap follow-up of one campaign is superseded by its successor in the
+    /// campaign that owns the work now, and the typed edge survives.
+    #[test]
+    fn a_follow_up_is_superseded_by_one_re_homed_to_another_campaign() {
+        let mut mind = seeded();
+        let source = r(K::Target, &id("target", "r1"));
+        committed(admit(&mut mind, vec![follow_up("gap-session-id", source.clone())]));
+        let mut batch = rival_revision(1);
+        let D::FollowUp(mut foreign) = follow_up("gap-session-id", source) else { panic!("a follow-up") };
+        foreign.campaign = RIVAL.into();
+        batch.push(D::FollowUp(foreign));
+        batch.push(resolution(
+            r(K::FollowUp, &id("follow_up", "gap-session-id")),
+            superseded(&[r(K::FollowUp, &format!("{RIVAL}:follow_up:gap-session-id"))]),
+        ));
+        committed(admit(&mut mind, batch));
+        let docs = docs_of(&mind);
+        assert!(!docs.in_force(K::FollowUp, &id("follow_up", "gap-session-id")));
+        assert!(docs.in_force(K::FollowUp, &format!("{RIVAL}:follow_up:gap-session-id")));
+    }
+
+    #[test]
+    fn supersession_on_its_own_line_commits_for_every_kind() {
+        let source = r(K::Target, &id("target", "r1"));
+        let mut mind = seeded();
+        committed(admit(&mut mind, repo_revision(2, &[REPO])));
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![spec_on("1", REPO)]));
+        let D::CutSpec(mut next) = spec_on("1", REPO) else { panic!("a spec") };
+        next.revision = 2;
+        committed(admit(&mut mind, vec![
+            D::CutSpec(next),
+            resolution(r(K::CutSpec, &id("cut_spec", "cut-1.r1")), superseded(&[r(K::CutSpec, &id("cut_spec", "cut-1.r2"))])),
+        ]));
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![follow_up("old", source.clone())]));
+        committed(admit(&mut mind, vec![
+            follow_up("new", source),
+            resolution(r(K::FollowUp, &id("follow_up", "old")), superseded(&[r(K::FollowUp, &id("follow_up", "new"))])),
+        ]));
+        let mut mind = seeded();
+        let epiphany = format!("{INSTANCE}:stewardship:gamecult_-epiphany");
+        committed(admit(&mut mind, vec![
+            stewardship_n(INSTANCE, REPO, 2),
+            resolution(r(K::Stewardship, &format!("{epiphany}.n1")), superseded(&[r(K::Stewardship, &format!("{epiphany}.n2"))])),
+        ]));
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("old"))]));
+        committed(admit(&mut mind, vec![
+            D::Ruling(ruling("new")),
+            resolution(r(K::Ruling, &id("ruling", "old")), superseded(&[r(K::Ruling, &id("ruling", "new"))])),
+        ]));
+    }
+
+    #[test]
+    fn a_ruling_of_one_campaign_is_superseded_by_a_ruling_of_a_prefix_sharing_campaign() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("old"))]));
+        let mut batch = rival_revision(1);
+        let mut foreign = ruling("new");
+        foreign.campaign = RIVAL.into();
+        batch.push(D::Ruling(foreign));
+        batch.push(resolution(r(K::Ruling, &id("ruling", "old")), superseded(&[r(K::Ruling, &format!("{RIVAL}:ruling:new"))])));
+        committed(admit(&mut mind, batch));
     }
 
     #[test]
