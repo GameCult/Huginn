@@ -99,6 +99,8 @@ struct Scripted {
     hangs: bool,
     exited: bool,
     eof: bool,
+    /// How many times it was asked: a loop that never ends is a failure, not a hang.
+    asked: u32,
 }
 
 impl Child for Scripted {
@@ -112,6 +114,8 @@ impl Child for Scripted {
 
     fn next(&mut self, timeout: StdDuration) -> Read {
         self.log.borrow_mut().push(Event::Asked(timeout));
+        self.asked += 1;
+        assert!(self.asked < 500, "the loop never ended");
         match self.steps.pop_front() {
             Some(Step::Line(line)) => Read::Line(line),
             Some(Step::Idle(seconds)) => {
@@ -272,7 +276,7 @@ fn carry_scripted(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Opt
     let log = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(Fixed(Cell::new(at_start())));
     let fake = Fake {
-        child: RefCell::new(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false })),
+        child: RefCell::new(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false, asked: 0 })),
         spawns: RefCell::new(Vec::new()),
         refuse: false,
     };
@@ -749,7 +753,7 @@ fn the_clock_is_read_once_per_event_so_a_step_of_the_wall_clock_cannot_split_a_p
         }
     }
     let steps: VecDeque<Step> = vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", CEILING_TOKENS + 1)), Idle(0)].into();
-    let child = Scripted { steps, log: log.clone(), clock: Rc::new(Fixed(Cell::new(at_start()))), code: Some(0), dies_on: None, refuses: vec![], hangs: false, exited: false, eof: false };
+    let child = Scripted { steps, log: log.clone(), clock: Rc::new(Fixed(Cell::new(at_start()))), code: Some(0), dies_on: None, refuses: vec![], hangs: false, exited: false, eof: false, asked: 0 };
     let fake = Fake { child: RefCell::new(Some(child)), spawns: RefCell::new(Vec::new()), refuse: false };
     let outcome = carry(&Seen::of(&mind), &Stepped(clock.clone()), &fake, &mut Vec::new()).unwrap();
     let events = log.borrow().clone();
@@ -963,10 +967,28 @@ mod process {
     }
 
     /// The real child as it is: a read may time out, which is how the drain after an exit is waited.
+    /// A run that has not ended by 15 s is a failure, not a hang.
+    struct Bounded(Box<dyn Child>, std::time::Instant);
+    impl Child for Bounded {
+        fn write_line(&mut self, line: &str) {
+            self.0.write_line(line)
+        }
+        fn close_input(&mut self) {
+            self.0.close_input()
+        }
+        fn next(&mut self, timeout: StdDuration) -> Read {
+            assert!(self.1.elapsed() < StdDuration::from_secs(15), "the run did not end");
+            self.0.next(StdDuration::from_secs(1).min(timeout))
+        }
+        fn stop(&mut self, how: Stop) -> bool {
+            self.0.stop(how)
+        }
+    }
+
     struct Patient(PathBuf);
     impl Spawner for Patient {
         fn spawn(&self, args: &[String]) -> Result<Box<dyn Child>> {
-            Ok(start(&self.0, args))
+            Ok(Box::new(Bounded(start(&self.0, args), std::time::Instant::now())))
         }
     }
 
