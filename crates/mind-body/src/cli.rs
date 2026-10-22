@@ -73,8 +73,8 @@ pub fn run(
                     Ok(())
                 }
                 (Err(write), Ok(())) => Err(write.context("the brake was not written; the units were stopped")),
-                (Ok(()), Err(stop)) => Err(stop.context("the brake is held; the units were not stopped")),
-                (Err(write), Err(stop)) => Err(anyhow!("the brake was not written ({write:#}) and the units were not stopped ({stop:#})")),
+                (Ok(()), Err(stop)) => Err(stop.context("the brake is held; the stop failed")),
+                (Err(write), Err(stop)) => Err(anyhow!("the brake was not written ({write:#}) and the stop failed ({stop:#})")),
             }
         }
         ["brake", "release"] => ControlWriter::open(&path)?.set_brake(true, now, set_by),
