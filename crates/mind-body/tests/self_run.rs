@@ -130,6 +130,7 @@ mod lane {
                 not_in_scope: vec![],
                 canonical_implementations: vec![],
                 doc: doc_ref(),
+                repos: vec![],
             }),
             PipelineDocument::Run(PipelineRun {
                 instance: Slug(INSTANCE.into()),
