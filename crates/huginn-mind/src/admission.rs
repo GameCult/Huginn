@@ -818,7 +818,8 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
 /// The one supersession lineage rule (ruling `supersession-lineage`). A target is
 /// superseded only by a target of its campaign, a cut_spec only by a cut_spec of its
 /// campaign and cut, and a ruling by any ruling: operator directions cut across campaigns.
-fn same_lineage(subject: &D, supersessor: &D) -> bool {
+fn same_lineage(subject: &PipelineDocument, supersessor: &PipelineDocument) -> bool {
+    use PipelineDocument as D;
     match (subject, supersessor) {
         (D::Target(old), D::Target(new)) => old.campaign == new.campaign,
         (D::CutSpec(old), D::CutSpec(new)) => old.campaign == new.campaign && old.cut == new.cut,
