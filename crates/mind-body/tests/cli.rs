@@ -237,6 +237,25 @@ fn check_opens_on_release_with_a_dial_and_is_per_instance() {
 }
 
 #[test]
+fn check_holds_for_the_named_instance_with_a_released_prefix_neighbour() {
+    let root = tempfile::tempdir().unwrap();
+    go(root.path(), &["--instance", "eureka", "brake", "hold"], "op", 0).0.unwrap();
+    // Neighbours that share the held instance's text as a prefix, or only an edge of it, are released with a dial.
+    for (i, neighbour) in ["eureka-two", "eureka2", "xeureka"].into_iter().enumerate() {
+        let at = 1 + 2 * i as i64;
+        go(root.path(), &["--instance", neighbour, "brake", "release"], "op", at).0.unwrap();
+        go(root.path(), &["--instance", neighbour, "dial", "set", "--heat", "0.5", "--base-cooldown-s", "3600", "--base-run-usd", "5"], "op", at + 1)
+            .0
+            .unwrap();
+        let (open, _) = go(root.path(), &["--instance", neighbour, "check"], "op", 10);
+        open.unwrap_or_else(|error| panic!("{neighbour} is released and must open: {error:#}"));
+    }
+    let (result, out) = check_out(root.path());
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("BrakeHeld") && out.contains("BrakeHeld"), "{error} / {out}");
+}
+
+#[test]
 fn check_writes_nothing_and_creates_no_directory() {
     let root = tempfile::tempdir().unwrap();
     assert!(check_out(root.path()).0.is_err());
@@ -314,7 +333,8 @@ fn a_failing_stopper_fails_the_hold_and_leaves_the_brake_held() {
     });
     let error = format!("{:#}", result.unwrap_err());
     assert_eq!(calls.len(), 1);
-    assert!(error.contains("units were not stopped") && error.contains("exit status 5"), "{error}");
+    assert!(error.contains("the brake is held") && error.contains("exit status 5"), "{error}");
+    assert!(!error.contains("were not stopped"), "{error}");
     assert!(!out.contains("stopped"), "a failed stop printed success: {out}");
     assert!(shown(root.path()).contains("BrakeHeld"));
 }
@@ -332,20 +352,27 @@ fn a_failing_write_still_stops_and_the_hold_fails() {
     let (result, _, calls) = go_stopping(root.path(), &["--instance", "eureka", "brake", "hold"], "op", 2, |_| Err(anyhow::anyhow!("stop failed")));
     let error = format!("{:#}", result.unwrap_err());
     assert_eq!(calls.len(), 1);
-    assert!(error.contains("brake was not written") && error.contains("units were not stopped"), "{error}");
+    assert!(error.contains("brake was not written") && error.contains("the stop failed") && !error.contains("were not stopped"), "{error}");
 }
 
 /// Runs the real binary's `brake hold` with a `systemctl` of ours first on
-/// PATH, so the stopper main.rs wires is the one under test. The fake records
-/// its arguments, one per line, and exits with `exit`.
+/// PATH, so the stopper main.rs wires is the one under test. The fake appends
+/// its arguments to a record, one per line; `stop` exits with `exit`, and
+/// `is-active` answers inactive for the Self unit and active for the Persona
+/// unit, as systemd does when it stopped one and failed the other. The root is
+/// returned so the store can be read afterwards.
 #[cfg(unix)]
-fn hold_through_the_binary(exit: i32) -> (std::process::Output, Vec<String>) {
+fn hold_through_the_binary(exit: i32) -> (std::process::Output, Vec<String>, tempfile::TempDir) {
     use std::os::unix::fs::PermissionsExt;
     let bin = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     let record = bin.path().join("recorded");
     let script = bin.path().join("systemctl");
-    std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\n' \"$@\" > '{}'\nexit {exit}\n", record.display())).unwrap();
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\n' \"$@\" >> '{}'\ncase \"$1\" in\n  is-active) case \"$2\" in mind-self@eureka.service) echo inactive; exit 3;; *) echo active; exit 0;; esac;;\n  *) exit {exit};;\nesac\n",
+        record.display()
+    );
+    std::fs::write(&script, body).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_mind-control"))
         .env("PATH", bin.path())
@@ -353,25 +380,31 @@ fn hold_through_the_binary(exit: i32) -> (std::process::Output, Vec<String>) {
         .output()
         .unwrap();
     let recorded = std::fs::read_to_string(&record).map(|text| text.lines().map(str::to_string).collect()).unwrap_or_default();
-    (output, recorded)
+    (output, recorded, root)
 }
 
 #[cfg(unix)]
 #[test]
 fn the_binary_hold_runs_systemctl_stop_on_exactly_the_units_it_starts() {
-    let (output, recorded) = hold_through_the_binary(0);
+    let (output, recorded, _root) = hold_through_the_binary(0);
     assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(recorded, ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service"]);
+    assert_eq!(recorded, ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service"], "a stop that succeeds asks no state");
     assert!(String::from_utf8_lossy(&output.stdout).contains("units: stopped mind-self@eureka.service mind-persona@eureka.service"));
 }
 
 #[cfg(unix)]
 #[test]
-fn the_binary_hold_fails_with_status_2_when_systemctl_does() {
-    let (output, recorded) = hold_through_the_binary(5);
+fn a_partial_stop_names_each_units_state_and_keeps_the_brake_held_with_exit_2() {
+    let (output, recorded, root) = hold_through_the_binary(5);
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(recorded.len(), 4, "systemctl was run: {recorded:?}");
+    assert_eq!(
+        recorded,
+        ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service", "is-active", "mind-self@eureka.service", "is-active", "mind-persona@eureka.service"]
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("units were not stopped") && stderr.contains("exit status 5"), "{stderr}");
+    assert!(stderr.contains("exit status 5") && stderr.contains("the brake is held"), "{stderr}");
+    assert!(stderr.contains("mind-self@eureka.service is inactive") && stderr.contains("mind-persona@eureka.service is active"), "{stderr}");
+    assert!(!stderr.contains("were not stopped"), "{stderr}");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("stopped"));
+    assert!(shown(root.path()).contains("BrakeHeld"));
 }

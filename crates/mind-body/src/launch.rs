@@ -142,7 +142,8 @@ impl SystemdLauncher {
     /// Stops every unit of both turns of one instance and waits for them. An
     /// inherent method, not on `Launcher`: only the operator's brake hold
     /// calls it. A unit that is not installed is systemctl's exit 5, and the
-    /// others still stop.
+    /// others still stop; when the stop fails the error names each unit's
+    /// state, because systemd may have stopped one and not the other.
     pub fn stop_all(&self, instance: &Slug) -> Result<()> {
         let args = stop_args(instance)?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -150,9 +151,33 @@ impl SystemdLauncher {
         if reply.success {
             return Ok(());
         }
+        let states = [RunTurn::SelfRun, RunTurn::PersonaTurn]
+            .into_iter()
+            .map(|turn| {
+                let unit = unit(instance, turn)?;
+                let state = self.unit_state(&unit);
+                Ok(format!("{unit} is {state}"))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join(", ");
         match reply.code {
-            Some(code) => Err(anyhow!("systemctl stop failed with exit status {code}")),
-            None => Err(anyhow!("systemctl stop was ended by a signal")),
+            Some(code) => Err(anyhow!("systemctl stop failed with exit status {code}; {states}")),
+            None => Err(anyhow!("systemctl stop was ended by a signal; {states}")),
+        }
+    }
+
+    /// One unit's state after a failed stop: systemd's own word when it is one
+    /// of the three a failed stop can leave, else `unknown`. Nothing else the query
+    /// prints is carried.
+    fn unit_state(&self, unit: &str) -> &'static str {
+        let Ok(reply) = self.systemctl.run(&["is-active", unit]) else {
+            return "unknown";
+        };
+        match reply.stdout.trim() {
+            "active" => "active",
+            "inactive" => "inactive",
+            "failed" => "failed",
+            _ => "unknown",
         }
     }
 }
@@ -1051,6 +1076,14 @@ mod tests {
         assert!(names.iter().any(|n| n.len() > 32) && names.iter().any(|n| n.contains('-')) && names.iter().any(|n| n.contains('_')));
     }
 
+    /// A claim id from the same generator as instance names: varied alphabets,
+    /// both separators and the edge lengths, so a refusal keyed on id text
+    /// cannot pass.
+    fn claim_id(draw: &mut Draw) -> String {
+        let length = LENGTH_EDGES[draw.below(LENGTH_EDGES.len())];
+        slug_of(draw, length)
+    }
+
     #[test]
     fn a_persona_turn_with_any_claims_at_all_is_refused_and_touches_nothing() {
         let kinds = PipelineKind::ALL;
@@ -1059,14 +1092,16 @@ mod tests {
         // Every rotation of the kinds, so no kind or position is the one that starts, at every small size.
         for start in 0..kinds.len() {
             for size in 1..=40 {
-                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], &format!("doc-{i}"))).collect());
-                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], "doc")).collect());
+                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], &claim_id(&mut draw))).collect());
+                let one = claim_id(&mut draw);
+                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], &one)).collect());
             }
         }
         // Every kind alone, repeated.
         for kind in kinds {
             for size in 1..=40 {
-                sets.push((0..size).map(|_| reference(*kind, "doc")).collect());
+                let one = claim_id(&mut draw);
+                sets.push((0..size).map(|_| reference(*kind, &one)).collect());
             }
         }
         // Drawn: every position a kind and an id from a pool of any size (one id repeated, to all distinct),
@@ -1074,11 +1109,11 @@ mod tests {
         let sizes = [1, 2, 3, 4, 5, 12, 13, 14, 26, 27, 64, 65, 100, 255, 256, 300];
         for round in 0..3_000 {
             let size = if round < 600 { sizes[round % sizes.len()] } else { 1 + draw.below(300) };
-            let pool = 1 + draw.below(size);
-            sets.push((0..size).map(|_| reference(kinds[draw.below(kinds.len())], &format!("doc-{}", draw.below(pool)))).collect());
+            let pool: Vec<String> = (0..1 + draw.below(size)).map(|_| claim_id(&mut draw)).collect();
+            sets.push((0..size).map(|_| reference(kinds[draw.below(kinds.len())], &pool[draw.below(pool.len())])).collect());
         }
         for size in [1_000, 10_000, 100_000] {
-            sets.push((0..size).map(|i| reference(kinds[draw.below(kinds.len())], &format!("doc-{i}"))).collect());
+            sets.push((0..size).map(|_| reference(kinds[draw.below(kinds.len())], &claim_id(&mut draw))).collect());
         }
         for claims in sets {
             let length = LENGTH_EDGES[draw.below(LENGTH_EDGES.len())];
@@ -1128,18 +1163,24 @@ mod tests {
         success: Cell<bool>,
         code: Cell<Option<i32>>,
         stdout: RefCell<String>,
+        /// Per-unit answers to `is-active`; a unit not listed gets `stdout`.
+        states: RefCell<Vec<(&'static str, &'static str)>>,
     }
 
     impl Systemctl for &'static Spy {
         fn run(&self, args: &[&str]) -> Result<SystemctlReply> {
             self.calls.borrow_mut().push(args.iter().map(|arg| arg.to_string()).collect());
-            Ok(SystemctlReply { success: self.success.get(), code: self.code.get(), stdout: self.stdout.borrow().clone() })
+            let said = match args {
+                ["is-active", unit] => self.states.borrow().iter().find(|(named, _)| named == unit).map(|(_, state)| state.to_string()),
+                _ => None,
+            };
+            Ok(SystemctlReply { success: self.success.get(), code: self.code.get(), stdout: said.unwrap_or_else(|| self.stdout.borrow().clone()) })
         }
     }
 
     fn spied() -> (SystemdLauncher, &'static Spy) {
         let spy: &'static Spy =
-            Box::leak(Box::new(Spy { calls: RefCell::default(), success: Cell::new(true), code: Cell::new(Some(0)), stdout: RefCell::default() }));
+            Box::leak(Box::new(Spy { calls: RefCell::default(), success: Cell::new(true), code: Cell::new(Some(0)), stdout: RefCell::default(), states: RefCell::default() }));
         (SystemdLauncher::over(Box::new(spy)), spy)
     }
 
@@ -1208,15 +1249,25 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_stop_is_an_error_naming_the_exit_status_and_no_instance() {
+    fn a_failed_stop_names_the_exit_status_and_each_units_state_and_carries_no_other_output() {
         let (launcher, spy) = spied();
         spy.success.set(false);
         spy.code.set(Some(5));
-        let shown = format!("{:#}", launcher.stop_all(&Slug("canary-instance-7f3a91".into())).unwrap_err());
-        assert!(shown.contains("exit status 5") && !shown.contains("canary"), "{shown}");
+        spy.states.borrow_mut().extend([("mind-self@eureka.service", "inactive\n"), ("mind-persona@eureka.service", "active\n")]);
+        let shown = format!("{:#}", launcher.stop_all(&eureka()).unwrap_err());
+        assert!(shown.contains("exit status 5"), "{shown}");
+        assert!(shown.contains("mind-self@eureka.service is inactive") && shown.contains("mind-persona@eureka.service is active"), "{shown}");
+        let asked: Vec<Vec<String>> = spy.calls.borrow().iter().skip(1).cloned().collect();
+        assert_eq!(asked, [["is-active", "mind-self@eureka.service"], ["is-active", "mind-persona@eureka.service"]], "one query per unit, after the one stop");
+        // A state word outside the three, and anything systemctl prints with it, is not carried.
+        spy.states.borrow_mut().clear();
+        *spy.stdout.borrow_mut() = "canary-output-7f3a91\n".to_string();
         spy.code.set(None);
         let shown = format!("{:#}", launcher.stop_all(&eureka()).unwrap_err());
-        assert!(shown.contains("signal"), "{shown}");
+        assert!(shown.contains("signal") && shown.contains("is unknown") && !shown.contains("canary"), "{shown}");
+        spy.states.borrow_mut().push(("mind-self@eureka.service", "failed\n"));
+        let shown = format!("{:#}", launcher.stop_all(&eureka()).unwrap_err());
+        assert!(shown.contains("mind-self@eureka.service is failed"), "{shown}");
     }
 
     #[test]
