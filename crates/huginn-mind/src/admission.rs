@@ -598,7 +598,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
                     actual: stewardship.sequence,
                 });
             }
-            if docs.stewardships_of(mind, &stewardship.repo, None).iter().any(|(other, _)| *other != key) {
+            if docs.rival_in_force(key, &staged.document).is_some() {
                 return Err(MindRefusal::AlreadyStewarded { repo: stewardship.repo.0.clone() });
             }
             Ok(())
@@ -770,11 +770,19 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         && subject_kind == K::Resolution
         && let Some(D::Resolution(reinstating)) = docs.find(K::Resolution, subject_id)
         && let Some(base) = docs.find(reinstating.subject.kind, &reinstating.subject.id.0)
-        && let Some(later) = docs.later_in_force(base)
+        && let Some(rival) = docs.rival_in_force(&reinstating.subject.id.0, base)
     {
+        // A stewardship put back in force beside an earlier one meets the
+        // admission refusal for the same fact: the repo already has a steward.
+        if let D::Stewardship(base) = base
+            && let Some(D::Stewardship(standing)) = docs.find(K::Stewardship, rival)
+            && standing.sequence < base.sequence
+        {
+            return Err(MindRefusal::AlreadyStewarded { repo: base.repo.0.clone() });
+        }
         return Err(MindRefusal::WouldReinstateOverLater {
             subject: reinstating.subject.id.0.clone(),
-            later: later.into(),
+            later: rival.into(),
         });
     }
     // Withdrawing a run's closure puts the run back in force, and a run in
@@ -1680,6 +1688,33 @@ mod tests {
         committed(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())]));
         let in_force = docs_of(&mind).stewardships_of(&slug(INSTANCE), &repo(REPO), None).iter().map(|(key, _)| key.to_string()).collect::<Vec<_>>();
         assert_eq!(in_force, vec![stewardship_key(1)]);
+    }
+
+    /// One assignment stands per repo, whichever record a withdrawal would put
+    /// back: reinstating the later of two withdrawn assignments while the
+    /// earlier is back in force is refused as the assignment itself would be,
+    /// and the next assignment then meets exactly the one that stands.
+    #[test]
+    fn a_withdrawal_does_not_reinstate_a_stewardship_beside_an_earlier_one() {
+        let mut mind = seeded();
+        let n1 = stewardship_key(1);
+        let n2 = stewardship_key(2);
+        let first = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1");
+        let second = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n2.n1");
+        committed(admit(&mut mind, vec![resolution(r(K::Stewardship, &n1), withdrawn())]));
+        committed(admit(&mut mind, vec![stewardship_n(INSTANCE, REPO, 2)]));
+        committed(admit(&mut mind, vec![resolution(r(K::Stewardship, &n2), withdrawn())]));
+        committed(admit(&mut mind, vec![resolution(r(K::Resolution, &first), withdrawn())]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &second), withdrawn())])),
+            MindRefusal::AlreadyStewarded { repo: REPO.into() }
+        );
+        let in_force = docs_of(&mind).stewardships_of(&slug(INSTANCE), &repo(REPO), None).iter().map(|(key, _)| key.to_string()).collect::<Vec<_>>();
+        assert_eq!(in_force, vec![n1], "the reinstated assignment stands alone");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![stewardship_n(INSTANCE, REPO, 3)])),
+            MindRefusal::AlreadyStewarded { repo: REPO.into() }
+        );
     }
 
     /// And it reads the batch: the assignment that stands later than the one

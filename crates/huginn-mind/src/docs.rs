@@ -224,12 +224,17 @@ impl Docs {
             .collect()
     }
 
-    /// The in-force record that stands later than `base` in the scope `base`
-    /// is sequenced in, if any: what a withdrawal that put `base` back in
-    /// force would leave standing beside it.
-    pub(crate) fn later_in_force(&self, base: &PipelineDocument) -> Option<&str> {
+    /// The in-force record, other than `base_key`, that cannot stand beside
+    /// `base` on its line: the one question "may this record be in force"
+    /// asks, whether `base` is being admitted (a stewardship's
+    /// `AlreadyStewarded`) or put back in force by a withdrawal. A line holds
+    /// one stewardship at a time, so any other stands in its way; a revision
+    /// is only displaced by a later one.
+    pub(crate) fn rival_in_force(&self, base_key: &str, base: &PipelineDocument) -> Option<&str> {
         let kind = base.kind();
-        self.of_kind(kind).find(|(key, other)| later_than(base, other) && self.in_force(kind, key)).map(|(key, _)| key)
+        self.of_kind(kind)
+            .find(|(key, other)| *key != base_key && rivals(base, other) && self.in_force(kind, key))
+            .map(|(key, _)| key)
     }
 
     /// The in-force run, other than `run_key`, that holds `claim`: the one
@@ -336,18 +341,18 @@ pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
     }
 }
 
-/// Whether `other` is a later record than `base` on the line `base` is
-/// sequenced in. Kinds that carry no sequence have no order, and a resolution
-/// is never a base here: the cap above refuses the withdrawal that would
-/// reinstate one before the question of a later record arises.
-fn later_than(base: &PipelineDocument, other: &PipelineDocument) -> bool {
+/// Whether `other` cannot stand in force beside `base`, being on `base`'s line:
+/// any other stewardship of an instance and repo, a later revision of a target
+/// or cut spec. A resolution is never a base here: the cap in `resolution_rule`
+/// refuses the withdrawal that would reinstate one first.
+fn rivals(base: &PipelineDocument, other: &PipelineDocument) -> bool {
     use PipelineDocument as D;
     let Some(line) = line_of(base) else { return false };
     if line_of(other) != Some(line) {
         return false;
     }
     match (base, other) {
-        (D::Stewardship(base), D::Stewardship(other)) => other.sequence > base.sequence,
+        (D::Stewardship(_), D::Stewardship(_)) => true,
         (D::Target(base), D::Target(other)) => other.revision > base.revision,
         (D::CutSpec(base), D::CutSpec(other)) => other.revision > base.revision,
         _ => false,
