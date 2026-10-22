@@ -6,6 +6,8 @@ steer its next action, and the provenance of every admitted claim.
 
 Upstream: `https://github.com/GameCult/Huginn.git`
 
+**Status.** Live: `huginn-mind` (admission with receipts, typed queries, derived status), `huginn-daemon` (CultNet RUDP with a Qdrant semantic index), and the `huginn` CLI from `crates/eureka-state` (whoami, view, query, admit, schema). The `eureka` instance runs on Yggdrasil. Entry points: `cargo check --workspace`, `crates/huginn-mind/src/admission.rs`, `crates/huginn-daemon/src/serve.rs`, `schemas/cultnet/`. Planned: what each crate does next is owned by the `eureka-body` cut specs in the mind and `docs/eureka-body-map.md`; the legacy `.voidbot/` Persona migration belongs to the portable-Persona work.
+
 ## Authority
 
 - An instance owns its mind; Huginn owns the state. Huginn is the single
@@ -38,7 +40,7 @@ edits `.cc` state. Huginn reads and writes minds.
 
 ## Layout
 
-A Cargo workspace of three crates:
+A Cargo workspace of five crates (`crates/eureka-pipeline` holds the document shapes and keys, `crates/mind-body` the control store, launch primitive and `mind-wake` one-shot; the three below are the mind, the daemon and the client):
 
 - `crates/huginn-mind`: storage, identity, admission, and queries and derived
   status over memory documents.
