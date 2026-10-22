@@ -75,12 +75,13 @@ mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query
 mind_body::queue: struct HuginnMind< 'a >  pub-fields[]
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq , PartialOrd , Ord)] pub enum Stop { Interrupt , Terminate , Kill , }
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Cause { Own , FlushRequested , Signalled (Stop) , Unstoppable , }
-mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Closed , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Eof , Exited (Option < i32 >) , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 } , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 } , Result , Other , Unreadable , }
 mind_body::self_run: const AGENT : & str
 mind_body::self_run: const CEILING_TOKENS : u64
 mind_body::self_run: const ESCALATE_AFTER_S : i64
+mind_body::self_run: const EXIT_DRAIN_S : i64
 mind_body::self_run: const FLUSH_GRACE_S : i64
 mind_body::self_run: const FLUSH_HEADROOM_TOKENS : u64
 mind_body::self_run: const FLUSH_MESSAGE : & str
@@ -97,7 +98,7 @@ mind_body::self_run: impl SelfRunOutcome: fn exit_status (& self) -> i32
 mind_body::self_run: impl Spawner for ClaudeSpawner
 mind_body::self_run: impl Stop
 mind_body::self_run: impl fmt :: Display for SelfRunOutcome
-mind_body::self_run: pub trait Child { fn write_line (& mut self , line : & str) ; fn close_input (& mut self) ; fn next_line (& mut self , timeout : StdDuration) -> Read ; fn stop (& mut self , how : Stop) -> bool ; fn wait (& mut self) -> Option < i32 > ; }
+mind_body::self_run: pub trait Child { fn write_line (& mut self , line : & str) ; fn close_input (& mut self) ; fn next (& mut self , timeout : StdDuration) -> Read ; fn stop (& mut self , how : Stop) -> bool ; }
 mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String]) -> Result < Box < dyn Child > > ; }
 mind_body::self_run: struct ClaudeSpawner  pub-fields[]
 mind_body::wake: # [derive (Clone , Debug , PartialEq , Eq)] pub enum WakeOutcome { Held { reason : HeldReason } , NotYet { until : DateTime < Utc > } , Busy { run : PipelineRef } , Launched { run : PipelineRef } , Refused (Declined) , }

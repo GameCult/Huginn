@@ -8,10 +8,14 @@
 //! `eureka-body:ruling:self-lifecycle-flush-rehydrate`: a Self run admits what
 //! the mind lacks and ends, it never summarises), closes the child's input at
 //! the first result, and stops a child that outlives its flush: an interrupt
-//! after the grace, or once the prefix has grown by the headroom beyond the
-//! prefix the flush was asked at (ruling
+//! after the grace, or once the requests of the flush's own turn have grown the
+//! prefix by the headroom beyond the prefix the flush was asked at (ruling
 //! `eureka-body:ruling:flush-always-gets-a-turn`), then SIGTERM and SIGKILL if
-//! the child ignores that.
+//! the child ignores that. Signals go to the child's process group.
+//!
+//! Every timing decision is one pure function, `decide` (the `decide` module,
+//! ruling `eureka-body:ruling:self-run-decider`). `carry` is the loop that turns
+//! the operating system's facts into events and executes the actions.
 //!
 //! The actuator admits nothing, reads neither the brake nor the environment and
 //! stops no unit: the gate and the brake hold own those. It never echoes an
@@ -19,16 +23,14 @@
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
 //! parsed is stored.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child as OsChild, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Duration, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{PipelineDocument, PipelineRef, RunTurn, Slug};
 use huginn_mind::PipelinePageItems;
@@ -37,6 +39,8 @@ use uuid::Uuid;
 
 use crate::launch::{Clock, holders};
 use crate::queue::MindPort;
+
+use decide::{Action, Event, State, decide, next_deadline};
 
 /// The measured Self ceiling: at this prefix the flush is asked for.
 pub const CEILING_TOKENS: u64 = 300_000;
@@ -47,6 +51,9 @@ pub const FLUSH_HEADROOM_TOKENS: u64 = 60_000;
 pub const FLUSH_GRACE_S: i64 = 15 * 60;
 /// How long a child may ignore a signal before the next, stronger one.
 pub const ESCALATE_AFTER_S: i64 = 120;
+/// How long a stream may stay open after the child has exited (a descendant
+/// holding its stdout) before the run is over without it.
+pub const EXIT_DRAIN_S: i64 = 2;
 /// A backstop `claude` enforces; the ceiling is reached first.
 pub const MAX_TURNS: u32 = 500;
 /// The name the start message tells her to admit as.
@@ -129,13 +136,15 @@ pub fn read_usage(line: &str) -> Usage {
     }
 }
 
-/// What the child's stdout gave in one wait.
+/// What the child gave in one wait: the operating system's facts about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Read {
     Line(String),
     Timeout,
-    /// The stream ended: the child is gone or going.
-    Closed,
+    /// Its stdout ended.
+    Eof,
+    /// It was reaped: its exit code, none when a signal ended it.
+    Exited(Option<i32>),
 }
 
 /// The running `claude`. A test hands in a scripted one.
@@ -145,11 +154,9 @@ pub trait Child {
     fn write_line(&mut self, line: &str);
     /// Closes its input; later writes go nowhere.
     fn close_input(&mut self);
-    fn next_line(&mut self, timeout: StdDuration) -> Read;
-    /// Sends it the signal; whether the signal was delivered.
+    fn next(&mut self, timeout: StdDuration) -> Read;
+    /// Sends the signal to its whole process group; whether it was delivered.
     fn stop(&mut self, how: Stop) -> bool;
-    /// Its exit code, none when a signal ended it.
-    fn wait(&mut self) -> Option<i32>;
 }
 
 /// The signals the actuator sends, weakest first.
@@ -245,76 +252,45 @@ fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, String)>> {
 /// Carries her one open Self run: one `claude` child from the start message to
 /// its end. The request lines go to `out`. A mind that cannot be reached or a
 /// child that cannot be started is an error; every other end is an outcome.
+/// This is only the loop: facts in, one clock read per fact, actions out.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, spawner: &dyn Spawner, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let Some((run, budget)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
     let mut child = spawner.spawn(&claude_args(session_id(&run), &budget))?;
     let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
     child.write_line(&user_line(&start_message(mind.instance(), &run)));
 
-    let (mut seen, mut requests, mut prefix) = (HashSet::new(), 0u64, 0u64);
-    let mut result_seen = false;
-    // The prefix and the grace deadline of the flush, once asked for.
-    let mut flush: Option<(u64, DateTime<Utc>)> = None;
-    // The last signal attempted and when, and the strongest one delivered.
-    let mut stopping: Option<(Stop, DateTime<Utc>)> = None;
-    let mut delivered: Option<Stop> = None;
+    let mut state = State::default();
+    let mut now = clock.now();
     loop {
-        // The one deadline the wait must not pass: the next escalation once a signal went out, else the grace.
-        let deadline = match (stopping, flush) {
-            (Some((_, sent)), _) => Some(sent + Duration::seconds(ESCALATE_AFTER_S)),
-            (None, Some((_, grace_ends))) => Some(grace_ends),
-            (None, None) => None,
-        };
-        let wait = deadline.map_or(POLL, |ends| (ends - clock.now()).to_std().unwrap_or_default().min(POLL));
-        match child.next_line(wait) {
+        let wait = next_deadline(&state).map_or(POLL, |at| (at - now).to_std().unwrap_or_default().min(POLL));
+        let fact = match child.next(wait) {
             Read::Line(line) => match read_usage(&line) {
-                // A message id seen before is the same request again (F24).
-                Usage::Request { id, prefix: newest } if seen.insert(id.clone()) => {
-                    requests += 1;
-                    prefix = newest;
-                    writeln!(out, "request {requests} prefix {prefix}")?;
-                }
-                Usage::Result if !result_seen => {
-                    result_seen = true;
-                    child.close_input();
-                }
-                _ => {}
+                Usage::Request { id, prefix } => Event::Request { id, prefix },
+                Usage::Result => Event::Result,
+                Usage::Other | Usage::Unreadable => Event::Tick,
             },
-            Read::Timeout => {}
-            Read::Closed => break,
-        }
-        if flush.is_none() && !result_seen && prefix >= CEILING_TOKENS {
-            child.write_line(&user_line(FLUSH_MESSAGE));
-            flush = Some((prefix, clock.now() + Duration::seconds(FLUSH_GRACE_S)));
-        }
-        // The backstop is relative to the flush point, so it cannot fire in the pass that wrote the flush.
-        let due = match (stopping, flush) {
-            (Some((_, sent)), _) => clock.now() >= sent + Duration::seconds(ESCALATE_AFTER_S),
-            (None, Some((at, grace_ends))) => clock.now() >= grace_ends || at.checked_add(FLUSH_HEADROOM_TOKENS).is_some_and(|limit| prefix >= limit),
-            (None, None) => false,
+            Read::Timeout => Event::Tick,
+            Read::Eof => Event::StdoutEof,
+            Read::Exited(code) => Event::ChildExited(code),
         };
-        if due {
-            let how = stopping.map_or(Stop::Interrupt, |(last, _)| last.next());
-            if child.stop(how) {
-                delivered = Some(how);
+        now = clock.now();
+        let mut event = Some(fact);
+        while let Some(heard) = event.take() {
+            let counted = state.requests;
+            let (next, action) = decide(state, heard, now);
+            state = next;
+            if state.requests != counted {
+                writeln!(out, "request {} prefix {}", state.requests, state.prefix)?;
             }
-            stopping = Some((how, clock.now()));
-            if how == Stop::Kill {
-                // A grandchild can hold the stream open past a dead child: do not wait for its end.
-                break;
+            match action {
+                Action::None => {}
+                Action::WriteFlush => child.write_line(&user_line(FLUSH_MESSAGE)),
+                Action::CloseStdin => child.close_input(),
+                Action::Signal(how) => event = Some(Event::Signalled { how, delivered: child.stop(how) }),
+                Action::Finish(outcome) => return Ok(outcome),
             }
         }
     }
-    if matches!(stopping, Some((Stop::Kill, _))) && delivered != Some(Stop::Kill) {
-        return Ok(SelfRunOutcome::Ended { cause: Cause::Unstoppable, code: None, requests, prefix });
-    }
-    let code = child.wait();
-    let cause = match (delivered, flush) {
-        (Some(how), _) => Cause::Signalled(how),
-        (None, Some(_)) => Cause::FlushRequested,
-        (None, None) => Cause::Own,
-    };
-    Ok(SelfRunOutcome::Ended { cause, code, requests, prefix })
 }
 
 /// The real spawner: the `claude` on the unit's `PATH`, with the unit's
@@ -328,25 +304,38 @@ impl Spawner for ClaudeSpawner {
 }
 
 fn spawn_program(program: &Path, args: &[String]) -> Result<Box<dyn Child>> {
-    let mut process = Command::new(program).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().context("claude could not be started")?;
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+    // Its own process group, so that a signal reaches what the child started too.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut process = command.spawn().context("claude could not be started")?;
+    let group = process.id();
     let stdin = process.stdin.take();
     let stdout = process.stdout.take().ok_or_else(|| anyhow!("claude has no stdout"))?;
-    let (sender, lines) = channel();
+    let (sender, facts) = channel();
+    let lines = sender.clone();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).split(b'\n') {
-            let Ok(bytes) = line else { return };
-            if sender.send(String::from_utf8_lossy(&bytes).into_owned()).is_err() {
+            let Ok(bytes) = line else { break };
+            if lines.send(Read::Line(String::from_utf8_lossy(&bytes).into_owned())).is_err() {
                 return;
             }
         }
+        let _ = lines.send(Read::Eof);
     });
-    Ok(Box::new(ClaudeProcess { process, stdin, lines }))
+    // The one waitpid: the child's end is a fact of its own, not inferred from its stream.
+    std::thread::spawn(move || {
+        let _ = sender.send(Read::Exited(process.wait().ok().and_then(|status| status.code())));
+    });
+    Ok(Box::new(ClaudeProcess { stdin, facts, group }))
 }
 
 struct ClaudeProcess {
-    process: OsChild,
     stdin: Option<ChildStdin>,
-    lines: Receiver<String>,
+    facts: Receiver<Read>,
+    /// The child's pid, which is its process group's id.
+    group: u32,
 }
 
 impl Child for ClaudeProcess {
@@ -360,28 +349,26 @@ impl Child for ClaudeProcess {
         self.stdin = None;
     }
 
-    fn next_line(&mut self, timeout: StdDuration) -> Read {
-        match self.lines.recv_timeout(timeout) {
-            Ok(line) => Read::Line(line),
+    fn next(&mut self, timeout: StdDuration) -> Read {
+        match self.facts.recv_timeout(timeout) {
+            Ok(fact) => fact,
             Err(RecvTimeoutError::Timeout) => Read::Timeout,
-            Err(RecvTimeoutError::Disconnected) => Read::Closed,
+            Err(RecvTimeoutError::Disconnected) => Read::Eof,
         }
     }
 
     fn stop(&mut self, how: Stop) -> bool {
         // The `kill` program, not a libc call: the library names no FFI.
         let signal = match how {
-            Stop::Interrupt => "-INT",
-            Stop::Terminate => "-TERM",
-            Stop::Kill => return self.process.kill().is_ok(),
+            Stop::Interrupt => "INT",
+            Stop::Terminate => "TERM",
+            Stop::Kill => "KILL",
         };
-        Command::new("kill").args([signal, &self.process.id().to_string()]).status().is_ok_and(|status| status.success())
-    }
-
-    fn wait(&mut self) -> Option<i32> {
-        self.process.wait().ok().and_then(|status| status.code())
+        Command::new("kill").args(["-s", signal, "--", &format!("-{}", self.group)]).stderr(Stdio::null()).status().is_ok_and(|status| status.success())
     }
 }
+
+mod decide;
 
 #[cfg(test)]
 mod tests;
