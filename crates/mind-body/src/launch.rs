@@ -1076,6 +1076,14 @@ mod tests {
         assert!(names.iter().any(|n| n.len() > 32) && names.iter().any(|n| n.contains('-')) && names.iter().any(|n| n.contains('_')));
     }
 
+    /// A claim id from the same generator as instance names: varied alphabets,
+    /// both separators and the edge lengths, so a refusal keyed on id text
+    /// cannot pass.
+    fn claim_id(draw: &mut Draw) -> String {
+        let length = LENGTH_EDGES[draw.below(LENGTH_EDGES.len())];
+        slug_of(draw, length)
+    }
+
     #[test]
     fn a_persona_turn_with_any_claims_at_all_is_refused_and_touches_nothing() {
         let kinds = PipelineKind::ALL;
@@ -1084,14 +1092,16 @@ mod tests {
         // Every rotation of the kinds, so no kind or position is the one that starts, at every small size.
         for start in 0..kinds.len() {
             for size in 1..=40 {
-                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], &format!("doc-{i}"))).collect());
-                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], "doc")).collect());
+                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], &claim_id(&mut draw))).collect());
+                let one = claim_id(&mut draw);
+                sets.push((0..size).map(|i| reference(kinds[(start + i) % kinds.len()], &one)).collect());
             }
         }
         // Every kind alone, repeated.
         for kind in kinds {
             for size in 1..=40 {
-                sets.push((0..size).map(|_| reference(*kind, "doc")).collect());
+                let one = claim_id(&mut draw);
+                sets.push((0..size).map(|_| reference(*kind, &one)).collect());
             }
         }
         // Drawn: every position a kind and an id from a pool of any size (one id repeated, to all distinct),
@@ -1099,11 +1109,11 @@ mod tests {
         let sizes = [1, 2, 3, 4, 5, 12, 13, 14, 26, 27, 64, 65, 100, 255, 256, 300];
         for round in 0..3_000 {
             let size = if round < 600 { sizes[round % sizes.len()] } else { 1 + draw.below(300) };
-            let pool = 1 + draw.below(size);
-            sets.push((0..size).map(|_| reference(kinds[draw.below(kinds.len())], &format!("doc-{}", draw.below(pool)))).collect());
+            let pool: Vec<String> = (0..1 + draw.below(size)).map(|_| claim_id(&mut draw)).collect();
+            sets.push((0..size).map(|_| reference(kinds[draw.below(kinds.len())], &pool[draw.below(pool.len())])).collect());
         }
         for size in [1_000, 10_000, 100_000] {
-            sets.push((0..size).map(|i| reference(kinds[draw.below(kinds.len())], &format!("doc-{i}"))).collect());
+            sets.push((0..size).map(|_| reference(kinds[draw.below(kinds.len())], &claim_id(&mut draw))).collect());
         }
         for claims in sets {
             let length = LENGTH_EDGES[draw.below(LENGTH_EDGES.len())];
