@@ -772,12 +772,9 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
         && let Some(base) = docs.find(reinstating.subject.kind, &reinstating.subject.id.0)
         && let Some(rival) = docs.rival_in_force(&reinstating.subject.id.0, base)
     {
-        // A stewardship put back in force beside an earlier one meets the
-        // admission refusal for the same fact: the repo already has a steward.
-        if let D::Stewardship(base) = base
-            && let Some(D::Stewardship(standing)) = docs.find(K::Stewardship, rival)
-            && standing.sequence < base.sequence
-        {
+        // The repo already has a steward, earlier or later: the admission
+        // refusal for the same fact, from the same owner.
+        if let D::Stewardship(base) = base {
             return Err(MindRefusal::AlreadyStewarded { repo: base.repo.0.clone() });
         }
         return Err(MindRefusal::WouldReinstateOverLater {
@@ -1559,7 +1556,8 @@ mod tests {
     /// Q19 A's rationale, which the cap alone does not carry: a withdrawal
     /// never re-raises an earlier record over a later one. The repo went away
     /// and came back, so withdrawing the hand-off's withdrawal would put the
-    /// first assignment back in force beside the second.
+    /// first assignment back in force beside the second: the repo already has
+    /// a steward.
     #[test]
     fn a_withdrawal_does_not_reinstate_a_stewardship_over_a_later_one() {
         let mut mind = seeded();
@@ -1567,12 +1565,11 @@ mod tests {
         let D::HandOff(mut back) = hand_off(OTHER_INSTANCE, INSTANCE, REPO, &[]) else { panic!() };
         back.handed_on = eureka_pipeline::Date("2026-09-17".into());
         committed(admit(&mut mind, vec![D::HandOff(back)]));
-        let first = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
         let again = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2");
         let withdrawal = format!("{INSTANCE}:resolution:stewardship.gamecult_-epiphany.n1.n1");
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())])),
-            MindRefusal::WouldReinstateOverLater { subject: first, later: again.clone() }
+            MindRefusal::AlreadyStewarded { repo: REPO.into() }
         );
         let docs = Docs::from_image(mind.envelopes()).unwrap();
         let in_force = docs.stewardships_of(&slug(INSTANCE), &repo(REPO), None).iter().map(|(key, _)| *key).collect::<Vec<_>>();
@@ -1692,8 +1689,8 @@ mod tests {
 
     /// One assignment stands per repo, whichever record a withdrawal would put
     /// back: reinstating the later of two withdrawn assignments while the
-    /// earlier is back in force is refused as the assignment itself would be,
-    /// and the next assignment then meets exactly the one that stands.
+    /// earlier is back in force is refused, and the next assignment then meets
+    /// exactly the one that stands.
     #[test]
     fn a_withdrawal_does_not_reinstate_a_stewardship_beside_an_earlier_one() {
         let mut mind = seeded();
@@ -1730,7 +1727,7 @@ mod tests {
                 hand_off_on(OTHER_INSTANCE, INSTANCE, "2026-09-17"),
                 resolution(r(K::Resolution, &withdrawal), withdrawn()),
             ])),
-            MindRefusal::WouldReinstateOverLater { subject: stewardship_key(1), later: stewardship_key(2) }
+            MindRefusal::AlreadyStewarded { repo: REPO.into() }
         );
     }
 
