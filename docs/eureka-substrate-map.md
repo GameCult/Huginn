@@ -381,3 +381,102 @@ mind-launch in admission.rs, docs.rs and the response schema, so whichever
 merges second rebases and regenerates the schema) -> skill-campaign-repos
 (Eureka campaign-state.md). huginn-cli's campaigns recipe, if it prints repos,
 prints the opening set until it reads the target too.
+
+## Recall at admission (Imagination, 2026-10-23)
+
+Serves `eureka-substrate:ruling:recall-triggers-rescoped` (order of work) and
+`eureka-substrate:ruling:admit-near-duplicate-deny-once` (the design, ruled).
+Spec: `eureka-substrate:cut_spec:cut-recall-admit.r1`, GameCult/Eureka at
+`614caf8` (main). Prior-art facts: Eureka `docs/research/recall-triggers-prior-art.md`
+on branch `eureka-substrate/recall-triggers-research` (PR #28); the claims this
+cut rests on were re-checked below rather than taken from it.
+
+### Body facts (probes, 2026-10-23, Starfire)
+
+- R-B1. Harness version. `claude --version` on PATH (npm) is 2.1.268; the
+  harness running these sessions is the desktop's bundled claude-code 2.1.308
+  (`CLAUDE_CODE_EXECPATH`). Hooks in `~/.claude/settings.json` are read by
+  2.1.308. Facts about hook behaviour must name 2.1.308, not 2.1.268.
+- R-B2. Headless probe blocked. `claude -p` from a scratch project with a
+  throwaway `.claude/settings.json` failed on both binaries: "Failed to
+  authenticate: OAuth session expired and could not be refreshed". No live hook
+  run was possible; the facts below are source reads of the 2.1.308 bundle
+  (strings in `claude.exe`) plus the docs. The live checks moved to the spec's
+  `verification.operator`.
+- R-B3. Hook input (source read, 2.1.308, the common-input builder). Fields:
+  `session_id` = the session's id (the same value inside subagents: the
+  subagent's tool context carries the parent session), `transcript_path`, `cwd`,
+  `scratchpad_dir` (present when the scratchpad feature is on; derived from the
+  session id, so shared by root and subagents), `prompt_id`, `permission_mode`,
+  `agent_id` and `agent_type` (the field's own description: present only when
+  the hook fires from within a subagent), `effort`. PreToolUse adds
+  `tool_name`, `tool_input`, `tool_use_id`, and `mcp_server` for MCP tools.
+- R-B4. Deny reaches the model (source read, 2.1.308): a PreToolUse
+  `permissionDecision: "deny"` becomes the call's block message,
+  `permissionDecisionReason ?? "Blocked by hook"`. Docs agree ("For deny, shown
+  to Claude"). Not observed live (R-B2).
+- R-B5. Subagents (docs, verbatim in the PR #28 facts; source agrees by the
+  `agent_id` description): settings-file tool hooks fire for a subagent's tool
+  calls. So one user-settings entry covers Self, Hands, Soul and Imagination
+  admits. Not observed live (R-B2).
+- R-B6. Matcher: `mcp__eureka-state__admit` is all letters, digits, `_` and
+  `-`, so it is an exact match (docs' matcher rule); `mcp__eureka-state__.*` is
+  a regex and would also fire on view and query.
+- R-B7. Digest stability: the hook sees `tool_input` as parsed JSON, so a
+  digest over sorted-key canonical JSON is independent of key order and
+  whitespace in the model's call. An "identical retry" is identical in value,
+  which is what the ruling asks of the agent.
+- R-B8. Latency (live mind, through `tools/mind.py` at `614caf8`): whoami 0.14 s
+  (spawn and handshake are cheap); one semantic query 2.17-2.27 s, flat from a
+  45-byte to a 1000-byte text; three queries in one binding session 6.49 s (no
+  saving: the cost is server-side); three concurrent `mind.call`s 4.62 s wall,
+  six 8.26 s (partly serialised, about 1.2 s per extra query). Bound: at most 3
+  checked documents, concurrent, deadline 10 s, hook timeout 15 s.
+- R-B9. For the next cut (not specified): whether PreToolUse `updatedInput` on
+  the Agent tool reaches the subagent's prompt on 2.1.308 is unproven. The
+  bundle validates `updatedInput` generically; no Agent-specific handling was
+  found by string search, which proves nothing either way. GitHub #39814
+  (ignored on 2.1.85+, closed not planned) stands unrefuted. SubagentStart's
+  input carries `agent_id` and `agent_type` and no prompt (source read); its
+  `additionalContext` reaching the subagent is documented, not observed.
+
+### Model page: the held-once record
+
+| Question | Answer |
+|---|---|
+| What names it | A digest: sha256 of canonical `tool_input` plus `agent_id` (empty at root). Injective up to hash collision; two agents sending the same batch get different digests, so each is shown the neighbours once. |
+| Where it lives | `<scratchpad_dir>/recall-admit-digests` when `scratchpad_dir` is a directory, else a temp file keyed by a hash of `session_id`. Session-scoped; it dies with the scratchpad. |
+| Lifecycle | Appended when a batch is held; read on the next admit; never edited or replayed. A batch changed after the hold has a new digest and is held again. |
+| Who decides | `tools/recall.py admit` alone. It never allows or asks (that would bypass the operator's permission rules); acceptance stays Huginn admission's. If it cannot record the digest it does not hold the call, because a hold it cannot remember would hold every retry. |
+
+### Rationale
+
+- Why every batch with a ruling or question is held once: the semantic page
+  carries no score (`gap-semantic-page-no-score`), so "near" cannot be
+  measured, and nearest-neighbour search always returns k results. The ruled
+  design accepts one round trip per such batch and leaves the judgement to the
+  agent. Exclusions (own id, batch ids, the answered question, superseded
+  subjects) keep the list from naming what the batch already handles.
+- Query text is the document's title: focused one-topic texts retrieve well and
+  long multi-topic ones do not (`gap-semantic-one-text-per-query`).
+- Fail open: an admit hook that holds when Huginn is down would hold every
+  admission; and the admit itself fails on Unavailable anyway. A failure prints
+  one fixed sentence as `additionalContext` (it lands next to the tool result)
+  so the agent knows the batch went unchecked; it never echoes an input.
+- The hook is bound to the MCP tool name. An admit path that bypasses it (the
+  `huginn` CLI cuts) must carry the check: `eureka-substrate:follow_up:admit-check-follows-admit-path`.
+
+### Cut sequence
+
+1. recall-admit (Eureka): `cut-recall-admit.r1`.
+2. recall-dispatch (Eureka, or brief text): the in-force records nearest a
+   subagent brief reach the subagent. First a live probe on the harness
+   version (R-B9): Agent `updatedInput` vs a SubagentStart hook (no prompt in
+   its input, so it needs the brief from elsewhere) vs Self putting the recall
+   into the brief it writes. Needs `claude -p` authenticated (R-B2).
+3. recall-session-start (Eureka): a SessionStart hook recalls against the
+   area's handoff and open campaigns.
+4. The prompt hook (`recall.py prompt`, landed, uninstalled) is installed last,
+   if at all. The retrieval-quality gaps (`gap-semantic-page-no-score`,
+   `gap-semantic-one-text-per-query`, `gap-persona-state-not-indexed`) come
+   before cuts 2-4.
