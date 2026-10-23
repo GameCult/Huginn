@@ -439,6 +439,27 @@ cut rests on were re-checked below rather than taken from it.
   (ignored on 2.1.85+, closed not planned) stands unrefuted. SubagentStart's
   input carries `agent_id` and `agent_type` and no prompt (source read); its
   `additionalContext` reaching the subagent is documented, not observed.
+- R-B10 (Self, 2026-10-23, live, after the operator re-authenticated the CLI):
+  three `claude -p --model haiku` runs on the desktop's claude-code 2.1.308
+  (`...\Claude-Data\...\claude-code\2.1.308\...\claude.exe`), from the scratch
+  project `scratchpad\imagination-recall-admit\hookprobe` (its project
+  `.claude/settings.json`, hook `hook.py` that denies every admit).
+  (a) Root admit: the deny reached the model as the tool's error text,
+  `PreToolUse:mcp__eureka-state__admit hook error: <permissionDecisionReason>`.
+  The prefix says "hook error", so the reason's first words must make clear the
+  hold is not a failure. Hook input keys: cwd, effort, hook_event_name,
+  mcp_server, permission_mode, prompt_id, scratchpad_dir, session_id,
+  tool_input, tool_name, tool_use_id, transcript_path (no agent_id at root).
+  (b) Subagent: SubagentStart fired with agent_id and agent_type, and its
+  `additionalContext` reached the subagent (it quoted the injected word). The
+  subagent's admit fired the same project-settings PreToolUse hook with
+  agent_id and agent_type, and the deny reached it.
+  (c) Agent `updatedInput`: a PreToolUse hook on `Agent` returning
+  `permissionDecision: allow` with `updatedInput` (prompt replaced) changed
+  what the subagent received: it answered the injected prompt, not the
+  original. GitHub #39814 does not hold on 2.1.308. Caveat: `allow` also
+  auto-approves the spawn, so a dispatch hook must decide whether it may
+  return allow (see cut 2).
 
 ### Model page: the held-once record
 
@@ -470,10 +491,12 @@ cut rests on were re-checked below rather than taken from it.
 
 1. recall-admit (Eureka): `cut-recall-admit.r1`.
 2. recall-dispatch (Eureka, or brief text): the in-force records nearest a
-   subagent brief reach the subagent. First a live probe on the harness
-   version (R-B9): Agent `updatedInput` vs a SubagentStart hook (no prompt in
-   its input, so it needs the brief from elsewhere) vs Self putting the recall
-   into the brief it writes. Needs `claude -p` authenticated (R-B2).
+   subagent brief reach the subagent. R-B10(c): a PreToolUse `Agent` hook's
+   `updatedInput` reaches the subagent's prompt on 2.1.308, and SubagentStart
+   context reaches it too (R-B10(b)). Open for the map: whether returning
+   `allow` (required for `updatedInput`) is acceptable when it bypasses the
+   spawn's permission prompt, or whether `ask`, or a SubagentStart pairing,
+   is used instead.
 3. recall-session-start (Eureka): a SessionStart hook recalls against the
    area's handoff and open campaigns.
 4. The prompt hook (`recall.py prompt`, landed, uninstalled) is installed last,
