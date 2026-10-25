@@ -521,7 +521,7 @@ impl<S: MindStore> Mind<S> {
     /// at the head, decided before the index is asked anything.
     ///
     /// The selection passes the doors `semantic_selection` names, then is
-    /// walked by cursor at one snapshot, header projection, until it has no
+    /// walked by cursor at one snapshot, a page of LIMIT_MAX at a time, until it has no
     /// next page, so `hops` and `in_force` decide membership exactly as
     /// `query` does. The index never decides who is a member; it scores the
     /// ids this returns.
@@ -529,7 +529,7 @@ impl<S: MindStore> Mind<S> {
         let selection = Self::semantic_selection(selection, semantic)?;
         let head = receipt::head(self)?;
         let rows = Reader::at(self, head)?.rows()?;
-        let mut walk = Selection { limit: Some(LIMIT_MAX), projection: Selection::default().projection, ..selection };
+        let mut walk = Selection { limit: Some(LIMIT_MAX), ..selection };
         let mut ids = Vec::new();
         loop {
             let evaluation = select(&Vocabulary, &rows, &walk, head, self.cursor_key())?;
