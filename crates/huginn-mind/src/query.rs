@@ -1951,19 +1951,22 @@ mod tests {
         assert_eq!(ids(&ranked.page), vec![fu("FU-1")]);
     }
 
-    /// The walk keeps the role of the caller's `cites` hop: Q1 is cited by two
-    /// resolutions, one as its subject and one as what supersedes another
-    /// question, and a hop through `subject` admits only the first.
+    /// The walk keeps the role of the caller's `cites` hop: spec r2 is cited
+    /// by two resolutions, one as its subject and one as what supersedes r1,
+    /// and a hop through `subject` admits only the first.
     #[test]
     fn a_cites_hop_keeps_its_role_in_the_members() {
         let mut mind = seeded();
-        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A"), question("Q2", &["A", "B"], "A")]));
-        let (q1, q2) = (id("question", "Q1"), id("question", "Q2"));
-        committed(admit(&mut mind, vec![answering("R1", &q1)]));
-        committed(admit(&mut mind, vec![resolution(r(K::Question, &q2), superseded(&[r(K::Question, &q1)]))]));
-        let (as_subject, as_superseder) = (id("resolution", "question.Q1.n1"), id("resolution", "question.Q2.n1"));
+        let (r1, r2) = (id("cut_spec", "cut-1.r1"), id("cut_spec", "cut-1.r2"));
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1))]));
+        committed(admit(&mut mind, vec![
+            D::CutSpec(cut_spec("1", 2)),
+            resolution(r(K::CutSpec, &r1), superseded(&[r(K::CutSpec, &r2)])),
+        ]));
+        committed(admit(&mut mind, vec![resolution(r(K::CutSpec, &r2), withdrawn())]));
+        let (as_superseder, as_subject) = (id("resolution", "cut_spec.cut-1.r1.n1"), id("resolution", "cut_spec.cut-1.r2.n1"));
         let through = |role: Option<&str>| Selection {
-            cites: Some(cites(K::Question, &q1, role)),
+            cites: Some(cites(K::CutSpec, &r2, role)),
             ..of_kinds(&[K::Resolution])
         };
         let hits = [hit(K::Resolution, &as_superseder, 0.9), hit(K::Resolution, &as_subject, 0.8)];
@@ -1978,7 +1981,7 @@ mod tests {
         assert_eq!(mind.members(&superseded_by, &asking(5)).unwrap().ids, vec![r(K::Resolution, &as_superseder)]);
 
         let any = mind.members(&through(None), &asking(5)).unwrap();
-        assert_eq!(any.ids, vec![r(K::Resolution, &as_subject), r(K::Resolution, &as_superseder)]);
+        assert_eq!(any.ids, vec![r(K::Resolution, &as_superseder), r(K::Resolution, &as_subject)]);
     }
 
     /// `matched` is what the selection admits, not what the index returned:
