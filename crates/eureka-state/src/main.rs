@@ -281,7 +281,7 @@ impl EurekaState {
     }
 
     #[tool(
-        description = "Query the mind with a CultNet typed selection, optionally ranked by semantic nearness. Returns one page; pass its cursor back in the selection for the next."
+        description = "Query the mind with a CultNet typed selection, optionally ranked by semantic nearness. Returns one page; pass its cursor back in the selection for the next. A semantic answer returns at most top_k members of the selection, nearest first, with scores (one cosine similarity per row, in order)."
     )]
     async fn query(&self, Parameters(input): Parameters<QueryInput>) -> CallToolResult {
         self.answer(move |instance| HuginnMindRequest::Query {

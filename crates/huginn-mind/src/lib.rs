@@ -48,7 +48,7 @@ pub use mind::{HuginnMindEpoch, Mind};
 pub use persona::{PersonaPutOutcome, PersonaStateView};
 pub use query::{
     AdmissionFacts, PipelineDocumentSummary, PipelineDocumentView, PipelineEdge, PipelineFacts, PipelinePageItems,
-    PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, Ranked, SUMMARY_MAX_BYTES, SemanticQuery,
+    Members, PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, Ranked, SUMMARY_MAX_BYTES, SemanticQuery,
 };
 pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
 pub use refusal::{MindRefusal, RunId};

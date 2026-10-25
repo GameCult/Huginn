@@ -119,7 +119,7 @@ impl HuginnMindRequest {
 /// Every answer a mind gives. A refusal is data in the response, never a
 /// transport failure: the read side carries `Refused`, the write side carries
 /// the outcome's own `Refused`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum HuginnMindResponse {
     Whoami(MindStatus),
     Admit(PipelineAdmissionOutcome),
@@ -263,6 +263,7 @@ mod tests {
     }
 
     fn responses() -> Vec<HuginnMindResponse> {
+        let one_row = seeded().query(&Selection { limit: Some(1), ..Selection::default() }).unwrap().items;
         let refusal = MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() };
         vec![
             HuginnMindResponse::Whoami(seeded().status(IndexStatus::Current)),
@@ -276,6 +277,15 @@ mod tests {
                 next: None,
                 items: PipelinePageItems::Headers(vec![]),
                 edges: None,
+                scores: None,
+            }),
+            HuginnMindResponse::Query(PipelineSelectionPage {
+                matched: 1,
+                as_of: 1,
+                next: None,
+                items: one_row,
+                edges: None,
+                scores: Some(vec![0.5]),
             }),
             HuginnMindResponse::Refused(refusal),
             HuginnMindResponse::Persona(None),
@@ -324,6 +334,24 @@ mod tests {
             let bytes = rmp_serde::to_vec_named(&response).unwrap();
             assert_eq!(rmp_serde::from_slice::<HuginnMindResponse>(&bytes).unwrap(), response);
         }
+    }
+
+    /// A new client reads an old daemon's page: the five fields it had, no
+    /// `scores`. This is what keeps rollback by flip safe.
+    #[test]
+    fn a_page_encoded_without_scores_decodes_with_none() {
+        #[derive(Serialize)]
+        struct OldPage {
+            matched: u32,
+            as_of: u64,
+            next: Option<String>,
+            items: PipelinePageItems,
+            edges: Option<Vec<crate::query::PipelineEdge>>,
+        }
+        let old = OldPage { matched: 0, as_of: 7, next: None, items: PipelinePageItems::Headers(vec![]), edges: None };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        let page = rmp_serde::from_slice::<PipelineSelectionPage>(&bytes).unwrap();
+        assert_eq!((page.matched, page.as_of, page.scores), (0, 7, None));
     }
 
     /// The two files the catalog publishes are the derivation of the two

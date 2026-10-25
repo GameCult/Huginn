@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
 use huginn_mind::eureka_pipeline::{PipelineRef, Slug};
 use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, IndexStatus};
-use huginn_mind::{Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery};
+use huginn_mind::{Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery};
 
 /// Where the index attaches. Called after a batch commits, with the refs the
 /// batch landed, derived writes included; the sink may read each through
@@ -22,9 +22,11 @@ use huginn_mind::{Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, Semant
 pub trait IndexSink<S: MindStore> {
     fn committed(&mut self, mind: &Mind<S>, writes: &[PipelineRef]) -> anyhow::Result<()>;
     fn status(&self) -> IndexStatus;
-    /// Starts a search for the documents nearest `text`, at most `top_k` of
-    /// them wanted. `Err` says why the index cannot be asked now.
-    fn search(&mut self, text: &str, top_k: u32) -> Result<SearchTicket, String>;
+    /// Starts a search for the documents nearest `text`: the index scores only
+    /// `among`, the member document ids the mind chose, and answers the
+    /// nearest first, at most `top_k`. `Err` says why the index cannot be
+    /// asked now.
+    fn search(&mut self, text: &str, top_k: u32, among: Vec<String>) -> Result<SearchTicket, String>;
     /// How long after it was asked a search is worth answering: the index's
     /// own bound on it, which the loop waiting for the answer must share.
     fn search_deadline(&self) -> std::time::Duration;
@@ -53,6 +55,7 @@ pub struct Search {
     pub ticket: SearchTicket,
     selection: Selection,
     semantic: SemanticQuery,
+    members: Members,
 }
 
 /// What a request came to: an answer, or a search the index has yet to
@@ -171,15 +174,26 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         Handled::Answered(answer)
     }
 
-    /// A semantic query starts only if the mind would accept it (so nothing is
-    /// embedded for a query that cannot be ranked) and the index can be asked.
+    /// A semantic query starts only if the mind accepts it, and the mind
+    /// decides its members before the index is asked anything. A selection
+    /// with no members is answered at once: nothing is embedded and the index
+    /// is not called. Otherwise the index scores those members and the answer
+    /// waits in a `Search`.
     fn begin_search(&mut self, selection: Selection, semantic: SemanticQuery) -> Handled {
         let refused = |refusal: MindRefusal| Handled::Answered(HuginnMindResponse::Refused(refusal));
-        if let Err(refusal) = self.mind.check_semantic(&selection, &semantic) {
-            return refused(refusal);
+        let members = match self.mind.members(&selection, &semantic) {
+            Ok(members) => members,
+            Err(refusal) => return refused(refusal),
+        };
+        if members.ids.is_empty() {
+            return match self.mind.rank(&selection, &semantic, &members, &[]) {
+                Ok(ranked) => Handled::Answered(HuginnMindResponse::Query(ranked.page)),
+                Err(refusal) => refused(refusal),
+            };
         }
-        match self.index.search(&semantic.text.0, semantic.top_k) {
-            Ok(ticket) => Handled::Searching(Search { ticket, selection, semantic }),
+        let among = members.ids.iter().map(|id| id.id.0.clone()).collect();
+        match self.index.search(&semantic.text.0, semantic.top_k, among) {
+            Ok(ticket) => Handled::Searching(Search { ticket, selection, semantic, members }),
             Err(detail) => refused(MindRefusal::Unavailable { detail }),
         }
     }
@@ -199,16 +213,16 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         self.index.abandon(ticket);
     }
 
-    /// The answer to a search: the index's candidates ranked through the mind
-    /// (`Mind::rank` drops what the mind does not hold and lets the selection
-    /// decide the rest), or, when the index could not answer, a typed
+    /// The answer to a search: the index's scores for the members ranked
+    /// through the mind (`Mind::rank` answers as of the snapshot the members
+    /// were taken at and drops what is not a member), or, when the index could not answer, a typed
     /// `Unavailable`. Never an empty page in place of a failure.
     pub fn finish(&mut self, search: Search, found: Result<Hits, String>) -> HuginnMindResponse {
         let hits = match found {
             Ok(hits) => hits,
             Err(detail) => return HuginnMindResponse::Refused(MindRefusal::Unavailable { detail }),
         };
-        match self.mind.rank(&search.selection, &search.semantic, &hits) {
+        match self.mind.rank(&search.selection, &search.semantic, &search.members, &hits) {
             Ok(ranked) => {
                 if let Some(note) = dropped_note(&ranked.dropped) {
                     eprintln!("{note}");
@@ -479,7 +493,7 @@ pub(crate) mod tests {
             IndexStatus::Current
         }
 
-        fn search(&mut self, _text: &str, _top_k: u32) -> Result<SearchTicket, String> {
+        fn search(&mut self, _text: &str, _top_k: u32, _among: Vec<String>) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
 
@@ -521,7 +535,7 @@ pub(crate) mod tests {
             IndexStatus::Current
         }
 
-        fn search(&mut self, _text: &str, _top_k: u32) -> Result<SearchTicket, String> {
+        fn search(&mut self, _text: &str, _top_k: u32, _among: Vec<String>) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
 
@@ -547,7 +561,7 @@ pub(crate) mod tests {
             IndexStatus::Current
         }
 
-        fn search(&mut self, _text: &str, _top_k: u32) -> Result<SearchTicket, String> {
+        fn search(&mut self, _text: &str, _top_k: u32, _among: Vec<String>) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
 

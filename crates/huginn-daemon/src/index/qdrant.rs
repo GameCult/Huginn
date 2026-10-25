@@ -138,9 +138,16 @@ impl VectorIndex for QdrantIndex {
         Ok(())
     }
 
-    fn search(&mut self, collection: &str, vector: &[f32], limit: u32, within: Duration) -> Result<Vec<Hit>> {
+    fn search(&mut self, collection: &str, vector: &[f32], among: &[String], limit: u32, within: Duration) -> Result<Vec<Hit>> {
         let http = self.http.bounded(within);
-        let body = json!({ "vector": vector, "limit": limit, "with_payload": ["doc_id", "kind"], "with_vector": false });
+        let body = json!({
+            "vector": vector,
+            "filter": { "must": [{ "has_id": among }] },
+            "params": { "exact": true },
+            "limit": limit,
+            "with_payload": ["doc_id", "kind"],
+            "with_vector": false,
+        });
         let (_, answer) =
             self.ask_with(&http, Method::Post, &format!("/collections/{collection}/points/search"), Some(&body), &[200])?;
         let found = answer["result"].as_array().context("Qdrant's search has no result")?;

@@ -361,7 +361,7 @@ fn every_call_on_the_search_path_is_bounded_by_the_searchs_time_and_the_flush_by
     index.state.lock().unwrap().bounds.clear();
 
     let within = Duration::from_secs(20);
-    projector.search("anything", 3, within).unwrap();
+    projector.search("anything", 3, &[], within).unwrap();
     let embedder = embedder.state.lock().unwrap();
     let index = index.state.lock().unwrap();
     assert_eq!(embedder.identity_bounds.len(), 2, "the model is read before and after the embed");
@@ -398,7 +398,7 @@ fn a_hung_embedder_holds_the_worker_no_longer_than_the_search_that_asked() {
     embedder.state.lock().unwrap().hang_identity = true;
     let started = Instant::now();
     let due = started + Duration::from_millis(400);
-    lock(&sink.shared).searches.push_back(Queued { ticket: SearchTicket(70), text: "hung".into(), top_k: 3, due });
+    lock(&sink.shared).searches.push_back(Queued { ticket: SearchTicket(70), text: "hung".into(), top_k: 3, among: vec![], due });
     sink.shared.1.notify_all();
     let answered = answers(&mut sink, 1);
     assert_eq!(answered[0].0, SearchTicket(70));
@@ -411,6 +411,7 @@ fn a_hung_embedder_holds_the_worker_no_longer_than_the_search_that_asked() {
         ticket: SearchTicket(71),
         text: "late".into(),
         top_k: 3,
+        among: vec![],
         due: Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now),
     });
     sink.shared.1.notify_all();
@@ -1024,10 +1025,11 @@ fn an_idle_worker_finds_a_lost_collection_and_a_changed_model_without_a_write() 
 }
 
 /// A search embeds the query behind the model's instruction, asks the index
-/// with no filter for `min(top_k * 4, 200)`, and hands back candidates by id
-/// and kind; a hit of a kind this organ has no name for is left out.
+/// for exactly `top_k` among the members it was handed (no oversample), and
+/// hands back candidates by id and kind; a hit of a kind this organ has no
+/// name for is left out.
 #[test]
-fn a_search_embeds_the_query_with_its_instruction_and_oversamples() {
+fn a_search_embeds_the_query_with_its_instruction_and_asks_for_top_k_among_the_members() {
     let (_root, mind) = mind_with_documents();
     let entries = mind.index_entries(None).unwrap();
     let (embedder, index) = pair();
@@ -1037,19 +1039,23 @@ fn a_search_embeds_the_query_with_its_instruction_and_oversamples() {
         Hit { doc_id: "eureka-state:mystery:X".into(), kind: "mystery".into(), score: 0.8 },
     ];
 
-    let hits = projector.search("who owns the state", 3, SEARCH_DEADLINE).unwrap();
+    let mut among: Vec<String> = entries.iter().map(|entry| entry.id.id.0.clone()).collect();
+    among.push("eureka-state:mystery:X".into());
+    let hits = projector.search("who owns the state", 3, &among, SEARCH_DEADLINE).unwrap();
     assert_eq!(hits.len(), 1, "the unknown kind is left out");
     assert_eq!(hits[0].0.id.0, "eureka-state:question:Q1");
     assert_eq!(hits[0].0.kind, PipelineKind::Question);
     assert_eq!(hits[0].1, 0.9);
     let embedded = embedder.texts();
     assert_eq!(embedded.last().unwrap(), &format!("Instruct: {QUERY_INSTRUCTION}\nQuery: who owns the state"));
-    projector.search("again", 100, SEARCH_DEADLINE).unwrap();
-    let searches = index.state.lock().unwrap().searches.clone();
-    assert_eq!(searches.iter().map(|(name, length, limit)| (name.as_str(), *length, *limit)).collect::<Vec<_>>(), [
-        (collection().as_str(), 4, 12),
-        (collection().as_str(), 4, 200),
-    ]);
+    projector.search("again", 100, &among, SEARCH_DEADLINE).unwrap();
+    let state = index.state.lock().unwrap();
+    assert_eq!(state.searches.iter().map(|(name, length, limit)| (name.as_str(), *length, *limit)).collect::<Vec<_>>(), [
+        (collection().as_str(), 4, 3),
+        (collection().as_str(), 4, 100),
+    ], "top_k as asked, with no oversample");
+    let points: Vec<String> = among.iter().map(|id| point_id(id)).collect();
+    assert_eq!(state.among, [points.clone(), points], "the index was handed the members' point ids");
 }
 
 /// A search is never run against a collection that is not known to fit the
@@ -1061,31 +1067,31 @@ fn a_search_refuses_when_the_index_is_not_reconciled_with_the_model() {
     let entries = mind.index_entries(None).unwrap();
     let (embedder, index) = pair();
     let mut fresh = Projector::new(embedder.clone(), index.clone(), &slug(INSTANCE), Some(MIND.into()));
-    assert!(format!("{:#}", fresh.search("anything", 3, SEARCH_DEADLINE).unwrap_err()).contains("not been built"));
+    assert!(format!("{:#}", fresh.search("anything", 3, &[], SEARCH_DEADLINE).unwrap_err()).contains("not been built"));
     assert!(embedder.texts().is_empty() && index.state.lock().unwrap().searches.is_empty());
 
     let mut projector = projected(&embedder, &index, &entries);
     embedder.state.lock().unwrap().identity.digest = "d2".into();
     let before = embedder.texts().len();
-    assert!(format!("{:#}", projector.search("anything", 3, SEARCH_DEADLINE).unwrap_err()).contains("model changed"));
+    assert!(format!("{:#}", projector.search("anything", 3, &[], SEARCH_DEADLINE).unwrap_err()).contains("model changed"));
     assert_eq!(embedder.texts().len(), before, "the query was not embedded under the new model");
     assert!(index.state.lock().unwrap().searches.is_empty());
     assert!(projector.stale(), "and the reconciliation is to be redone");
 }
 
-/// The search asks for the nearest points to a vector with no filter of any
-/// kind (which documents may be shown is the mind's), and reads back the
+/// The search scores exactly the points it is handed (a has_id filter, exact
+/// search; which documents are members is the mind's), and reads back the
 /// document id, the kind and the score, in the order Qdrant gave them. A hit
 /// missing what the join needs is an error, not a guess.
 #[test]
-fn qdrant_search_sends_no_filter_and_reads_ids_kinds_and_scores() {
+fn qdrant_search_scores_only_the_members_exactly_and_reads_ids_kinds_and_scores() {
     let name = collection();
     let answering = stub(&[(
         "POST /collections/",
         200,
         r#"{"result":[{"id":"p1","score":0.75,"payload":{"doc_id":"eureka-state:question:Q1","kind":"question"}},{"id":"p2","score":0.5,"payload":{"doc_id":"eureka-state:ruling:R1","kind":"ruling"}}]}"#,
     )]);
-    let hits = QdrantIndex::new(&answering.url).search(&name, &[0.5, 1.0, 2.0, 3.0], 12, TIME).unwrap();
+    let hits = QdrantIndex::new(&answering.url).search(&name, &[0.5, 1.0, 2.0, 3.0], &["p1".to_owned(), "p2".to_owned()], 12, TIME).unwrap();
     assert_eq!(
         hits,
         [
@@ -1095,20 +1101,26 @@ fn qdrant_search_sends_no_filter_and_reads_ids_kinds_and_scores() {
     );
     let seen = answering.seen.lock().unwrap();
     assert_eq!((seen[0].0.as_str(), seen[0].1.as_str()), ("POST", format!("/collections/{name}/points/search").as_str()));
-    for expected in ["\"vector\":[0.5,1.0,2.0,3.0]", "\"limit\":12", "\"with_vector\":false"] {
+    for expected in [
+        "\"vector\":[0.5,1.0,2.0,3.0]",
+        "\"has_id\":[\"p1\",\"p2\"]",
+        "\"exact\":true",
+        "\"limit\":12",
+        "\"with_vector\":false",
+    ] {
         assert!(seen[0].2.contains(expected), "{expected} in {}", seen[0].2);
     }
-    assert!(!seen[0].2.contains("filter"), "no predicate is lowered into the index: {}", seen[0].2);
+    assert!(!seen[0].2.contains("\"kind\":{"), "membership is ids alone, no predicate on a payload field: {}", seen[0].2);
     drop(seen);
 
     let nameless = stub(&[("POST /collections/", 200, r#"{"result":[{"id":"p","score":0.5,"payload":{"kind":"question"}}]}"#)]);
-    assert!(QdrantIndex::new(&nameless.url).search(&name, &[1.0], 1, TIME).is_err());
+    assert!(QdrantIndex::new(&nameless.url).search(&name, &[1.0], &[], 1, TIME).is_err());
     let failing = stub(&[("POST /collections/", 404, r#"{"status":{"error":"not found"}}"#)]);
-    assert!(QdrantIndex::new(&failing.url).search(&name, &[1.0], 1, TIME).is_err());
+    assert!(QdrantIndex::new(&failing.url).search(&name, &[1.0], &[], 1, TIME).is_err());
 }
 
 fn queued(ticket: u64, text: &str) -> Queued {
-    Queued { ticket: SearchTicket(ticket), text: text.into(), top_k: 3, due: Instant::now() + SEARCH_DEADLINE }
+    Queued { ticket: SearchTicket(ticket), text: text.into(), top_k: 3, among: vec![], due: Instant::now() + SEARCH_DEADLINE }
 }
 
 fn shared_with(
@@ -1199,7 +1211,7 @@ type Answers = Vec<(SearchTicket, Result<Hits, String>)>;
 /// The sink's own calls, named: the trait is generic over the store and the
 /// worker does not care which.
 fn ask_sink(sink: &mut WorkerSink, text: &str, top_k: u32) -> Result<SearchTicket, String> {
-    <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search(sink, text, top_k)
+    <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search(sink, text, top_k, vec![])
 }
 
 fn collected(sink: &mut WorkerSink) -> Answers {
@@ -1278,7 +1290,7 @@ fn a_search_is_refused_only_for_a_rebuild_or_a_failure() {
     let (lost_embedder, lost_index) = pair();
     let mut rebuilding_now = rebuilding(&lost_embedder, &lost_index, &entries);
     let searches = lost_index.state.lock().unwrap().searches.len();
-    let refusal = format!("{:#}", rebuilding_now.search("anything", 3, SEARCH_DEADLINE).unwrap_err());
+    let refusal = format!("{:#}", rebuilding_now.search("anything", 3, &[], SEARCH_DEADLINE).unwrap_err());
     assert!(refusal.contains("being rebuilt") && refusal.contains("pending: 4"), "{refusal}");
     assert_eq!(lost_index.state.lock().unwrap().searches.len(), searches, "the rebuilt collection was not asked");
     assert!(embedder.texts().is_empty() && index.state.lock().unwrap().searches.is_empty());
@@ -1287,7 +1299,7 @@ fn a_search_is_refused_only_for_a_rebuild_or_a_failure() {
     let mut lagging = projected(&embedder, &index, &entries[..3]);
     lagging.want(entries[3..].iter().cloned());
     assert_eq!(lagging.progress_status(), IndexStatus::Behind { pending: 1 });
-    assert!(lagging.search("anything", 3, SEARCH_DEADLINE).is_ok());
+    assert!(lagging.search("anything", 3, &[], SEARCH_DEADLINE).is_ok());
 }
 
 /// A search that fails for its own reasons (the vector store errs, the
@@ -1309,11 +1321,11 @@ fn a_failed_search_fails_that_search_alone() {
         let mut projector = projected(&embedder, &index, &entries);
         let listed = index.state.lock().unwrap().listed;
         fault(&embedder, &index, true);
-        assert!(projector.search("anything", 3, Duration::from_millis(50)).is_err(), "{what}");
+        assert!(projector.search("anything", 3, &[], Duration::from_millis(50)).is_err(), "{what}");
         assert_eq!(projector.progress_status(), IndexStatus::Current, "{what}");
         assert!(!projector.stale(), "{what}");
         fault(&embedder, &index, false);
-        assert!(projector.search("anything", 3, SEARCH_DEADLINE).is_ok(), "{what}: the next search is answered");
+        assert!(projector.search("anything", 3, &[], SEARCH_DEADLINE).is_ok(), "{what}: the next search is answered");
         assert_eq!(index.state.lock().unwrap().listed, listed, "{what}: the collection was not listed again");
     }
 
@@ -1344,7 +1356,7 @@ fn a_model_changed_refusal_names_the_state_and_the_pending_count() {
     let mut projector = projected(&embedder, &index, &entries[..3]);
     projector.want(entries[3..].iter().cloned());
     embedder.state.lock().unwrap().identity.digest = "d2".into();
-    let refusal = format!("{:#}", projector.search("anything", 3, SEARCH_DEADLINE).unwrap_err());
+    let refusal = format!("{:#}", projector.search("anything", 3, &[], SEARCH_DEADLINE).unwrap_err());
     assert!(refusal.contains("model changed") && refusal.contains("being rebuilt") && refusal.contains("pending: 1"), "{refusal}");
 }
 
@@ -1374,7 +1386,7 @@ fn a_search_re_reads_the_collections_label() {
         let mut projector = projected(&embedder, &index, &entries);
         change(index.state.lock().unwrap().collections.get_mut(&collection()).unwrap());
         let embedded = embedder.texts().len();
-        let refusal = format!("{:#}", projector.search("anything", 3, SEARCH_DEADLINE).unwrap_err());
+        let refusal = format!("{:#}", projector.search("anything", 3, &[], SEARCH_DEADLINE).unwrap_err());
         assert!(refusal.contains("no longer the one this mind's index was built as"), "{what}: {refusal}");
         assert_eq!(embedder.texts().len(), embedded, "{what}: nothing was embedded");
         assert!(index.state.lock().unwrap().searches.is_empty(), "{what}");
@@ -1383,7 +1395,7 @@ fn a_search_re_reads_the_collections_label() {
     let (embedder, index) = pair();
     let mut projector = projected(&embedder, &index, &entries);
     index.state.lock().unwrap().collections.clear();
-    assert!(projector.search("anything", 3, SEARCH_DEADLINE).is_err(), "no collection");
+    assert!(projector.search("anything", 3, &[], SEARCH_DEADLINE).is_err(), "no collection");
     assert!(projector.stale());
 }
 
@@ -1400,7 +1412,7 @@ fn a_model_that_changes_while_the_query_is_embedded_is_refused() {
     let mut projector = projected(&embedder, &index, &entries);
     gate.shut_again();
     let searching = std::thread::spawn(move || {
-        let found = projector.search("anything", 3, SEARCH_DEADLINE);
+        let found = projector.search("anything", 3, &[], SEARCH_DEADLINE);
         (projector, found)
     });
     gate.wait_arrived(1);
@@ -1767,7 +1779,7 @@ fn a_search_reads_an_admission_acknowledged_before_it_was_asked() {
 #[test]
 fn a_collection_made_again_refuses_searches_until_it_is_refilled() {
     let refused = |projector: &mut Projector<FakeEmbedder, FakeIndex>, pending: u32| {
-        let why = format!("{:#}", projector.search("anything", 3, SEARCH_DEADLINE).unwrap_err());
+        let why = format!("{:#}", projector.search("anything", 3, &[], SEARCH_DEADLINE).unwrap_err());
         assert!(why.contains("being rebuilt") && why.contains(&format!("pending: {pending}")), "{why}");
     };
     let entries = entries_of(BATCH + 8);
@@ -1787,7 +1799,7 @@ fn a_collection_made_again_refuses_searches_until_it_is_refilled() {
     refused(&mut projector, 8);
     assert_eq!(projector.advance().unwrap(), Advance::Progressed);
     assert_eq!(projector.progress_status(), IndexStatus::Current);
-    assert!(projector.search("anything", 3, SEARCH_DEADLINE).is_ok(), "answered once refilled");
+    assert!(projector.search("anything", 3, &[], SEARCH_DEADLINE).is_ok(), "answered once refilled");
     assert_eq!(index.state.lock().unwrap().held_when_searched, [40]);
     projector.want(entries_of(1).into_iter().map(|mut entry| {
         entry.id.id.0.push_str("-later");
@@ -1805,7 +1817,7 @@ fn a_collection_made_again_refuses_searches_until_it_is_refilled() {
     assert_eq!(projector.progress_status(), IndexStatus::Reconciling { pending: 8 });
     refused(&mut projector, 8);
     drain(&mut projector);
-    assert!(projector.search("anything", 3, SEARCH_DEADLINE).is_ok());
+    assert!(projector.search("anything", 3, &[], SEARCH_DEADLINE).is_ok());
 }
 
 /// Through the worker: a collection lost while the worker runs is made again,
@@ -1922,7 +1934,7 @@ fn a_later_calls_bound_shrinks_as_the_search_spends_its_time() {
         state.identity_bounds.clear();
     }
     index.state.lock().unwrap().bounds.clear();
-    projector.search("anything", 3, within).unwrap();
+    projector.search("anything", 3, &[], within).unwrap();
 
     let embedder = embedder.state.lock().unwrap();
     let index = index.state.lock().unwrap();

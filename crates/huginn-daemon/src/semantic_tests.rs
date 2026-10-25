@@ -268,7 +268,8 @@ fn healthy() -> Harness {
 /// hold, all scoring above the two that stand, and only the two that stand come
 /// back, in score order. The selection's other predicates still cut the
 /// candidates, and the embedder saw the query behind its instruction while the
-/// index was asked for an oversample.
+/// index was asked for exactly top_k among the members, and `matched` counts
+/// the members.
 #[test]
 fn a_semantic_query_returns_only_documents_the_mind_holds_and_the_selection_admits() {
     let harness = healthy();
@@ -286,7 +287,9 @@ fn a_semantic_query_returns_only_documents_the_mind_holds_and_the_selection_admi
     let standing_only = ask(&mut client, "m-1", &semantic(standing(), 5));
     assert_eq!(ids(&standing_only), vec![id("ruling", "R4"), id("question", "Q2")]);
     let HuginnMindResponse::Query(page) = &standing_only else { unreachable!() };
-    assert_eq!((page.matched, page.next.as_ref()), (2, None));
+    let members = ids(&ask(&mut client, "m-0", &plain_of(standing()))).len();
+    assert!(members > 2, "the mind has more in force than the two hits: {members}");
+    assert_eq!((page.matched as usize, page.next.as_ref()), (members, None), "matched counts the members, not the hits");
 
     let rulings = Selection { schemas: Some(vec![PipelineKind::Ruling.type_id().into()]), ..standing() };
     assert_eq!(ids(&ask(&mut client, "m-2", &semantic(rulings, 5))), vec![id("ruling", "R4")], "the selection's schemas still apply");
@@ -298,7 +301,72 @@ fn a_semantic_query_returns_only_documents_the_mind_holds_and_the_selection_admi
     let embedded = harness.embedder.texts();
     assert!(embedded.iter().any(|text| text.starts_with("Instruct: ") && text.ends_with("\nQuery: who owns the state")), "{embedded:?}");
     let searches = harness.index.state.lock().unwrap().searches.clone();
-    assert!(searches.iter().all(|(name, _, limit)| *name == collection_name(&slug(INSTANCE)) && *limit == 20), "{searches:?}");
+    assert!(searches.iter().all(|(name, _, limit)| *name == collection_name(&slug(INSTANCE)) && *limit == 5), "top_k, with no oversample: {searches:?}");
+}
+
+fn plain_of(selection: Selection) -> HuginnMindRequest {
+    HuginnMindRequest::Query { instance: slug(INSTANCE), selection, semantic: None }
+}
+
+/// Thirty rulings stand out of force (superseded by K0) and five stand, and the
+/// index ranks every one that does not stand above every one that does. The
+/// members reach the index, so the nearest top_k of them are the answer:
+/// top_k 4 answers four rows, where an index window cut before the mind judged
+/// would have answered none.
+#[test]
+fn a_narrow_selection_gets_top_k_members_when_non_members_score_higher() {
+    let gone = |n: u32| id("ruling", &format!("N{n}"));
+    let kept = |n: u32| id("ruling", &format!("K{n}"));
+    let mut seed = Vec::new();
+    seed.push(campaign_seed());
+    seed.push((0..5).map(|n| ruling(&format!("K{n}"), None)).collect());
+    seed.push((0..30).map(|n| ruling(&format!("N{n}"), None)).collect());
+    seed.push(
+        (0..30)
+            .map(|n| {
+                resolution(
+                    PipelineKind::Ruling,
+                    &gone(n),
+                    ResolutionOutcome::Superseded { by: vec![PipelineRef { kind: PipelineKind::Ruling, id: Short(kept(0)) }] },
+                )
+            })
+            .collect(),
+    );
+    let (embedder, index) = (FakeEmbedder::new("d1"), FakeIndex::default());
+    let harness = Harness::start(seed, embedder, index, Duration::from_secs(30));
+    let mut client = harness.client();
+    until_index(&mut client, "Current", |status| *status == IndexStatus::Current);
+    let mut hits: Vec<Hit> = (0..30).map(|n| hit("ruling", gone(n), 0.9 - n as f32 * 0.001)).collect();
+    hits.extend((0..5).map(|n| hit("ruling", kept(n), 0.5 - n as f32 * 0.1)));
+    harness.index.state.lock().unwrap().hits = hits;
+
+    let rulings = Selection { schemas: Some(vec![PipelineKind::Ruling.type_id().into()]), ..standing() };
+    let answer = ask(&mut client, "m-1", &semantic(rulings, 4));
+    assert_eq!(ids(&answer), (0..4).map(kept).collect::<Vec<_>>(), "the four nearest members, none of the nearer non-members");
+    let HuginnMindResponse::Query(page) = &answer else { unreachable!() };
+    assert_eq!(page.matched, 5);
+    let scores = page.scores.clone().expect("a semantic page carries scores");
+    assert_eq!(scores.len(), 4);
+    assert!(scores.windows(2).all(|pair| pair[0] >= pair[1]), "best first: {scores:?}");
+    assert!((scores[0] - 0.5).abs() < 1e-6, "the score is the index's: {scores:?}");
+}
+
+/// A selection that matches nothing is an empty page at once: the query is not
+/// embedded and the index is not asked.
+#[test]
+fn an_empty_membership_is_an_empty_page_and_the_index_is_never_asked() {
+    let harness = healthy();
+    let mut client = harness.client();
+    until_index(&mut client, "Current", |status| *status == IndexStatus::Current);
+    let embedded = harness.embedder.texts().len();
+    harness.index.state.lock().unwrap().hits = vec![hit("question", id("question", "Q1"), 0.9)];
+
+    let findings = Selection { schemas: Some(vec![PipelineKind::Finding.type_id().into()]), ..standing() };
+    let answer = ask(&mut client, "m-1", &semantic(findings, 5));
+    let HuginnMindResponse::Query(page) = &answer else { panic!("{answer:?}") };
+    assert_eq!((page.matched, ids(&answer).len(), page.scores.clone()), (0, 0, Some(vec![])));
+    assert_eq!(harness.embedder.texts().len(), embedded, "nothing was embedded");
+    assert!(harness.index.state.lock().unwrap().searches.is_empty(), "the index was not asked");
 }
 
 /// A cursor cannot resume a ranked answer and a ranked answer has no order to

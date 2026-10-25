@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail, ensure};
 
-use super::{CollectionMeta, Described, Embedder, Hit, ModelIdentity, Point, VectorIndex};
+use super::{CollectionMeta, Described, Embedder, Hit, ModelIdentity, Point, VectorIndex, point_id};
 
 pub(crate) fn identity(digest: &str) -> ModelIdentity {
     ModelIdentity { name: "model".into(), digest: digest.into(), dimensions: 4 }
@@ -147,6 +147,8 @@ pub(crate) struct IndexState {
     pub(crate) hits: Vec<Hit>,
     /// The collection, vector length and limit of every search, in order.
     pub(crate) searches: Vec<(String, usize, u32)>,
+    /// The point ids each search was restricted to, in order.
+    pub(crate) among: Vec<Vec<String>>,
     /// How many times every point id was listed: only a reconciliation does.
     pub(crate) listed: u32,
     /// Whether a search fails at the vector store, the rest of it working.
@@ -218,18 +220,20 @@ impl VectorIndex for FakeIndex {
         Ok(())
     }
 
-    fn search(&mut self, collection: &str, vector: &[f32], limit: u32, within: Duration) -> Result<Vec<Hit>> {
+    fn search(&mut self, collection: &str, vector: &[f32], among: &[String], limit: u32, within: Duration) -> Result<Vec<Hit>> {
         let mut state = self.state.lock().unwrap();
         state.bounds.push(("search", within));
         if state.down {
             bail!("the vector store is down");
         }
         state.searches.push((collection.into(), vector.len(), limit));
+        state.among.push(among.to_vec());
         ensure!(!state.fail_search, "the vector store failed the search");
         ensure!(state.collections.contains_key(collection), "no collection {collection}");
         let held = state.collections[collection].points.len();
         state.held_when_searched.push(held);
-        Ok(state.hits.clone())
+        // A filtered exact index: only the points handed in are scored.
+        Ok(state.hits.iter().filter(|hit| among.contains(&point_id(&hit.doc_id))).take(limit as usize).cloned().collect())
     }
 }
 
