@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cultnet_rs::{
-    Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, PROJECTION_HEADER, Row, Selection, select, validate,
+    Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, Row, Selection, select, validate,
 };
 use eureka_pipeline::{
     ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, OrgRepo,
@@ -534,8 +534,8 @@ impl<S: MindStore> Mind<S> {
         // The walk is built here, field by field, from the caller's filters
         // alone and never spread from the caller's selection: the page size
         // is ours (the caller's `limit` shapes an answer, not the walk's cost:
-        // one select per member at limit 1), and the walk is headers only,
-        // from the first page, in the one order.
+        // one select per member at limit 1), from the first page, in the
+        // one order.
         let Selection { schemas, keys, fields, cites, cited, .. } = selection;
         let mut walk = Selection {
             schemas,
@@ -543,10 +543,10 @@ impl<S: MindStore> Mind<S> {
             fields,
             cites,
             cited,
-            projection: PROJECTION_HEADER.into(),
             descending: false,
             limit: Some(LIMIT_MAX),
             cursor: None,
+            ..Selection::default()
         };
         let mut ids = Vec::new();
         let mut pages = 0;
@@ -1949,6 +1949,36 @@ mod tests {
         let ranked = rank_all(&mind, &selection, &asking(5), &hits);
         assert_eq!(ranked.page.matched, 1);
         assert_eq!(ids(&ranked.page), vec![fu("FU-1")]);
+    }
+
+    /// The walk keeps the role of the caller's `cites` hop: Q1 is cited by two
+    /// resolutions, one as its subject and one as what supersedes another
+    /// question, and a hop through `subject` admits only the first.
+    #[test]
+    fn a_cites_hop_keeps_its_role_in_the_members() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A"), question("Q2", &["A", "B"], "A")]));
+        let (q1, q2) = (id("question", "Q1"), id("question", "Q2"));
+        committed(admit(&mut mind, vec![answering("R1", &q1)]));
+        committed(admit(&mut mind, vec![resolution(r(K::Question, &q2), superseded(&[r(K::Question, &q1)]))]));
+        let (as_subject, as_superseder) = (id("resolution", "question.Q1.n1"), id("resolution", "question.Q2.n1"));
+        let through = |role: Option<&str>| Selection {
+            cites: Some(cites(K::Question, &q1, role)),
+            ..of_kinds(&[K::Resolution])
+        };
+        let hits = [hit(K::Resolution, &as_superseder, 0.9), hit(K::Resolution, &as_subject, 0.8)];
+
+        let subject = through(Some("subject"));
+        assert_eq!(mind.members(&subject, &asking(5)).unwrap().ids, vec![r(K::Resolution, &as_subject)]);
+        let ranked = rank_all(&mind, &subject, &asking(5), &hits);
+        assert_eq!(ranked.page.matched, 1);
+        assert_eq!(ids(&ranked.page), vec![as_subject.clone()]);
+
+        let superseded_by = through(Some("superseded_by"));
+        assert_eq!(mind.members(&superseded_by, &asking(5)).unwrap().ids, vec![r(K::Resolution, &as_superseder)]);
+
+        let any = mind.members(&through(None), &asking(5)).unwrap();
+        assert_eq!(any.ids, vec![r(K::Resolution, &as_subject), r(K::Resolution, &as_superseder)]);
     }
 
     /// `matched` is what the selection admits, not what the index returned:
