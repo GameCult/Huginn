@@ -295,6 +295,8 @@ pub struct PipelineSelectionPage {
 pub struct Members {
     pub as_of: u64,
     pub ids: Vec<PipelineRef>,
+    /// How many select pages the walk took: the cost of the membership.
+    pub pages: u32,
 }
 
 /// A ranked semantic answer: the page, and the hits the index named that the
@@ -517,26 +519,6 @@ impl<S: MindStore> Mind<S> {
         refuse_values(selection)
     }
 
-    /// The selection `members` walks: the caller's filters and nothing else.
-    /// Built field by field, never spread from the caller's selection, so the
-    /// page size is ours (the caller's `limit` shapes an answer, not the
-    /// walk's cost: one select per member at limit 1) and the walk is headers
-    /// only, from the first page, in the one order.
-    fn walk_selection(selection: Selection) -> Selection {
-        let Selection { schemas, keys, fields, cites, cited, .. } = selection;
-        Selection {
-            schemas,
-            keys,
-            fields,
-            cites,
-            cited,
-            projection: PROJECTION_HEADER.into(),
-            descending: false,
-            limit: Some(LIMIT_MAX),
-            cursor: None,
-        }
-    }
-
     /// The members of a semantic query: every document the selection matches
     /// at the head, decided before the index is asked anything.
     ///
@@ -549,14 +531,32 @@ impl<S: MindStore> Mind<S> {
         let selection = Self::semantic_selection(selection, semantic)?;
         let head = receipt::head(self)?;
         let rows = Reader::at(self, head)?.rows()?;
-        let mut walk = Self::walk_selection(selection);
+        // The walk is built here, field by field, from the caller's filters
+        // alone and never spread from the caller's selection: the page size
+        // is ours (the caller's `limit` shapes an answer, not the walk's cost:
+        // one select per member at limit 1), and the walk is headers only,
+        // from the first page, in the one order.
+        let Selection { schemas, keys, fields, cites, cited, .. } = selection;
+        let mut walk = Selection {
+            schemas,
+            keys,
+            fields,
+            cites,
+            cited,
+            projection: PROJECTION_HEADER.into(),
+            descending: false,
+            limit: Some(LIMIT_MAX),
+            cursor: None,
+        };
         let mut ids = Vec::new();
+        let mut pages = 0;
         loop {
             let evaluation = select(&Vocabulary, &rows, &walk, head, self.cursor_key())?;
+            pages += 1;
             ids.extend(evaluation.rows.iter().map(ref_of));
             match evaluation.next_cursor {
                 Some(next) => walk.cursor = Some(next),
-                None => return Ok(Members { as_of: head, ids }),
+                None => return Ok(Members { as_of: head, ids, pages }),
             }
         }
     }
@@ -1907,27 +1907,46 @@ mod tests {
         assert_eq!(mind.members(&limited, &asking(5)).unwrap().ids.len(), 250);
     }
 
-    /// The walk costs one select per 200 members whatever the caller asked
-    /// for: a caller's `limit`, projection, order or cursor never reach it,
-    /// and its filters all do.
+    /// The walk costs one select per LIMIT_MAX members whatever the caller
+    /// asked for, through the production `members`: a caller's `limit`,
+    /// projection or spread never reach it. At limit 1 and document
+    /// projection over 590 questions the walk takes exactly 3 pages and
+    /// returns exactly the questions, in key order.
     #[test]
     fn the_members_walk_takes_its_page_size_from_the_mind_not_the_caller() {
-        let questions = of_kinds(&[K::Question]);
-        let caller = Selection {
-            limit: Some(1),
-            projection: PROJECTION_DOCUMENT.into(),
-            descending: true,
-            cursor: Some("caller-cursor".into()),
-            keys: Some(vec!["Q1".into()]),
-            cited: Some(Incoming { role: "subject".into(), exists: false }),
-            ..questions
-        };
-        let walk = Mind::<MemoryStore>::walk_selection(caller.clone());
-        assert_eq!(walk.limit, Some(LIMIT_MAX));
-        assert_eq!(walk.projection, PROJECTION_HEADER);
-        assert!(!walk.descending);
-        assert_eq!(walk.cursor, None);
-        assert_eq!((walk.schemas, walk.keys, walk.cited), (caller.schemas, caller.keys, caller.cited));
+        let mut mind = seeded();
+        for start in (0..590u32).step_by(crate::admission::BATCH_MAX) {
+            committed(admit(&mut mind, (start..(start + crate::admission::BATCH_MAX as u32).min(590)).map(question_n).collect()));
+        }
+        let caller = Selection { limit: Some(1), projection: PROJECTION_DOCUMENT.into(), ..of_kinds(&[K::Question]) };
+        let members = mind.members(&caller, &asking(5)).unwrap();
+        let mut expected: Vec<PipelineRef> = (0..590).map(|n| r(K::Question, &id("question", &format!("Q{n}")))).collect();
+        expected.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        assert_eq!(members.ids, expected, "exactly the questions, once each, in key order");
+        assert_eq!(LIMIT_MAX, 200);
+        assert_eq!(members.pages, 3, "590 members at the mind's page of 200");
+    }
+
+    /// The walk keeps the caller's `cites` hop: among follow-ups, only the one
+    /// citing Q1 is a member, and a ranking over all three counts only it.
+    #[test]
+    fn a_cites_hop_limits_the_members_to_the_cited_rows() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A"), question("Q2", &["A", "B"], "A")]));
+        let (q1, q2) = (id("question", "Q1"), id("question", "Q2"));
+        committed(admit(&mut mind, vec![
+            follow_up("FU-1", r(K::Question, &q1)),
+            follow_up("FU-2", r(K::Question, &q2)),
+            follow_up("FU-3", r(K::Question, &q2)),
+        ]));
+        let selection = Selection { cites: Some(cites(K::Question, &q1, None)), ..of_kinds(&[K::FollowUp]) };
+        let fu = |label: &str| id("follow_up", label);
+        let members = mind.members(&selection, &asking(5)).unwrap();
+        assert_eq!(members.ids, vec![r(K::FollowUp, &fu("FU-1"))]);
+        let hits = [hit(K::FollowUp, &fu("FU-2"), 0.9), hit(K::FollowUp, &fu("FU-1"), 0.8), hit(K::FollowUp, &fu("FU-3"), 0.7)];
+        let ranked = rank_all(&mind, &selection, &asking(5), &hits);
+        assert_eq!(ranked.page.matched, 1);
+        assert_eq!(ids(&ranked.page), vec![fu("FU-1")]);
     }
 
     /// `matched` is what the selection admits, not what the index returned:
