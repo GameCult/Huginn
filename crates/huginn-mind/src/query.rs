@@ -1911,7 +1911,7 @@ mod tests {
     /// asked for, through the production `members`: a caller's `limit`,
     /// projection or spread never reach it. At limit 1 and document
     /// projection over 599 questions the walk takes exactly 3 pages and
-    /// returns exactly the questions, in key order.
+    /// returns exactly the questions, in the mind's order.
     #[test]
     fn the_members_walk_takes_its_page_size_from_the_mind_not_the_caller() {
         let mut mind = seeded();
@@ -1920,9 +1920,11 @@ mod tests {
         }
         let caller = Selection { limit: Some(1), projection: PROJECTION_DOCUMENT.into(), ..of_kinds(&[K::Question]) };
         let members = mind.members(&caller, &asking(5)).unwrap();
-        let mut expected: Vec<PipelineRef> = (0..599).map(|n| r(K::Question, &id("question", &format!("Q{n}")))).collect();
-        expected.sort_by(|a, b| a.id.0.cmp(&b.id.0));
-        assert_eq!(members.ids, expected, "exactly the questions, once each, in key order");
+        // The one order: admission order (a batch is one ordinal), then key.
+        let mut numbered: Vec<u32> = (0..599).collect();
+        numbered.sort_by_key(|n| (n / crate::admission::BATCH_MAX as u32, format!("Q{n}")));
+        let expected: Vec<PipelineRef> = numbered.iter().map(|n| r(K::Question, &id("question", &format!("Q{n}")))).collect();
+        assert_eq!(members.ids, expected, "exactly the questions, once each, in the mind's order");
         assert_eq!(LIMIT_MAX, 200);
         assert_eq!(members.pages, 3, "599 members at the mind's page of 200");
     }
