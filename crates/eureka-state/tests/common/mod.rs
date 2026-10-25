@@ -89,7 +89,7 @@ impl<S: MindStore> IndexSink<S> for Inert {
     fn status(&self) -> IndexStatus {
         IndexStatus::Current
     }
-    fn search(&mut self, _text: &str, _top_k: u32) -> Result<SearchTicket, String> {
+    fn search(&mut self, _text: &str, _top_k: u32, _among: Vec<String>) -> Result<SearchTicket, String> {
         Err("this index cannot search".into())
     }
     fn search_deadline(&self) -> Duration {

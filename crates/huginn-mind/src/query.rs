@@ -20,7 +20,7 @@
 //! scores, and this module joins them back through the mind and lets the
 //! selection decide. No clock, no store handle, no network.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cultnet_rs::{
     Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, Row, Selection, select, validate,
@@ -77,7 +77,9 @@ pub struct PipelineDocumentView {
 
 /// A semantic query: the text to find documents near, and how many. The index
 /// owns which fields of each kind are text (`index_text`), so no substring
-/// filter lives here to become a second answer to that question.
+/// filter lives here to become a second answer to that question. `top_k` is
+/// the most rows answered, all of them members of the selection: the
+/// selection decides membership before the index is asked.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SemanticQuery {
     pub text: Line,
@@ -272,15 +274,29 @@ pub struct PipelineEdge {
 }
 
 /// One page of a selection. `matched` is the count before paging, `as_of` the
-/// snapshot the page and every cursor of its walk are exact as of, and `edges`
-/// is present exactly when the selection follows a hop.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// snapshot the page and every cursor of its walk are exact as of, `edges`
+/// is present exactly when the selection follows a hop, and `scores` exactly
+/// when the answer is semantic: one cosine similarity per item, in order
+/// (higher is nearer), for display and thresholding. It is never stored.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PipelineSelectionPage {
     pub matched: u32,
     pub as_of: u64,
     pub next: Option<String>,
     pub items: PipelinePageItems,
     pub edges: Option<Vec<PipelineEdge>>,
+    pub scores: Option<Vec<f32>>,
+}
+
+/// The selection's whole match set at one snapshot, in the selection's order:
+/// what a cursor walk of `query` over the same selection returns. Local to
+/// the process, like `Ranked`; it is never on the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Members {
+    pub as_of: u64,
+    pub ids: Vec<PipelineRef>,
+    /// How many select pages the walk took: the cost of the membership.
+    pub pages: u32,
 }
 
 /// A ranked semantic answer: the page, and the hits the index named that the
@@ -468,7 +484,7 @@ impl<S: MindStore> Mind<S> {
         };
         let rows = Reader::at(self, as_of)?.rows()?;
         let evaluation = select(&Vocabulary, &rows, &selection, as_of, self.cursor_key())?;
-        Self::page(&selection, evaluation, as_of)
+        Self::page(&selection, evaluation, as_of, None)
     }
 
     /// What a semantic query must satisfy before anything is embedded: the
@@ -503,54 +519,87 @@ impl<S: MindStore> Mind<S> {
         refuse_values(selection)
     }
 
-    /// Whether a semantic query may be started, decided before the index is
-    /// asked anything. `rank` runs the same check again over the same inputs.
-    pub fn check_semantic(&self, selection: &Selection, semantic: &SemanticQuery) -> Result<(), MindRefusal> {
-        Self::semantic_selection(selection, semantic).map(drop)
+    /// The members of a semantic query: every document the selection matches
+    /// at the head, decided before the index is asked anything.
+    ///
+    /// The selection passes the doors `semantic_selection` names, then is
+    /// walked by cursor at one snapshot, a page of LIMIT_MAX at a time, until it has no
+    /// next page, so `hops` and `in_force` decide membership exactly as
+    /// `query` does. The index never decides who is a member; it scores the
+    /// ids this returns.
+    pub fn members(&self, selection: &Selection, semantic: &SemanticQuery) -> Result<Members, MindRefusal> {
+        let selection = Self::semantic_selection(selection, semantic)?;
+        let head = receipt::head(self)?;
+        let rows = Reader::at(self, head)?.rows()?;
+        // The walk is built here, field by field, from the caller's filters
+        // alone and never spread from the caller's selection: the page size
+        // is ours (the caller's `limit` shapes an answer, not the walk's cost:
+        // one select per member at limit 1), from the first page, in the
+        // one order.
+        let Selection { schemas, keys, fields, cites, cited, .. } = selection;
+        let mut walk = Selection {
+            schemas,
+            keys,
+            fields,
+            cites,
+            cited,
+            limit: Some(LIMIT_MAX),
+            ..Selection::default()
+        };
+        let mut ids = Vec::new();
+        let mut pages = 0;
+        loop {
+            let evaluation = select(&Vocabulary, &rows, &walk, head, self.cursor_key())?;
+            pages += 1;
+            ids.extend(evaluation.rows.iter().map(ref_of));
+            match evaluation.next_cursor {
+                Some(next) => walk.cursor = Some(next),
+                None => return Ok(Members { as_of: head, ids, pages }),
+            }
+        }
     }
 
-    /// The page a semantic query answers, from the candidates the index gave,
-    /// with the hits the mind holds no document for.
+    /// The page a semantic query answers, from the hits the index scored
+    /// among the members, with the hits the mind refused.
     ///
-    /// The index supplies ids and scores and nothing else. A hit is a
-    /// candidate: it is dropped unless the mind holds a document of that kind
-    /// and id at the head, and what remains is decided by the selection, run
-    /// by the substrate over every row the mind has, its `keys` narrowed to
-    /// the candidates. Narrowing `keys` rather than the rows keeps the
-    /// evaluator's universe whole, so `cited` and `in_force` mean what they
-    /// mean in `query`. Nothing about a document's standing is read from the
-    /// index; `in_force` is the caller's to ask for and the mind's to derive.
-    ///
-    /// This is the one place the mind judges whether it holds a hit, in the
-    /// one read of its rows that ranking needs: `Ranked::dropped` returns the
-    /// hits it found no document for, for the caller to report.
+    /// The mind decides membership first (`members`); the index only scores
+    /// the ids it was handed, so the answer is exact as of `members.as_of`,
+    /// the snapshot the members were taken at, and not the head. The index
+    /// supplies ids and scores and nothing else. A hit is dropped, and
+    /// reported in `Ranked::dropped`, unless the mind holds a document of
+    /// that kind and id at that snapshot and the id is one of `members.ids`.
+    /// What remains is evaluated by the substrate over every row the mind
+    /// had, its `keys` narrowed to the hits. Narrowing `keys` rather than the
+    /// rows keeps the evaluator's universe whole, so `cited` and `in_force`
+    /// mean what they mean in `query`. Nothing about a document's standing is
+    /// read from the index.
     ///
     /// The order is the one thing the substrate cannot know: score, highest
     /// first, ties by ordinal. The page holds at most the selection's limit
-    /// and at most `top_k` documents, `matched` counts every candidate the
-    /// selection passed, and `next` is never set. The substrate answers at
-    /// most `LIMIT_MAX` rows and cuts by ordinal, so the candidates are cut
-    /// to the best `LIMIT_MAX` by score first, among the documents the mind
-    /// holds: an id the mind does not hold never takes the place of one it
-    /// does.
+    /// and at most `top_k` documents, `matched` counts the members, `scores`
+    /// holds one score per kept row, in row order, and `next` is never set.
     pub fn rank(
         &self,
         selection: &Selection,
         semantic: &SemanticQuery,
+        members: &Members,
         hits: &[(PipelineRef, f32)],
     ) -> Result<Ranked, MindRefusal> {
         let selection = Self::semantic_selection(selection, semantic)?;
-        let head = receipt::head(self)?;
-        let rows = Reader::at(self, head)?.rows()?;
+        let as_of = members.as_of;
+        let rows = Reader::at(self, as_of)?.rows()?;
 
         let held: BTreeMap<(PipelineKind, &str), i64> =
             rows.iter().map(|row| ((row.kind, row.key.as_str()), row.ordinal())).collect();
+        let member: BTreeSet<(PipelineKind, &str)> =
+            members.ids.iter().map(|id| (id.kind, id.id.0.as_str())).collect();
         let mut candidates: Vec<(&str, f32, i64)> = Vec::new();
         let mut dropped = Vec::new();
         for (hit, score) in hits {
-            match held.get(&(hit.kind, hit.id.0.as_str())) {
-                Some(&ordinal) => candidates.push((hit.id.0.as_str(), *score, ordinal)),
-                None => dropped.push(hit.clone()),
+            let id = (hit.kind, hit.id.0.as_str());
+            match held.get(&id) {
+                Some(&ordinal) if member.contains(&id) => candidates.push((id.1, *score, ordinal)),
+                _ => dropped.push(hit.clone()),
             }
         }
         candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.2.cmp(&b.2)));
@@ -569,12 +618,13 @@ impl<S: MindStore> Mind<S> {
             Evaluation { rows: Vec::new(), matched: 0, edges: Vec::new(), next_cursor: None }
         } else {
             let narrowed = Selection { keys: Some(keys), limit: Some(LIMIT_MAX), ..selection.clone() };
-            select(&Vocabulary, &rows, &narrowed, head, self.cursor_key())?
+            select(&Vocabulary, &rows, &narrowed, as_of, self.cursor_key())?
         };
         let score = |row: &SelectionRow| scores.get(row.key.as_str()).copied().unwrap_or(f32::NEG_INFINITY);
         evaluation.rows.sort_by(|a, b| score(b).total_cmp(&score(a)).then(a.ordinal().cmp(&b.ordinal())));
         evaluation.rows.truncate(limit);
         evaluation.next_cursor = None;
+        let row_scores: Vec<f32> = evaluation.rows.iter().map(score).collect();
         let position =
             |kind: PipelineKind, key: &str| evaluation.rows.iter().position(|row| row.kind == kind && row.key == key);
         let mut kept: Vec<(usize, EdgeMatch<SelectionRow>)> = std::mem::take(&mut evaluation.edges)
@@ -589,7 +639,8 @@ impl<S: MindStore> Mind<S> {
             .collect();
         kept.sort_by_key(|(at, _)| *at);
         evaluation.edges = kept.into_iter().map(|(_, edge)| edge).collect();
-        Ok(Ranked { page: Self::page(&selection, evaluation, head)?, dropped })
+        evaluation.matched = u32::try_from(members.ids.len()).unwrap_or(u32::MAX);
+        Ok(Ranked { page: Self::page(&selection, evaluation, as_of, Some(row_scores))?, dropped })
     }
 
     /// The projection of an evaluation: a header or a whole view per row, and
@@ -598,6 +649,7 @@ impl<S: MindStore> Mind<S> {
         selection: &Selection,
         evaluation: Evaluation<SelectionRow>,
         as_of: u64,
+        scores: Option<Vec<f32>>,
     ) -> Result<PipelineSelectionPage, MindRefusal> {
         let items = if selection.projection == PROJECTION_DOCUMENT {
             PipelinePageItems::Documents(evaluation.rows.iter().map(|row| row.view.clone()).collect())
@@ -616,7 +668,7 @@ impl<S: MindStore> Mind<S> {
         } else {
             None
         };
-        Ok(PipelineSelectionPage { matched: evaluation.matched, as_of, next: evaluation.next_cursor, items, edges })
+        Ok(PipelineSelectionPage { matched: evaluation.matched, as_of, next: evaluation.next_cursor, items, edges, scores })
     }
 }
 
@@ -1594,6 +1646,13 @@ mod tests {
         with(selection, any_of("in_force", &["true"]))
     }
 
+    /// The members of the selection from the mind, then the page ranked from
+    /// the hits: the two steps the daemon takes around the index.
+    fn rank_all(mind: &Mind<MemoryStore>, selection: &Selection, semantic: &SemanticQuery, hits: &[(PipelineRef, f32)]) -> Ranked {
+        let members = mind.members(selection, semantic).unwrap();
+        mind.rank(selection, semantic, &members, hits).unwrap()
+    }
+
     /// A mind with every way a document stops being in force: Q1 answered
     /// (resolved), Q2 answered and the answer withdrawn (its resolution is
     /// resolved, the question in force again), R3 superseded by R4.
@@ -1637,7 +1696,7 @@ mod tests {
             hit(K::Ruling, &shelf.r4, 0.5),
             hit(K::Question, &shelf.q2, 0.4),
         ];
-        let ranked = shelf.mind.rank(&Selection::default(), &asking(10), &hits).unwrap();
+        let ranked = rank_all(&shelf.mind, &Selection::default(), &asking(10), &hits);
         assert_eq!(
             ranked.dropped,
             vec![r(K::Question, &id("question", "Q99")), r(K::Question, &shelf.r4)],
@@ -1646,16 +1705,17 @@ mod tests {
         let everything = ranked.page;
         assert_eq!(ids(&everything), vec![shelf.q1.clone(), shelf.withdrawn_resolution.clone(), shelf.r3.clone(), shelf.r4.clone(), shelf.q2.clone()],
             "without in_force the selection has not asked about standing, and the unheld and mis-kinded hits are gone");
-        assert_eq!(everything.matched, 5);
+        assert_eq!(everything.matched, plain_matched(&shelf.mind, &Selection::default()), "matched counts the whole mind, not the five hits");
 
-        let page = shelf.mind.rank(&standing(Selection::default()), &asking(10), &hits).unwrap().page;
+        let page = rank_all(&shelf.mind, &standing(Selection::default()), &asking(10), &hits).page;
         assert_eq!(ids(&page), vec![shelf.r4.clone(), shelf.q2.clone()]);
-        assert_eq!((page.matched, page.next), (2, None));
+        assert_eq!((page.matched, page.next), (plain_matched(&shelf.mind, &standing(Selection::default())), None));
         assert_eq!(page.as_of, receipt::head(&shelf.mind).unwrap());
 
-        let none = shelf.mind.rank(&standing(Selection::default()), &asking(10), &[hit(K::Question, &id("question", "Q99"), 1.0)]).unwrap().page;
-        assert_eq!((none.matched, ids(&none)), (0, Vec::<String>::new()), "an empty candidate set is an empty page, not a refusal");
-        assert_eq!(shelf.mind.rank(&standing(Selection::default()), &asking(10), &[]).unwrap().page.matched, 0);
+        let none = rank_all(&shelf.mind, &standing(Selection::default()), &asking(10), &[hit(K::Question, &id("question", "Q99"), 1.0)]).page;
+        assert_eq!(ids(&none), Vec::<String>::new(), "an empty candidate set is an empty page, not a refusal");
+        assert_eq!(none.matched, plain_matched(&shelf.mind, &standing(Selection::default())), "and the members are still counted");
+        assert_eq!(rank_all(&shelf.mind, &standing(Selection::default()), &asking(10), &[]).page.matched, none.matched);
     }
 
     /// The substrate answers 200 rows and cuts by ordinal, so 250 candidates
@@ -1673,10 +1733,11 @@ mod tests {
         let mut hits: Vec<(PipelineRef, f32)> = (0..250).map(|n| hit(K::Question, &key(n), n as f32)).collect();
         // Twenty ids the mind holds nothing for, above every real score.
         hits.extend((0..20).map(|n| hit(K::Question, &id("question", &format!("Gone{n}")), 1000.0 + n as f32)));
-        let ranked = mind.rank(&Selection::default(), &asking(200), &hits).unwrap();
+        let ranked = rank_all(&mind, &Selection::default(), &asking(200), &hits);
         let expected: Vec<String> = (50..250).rev().map(key).collect();
         assert_eq!(ids(&ranked.page), expected, "the 200 best, best first");
-        assert_eq!(ranked.page.matched, 200);
+        assert_eq!(ranked.page.matched, plain_matched(&mind, &Selection::default()));
+        assert!(ranked.page.matched > 250, "every member, not the 200 answered");
         assert_eq!(ranked.dropped.len(), 20);
     }
 
@@ -1687,17 +1748,17 @@ mod tests {
     fn ranked_results_are_ordered_by_score_then_ordinal_and_cut_to_the_limit() {
         let shelf = shelf();
         let by_ordinal = [hit(K::Question, &shelf.q2, 0.4), hit(K::Ruling, &shelf.r4, 0.5)];
-        assert_eq!(ids(&shelf.mind.rank(&standing(Selection::default()), &asking(10), &by_ordinal).unwrap().page), vec![shelf.r4.clone(), shelf.q2.clone()],
+        assert_eq!(ids(&rank_all(&shelf.mind, &standing(Selection::default()), &asking(10), &by_ordinal).page), vec![shelf.r4.clone(), shelf.q2.clone()],
             "Q2 was admitted first, and the better score still comes first");
         let tied = [hit(K::Ruling, &shelf.r4, 0.5), hit(K::Question, &shelf.q2, 0.5)];
-        assert_eq!(ids(&shelf.mind.rank(&standing(Selection::default()), &asking(10), &tied).unwrap().page), vec![shelf.q2.clone(), shelf.r4.clone()],
+        assert_eq!(ids(&rank_all(&shelf.mind, &standing(Selection::default()), &asking(10), &tied).page), vec![shelf.q2.clone(), shelf.r4.clone()],
             "a tie falls to the earlier ordinal");
 
         let limited = Selection { limit: Some(1), ..standing(Selection::default()) };
-        let page = shelf.mind.rank(&limited, &asking(10), &by_ordinal).unwrap().page;
-        assert_eq!((ids(&page), page.matched, page.next), (vec![shelf.r4.clone()], 2, None), "the limit keeps the best, not the earliest");
-        let page = shelf.mind.rank(&standing(Selection::default()), &asking(1), &by_ordinal).unwrap().page;
-        assert_eq!((ids(&page), page.matched), (vec![shelf.r4.clone()], 2), "top_k bounds the page too");
+        let page = rank_all(&shelf.mind, &limited, &asking(10), &by_ordinal).page;
+        assert_eq!((ids(&page), page.matched, page.next), (vec![shelf.r4.clone()], plain_matched(&shelf.mind, &standing(Selection::default())), None), "the limit keeps the best, not the earliest");
+        let page = rank_all(&shelf.mind, &standing(Selection::default()), &asking(1), &by_ordinal).page;
+        assert_eq!((ids(&page), page.matched), (vec![shelf.r4.clone()], plain_matched(&shelf.mind, &standing(Selection::default()))), "top_k bounds the page too");
     }
 
     /// Membership is the selection's alone: a kind, a key allowlist and a
@@ -1708,16 +1769,18 @@ mod tests {
     fn the_selections_own_predicates_decide_which_candidates_stay() {
         let shelf = shelf();
         let hits = [hit(K::Question, &shelf.q2, 0.4), hit(K::Ruling, &shelf.r4, 0.5)];
-        assert_eq!(ids(&shelf.mind.rank(&of_kinds(&[K::Ruling]), &asking(10), &hits).unwrap().page), vec![shelf.r4.clone()]);
+        assert_eq!(ids(&rank_all(&shelf.mind, &of_kinds(&[K::Ruling]), &asking(10), &hits).page), vec![shelf.r4.clone()]);
         let keyed = Selection { keys: Some(vec![shelf.q2.clone(), shelf.q1.clone()]), ..Selection::default() };
-        assert_eq!(ids(&shelf.mind.rank(&keyed, &asking(10), &hits).unwrap().page), vec![shelf.q2.clone()], "keys intersect the candidates");
+        assert_eq!(ids(&rank_all(&shelf.mind, &keyed, &asking(10), &hits).page), vec![shelf.q2.clone()], "keys intersect the candidates");
         let disjoint = Selection { keys: Some(vec![shelf.q1.clone()]), ..Selection::default() };
-        assert_eq!(shelf.mind.rank(&disjoint, &asking(10), &hits).unwrap().page.matched, 0);
+        let none = rank_all(&shelf.mind, &disjoint, &asking(10), &hits);
+        assert_eq!((none.page.matched, ids(&none.page).len()), (1, 0), "Q1 is the one member, and neither hit is it");
+        assert_eq!(none.dropped.len(), 2, "hits outside the members are dropped");
         let unnamed = Selection { cited: Some(Incoming { role: "subject".into(), exists: false }), ..Selection::default() };
         let plain = ids(&shelf.mind.query(&Selection { keys: Some(vec![shelf.q2.clone(), shelf.r4.clone()]), ..unnamed.clone() }).unwrap());
         assert_eq!(plain, vec![shelf.r4.clone()], "no resolution names R4 as its subject, and one names Q2");
-        assert_eq!(ids(&shelf.mind.rank(&unnamed, &asking(10), &hits).unwrap().page), plain, "the same answer as the plain query over the same rows");
-        assert_eq!(ids(&shelf.mind.rank(&Selection { projection: "document".into(), ..of_kinds(&[K::Ruling]) }, &asking(10), &hits).unwrap().page), vec![shelf.r4.clone()]);
+        assert_eq!(ids(&rank_all(&shelf.mind, &unnamed, &asking(10), &hits).page), plain, "the same answer as the plain query over the same rows");
+        assert_eq!(ids(&rank_all(&shelf.mind, &Selection { projection: "document".into(), ..of_kinds(&[K::Ruling]) }, &asking(10), &hits).page), vec![shelf.r4.clone()]);
     }
 
     /// A citation hop is answered over the whole mind, and its edges follow the
@@ -1729,14 +1792,14 @@ mod tests {
         let shelf = shelf();
         let named = Selection { cited: Some(Incoming { role: "subject".into(), exists: true }), ..of_kinds(&[K::Question]) };
         let hits = [hit(K::Question, &shelf.q2, 0.9), hit(K::Question, &shelf.q1, 0.4)];
-        let both = shelf.mind.rank(&named, &asking(10), &hits).unwrap().page;
+        let both = rank_all(&shelf.mind, &named, &asking(10), &hits).page;
         assert_eq!(ids(&both), vec![shelf.q2.clone(), shelf.q1.clone()], "Q1 was admitted first and scored lower");
         let edges = both.edges.expect("a hop carries its edges");
         let targets: Vec<&str> = edges.iter().map(|edge| edge.to.id.0.as_str()).collect();
         assert_eq!(targets, [shelf.q2.as_str(), shelf.q1.as_str()], "the edges follow the page order");
         assert!(edges.iter().all(|edge| edge.from.kind == K::Resolution && edge.role == CitationRole::Subject));
 
-        let limited = shelf.mind.rank(&Selection { limit: Some(1), ..named.clone() }, &asking(10), &hits).unwrap().page;
+        let limited = rank_all(&shelf.mind, &Selection { limit: Some(1), ..named.clone() }, &asking(10), &hits).page;
         assert_eq!(ids(&limited), vec![shelf.q2.clone()]);
         let kept = limited.edges.unwrap();
         assert_eq!(kept.len(), 1, "the dropped row's edge is dropped with it");
@@ -1744,41 +1807,238 @@ mod tests {
         assert_eq!(kept[0].from.id.0, id("resolution", "question.Q2.n1"));
 
         let empty_cursor = Selection { cursor: Some(String::new()), ..standing(Selection::default()) };
-        let with = shelf.mind.rank(&empty_cursor, &asking(10), &[hit(K::Ruling, &shelf.r4, 0.5)]).unwrap().page;
+        let with = rank_all(&shelf.mind, &empty_cursor, &asking(10), &[hit(K::Ruling, &shelf.r4, 0.5)]).page;
         assert_eq!(ids(&with), vec![shelf.r4.clone()]);
     }
 
 
     /// A ranked answer cannot be resumed, so a cursor is refused by name, and
-    /// so is a query that cannot be asked, before any hit is looked at.
+    /// so is a query that cannot be asked: `members` refuses before the index
+    /// is asked anything and before any hit is looked at.
     #[test]
     fn a_semantic_query_that_cannot_be_ranked_is_refused_by_name() {
         let shelf = shelf();
-        let hits = [hit(K::Ruling, &shelf.r4, 0.5)];
         let with_cursor = Selection { cursor: Some("anything".into()), ..Selection::default() };
         fn on(field: &str, refusal: &MindRefusal) -> bool {
             matches!(refusal, MindRefusal::SelectionInvalid { field: f, .. } if f == field)
         }
-        for refusal in [
-            shelf.mind.rank(&with_cursor, &asking(10), &hits).unwrap_err(),
-            shelf.mind.check_semantic(&with_cursor, &asking(10)).unwrap_err(),
-        ] {
-            assert!(on("cursor", &refusal), "{refusal:?}");
-        }
+        let refusal = shelf.mind.members(&with_cursor, &asking(10)).unwrap_err();
+        assert!(on("cursor", &refusal), "{refusal:?}");
         let reversed = Selection { descending: true, ..Selection::default() };
-        for refusal in [
-            shelf.mind.rank(&reversed, &asking(10), &hits).unwrap_err(),
-            shelf.mind.check_semantic(&reversed, &asking(10)).unwrap_err(),
-        ] {
-            assert!(on("descending", &refusal), "a ranked answer has no order to reverse: {refusal:?}");
-        }
-        assert!(on("semantic.top_k", &shelf.mind.rank(&Selection::default(), &asking(0), &hits).unwrap_err()));
-        assert!(on("semantic.top_k", &shelf.mind.rank(&Selection::default(), &asking(201), &hits).unwrap_err()));
+        let refusal = shelf.mind.members(&reversed, &asking(10)).unwrap_err();
+        assert!(on("descending", &refusal), "a ranked answer has no order to reverse: {refusal:?}");
+        assert!(on("semantic.top_k", &shelf.mind.members(&Selection::default(), &asking(0)).unwrap_err()));
+        assert!(on("semantic.top_k", &shelf.mind.members(&Selection::default(), &asking(201)).unwrap_err()));
         let blank = SemanticQuery { text: "  ".into(), top_k: 3 };
-        assert!(on("semantic.text", &shelf.mind.rank(&Selection::default(), &blank, &hits).unwrap_err()));
+        assert!(on("semantic.text", &shelf.mind.members(&Selection::default(), &blank).unwrap_err()));
         let malformed = with(Selection::default(), any_of("root", &["a/../b"]));
-        assert_eq!(shelf.mind.check_semantic(&malformed, &asking(3)), shelf.mind.query(&malformed).map(drop), "the same door as a plain query");
-        assert!(shelf.mind.check_semantic(&standing(Selection::default()), &asking(3)).is_ok());
+        assert_eq!(
+            shelf.mind.members(&malformed, &asking(3)).map(drop),
+            shelf.mind.query(&malformed).map(drop),
+            "the same door as a plain query"
+        );
+        assert!(shelf.mind.members(&standing(Selection::default()), &asking(3)).is_ok());
+        // rank runs the same doors over the same inputs.
+        let members = shelf.mind.members(&Selection::default(), &asking(10)).unwrap();
+        let refusal = shelf.mind.rank(&with_cursor, &asking(10), &members, &[]).unwrap_err();
+        assert!(on("cursor", &refusal), "{refusal:?}");
+    }
+
+    /// The matched count a plain query gives the same selection: the figure a
+    /// semantic answer's `matched` must equal, computed without the semantic
+    /// path.
+    fn plain_matched(mind: &Mind<MemoryStore>, selection: &Selection) -> u32 {
+        mind.query(selection).unwrap().matched
+    }
+
+    /// Every id a cursor walk of `query` returns for the selection, in order.
+    fn walked(mind: &Mind<MemoryStore>, selection: &Selection) -> Vec<PipelineRef> {
+        let mut walk = selection.clone();
+        let mut out = Vec::new();
+        loop {
+            let page = mind.query(&walk).unwrap();
+            match &page.items {
+                PipelinePageItems::Headers(headers) => out.extend(headers.iter().map(|header| header.id.clone())),
+                PipelinePageItems::Documents(views) => out.extend(views.iter().map(|view| view.id.clone())),
+            }
+            match page.next {
+                Some(next) => walk.cursor = Some(next),
+                None => return out,
+            }
+        }
+    }
+
+    /// The members of a selection are everything it matches, not the first
+    /// page: past 200 rows, with a citation hop and `in_force`, they are the
+    /// cursor walk of `query` over the same selection, as of the head.
+    #[test]
+    fn members_are_the_whole_match_of_the_selection_past_one_page() {
+        let mut mind = seeded();
+        for start in (0..250).step_by(crate::admission::BATCH_MAX) {
+            committed(admit(&mut mind, (start..(start + crate::admission::BATCH_MAX as u32).min(250)).map(question_n).collect()));
+        }
+        // Forty questions are answered: resolved, and named as a subject.
+        let answered: Vec<D> =
+            (0..40).map(|n| answering(&format!("R{n}"), &id("question", &format!("Q{n}")))).collect();
+        for batch in answered.chunks(crate::admission::BATCH_MAX) {
+            committed(admit(&mut mind, batch.to_vec()));
+        }
+        let questions = of_kinds(&[K::Question]);
+        let unnamed = Selection { cited: Some(Incoming { role: "subject".into(), exists: false }), ..questions.clone() };
+        let selections = [
+            Selection::default(),
+            questions.clone(),
+            standing(questions.clone()),
+            unnamed.clone(),
+            standing(unnamed),
+        ];
+        for selection in selections {
+            let members = mind.members(&selection, &asking(5)).unwrap();
+            assert_eq!(members.as_of, receipt::head(&mind).unwrap());
+            assert_eq!(members.ids, walked(&mind, &selection), "{selection:?}");
+            assert_eq!(members.ids.len() as u32, plain_matched(&mind, &selection));
+        }
+        let standing_questions = mind.members(&standing(questions), &asking(5)).unwrap();
+        assert_eq!(standing_questions.ids.len(), 210, "250 questions, 40 of them resolved, all past one page");
+        // The selection's own limit shortens a page, never the membership.
+        let limited = Selection { limit: Some(3), ..of_kinds(&[K::Question]) };
+        assert_eq!(mind.members(&limited, &asking(5)).unwrap().ids.len(), 250);
+    }
+
+    /// The walk costs one select per LIMIT_MAX members whatever the caller
+    /// asked for, through the production `members`: a caller's `limit`,
+    /// projection or spread never reach it. At limit 1 and document
+    /// projection over 599 questions the walk takes exactly 3 pages and
+    /// returns exactly the questions, in the mind's order.
+    #[test]
+    fn the_members_walk_takes_its_page_size_from_the_mind_not_the_caller() {
+        let mut mind = seeded();
+        for start in (0..599u32).step_by(crate::admission::BATCH_MAX) {
+            committed(admit(&mut mind, (start..(start + crate::admission::BATCH_MAX as u32).min(599)).map(question_n).collect()));
+        }
+        let caller = Selection { limit: Some(1), projection: PROJECTION_DOCUMENT.into(), ..of_kinds(&[K::Question]) };
+        let members = mind.members(&caller, &asking(5)).unwrap();
+        // The one order: admission order (a batch is one ordinal), then key.
+        let mut numbered: Vec<u32> = (0..599).collect();
+        numbered.sort_by_key(|n| (n / crate::admission::BATCH_MAX as u32, format!("Q{n}")));
+        let expected: Vec<PipelineRef> = numbered.iter().map(|n| r(K::Question, &id("question", &format!("Q{n}")))).collect();
+        assert_eq!(members.ids, expected, "exactly the questions, once each, in the mind's order");
+        assert_eq!(LIMIT_MAX, 200);
+        assert_eq!(members.pages, 3, "599 members at the mind's page of 200");
+    }
+
+    /// The walk keeps the caller's `cites` hop: among follow-ups, only the one
+    /// citing Q1 is a member, and a ranking over all three counts only it.
+    #[test]
+    fn a_cites_hop_limits_the_members_to_the_cited_rows() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A"), question("Q2", &["A", "B"], "A")]));
+        let (q1, q2) = (id("question", "Q1"), id("question", "Q2"));
+        committed(admit(&mut mind, vec![
+            follow_up("FU-1", r(K::Question, &q1)),
+            follow_up("FU-2", r(K::Question, &q2)),
+            follow_up("FU-3", r(K::Question, &q2)),
+        ]));
+        let selection = Selection { cites: Some(cites(K::Question, &q1, None)), ..of_kinds(&[K::FollowUp]) };
+        let fu = |label: &str| id("follow_up", label);
+        let members = mind.members(&selection, &asking(5)).unwrap();
+        assert_eq!(members.ids, vec![r(K::FollowUp, &fu("FU-1"))]);
+        let hits = [hit(K::FollowUp, &fu("FU-2"), 0.9), hit(K::FollowUp, &fu("FU-1"), 0.8), hit(K::FollowUp, &fu("FU-3"), 0.7)];
+        let ranked = rank_all(&mind, &selection, &asking(5), &hits);
+        assert_eq!(ranked.page.matched, 1);
+        assert_eq!(ids(&ranked.page), vec![fu("FU-1")]);
+    }
+
+    /// The walk keeps the role of the caller's `cites` hop: spec r2 is cited
+    /// by two resolutions, one as its subject and one as what supersedes r1,
+    /// and a hop through `subject` admits only the first.
+    #[test]
+    fn a_cites_hop_keeps_its_role_in_the_members() {
+        let mut mind = seeded();
+        let (r1, r2) = (id("cut_spec", "cut-1.r1"), id("cut_spec", "cut-1.r2"));
+        committed(admit(&mut mind, vec![D::CutSpec(cut_spec("1", 1))]));
+        committed(admit(&mut mind, vec![
+            D::CutSpec(cut_spec("1", 2)),
+            resolution(r(K::CutSpec, &r1), superseded(&[r(K::CutSpec, &r2)])),
+        ]));
+        committed(admit(&mut mind, vec![resolution(r(K::CutSpec, &r2), withdrawn())]));
+        let (as_superseder, as_subject) = (id("resolution", "cut_spec.cut-1.r1.n1"), id("resolution", "cut_spec.cut-1.r2.n1"));
+        let through = |role: Option<&str>| Selection {
+            cites: Some(cites(K::CutSpec, &r2, role)),
+            ..of_kinds(&[K::Resolution])
+        };
+        let hits = [hit(K::Resolution, &as_superseder, 0.9), hit(K::Resolution, &as_subject, 0.8)];
+
+        let subject = through(Some("subject"));
+        assert_eq!(mind.members(&subject, &asking(5)).unwrap().ids, vec![r(K::Resolution, &as_subject)]);
+        let ranked = rank_all(&mind, &subject, &asking(5), &hits);
+        assert_eq!(ranked.page.matched, 1);
+        assert_eq!(ids(&ranked.page), vec![as_subject.clone()]);
+
+        let superseded_by = through(Some("superseded_by"));
+        assert_eq!(mind.members(&superseded_by, &asking(5)).unwrap().ids, vec![r(K::Resolution, &as_superseder)]);
+
+        let any = mind.members(&through(None), &asking(5)).unwrap();
+        assert_eq!(any.ids, vec![r(K::Resolution, &as_superseder), r(K::Resolution, &as_subject)]);
+    }
+
+    /// `matched` is what the selection admits, not what the index returned:
+    /// two hits among five members still say five.
+    #[test]
+    fn matched_counts_the_members_not_the_hits() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, (0..5).map(question_n).collect()));
+        let key = |n: u32| id("question", &format!("Q{n}"));
+        let selection = of_kinds(&[K::Question]);
+        let ranked = rank_all(&mind, &selection, &asking(10), &[hit(K::Question, &key(3), 0.9), hit(K::Question, &key(1), 0.2)]);
+        assert_eq!(ranked.page.matched, 5);
+        assert_eq!(ids(&ranked.page), vec![key(3), key(1)]);
+    }
+
+    /// A semantic page says how near each row is, row for row and best first;
+    /// a plain page says nothing of the kind.
+    #[test]
+    fn a_semantic_page_carries_one_score_per_row_best_first_and_a_plain_page_none() {
+        let shelf = shelf();
+        let hits = [
+            hit(K::Question, &shelf.q2, 0.4),
+            hit(K::Ruling, &shelf.r4, 0.5),
+            hit(K::Question, &shelf.q1, 0.9),
+            hit(K::Question, &id("question", "Q99"), 0.8),
+        ];
+        let page = rank_all(&shelf.mind, &standing(Selection::default()), &asking(10), &hits).page;
+        assert_eq!(ids(&page), vec![shelf.r4.clone(), shelf.q2.clone()]);
+        assert_eq!(page.scores, Some(vec![0.5, 0.4]), "the scores of the rows kept, in row order");
+        let all = rank_all(&shelf.mind, &Selection::default(), &asking(2), &hits).page;
+        assert_eq!(ids(&all), vec![shelf.q1.clone(), shelf.r4.clone()]);
+        assert_eq!(all.scores, Some(vec![0.9, 0.5]), "cut to top_k, the scores are cut with the rows");
+        let empty = rank_all(&shelf.mind, &standing(Selection::default()), &asking(10), &[]).page;
+        assert_eq!(empty.scores, Some(vec![]), "a semantic answer with no rows still says it is semantic");
+        assert_eq!(shelf.mind.query(&standing(Selection::default())).unwrap().scores, None);
+    }
+
+    /// The answer is the snapshot the members were taken at, not the head: a
+    /// ruling superseded after `members` is still in force there, and a hit
+    /// the members do not hold is dropped and reported.
+    #[test]
+    fn rank_reads_the_snapshot_the_members_were_taken_at() {
+        let mut shelf = shelf();
+        let selection = standing(of_kinds(&[K::Ruling]));
+        let members = shelf.mind.members(&selection, &asking(10)).unwrap();
+        assert!(members.ids.contains(&r(K::Ruling, &shelf.r4)));
+        let r5 = id("ruling", "R5");
+        committed(admit(&mut shelf.mind, vec![D::Ruling(ruling("R5"))]));
+        committed(admit(&mut shelf.mind, vec![resolution(r(K::Ruling, &shelf.r4), superseded(&[r(K::Ruling, &r5)]))]));
+        assert!(
+            !ids(&shelf.mind.query(&selection).unwrap()).contains(&shelf.r4),
+            "at the head R4 no longer stands"
+        );
+        let hits = [hit(K::Ruling, &shelf.r4, 0.5), hit(K::Ruling, &r5, 0.9)];
+        let ranked = shelf.mind.rank(&selection, &asking(10), &members, &hits).expect("the members rank");
+        assert_eq!(ids(&ranked.page), vec![shelf.r4.clone()], "R4 still stands as of the members' snapshot");
+        assert_eq!(ranked.page.as_of, members.as_of);
+        assert!(members.as_of < receipt::head(&shelf.mind).unwrap());
+        assert_eq!(ranked.dropped, vec![r(K::Ruling, &r5)], "a hit outside the members is dropped, not answered");
     }
 
     /// A summary is bounded by a named constant whatever the document's lists

@@ -46,9 +46,13 @@ fn the_adapters_embed_write_query_and_clean_up_a_scratch_collection() {
     let mut embedder = OllamaEmbedder::new(&ollama, &model);
     let identity = embedder.model_identity(Duration::from_secs(60)).expect("the model is listed");
     println!("identity: {identity:?}");
-    let texts = ["The organ owns the mind.".to_string(), "A recipe for lentil soup.".to_string()];
-    let vectors = embedder.embed(&texts, Duration::from_secs(60)).expect("two texts embed");
-    assert_eq!(vectors.len(), 2);
+    let texts = [
+        "The organ owns the mind.".to_string(),
+        "A recipe for lentil soup.".to_string(),
+        "How to keep a sourdough starter alive.".to_string(),
+    ];
+    let vectors = embedder.embed(&texts, Duration::from_secs(60)).expect("three texts embed");
+    assert_eq!(vectors.len(), 3);
     assert!(vectors.iter().all(|vector| vector.len() == identity.dimensions as usize));
 
     let meta = CollectionMeta {
@@ -97,10 +101,17 @@ fn the_adapters_embed_write_query_and_clean_up_a_scratch_collection() {
             let asked = format!("Instruct: {QUERY_INSTRUCTION}
 Query: Who is responsible for keeping the memory?");
             let query = embedder.embed(&[asked], Duration::from_secs(60)).expect("the query embeds").remove(0);
-            let hits = store.search(name, &query, 2, Duration::from_secs(60)).unwrap();
+            let among: Vec<String> = points.iter().map(|point| point.id.clone()).collect();
+            let hits = store.search(name, &query, &among, 2, Duration::from_secs(60)).unwrap();
             assert_eq!(hits.len(), 2, "{hits:?}");
             assert_eq!((hits[0].doc_id.as_str(), hits[0].kind.as_str()), ("smoke:doc:0", "question"), "{hits:?}");
             assert!(hits[0].score > hits[1].score, "{hits:?}");
+            // The members are a strict subset that leaves out the nearest point:
+            // the filter must exclude it, not merely rank it.
+            let subset: Vec<String> = points[1..].iter().map(|point| point.id.clone()).collect();
+            let hits = store.search(name, &query, &subset, 3, Duration::from_secs(60)).unwrap();
+            let docs: BTreeSet<&str> = hits.iter().map(|hit| hit.doc_id.as_str()).collect();
+            assert_eq!(docs, BTreeSet::from(["smoke:doc:1", "smoke:doc:2"]), "only the members are scored: {hits:?}");
             println!("{name}: described, created, upserted {} points, queried, searched: {hits:?}", points.len());
         }
     }));

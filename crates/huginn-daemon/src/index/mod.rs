@@ -129,9 +129,6 @@ pub const BULK_EMBED_TIMEOUT: Duration = Duration::from_secs(300);
 /// adapter's default.
 pub const INDEX_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The most candidates one search asks the index for.
-pub const OVERSAMPLE_MAX: u32 = 200;
-
 /// What an embedder is: the model by name and by digest, and the length of the
 /// vectors it returns. Compatibility of a collection is decided on this and
 /// on nothing else: never on the address the embedder was reached at.
@@ -208,10 +205,11 @@ pub trait VectorIndex {
     /// Every point id the collection holds.
     fn ids(&mut self, collection: &str) -> Result<BTreeSet<String>>;
     fn upsert(&mut self, collection: &str, points: &[Point]) -> Result<()>;
-    /// The `limit` nearest points to `vector`, best first, with no filter: which
-    /// documents may be shown is the mind's to decide. An error once `within`
-    /// has passed.
-    fn search(&mut self, collection: &str, vector: &[f32], limit: u32, within: Duration) -> Result<Vec<Hit>>;
+    /// Scores exactly the points in `among` (exact, not approximate) against
+    /// `vector` and returns the `limit` nearest, best first. Which documents
+    /// are members is the mind's: the index only scores the points it is
+    /// handed. An error once `within` has passed.
+    fn search(&mut self, collection: &str, vector: &[f32], among: &[String], limit: u32, within: Duration) -> Result<Vec<Hit>>;
 }
 
 /// The mind's collection: one per instance.
@@ -556,11 +554,12 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         Ok(Ok(vectors))
     }
 
-    /// The candidates a query text finds: the text is embedded with the model's
-    /// query instruction and the collection is searched, with no filter and an
-    /// oversample of `min(top_k * 4, 200)`, because the mind will drop most of
-    /// what the index cannot know is not in force. A hit naming a kind this
-    /// organ has no name for is logged and left out.
+    /// The candidates a query text finds: the text is embedded with the model
+    /// query instruction and the collection scores exactly the `among` member
+    /// documents (ids the mind chose) and returns the `top_k` nearest. There
+    /// is no oversample: the members are scored, so the nearest `top_k` of them
+    /// are the answer. A hit naming a kind this organ has no name for is
+    /// logged and left out.
     ///
     /// A search is refused while the index is being rebuilt or cannot be asked
     /// (`unsearchable`), naming the state and how many documents are pending.
@@ -573,7 +572,7 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
     /// was reconciled under. Every call is bounded by what remains of
     /// `within`. A search that fails for any other reason (a timeout, a store
     /// error) fails alone and leaves the reconciliation standing.
-    pub fn search(&mut self, text: &str, top_k: u32, within: Duration) -> Result<Hits> {
+    pub fn search(&mut self, text: &str, top_k: u32, among: &[String], within: Duration) -> Result<Hits> {
         if let Some(why) = unsearchable(&self.progress_status()) {
             bail!("{why}");
         }
@@ -592,8 +591,8 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         ensure!(vectors.len() == 1, "the embedder returned {} vectors for one query", vectors.len());
         let vector = vectors.remove(0);
         ensure!(vector.len() == dimensions, "the embedder returned a query vector of {} where the collection holds {dimensions}", vector.len());
-        let limit = top_k.saturating_mul(4).min(OVERSAMPLE_MAX);
-        let found = self.index.search(&self.collection, &vector, limit, budget.left()?)?;
+        let points: Vec<String> = among.iter().map(|id| point_id(id)).collect();
+        let found = self.index.search(&self.collection, &vector, &points, top_k, budget.left()?)?;
         let mut hits = Vec::with_capacity(found.len());
         for hit in found {
             match PipelineKind::ALL.iter().find(|kind| kind.name() == hit.kind) {
@@ -665,6 +664,8 @@ struct Queued {
     ticket: SearchTicket,
     text: String,
     top_k: u32,
+    /// The member document ids the index is to score.
+    among: Vec<String>,
     due: Instant,
 }
 
@@ -780,9 +781,9 @@ fn serve_search<E: Embedder, V: VectorIndex>(projector: &mut Projector<E, V>, sh
     }
     #[cfg(test)]
     tests::after_absorb(&mut guard);
-    let Some(Queued { ticket, text, top_k, due }) = take_search(projector, &mut guard) else { return };
+    let Some(Queued { ticket, text, top_k, among, due }) = take_search(projector, &mut guard) else { return };
     drop(guard);
-    let found = projector.search(&text, top_k, due.saturating_duration_since(Instant::now())).map_err(|error| format!("{error:#}"));
+    let found = projector.search(&text, top_k, &among, due.saturating_duration_since(Instant::now())).map_err(|error| format!("{error:#}"));
     lock(shared).found.push((ticket, found));
 }
 
@@ -1010,7 +1011,7 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
     /// queue: the refusal is the answer, naming why and how many documents are
     /// pending. Documents admitted and not yet written are not a refusal: the
     /// search waits behind them.
-    fn search(&mut self, text: &str, top_k: u32) -> Result<SearchTicket, String> {
+    fn search(&mut self, text: &str, top_k: u32, among: Vec<String>) -> Result<SearchTicket, String> {
         let mut guard = lock(&self.shared);
         let status = including(&guard.status, u32::try_from(guard.inbox.len()).unwrap_or(u32::MAX));
         if let Some(why) = unsearchable(&status) {
@@ -1024,7 +1025,7 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
         }
         let ticket = SearchTicket(guard.next_ticket);
         guard.next_ticket += 1;
-        guard.searches.push_back(Queued { ticket, text: text.to_owned(), top_k, due: Instant::now() + self.deadline });
+        guard.searches.push_back(Queued { ticket, text: text.to_owned(), top_k, among, due: Instant::now() + self.deadline });
         drop(guard);
         self.shared.1.notify_all();
         Ok(ticket)

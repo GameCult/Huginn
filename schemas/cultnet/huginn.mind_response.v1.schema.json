@@ -3663,7 +3663,7 @@
       ]
     },
     "PipelineSelectionPage": {
-      "description": "One page of a selection. `matched` is the count before paging, `as_of` the\nsnapshot the page and every cursor of its walk are exact as of, and `edges`\nis present exactly when the selection follows a hop.",
+      "description": "One page of a selection. `matched` is the count before paging, `as_of` the\nsnapshot the page and every cursor of its walk are exact as of, `edges`\nis present exactly when the selection follows a hop, and `scores` exactly\nwhen the answer is semantic: one cosine similarity per item, in order\n(higher is nearer), for display and thresholding. It is never stored.",
       "type": "object",
       "properties": {
         "as_of": {
@@ -3693,6 +3693,16 @@
             "string",
             "null"
           ]
+        },
+        "scores": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "float"
+          }
         }
       },
       "required": [

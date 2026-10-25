@@ -165,7 +165,7 @@ fn ruling(quote: Option<&str>) -> PipelineDocument {
 }
 
 fn empty_page() -> PipelineSelectionPage {
-    PipelineSelectionPage { matched: 0, as_of: 1, next: None, items: PipelinePageItems::Headers(vec![]), edges: None }
+    PipelineSelectionPage { matched: 0, as_of: 1, next: None, items: PipelinePageItems::Headers(vec![]), edges: None, scores: None }
 }
 
 fn answer(operation: &str, response: &HuginnMindResponse) -> cultnet_rs::CultNetMessage {
@@ -524,6 +524,7 @@ fn committing(stored: Vec<PipelineDocumentView>) -> Server {
                     next: None,
                     items: PipelinePageItems::Documents(stored.clone()),
                     edges: None,
+                    scores: None,
                 };
                 answer("query", &HuginnMindResponse::Query(page))
             }
