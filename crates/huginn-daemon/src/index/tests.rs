@@ -1101,16 +1101,13 @@ fn qdrant_search_scores_only_the_members_exactly_and_reads_ids_kinds_and_scores(
     );
     let seen = answering.seen.lock().unwrap();
     assert_eq!((seen[0].0.as_str(), seen[0].1.as_str()), ("POST", format!("/collections/{name}/points/search").as_str()));
-    for expected in [
-        "\"vector\":[0.5,1.0,2.0,3.0]",
-        "\"has_id\":[\"p1\",\"p2\"]",
-        "\"exact\":true",
-        "\"limit\":12",
-        "\"with_vector\":false",
-    ] {
-        assert!(seen[0].2.contains(expected), "{expected} in {}", seen[0].2);
-    }
-    assert!(!seen[0].2.contains("\"kind\":{"), "membership is ids alone, no predicate on a payload field: {}", seen[0].2);
+    let body: serde_json::Value = serde_json::from_str(&seen[0].2).expect("the request body is JSON");
+    assert_eq!(body["vector"], serde_json::json!([0.5, 1.0, 2.0, 3.0]));
+    assert_eq!(body["filter"], serde_json::json!({ "must": [{ "has_id": ["p1", "p2"] }] }), "members are included, by id alone");
+    assert_eq!(body["params"], serde_json::json!({ "exact": true }), "exact search, under params");
+    assert_eq!(body["limit"], 12);
+    assert_eq!(body["with_vector"], false);
+    assert!(body.get("exact").is_none(), "a top-level exact is ignored by Qdrant: {body}");
     drop(seen);
 
     let nameless = stub(&[("POST /collections/", 200, r#"{"result":[{"id":"p","score":0.5,"payload":{"kind":"question"}}]}"#)]);
