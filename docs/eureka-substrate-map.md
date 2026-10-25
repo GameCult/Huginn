@@ -502,4 +502,219 @@ cut rests on were re-checked below rather than taken from it.
 4. The prompt hook (`recall.py prompt`, landed, uninstalled) is installed last,
    if at all. The retrieval-quality gaps (`gap-semantic-page-no-score`,
    `gap-semantic-one-text-per-query`, `gap-persona-state-not-indexed`) come
-   before cuts 2-4.
+   before cuts 2-4. They are mapped in "Semantic retrieval quality" below.
+
+## Semantic retrieval quality (Imagination, 2026-10-25)
+
+Serves `eureka-substrate:ruling:recall-triggers-rescoped`, which puts the
+retrieval-quality gaps before any further recall trigger. Gaps:
+`gap-semantic-topk-before-filter` and `gap-semantic-page-no-score` are one
+cut, `cut-semantic-members-scores`. `gap-semantic-one-text-per-query` is next
+in the sequence. Huginn is at `0b8ae4f` (origin/main, checkout clean on main).
+
+### Body facts (probes and source reads, 2026-10-25)
+
+- S-B1 (source read, `0b8ae4f`). The search path. `Daemon::begin_search`
+  (`crates/huginn-daemon/src/daemon.rs:176-185`) runs `Mind::check_semantic`,
+  then calls `IndexSink::search(text, top_k)`. The worker's `Projector::search`
+  (`crates/huginn-daemon/src/index/mod.rs:576-606`) embeds the text and asks
+  `VectorIndex::search` for `min(top_k * 4, OVERSAMPLE_MAX = 200)` points with no
+  filter (`:595`). `QdrantIndex::search` (`index/qdrant.rs:141-157`) posts
+  `points/search` with `vector`, `limit` and `with_payload: [doc_id, kind]`, and
+  no `filter` or `params`. `Daemon::finish` (`daemon.rs:206-221`) hands the hits to
+  `Mind::rank` (`crates/huginn-mind/src/query.rs:536-594`). `rank` drops the
+  hits the mind does not hold, cuts to the best 200 by score, narrows the
+  selection's `keys` to the candidates, evaluates the selection at head, sorts
+  by score and cuts to `min(limit, top_k)`. The selection's filters (kind,
+  root, `in_force`, hops) therefore apply only to the oversampled window: the
+  window is cut before membership is decided. The scores live in a local map
+  (`:558-575`), and `Self::page` (`:597-620`) builds `PipelineSelectionPage`
+  (`:274-284`: `matched, as_of, next, items, edges`) without them.
+- S-B2 (live probe through the eureka-state MCP tool, as_of 3919). Root
+  `eureka-substrate` has 39 in-force rulings. A semantic query over them
+  returned 3 rows at top_k 15 and 0 rows at top_k 4. Over its 77 in-force
+  questions and follow-ups, top_k 15 returned 4. Over the 1,686 in-force
+  rulings, questions and follow-ups of every root, top_k 10 returned 10. The 4x
+  over-fetch is enough only when members make up more than about a quarter of
+  the nearest points.
+- S-B3 (live probe, `tools/mind.py` from Starfire). A semantic query takes 2.5
+  to 2.7 s end to end, whatever the selection (narrow, mid, no filter) and
+  top_k (4 to 200). `whoami` takes 0.14 s. Embedding dominates the time.
+- S-B4 (live probe, Yggdrasil `127.0.0.1:6333`). Qdrant 1.17.1, collection
+  `huginn_mind_eureka`: 11,210 points (the mind holds 11,218 documents), 1,024
+  dimensions, Cosine, `on_disk` vectors. `indexed_vectors_count` is 0 over 8
+  segments, and `hnsw_config.full_scan_threshold` and `indexing_threshold` are
+  both 10000 (KB). No segment has reached the indexing threshold, so no HNSW
+  graph exists and every search is a brute-force scan. An unfiltered limit-200
+  search returned the same ids in the same order with and without
+  `params.exact`. The payload schema is empty, so there is no payload index.
+- S-B5 (live probe, same collection, median of 5 calls against one stored
+  vector):
+
+  | Search | ms | request bytes | response bytes |
+  |---|---|---|---|
+  | unfiltered, limit 200 | 3.3-3.6 | 14k | 41k |
+  | unfiltered, limit 11,210 (every point) | 42-45 | 14k | 2.07M |
+  | `has_id` 200 ids, limit 50 | 1.3 | 22k | 10k |
+  | `has_id` 3,000 ids, limit 50 | 3.7 | 134k | 10k |
+  | `has_id` 11,210 ids, limit 50 (exact: 9.5) | 9.0-10.5 | 462k | 10k |
+
+  Each filtered top 50 was compared with a brute-force full ranking restricted
+  to the same ids. The score lists were equal in every case, and the id sets
+  were equal except at tied scores (`0.58452` twice, `0.67256` twice), where
+  identical texts traded places at the window's edge. A `has_id` filter is
+  therefore exact up to ties.
+- S-B6 (source read, CultLib `8fc74c7`, the `cultnet-rs` that Huginn pins).
+  `select` (`packages/cultnet-rs/src/selection.rs:1742`) evaluates schemas,
+  keys, fields and both hops over the full row set. It returns at most
+  `LIMIT_MAX` = 200 rows per call, paged by cursor (`:1814-1830`). `matches`
+  (`:1630`) is the single-row fast path and asserts that the selection has no
+  hop. No entry point returns every match unpaged. `Reader::at`
+  (`query.rs:364-375`) reads the mind as of any receipt, so a cursor walk at
+  one `as_of` is exact.
+- S-B7 (source read). Consumers of the page shape:
+  - `huginn-mind` `wire.rs`: `HuginnMindResponse::Query` with
+    `derive(... Eq ...)` at `:122`, and a round-trip fixture at `:273-279`.
+  - The published `schemas/cultnet/huginn.mind_response.v1.schema.json`. Its
+    `PipelineSelectionPage` is at `:3665-3703`, pinned byte for byte by
+    `published_wire_schemas_match_derivation` (`wire.rs:332`).
+  - The eureka-state MCP server (`crates/eureka-state/src/main.rs:283-293`),
+    which passes the page through as JSON.
+  - The `huginn` CLI (`src/bin/huginn/main.rs:228-269`), which prints headers
+    and `matched`, and its tests' page literals (`tests/cli.rs:167-168`,
+    `:521-527`).
+  - `mind-body` `queue.rs:66`, which makes plain queries only.
+  - In the Eureka repo (`6d7cf60`), `tools/recall.py`. It reads only
+    `answer["items"]["Documents"]` (`:148-150`, `:174-176`) and ignores
+    other keys.
+  Both doors ignore unknown keys (gamecult-ops `runbooks/huginn-yggdrasil.md`,
+  Rollback), and serde reads a missing `Option` field as `None`.
+- S-B8 (live probe, ssh Yggdrasil; gamecult-ops `b9e0109`). The live release is
+  `68c6dd7`, six first-parent merges behind `0b8ae4f`, among them `35dda44`
+  (mind-self-run) and `f8eaf50` (campaign-repos). Huginn on Yggdrasil is an
+  interim hand-installed systemd unit, not an Idunn target: there is no
+  recipe, binding or brake. The deploy owner is the runbook's Upgrade
+  procedure, steps 1-9, daemon first and then client. Its Verify section has no
+  semantic-search check. No `huginn.exe` is installed on Starfire. The live
+  client is `C:\Users\Meta\.eureka\bin\eureka-state.exe`.
+
+### Model page
+
+No persistent kind changes. The page is a wire answer and is never stored, so
+`stored-documents-valid` is untouched. The Qdrant collection keeps its points,
+payload and metadata. Only the search request changes.
+
+### Rationale
+
+- **One cut, not two.** Both gaps belong to the semantic page, and one function
+  decides both: `Mind::rank` and the page it builds. The membership fix changes
+  what `rank` receives and what `matched` means. The score is one more column
+  of the rows `rank` already orders by score. Two cuts would edit the same
+  function, page struct, derive line and schema file twice in a row.
+  `gap-semantic-one-text-per-query` is a different decision (how a query
+  becomes vectors, and fusion). It edits `SemanticQuery`, `Projector::search`
+  and the `IndexSink` signature, all of which this cut also changes, so it is
+  the next cut rather than a sibling.
+- **The mind owns membership and the index only scores.** Before anything is
+  embedded, the mind computes the selection's whole match set (`members`) at
+  one snapshot. The index scores exactly those points and returns the nearest
+  `top_k`. `rank` reads the same snapshot, so the page is exact as of one
+  `as_of`, as a cursor walk is. This is pre-filtering. The established systems
+  have converged on it because post-filtering fails the way S-B2 shows. The
+  sources below are from their documentation as known in June 2026 and were
+  not re-fetched for this map. Confidence is high on the mechanisms and medium
+  on the exact defaults.
+  - pgvector: with an HNSW or IVFFlat index, `WHERE` filters after the index
+    scan, so a filtered query returns fewer than `LIMIT` rows. 0.8.0 (2024)
+    added iterative index scans (`hnsw.iterative_scan` = `strict_order` or
+    `relaxed_order`, bounded by `hnsw.max_scan_tuples`, default 20,000), which
+    keep scanning until enough rows pass. Without an index, a scan with `WHERE`
+    is exact.
+  - Qdrant: filtering happens during search, not after it. The query planner
+    estimates a filter's cardinality from payload indexes. Below
+    `full_scan_threshold` it scores the filtered points exactly. Above it, it
+    uses filterable HNSW, which adds extra edges per indexed payload value.
+    `has_id` filters on the primary id, and `params.exact` forces a full scan.
+  - Weaviate: the filter builds an allow-list before the vector search. Below
+    `flatSearchCutoff` (default 40,000) it brute-forces the allow-list. Since
+    1.27 it can use ACORN on HNSW for restrictive filters.
+  - Milvus: a scalar filter becomes a bitset that the ANN search consults
+    while it walks the index.
+  - Lucene 9.1+ (and Elasticsearch and OpenSearch kNN `filter`): the filter is
+    evaluated first. If it matches fewer documents than the graph search would
+    visit, the search is exact over the matches. Otherwise HNSW is explored
+    accepting only filtered documents, so k results come back whenever k
+    exist.
+
+  The shared lesson: build the allow-list first, and brute-force it when it is
+  small. Here the whole corpus is 11k points, already scanned by brute force
+  (S-B4) and below every system's cutoff. The simplest exact mechanism is
+  therefore the right one: send the member ids as a `has_id` filter with
+  `params.exact: true` and `limit = top_k`. At today's size this costs at most
+  about 10 ms (S-B5), against a 2.5 s query (S-B3).
+- **Rejected alternatives.**
+  - Iterative over-fetch (the pgvector 0.8 shape). It is still approximate
+    under its scan bound, and it needs a loop that crosses between the worker
+    and the mind several times per query. It also leaves the index deciding
+    which candidates the mind ever sees.
+  - Scoring every point (limit = collection size). This is exact, but it
+    sends 2 MB per query (S-B5), and `rank` would still have to page past 200
+    candidates.
+  - Qdrant payload filters on `kind` and `root`. `in_force` and the hops cannot
+    be expressed there, because the payload carries no status by design
+    (`index/mod.rs:57-61`). Payload filters would be a second, partial judge
+    of membership.
+  - The `matches` fast path for hop-free selections (S-B6), rejected for now.
+    It would be a second membership path beside `select`. Keep one walk.
+- **Membership comes from a cursor walk.** It is enumerated by walking `select`
+  at one `as_of`, because the substrate pages at 200 (S-B6). That costs one
+  `select` per 200 members, at most 57 at today's size. If the live timing in
+  the spec's verification shows the walk matters, the fix is an unpaged
+  evaluation entry in CultLib's `cultnet-rs`, not a second judge here.
+- **`matched` counts members.** On a semantic page `matched` counts the
+  selection's matches at `as_of`, as it does on a plain page, so a caller sees
+  "39 matched, 15 shown". Before this cut it counted the candidates that
+  passed.
+- **The score is a parallel field.** It is `scores: Option<Vec<f32>>` on
+  `PipelineSelectionPage`: one score per item, in order, present exactly when
+  the answer is semantic.
+  - This follows the page's `edges` convention ("present exactly when the
+    selection follows a hop"). It also keeps the score off
+    `PipelineDocumentView`, which `view` returns too.
+  - The value is Qdrant's cosine similarity as returned: higher is nearer, at
+    most 1.
+  - The field is additive and never stored. An old client ignores it, and a
+    new client reads `None` from an old daemon. Rolling back by flipping
+    `current` stays safe (runbook Rollback, the additive-field class).
+  - `f32` is not `Eq`, so `Eq` leaves the page and response derives.
+- **Known limit: ties at the window's edge.** Members with tied scores (from
+  identical texts, S-B5) are cut in the index's order, not by the mind's
+  ordinal tie-break, because the mind sees only the window. Accepted, because
+  ties need identical text.
+- **Known limit: exact search is linear.** `params.exact` makes every search
+  linear in the number of members: about 10 ms at 11k points. Revisit when the
+  collection nears 100k points or a filtered search passes about 50 ms. Then
+  Qdrant's own planner is the next mechanism.
+- **`recall.py`'s compensation becomes correct.** Once this cut is deployed,
+  `+len(excluded)` compensates the right set. The ids it excludes (the answered
+  question, superseded subjects) are in-force members, so asking for
+  `k + len(excluded)` members leaves at least `k` after exclusion whenever
+  that many exist. Before the cut it compensated for exclusions while the
+  shortfall came from non-members.
+
+### Cut sequence
+
+1. semantic-members-scores (Huginn): `cut-semantic-members-scores.r2`.
+2. ops-semantic-verify (gamecult-ops, lands with the deploy of 1): the
+   runbook's Verify gains a semantic check, that a narrow selection returns
+   `min(top_k, matched)` rows, each with a score. It waits on 1's verdict,
+   because it states 1's behaviour.
+3. semantic-many-texts (Huginn): `SemanticQuery` takes several texts, embeds
+   them in one batch call and fuses them by reciprocal rank inside the organ
+   (`gap-semantic-one-text-per-query`). It waits on 1, because it edits the
+   same `SemanticQuery`, `Projector::search` and `IndexSink::search`.
+4. recall-score-threshold (Eureka): `recall.py` drops rows below a score floor
+   instead of keeping a fixed top_k, and the `huginn` CLI prints each row's
+   score. It waits on 1 being deployed.
+5. `gap-persona-state-not-indexed` stays with the persona-state upgrade
+   (`huginn-upgrade-daemon-first`).
