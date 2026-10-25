@@ -1110,6 +1110,15 @@ fn qdrant_search_scores_only_the_members_exactly_and_reads_ids_kinds_and_scores(
     assert!(body.get("exact").is_none(), "a top-level exact is ignored by Qdrant: {body}");
     drop(seen);
 
+    // The limit is the caller's by value, across the range top_k takes: no
+    // constant, clamp or cap sits between the daemon and Qdrant.
+    for limit in [1, 12, 200] {
+        let echoing = stub(&[("POST /collections/", 200, r#"{"result":[]}"#)]);
+        QdrantIndex::new(&echoing.url).search(&name, &[1.0], &["p1".to_owned()], limit, TIME).unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&echoing.seen.lock().unwrap()[0].2).expect("the request body is JSON");
+        assert_eq!(sent["limit"], limit, "the limit asked for is the limit sent");
+    }
+
     let nameless = stub(&[("POST /collections/", 200, r#"{"result":[{"id":"p","score":0.5,"payload":{"kind":"question"}}]}"#)]);
     assert!(QdrantIndex::new(&nameless.url).search(&name, &[1.0], &[], 1, TIME).is_err());
     let failing = stub(&[("POST /collections/", 404, r#"{"status":{"error":"not found"}}"#)]);
