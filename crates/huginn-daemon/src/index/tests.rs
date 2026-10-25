@@ -1443,7 +1443,8 @@ fn every_search_has_its_own_ticket_and_its_answer_comes_back_exactly_once() {
     )];
     let mut tickets = Vec::new();
     for text in ["a", "b", "c"] {
-        let ticket = ask_sink(&mut sink, text, 3).unwrap();
+        let among = vec!["eureka-state:question:Q1".to_owned()];
+        let ticket = <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search(&mut sink, text, 3, among).unwrap();
         assert_eq!(answers(&mut sink, 1), vec![(ticket, Ok(expected.clone()))]);
         assert!(collected(&mut sink).is_empty(), "an answer is handed over once");
         tickets.push(ticket);
