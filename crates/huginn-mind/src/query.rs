@@ -543,9 +543,7 @@ impl<S: MindStore> Mind<S> {
             fields,
             cites,
             cited,
-            descending: false,
             limit: Some(LIMIT_MAX),
-            cursor: None,
             ..Selection::default()
         };
         let mut ids = Vec::new();
