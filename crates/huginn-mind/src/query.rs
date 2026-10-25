@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cultnet_rs::{
-    Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, Row, Selection, select, validate,
+    Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, PROJECTION_HEADER, Row, Selection, select, validate,
 };
 use eureka_pipeline::{
     ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, OrgRepo,
@@ -517,6 +517,26 @@ impl<S: MindStore> Mind<S> {
         refuse_values(selection)
     }
 
+    /// The selection `members` walks: the caller's filters and nothing else.
+    /// Built field by field, never spread from the caller's selection, so the
+    /// page size is ours (the caller's `limit` shapes an answer, not the
+    /// walk's cost: one select per member at limit 1) and the walk is headers
+    /// only, from the first page, in the one order.
+    fn walk_selection(selection: Selection) -> Selection {
+        let Selection { schemas, keys, fields, cites, cited, .. } = selection;
+        Selection {
+            schemas,
+            keys,
+            fields,
+            cites,
+            cited,
+            projection: PROJECTION_HEADER.into(),
+            descending: false,
+            limit: Some(LIMIT_MAX),
+            cursor: None,
+        }
+    }
+
     /// The members of a semantic query: every document the selection matches
     /// at the head, decided before the index is asked anything.
     ///
@@ -529,7 +549,7 @@ impl<S: MindStore> Mind<S> {
         let selection = Self::semantic_selection(selection, semantic)?;
         let head = receipt::head(self)?;
         let rows = Reader::at(self, head)?.rows()?;
-        let mut walk = Selection { limit: Some(LIMIT_MAX), ..selection };
+        let mut walk = Self::walk_selection(selection);
         let mut ids = Vec::new();
         loop {
             let evaluation = select(&Vocabulary, &rows, &walk, head, self.cursor_key())?;
@@ -1885,6 +1905,29 @@ mod tests {
         // The selection's own limit shortens a page, never the membership.
         let limited = Selection { limit: Some(3), ..of_kinds(&[K::Question]) };
         assert_eq!(mind.members(&limited, &asking(5)).unwrap().ids.len(), 250);
+    }
+
+    /// The walk costs one select per 200 members whatever the caller asked
+    /// for: a caller's `limit`, projection, order or cursor never reach it,
+    /// and its filters all do.
+    #[test]
+    fn the_members_walk_takes_its_page_size_from_the_mind_not_the_caller() {
+        let questions = of_kinds(&[K::Question]);
+        let caller = Selection {
+            limit: Some(1),
+            projection: PROJECTION_DOCUMENT.into(),
+            descending: true,
+            cursor: Some("caller-cursor".into()),
+            keys: Some(vec!["Q1".into()]),
+            cited: Some(Incoming { role: "subject".into(), exists: false }),
+            ..questions
+        };
+        let walk = Mind::<MemoryStore>::walk_selection(caller.clone());
+        assert_eq!(walk.limit, Some(LIMIT_MAX));
+        assert_eq!(walk.projection, PROJECTION_HEADER);
+        assert!(!walk.descending);
+        assert_eq!(walk.cursor, None);
+        assert_eq!((walk.schemas, walk.keys, walk.cited), (caller.schemas, caller.keys, caller.cited));
     }
 
     /// `matched` is what the selection admits, not what the index returned:
