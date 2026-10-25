@@ -351,6 +351,27 @@ fn a_narrow_selection_gets_top_k_members_when_non_members_score_higher() {
     assert!((scores[0] - 0.5).abs() < 1e-6, "the score is the index's: {scores:?}");
 }
 
+/// The daemon forwards the caller's top_k to the index as asked, however large:
+/// twenty members stand, top_k 15 reaches the index as 15 and answers fifteen
+/// rows, and top_k 200 reaches it as 200 and answers all twenty.
+#[test]
+fn a_large_top_k_reaches_the_index_whole_and_answers_that_many_members() {
+    let kept = |n: u32| id("ruling", &format!("K{n:02}"));
+    let seed = vec![campaign_seed(), (0..20).map(|n| ruling(&format!("K{n:02}"), None)).collect()];
+    let harness = Harness::start(seed, FakeEmbedder::new("d1"), FakeIndex::default(), Duration::from_secs(30));
+    let mut client = harness.client();
+    until_index(&mut client, "Current", |status| *status == IndexStatus::Current);
+    harness.index.state.lock().unwrap().hits = (0..20).map(|n| hit("ruling", kept(n), 0.9 - n as f32 * 0.01)).collect();
+    let rulings = Selection { schemas: Some(vec![PipelineKind::Ruling.type_id().into()]), ..standing() };
+
+    let fifteen = ask(&mut client, "m-1", &semantic(rulings.clone(), 15));
+    assert_eq!(ids(&fifteen), (0..15).map(kept).collect::<Vec<_>>());
+    let all = ask(&mut client, "m-2", &semantic(rulings, 200));
+    assert_eq!(ids(&all), (0..20).map(kept).collect::<Vec<_>>());
+    let limits: Vec<u32> = harness.index.state.lock().unwrap().searches.iter().map(|(_, _, limit)| *limit).collect();
+    assert_eq!(limits, vec![15, 200], "the index is asked for the caller's top_k, not a clamp of it");
+}
+
 /// A selection that matches nothing is an empty page at once: the query is not
 /// embedded and the index is not asked.
 #[test]
