@@ -362,7 +362,6 @@ fn snapshot(cache: &CultCache) -> Vec<CultCacheEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admission::PipelineAdmissionOutcome;
     use crate::fixtures::{INSTANCE, epoch, instance, prepare, slug};
     use crate::store::test_stores::MemoryStore;
     use cultcache_rs::CacheBackingStore;
