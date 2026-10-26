@@ -473,6 +473,15 @@ impl<S: MindStore> Mind<S> {
     /// because `Reader::at` is the expensive build. Admits nothing. A fault
     /// names the document's key and what failed, never its content.
     pub fn read_back(&self) -> Result<usize, MindRefusal> {
+        self.read_back_through(Reader::view)
+    }
+
+    /// The gate's one body; `lookup` is the read path under test, which tests
+    /// replace with a lying one to prove the view comparison refuses.
+    fn read_back_through(
+        &self,
+        lookup: impl Fn(&Reader, &PipelineRef) -> Result<Option<PipelineDocumentView>, MindRefusal>,
+    ) -> Result<usize, MindRefusal> {
         let cache = schema_cache()?;
         let reader = Reader::at(self, receipt::head(self)?)?;
         let mut count = 0;
@@ -488,7 +497,7 @@ impl<S: MindStore> Mind<S> {
             if (&again.key, &again.r#type, &again.payload) != (key, &envelope.r#type, &envelope.payload) {
                 return Err(integrity(&envelope.r#type, key, "does not re-encode to its stored bytes"));
             }
-            let viewed = reader.view(&PipelineRef { kind, id: Short(key.clone()) })?;
+            let viewed = lookup(&reader, &PipelineRef { kind, id: Short(key.clone()) })?;
             if viewed.map(|view| view.document).as_ref() != Some(&stored) {
                 return Err(integrity(&envelope.r#type, key, "does not view back as stored"));
             }
@@ -2303,6 +2312,24 @@ mod tests {
     fn read_back_refuses_a_document_stored_under_the_wrong_type() {
         let (rows, _) = faulted(|rows, at| rows[at].r#type = K::Verdict.type_id().into());
         assert!(matches!(read_back_of(rows), Err(MindRefusal::Document(_) | MindRefusal::Unavailable { .. })));
+    }
+
+    /// The read path is what the gate compares the stored bytes against: a path
+    /// that answers nothing, or another document, is refused.
+    #[test]
+    fn read_back_refuses_a_read_path_that_does_not_return_the_stored_document() {
+        let mind = |rows| {
+            let store = MemoryStore::new();
+            rows.into_iter().for_each(|row| store.plant(row));
+            Mind::open_with(store, &slug(INSTANCE)).unwrap()
+        };
+        let absent = mind(gate_rows()).read_back_through(|_, _| Ok(None));
+        assert!(matches!(&absent, Err(MindRefusal::Unavailable { detail }) if detail.contains("does not view back")), "{absent:?}");
+        let other = mind(gate_rows()).read_back_through(|reader, id| {
+            let first = reader.docs.image.iter().find(|held| held.kind == id.kind).unwrap();
+            reader.view_of(first).map(Some)
+        });
+        assert!(matches!(&other, Err(MindRefusal::Unavailable { detail }) if detail.contains("does not view back")), "{other:?}");
     }
 
     #[test]
