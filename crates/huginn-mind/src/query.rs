@@ -394,6 +394,12 @@ impl Reader {
         self.docs.image.iter().find(|held| held.kind == kind && held.key == key)
     }
 
+    /// The lookup `Mind::view` answers through, so a caller holding one `Reader`
+    /// views many documents from one snapshot.
+    fn view(&self, id: &PipelineRef) -> Result<Option<PipelineDocumentView>, MindRefusal> {
+        self.held(id.kind, &id.id.0).map(|held| self.view_of(held)).transpose()
+    }
+
     fn view_of(&self, held: &Held) -> Result<PipelineDocumentView, MindRefusal> {
         let admission = self.facts.of(held)?;
         let status = match self.docs.closing_resolution(held.kind, &held.key) {
@@ -455,8 +461,7 @@ impl<S: MindStore> Mind<S> {
     /// vocabulary for one rule.
     pub fn view(&self, id: &PipelineRef) -> Result<Option<PipelineDocumentView>, MindRefusal> {
         id.validate_ref()?;
-        let reader = Reader::at(self, receipt::head(self)?)?;
-        reader.held(id.kind, &id.id.0).map(|held| reader.view_of(held)).transpose()
+        Reader::at(self, receipt::head(self)?)?.view(id)
     }
 
     /// One typed selection over the mind, as of one snapshot.
@@ -682,7 +687,7 @@ mod tests {
     use crate::store::test_stores::MemoryStore;
     use chrono::{TimeZone, Utc};
     use eureka_pipeline::{
-        ClaimOutcome, FindingConfidence, PipelineDocument as D, PipelineKind as K, PipelineRefusal, ResolutionOutcome,
+        ClaimOutcome, FindingConfidence, PipelineDocument as D, PipelineKind as K, PipelineRefusal, ResolutionOutcome, pipeline_key,
     };
 
     fn view(mind: &Mind<MemoryStore>, kind: K, key: &str) -> PipelineDocumentView {
@@ -2117,5 +2122,45 @@ mod tests {
         let found = view(&mind, K::Question, &q1);
         assert_eq!(found.id, r(K::Question, &q1), "the id travels with the document");
         assert_eq!(Some(found.document), mind.get(K::Question, &q1).unwrap());
+    }
+
+    /// The upgrade gate (ruling readback-gate-and-materialized-image): every
+    /// stored pipeline document decodes, validates, rekeys, re-prepares to its
+    /// stored key, type and payload bytes, and views back unchanged through the
+    /// read path `Mind::view` uses. One `Reader` serves every view, because
+    /// `Reader::at` is the expensive build; a `Mind::view` per document would
+    /// repeat it N times. Admits nothing, but opens the store read-write: run it
+    /// on a scratch copy of a state root, never the live file. Measured about
+    /// 30 s in debug at 11,328 documents.
+    #[test]
+    #[ignore = "needs HUGINN_MIND_SNAPSHOT, a scratch copy of a Huginn state root"]
+    fn stored_documents_read_back() {
+        let root = std::env::var("HUGINN_MIND_SNAPSHOT").expect("HUGINN_MIND_SNAPSHOT names a scratch copy of the state root");
+        let mind = Mind::open(std::path::Path::new(&root), &Slug("eureka".into())).unwrap();
+        let cache = schema_cache().unwrap();
+        let reader = Reader::at(&mind, receipt::head(&mind).unwrap()).unwrap();
+        let mut count = 0;
+        for envelope in mind.envelopes() {
+            let Some(kind) = crate::docs::kind_of_type(&envelope.r#type) else { continue };
+            let stored = D::decode(envelope).unwrap_or_else(|refusal| panic!("{} does not decode: {refusal:?}", envelope.key));
+            stored.validate().unwrap_or_else(|refusal| panic!("{} no longer validates: {refusal:?}", envelope.key));
+            let rekeyed = pipeline_key(&stored).unwrap_or_else(|refusal| panic!("{} no longer keys: {refusal:?}", envelope.key));
+            assert_eq!(rekeyed, envelope.key, "stored key differs from the key the leaf computes");
+            let again = stored.prepare(&cache).unwrap_or_else(|error| panic!("{} does not re-prepare: {error}", envelope.key));
+            assert_eq!(
+                (&again.key, &again.r#type, &again.payload),
+                (&envelope.key, &envelope.r#type, &envelope.payload),
+                "{} does not re-encode to its stored bytes",
+                envelope.key
+            );
+            let view = reader
+                .view(&r(kind, &envelope.key))
+                .unwrap_or_else(|refusal| panic!("{} does not view: {refusal:?}", envelope.key))
+                .unwrap_or_else(|| panic!("{} is stored but does not view", envelope.key));
+            assert_eq!(view.document, stored, "{} views back changed", envelope.key);
+            count += 1;
+        }
+        assert_ne!(count, 0, "the snapshot held no pipeline document");
+        println!("read back {count} stored documents");
     }
 }
