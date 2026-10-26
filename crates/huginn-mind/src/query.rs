@@ -2318,7 +2318,7 @@ mod tests {
     /// that answers nothing, or another document, is refused.
     #[test]
     fn read_back_refuses_a_read_path_that_does_not_return_the_stored_document() {
-        let mind = |rows| {
+        let mind = |rows: Vec<cultcache_rs::CultCacheEnvelope>| {
             let store = MemoryStore::new();
             rows.into_iter().for_each(|row| store.plant(row));
             Mind::open_with(store, &slug(INSTANCE)).unwrap()
