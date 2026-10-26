@@ -28,13 +28,13 @@ use cultnet_rs::{
 use eureka_pipeline::{
     ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, OrgRepo,
     PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha,
-    Short, Slug, Title,
+    Short, Slug, Title, pipeline_key,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::docs::{CitationRole, Docs, Held, citations};
-use crate::mind::Mind;
+use crate::docs::{CitationRole, Docs, Held, citations, kind_of_type};
+use crate::mind::{Mind, schema_cache};
 use crate::receipt::{self, PipelineProvenance};
 use crate::refusal::MindRefusal;
 use crate::rows::{SelectionRow, Vocabulary, refuse_values};
@@ -464,6 +464,47 @@ impl<S: MindStore> Mind<S> {
         Reader::at(self, receipt::head(self)?)?.view(id)
     }
 
+    /// The upgrade gate (ruling readback-gate-and-materialized-image): every
+    /// stored pipeline document decodes, validates, rekeys, re-prepares to its
+    /// stored key, type and payload bytes, and views back unchanged through the
+    /// read path `view` uses; every pipeline write a receipt names is stored,
+    /// and every stored document has its receipt. Returns how many documents
+    /// it read back; an empty store is a fault. One `Reader` serves every view,
+    /// because `Reader::at` is the expensive build. Admits nothing. A fault
+    /// names the document's key and what failed, never its content.
+    pub fn read_back(&self) -> Result<usize, MindRefusal> {
+        let cache = schema_cache()?;
+        let reader = Reader::at(self, receipt::head(self)?)?;
+        let mut count = 0;
+        for envelope in self.envelopes() {
+            let Some(kind) = kind_of_type(&envelope.r#type) else { continue };
+            let key = &envelope.key;
+            let stored = PipelineDocument::decode(envelope).map_err(|_| integrity(&envelope.r#type, key, "does not decode"))?;
+            stored.validate().map_err(|_| integrity(&envelope.r#type, key, "no longer validates"))?;
+            if pipeline_key(&stored).map_err(|_| integrity(&envelope.r#type, key, "no longer keys"))? != *key {
+                return Err(integrity(&envelope.r#type, key, "is stored under a key the leaf no longer computes"));
+            }
+            let again = stored.prepare(&cache).map_err(|_| integrity(&envelope.r#type, key, "does not re-prepare"))?;
+            if (&again.key, &again.r#type, &again.payload) != (key, &envelope.r#type, &envelope.payload) {
+                return Err(integrity(&envelope.r#type, key, "does not re-encode to its stored bytes"));
+            }
+            let viewed = reader.view(&PipelineRef { kind, id: Short(key.clone()) })?;
+            if viewed.map(|view| view.document).as_ref() != Some(&stored) {
+                return Err(integrity(&envelope.r#type, key, "does not view back as stored"));
+            }
+            count += 1;
+        }
+        for (type_id, key) in reader.facts.0.keys() {
+            if kind_of_type(type_id).is_some() && self.raw_envelope(type_id, key).is_none() {
+                return Err(integrity(type_id, key, "is named by a receipt but not stored"));
+            }
+        }
+        if count == 0 {
+            return Err(MindRefusal::Unavailable { detail: "the store holds no pipeline document".into() });
+        }
+        Ok(count)
+    }
+
     /// One typed selection over the mind, as of one snapshot.
     ///
     /// In order: the substrate checks the selection's names; the organ's door
@@ -683,7 +724,6 @@ mod tests {
     use crate::fixtures::*;
     use crate::receipt::Faculty;
     use cultnet_rs::{Citation, FieldPredicate, Incoming, RecordRef};
-    use crate::mind::schema_cache;
     use crate::store::test_stores::MemoryStore;
     use chrono::{TimeZone, Utc};
     use eureka_pipeline::{
@@ -2124,43 +2164,156 @@ mod tests {
         assert_eq!(Some(found.document), mind.get(K::Question, &q1).unwrap());
     }
 
-    /// The upgrade gate (ruling readback-gate-and-materialized-image): every
-    /// stored pipeline document decodes, validates, rekeys, re-prepares to its
-    /// stored key, type and payload bytes, and views back unchanged through the
-    /// read path `Mind::view` uses. One `Reader` serves every view, because
-    /// `Reader::at` is the expensive build; a `Mind::view` per document would
-    /// repeat it N times. Admits nothing, but opens the store read-write: run it
-    /// on a scratch copy of a state root, never the live file. Measured about
-    /// 30 s in debug at 11,328 documents.
+    /// A store of 135 pipeline documents: past any sampling cutoff, with one
+    /// resolution so a view carries a closing status. Returns its rows.
+    fn gate_rows() -> Vec<cultcache_rs::CultCacheEnvelope> {
+        let store = MemoryStore::new();
+        let mut mind = opened(store.clone(), INSTANCE);
+        seed(&mut mind);
+        for chunk in (1..=130).collect::<Vec<u32>>().chunks(10) {
+            committed(admit(&mut mind, chunk.iter().map(|n| question_n(*n)).collect()));
+        }
+        committed(admit(&mut mind, vec![resolution(r(K::Question, &id("question", "Q1")), withdrawn())]));
+        store.rows()
+    }
+
+    fn read_back_of(rows: Vec<cultcache_rs::CultCacheEnvelope>) -> Result<usize, MindRefusal> {
+        let store = MemoryStore::new();
+        for row in rows {
+            store.plant(row);
+        }
+        Mind::open_with(store, &slug(INSTANCE))?.read_back()
+    }
+
+    /// The stored question the faults land on: the last pipeline document in
+    /// identity order, so a gate that stops early or samples never reaches it.
+    fn last_question(rows: &[cultcache_rs::CultCacheEnvelope]) -> usize {
+        let pipeline: Vec<usize> =
+            (0..rows.len()).filter(|at| crate::docs::kind_of_type(&rows[*at].r#type).is_some()).collect();
+        assert!(pipeline.len() > 130, "the fixture is past any cutoff: {}", pipeline.len());
+        let at = *pipeline.last().unwrap();
+        assert_eq!(rows[at].r#type, K::Question.type_id(), "the target is a question");
+        at
+    }
+
+    fn refused_with(rows: Vec<cultcache_rs::CultCacheEnvelope>, fragment: &str, target: &str) {
+        match read_back_of(rows) {
+            Err(MindRefusal::Unavailable { detail }) => {
+                assert!(detail.contains(fragment), "refused for another reason: {detail}");
+                assert!(detail.contains(target) || fragment == "holds no pipeline document", "the fault names the key: {detail}");
+            }
+            other => panic!("expected an Unavailable refusal containing {fragment:?}, got {other:?}"),
+        }
+    }
+
+    /// The gate over a clean store reads back every pipeline document, and
+    /// says how many: the exact count, so a gate that stops early is seen.
+    #[test]
+    fn read_back_accepts_a_clean_store_and_counts_every_document() {
+        assert_eq!(read_back_of(gate_rows()).unwrap(), 135);
+    }
+
+    fn faulted(fault: impl FnOnce(&mut Vec<cultcache_rs::CultCacheEnvelope>, usize)) -> (Vec<cultcache_rs::CultCacheEnvelope>, String) {
+        let mut rows = gate_rows();
+        let at = last_question(&rows);
+        let key = rows[at].key.clone();
+        fault(&mut rows, at);
+        (rows, key)
+    }
+
+    fn rewritten(payload: &[u8], edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) -> Vec<u8> {
+        let mut map: serde_json::Map<String, serde_json::Value> = rmp_serde::from_slice(payload).unwrap();
+        edit(&mut map);
+        rmp_serde::to_vec_named(&map).unwrap()
+    }
+
+    #[test]
+    fn read_back_refuses_an_undecodable_payload() {
+        let (rows, _) = faulted(|rows, at| rows[at].payload = vec![0xc1]);
+        assert!(matches!(read_back_of(rows), Err(MindRefusal::Document(_) | MindRefusal::Unavailable { .. })));
+    }
+
+    #[test]
+    fn read_back_refuses_a_field_past_its_bound() {
+        let (rows, key) = faulted(|rows, at| {
+            rows[at].payload = rewritten(&rows[at].payload, |map| {
+                map.insert("title".into(), serde_json::Value::String("x".repeat(300)));
+            });
+        });
+        refused_with(rows, "no longer validates", &key);
+    }
+
+    #[test]
+    fn read_back_refuses_a_changed_key() {
+        let (rows, key) = faulted(|rows, at| {
+            let mut moved = rows[at].clone();
+            moved.key.push('x');
+            rows.push(moved);
+        });
+        // the original stays (its receipt names it) and the moved copy has no receipt
+        refused_with(rows, "has no commit receipt", &format!("{key}x"));
+    }
+
+    #[test]
+    fn read_back_refuses_a_trailing_byte() {
+        let (rows, key) = faulted(|rows, at| rows[at].payload.push(0x00));
+        refused_with(rows, "re-encode", &key);
+    }
+
+    #[test]
+    fn read_back_refuses_a_payload_that_decodes_but_was_encoded_differently() {
+        let (rows, key) = faulted(|rows, at| {
+            let again = rewritten(&rows[at].payload, |_| {});
+            assert_ne!(again, rows[at].payload, "the re-encoding differs, so the fault is real");
+            rows[at].payload = again;
+        });
+        refused_with(rows, "re-encode", &key);
+    }
+
+    #[test]
+    fn read_back_refuses_a_foreign_type() {
+        let mut rows = gate_rows();
+        let at = last_question(&rows);
+        rows[at].r#type = "epiphany.pipeline.finding.v9".into();
+        assert!(matches!(read_back_of(rows), Err(MindRefusal::ForeignStore { .. })));
+    }
+
+    #[test]
+    fn read_back_refuses_a_document_stored_under_the_wrong_type() {
+        let (rows, _) = faulted(|rows, at| rows[at].r#type = K::Verdict.type_id().into());
+        assert!(matches!(read_back_of(rows), Err(MindRefusal::Document(_) | MindRefusal::Unavailable { .. })));
+    }
+
+    #[test]
+    fn read_back_refuses_an_empty_store() {
+        refused_with(Vec::new(), "holds no pipeline document", "");
+    }
+
+    #[test]
+    fn read_back_refuses_a_receipted_document_that_is_not_stored() {
+        let (rows, key) = faulted(|rows, at| {
+            rows.remove(at);
+        });
+        refused_with(rows, "named by a receipt but not stored", &key);
+    }
+
+    #[test]
+    fn read_back_refuses_a_stored_document_with_no_receipt() {
+        let (rows, _) = faulted(|rows, _| rows.push(prepare(&question_n(900))));
+        refused_with(rows, "has no commit receipt", "Q900");
+    }
+
+    /// The upgrade gate on a real store (ruling readback-gate-and-materialized-image):
+    /// the one function `Mind::read_back` over a scratch copy of a state root.
+    /// Opens the store read-write, so run it on a copy, never the live file.
+    /// Measured about 30 s in debug at 11,328 documents.
     #[test]
     #[ignore = "needs HUGINN_MIND_SNAPSHOT, a scratch copy of a Huginn state root"]
     fn stored_documents_read_back() {
         let root = std::env::var("HUGINN_MIND_SNAPSHOT").expect("HUGINN_MIND_SNAPSHOT names a scratch copy of the state root");
+        let started = std::time::Instant::now();
         let mind = Mind::open(std::path::Path::new(&root), &Slug("eureka".into())).unwrap();
-        let cache = schema_cache().unwrap();
-        let reader = Reader::at(&mind, receipt::head(&mind).unwrap()).unwrap();
-        let mut count = 0;
-        for envelope in mind.envelopes() {
-            let Some(kind) = crate::docs::kind_of_type(&envelope.r#type) else { continue };
-            let stored = D::decode(envelope).unwrap_or_else(|refusal| panic!("{} does not decode: {refusal:?}", envelope.key));
-            stored.validate().unwrap_or_else(|refusal| panic!("{} no longer validates: {refusal:?}", envelope.key));
-            let rekeyed = pipeline_key(&stored).unwrap_or_else(|refusal| panic!("{} no longer keys: {refusal:?}", envelope.key));
-            assert_eq!(rekeyed, envelope.key, "stored key differs from the key the leaf computes");
-            let again = stored.prepare(&cache).unwrap_or_else(|error| panic!("{} does not re-prepare: {error}", envelope.key));
-            assert_eq!(
-                (&again.key, &again.r#type, &again.payload),
-                (&envelope.key, &envelope.r#type, &envelope.payload),
-                "{} does not re-encode to its stored bytes",
-                envelope.key
-            );
-            let view = reader
-                .view(&r(kind, &envelope.key))
-                .unwrap_or_else(|refusal| panic!("{} does not view: {refusal:?}", envelope.key))
-                .unwrap_or_else(|| panic!("{} is stored but does not view", envelope.key));
-            assert_eq!(view.document, stored, "{} views back changed", envelope.key);
-            count += 1;
-        }
-        assert_ne!(count, 0, "the snapshot held no pipeline document");
-        println!("read back {count} stored documents");
+        let count = mind.read_back().unwrap();
+        println!("read back {count} stored documents in {:?}", started.elapsed());
     }
 }
