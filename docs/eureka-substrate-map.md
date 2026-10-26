@@ -718,3 +718,74 @@ payload and metadata. Only the search request changes.
    score. It waits on 1 being deployed.
 5. `gap-persona-state-not-indexed` stays with the persona-state upgrade
    (`huginn-upgrade-daemon-first`).
+
+## Upgrade read-back gate (Imagination, 2026-10-26)
+
+Ruling `eureka-substrate:ruling:readback-gate-and-materialized-image` part (1)
+and follow-up `eureka-substrate:follow_up:upgrade-readback-unbounded`. Pinned:
+Huginn `origin/main` `dd07485b4e69e6743825fec2f19825761ea446a6`, gamecult-ops
+`origin/main` `b9e0109773eccea3215ed53c1af5ecccae37b543`.
+
+### Body facts (probe and source reads, 2026-10-26)
+
+- Probe, 2026-10-26 ~12:52 UTC, Yggdrasil, `ygg-verify.sh` `RUN_ON_HOST=1`
+  (image `eureka-verify-rust:b99d30ec441e`, 4 CPUs, 6 GiB, nice 10). A scratch
+  clone at `dd07485` plus one probe test in `query.rs`'s tests (scratch commit
+  `d93b400`, pushed only to the verify mirror) ran against a copy of the cold
+  copy `/var/backups/huginn-upgrade/dd07485b…/mind.redb` (sha256
+  `814947b9…c5e0`, 245,370,880 bytes) inside the job's work dir; the copy was
+  deleted afterwards. 15,291 envelopes, 11,328 pipeline documents.
+
+  | Step | debug | release |
+  | --- | --- | --- |
+  | `Mind::open` | 3.16 s | 0.58 s |
+  | decode, validate, re-key, re-prepare to stored bytes (all 11,328) | 1.14 s | 0.23 s |
+  | one `Mind::view` (one `Reader::at`) | 19.6 s | 1.05 s |
+  | one `Reader::at` | 20.4 s | 0.97 s |
+  | `held` + `view_of` for all 11,328 from that one `Reader` | 4.88 s | 0.39 s |
+  | whole test binary | 49.3 s | 3.35 s |
+
+  So the deleted organ test's loop (one `Mind::view` per document) costs about
+  11,328 x 20 s = 63 h in debug and 3.3 h in release: it never finishes, which
+  matches the 2 h hang. The one-snapshot gate costs open + byte check +
+  one `Reader::at` + the view loop: about 30 s debug, 2.5 s release at this
+  size. The runbook's deadline is 600 s.
+- The view loop from one `Reader` is not strictly linear: `Reader::held` is a
+  linear find and `Docs::closing_resolution` scans every resolution, so it is
+  O(N x R) comparisons. It is the same cost `Reader::rows` pays on every query
+  today, measured at 4.9 s debug. The gate does not fix it; part (2) of the
+  ruling (the materialized image) owns it.
+- `mind::tests::snapshot_admits_and_reads_back` (`mind.rs:789-878`) also
+  resolves six hard-coded idunn-watchdog findings and withdraws resolutions
+  whose withdrawal keys exceed 64 bytes: the 2026-10-01 key-bound migration,
+  done once. `eureka-pipeline` `tests::stored_documents_read_back`
+  (`lib.rs:2750-2822`) checks decode, validate, re-key and stored bytes, plus
+  resolvability loops and the same six findings ("still stuck").
+
+### Rationale
+
+One gate, in `huginn-mind`. The leaf cannot hold it: `eureka-pipeline` has no
+dependency on `huginn-mind` (the reverse holds), so it cannot see `view`. Two
+gates overlapped on decode, validate and re-key; the leaf's byte check costs
+1.1 s debug and moves into the organ's gate beside the view check. The leaf's
+resolvability loops are pinned on synthetic keys by its bound tests (ruling
+`key-bound`), and its six-finding list is history.
+
+The gate goes through the read path, not a copy of it: `Mind::view` is split
+into `Reader::at` plus a new `Reader::view` (lookup, then `view_of`), and the
+gate builds one `Reader` and calls `Reader::view` per document. A test that
+re-spelled `held` and `view_of` would agree with its own copy. That split is
+the only production edit; `Reader::at`, `held`, `view_of`, `rows`, `query`
+and `rank` are unchanged, and the read path's cost stays with part (2).
+
+### Cut sequence
+
+1. readback-gate (Huginn): `cut-readback-gate.r1`.
+2. ops-readback-deadline (gamecult-ops): `cut-ops-readback-deadline.r1`,
+   beside 1. Step 5 runs the one gate detached in container
+   `huginn-readback-$sha`, deadline 600 s, kill by name, old daemon restarted on
+   expiry or failure. It names 1's test, so an upgrade with it targets Huginn
+   main at or after 1's merge.
+3. materialized-image (Huginn): a decoded, indexed image the daemon keeps and
+   advances per admission (ruling part 2). Mapped after prior art; not mapped
+   here.
