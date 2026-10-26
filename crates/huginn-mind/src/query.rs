@@ -2244,15 +2244,30 @@ mod tests {
         refused_with(rows, "no longer validates", &key);
     }
 
+    /// A document stored under a key other than the one the leaf computes for
+    /// it, with its receipt renamed to match, so only the re-key check can see it.
     #[test]
     fn read_back_refuses_a_changed_key() {
         let (rows, key) = faulted(|rows, at| {
-            let mut moved = rows[at].clone();
-            moved.key.push('x');
-            rows.push(moved);
+            let old = rows[at].key.clone();
+            rows[at].key.push('x');
+            let mind = Mind::open_with(
+                {
+                    let store = MemoryStore::new();
+                    rows.iter().for_each(|row| store.plant(row.clone()));
+                    store
+                },
+                &slug(INSTANCE),
+            )
+            .unwrap();
+            let mut receipt =
+                mind.receipts().unwrap().into_iter().find(|receipt| receipt.writes.iter().any(|write| write.document_key == old)).unwrap();
+            receipt.writes.iter_mut().filter(|write| write.document_key == old).for_each(|write| write.document_key.push('x'));
+            let renamed = schema_cache().unwrap().prepare_entry_named(&receipt.receipt_id, &receipt).unwrap().0;
+            let at = rows.iter().position(|row| row.r#type == renamed.r#type && row.key == renamed.key).unwrap();
+            rows[at] = renamed;
         });
-        // the original stays (its receipt names it) and the moved copy has no receipt
-        refused_with(rows, "has no commit receipt", &format!("{key}x"));
+        refused_with(rows, "key the leaf no longer computes", &key);
     }
 
     #[test]
