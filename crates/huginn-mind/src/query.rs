@@ -2185,14 +2185,13 @@ mod tests {
         Mind::open_with(store, &slug(INSTANCE))?.read_back()
     }
 
-    /// The stored question the faults land on: the last pipeline document in
-    /// identity order, so a gate that stops early or samples never reaches it.
+    /// The stored question the faults land on: the last question in identity
+    /// order, with more than 100 pipeline documents before it, so a gate that
+    /// stops early or samples never reaches it.
     fn last_question(rows: &[cultcache_rs::CultCacheEnvelope]) -> usize {
-        let pipeline: Vec<usize> =
-            (0..rows.len()).filter(|at| crate::docs::kind_of_type(&rows[*at].r#type).is_some()).collect();
-        assert!(pipeline.len() > 130, "the fixture is past any cutoff: {}", pipeline.len());
-        let at = *pipeline.last().unwrap();
-        assert_eq!(rows[at].r#type, K::Question.type_id(), "the target is a question");
+        let at = rows.iter().rposition(|row| row.r#type == K::Question.type_id()).unwrap();
+        let before = rows[..at].iter().filter(|row| crate::docs::kind_of_type(&row.r#type).is_some()).count();
+        assert!(before > 100, "the fixture is past any cutoff: {before}");
         at
     }
 
