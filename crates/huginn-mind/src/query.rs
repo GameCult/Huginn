@@ -727,7 +727,7 @@ mod tests {
     use crate::store::test_stores::MemoryStore;
     use chrono::{TimeZone, Utc};
     use eureka_pipeline::{
-        ClaimOutcome, FindingConfidence, PipelineDocument as D, PipelineKind as K, PipelineRefusal, ResolutionOutcome, pipeline_key,
+        ClaimOutcome, FindingConfidence, PipelineDocument as D, PipelineKind as K, PipelineRefusal, ResolutionOutcome,
     };
 
     fn view(mind: &Mind<MemoryStore>, kind: K, key: &str) -> PipelineDocumentView {
