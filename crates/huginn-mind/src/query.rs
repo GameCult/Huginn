@@ -2264,9 +2264,14 @@ mod tests {
     #[test]
     fn read_back_refuses_a_payload_that_decodes_but_was_encoded_differently() {
         let (rows, key) = faulted(|rows, at| {
-            let named = rmp_serde::to_vec_named(&stored_question(&rows[at])).unwrap();
-            assert_ne!(named, rows[at].payload, "the re-encoding differs, so the fault is real");
-            rows[at].payload = named;
+            // The same array, its header in the wider array16 form: it decodes to the
+            // same document and encodes to different bytes.
+            let payload = &rows[at].payload;
+            assert_eq!(payload[0] & 0xf0, 0x90, "the payload opens with a fixarray header");
+            let mut wider = vec![0xdc, 0x00, payload[0] & 0x0f];
+            wider.extend_from_slice(&payload[1..]);
+            assert_eq!(D::decode(&cultcache_rs::CultCacheEnvelope { payload: wider.clone(), ..rows[at].clone() }).unwrap(), D::Question(stored_question(&rows[at])));
+            rows[at].payload = wider;
         });
         refused_with(rows, "re-encode", &key);
     }
