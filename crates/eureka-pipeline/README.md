@@ -18,13 +18,6 @@ and every encoding-relevant variant against `golden/envelopes.txt`. A diff
 there is a wire change; do not regenerate it to make the test pass. An additive
 field adds golden lines and never changes an existing one.
 
-Opt-in, against a real store: `stored_documents_read_back` decodes, validates
-and keys every stored pipeline document and asserts that it re-encodes to the
-stored key, type and payload bytes. Take a copy of the store (the test copies
-the file again before opening it, so the copy may be read-only), never open the
-live one:
-
-```sh
-sudo cp /var/lib/gamecult/huginn/minds/eureka/mind.redb "$SNAP/minds/eureka/mind.redb"
-HUGINN_MIND_SNAPSHOT="$SNAP" cargo test -p eureka-pipeline -- --ignored --exact tests::stored_documents_read_back --nocapture
-```
+The real-store gate is huginn-mind's `#[ignore]` `query::tests::stored_documents_read_back`,
+which checks these stored bytes and the read path together (the leaf cannot see the read
+path); the Huginn Upgrade runbook in gamecult-ops runs it.
