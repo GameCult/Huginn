@@ -2220,10 +2220,12 @@ mod tests {
         (rows, key)
     }
 
-    fn rewritten(payload: &[u8], edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>)) -> Vec<u8> {
-        let mut map: serde_json::Map<String, serde_json::Value> = rmp_serde::from_slice(payload).unwrap();
-        edit(&mut map);
-        rmp_serde::to_vec_named(&map).unwrap()
+    /// The stored question, decoded, for a test to bend.
+    fn stored_question(row: &cultcache_rs::CultCacheEnvelope) -> eureka_pipeline::PipelineQuestion {
+        match D::decode(row).unwrap() {
+            D::Question(question) => question,
+            other => panic!("not a question: {other:?}"),
+        }
     }
 
     #[test]
@@ -2235,9 +2237,9 @@ mod tests {
     #[test]
     fn read_back_refuses_a_field_past_its_bound() {
         let (rows, key) = faulted(|rows, at| {
-            rows[at].payload = rewritten(&rows[at].payload, |map| {
-                map.insert("title".into(), serde_json::Value::String("x".repeat(300)));
-            });
+            let mut question = stored_question(&rows[at]);
+            question.title = "x".repeat(300).as_str().into();
+            rows[at].payload = D::Question(question).prepare(&schema_cache().unwrap()).unwrap().payload;
         });
         refused_with(rows, "no longer validates", &key);
     }
@@ -2262,9 +2264,9 @@ mod tests {
     #[test]
     fn read_back_refuses_a_payload_that_decodes_but_was_encoded_differently() {
         let (rows, key) = faulted(|rows, at| {
-            let again = rewritten(&rows[at].payload, |_| {});
-            assert_ne!(again, rows[at].payload, "the re-encoding differs, so the fault is real");
-            rows[at].payload = again;
+            let named = rmp_serde::to_vec_named(&stored_question(&rows[at])).unwrap();
+            assert_ne!(named, rows[at].payload, "the re-encoding differs, so the fault is real");
+            rows[at].payload = named;
         });
         refused_with(rows, "re-encode", &key);
     }
