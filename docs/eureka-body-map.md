@@ -67,6 +67,14 @@ contract v3 cut line falls" made exact, path B line 3b given its spec. Spec:
 `cut-connector-reasoning-item.r1`. No question: the ruling and research section 5 settle every
 choice the cut makes. Research reused unchanged.
 
+Revised again on 2026-10-28 by Imagination (`imagination-connector-spend`, session
+`self-2026-10-28-eureka`) at ModelConnector `1d51e71` (B3b landed), for cut `connector-spend`.
+New fact F33 (probes on Yggdrasil), the B3c bullet of "Where the contract v3 cut line falls"
+made exact, path B line 3c given its spec and B4's riders carried. Spec:
+`cut-connector-spend.r1`. Question: `connector-spend-ceiling` (blocks the spec). Follow-up:
+`connector-spend-readout`. Research reused unchanged (`725f5a5` section 2 is the ceiling
+question's evidence).
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
@@ -417,6 +425,22 @@ Each line: what was run, where, result.
   and every backend writes its own `receipt.provider` (`fixtures.rs:63-83`, test backends
   `serve.rs:945-962`, `service.rs:1074-1091`): today nothing stops a backend from seeing foreign
   state or mis-tagging its own.
+- **F33 The kit holds no spend today, and its store fails closed but locks out readers**
+  (2026-10-28, Yggdrasil ygg-verify rust image, scratch commit `79e14b8` on ModelConnector
+  `1d51e71`, never pushed; source reads at `1d51e71`). Baseline: 94 lib tests with `daemon`, 37
+  without, plus 4 `published_schemas`, 4 `reasoning_state` and 3 `wire_golden_v3`, all green.
+  P1: a `CacheBackingStore` whose `push` fails makes `CultCache::put` return the error and leaves
+  nothing in memory (`get` is `None`), so a reservation written with `put` before execution is
+  either durable or refused. `begin` already returns `ServiceError::ReplayStore` before
+  `live.insert` and before the backend runs (`service.rs:367-369`), so the replay store is a
+  fail-closed ledger by construction. P2: a second `OwnedRedbMessagePackBackingStore::new` on a
+  held path fails "already has an active owner", in the same process and from a child process,
+  so no root stop hook can read the connector's store while the connector runs. Source reads:
+  `CallerConfig` and `CallerAdmission` carry no spend field (`serve.rs:105-114`,
+  `service.rs:19-28`); `Usage` is tokens only and the receipt has no cost (`contract.rs:193-204`,
+  `465-479`); `TransportOutcome::Failed` carries no usage (`524-527`); replay records are never
+  deleted or pruned (no `delete` on the store in `service.rs`); `TransportService::open` takes a
+  path, so a test cannot inject a failing store (`service.rs:181-182`).
 
 ## The model page (step 0b)
 
@@ -641,6 +665,30 @@ before B4 so no consumer ever sees an intermediate v3:
   both reserve this way). Its map raises how the connector's per-caller ceiling relates to her
   run's `budget_usd` (invariant `run-is-the-grant`, ruling `turn-cost-measured`) and whether
   amounts are integer micro-dollars or the mind's canonical decimal string.
+  Placed by spec `cut-connector-spend.r1` (F33):
+  - The ledger is the connector's replay store, not her mind and not mind-body's control store.
+    The rulings settle it: `brake-dial-root-store-now` keeps the spend ledger with the wallet,
+    outside what she merges; its question names "the connector's max_cost_usd and ledger
+    (another user)" as an enforcement point outside her writable environment; `turn-cost-measured`
+    names the connector ledger as the Persona turn's cost source; `connector-owner` makes it
+    durable and fail-closed. `run-is-the-grant` binds her organs, and the connector is the
+    wallet's, not hers. The reservation lives in the replay record itself, so reserving and
+    claiming the request are one `put` (P1): there is no second record to drift.
+  - Amounts are integer micro-USD (`u64`), prices micro-USD per million tokens, cost rounded up
+    once per request. Not a fork: exact arithmetic needs integers or a decimal, cultcache-rs has
+    no decimal (follow-up `cultcache-rs-decimal-and-nofollow`), and a canonical decimal budget of
+    at most six places converts exactly at the Persona organ (B5).
+  - The input bound is the named-MessagePack length of the provider request plus a per-model
+    overhead from the price table: a byte-level BPE token is at least one byte, so text cannot
+    exceed it (unprobed against a real tokenizer; B4's rider). It is priced at the dearest input
+    rate the request's cache retention allows.
+  - Two refusals, not one `Budget`: `CostBound` (the worst case exceeds the invocation's own
+    `max_cost_micro_usd`, decided by the invocation alone, before the replay lookup) and
+    `SpendCeiling` (the caller's window cannot hold the reservation, after the replay lookup, so
+    a recorded answer is always replayed). OpenRouter tells its limit sources apart the same way.
+  - What bounds the caller's total is question `connector-spend-ceiling`: `max_cost` is written by
+    her own Persona organ, which she may rewrite (`she-owns-her-body`), so it is not a wallet
+    control on its own.
 
 ### How a Self run is carried (cut `mind-self-run`)
 
@@ -720,7 +768,8 @@ operator's token, then A6 and the bring-up; A3, A4 and A1 run beside it):
      `cut_spec:cut-connector-reasoning-item.r1` at `bf958fc`; B3a has landed, so it is ready to
      dispatch. Follow-up `connector-reasoning-state-cheap-providers` is answered by research
      `725f5a5` section 1d and needs no kit rule (every provider's state stays opaque bytes).
-   - c. `connector-spend` (ModelConnector): waits on B3b (same files).
+   - c. `connector-spend` (ModelConnector): spec `cut_spec:cut-connector-spend.r1` at `1d51e71`.
+     B3b has landed; it waits on question `question:connector-spend-ceiling`.
 4. `claude-connector` (ModelConnector; ruling `persona-first-connector-claude`): waits on B3. Its
    map raises how it authenticates and whose credential it holds against invariant
    `token-out-of-her-reach` (rulings `connector-owner`, `self-run-token-reach`). It also carries
@@ -728,6 +777,13 @@ operator's token, then A6 and the bring-up; A3, A4 and A1 run beside it):
    Idunn's current contract, if Idunn deploys it (the CultLib bump moved to B3a). Its lowering
    to the Messages API must be deterministic: Anthropic binds a replayed thinking block to the
    unchanged system, tools and earlier messages (research `725f5a5` section 1a, prefix check).
+   Riders carried from B3c and the B3 Soul passes: the price table lives in that config document
+   (one `ModelPrice` per allowed model, a missing one refused at open); if B3c's byte bound
+   refuses real turns, the backend supplies a provider count instead (Anthropic `count_tokens`,
+   research section 2d); the turn-cost charge needs a spend readout because the store is held
+   exclusively (F33 P2, follow-up `connector-spend-readout`); the tool-exchange boundary is
+   confirmed against Anthropic's rules (follow-up `claude-tool-exchange-boundary`); and whatever
+   of follow-up `kit-contract-test-debt` B3a-c did not kill is killed in code B4 touches.
 5. `mind-persona` (Huginn): the Persona organ, one connector request per turn
    (`persona-turn-connector`), Persona state through Huginn (landed), the start-Self tool (A6),
    traces with provenance from day one (`collect-with-provenance-gate-at-training`). Waits on
