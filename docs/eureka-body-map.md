@@ -60,6 +60,13 @@ superseded only to split two context windows; they block r2). Follow-up:
 `cultnet-binary-operation-payload`. Research: Huginn `725f5a5`
 `docs/research/connector-contract-v3-prior-art.md`.
 
+Revised again on 2026-10-28 by Imagination (`imagination-reasoning-item`, session
+`self-2026-10-28-eureka`) at ModelConnector `bf958fc` (B3a landed), for cut
+`connector-reasoning-item`. New fact F32 (probe on Yggdrasil), the B3b bullet of "Where the
+contract v3 cut line falls" made exact, path B line 3b given its spec. Spec:
+`cut-connector-reasoning-item.r1`. No question: the ruling and research section 5 settle every
+choice the cut makes. Research reused unchanged.
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
@@ -395,6 +402,21 @@ Each line: what was run, where, result.
   be `messagepack-base64` (`contracts.rs:780`); CultNet security holds one key per server where
   the kit binds one per caller with ids in the AAD. Huginn's `huginn.mind` is already this
   shape (`huginn-mind/src/envelope.rs`).
+- **F32 The reasoning variants cost the v3 wire nothing it has pinned** (2026-10-28, Yggdrasil
+  ygg-verify rust image, scratch commit `af9fb74` on ModelConnector `bf958fc`, never pushed).
+  `InputItem::ReasoningState { provider, model, state }` and
+  `TransportEventPayload::ReasoningState { state }`, `state` under `serde_bytes` with the
+  envelope's `binary_schema`: all 83 unit tests and both `wire_golden_v3` tests pass with every
+  committed golden byte-identical; only `published_schemas` fails (the new variant, expected).
+  The item encodes as a one-key map whose `state` is MessagePack `bin` (`c4 03 ff 80 01` for three
+  bytes); a 1 MiB state encodes in 1,048,623 bytes (47 bytes of overhead); the schema shows
+  `state` as `format: binary`. So the receipt field `foreign_reasoning_dropped` and the new event
+  in the transported golden are the only wire changes B3b makes to existing fixtures. Source
+  reads at `bf958fc`: `ProviderBackend::execute` receives the caller's whole
+  `TransportInvocation` (`serve.rs:29`, via `ExecutionClaim::invocation`, `service.rs:115-119`),
+  and every backend writes its own `receipt.provider` (`fixtures.rs:63-83`, test backends
+  `serve.rs:945-962`, `service.rs:1074-1091`): today nothing stops a backend from seeing foreign
+  state or mis-tagging its own.
 
 ## The model page (step 0b)
 
@@ -607,6 +629,11 @@ before B4 so no consumer ever sees an intermediate v3:
   `ProviderBackend` declares its provider tag; the service refuses foreign state after the last
   user text (`ForeignReasoningState`) and drops it elsewhere before the backend sees it, counting
   the drop on the receipt. A backend receives a call that cannot show it a foreign item.
+  Placed by spec `cut-connector-reasoning-item.r1` (F32): the event carries the bytes alone and
+  the kit stamps provider and model from the receipt when it builds transcript items, and the
+  receipt's provider and drop count are derived by the service (`ProviderCall::transported`,
+  gated in `complete`), so a backend can neither see foreign state nor mis-tag its own. Only a
+  `Completed` result yields transcript items: a partial thinking block is never replayed.
 - B3c `connector-spend`: price table in the connector's config, `max_cost` on the invocation,
   a worst-case reservation (input estimate plus `max_output_tokens` times the output price) held
   in the replay store and settled to actual, cost on the outcome, a `Budget` refusal, fail
@@ -689,8 +716,10 @@ operator's token, then A6 and the bring-up; A3, A4 and A1 run beside it):
    - a. `connector-contract-v3`: spec `cut_spec:cut-connector-contract-v3.r2`. Waits on B2
      (landed, `ec0519d`) and questions `question:connector-v3-wire` and
      `question:connector-v2-coexistence`.
-   - b. `connector-reasoning-item` (ModelConnector): waits on B3a. Reads follow-up
-     `connector-reasoning-state-cheap-providers` (answered in research `725f5a5` section 1d).
+   - b. `connector-reasoning-item` (ModelConnector): spec
+     `cut_spec:cut-connector-reasoning-item.r1` at `bf958fc`; B3a has landed, so it is ready to
+     dispatch. Follow-up `connector-reasoning-state-cheap-providers` is answered by research
+     `725f5a5` section 1d and needs no kit rule (every provider's state stays opaque bytes).
    - c. `connector-spend` (ModelConnector): waits on B3b (same files).
 4. `claude-connector` (ModelConnector; ruling `persona-first-connector-claude`): waits on B3. Its
    map raises how it authenticates and whose credential it holds against invariant
