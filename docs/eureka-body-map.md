@@ -44,6 +44,13 @@ and "How a Self run is carried" is new. Specs: `cut-mind-self-run.r1`,
 `cut-mind-body-riders.r1`. Questions: `first-self-run-starter`, `self-run-permissions`. Probe
 outputs: `F:\Projects\eureka-handoff-aux-2026-10-22\imag-self-run\`.
 
+Revised again on 2026-10-28 by Imagination (`imagination-kit-lift`, session
+`self-2026-10-28-eureka`) at CodexConnector `fd7cec4`, Ghostlight `c43eb54` and ModelConnector
+`1cf879f`, for cut `connector-kit-lift`. New facts F26-F29, new rationale "Where the kit lift's
+cut line falls", path B refreshed. Spec: `cut-connector-kit-lift.r1`. Questions:
+`connector-kit-relicense` (blocks the spec), `codex-connector-fate`. The baseline probe log was
+a session scratchpad file and is not kept; its counts are in F26.
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
@@ -318,6 +325,48 @@ Each line: what was run, where, result.
   correctness holds under either delivery, and its operator verification probes both on
   Yggdrasil with her token.
 
+- **F26 CodexConnector at origin/main `fd7cec4` builds and tests green** (2026-10-28, Yggdrasil,
+  ygg-verify rust image, `cargo build --features daemon --all-targets`, `cargo test --features
+  daemon`, `cargo test`): 46 lib + 1 bin tests with `daemon`, 11 lib tests without. `fd7cec4` is
+  F10's `3ddc12e` plus a README merge; F10's line numbers still hold. Files: `src/lib.rs` 1,958,
+  `daemon.rs` 1,180, `provider_backend.rs` 1,463, `idunn_health.rs` 1,396, `main.rs` 188, no
+  `vendor/`. CultLib pinned at `e171eca` (2026-09-04); 248 CultLib commits touch
+  `packages/cultcache-rs` or `packages/cultnet-rs` since, and the store API the connector uses
+  (`OwnedRedbMessagePackBackingStore`, `SingleFileMessagePackBackingStore`, `register_entry_type`,
+  `pull_all_backing_stores`, `get_all_with_keys`) still exists at CultLib `a4eae90`.
+- **F27 What is provider-neutral and what is Codex** (source read, `fd7cec4`). Neutral: the contract
+  types and validation (`lib.rs:51-485`, `622-631`, `1351-1415`), the AES-256-GCM envelope and
+  four-byte big-endian framing (`633-710`, `824-952`), the one-request client (`711-833`), caller
+  admission and the CultCache replay service (`954-1313`), and the accept loop
+  (`daemon.rs:344-380`, `565-740`). The daemon calls its backend at exactly two points,
+  `readiness()` and `execute(&invocation) -> CodexTransportResult` (`daemon.rs:592-653`), so one
+  trait is the whole seam. Codex: `provider_backend.rs` (the pinned `codex app-server` child,
+  `auth.json`, Responses SSE parsing), the Responses lowering `canonical_responses_body`
+  (`lib.rs:487-620`), `CodexDaemonConfig` (`daemon.rs:47-171`, CultCache type
+  `gamecult.codex.connector_config.v1`, with `codex_executable` and `codex_home`), the managed
+  paths (`daemon.rs:453-536`), and the Idunn recipe (npm `@openai/codex` input). `idunn_health.rs`
+  is Idunn runtime presence with Codex-named constants (target `codex-connector`, capability
+  `gamecult.codex.subscription-inference`, env `CODEX_CONNECTOR_CULTNET_RUDP`). The request
+  itself carries OpenAI Responses fields (`reasoning_summary`, `service_tier`,
+  `previous_response_id`, `output_format_name`, `prompt_cache_key`).
+- **F28 The wire is serde MessagePack, not CultNet** (source read). The envelope, invocation and
+  result are `rmp_serde` encodings of serde structs (`lib.rs:476-710`, client `748` and `765`,
+  daemon `637` and `652`); schema ids are strings compared by hand, not a CultNet schema.
+  CultCache holds only the replay record and the daemon config; CultNet is used only for Idunn
+  runtime presence and route observation. JSON: `parameters_json`, `output_schema_json` and tool
+  `arguments` are JSON strings checked by `require_json_object`; they are provider-facing (JSON
+  Schema and the provider's own tool-call arguments), a xenos boundary. Every other JSON use is
+  inside `provider_backend.rs` (HTTP body, SSE, app-server JSON-RPC, `auth.json`), also xenos.
+- **F29 Consumers and license** (git grep at each origin/main). Ghostlight `c43eb54` pins
+  `codex-connector` at `68fe94b` as a library (`Cargo.toml:18`, no `daemon` feature) and imports
+  the contract and client in `crates/ghostlight/src/controllers.rs:34-37` and seven other files;
+  Epiphany's pins are archive (target invariant `nothing-runs-from-epiphany`). gamecult-ops
+  `idunn/yggdrasil/bindings/codex-connector.toml.in` names origin GitHub CodexConnector; Idunn
+  `docs/migration.md:49-55` says retire codex-connector, and `:163` calls its recipe stale.
+  CodexConnector's project code is PolyForm Noncommercial 1.0.0 (`LICENSE` section 3), all 33
+  commits by Meta Vens; ModelConnector is AGPL-3.0-only at `1cf879f` (LICENSE and a 26-line
+  planned README).
+
 ## The model page (step 0b)
 
 One row per persistent kind this body introduces or changes. Rows for the thirteen
@@ -493,6 +542,22 @@ never trip (finding `breaker-counts-every-document`). Two attributions are avail
 Idunn's migration doc says Codex is dead (F9). The kit is lifted out of CodexConnector,
 and the Codex backend's existing tests are the only proof that the lift is behaviour
 neutral. Keeping the backend compiling costs nothing; deploying it is not proposed.
+Superseded 2026-10-28 by "Where the kit lift's cut line falls" below: a wire parity test
+against the v2 library proves neutrality without porting the backend.
+
+### Where the kit lift's cut line falls (cut `connector-kit-lift`)
+
+The lift moves only what F27 calls provider-neutral, behind one `ProviderBackend` trait, and
+proves itself by a parity test against the v2 library at `fd7cec4` rather than by porting the
+Codex backend. Three reasons. The Codex daemon has no consumer (F29, ruling
+`no-return-to-openai-supplier`), so porting it buys nothing the parity test does not prove more
+directly. Leaving it out makes the cut independent of question `codex-connector-fate`. And it keeps
+B2 a pure move (verbatim code, `Codex` stripped from Rust names, wire bytes unchanged), so Soul can
+falsify the move alone, and B3 owns every contract change: ids, the reasoning item, spend, and the
+Responses-shaped request fields (F27). This supersedes "Why the kit keeps its Codex backend" above,
+whose premise (the backend's tests are the only proof of neutrality) the parity test removes.
+Idunn presence (`idunn_health.rs`) is not lifted with it: it is deployment, and is checked
+against Idunn's current presence contract when a connector binary is first deployed (B4).
 
 ### How a Self run is carried (cut `mind-self-run`)
 
@@ -553,32 +618,38 @@ operator's token, then A6 and the bring-up; A3, A4 and A1 run beside it):
    rule in the actuator. Waits on A2 (ruling `run-measure-in-body-store`). Not on the path to
    the first run: A2 runs every run fresh, which the ruling allows (a cold cache is fresh).
 
-**B. To "Eureka speaks a Persona turn"** (critical path: B1, B2, B3, B4, B5, B6):
+**B. To "Eureka speaks a Persona turn"** (critical path: B2, B3, B4, B5, B6; refreshed
+2026-10-28, Imagination `imagination-kit-lift`):
 
-1. Self decision for follow-up `body-campaign-repos`. The mechanism is ruled
-   (`eureka-substrate:ruling:campaign-repo-set-home`) and mapped
-   (`eureka-substrate:cut_spec:cut-campaign-repos.r1`, Huginn, and `cut-skill-campaign-repos.r1`,
-   Eureka; both unreported). Self must decide three things: dispatch those two cuts now and
-   upgrade the daemon; the connector kit repo's name and host (the follow-up proposes
-   `GameCult/ModelConnector`; no `body-repos-on-forge` ruling exists in the mind, so either the
-   doctrine default, GitHub `GameCult`, or a question); and admit `target:r2` with the repo set
-   plus `GameCult/Idunn` and the kit. That fills the 8-repo bound (6 + 2).
-2. `connector-kit-lift` (kit repo): waits on B1 (ruling `connector-kit-home`).
-3. `connector-contract-v3` with `connector-reasoning-item` and `connector-spend` (kit): wait on
-   B2; rulings `connector-opaque-state-item`, `connector-owner`; follow-up
-   `connector-reasoning-state-cheap-providers`.
-4. `claude-connector` or `openai-compatible-connector` (kit): waits on B3, and on which
-   provider serves Persona turns first (rulings `no-return-to-openai-supplier`, follow-up
-   `connector-reasoning-state-cheap-providers`). Self raises that question when B3 is mapped.
+1. Done 2026-10-28: `target:r2` carries the eight-repo set with GameCult/Idunn and
+   GameCult/ModelConnector (follow-up `body-campaign-repos` Fixed by Huginn `f8eaf50`); the kit
+   repo is GameCult/ModelConnector on the forge (`connector-kit-repo-modelconnector`).
+2. `connector-kit-lift` (ModelConnector): spec `cut_spec:cut-connector-kit-lift.r1`. Blocked on
+   question `question:connector-kit-relicense` (F29: CodexConnector is PolyForm Noncommercial).
+   Waits on nothing else.
+   - Beside it, off the critical path: `codex-connector-park` or `codex-onto-kit`
+     (CodexConnector, gamecult-ops). Waits on question `question:codex-connector-fate` and on B2.
+3. `connector-contract-v3` with `connector-reasoning-item` and `connector-spend` (ModelConnector):
+   waits on B2. Ids become `gamecult.model.*.v3`; the `ReasoningState` item (ruling
+   `connector-opaque-state-item`); `max_cost_usd` on the invocation, cost on the outcome, a
+   `Budget` refusal and a durable fail-closed ledger (ruling `connector-owner`); the
+   provider-neutral request shape, settling F27's Responses fields; whether the wire becomes
+   CultNet typed documents instead of serde MessagePack (F28, GameCult doctrine); `wire_parity_v2`
+   deleted. Follow-up `connector-reasoning-state-cheap-providers` is read when the item is mapped.
+4. `claude-connector` (ModelConnector; ruling `persona-first-connector-claude`): waits on B3. Its
+   map raises how it authenticates and whose credential it holds against invariant
+   `token-out-of-her-reach` (rulings `connector-owner`, `self-run-token-reach`). It also carries
+   the connector's own config document, the CultLib bump from `e171eca` (F26), and Idunn presence
+   rebuilt from `idunn_health.rs` against Idunn's current contract, if Idunn deploys it.
 5. `mind-persona` (Huginn): the Persona organ, one connector request per turn
    (`persona-turn-connector`), Persona state through Huginn (landed), the start-Self tool (A6),
    traces with provenance from day one (`collect-with-provenance-gate-at-training`). Waits on
    B4 and on where traces live (question `persona-trace-retention` was withdrawn to be re-asked
    with the trace store; re-ask it when B5 is mapped).
-6. `persona-mouth` (Bifrost or gamecult-ops): where a turn is heard. Waits on B5 and on which
-   mouth first: Matrix (`chat-platform`, not yet deployed; follow-up
-   `identity-minting-moves-to-bifrost` precedes the chat rollout) or Discord
-   (`body-includes-discord`). Self raises it when B5 is mapped.
+6. `persona-mouth` (Bifrost or gamecult-ops): Matrix (ruling `persona-mouth-matrix`; Discord
+   stays out, `gamecult-chat:ruling:discord-taints-training`). Waits on B5 and on the Matrix
+   deployment (`chat-platform`, `chat-stand-up-now`; follow-up
+   `identity-minting-moves-to-bifrost` precedes the chat rollout).
 
 **C. Beside both paths:**
 
@@ -591,8 +662,8 @@ operator's token, then A6 and the bring-up; A3, A4 and A1 run beside it):
    and eureka-substrate Cut 12 leasing) and the swarm scheduler (C3).
 3. `swarm-ctb-scheduler` (Huginn): rulings `mind-scheduling-ctb`, `swarm-dial-one-budget`,
    `swarm-scheduler-one-shot`, `turn-cost-measured`. Waits on A8 (its cost source).
-4. `idunn-job-workload` (Idunn): the deletion line of the hand install. Waits on B1 (Idunn
-   joins the campaign); due before the first hosted member (`mind-units-templated-interim`).
+4. `idunn-job-workload` (Idunn): the deletion line of the hand install. Idunn joined the
+   campaign in `target:r2`; due before the first hosted member (`mind-units-templated-interim`).
 5. `wire-names-rename` (Huginn, Eureka): before the first hosted mind
    (`wire-names-rename-before-hosting`). Waits on nothing; schedule before C2.
 6. `doctrine-repoint` (Eureka, F12), then `epiphany-archive` (last).
