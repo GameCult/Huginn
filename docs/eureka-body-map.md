@@ -51,6 +51,15 @@ cut line falls", path B refreshed. Spec: `cut-connector-kit-lift.r1`. Questions:
 `connector-kit-relicense` (blocks the spec), `codex-connector-fate`. The baseline probe log was
 a session scratchpad file and is not kept; its counts are in F26.
 
+Revised again on 2026-10-28 by Imagination (`imagination-contract-v3`, session
+`self-2026-10-28-eureka`) at ModelConnector `ec0519d` and CultLib `a4eae90`, for cut
+`connector-contract-v3`. New facts F30-F31 (probes on Yggdrasil), new rationale "Where the
+contract v3 cut line falls", B3 split into B3a-B3c. Spec: `cut-connector-contract-v3.r2`.
+Questions: `connector-v3-wire`, `connector-v2-coexistence` (both raised in r1, which r2
+superseded only to split two context windows; they block r2). Follow-up:
+`cultnet-binary-operation-payload`. Research: Huginn `725f5a5`
+`docs/research/connector-contract-v3-prior-art.md`.
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
@@ -367,6 +376,26 @@ Each line: what was run, where, result.
   commits by Meta Vens; ModelConnector is AGPL-3.0-only at `1cf879f` (LICENSE and a 26-line
   planned README).
 
+- **F30 The v2 wire decoded, and what a v3 change costs it** (2026-10-28, Yggdrasil, ygg-verify
+  rust image, scratch clone of ModelConnector `ec0519d` plus a probe-only commit; research
+  `725f5a5` section 4, probes P2-P5). Baseline 77 tests green with and without `daemon`. The real
+  v2 frame `envelope_invocation.mp` is 735 bytes for 429 bytes of ciphertext (ratio 1.713; a
+  positional six-array, `0x96`) and decrypts to Ghostlight-shaped content. Ciphertext as
+  MessagePack `bin` makes it 526 (1.226); at 1 MiB all-high, v2 2,097,251 vs bin 1,048,675. The
+  v2 type reads bin and named encodings unchanged. Positional encoding fails on any added field
+  ("array had incorrect length"); named encoding drops an unknown field silently; a v2
+  `InputItem` refuses an unknown variant; a v3 envelope id is refused by v2 before decryption,
+  so a v2 daemon drops a v3 caller's connection and never answers.
+- **F31 CultNet can carry the kit as an operation service** (same job, cultnet-rs at CultLib
+  `a4eae90`; source reads in research section 4). The sealed envelope as the
+  `messagepack-base64` payload of `cultnet.operation_request.v0` round-trips through
+  `encode_cultnet_message_to_vec`/`decode_cultnet_message_from_slice`: 1.354x at 64 KiB, 1.335x
+  at 1 MiB, 1.334x at 8 MiB (deterministic), 6.5 ms encode and 1.0 ms decode at 1 MiB, release.
+  CultNet's `TcpFramed` frame is the kit's 4-byte big-endian frame; operation payloads may only
+  be `messagepack-base64` (`contracts.rs:780`); CultNet security holds one key per server where
+  the kit binds one per caller with ids in the AAD. Huginn's `huginn.mind` is already this
+  shape (`huginn-mind/src/envelope.rs`).
+
 ## The model page (step 0b)
 
 One row per persistent kind this body introduces or changes. Rows for the thirteen
@@ -559,6 +588,33 @@ whose premise (the backend's tests are the only proof of neutrality) the parity 
 Idunn presence (`idunn_health.rs`) is not lifted with it: it is deployment, and is checked
 against Idunn's current presence contract when a connector binary is first deployed (B4).
 
+### Where the contract v3 cut line falls (cut `connector-contract-v3`)
+
+B3 as one cut (wire, request shape, reasoning item, spend) reads the whole kit and rewrites most
+of it, past half of a Hands pass. It splits along owners, each falsifiable alone, all landing
+before B4 so no consumer ever sees an intermediate v3:
+
+- B3a `connector-contract-v3` (spec r2): the wire and the documents. One codec owner (named
+  MessagePack, unknown fields refused), one carriage owner (a CultNet operation, if
+  `connector-v3-wire` goes as recommended), typed outcomes and refusals, the request made
+  provider-neutral, v2 deleted, schemas published from the types. It folds in
+  `v3-ciphertext-as-bytes` and the parts of `kit-contract-test-debt` in code it rewrites, and
+  takes the CultLib bump from B4 because cultnet-rs must be at the rev cultcache-rs is.
+- B3b `connector-reasoning-item`, settled here so its spec is quick (research section 5): one
+  `ReasoningState {provider, model, state: bytes}` per provider block, in transcript order, as
+  both an `InputItem` and an event, the bytes the connector's encoding of the whole block; a kit
+  function that turns a result's events into transcript items, so no caller branches on provider;
+  `ProviderBackend` declares its provider tag; the service refuses foreign state after the last
+  user text (`ForeignReasoningState`) and drops it elsewhere before the backend sees it, counting
+  the drop on the receipt. A backend receives a call that cannot show it a foreign item.
+- B3c `connector-spend`: price table in the connector's config, `max_cost` on the invocation,
+  a worst-case reservation (input estimate plus `max_output_tokens` times the output price) held
+  in the replay store and settled to actual, cost on the outcome, a `Budget` refusal, fail
+  closed when the ledger cannot be written (ruling `connector-owner`; LiteLLM and OpenRouter
+  both reserve this way). Its map raises how the connector's per-caller ceiling relates to her
+  run's `budget_usd` (invariant `run-is-the-grant`, ruling `turn-cost-measured`) and whether
+  amounts are integer micro-dollars or the mind's canonical decimal string.
+
 ### How a Self run is carried (cut `mind-self-run`)
 
 The run document is the grant (`open_and_launch`); the unit takes only `--instance`
@@ -618,29 +674,31 @@ operator's token, then A6 and the bring-up; A3, A4 and A1 run beside it):
    rule in the actuator. Waits on A2 (ruling `run-measure-in-body-store`). Not on the path to
    the first run: A2 runs every run fresh, which the ruling allows (a cold cache is fresh).
 
-**B. To "Eureka speaks a Persona turn"** (critical path: B2, B3, B4, B5, B6; refreshed
+**B. To "Eureka speaks a Persona turn"** (critical path: B2, B3a-c, B4, B5, B6; refreshed
 2026-10-28, Imagination `imagination-kit-lift`):
 
 1. Done 2026-10-28: `target:r2` carries the eight-repo set with GameCult/Idunn and
    GameCult/ModelConnector (follow-up `body-campaign-repos` Fixed by Huginn `f8eaf50`); the kit
    repo is GameCult/ModelConnector on the forge (`connector-kit-repo-modelconnector`).
-2. `connector-kit-lift` (ModelConnector): spec `cut_spec:cut-connector-kit-lift.r1`. Blocked on
-   question `question:connector-kit-relicense` (F29: CodexConnector is PolyForm Noncommercial).
-   Waits on nothing else.
-   - Beside it, off the critical path: `codex-connector-park` or `codex-onto-kit`
-     (CodexConnector, gamecult-ops). Waits on question `question:codex-connector-fate` and on B2.
-3. `connector-contract-v3` with `connector-reasoning-item` and `connector-spend` (ModelConnector):
-   waits on B2. Ids become `gamecult.model.*.v3`; the `ReasoningState` item (ruling
-   `connector-opaque-state-item`); `max_cost_usd` on the invocation, cost on the outcome, a
-   `Budget` refusal and a durable fail-closed ledger (ruling `connector-owner`); the
-   provider-neutral request shape, settling F27's Responses fields; whether the wire becomes
-   CultNet typed documents instead of serde MessagePack (F28, GameCult doctrine); `wire_parity_v2`
-   deleted. Follow-up `connector-reasoning-state-cheap-providers` is read when the item is mapped.
+2. Landed 2026-10-28: `connector-kit-lift` (ModelConnector main `ec0519d`, spec
+   `cut_spec:cut-connector-kit-lift.r1`, relicensed by ruling `connector-kit-relicense-agpl`).
+   - Beside it, off the critical path: `codex-connector-park` (CodexConnector, gamecult-ops;
+     ruling `codex-connector-park`).
+3. `connector-contract-v3` (ModelConnector), split three ways (rationale "Where the contract v3
+   cut line falls"):
+   - a. `connector-contract-v3`: spec `cut_spec:cut-connector-contract-v3.r2`. Waits on B2
+     (landed, `ec0519d`) and questions `question:connector-v3-wire` and
+     `question:connector-v2-coexistence`.
+   - b. `connector-reasoning-item` (ModelConnector): waits on B3a. Reads follow-up
+     `connector-reasoning-state-cheap-providers` (answered in research `725f5a5` section 1d).
+   - c. `connector-spend` (ModelConnector): waits on B3b (same files).
 4. `claude-connector` (ModelConnector; ruling `persona-first-connector-claude`): waits on B3. Its
    map raises how it authenticates and whose credential it holds against invariant
    `token-out-of-her-reach` (rulings `connector-owner`, `self-run-token-reach`). It also carries
-   the connector's own config document, the CultLib bump from `e171eca` (F26), and Idunn presence
-   rebuilt from `idunn_health.rs` against Idunn's current contract, if Idunn deploys it.
+   the connector's own config document and Idunn presence rebuilt from `idunn_health.rs` against
+   Idunn's current contract, if Idunn deploys it (the CultLib bump moved to B3a). Its lowering
+   to the Messages API must be deterministic: Anthropic binds a replayed thinking block to the
+   unchanged system, tools and earlier messages (research `725f5a5` section 1a, prefix check).
 5. `mind-persona` (Huginn): the Persona organ, one connector request per turn
    (`persona-turn-connector`), Persona state through Huginn (landed), the start-Self tool (A6),
    traces with provenance from day one (`collect-with-provenance-gate-at-training`). Waits on
