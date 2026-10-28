@@ -459,7 +459,7 @@ Each line: what was run, where, result.
   with `serde_json` `raw_value` builds in the workspace on rust 1.95. Baseline: 138 kit lib tests
   with `daemon`, green. Source reads at `e0c0832`: `ProviderBackend::execute` returns a
   `TransportResult` synchronously on the serve loop's per-connection thread (`serve.rs:25-38`,
-  `243-260`); the backend's only result door is `ProviderCall::transported` (`service.rs:380`);
+  `240-262`); the backend's only result door is `ProviderCall::transported` (`service.rs:380`);
   `wire_encode` is `pub(crate)` (`contract.rs:586`), so a connector crate encodes its own state
   with `rmp_serde` directly; there is no connector binary, config document or Idunn presence in the
   repo (`crates/` holds only `model-connector`); CodexConnector's `idunn_health.rs` is 1,396 lines
