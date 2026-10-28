@@ -75,6 +75,13 @@ made exact, path B line 3c given its spec and B4's riders carried. Spec:
 `connector-spend-readout`. Research reused unchanged (`725f5a5` section 2 is the ceiling
 question's evidence).
 
+Revised again on 2026-10-28 by Imagination (`imagination-claude-connector`, session
+`self-2026-10-28-eureka`) at ModelConnector `e0c0832` (B3c landed), for map line B4. New fact F34
+(probes on Yggdrasil), rationale "Where the Claude connector cut line falls", path B line 4 split
+into B4a-c. Spec: `cut-claude-backend.r1` (B4a). Question: `claude-connector-credential` (blocks
+the spec). Follow-up: `claude-byte-bound-live-check`. Research: Huginn `f237623`
+`docs/research/claude-connector-prior-art.md`.
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
@@ -441,6 +448,23 @@ Each line: what was run, where, result.
   `465-479`); `TransportOutcome::Failed` carries no usage (`524-527`); replay records are never
   deleted or pruned (no `delete` on the store in `service.rs`); `TransportService::open` takes a
   path, so a test cannot inject a failing store (`service.rs:181-182`).
+- **F34 The kit's in-flight boundary misses Claude's turn rule; caller JSON must not pass through
+  `json!`** (2026-10-28, Yggdrasil ygg-verify rust image, scratch commits `eb021f0`, `0c9a39d` on
+  ModelConnector `e0c0832`, never pushed). P1: a kit lib test admitting `[UserText,
+  ReasoningState(other-provider), ToolCall, ToolResult, UserText]` printed `executed, dropped=1`,
+  so foreign state in a tool exchange the model has not yet answered is dropped, where Anthropic
+  counts a tool loop as one assistant turn (research `f237623` section 4). P2: a `RawValue`
+  `{"b":1,"a":2}` serialized through `json!` came out `{"a":2,"b":1}`; through a typed
+  `#[derive(Serialize)]` field it came out verbatim. P3: `ureq 3.5.0` (rustls, no default features)
+  with `serde_json` `raw_value` builds in the workspace on rust 1.95. Baseline: 138 kit lib tests
+  with `daemon`, green. Source reads at `e0c0832`: `ProviderBackend::execute` returns a
+  `TransportResult` synchronously on the serve loop's per-connection thread (`serve.rs:25-38`,
+  `243-260`); the backend's only result door is `ProviderCall::transported` (`service.rs:380`);
+  `wire_encode` is `pub(crate)` (`contract.rs:586`), so a connector crate encodes its own state
+  with `rmp_serde` directly; there is no connector binary, config document or Idunn presence in the
+  repo (`crates/` holds only `model-connector`); CodexConnector's `idunn_health.rs` is 1,396 lines
+  and its recipe binds a CultCache config document, a replay slot and a credential state slot
+  (`deployment/idunn/recipe.toml`).
 
 ## The model page (step 0b)
 
@@ -690,6 +714,44 @@ before B4 so no consumer ever sees an intermediate v3:
     her own Persona organ, which she may rewrite (`she-owns-her-body`), so it is not a wallet
     control on its own.
 
+### Where the Claude connector cut line falls (map line B4)
+
+B4 as one cut (backend, binary, config document, credential delivery, Idunn presence, spend
+readout, retention, clock recovery) is three owners and well past one Hands pass: the presence port
+alone is 1,396 lines in CodexConnector (F34). It splits so each part is falsifiable alone:
+
+- B4a `claude-backend` (spec `cut-claude-backend.r1`): the `ProviderBackend` for the Messages API
+  as a library crate. Lowering is a pure function over typed structs with caller JSON as `RawValue`
+  (F34 P2), because Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 accept a replayed thinking block
+  only while system, tools and earlier messages are byte-unchanged. The response is read as a
+  stream (the docs steer long requests to streaming and a stream reports usage as it goes). One
+  execute is one HTTP request: no internal retry, so the replay store's "the provider runs once"
+  stays literal. Every provider failure bills the reservation (usage `None`), because the docs do
+  not say an errored request is free. The kit's in-flight boundary moves to the last user-side run
+  holding no tool result (F34 P1, research section 4), which answers follow-up
+  `claude-tool-exchange-boundary`. Token counting stays the kit's byte bound: `count_tokens` is an
+  estimate in both directions and a second network call, so it is not a bound either; the one open
+  premise (signature bytes against billed prior-turn thinking) is follow-up
+  `claude-byte-bound-live-check`, read from receipts' `overrun_micro_usd` on the first live turns.
+  The credential is question `claude-connector-credential`: Anthropic's terms forbid routing a
+  connector's requests through subscription OAuth, so the recommendation is an operator-owned
+  Console key in a dedicated workspace (the default workspace cannot carry a spend limit), readable
+  only by the connector's unit.
+- B4b `claude-connector-binary`: the `claude-connector` binary, its config document (CultCache,
+  root-owned: listen address, `ServeLimits`, callers, the price table with one `ModelPrice` per
+  allowed model and `overhead_tokens` measured per `claude-byte-bound-live-check`, the credential
+  file path), credential delivery to the connector's own unit user, and deployment. Its map raises
+  whether Idunn deploys it now (presence rebuilt from `idunn_health.rs` against Idunn's current
+  contract) or it is hand-installed beside her units until `idunn-job-workload`
+  (`mind-units-templated-interim` is the precedent), and carries follow-up
+  `spend-window-clock-recovery` (the audited root verb belongs with the config document).
+- B4c `connector-spend-readout`: the spend read operation beside `invoke` and replay-store
+  retention (follow-ups `connector-spend-readout-2`, `replay-store-retention`). Kit code, needed by
+  the turn-cost charge (A8, B5), not by the first live turn.
+
+B4a touches none of the code `kit-contract-test-debt` names, so that follow-up stays open for the
+next cut in `contract.rs`, `client.rs` or `envelope.rs`.
+
 ### How a Self run is carried (cut `mind-self-run`)
 
 The run document is the grant (`open_and_launch`); the unit takes only `--instance`
@@ -770,20 +832,16 @@ operator's token, then A6 and the bring-up; A3, A4 and A1 run beside it):
      `725f5a5` section 1d and needs no kit rule (every provider's state stays opaque bytes).
    - c. `connector-spend` (ModelConnector): spec `cut_spec:cut-connector-spend.r1` at `1d51e71`.
      B3b has landed; it waits on question `question:connector-spend-ceiling`.
-4. `claude-connector` (ModelConnector; ruling `persona-first-connector-claude`): waits on B3. Its
-   map raises how it authenticates and whose credential it holds against invariant
-   `token-out-of-her-reach` (rulings `connector-owner`, `self-run-token-reach`). It also carries
-   the connector's own config document and Idunn presence rebuilt from `idunn_health.rs` against
-   Idunn's current contract, if Idunn deploys it (the CultLib bump moved to B3a). Its lowering
-   to the Messages API must be deterministic: Anthropic binds a replayed thinking block to the
-   unchanged system, tools and earlier messages (research `725f5a5` section 1a, prefix check).
-   Riders carried from B3c and the B3 Soul passes: the price table lives in that config document
-   (one `ModelPrice` per allowed model, a missing one refused at open); if B3c's byte bound
-   refuses real turns, the backend supplies a provider count instead (Anthropic `count_tokens`,
-   research section 2d); the turn-cost charge needs a spend readout because the store is held
-   exclusively (F33 P2, follow-up `connector-spend-readout`); the tool-exchange boundary is
-   confirmed against Anthropic's rules (follow-up `claude-tool-exchange-boundary`); and whatever
-   of follow-up `kit-contract-test-debt` B3a-c did not kill is killed in code B4 touches.
+4. `claude-connector` (ModelConnector; ruling `persona-first-connector-claude`), split three ways
+   (rationale "Where the Claude connector cut line falls"):
+   - a. `claude-backend`: spec `cut_spec:cut-claude-backend.r1` at `e0c0832`. B3 has landed; it
+     waits on question `question:claude-connector-credential`.
+   - b. `claude-connector-binary` (ModelConnector, gamecult-ops or Idunn): the binary, its config
+     document and price table, credential delivery, deployment and Idunn presence, follow-ups
+     `spend-window-clock-recovery` and `claude-byte-bound-live-check`. Waits on B4a and the
+     credential ruling; its map raises Idunn-now versus hand-install.
+   - c. `connector-spend-readout` (ModelConnector): follow-ups `connector-spend-readout-2`,
+     `replay-store-retention`. Waits on B4a; due before the turn-cost charge (A8, B5).
 5. `mind-persona` (Huginn): the Persona organ, one connector request per turn
    (`persona-turn-connector`), Persona state through Huginn (landed), the start-Self tool (A6),
    traces with provenance from day one (`collect-with-provenance-gate-at-training`). Waits on
