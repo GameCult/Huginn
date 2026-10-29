@@ -811,6 +811,40 @@ in-force `operated_by Mind` Self run of its instance, which admission keeps uniq
   prefix passes `CEILING_TOKENS + FLUSH_ALLOWANCE_TOKENS`, it is interrupted once. A queued
   message that is never delivered costs the flush, never the stop.
 
+### Swarm by 2026-10-30 (Imagination `imagination-swarm-tonight`, 2026-10-29)
+
+Ruling `self-runs-through-connector` (operator) makes this the top priority: Eureka hears and
+speaks in Matrix, takes turns through the Claude connector on one token, starts her own Self runs
+and reads the communal burn into #burn, under the operator's brake and dial. Units are
+hand-managed on Yggdrasil tonight (follow-up `swarm-units-under-idunn`).
+
+Flow: a message in #swarm, #burn or #operator reaches the Bifrost mouth (`persona-mouth`, the only
+holder of @eureka's Matrix token, ruling `persona-matrix-account-interim`), which queues a typed
+delivery and rings `mind-persona@eureka`; the waker rings it on cadence too
+(`persona-turn-drains-deliveries`). The unit's gate reads brake and dial; `mind-persona` builds a
+turn (persona state, deliveries, her runs, the connector's spend and plan-quota readout), calls the
+connector tool-less with a JSON Schema, and decodes one typed `PersonaReply`
+(`persona-reply-typed-by-schema`): say items go back to the mouth, a `start_self_run` admits a brief
+follow-up and calls `open_and_launch` (`self-run-brief-claimed-follow-up`). `mind-self@eureka`
+leases the token from the connector on a pipe fd over a peer-uid unix socket and runs claude in her
+own user and workspace (`self-run-credential-lease`); the connector reserves and settles in its
+ledger. The brake hold stops both units; the mouth refuses sends while held.
+
+Authority: connector = token, admission, ledger, plan-quota observation; mind-control = brake and
+dial; Bifrost = Matrix credential, ear, mouth; mind-persona = the turn and the decision to start a
+Self run; mind-self-run = the Self run's process (argv, flush, interrupt). Demoted: A5's token
+EnvironmentFile (never lands), A6 `mind-launch-self` (not built; the Persona opens runs, ruling
+`first-self-run-starter`), the Discord posting actuator (deleted in `persona-mouth`).
+
+Cuts (specs `cut_spec:cut-<label>.r1`), all dispatchable now in parallel:
+`claude-turn-schema-quota` and `claude-self-run-lease` (ModelConnector; merge in that order),
+`mind-persona` and `mind-self-via-lease` (Huginn), `persona-mouth` (Bifrost),
+`swarm-connector-yggdrasil` and `swarm-units-yggdrasil` (gamecult-ops). Then bring-up (Self and
+operator): token minted, releases built, scripts run as root, smoke turn, dial set, brake released,
+`mind-wake@eureka.timer` enabled. Open: questions `eureka-forge-write-tonight`,
+`who-directs-self-runs`. Not on tonight's path: B4d tools in Persona turns, the appservice
+(follow-up `matrix-appservice-persona-identity`), the swarm scheduler (C3), more instances (C2).
+
 ### Cut sequence (refreshed 2026-10-22, Imagination `imagination-self-run`)
 
 Landed on Huginn main `70d0cef`: leaf-into-huginn, mind-control-store, run-live-admission,
