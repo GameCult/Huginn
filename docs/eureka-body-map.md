@@ -82,6 +82,15 @@ into B4a-c. Spec: `cut-claude-backend.r1` (B4a). Question: `claude-connector-cre
 the spec). Follow-up: `claude-byte-bound-live-check`. Research: Huginn `f237623`
 `docs/research/claude-connector-prior-art.md`.
 
+Revised again on 2026-10-29 by Modeling (`modeling-claude-code-backend`, session
+`self-2026-10-29-eureka`) at ModelConnector `200933f`, after B4a landed as `claude-code-backend`
+(spec `cut-claude-code-backend.r1`; cut report `h2`, Soul verdict `s2`). Ruling
+`claude-connector-via-claude-code` answered question `claude-connector-credential` and withdrew
+spec `cut-claude-backend.r1`. New fact F35. The B4 rationale and path B line 4 are rewritten
+(B4a landed, B4d added, the Console-key backend deferred), the spend-ledger row of the model
+page changed and a Claude connector backend row was added. F34's repo-state sentence keeps its
+tense.
+
 ## Pinned heads (fetched 2026-10-08 ~12:10 UTC)
 
 | Repo | Ref | Commit | Note |
@@ -465,6 +474,26 @@ Each line: what was run, where, result.
   repo (`crates/` holds only `model-connector`); CodexConnector's `idunn_health.rs` is 1,396 lines
   and its recipe binds a CultCache config document, a replay slot and a credential state slot
   (`deployment/idunn/recipe.toml`).
+- **F35 B4a at ModelConnector `200933f` (landed; read from cut report `h2`, verdict `s2` and the
+  crate, 2026-10-29).** `crates/claude-connector` is a library (`backend.rs`, `config.rs`,
+  `handle.rs`, `launch.rs`, `process.rs`, `stream.rs`; deps `model-connector` with `daemon`,
+  `serde_json`, `rmp-serde`, `sha2`, `zeroize`, `libc` on unix; no HTTP client). There is still no
+  binary, config document or Idunn presence. `model-connector` and `schemas/` are byte-identical
+  to `e0c0832`. Gate: 198 tests green; `cargo mutants --in-diff` 155 mutants, 121 caught, 0 missed,
+  2 timeouts (`process.rs` `StdChild::kill`). Live (claude 2.1.312, Starfire, haiku-5-5, four
+  calls): print mode emits `result.model_usage_since_last_result`, the turn's own usage; the
+  cumulative `modelUsage` of a resumed fork also counts the earlier turns, so it is never read;
+  `--system-prompt-file` replaces the system prompt as `--system-prompt` does. Argv sets
+  `--tools ""`, `--strict-mcp-config`, `--setting-sources ""`, `--permission-prompts none`, and
+  `--resume <id> --fork-session` on every resume. The child env is cleared to `PATH`, `HOME`,
+  `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS` and the one const
+  `CLAUDE_CODE_OAUTH_TOKEN`. Not exercised live: `CLAUDE_CODE_MAX_OUTPUT_TOKENS`. Open scars from
+  Soul `s2`: `stderr-join-reachable` (the stderr-tail join is reachable but undefended in the
+  repo), `prompt-file-exclusive-undefended` (the exclusive create on a predictable temp name),
+  and `door-refusal-boundary` (code bills zero only for a 401 or 403 with explicitly empty usage;
+  ruling `claude-code-plan-quota-fuse-2`, admitted after `s2`, says 401, 403 and 429, so a 429 with
+  `{}` still bills the reservation until follow-up `claude-backend-hardening` lands). Follow-ups
+  `handle-unauthenticated`, `pin-checked-only-at-ready`.
 
 ## The model page (step 0b)
 
@@ -480,7 +509,8 @@ pipeline kinds are in Huginn `docs/eureka-substrate-map.md`.
 | Brake | One document per instance in a root-owned CultCache store `/etc/gamecult/minds/<instance>/control.cc`, type `eureka.control.brake.v1 { released: bool, set_at, set_by }`. | Replaced whole by the operator's CLI; never appended. Absent or undecodable reads as held. `mind-control brake hold` writes it held and then, in the same command, stops her running units: `systemctl stop` (blocking) over `mind-self@<i>:*` and `mind-persona@<i>:*`, through `SystemdLauncher::stop_all` (cut brake-stop; ruling `self-run-actuator`; F18-F20). | Operator only (ruling `brake-dial-root-store-now`); her units read it, and the file is not writable by any user she runs as. The hold is the one stopper of her units. `read_effective` is the one reader. Its `Released` answer carries a `Grant` (cadence and run cap, private fields, not `Clone`), which `open_and_launch` takes by value, so no run opens without a released reading (cut mind-launch r3). |
 | Burn-rate dial | Same store, `eureka.control.burn_rate.v1 { heat, base_cooldown_s, base_run_usd, set_at, set_by }`; `heat` in 0.05..=2.0. | Replaced whole by the CLI. Absent or out of bounds reads as heat 0, which launches nothing (fail closed, LiteLLM scar rider of ruling `connector-owner`). Schedules and her own rest arrive later as follow-up `burn-schedule-and-rest`. | Operator. Derived (never stored): wake cadence `base_cooldown_s / heat`, per-run cap `--max-budget-usd = base_run_usd × heat`, per-request `max_cost_usd`. |
 | Connector request and transcript items | Request: `(caller_runtime_id, request_id)`, the replay key the daemon already keeps (`replay.cc`). Items: UserText, AssistantText, ToolCall, ToolResult, plus `ReasoningState { provider, model, opaque }` (ruling `connector-opaque-state-item`). Contract ids become provider-neutral `gamecult.model.*.v3` (follow-up `connector-contract-untyped`); the connector serves Ghostlight too, so not `eureka.*`. | Invocation expires at `expires_at_unix_ms`; replay record per key; restart-era `Indeterminate`. The caller stores the transcript and replays it verbatim; foreign-tagged reasoning state inside an in-flight tool exchange is refused typed; completed-turn foreign state is settled per provider in the connector cut (follow-up `connector-reasoning-state-cheap-providers`). | The connector produces, reads or refuses reasoning bytes; callers never branch on provider. |
-| Connector spend ledger | `gamecult.model.caller_spend.v1` keyed by caller runtime id and window start, in each daemon's state root. | Rolled per window; refusal `Budget` at the cap; durable, and a missing ledger refuses the request. | Each daemon writes its own; the root caller config sets the cap. |
+| Connector spend ledger | The reservation lives in the replay record itself (cut connector-spend, F33): integer micro-USD, windowed per caller (ruling `connector-spend-caller-window-ceiling`). | Reserve before the provider runs, settle to actual; refusals `CostBound` (the invocation's own `max_cost_micro_usd`) and `SpendCeiling` (the caller's window); a ledger that cannot be written refuses the request. | The kit's `ProviderCall::charge` is the one billing owner; a backend reports usage or `None` (bills the reservation). The root caller config sets the ceiling. |
+| Claude connector backend (B4a, landed `200933f`) | `ClaudeCodeBackend` in `crates/claude-connector`, provider tag `claude-code`: one `claude -p` child per call in its own process group, tool-less, system prompt in a private temp file; reasoning state is a named-MessagePack `ClaudeCodeHandle { session_id, instance, prefix_sha256 }`; usage is `model_usage_since_last_result` summed over models, in list-price units from B4b's price table (ruling `claude-code-plan-quota-fuse-2`). | A handle resumes (always `--fork-session`) only when it decodes, names this instance, its session file exists and its digest matches the request's instructions, model and earlier items; anything else re-seeds from the caller's transcript (ruling `claude-code-handle-reseeds`). The CLI's session store under `config_dir` is a cache; the caller's transcript is the truth. A refusal at the door with explicitly empty usage bills zero; unknown usage, a crash or a deadline bills the reservation. | The backend owns the argv, env, process and stream mapping. It never reads `total_cost_usd`, never forwards `ANTHROPIC_API_KEY`, never retries, never spawns twice per execute. Forbidden: `--bare`, `--fallback-model`, `--mcp-config` and `--dangerously-skip-permissions` (B4d changes the MCP line, by spec). Her organs hold none of it: the subscription token lives in the connector's own environment. |
 | Persona turn traces | **Empty: question `persona-trace-retention`.** Candidate: per turn, the request digest, the transcript items and the typed output, keyed by the turn's run. | Empty: how long they are kept, whether Discord-sourced content may enter a training export (F14). | Empty: who may export them. |
 | Persona state | `gamecult.persona_state.v0`, one per mind, `personaId` = instance (cut-huginn-persona-state r2, eureka-substrate). | Replaced whole under CAS with a receipt; she may rewrite any field (`identity-write-all-visible`). | The Persona organ is the only writer. |
 | Identity diffs | The pair of receipts of two consecutive Persona puts whose identity fields (publicName, publicDescription, presentation, values) differ. Derived, not stored. | Composed by the Persona organ at put time and sent as one delivery request through the crossing; a failed post is retried by Bifrost's delivery journal, not by her. | Persona organ composes; Bifrost posts under the permit. No rate limit. |
@@ -718,38 +748,45 @@ before B4 so no consumer ever sees an intermediate v3:
 
 B4 as one cut (backend, binary, config document, credential delivery, Idunn presence, spend
 readout, retention, clock recovery) is three owners and well past one Hands pass: the presence port
-alone is 1,396 lines in CodexConnector (F34). It splits so each part is falsifiable alone:
+alone is 1,396 lines in CodexConnector (F34). Ruling `claude-connector-via-claude-code`
+(2026-10-29, operator) answered the credential question: the first Claude backend drives the
+`claude` binary on the operator's subscription, not the Messages API with a Console key. It
+splits so each part is falsifiable alone:
 
-- B4a `claude-backend` (spec `cut-claude-backend.r1`): the `ProviderBackend` for the Messages API
-  as a library crate. Lowering is a pure function over typed structs with caller JSON as `RawValue`
-  (F34 P2), because Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 accept a replayed thinking block
-  only while system, tools and earlier messages are byte-unchanged. The response is read as a
-  stream (the docs steer long requests to streaming and a stream reports usage as it goes). One
-  execute is one HTTP request: no internal retry, so the replay store's "the provider runs once"
-  stays literal. Every provider failure bills the reservation (usage `None`), because the docs do
-  not say an errored request is free. The kit's in-flight boundary moves to the last user-side run
-  holding no tool result (F34 P1, research section 4), which answers follow-up
-  `claude-tool-exchange-boundary`. Token counting stays the kit's byte bound: `count_tokens` is an
-  estimate in both directions and a second network call, so it is not a bound either; the one open
-  premise (signature bytes against billed prior-turn thinking) is follow-up
-  `claude-byte-bound-live-check`, read from receipts' `overrun_micro_usd` on the first live turns.
-  The credential is question `claude-connector-credential`: Anthropic's terms forbid routing a
-  connector's requests through subscription OAuth, so the recommendation is an operator-owned
-  Console key in a dedicated workspace (the default workspace cannot carry a spend limit), readable
-  only by the connector's unit.
-- B4b `claude-connector-binary`: the `claude-connector` binary, its config document (CultCache,
-  root-owned: listen address, `ServeLimits`, callers, the price table with one `ModelPrice` per
-  allowed model and `overhead_tokens` measured per `claude-byte-bound-live-check`, the credential
-  file path), credential delivery to the connector's own unit user, and deployment. Its map raises
+- B4a `claude-code-backend` (landed, ModelConnector `200933f`, spec `cut-claude-code-backend.r1`,
+  F35): `ClaudeCodeBackend` as a library crate, tool-less turns, session-handle reasoning state
+  (ruling `claude-code-handle-reseeds`), usage from `model_usage_since_last_result` (ruling
+  `claude-code-plan-quota-fuse-2`). The kit is unchanged, so the in-flight boundary (follow-up
+  `claude-tool-exchange-boundary`) was not moved here; it belongs to B4d.
+- B4b `claude-connector-binary` (next): the `claude-connector` binary, its config document
+  (CultCache, root-owned: listen address, `ServeLimits`, callers, the `ClaudeCodeConfig` fields,
+  the price table with one `ModelPrice` per allowed model in list-price units and
+  `overhead_tokens` for the harness preamble), credential delivery
+  (`CLAUDE_CODE_OAUTH_TOKEN` from a root-0600 EnvironmentFile to the connector's own unit user,
+  readable by no unit of hers), the pinned `claude` binary digest, and deployment. Its map raises
   whether Idunn deploys it now (presence rebuilt from `idunn_health.rs` against Idunn's current
   contract) or it is hand-installed beside her units until `idunn-job-workload`
-  (`mind-units-templated-interim` is the precedent), and carries follow-up
-  `spend-window-clock-recovery` (the audited root verb belongs with the config document).
+  (`mind-units-templated-interim` is the precedent). It carries follow-ups
+  `spend-window-clock-recovery` and `claude-byte-bound-live-check`; the first live tool-less turn
+  is its operator check, and confirms `CLAUDE_CODE_MAX_OUTPUT_TOKENS` under the pinned binary.
 - B4c `connector-spend-readout`: the spend read operation beside `invoke` and replay-store
   retention (follow-ups `connector-spend-readout-2`, `replay-store-retention`). Kit code, needed by
   the turn-cost charge (A8, B5), not by the first live turn.
+- B4d `claude-tool-exchange`: ruling `claude-code-runs-her-tools` (operator, 2026-10-29) lets the
+  claude process run her tool loop over MCP, so one kit call becomes a whole agent loop, and
+  `self-run-actuator-2` restates the actuator ruling to match (the connector may host her Persona
+  turn's tool loop on this backend). The cut owes: the kit reserves for the whole call, not one
+  turn; the process carries `--max-turns` and a budget cap; her tools never inherit the
+  connector's environment, where the subscription token lives, so they run as MCP servers in her
+  own unit that claude reaches, or under a scrubbed environment (`token-out-of-her-reach` holds);
+  `--mcp-config` and `--tools` leave B4a's forbidden list for exactly that surface; the kit's
+  in-flight boundary and `partition_reasoning` change (F34 P1). It waits on B4b.
+- Later, off the path: a Console-key Messages API backend (follow-up `claude-api-backend`, owner
+  Self when quota contention is observed), from the withdrawn spec `cut-claude-backend.r1`, whose
+  probes (F34) and anchors are its raw material. Its provider tag differs from `claude-code`, so
+  the kit treats each backend's reasoning state as foreign to the other.
 
-B4a touches none of the code `kit-contract-test-debt` names, so that follow-up stays open for the
+B4a touched none of the code `kit-contract-test-debt` names, so that follow-up stays open for the
 next cut in `contract.rs`, `client.rs` or `envelope.rs`.
 
 ### How a Self run is carried (cut `mind-self-run`)
@@ -832,17 +869,25 @@ operator's token, then A6 and the bring-up; A3, A4 and A1 run beside it):
      `725f5a5` section 1d and needs no kit rule (every provider's state stays opaque bytes).
    - c. `connector-spend` (ModelConnector): spec `cut_spec:cut-connector-spend.r1` at `1d51e71`.
      B3b has landed; it waits on question `question:connector-spend-ceiling`.
-4. `claude-connector` (ModelConnector; ruling `persona-first-connector-claude`), split three ways
-   (rationale "Where the Claude connector cut line falls"):
-   - a. `claude-backend`: spec `cut_spec:cut-claude-backend.r1` at `e0c0832`. B3 has landed; it
-     waits on question `question:claude-connector-credential`.
-   - b. `claude-connector-binary` (ModelConnector, gamecult-ops or Idunn): the binary, its config
-     document and price table, credential delivery, deployment and Idunn presence, follow-ups
-     `spend-window-clock-recovery` and `claude-byte-bound-live-check`. Waits on B4a and the
-     credential ruling; its map raises Idunn-now versus hand-install.
+4. `claude-connector` (ModelConnector; rulings `persona-first-connector-claude`,
+   `claude-connector-via-claude-code`), split four ways (rationale "Where the Claude connector cut
+   line falls"):
+   - a. `claude-code-backend`: landed 2026-10-29 as ModelConnector `200933f` (spec
+     `cut_spec:cut-claude-code-backend.r1`, report `h2`, verdict `s2`). The withdrawn
+     `cut-claude-backend.r1` (Console-key Messages lowering) is raw material for the later
+     `claude-api-backend`.
+   - b. `claude-connector-binary` (next; ModelConnector, gamecult-ops or Idunn): the binary, its
+     CultCache config document and price table, credential delivery, deployment and Idunn
+     presence on Yggdrasil, follow-ups `spend-window-clock-recovery` and
+     `claude-byte-bound-live-check`; its map raises Idunn-now versus hand-install.
    - c. `connector-spend-readout` (ModelConnector): follow-ups `connector-spend-readout-2`,
-     `replay-store-retention`. Waits on B4a; due before the turn-cost charge (A8, B5).
-5. `mind-persona` (Huginn): the Persona organ, one connector request per turn
+     `replay-store-retention`. Kit code, ready now that B4a has landed; due before the turn-cost
+     charge (A8, B5).
+   - d. `claude-tool-exchange` (ModelConnector, with her tool MCP servers): claude runs her tools
+     over MCP (ruling `claude-code-runs-her-tools`); her tools never inherit the connector's
+     token. Waits on B4b.
+   - Later: `claude-api-backend` (follow-up), a Console-key API backend.
+5. `mind-persona` (Huginn): the Persona organ, one connector request per turn (a whole tool loop once B4d lands)
    (`persona-turn-connector`), Persona state through Huginn (landed), the start-Self tool (A6),
    traces with provenance from day one (`collect-with-provenance-gate-at-training`). Waits on
    B4 and on where traces live (question `persona-trace-retention` was withdrawn to be re-asked
