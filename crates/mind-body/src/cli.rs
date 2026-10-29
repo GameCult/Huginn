@@ -8,7 +8,14 @@
 //! mind-control --instance <slug> brake release
 //! mind-control --instance <slug> dial set --heat H --base-cooldown-s S --base-run-usd U
 //! mind-control [--root <dir>] --instance <slug> check
+//! mind-control [--root <dir>] swarm show
+//! mind-control swarm brake hold | release
+//! mind-control swarm dial set --heat H --base-rate R --base-run U --k K
+//! mind-control swarm share set <instance> <weight>
 //! ```
+//!
+//! The `swarm` verbs write `<root>/swarm.cc` and stop no unit: the swarm's
+//! brake and heat 0 are read by the organs that act on the swarm's behalf.
 //!
 //! `check` exits 0 only when the brake is released and the dial in bounds; a
 //! systemd unit runs it as its `ExecCondition`. It writes nothing.
@@ -27,11 +34,13 @@ use chrono::{DateTime, Utc};
 use eureka_pipeline::{RunTurn, Slug};
 use rust_decimal::Decimal;
 
-use crate::control::{BurnRate, ControlWriter, Effective, FileSource, control_path, derive, load_state};
+use crate::control::{
+    BurnRate, ControlWriter, Effective, FileSource, Share, SwarmDial, SwarmWriter, control_path, derive, derive_swarm, load_state, load_swarm_state, swarm_path,
+};
 use crate::launch::unit;
 
 const USAGE: &str =
-    "usage: mind-control [--root <dir>] --instance <slug> show | check | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U";
+    "usage: mind-control [--root <dir>] --instance <slug> show | check | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U | mind-control [--root <dir>] swarm show | brake hold | brake release | dial set --heat H --base-rate R --base-run U --k K | share set <instance> <weight>";
 
 /// The arguments every organ binary shares: `--instance <slug>` and an optional
 /// `--endpoint rudp://<ip>:<port>`, which `env_endpoint` (the binary's reading of
@@ -86,6 +95,11 @@ pub fn run(
         [flag, dir, rest @ ..] if flag == "--root" => (Path::new(dir), rest),
         _ => (root, args),
     };
+    if let [word, rest @ ..] = args
+        && word == "swarm"
+    {
+        return swarm(root, rest, set_by, now, out);
+    }
     let (instance, command) = match args {
         [flag, instance, command @ ..] if flag == "--instance" => (Slug(instance.clone()), command),
         _ => bail!("{USAGE}"),
@@ -115,6 +129,87 @@ pub fn run(
         }
         _ => bail!("{USAGE}"),
     }
+}
+
+/// The `swarm` verbs over `<root>/swarm.cc`. Every refusal happens before the
+/// writer is opened, so a refused command creates nothing.
+fn swarm(root: &Path, args: &[String], set_by: &str, now: DateTime<Utc>, out: &mut impl Write) -> Result<()> {
+    let path = swarm_path(root);
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["show"] => show_swarm(&path, out),
+        ["brake", "hold"] => SwarmWriter::open(&path)?.set_brake(false, now, set_by),
+        ["brake", "release"] => SwarmWriter::open(&path)?.set_brake(true, now, set_by),
+        ["dial", "set", flags @ ..] => {
+            let dial = parse_swarm_dial(flags, now, set_by)?;
+            SwarmWriter::open(&path)?.set_dial(dial)
+        }
+        ["share", "set", instance, weight] => {
+            let share = Share { instance: (*instance).to_string(), weight: Decimal::from_str(weight).context("the weight is not a decimal")? };
+            SwarmWriter::open(&path)?.set_share(share)
+        }
+        _ => bail!("{USAGE}"),
+    }
+}
+
+fn parse_swarm_dial(flags: &[&str], now: DateTime<Utc>, set_by: &str) -> Result<SwarmDial> {
+    let (mut heat, mut rate, mut run_usd, mut k) = (None, None, None, None);
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        let value = rest.next().ok_or_else(|| anyhow!("{flag} needs a value"))?;
+        let slot = match *flag {
+            "--heat" => &mut heat,
+            "--base-rate" => &mut rate,
+            "--base-run" => &mut run_usd,
+            "--k" => &mut k,
+            other => bail!("unknown flag {other:?}"),
+        };
+        if slot.replace(*value).is_some() {
+            bail!("{flag} given twice");
+        }
+    }
+    Ok(SwarmDial {
+        heat: Decimal::from_str(need(heat, "--heat")?).context("--heat is not a decimal")?,
+        base_rate_usd_per_h: Decimal::from_str(need(rate, "--base-rate")?).context("--base-rate is not a decimal")?,
+        base_run_usd: Decimal::from_str(need(run_usd, "--base-run")?).context("--base-run is not a decimal")?,
+        k: need(k, "--k")?.parse().context("--k is not a whole number")?,
+        set_at: now,
+        set_by: set_by.to_string(),
+    })
+}
+
+fn show_swarm(path: &Path, out: &mut impl Write) -> Result<()> {
+    let source = FileSource::new(path);
+    writeln!(out, "swarm: {}", path.display())?;
+    match load_swarm_state(&source) {
+        Ok(state) => {
+            match &state.brake {
+                Some(brake) => writeln!(out, "brake: {} (set_at {}, set_by {})", if brake.released { "released" } else { "held" }, brake.set_at.to_rfc3339(), brake.set_by)?,
+                None => writeln!(out, "brake: absent")?,
+            }
+            match &state.dial {
+                Some(dial) => writeln!(
+                    out,
+                    "dial: heat {} base_rate_usd_per_h {} base_run_usd {} k {} (set_at {}, set_by {})",
+                    dial.heat,
+                    dial.base_rate_usd_per_h,
+                    dial.base_run_usd,
+                    dial.k,
+                    dial.set_at.to_rfc3339(),
+                    dial.set_by
+                )?,
+                None => writeln!(out, "dial: absent")?,
+            }
+            let mut shares: Vec<_> = state.shares.iter().collect();
+            shares.sort_by(|a, b| a.instance.cmp(&b.instance));
+            for share in shares {
+                writeln!(out, "share: {} {}", share.instance, share.weight)?;
+            }
+        }
+        Err(error) => writeln!(out, "store: undecodable ({error:#})")?,
+    }
+    writeln!(out, "effective: {:?}", derive_swarm(&source))?;
+    Ok(())
 }
 
 fn parse_dial(flags: &[&str], now: DateTime<Utc>, set_by: &str) -> Result<BurnRate> {

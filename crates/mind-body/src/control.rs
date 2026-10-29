@@ -26,6 +26,13 @@
 //! the filesystem is the authority. The writer only refuses to write through an
 //! existing directory, lock or store that is not root's or that group or world
 //! can write (`UnsafeStore`); it checks no caller identity.
+//!
+//! The swarm has one more store of the same kind, `CONTROL_ROOT/swarm.cc`: a
+//! file beside the instance directories, so no instance name reaches it. It
+//! holds the swarm's brake, the swarm dial (heat, the spend rate, the per-run
+//! cap and the concurrency) and each instance's share. `read_envelope` is its
+//! one reader, fail closed like `read_effective`; `Envelope::grant_for` is the
+//! only way to narrow the envelope into a `Grant`, and it never widens one.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -44,6 +51,14 @@ pub const CONTROL_ROOT: &str = "/etc/gamecult/minds";
 /// The one key each control document has in the store.
 pub const BRAKE_KEY: &str = "brake";
 pub const DIAL_KEY: &str = "dial";
+
+/// The swarm's store, a file directly under `CONTROL_ROOT`.
+pub const SWARM_FILE: &str = "swarm.cc";
+
+/// `<root>/swarm.cc`.
+pub fn swarm_path(root: &Path) -> PathBuf {
+    root.join(SWARM_FILE)
+}
 
 /// `<root>/<instance>/control.cc`, after the leaf's slug grammar has passed, so
 /// an instance name cannot walk out of the root.
@@ -116,6 +131,10 @@ pub enum HeldReason {
     BrakeHeld,
     DialAbsent,
     DialOutOfBounds,
+    /// The swarm dial's heat is 0: the operator stopped everything.
+    HeatZero,
+    /// A share in the swarm store is out of bounds or not keyed by its instance.
+    ShareOutOfBounds,
     Undecodable,
 }
 
@@ -255,6 +274,14 @@ fn registered_cache() -> Result<CultCache> {
     let mut cache = CultCache::new();
     cache.register_entry_type::<Brake>()?;
     cache.register_entry_type::<BurnRate>()?;
+    Ok(cache)
+}
+
+fn swarm_cache() -> Result<CultCache> {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<Brake>()?;
+    cache.register_entry_type::<SwarmDial>()?;
+    cache.register_entry_type::<Share>()?;
     Ok(cache)
 }
 
@@ -408,6 +435,44 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
+/// Before the first write: the control directory exists at 0755 and the
+/// lock file at 0644, set explicitly because creation takes the umask.
+/// A directory, lock or store that already exists must be root's and not
+/// group- or world-writable, else the write is refused (`UnsafeStore`): the
+/// operator fixes the install. Called after a setter's own refusals, so a
+/// refused write creates nothing.
+fn prepare_store(path: &Path) -> Result<()> {
+    let directory = path.parent().context("control path has no directory")?;
+    let mut lock_name = path.file_name().context("control path has no file name")?.to_os_string();
+    lock_name.push(".lock");
+    let lock = path.with_file_name(lock_name);
+    for existing in [directory, lock.as_path(), path] {
+        if existing.exists() {
+            require_root_only_writable(existing)?;
+        }
+    }
+    // Every directory this write creates is 0755, ancestors included: a
+    // restrictive process umask would otherwise leave /etc/gamecult/minds
+    // untraversable by the units that only read.
+    let missing: Vec<&Path> = directory.ancestors().take_while(|ancestor| !ancestor.exists()).collect();
+    if !missing.is_empty() {
+        std::fs::create_dir_all(directory).with_context(|| format!("failed to create {}", directory.display()))?;
+        for created in missing {
+            set_mode(created, DIR_MODE)?;
+        }
+    }
+    if !lock.exists() {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock)
+            .with_context(|| format!("failed to open {}", lock.display()))?;
+        set_mode(&lock, FILE_MODE)?;
+    }
+    Ok(())
+}
+
 impl ControlWriter {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
@@ -417,42 +482,8 @@ impl ControlWriter {
         Ok(Self { cache, path })
     }
 
-    /// Before the first write: the control directory exists at 0755 and the
-    /// lock file at 0644, set explicitly because creation takes the umask.
-    /// A directory, lock or store that already exists must be root's and not
-    /// group- or world-writable, else the write is refused (`UnsafeStore`): the
-    /// operator fixes the install. Called after a setter's own refusals, so a
-    /// refused write creates nothing.
     fn prepare(&self) -> Result<()> {
-        let directory = self.path.parent().context("control path has no directory")?;
-        let mut lock_name = self.path.file_name().context("control path has no file name")?.to_os_string();
-        lock_name.push(".lock");
-        let lock = self.path.with_file_name(lock_name);
-        for existing in [directory, lock.as_path(), self.path.as_path()] {
-            if existing.exists() {
-                require_root_only_writable(existing)?;
-            }
-        }
-        // Every directory this write creates is 0755, ancestors included: a
-        // restrictive process umask would otherwise leave /etc/gamecult/minds
-        // untraversable by the units that only read.
-        let missing: Vec<&Path> = directory.ancestors().take_while(|ancestor| !ancestor.exists()).collect();
-        if !missing.is_empty() {
-            std::fs::create_dir_all(directory).with_context(|| format!("failed to create {}", directory.display()))?;
-            for created in missing {
-                set_mode(created, DIR_MODE)?;
-            }
-        }
-        if !lock.exists() {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(&lock)
-                .with_context(|| format!("failed to open {}", lock.display()))?;
-            set_mode(&lock, FILE_MODE)?;
-        }
-        Ok(())
+        prepare_store(&self.path)
     }
 
     /// After a write: the store file the atomic rename put in place takes the
@@ -477,6 +508,237 @@ impl ControlWriter {
         }
         self.prepare()?;
         self.cache.put(DIAL_KEY, &dial)?;
+        self.settle()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The swarm store: `CONTROL_ROOT/swarm.cc`.
+// ---------------------------------------------------------------------------
+
+/// The swarm dial: `heat` scales the whole swarm's activity, 0 stops it. The
+/// base values say what heat 1.0 means: the total spend rate, the most one run
+/// may spend, and `k`, how many turns may run at once. The envelope derives
+/// rate and run cap from it, never stored.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "eureka.control.swarm_dial.v1", schema = "ControlSwarmDial")]
+pub struct SwarmDial {
+    #[cultcache(key = 0)]
+    pub heat: Decimal,
+    #[cultcache(key = 1)]
+    pub base_rate_usd_per_h: Decimal,
+    #[cultcache(key = 2)]
+    pub base_run_usd: Decimal,
+    #[cultcache(key = 3)]
+    pub k: u32,
+    #[cultcache(key = 4)]
+    pub set_at: DateTime<Utc>,
+    #[cultcache(key = 5)]
+    pub set_by: String,
+}
+
+impl SwarmDial {
+    /// The one bounds rule for the swarm dial: the reader holds on it and the
+    /// CLI refuses on it. Heat 0 is in bounds (it is the stop); the reader
+    /// answers it as held.
+    pub fn in_bounds(&self) -> bool {
+        self.heat >= Decimal::ZERO && self.heat <= heat_max() && self.base_rate_usd_per_h > Decimal::ZERO && self.base_run_usd > Decimal::ZERO && self.k >= 1
+    }
+}
+
+/// One instance's share of the swarm, keyed in the store by the instance name.
+/// An instance with no share has weight 1.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "eureka.control.share.v1", schema = "ControlShare")]
+pub struct Share {
+    #[cultcache(key = 0)]
+    pub instance: String,
+    #[cultcache(key = 1)]
+    pub weight: Decimal,
+}
+
+impl Share {
+    /// A share is a slug-named instance with a positive weight.
+    pub fn in_bounds(&self) -> bool {
+        Slug(self.instance.clone()).validate_slug().is_ok() && self.weight > Decimal::ZERO
+    }
+}
+
+/// The swarm store's contents, decoded and not yet judged.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SwarmState {
+    pub brake: Option<Brake>,
+    pub dial: Option<SwarmDial>,
+    pub shares: Vec<Share>,
+}
+
+/// What the swarm store allows right now.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SwarmEffective {
+    Held(HeldReason),
+    Released(Envelope),
+}
+
+/// The swarm's budget while the brake is released and heat is above 0. Its
+/// fields are private and only `read_envelope` makes one, so a run cap derived
+/// from it exists only as the reading of the root-owned swarm store.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Envelope {
+    rate_usd_per_h: Decimal,
+    run_cap_usd: Decimal,
+    k: u32,
+    shares: std::collections::BTreeMap<String, Decimal>,
+}
+
+impl Envelope {
+    /// The swarm's total spend rate: `base_rate_usd_per_h x heat`.
+    pub fn rate_usd_per_h(&self) -> Decimal {
+        self.rate_usd_per_h
+    }
+
+    /// The most any one run may spend: `base_run_usd x heat`.
+    pub fn run_cap_usd(&self) -> Decimal {
+        self.run_cap_usd
+    }
+
+    /// How many turns may run at once.
+    pub fn k(&self) -> u32 {
+        self.k
+    }
+
+    /// The instance's weight; 1 when the store holds no share for it.
+    pub fn share(&self, instance: &Slug) -> Decimal {
+        self.shares.get(&instance.0).copied().unwrap_or(Decimal::ONE)
+    }
+
+    /// Narrows this envelope and the instance's own reading into the Grant for
+    /// one run of `budget_usd`. It is the only new way to build a Grant and it
+    /// never widens: `None` unless the instance's own reading is released for
+    /// this instance and `0 < budget_usd` is within both the swarm's run cap and
+    /// the instance's own. The Grant's cap is the budget.
+    pub fn grant_for(&self, instance: &Slug, instance_effective: &Effective, budget_usd: Decimal) -> Option<Grant> {
+        let Effective::Released(own) = instance_effective else {
+            return None;
+        };
+        if own.instance != *instance || budget_usd <= Decimal::ZERO || budget_usd > self.run_cap_usd || budget_usd > own.run_cap_usd {
+            return None;
+        }
+        Some(Grant { instance: instance.clone(), cadence: own.cadence, run_cap_usd: budget_usd })
+    }
+}
+
+impl SwarmState {
+    /// The one derivation. Order: brake, dial bounds, heat, shares.
+    pub(crate) fn effective(&self) -> SwarmEffective {
+        let held = SwarmEffective::Held;
+        let Some(brake) = &self.brake else {
+            return held(HeldReason::BrakeAbsent);
+        };
+        if !brake.released {
+            return held(HeldReason::BrakeHeld);
+        }
+        let Some(dial) = &self.dial else {
+            return held(HeldReason::DialAbsent);
+        };
+        if !dial.in_bounds() {
+            return held(HeldReason::DialOutOfBounds);
+        }
+        if dial.heat.is_zero() {
+            return held(HeldReason::HeatZero);
+        }
+        if !self.shares.iter().all(Share::in_bounds) {
+            return held(HeldReason::ShareOutOfBounds);
+        }
+        match (dial.base_rate_usd_per_h.checked_mul(dial.heat), dial.base_run_usd.checked_mul(dial.heat)) {
+            (Some(rate_usd_per_h), Some(run_cap_usd)) => SwarmEffective::Released(Envelope {
+                rate_usd_per_h,
+                run_cap_usd,
+                k: dial.k,
+                shares: self.shares.iter().map(|share| (share.instance.clone(), share.weight)).collect(),
+            }),
+            _ => held(HeldReason::DialOutOfBounds),
+        }
+    }
+}
+
+/// Decodes the swarm store. An envelope the cache does not know, a payload that
+/// does not decode or a share not keyed by its own instance is an error.
+pub fn load_swarm_state(source: &impl ControlSource) -> Result<SwarmState> {
+    let mut cache = swarm_cache()?;
+    for envelope in source.snapshot().context("swarm store cannot be read")? {
+        cache.put_raw_envelope(envelope)?;
+    }
+    let mut shares = Vec::new();
+    for (key, share) in cache.get_all_with_keys::<Share>()? {
+        anyhow::ensure!(key == share.instance, "a share is not keyed by its instance");
+        shares.push(share);
+    }
+    Ok(SwarmState { brake: cache.get::<Brake>(BRAKE_KEY)?, dial: cache.get::<SwarmDial>(DIAL_KEY)?, shares })
+}
+
+/// The one reader of the swarm store, at `CONTROL_ROOT/swarm.cc`; the caller
+/// supplies neither a root, a path nor a source. Anything but a decodable store
+/// holding a released brake, an in-bounds dial with heat above 0 and in-bounds
+/// shares is `Held`, with the reason.
+pub fn read_envelope() -> SwarmEffective {
+    derive_swarm(&FileSource::new(swarm_path(&control_root())))
+}
+
+/// The derivation over any source; the CLI's `show` is its other caller.
+pub(crate) fn derive_swarm(source: &impl ControlSource) -> SwarmEffective {
+    match load_swarm_state(source) {
+        Ok(state) => state.effective(),
+        Err(_) => SwarmEffective::Held(HeldReason::Undecodable),
+    }
+}
+
+/// The operator's writer over the swarm file, with the same root-only refusals
+/// as `ControlWriter`. Each setter replaces its document whole.
+pub struct SwarmWriter {
+    cache: CultCache,
+    path: PathBuf,
+}
+
+impl SwarmWriter {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let mut cache = swarm_cache()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        Ok(Self { cache, path })
+    }
+
+    fn settle(&self) -> Result<()> {
+        set_mode(&self.path, FILE_MODE)
+    }
+
+    pub fn set_brake(&mut self, released: bool, set_at: DateTime<Utc>, set_by: &str) -> Result<()> {
+        let brake = Brake { released, set_at, set_by: set_by.to_string() };
+        prepare_store(&self.path)?;
+        self.cache.put(BRAKE_KEY, &brake)?;
+        self.settle()
+    }
+
+    /// Refuses an out-of-bounds dial before anything is written.
+    pub fn set_dial(&mut self, dial: SwarmDial) -> Result<()> {
+        if !dial.in_bounds() {
+            anyhow::bail!(
+                "swarm dial refused: heat must be within 0..={}, base_rate_usd_per_h and base_run_usd above 0, k at least 1",
+                heat_max()
+            );
+        }
+        prepare_store(&self.path)?;
+        self.cache.put(DIAL_KEY, &dial)?;
+        self.settle()
+    }
+
+    /// Refuses a share for a non-slug instance or a weight at or below 0.
+    pub fn set_share(&mut self, share: Share) -> Result<()> {
+        if !share.in_bounds() {
+            anyhow::bail!("share refused: the instance must be a slug and the weight above 0");
+        }
+        prepare_store(&self.path)?;
+        self.cache.put(share.instance.clone(), &share)?;
         self.settle()
     }
 }

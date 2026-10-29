@@ -454,3 +454,65 @@ mod shared_arguments {
         }
     }
 }
+
+fn swarm_show(root: &std::path::Path) -> String {
+    let (result, out) = go(root, &["swarm", "show"], "op", 0);
+    result.unwrap();
+    out
+}
+
+#[test]
+fn swarm_verbs_round_trip() {
+    let root = tempfile::tempdir().unwrap();
+    let shown = swarm_show(root.path());
+    assert!(shown.contains("brake: absent") && shown.contains("dial: absent") && shown.contains("BrakeAbsent"), "{shown}");
+
+    for args in [
+        &["swarm", "brake", "release"][..],
+        &["swarm", "dial", "set", "--heat", "1.5", "--base-rate", "4", "--base-run", "2", "--k", "3"],
+        &["swarm", "share", "set", "weksa", "2.5"],
+    ] {
+        go(root.path(), args, "alice", 5).0.unwrap();
+    }
+    let shown = swarm_show(root.path());
+    assert!(shown.contains("brake: released") && shown.contains("set_by alice"), "{shown}");
+    assert!(shown.contains("dial: heat 1.5 base_rate_usd_per_h 4 base_run_usd 2 k 3"), "{shown}");
+    assert!(shown.contains("share: weksa 2.5"), "{shown}");
+    assert!(shown.contains("Released") && shown.contains("rate_usd_per_h: 6.0") && shown.contains("run_cap_usd: 3.0"), "{shown}");
+
+    // Heat 0 stops the swarm and is one command away; the hold stops it too.
+    go(root.path(), &["swarm", "dial", "set", "--heat", "0", "--base-rate", "4", "--base-run", "2", "--k", "3"], "alice", 6).0.unwrap();
+    assert!(swarm_show(root.path()).contains("HeatZero"));
+    go(root.path(), &["swarm", "brake", "hold"], "alice", 7).0.unwrap();
+    assert!(swarm_show(root.path()).contains("BrakeHeld"));
+}
+
+#[test]
+fn swarm_verbs_write_only_the_swarm_file_and_never_call_the_stopper() {
+    let root = tempfile::tempdir().unwrap();
+    let (result, _, calls) = go_stopping(root.path(), &["swarm", "brake", "hold"], "op", 0, |_| Ok(()));
+    result.unwrap();
+    assert!(calls.is_empty(), "the swarm hold has no instance to stop: {calls:?}");
+    let names = listing(root.path());
+    assert!(names.iter().all(|name| name.starts_with("swarm.cc")), "{names:?}");
+}
+
+#[test]
+fn swarm_commands_refuse_bad_input_and_write_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [
+        &["swarm"][..],
+        &["swarm", "dial", "set", "--heat", "1"],
+        &["swarm", "dial", "set", "--heat", "3", "--base-rate", "4", "--base-run", "2", "--k", "3"],
+        &["swarm", "dial", "set", "--heat", "1", "--base-rate", "4", "--base-run", "2", "--k", "0"],
+        &["swarm", "dial", "set", "--heat", "1", "--heat", "1", "--base-rate", "4", "--base-run", "2", "--k", "3"],
+        &["swarm", "share", "set", "weksa", "0"],
+        &["swarm", "share", "set", "weksa", "heavy"],
+        &["swarm", "share", "set", "Not A Slug", "1"],
+        &["swarm", "share", "set", "weksa"],
+        &["swarm", "brake", "release", "now"],
+    ] {
+        assert!(go(root.path(), args, "op", 0).0.is_err(), "{args:?} was accepted");
+    }
+    assert!(listing(root.path()).is_empty(), "a refused command wrote something");
+}

@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
 use eureka_pipeline::Slug;
-use mind_body::control::{BurnRate, ControlWriter, FileSource, control_path, load_state};
+use mind_body::control::{BurnRate, ControlWriter, FileSource, SwarmWriter, control_path, load_state, swarm_path};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
@@ -112,6 +112,9 @@ mod modes {
             "brake" => {
                 ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").unwrap();
             }
+            "swarm_brake" => {
+                SwarmWriter::open(swarm_path(Path::new(&std::env::var(ROOT).unwrap()))).unwrap().set_brake(true, at(0), "op").unwrap();
+            }
             "attacker" => {
                 // Spins on an open-for-write of the live store; any success is a hit.
                 let stop = std::env::var("MIND_BODY_STOP").unwrap();
@@ -179,6 +182,14 @@ mod modes {
             assert_eq!(mode(&control), 0o755, "directory under umask {umask}");
             assert_eq!(mode(&control.join("control.cc")), 0o644, "store under umask {umask}");
             assert_eq!(mode(&control.join("control.cc.lock")), 0o644, "lock under umask {umask}");
+        }
+    }
+
+    #[test]
+    fn the_swarm_store_is_created_0644_whatever_the_operators_umask() {
+        for umask in ["000", "022", "077"] {
+            let (dir, _) = written_under("swarm_brake", umask);
+            assert_eq!(mode(&swarm_path(dir.path())), 0o644, "swarm store under umask {umask}");
         }
     }
 

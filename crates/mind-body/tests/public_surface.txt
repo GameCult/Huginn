@@ -7,16 +7,21 @@ mind_body: mod wake
 mind_body::cli: fn instance_and_endpoint (args : & [String] , env_endpoint : Option < String > , usage : & str) -> Result < (Slug , SocketAddr) >
 mind_body::cli: fn operator_name (sudo_user : Option < String > , user : Option < String >) -> String
 mind_body::cli: fn run (args : & [String] , root : & Path , set_by : & str , now : DateTime < Utc > , out : & mut impl Write , stop_units : & mut dyn FnMut (& Slug) -> Result < () > ,) -> Result < () >
-mind_body::control: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum HeldReason { BrakeAbsent , BrakeHeld , DialAbsent , DialOutOfBounds , Undecodable , }
+mind_body::control: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum HeldReason { BrakeAbsent , BrakeHeld , DialAbsent , DialOutOfBounds , HeatZero , ShareOutOfBounds , Undecodable , }
 mind_body::control: # [derive (Debug , PartialEq , Eq)] pub enum Effective { Held { reason : HeldReason } , Released (Grant) , }
+mind_body::control: # [derive (Debug , PartialEq , Eq)] pub enum SwarmEffective { Held (HeldReason) , Released (Envelope) , }
 mind_body::control: const BRAKE_KEY : & str
 mind_body::control: const CONTROL_ROOT : & str
 mind_body::control: const DIAL_KEY : & str
+mind_body::control: const SWARM_FILE : & str
 mind_body::control: fn control_path (root : & Path , instance : & Slug) -> Result < PathBuf >
 mind_body::control: fn heat_max () -> Decimal
 mind_body::control: fn heat_min () -> Decimal
 mind_body::control: fn load_state (source : & impl ControlSource) -> Result < ControlState >
+mind_body::control: fn load_swarm_state (source : & impl ControlSource) -> Result < SwarmState >
 mind_body::control: fn read_effective (instance : & Slug) -> Effective
+mind_body::control: fn read_envelope () -> SwarmEffective
+mind_body::control: fn swarm_path (root : & Path) -> PathBuf
 mind_body::control: impl BurnRate
 mind_body::control: impl BurnRate: fn in_bounds (& self) -> bool
 mind_body::control: impl ControlSource for FileSource
@@ -25,12 +30,28 @@ mind_body::control: impl ControlWriter
 mind_body::control: impl ControlWriter: fn open (path : impl Into < PathBuf >) -> Result < Self >
 mind_body::control: impl ControlWriter: fn set_brake (& mut self , released : bool , set_at : DateTime < Utc > , set_by : & str) -> Result < () >
 mind_body::control: impl ControlWriter: fn set_dial (& mut self , dial : BurnRate) -> Result < () >
+mind_body::control: impl Envelope
+mind_body::control: impl Envelope: fn grant_for (& self , instance : & Slug , instance_effective : & Effective , budget_usd : Decimal) -> Option < Grant >
+mind_body::control: impl Envelope: fn k (& self) -> u32
+mind_body::control: impl Envelope: fn rate_usd_per_h (& self) -> Decimal
+mind_body::control: impl Envelope: fn run_cap_usd (& self) -> Decimal
+mind_body::control: impl Envelope: fn share (& self , instance : & Slug) -> Decimal
 mind_body::control: impl FileSource
 mind_body::control: impl FileSource: fn new (path : impl Into < PathBuf >) -> Self
 mind_body::control: impl Grant
 mind_body::control: impl Grant: fn cadence (& self) -> Duration
 mind_body::control: impl Grant: fn instance (& self) -> & Slug
 mind_body::control: impl Grant: fn run_cap_usd (& self) -> Decimal
+mind_body::control: impl Share
+mind_body::control: impl Share: fn in_bounds (& self) -> bool
+mind_body::control: impl SwarmDial
+mind_body::control: impl SwarmDial: fn in_bounds (& self) -> bool
+mind_body::control: impl SwarmState
+mind_body::control: impl SwarmWriter
+mind_body::control: impl SwarmWriter: fn open (path : impl Into < PathBuf >) -> Result < Self >
+mind_body::control: impl SwarmWriter: fn set_brake (& mut self , released : bool , set_at : DateTime < Utc > , set_by : & str) -> Result < () >
+mind_body::control: impl SwarmWriter: fn set_dial (& mut self , dial : SwarmDial) -> Result < () >
+mind_body::control: impl SwarmWriter: fn set_share (& mut self , share : Share) -> Result < () >
 mind_body::control: impl std :: error :: Error for UnsafeStore
 mind_body::control: impl std :: fmt :: Display for UnsafeStore
 mind_body::control: pub trait ControlSource { fn snapshot (& self) -> Result < Vec < CultCacheEnvelope > > ; }
@@ -38,8 +59,13 @@ mind_body::control: struct Brake # [derive (Clone , Debug , PartialEq , Eq , Dat
 mind_body::control: struct BurnRate # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[heat: Decimal, base_cooldown_s: u32, base_run_usd: Decimal, set_at: DateTime < Utc >, set_by: String]
 mind_body::control: struct ControlState # [derive (Clone , Debug , PartialEq , Eq , Default)] pub-fields[brake: Option < Brake >, dial: Option < BurnRate >]
 mind_body::control: struct ControlWriter  pub-fields[]
+mind_body::control: struct Envelope # [derive (Debug , PartialEq , Eq)] pub-fields[]
 mind_body::control: struct FileSource  pub-fields[]
 mind_body::control: struct Grant # [derive (Debug , PartialEq , Eq)] pub-fields[]
+mind_body::control: struct Share # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[instance: String, weight: Decimal]
+mind_body::control: struct SwarmDial # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[heat: Decimal, base_rate_usd_per_h: Decimal, base_run_usd: Decimal, k: u32, set_at: DateTime < Utc >, set_by: String]
+mind_body::control: struct SwarmState # [derive (Clone , Debug , PartialEq , Eq , Default)] pub-fields[brake: Option < Brake >, dial: Option < SwarmDial >, shares: Vec < Share >]
+mind_body::control: struct SwarmWriter  pub-fields[]
 mind_body::control: struct UnsafeStore # [derive (Debug)] pub-fields[path: PathBuf, mode: u32, uid: u32]
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Declined { Admission (MindRefusal) , Conflict , AlreadyAdmitted , StartFailed , GrantForOtherInstance , PersonaRunTakesNoClaims , }
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum LaunchOutcome { Launched { run : PipelineRef , } , NotQueued { item : PipelineRef , } , Tripped { item : PipelineRef , question : PipelineRef , } , Busy { run : PipelineRef , } , Refused (Declined) , }
