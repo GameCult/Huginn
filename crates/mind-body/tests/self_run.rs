@@ -26,6 +26,27 @@ fn all_output(output: &Output) -> String {
 }
 
 #[test]
+fn the_run_cap_must_be_a_positive_number_of_seconds_and_the_runtime_directory_must_be_named() {
+    let with_cap = |cap: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mind-self-run"));
+        command.args(["--instance", NO_SUCH_INSTANCE, "--endpoint", "rudp://127.0.0.1:9"]).env_remove("HUGINN_ENDPOINT").env_remove("RUNTIME_DIRECTORY").env("CLAUDE_LEASE_SOCKET", "/nonexistent/lease.sock");
+        match cap {
+            Some(cap) => command.env("MIND_SELF_RUN_CAP_S", cap),
+            None => command.env_remove("MIND_SELF_RUN_CAP_S"),
+        };
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        all_output(&output)
+    };
+    for bad in [None, Some("0"), Some(""), Some("abc"), Some("-5")] {
+        assert!(with_cap(bad).contains("MIND_SELF_RUN_CAP_S is not set to"), "{bad:?}");
+    }
+    // A positive cap passes that check and meets the next: the unit names no scratch directory.
+    let message = with_cap(Some("1"));
+    assert!(!message.contains("MIND_SELF_RUN_CAP_S") && message.contains("RUNTIME_DIRECTORY is not set"), "{message}");
+}
+
+#[test]
 fn without_an_instance_or_with_a_stray_argument_it_exits_2_with_the_usage_and_echoes_nothing() {
     let canary = "canary-argument-3f9a";
     for args in [
@@ -83,7 +104,11 @@ fn a_mind_that_cannot_be_reached_is_exit_2_before_any_child_and_names_no_value()
 
 #[cfg(unix)]
 mod lane {
+    use std::io::{IoSlice, Read, Write};
+    use std::mem::MaybeUninit;
     use std::net::UdpSocket;
+    use std::os::unix::net::UnixListener;
+    use std::sync::{Arc, Mutex};
     use std::path::Path;
     use std::process::{Child, Command, Output, Stdio};
     use std::time::Duration;
@@ -188,7 +213,7 @@ mod lane {
 
     /// The binary with `bin` first on `PATH`, until the daemon answers (exit 2 before that
     /// has started nothing). `SELF_RUN_ENV_CANARY` is a variable of the unit's environment.
-    fn ask(endpoint: &str, bin: &Path) -> Output {
+    fn ask(endpoint: &str, bin: &Path, socket: &Path) -> Output {
         let exe = Path::new(env!("CARGO_BIN_EXE_mind-self-run"));
         let path = format!("{}:/usr/bin:/bin", bin.display());
         for _ in 0..40 {
@@ -196,6 +221,9 @@ mod lane {
                 .args(["--instance", INSTANCE, "--endpoint", endpoint])
                 .env("PATH", &path)
                 .env("SELF_RUN_ENV_CANARY", ENV_CANARY)
+                .env("CLAUDE_LEASE_SOCKET", socket)
+                .env("MIND_SELF_RUN_CAP_S", "14400")
+                .env("RUNTIME_DIRECTORY", bin)
                 .output()
                 .unwrap();
             if attempt.status.code() != Some(2) {
@@ -204,6 +232,61 @@ mod lane {
             std::thread::sleep(Duration::from_millis(500));
         }
         panic!("the daemon never answered");
+    }
+
+    const GRANT: &[u8] = include_bytes!("../src/lease_client/lease_v1/grant.bin");
+    const SETTLED: &[u8] = include_bytes!("../src/lease_client/lease_v1/settled.bin");
+    const LANE_TOKEN: &str = "tok-lane-canary-51c7";
+
+    /// The connector's lease socket: every connection gets the golden grant with a pipe holding
+    /// `LANE_TOKEN` attached as SCM_RIGHTS, then the golden settled answer to the settle it reads.
+    /// The settle frames it received are kept.
+    struct FakeConnector {
+        _dir: TempDir,
+        path: std::path::PathBuf,
+        settles: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<Vec<u8>> {
+        let mut length = [0_u8; 4];
+        stream.read_exact(&mut length)?;
+        let mut frame = length.to_vec();
+        frame.resize(4 + u32::from_be_bytes(length) as usize, 0);
+        stream.read_exact(&mut frame[4..])?;
+        Ok(frame)
+    }
+
+    fn fake_connector() -> FakeConnector {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lease.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let settles = Arc::new(Mutex::new(Vec::new()));
+        let kept = settles.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let kept = kept.clone();
+                std::thread::spawn(move || {
+                    if read_frame(&mut stream).is_err() {
+                        return;
+                    }
+                    let (read, mut write) = std::io::pipe().unwrap();
+                    write.write_all(LANE_TOKEN.as_bytes()).unwrap();
+                    drop(write);
+                    let read: std::os::fd::OwnedFd = read.into();
+                    let fds = [std::os::fd::AsFd::as_fd(&read)];
+                    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+                    let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);
+                    assert!(control.push(rustix::net::SendAncillaryMessage::ScmRights(&fds)));
+                    rustix::net::sendmsg(&stream, &[IoSlice::new(GRANT)], &mut control, rustix::net::SendFlags::empty()).unwrap();
+                    if let Ok(settle) = read_frame(&mut stream) {
+                        kept.lock().unwrap().push(settle);
+                        let _ = stream.write_all(SETTLED);
+                    }
+                });
+            }
+        });
+        FakeConnector { _dir: dir, path, settles }
     }
 
     const ENV_CANARY: &str = "canary-unit-environment-b94e";
@@ -237,20 +320,22 @@ mod lane {
             )
         };
         let body = format!(
-            "echo journal-line >&2
-echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho \"$SELF_RUN_ENV_CANARY\" >> {record}\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0",
+            "read -r -u \"$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR\" cred
+echo journal-line >&2
+echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho \"$SELF_RUN_ENV_CANARY\" >> {record}\necho \"$cred\" >> {record}\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0",
             first = request("msg_1", 100),
             second = request("msg_2", 299_999),
             record = bin.path().join("record").display(),
         );
         let record = fake_claude(bin.path(), &body);
-        let output = ask(&endpoint, bin.path());
+        let connector = fake_connector();
+        let output = ask(&endpoint, bin.path(), &connector.path);
         drop(daemon);
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         assert_eq!(output.status.code(), Some(0), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 300000\nended: flush-requested code 0 requests 2 prefix 300000\n");
-        assert!(!all_output(&output).contains(ENV_CANARY), "the unit's environment is the child's, not the bin's output");
+        assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 300000\nsettled: billed 123456 micro-USD\nended: flush-requested code 0 requests 2 prefix 300000\n");
+        assert!(!all_output(&output).contains(ENV_CANARY), "the unit environment is not echoed");
         assert!(String::from_utf8_lossy(&output.stderr).contains("journal-line"), "the child's stderr is the unit's journal");
 
         let recorded = std::fs::read_to_string(&record).unwrap();
@@ -261,7 +346,12 @@ echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start
         assert!(lines.next().unwrap().contains("yggdrasil:run:selfrun-lane"), "the start message names her run");
         let flush = lines.next().unwrap();
         assert!(flush.contains(FLUSH_MESSAGE) && flush.contains("\"type\":\"user\""), "the flush went to the child's stdin: {flush}");
-        assert_eq!(lines.next().unwrap(), ENV_CANARY, "the child inherits the unit's environment");
+        assert_eq!(lines.next().unwrap(), "", "the child gets the allow-listed variables only, not the rest of the unit environment");
+        assert_eq!(lines.next().unwrap(), LANE_TOKEN, "the child read its credential from the lease's descriptor");
+        assert!(!all_output(&output).contains(LANE_TOKEN), "the token is never in the bin's output");
+        let settles = connector.settles.lock().unwrap();
+        assert_eq!(settles.len(), 1, "the run settled once");
+        assert!(String::from_utf8_lossy(&settles[0]).contains("claude_lease_settle"));
     }
 
     /// With no Self run of hers in the mind the bin starts no child and exits 3.
@@ -273,7 +363,8 @@ echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start
         let (daemon, _state, endpoint) = serve(documents);
         let bin = TempDir::new().unwrap();
         let record = fake_claude(bin.path(), "exit 0");
-        let output = ask(&endpoint, bin.path());
+        let connector = fake_connector();
+        let output = ask(&endpoint, bin.path(), &connector.path);
         drop(daemon);
         assert_eq!(output.status.code(), Some(3), "{}", all_output(&output));
         assert_eq!(String::from_utf8_lossy(&output.stdout), "no run: she has no single open Self run\n");

@@ -16,7 +16,8 @@
 //! the chat wire and port, `chat_rudp` its RUDP transport to Bifrost's mouth, and
 //! `connector` the model transport over ModelConnector's kit client).
 //!
-//! `self_run` carries one Self run inside `mind-self@<instance>`: the
+//! `lease_client` asks the Claude connector for a Self run's credential and settles
+//! what the run used. `self_run` carries one Self run inside `mind-self@<instance>`: the
 //! `mind-self-run` binary runs `claude` over stream-json for her one open Self
 //! run, asks for the flush at the context ceiling and stops a child that outlives it.
 
@@ -34,6 +35,7 @@ pub mod cli;
 pub mod connector;
 pub mod control;
 pub mod launch;
+pub mod lease_client;
 pub mod persona;
 pub mod queue;
 pub mod self_run;

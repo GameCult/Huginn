@@ -17,27 +17,43 @@
 //! ruling `eureka-body:ruling:self-run-decider`). `carry` is the loop that turns
 //! the operating system's facts into events and executes the actions.
 //!
-//! The actuator admits nothing, reads neither the brake nor the environment and
-//! stops no unit: the gate and the brake hold own those. It never echoes an
-//! argument, an endpoint or a stream line. Stream-json is Claude Code's wire, a
+//! The child's credential is a lease, not a variable (rulings
+//! `eureka-body:ruling:self-runs-through-connector` and
+//! `eureka-body:ruling:self-run-credential-lease`): before it starts `claude`,
+//! `carry` asks the connector for a lease (`lease_client`) until the unit's
+//! runtime cap, given to it in seconds (the connector sets the reservation and binds the lease to this
+//! unit's invocation), and the granted descriptor is the only place the
+//! token reaches the child. A refusal closes the run Recorded and starts nothing.
+//! When the child has ended `carry` settles with the usage, per model, the
+//! stream reported; a run that ends without settling (killed by the brake, a
+//! crash) is billed its reservation by the connector.
+//!
+//! The actuator admits only the closure of a run whose lease was refused. It
+//! reads neither the brake nor the environment and stops no unit: the gate and
+//! the brake hold own those. It never echoes an argument, an endpoint, a
+//! connector's refusal text or a stream line. Stream-json is Claude Code's wire, a
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
 //! parsed is stored.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
-use eureka_pipeline::{PipelineDocument, PipelineRef, RunTurn, Slug};
-use huginn_mind::PipelinePageItems;
+use eureka_pipeline::{PipelineDocument, PipelineRef, ResolutionOutcome, RunTurn, Slug};
+use huginn_mind::{PipelineAdmissionOutcome, PipelinePageItems};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::launch::{Clock, holders};
+use crate::launch::{Clock, closure, holders};
+use crate::lease_client::{Lender, LeaseRefusalKind, LeaseRequest, Lent, ModelUsage, Settlement, TokenFd, TokenUsage};
 use crate::queue::MindPort;
 
 use decide::{Action, Event, State, decide, next_deadline};
@@ -56,6 +72,22 @@ pub const ESCALATE_AFTER_S: i64 = 120;
 pub const EXIT_DRAIN_S: i64 = 2;
 /// A backstop `claude` enforces; the ceiling is reached first.
 pub const MAX_TURNS: u32 = 500;
+/// Names the variable the Self unit sets to its own `RuntimeMaxSec`, in seconds:
+/// the one length of a run. The unit owns the number; the lease asked for and
+/// the connector's `--lease-max-ms` follow it.
+pub const RUN_CAP_VARIABLE: &str = "MIND_SELF_RUN_CAP_S";
+/// Names the directory `claude` keeps its configuration, settings, hooks and skills in.
+const CONFIG_DIR_VARIABLE: &str = "CLAUDE_CONFIG_DIR";
+/// The unit's per-invocation scratch directory (systemd's `RuntimeDirectory=`,
+/// removed when the unit stops): where each child's configuration is made.
+pub const SCRATCH_VARIABLE: &str = "RUNTIME_DIRECTORY";
+/// Optional: a directory root owns, copied into each child's fresh configuration
+/// (its skills and settings). The child may change its copy; no run sees another's.
+pub const SEED_VARIABLE: &str = "MIND_SELF_CONFIG_SEED";
+/// Names the descriptor the child reads its credential from.
+const TOKEN_FD_VARIABLE: &str = "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR";
+/// Tells `claude` to scrub credentials from the environment of what it starts.
+const ENV_SCRUB_VARIABLE: &str = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB";
 /// The name the start message tells her to admit as.
 pub const AGENT: &str = "mind-self-run";
 /// The namespace of the session id: the run id is the name in it.
@@ -82,7 +114,10 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
 }
 
 /// The argument list of the child, and nothing else: no resume, continue or
-/// fork, no model, no permission mode and no settings belong to this actuator.
+/// fork, no model, no permission mode and no settings of its own belong to this
+/// actuator. Only the user's settings load (the fresh configuration directory
+/// the seed fills); the working directory's project and local settings, which a
+/// run could have written, do not.
 /// `budget_usd` is the run's, as stored.
 pub fn claude_args(session: Uuid, budget_usd: &str) -> Vec<String> {
     [
@@ -100,6 +135,8 @@ pub fn claude_args(session: Uuid, budget_usd: &str) -> Vec<String> {
         &MAX_TURNS.to_string(),
         "--permission-prompts",
         "none",
+        "--setting-sources",
+        "user",
     ]
     .map(String::from)
     .to_vec()
@@ -178,7 +215,8 @@ impl Stop {
 }
 
 pub trait Spawner {
-    fn spawn(&self, args: &[String]) -> Result<Box<dyn Child>>;
+    /// Starts the child with `token` as its credential descriptor.
+    fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>>;
 }
 
 /// Why a run ended.
@@ -199,15 +237,18 @@ pub enum Cause {
 pub enum SelfRunOutcome {
     /// She has not exactly one open Self run: nothing was started.
     NoRun,
+    /// The connector would not lend: the run is closed Recorded and nothing was started.
+    LeaseRefused { kind: LeaseRefusalKind },
     Ended { cause: Cause, code: Option<i32>, requests: u64, prefix: u64 },
 }
 
 impl SelfRunOutcome {
-    /// 0 when the child exited 0, 3 when no child was started, else 1 (a
-    /// child killed by a signal has no code).
+    /// 0 when the child exited 0, 3 when no child was started, 4 when the
+    /// connector refused the lease, else 1 (a child killed by a signal has no code).
     pub fn exit_status(&self) -> i32 {
         match self {
             Self::NoRun => 3,
+            Self::LeaseRefused { .. } => 4,
             Self::Ended { code: Some(0), .. } => 0,
             Self::Ended { .. } => 1,
         }
@@ -218,6 +259,7 @@ impl fmt::Display for SelfRunOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoRun => write!(f, "no run: she has no single open Self run"),
+            Self::LeaseRefused { kind } => write!(f, "no run: the connector refused the lease ({kind:?})"),
             Self::Ended { cause, code, requests, prefix } => {
                 let cause = match cause {
                     Cause::Own => "own",
@@ -249,26 +291,177 @@ fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, String)>> {
     }
 }
 
-/// Carries her one open Self run: one `claude` child from the start message to
-/// its end. The request lines go to `out`. A mind that cannot be reached or a
-/// child that cannot be started is an error; every other end is an outcome.
-/// This is only the loop: facts in, one clock read per fact, actions out.
-pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, spawner: &dyn Spawner, out: &mut dyn Write) -> Result<SelfRunOutcome> {
+/// What a run used, from its stream. `claude`'s own account comes first: a
+/// result record's `modelUsage` is its cumulative per-model total as of that
+/// result, so the last result that has one is the run's usage up to then, plus
+/// the tokens of every assistant message after it (the flush turn, or a turn the
+/// child was cut off in: those requests are billed too). A stream with no such
+/// result falls back to the tokens of every assistant message (once per message
+/// id, subagents included), by model.
+#[derive(Default)]
+struct Spent {
+    requests: BTreeMap<String, (String, TokenUsage)>,
+    reported: Option<BTreeMap<String, TokenUsage>>,
+    /// The message ids heard when `reported` was stated: its total already holds them.
+    counted: BTreeSet<String>,
+}
+
+/// The model of a message that names none; the connector prices it as it sees fit.
+const UNNAMED_MODEL: &str = "unknown";
+
+impl Spent {
+    fn hear(&mut self, line: &str) {
+        let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
+        match event.get("type").and_then(Value::as_str) {
+            Some("assistant") => {}
+            Some("result") => return self.hear_result(&event),
+            _ => return,
+        }
+        let message = event.get("message");
+        let Some(id) = message.and_then(|message| message.get("id")).and_then(Value::as_str) else { return };
+        let model = message.and_then(|message| message.get("model")).and_then(Value::as_str).unwrap_or(UNNAMED_MODEL);
+        let usage = message.and_then(|message| message.get("usage"));
+        let field = |name: &str| usage.and_then(|usage| usage.get(name)).and_then(Value::as_u64).unwrap_or(0);
+        let (named, seen) = self.requests.entry(id.to_string()).or_insert_with(|| (model.to_string(), TokenUsage::default()));
+        *named = model.to_string();
+        // Records that share an id are one request, each with the usage so far.
+        seen.input_tokens = seen.input_tokens.max(field("input_tokens"));
+        seen.cache_read_tokens = seen.cache_read_tokens.max(field("cache_read_input_tokens"));
+        seen.cache_write_tokens = seen.cache_write_tokens.max(field("cache_creation_input_tokens"));
+        seen.output_tokens = seen.output_tokens.max(field("output_tokens"));
+    }
+
+    /// A result's own per-model total, when it states one.
+    fn hear_result(&mut self, result: &serde_json::Map<String, Value>) {
+        let Some(Value::Object(models)) = result.get("modelUsage") else { return };
+        let counted = |used: &Value, name: &str| used.get(name).and_then(Value::as_u64).unwrap_or(0);
+        let stated: BTreeMap<String, TokenUsage> = models
+            .iter()
+            .map(|(model, used)| {
+                let usage = TokenUsage {
+                    input_tokens: counted(used, "inputTokens"),
+                    cache_read_tokens: counted(used, "cacheReadInputTokens"),
+                    cache_write_tokens: counted(used, "cacheCreationInputTokens"),
+                    output_tokens: counted(used, "outputTokens"),
+                    reasoning_tokens: None,
+                };
+                (model.clone(), usage)
+            })
+            .collect();
+        if !stated.is_empty() {
+            self.reported = Some(stated);
+            self.counted = self.requests.keys().cloned().collect();
+        }
+    }
+
+    /// The settle: the usage per model, models in name order.
+    fn settlement(&self) -> Settlement {
+        let mut by_model: BTreeMap<String, TokenUsage> = self.reported.clone().unwrap_or_default();
+        for (id, (model, request)) in &self.requests {
+            if self.reported.is_some() && self.counted.contains(id) {
+                continue;
+            }
+            let total = by_model.entry(model.clone()).or_default();
+            total.input_tokens = total.input_tokens.saturating_add(request.input_tokens);
+            total.cache_read_tokens = total.cache_read_tokens.saturating_add(request.cache_read_tokens);
+            total.cache_write_tokens = total.cache_write_tokens.saturating_add(request.cache_write_tokens);
+            total.output_tokens = total.output_tokens.saturating_add(request.output_tokens);
+        }
+        Settlement { usage: by_model.into_iter().map(|(model, usage)| ModelUsage { model, usage }).collect() }
+    }
+}
+
+fn unix_ms(at: DateTime<Utc>) -> u64 {
+    u64::try_from(at.timestamp_millis()).unwrap_or(0)
+}
+
+/// Closes a run whose lease was refused: Recorded with the refusal's kind, so a
+/// run that cannot be paid for counts as an empty run and trips the breaker.
+fn close_refused(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, kind: LeaseRefusalKind) -> Result<SelfRunOutcome> {
+    let reason = format!("the connector refused the credential lease: {kind:?}");
+    let document = closure(mind, run, clock.now(), ResolutionOutcome::Recorded { reason: reason.as_str().into() }, "The Self run's credential lease was refused, so no claude was started.")?;
+    let label = run.id.0.rsplit(':').next().unwrap_or(&run.id.0);
+    match mind.admit(AGENT, label, vec![document])? {
+        PipelineAdmissionOutcome::Committed { .. } => Ok(SelfRunOutcome::LeaseRefused { kind }),
+        _ => Err(anyhow!("the run whose lease was refused could not be closed")),
+    }
+}
+
+/// Closes a run whose lease was refused for its length: Withdrawn, because no
+/// claude ever ran and a misconfiguration is not an empty run; the breaker
+/// counts nothing and a launch that finds the unit dead has no open run to close.
+fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef) -> Result<()> {
+    let outcome = ResolutionOutcome::Withdrawn { reason: "the connector refused the lease as too long".into() };
+    let document = closure(mind, run, clock.now(), outcome, "The unit's runtime cap exceeds the connector's lease length, so no claude was started.")?;
+    let label = run.id.0.rsplit(':').next().unwrap_or(&run.id.0);
+    match mind.admit(AGENT, label, vec![document])? {
+        PipelineAdmissionOutcome::Committed { .. } => Ok(()),
+        _ => Err(anyhow!("the run whose lease was too long could not be withdrawn")),
+    }
+}
+
+/// Carries her one open Self run: one `claude` child from the lease to its
+/// settle. The request lines go to `out`. A mind that cannot be reached, a
+/// connector that cannot be reached or a child that cannot be started is an
+/// error; every other end is an outcome. The lease comes first: with none
+/// granted no child exists. It is settled once, after the child is known to
+/// have ended; a lease dropped any other way is billed in full by the connector.
+/// `run_cap_s` is the unit's `RuntimeMaxSec`: a connector that finds the lease
+/// too long is misconfigured, which is an error naming the mismatch and not a
+/// refusal of the run: the run is withdrawn, so the breaker counts nothing.
+pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let Some((run, budget)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
-    let mut child = spawner.spawn(&claude_args(session_id(&run), &budget))?;
+    let request = LeaseRequest { expires_at_unix_ms: unix_ms(clock.now()).saturating_add(run_cap_s.saturating_mul(1000)) };
+    let lease = match lender.lend(&request)? {
+        Lent::Granted(lease) => lease,
+        Lent::Refused(refused) if refused.kind == LeaseRefusalKind::Expired => {
+            withdraw_misconfigured(mind, clock, &run)?;
+            bail!("the connector refused a {run_cap_s} s lease as too long: raise its --lease-max-ms to at least the unit's RuntimeMaxSec ({RUN_CAP_VARIABLE}) plus slack");
+        }
+        Lent::Refused(refused) => return close_refused(mind, clock, &run, refused.kind),
+    };
+    let child = match spawner.spawn(&claude_args(session_id(&run), &budget), lease.token()) {
+        Ok(child) => child,
+        Err(error) => {
+            // No child ever held the token; the empty report is the connector's cue to bill the reservation.
+            let _ = lease.settle(Settlement::default());
+            return Err(error);
+        }
+    };
+    let mut spent = Spent::default();
+    let outcome = drive(mind, clock, child, &run, &mut spent, out)?;
+    // A child that could not even be killed may still be spending: that lease is
+    // dropped, and the connector bills the reservation.
+    if !matches!(outcome, SelfRunOutcome::Ended { cause: Cause::Unstoppable, .. }) {
+        // A settle that fails leaves the connector to bill the reservation; the run's outcome stands.
+        // Either way the journal says what the connector billed, or that it will bill the reservation.
+        let report = match lease.settle(spent.settlement()) {
+            Ok(billed) => format!("settled: billed {billed} micro-USD"),
+            Err(_) => "settle failed: the connector bills the reservation".to_string(),
+        };
+        let _ = writeln!(out, "{report}");
+    }
+    Ok(outcome)
+}
+
+/// The loop: facts in, one clock read per fact, actions out.
+fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run: &PipelineRef, spent: &mut Spent, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
-    child.write_line(&user_line(&start_message(mind.instance(), &run)));
+    child.write_line(&user_line(&start_message(mind.instance(), run)));
 
     let mut state = State::default();
     let mut now = clock.now();
     loop {
         let wait = next_deadline(&state).map_or(POLL, |at| (at - now).to_std().unwrap_or_default().min(POLL));
         let fact = match child.next(wait) {
-            Read::Line(line) => match read_usage(&line) {
-                Usage::Request { id, prefix } => Event::Request { id, prefix },
-                Usage::Result => Event::Result,
-                Usage::Other | Usage::Unreadable => Event::Tick,
-            },
+            Read::Line(line) => {
+                spent.hear(&line);
+                match read_usage(&line) {
+                    Usage::Request { id, prefix } => Event::Request { id, prefix },
+                    Usage::Result => Event::Result,
+                    Usage::Other | Usage::Unreadable => Event::Tick,
+                }
+            }
             Read::Timeout => Event::Tick,
             Read::Eof => Event::StdoutEof,
             Read::Exited(code) => Event::ChildExited(code),
@@ -293,23 +486,121 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, spawner: &dyn Spawner, out:
     }
 }
 
-/// The real spawner: the `claude` on the unit's `PATH`, with the unit's
-/// environment (the library names no variable), its stderr in the journal.
-pub struct ClaudeSpawner;
+/// The real spawner: the `claude` on the unit's `PATH`, its stderr in the
+/// journal. Its credential is the lease's descriptor, named in the one variable
+/// that says where to read it; the token is in no environment, argument or file.
+/// It holds the unit's environment, which the library never reads: the binary
+/// hands it over, and [`child_environment`] decides what of it the child sees.
+pub struct ClaudeSpawner {
+    unit_environment: Vec<(OsString, OsString)>,
+    scratch: PathBuf,
+    seed: Option<PathBuf>,
+}
 
-impl Spawner for ClaudeSpawner {
-    fn spawn(&self, args: &[String]) -> Result<Box<dyn Child>> {
-        spawn_program(Path::new("claude"), args)
+impl ClaudeSpawner {
+    /// From the unit's environment: it must name [`SCRATCH_VARIABLE`], and may name [`SEED_VARIABLE`].
+    pub fn new(unit_environment: impl IntoIterator<Item = (OsString, OsString)>) -> Result<Self> {
+        let unit_environment: Vec<(OsString, OsString)> = unit_environment.into_iter().collect();
+        let named = |variable: &str| unit_environment.iter().find(|(name, _)| name == variable).map(|(_, value)| PathBuf::from(value));
+        // systemd lists several runtime directories colon-separated; the unit names one.
+        let scratch = named(SCRATCH_VARIABLE).filter(|path| !path.as_os_str().is_empty()).ok_or_else(|| anyhow!("{SCRATCH_VARIABLE} is not set: the unit needs RuntimeDirectory="))?;
+        let seed = named(SEED_VARIABLE).filter(|path| !path.as_os_str().is_empty());
+        Ok(Self { unit_environment, scratch, seed })
     }
 }
 
-fn spawn_program(program: &Path, args: &[String]) -> Result<Box<dyn Child>> {
+impl Spawner for ClaudeSpawner {
+    fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
+        let config = FreshConfig::create(&self.scratch, self.seed.as_deref())?;
+        spawn_program(Path::new("claude"), args, token, &self.unit_environment, config)
+    }
+}
+
+/// The directory name of a child's configuration inside the scratch directory.
+const CONFIG_DIR_NAME: &str = "claude-config";
+
+/// One child's configuration directory: made empty (or as the seed) for it,
+/// owner-only, and removed when the child's handle goes. Whatever the run writes
+/// there (settings that set an environment variable, an `apiKeyHelper`, a base
+/// URL, a hook) lasts only as long as that run: the next one starts from the seed.
+struct FreshConfig(PathBuf);
+
+impl FreshConfig {
+    fn create(scratch: &Path, seed: Option<&Path>) -> Result<Self> {
+        let dir = scratch.join(CONFIG_DIR_NAME);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => bail!("a stale configuration directory could not be removed"),
+        }
+        let mut made = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut made, 0o700);
+        made.create(&dir).context("the configuration directory could not be made")?;
+        let fresh = Self(dir);
+        if let Some(seed) = seed {
+            copy_tree(seed, &fresh.0).context("the configuration seed could not be copied")?;
+        }
+        Ok(fresh)
+    }
+}
+
+impl Drop for FreshConfig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Copies directories and regular files; a link is skipped, never followed.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            std::fs::create_dir(&target)?;
+            copy_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether the child may see a unit variable. `claude` prefers an ambient
+/// credential (`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`,
+/// `CLAUDE_CODE_OAUTH_TOKEN`) to the lease's descriptor and takes its endpoint
+/// from `ANTHROPIC_BASE_URL`, so the child gets only what a shell needs to find
+/// its way; nothing credential-shaped is on the list. Its `HOME` and
+/// `CLAUDE_CONFIG_DIR` are its fresh configuration directory, set by the spawn.
+fn child_may_see(name: &OsStr) -> bool {
+    let name = name.to_string_lossy();
+    matches!(name.as_ref(), "PATH" | "LANG" | "TERM") || name.starts_with("LC_")
+}
+
+/// The unit's environment as the child sees it: the allow-list, and nothing else.
+fn child_environment(unit: &[(OsString, OsString)]) -> Vec<(&OsString, &OsString)> {
+    unit.iter().filter(|(name, _)| child_may_see(name)).map(|(name, value)| (name, value)).collect()
+}
+
+/// Starts `program` with a duplicate of the token descriptor open in it, and
+/// closes that duplicate here the moment the child exists. The lease's own
+/// descriptor is close-on-exec, so this duplicate is the child's only way to the
+/// token. `claude` reads it to the end once at startup, so what its own children
+/// inherit is an emptied pipe whose write end exists nowhere. The child's
+/// environment is cleared and rebuilt from `unit`'s allow-listed variables.
+fn spawn_program(program: &Path, args: &[String], token: &TokenFd, unit: &[(OsString, OsString)], config: FreshConfig) -> Result<Box<dyn Child>> {
+    let inheritable = token.inheritable().context("the credential descriptor could not be placed")?;
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+    command.env_clear().envs(child_environment(unit));
+    command.env("HOME", &config.0).env(CONFIG_DIR_VARIABLE, &config.0);
+    command.env(TOKEN_FD_VARIABLE, inheritable.number().to_string()).env(ENV_SCRUB_VARIABLE, "1");
     // Its own process group, so that a signal reaches what the child started too.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut process = command.spawn().context("claude could not be started")?;
+    drop(inheritable);
     let group = process.id();
     let stdin = process.stdin.take();
     let stdout = process.stdout.take().ok_or_else(|| anyhow!("claude has no stdout"))?;
@@ -328,7 +619,7 @@ fn spawn_program(program: &Path, args: &[String]) -> Result<Box<dyn Child>> {
     std::thread::spawn(move || {
         let _ = sender.send(Read::Exited(process.wait().ok().and_then(|status| status.code())));
     });
-    Ok(Box::new(ClaudeProcess { stdin, facts, group }))
+    Ok(Box::new(ClaudeProcess { stdin, facts, group, _config: config }))
 }
 
 struct ClaudeProcess {
@@ -336,6 +627,8 @@ struct ClaudeProcess {
     facts: Receiver<Read>,
     /// The child's pid, which is its process group's id.
     group: u32,
+    /// Its configuration, removed when the child's handle goes.
+    _config: FreshConfig,
 }
 
 impl Child for ClaudeProcess {

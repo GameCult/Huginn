@@ -13,7 +13,11 @@ use eureka_pipeline::{PipelineDocument, PipelineKind as K, PipelineRef, RunOpera
 use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
 
 use super::*;
+use crate::lease_client::{Lease, LeaseRefused, token_holding};
 use crate::testkit::*;
+
+/// A cap no constant of the library equals, so that a request of it came from the argument.
+const TEST_CAP_S: u64 = 5_400;
 
 const RECORDS: &str = include_str!("claude-2.1.268-assistant-usage-records.jsonl");
 const PROBE: &str = include_str!("claude-2.1.268-stream-json-probe.jsonl");
@@ -69,6 +73,14 @@ enum Event {
     /// A signal was attempted, delivered or not.
     Stopped(Stop),
     Asked(StdDuration),
+    /// The connector was asked for a lease and answered one.
+    Lent,
+    /// A child was started.
+    Spawned,
+    /// The lease was settled with this.
+    Settled(Settlement),
+    /// The lease was dropped unsettled: the connector bills the reservation.
+    Abandoned,
 }
 
 #[derive(Clone)]
@@ -171,12 +183,84 @@ struct Fake {
 }
 
 impl Spawner for Fake {
-    fn spawn(&self, args: &[String]) -> Result<Box<dyn Child>> {
+    fn spawn(&self, args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
         self.spawns.borrow_mut().push(args.to_vec());
         if self.refuse {
             return Err(anyhow!("refused"));
         }
-        Ok(Box::new(self.child.borrow_mut().take().expect("spawned twice")))
+        let child = self.child.borrow_mut().take().expect("spawned twice");
+        child.log.borrow_mut().push(Event::Spawned);
+        Ok(Box::new(child))
+    }
+}
+
+/// What the connector answers.
+#[derive(Clone, Copy)]
+enum Answer {
+    Grant,
+    /// Lends, then fails the settle.
+    GrantSettleFails,
+    Refuse(LeaseRefusalKind),
+    Unreachable,
+}
+
+/// The connector, as the actuator asks it: it logs into the child's log, so the
+/// order of lend, spawn, the child's end and settle is one sequence.
+struct FakeLender {
+    log: Rc<RefCell<Vec<Event>>>,
+    asked: RefCell<Vec<LeaseRequest>>,
+    answer: Answer,
+}
+
+impl FakeLender {
+    fn new(answer: Answer) -> Self {
+        Self::logging(Rc::new(RefCell::new(Vec::new())), answer)
+    }
+
+    fn logging(log: Rc<RefCell<Vec<Event>>>, answer: Answer) -> Self {
+        Self { log, asked: RefCell::new(Vec::new()), answer }
+    }
+}
+
+impl Lender for FakeLender {
+    fn lend(&self, request: &LeaseRequest) -> Result<Lent> {
+        self.asked.borrow_mut().push(request.clone());
+        match self.answer {
+            Answer::Grant | Answer::GrantSettleFails => {
+                self.log.borrow_mut().push(Event::Lent);
+                Ok(Lent::Granted(Box::new(FakeLease { log: self.log.clone(), token: token_holding("tok-canary"), settled: false, fails: matches!(self.answer, Answer::GrantSettleFails) })))
+            }
+            Answer::Refuse(kind) => Ok(Lent::Refused(LeaseRefused { kind, detail: "detail-canary".into() })),
+            Answer::Unreachable => Err(anyhow!("down")),
+        }
+    }
+}
+
+struct FakeLease {
+    log: Rc<RefCell<Vec<Event>>>,
+    token: TokenFd,
+    settled: bool,
+    /// The settle reaches the connector's side and fails there.
+    fails: bool,
+}
+
+impl Lease for FakeLease {
+    fn token(&self) -> &TokenFd {
+        &self.token
+    }
+
+    fn settle(mut self: Box<Self>, settlement: Settlement) -> Result<u64> {
+        self.settled = true;
+        self.log.borrow_mut().push(Event::Settled(settlement));
+        if self.fails { Err(anyhow!("detail-canary")) } else { Ok(7) }
+    }
+}
+
+impl Drop for FakeLease {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.log.borrow_mut().push(Event::Abandoned);
+        }
     }
 }
 
@@ -221,8 +305,11 @@ struct Ran {
     outcome: Result<SelfRunOutcome>,
     out: String,
     events: Vec<Event>,
+    /// Every event, the lease's included.
+    all: Vec<Event>,
     spawns: Vec<Vec<String>>,
     admits: usize,
+    asked: Vec<LeaseRequest>,
 }
 
 impl Ran {
@@ -246,6 +333,10 @@ impl Ran {
                 _ => None,
             })
             .collect()
+    }
+
+    fn count_all(&self, wanted: &Event) -> usize {
+        self.all.iter().filter(|event| *event == wanted).count()
     }
 
     fn count(&self, wanted: &Event) -> usize {
@@ -280,11 +371,14 @@ fn carry_scripted(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Opt
         spawns: RefCell::new(Vec::new()),
         refuse: false,
     };
+    let lender = FakeLender::logging(log.clone(), Answer::Grant);
     let mut out = Vec::new();
-    let outcome = carry(seen, &*clock, &fake, &mut out);
-    let events = log.borrow().clone();
+    let outcome = carry(seen, &*clock, &lender, &fake, TEST_CAP_S, &mut out);
+    let all = log.borrow().clone();
+    // The child's own events; the lease's are in `all`, in order with them.
+    let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Settled(_) | Event::Abandoned)).cloned().collect();
     let spawns = fake.spawns.borrow().clone();
-    Ran { outcome, out: String::from_utf8(out).unwrap(), events, spawns, admits: seen.admits.get() }
+    Ran { outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
 }
 
 fn at_start() -> chrono::DateTime<chrono::Utc> {
@@ -352,7 +446,7 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
     let mind = with_run();
     let clock = Rc::new(Fixed(Cell::new(at_start())));
     let refusing = Fake { child: RefCell::new(None), spawns: RefCell::new(Vec::new()), refuse: true };
-    assert!(carry(&Seen::of(&mind), &*clock, &refusing, &mut Vec::new()).is_err());
+    assert!(carry(&Seen::of(&mind), &*clock, &FakeLender::new(Answer::Grant), &refusing, TEST_CAP_S, &mut Vec::new()).is_err());
     assert_eq!(refusing.spawns.borrow().len(), 1, "it tried exactly once");
 
     struct Down;
@@ -369,7 +463,7 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
         }
     }
     let never = Fake { child: RefCell::new(None), spawns: RefCell::new(Vec::new()), refuse: false };
-    assert!(carry(&Down, &*clock, &never, &mut Vec::new()).is_err());
+    assert!(carry(&Down, &*clock, &FakeLender::new(Answer::Grant), &never, TEST_CAP_S, &mut Vec::new()).is_err());
     assert!(never.spawns.borrow().is_empty());
 }
 
@@ -396,6 +490,8 @@ fn claude_args_is_exactly_the_fixed_list_for_a_session_and_a_budget() {
             "500",
             "--permission-prompts",
             "none",
+            "--setting-sources",
+            "user",
         ]
     );
     // Those belong to the run measure or to the unit's managed settings.
@@ -491,7 +587,7 @@ fn records_that_share_a_message_id_count_once_and_subagent_records_never_move_th
     let ran = go(steps);
     assert_eq!(
         ran.out,
-        "request 1 prefix 84210\nrequest 2 prefix 100751\nrequest 3 prefix 117174\nrequest 4 prefix 118336\nrequest 5 prefix 126746\nrequest 6 prefix 127250\nrequest 7 prefix 129853\n"
+        "request 1 prefix 84210\nrequest 2 prefix 100751\nrequest 3 prefix 117174\nrequest 4 prefix 118336\nrequest 5 prefix 126746\nrequest 6 prefix 127250\nrequest 7 prefix 129853\nsettled: billed 7 micro-USD\n"
     );
     let (cause, _, requests, prefix) = ran.ended();
     assert_eq!((cause, requests, prefix), (Cause::Own, 7, 129_853), "the newest prefix, 129853, not a subagent's 999999");
@@ -619,7 +715,7 @@ fn a_jump_past_the_ceiling_plus_the_headroom_writes_the_flush_and_the_running_tu
     // The headroom is measured from the prefix the flush was asked at (400k) and counts the requests after the
     // first result only: 459_999 does not interrupt; 460_000 does, once, and m6 is never read.
     assert_eq!(jump.count(&Event::Stopped(Stop::Interrupt)), 1, "{kinds:?}");
-    assert_eq!(jump.out, "request 1 prefix 290000\nrequest 2 prefix 400000\nrequest 3 prefix 470000\nrequest 4 prefix 459999\nrequest 5 prefix 460000\n");
+    assert_eq!(jump.out, "request 1 prefix 290000\nrequest 2 prefix 400000\nrequest 3 prefix 470000\nrequest 4 prefix 459999\nrequest 5 prefix 460000\nsettled: billed 7 micro-USD\n");
     assert_eq!(jump.ended().0, Cause::Signalled(Stop::Interrupt));
     assert_eq!(flushes(&jump), 1);
 }
@@ -651,7 +747,7 @@ fn the_message_ids_of_a_long_run_are_all_remembered() {
     let ran = go(steps);
     let (_, _, requests, prefix) = ran.ended();
     assert_eq!((requests, prefix), (12, 1_000));
-    assert_eq!(ran.out.lines().count(), 12);
+    assert_eq!(ran.out.lines().filter(|line| line.starts_with("request ")).count(), 12);
 }
 
 #[test]
@@ -755,11 +851,12 @@ fn the_clock_is_read_once_per_event_so_a_step_of_the_wall_clock_cannot_split_a_p
     let steps: VecDeque<Step> = vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", CEILING_TOKENS + 1)), Idle(0)].into();
     let child = Scripted { steps, log: log.clone(), clock: Rc::new(Fixed(Cell::new(at_start()))), code: Some(0), dies_on: None, refuses: vec![], hangs: false, exited: false, eof: false, asked: 0 };
     let fake = Fake { child: RefCell::new(Some(child)), spawns: RefCell::new(Vec::new()), refuse: false };
-    let outcome = carry(&Seen::of(&mind), &Stepped(clock.clone()), &fake, &mut Vec::new()).unwrap();
+    let outcome = carry(&Seen::of(&mind), &Stepped(clock.clone()), &FakeLender::new(Answer::Grant), &fake, TEST_CAP_S, &mut Vec::new()).unwrap();
     let events = log.borrow().clone();
     let reads = events.iter().filter(|event| matches!(event, Event::Asked(_))).count() as u32;
-    // One read before the first wait, then one per fact heard: never a second read inside a pass.
-    assert_eq!(clock.1.get(), 1 + reads, "{events:?}");
+    // One read for the lease's expiry, one before the first wait, then one per fact heard:
+    // never a second read inside a pass.
+    assert_eq!(clock.1.get(), 2 + reads, "{events:?}");
     // The flush was written on the first request at time 0; the very next pass sees the stepped clock.
     // The flush pass itself has no interrupt, whatever the step: the interrupt is on a later event.
     let flush_at = events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains("context ceiling"))).unwrap();
@@ -827,7 +924,7 @@ fn unreadable_and_foreign_lines_are_skipped_and_never_printed() {
         Out(at("m1", 10)),
         Out(result_line()),
     ]);
-    assert_eq!(ran.out, "request 1 prefix 10\n");
+    assert_eq!(ran.out, "request 1 prefix 10\nsettled: billed 7 micro-USD\n");
     let outcome = ran.outcome.as_ref().unwrap().to_string();
     assert!(!ran.out.contains(canary) && !outcome.contains(canary));
     assert!(!ran.written().iter().any(|text| text.contains(canary)), "nothing from the stream is written back");
@@ -848,6 +945,8 @@ fn the_actuator_admits_nothing_to_the_mind_through_a_whole_flushed_run() {
 
 #[cfg(unix)]
 mod process {
+    mod lease_child;
+
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
@@ -865,8 +964,25 @@ mod process {
     /// Spawns it, retrying the one error a freshly written executable can give
     /// while another test's fork still holds its write handle.
     fn start(program: &Path, args: &[String]) -> Box<dyn Child> {
+        start_with(program, args, &token_holding("tok-canary"))
+    }
+
+    /// What the unit would hold: what a shell needs, and credential-shaped variables
+    /// that live only here, never in the test process, so only the spawner can pass them on.
+    fn unit_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let mut unit: Vec<(std::ffi::OsString, std::ffi::OsString)> = vec![("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into())];
+        for name in CREDENTIAL_CANARIES {
+            unit.push((name.into(), format!("canary-{name}").into()));
+        }
+        unit
+    }
+
+    const CREDENTIAL_CANARIES: [&str; 6] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_API_KEY_HELPER_TTL_MS", "UNLISTED_VARIABLE"];
+
+    fn start_with(program: &Path, args: &[String], token: &TokenFd) -> Box<dyn Child> {
         for _ in 0..50 {
-            match spawn_program(program, args) {
+            let config = FreshConfig::create(program.parent().unwrap(), None).unwrap();
+            match spawn_program(program, args, token, &unit_environment(), config) {
                 Ok(child) => return child,
                 Err(error) if format!("{error:#}").contains("busy") => std::thread::sleep(StdDuration::from_millis(100)),
                 Err(error) => panic!("{error:#}"),
@@ -934,7 +1050,9 @@ mod process {
     #[test]
     fn a_program_that_cannot_start_is_an_error_that_names_no_argument() {
         let canary = "canary-argument-6b0d";
-        let error = spawn_program(Path::new("/nonexistent/claude"), &[canary.to_string()]).err().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let config = FreshConfig::create(scratch.path(), None).unwrap();
+        let error = spawn_program(Path::new("/nonexistent/claude"), &[canary.to_string()], &token_holding("tok-canary"), &[], config).err().unwrap();
         assert!(!format!("{error:#}").contains(canary) && !format!("{error:#}").contains("nonexistent"), "{error:#}");
     }
 
@@ -961,8 +1079,8 @@ mod process {
 
     struct Spawn(PathBuf);
     impl Spawner for Spawn {
-        fn spawn(&self, args: &[String]) -> Result<Box<dyn Child>> {
-            Ok(Box::new(Prompt(start(&self.0, args))))
+        fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
+            Ok(Box::new(Prompt(start_with(&self.0, args, token))))
         }
     }
 
@@ -987,8 +1105,8 @@ mod process {
 
     struct Patient(PathBuf);
     impl Spawner for Patient {
-        fn spawn(&self, args: &[String]) -> Result<Box<dyn Child>> {
-            Ok(Box::new(Bounded(start(&self.0, args), std::time::Instant::now())))
+        fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
+            Ok(Box::new(Bounded(start_with(&self.0, args, token), std::time::Instant::now())))
         }
     }
 
@@ -1002,9 +1120,9 @@ mod process {
         let program = script(&dir, &body);
         let mind = with_run();
         let mut out = Vec::new();
-        let outcome = carry(&Seen::of(&mind), &SystemClock, &Spawn(program), &mut out).unwrap();
+        let outcome = carry(&Seen::of(&mind), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
         assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000 });
-        assert_eq!(String::from_utf8(out).unwrap(), "request 1 prefix 10\nrequest 2 prefix 300000\n");
+        assert_eq!(String::from_utf8(out).unwrap(), "request 1 prefix 10\nrequest 2 prefix 300000\nsettled: billed 7 micro-USD\n");
     }
 
     #[test]
@@ -1016,10 +1134,10 @@ mod process {
         let program = script(&dir, &format!("read -t 5 start\ncat <<'EOF'\n{result}\nEOF\nwhile read more; do :; done\nexit 1"));
         let started = std::time::Instant::now();
         let mut out = Vec::new();
-        let outcome = carry(&Seen::of(&with_run()), &SystemClock, &Spawn(program), &mut out).unwrap();
+        let outcome = carry(&Seen::of(&with_run()), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
         assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::Own, code: Some(1), requests: 0, prefix: 0 });
         assert_eq!(outcome.exit_status(), 1);
-        assert!(out.is_empty());
+        assert!(!String::from_utf8_lossy(&out).contains("request "), "no request was heard");
         assert!(started.elapsed() < StdDuration::from_secs(20), "it ended promptly");
     }
 
@@ -1036,7 +1154,7 @@ mod process {
             let program = script(&dir, &format!("{before}cat <<'EOF'\n{result}\nEOF\nsleep 30 &\necho $! > {}\nexit 0", pids.display()));
             let started = std::time::Instant::now();
             let mut out = Vec::new();
-            let outcome = carry(&Seen::of(&with_run()), &SystemClock, &Patient(program), &mut out).unwrap();
+            let outcome = carry(&Seen::of(&with_run()), &SystemClock, &FakeLender::new(Answer::Grant), &Patient(program), TEST_CAP_S, &mut out).unwrap();
             let holder = std::fs::read_to_string(&pids).unwrap().trim().to_string();
             let cause = if flushed { Cause::FlushRequested } else { Cause::Own };
             let (requests, prefix) = if flushed { (1, CEILING_TOKENS) } else { (0, 0) };
@@ -1085,3 +1203,5 @@ mod process {
         }
     }
 }
+
+mod lease;

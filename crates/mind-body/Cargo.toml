@@ -25,6 +25,7 @@ publish.workspace = true
 # MessagePack codec (`chat_client`); `sha2` derives the mouth's connection id from
 # the chat credential. The kit pins its own CultLib revision, so the graph holds
 # two until the workspace pin and the kit's meet.
+# `rmp-serde` is also the lease wire (`lease_client`): the connector's MessagePack frames.
 #
 # `serde_json` reads Claude Code's stream-json, a foreign owner's wire (`self_run`);
 # `uuid`'s v5 makes a Self run's session id derivable from the run's id.
@@ -46,6 +47,10 @@ uuid = { version = "1", default-features = false, features = ["v5"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# The lease socket: SCM_RIGHTS receive with MSG_CMSG_CLOEXEC and the descriptor
+# duplicates, as safe calls (the library forbids unsafe code). Already in the
+# graph through tempfile; this adds its `net` feature only.
+rustix = { version = "1", default-features = false, features = ["std", "net"] }
 
 # `syn`, `quote` and `proc-macro2` read the library's own source for
 # tests/public_surface.rs, which pins its public surface. All three are already

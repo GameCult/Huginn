@@ -275,9 +275,18 @@ fn past_grace(admitted_at: &str, now: DateTime<Utc>) -> bool {
 }
 
 /// The resolution that closes a dead run of hers: Recorded, not Withdrawn, so
-/// a unit that keeps dying counts as an empty run and trips the breaker. Its
-/// sequence is the run's next, counting a closure that was itself withdrawn.
+/// a unit that keeps dying counts as an empty run and trips the breaker.
 fn close_dead(mind: &dyn MindPort, run: &PipelineRef, now: DateTime<Utc>) -> Result<PipelineDocument> {
+    closure(mind, run, now, ResolutionOutcome::Recorded { reason: "unit not active".into() }, "The run's unit was not active when its turn's slot was next wanted.")
+}
+
+/// The closing resolution of `run` with `outcome`. Its sequence is the run's
+/// next, counting a closure that was itself withdrawn. The one builder of a
+/// closure for a run that ended without its own flush: a dead unit
+/// (`close_dead`, Recorded: it counts as an empty run) and a Self run whose
+/// credential lease was refused (`self_run`, Recorded for a refusal, Withdrawn
+/// for a misconfigured length: no run happened and none is counted).
+pub(crate) fn closure(mind: &dyn MindPort, run: &PipelineRef, now: DateTime<Utc>, outcome: ResolutionOutcome, rationale: &str) -> Result<PipelineDocument> {
     let closures = Selection { cites: Some(citing(run, Some("subject"))), ..of_kind(PipelineKind::Resolution) };
     let latest = headers(mind, &closures)?
         .iter()
@@ -290,8 +299,8 @@ fn close_dead(mind: &dyn MindPort, run: &PipelineRef, now: DateTime<Utc>) -> Res
     Ok(PipelineDocument::Resolution(PipelineResolution {
         subject: run.clone(),
         sequence: latest + 1,
-        outcome: ResolutionOutcome::Recorded { reason: "unit not active".into() },
-        rationale: "The run's unit was not active when its turn's slot was next wanted.".into(),
+        outcome,
+        rationale: rationale.into(),
         resolved_on: date(now),
     }))
 }

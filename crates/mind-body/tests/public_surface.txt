@@ -4,6 +4,7 @@ mind_body: mod cli
 mind_body: mod connector
 mind_body: mod control
 mind_body: mod launch
+mind_body: mod lease_client
 mind_body: mod persona
 mind_body: mod queue
 mind_body: mod self_run
@@ -119,6 +120,29 @@ mind_body::launch: struct Ports< 'a >  pub-fields[mind: & 'a dyn MindPort, launc
 mind_body::launch: struct SystemClock  pub-fields[]
 mind_body::launch: struct SystemctlReply  pub-fields[success: bool, code: Option < i32 >, stdout: String]
 mind_body::launch: struct SystemdLauncher  pub-fields[]
+mind_body::lease_client: # [derive (Clone , Copy , Debug , PartialEq , Eq , Serialize , Deserialize)] pub enum LeaseRefusalKind { SpendCeiling , CostBound , UnknownCaller , Expired , Busy , }
+mind_body::lease_client: const LEASE_SOCKET_VARIABLE : & str
+mind_body::lease_client: const MAX_LEASE_FRAME_BYTES : usize
+mind_body::lease_client: impl Inheritable
+mind_body::lease_client: impl Inheritable: fn number (& self) -> i32
+mind_body::lease_client: impl Lender for SocketLender
+mind_body::lease_client: impl SocketLender
+mind_body::lease_client: impl SocketLender: fn new (path : impl Into < PathBuf >) -> Self
+mind_body::lease_client: impl TokenFd
+mind_body::lease_client: impl TokenFd: fn inheritable (& self) -> Result < Inheritable >
+mind_body::lease_client: impl std :: fmt :: Debug for TokenFd
+mind_body::lease_client: pub enum Lent { Granted (Box < dyn Lease >) , Refused (LeaseRefused) , }
+mind_body::lease_client: pub trait Lease { fn token (& self) -> & TokenFd ; fn settle (self : Box < Self > , settlement : Settlement) -> Result < u64 > ; }
+mind_body::lease_client: pub trait Lender { fn lend (& self , request : & LeaseRequest) -> Result < Lent > ; }
+mind_body::lease_client: struct Inheritable  pub-fields[]
+mind_body::lease_client: struct LeaseRefused # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[kind: LeaseRefusalKind, detail: String]
+mind_body::lease_client: struct LeaseRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[expires_at_unix_ms: u64]
+mind_body::lease_client: struct ModelUsage # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[model: String, usage: TokenUsage]
+mind_body::lease_client: struct Settlement # [derive (Clone , Debug , Default , PartialEq , Eq)] pub-fields[usage: Vec < ModelUsage >]
+mind_body::lease_client: struct SocketLender  pub-fields[]
+mind_body::lease_client: struct TokenFd  pub-fields[]
+mind_body::lease_client: struct TokenUsage # [derive (Clone , Debug , Default , PartialEq , Eq , Serialize , Deserialize)] pub-fields[input_tokens: u64, cache_read_tokens: u64, cache_write_tokens: u64, output_tokens: u64, reasoning_tokens: Option < u64 >]
+mind_body::lease_client::socket: impl Lease for Granted
 mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Readout , Connector , Undecodable , RoomNotAllowed , Send , SelfRun , Ack , }
 mind_body::persona: # [derive (Debug , PartialEq , Eq)] pub enum Outcome { Dead (HeldReason) , NoRun (Declined) , Served { run : PipelineRef , answered : u32 , failure : Option < Failure > , self_run : Option < PipelineRef > } , }
 mind_body::persona: const AGENT : & str
@@ -173,7 +197,7 @@ mind_body::queue: struct HuginnMind< 'a >  pub-fields[]
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq , PartialOrd , Ord)] pub enum Stop { Interrupt , Terminate , Kill , }
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Cause { Own , FlushRequested , Signalled (Stop) , Unstoppable , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Eof , Exited (Option < i32 >) , }
-mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 } , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , LeaseRefused { kind : LeaseRefusalKind } , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 } , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 } , Result , Other , Unreadable , }
 mind_body::self_run: const AGENT : & str
 mind_body::self_run: const CEILING_TOKENS : u64
@@ -183,20 +207,28 @@ mind_body::self_run: const FLUSH_GRACE_S : i64
 mind_body::self_run: const FLUSH_HEADROOM_TOKENS : u64
 mind_body::self_run: const FLUSH_MESSAGE : & str
 mind_body::self_run: const MAX_TURNS : u32
+mind_body::self_run: const RUN_CAP_VARIABLE : & str
+mind_body::self_run: const SCRATCH_VARIABLE : & str
+mind_body::self_run: const SEED_VARIABLE : & str
 mind_body::self_run: const SESSION_NAMESPACE : Uuid
-mind_body::self_run: fn carry (mind : & dyn MindPort , clock : & dyn Clock , spawner : & dyn Spawner , out : & mut dyn Write) -> Result < SelfRunOutcome >
+mind_body::self_run: fn carry (mind : & dyn MindPort , clock : & dyn Clock , lender : & dyn Lender , spawner : & dyn Spawner , run_cap_s : u64 , out : & mut dyn Write) -> Result < SelfRunOutcome >
 mind_body::self_run: fn claude_args (session : Uuid , budget_usd : & str) -> Vec < String >
 mind_body::self_run: fn read_usage (line : & str) -> Usage
 mind_body::self_run: fn session_id (run : & PipelineRef) -> Uuid
 mind_body::self_run: fn start_message (instance : & Slug , run : & PipelineRef) -> String
 mind_body::self_run: impl Child for ClaudeProcess
+mind_body::self_run: impl ClaudeSpawner
+mind_body::self_run: impl ClaudeSpawner: fn new (unit_environment : impl IntoIterator < Item = (OsString , OsString) >) -> Result < Self >
+mind_body::self_run: impl Drop for FreshConfig
+mind_body::self_run: impl FreshConfig
 mind_body::self_run: impl SelfRunOutcome
 mind_body::self_run: impl SelfRunOutcome: fn exit_status (& self) -> i32
 mind_body::self_run: impl Spawner for ClaudeSpawner
+mind_body::self_run: impl Spent
 mind_body::self_run: impl Stop
 mind_body::self_run: impl fmt :: Display for SelfRunOutcome
 mind_body::self_run: pub trait Child { fn write_line (& mut self , line : & str) ; fn close_input (& mut self) ; fn next (& mut self , timeout : StdDuration) -> Read ; fn stop (& mut self , how : Stop) -> bool ; }
-mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String]) -> Result < Box < dyn Child > > ; }
+mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String] , token : & TokenFd) -> Result < Box < dyn Child > > ; }
 mind_body::self_run: struct ClaudeSpawner  pub-fields[]
 mind_body::wake: # [derive (Clone , Debug , PartialEq , Eq)] pub enum WakeOutcome { Held { reason : HeldReason } , NotYet { until : DateTime < Utc > } , Busy { run : PipelineRef } , Launched { run : PipelineRef } , Refused (Declined) , }
 mind_body::wake: const AGENT : & str

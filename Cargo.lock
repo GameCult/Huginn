@@ -1191,6 +1191,7 @@ dependencies = [
  "quote",
  "rmp-serde",
  "rust_decimal",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
