@@ -11,6 +11,11 @@
 //!
 //! `wake` is the waker's one cycle over them: the `mind-wake` binary.
 //!
+//! `persona` is the Persona organ: one start of `mind-persona@<instance>` drains her
+//! pending chat through the connector, one typed reply per turn (`chat_client` is
+//! the chat wire and port, `chat_rudp` its RUDP transport to Bifrost's mouth, and
+//! `connector` the model transport over ModelConnector's kit client).
+//!
 //! `self_run` carries one Self run inside `mind-self@<instance>`: the
 //! `mind-self-run` binary runs `claude` over stream-json for her one open Self
 //! run, asks for the flush at the context ceiling and stops a child that outlives it.
@@ -23,9 +28,13 @@
 #![forbid(clippy::disallowed_methods)]
 #![forbid(unsafe_code)]
 
+pub mod chat_client;
+pub mod chat_rudp;
 pub mod cli;
+pub mod connector;
 pub mod control;
 pub mod launch;
+pub mod persona;
 pub mod queue;
 pub mod self_run;
 pub mod wake;

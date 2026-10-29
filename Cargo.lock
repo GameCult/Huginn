@@ -143,6 +143,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "ar_archive_writer"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73cd58deff2140a0a8eae87e417bd01db68a33e148aa93d1e8cd837e55e312b6"
+dependencies = [
+ "object",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -401,13 +410,33 @@ source = "git+https://github.com/GameCult/CultLib.git?rev=8fc74c709444b884a2bd33
 dependencies = [
  "anyhow",
  "chrono",
- "cultcache-rs-derive",
+ "cultcache-rs-derive 0.1.0",
  "fs2",
  "redb",
  "rmp-serde",
  "serde",
  "serde_bytes",
  "serde_json",
+ "uuid",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "cultcache-rs"
+version = "0.3.1"
+source = "git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23#a4eae9056152335662f1115f97bf35fb00ab6d23"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cultcache-rs-derive 0.2.0",
+ "fs2",
+ "redb",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "serde_stacker",
+ "stacker",
  "uuid",
  "windows-sys 0.59.0",
 ]
@@ -423,6 +452,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cultcache-rs-derive"
+version = "0.2.0"
+source = "git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23#a4eae9056152335662f1115f97bf35fb00ab6d23"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "cultnet-rs"
 version = "0.1.0"
 source = "git+https://github.com/GameCult/CultLib.git?rev=8fc74c709444b884a2bd339e0c306bf9484d99d2#8fc74c709444b884a2bd339e0c306bf9484d99d2"
@@ -431,11 +470,36 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "cultcache-rs",
+ "cultcache-rs 0.2.0",
  "ed25519-dalek",
  "hmac",
  "rand 0.9.5",
  "reed-solomon-erasure",
+ "rmp-serde",
+ "rmpv",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "socket2",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "cultnet-rs"
+version = "0.2.0"
+source = "git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23#a4eae9056152335662f1115f97bf35fb00ab6d23"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64",
+ "chrono",
+ "cultcache-rs 0.3.1",
+ "ed25519-dalek",
+ "hmac",
+ "rand 0.9.5",
  "rmp-serde",
  "rmpv",
  "serde",
@@ -597,7 +661,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "cultcache-rs",
+ "cultcache-rs 0.2.0",
  "rmp-serde",
  "schemars",
  "serde",
@@ -611,7 +675,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "cultnet-rs",
+ "cultnet-rs 0.1.0",
  "huginn-daemon",
  "huginn-mind",
  "rmcp",
@@ -891,7 +955,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "cultnet-rs",
+ "cultnet-rs 0.1.0",
  "huginn-mind",
  "rmp-serde",
  "serde",
@@ -909,8 +973,8 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "cultcache-rs",
- "cultnet-rs",
+ "cultcache-rs 0.2.0",
+ "cultnet-rs 0.1.0",
  "eureka-pipeline",
  "jsonschema",
  "rmp-serde",
@@ -1116,20 +1180,44 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "cultcache-rs",
- "cultnet-rs",
+ "cultcache-rs 0.2.0",
+ "cultnet-rs 0.1.0",
  "eureka-pipeline",
  "eureka-state",
  "huginn-mind",
  "libc",
+ "model-connector",
  "proc-macro2",
  "quote",
+ "rmp-serde",
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2",
  "syn 2.0.119",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "model-connector"
+version = "0.1.0"
+source = "git+https://eureka.gamecult.org/forge/GameCult/ModelConnector.git?rev=480cf941c8b56ff34cd641fdcccbb72bcdce80c6#480cf941c8b56ff34cd641fdcccbb72bcdce80c6"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "cultcache-rs 0.3.1",
+ "cultnet-rs 0.2.0",
+ "rand_core 0.6.4",
+ "rmp-serde",
+ "rmpv",
+ "schemars",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "zeroize",
 ]
 
 [[package]]
@@ -1208,6 +1296,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "object"
+version = "0.39.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -1347,6 +1444,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "psm"
+version = "0.1.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dcd034599e63b970727f70d79e02d62390a4a84f7c6b827c27c46d5ac3fa622"
+dependencies = [
+ "ar_archive_writer",
+ "cc",
 ]
 
 [[package]]
@@ -1758,6 +1865,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_stacker"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4936375d50c4be7eff22293a9344f8e46f323ed2b3c243e52f89138d9bb0f4a"
+dependencies = [
+ "serde",
+ "serde_core",
+ "stacker",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1845,6 +1963,19 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "stacker"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "707f49d46706bacf8a2b00d51dace3f9de527c13eec3778f570c411f89e69967"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "psm",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,12 +1,44 @@
+mind_body: mod chat_client
+mind_body: mod chat_rudp
 mind_body: mod cli
+mind_body: mod connector
 mind_body: mod control
 mind_body: mod launch
+mind_body: mod persona
 mind_body: mod queue
 mind_body: mod self_run
 mind_body: mod wake
+mind_body::chat_client: const ACK : & str
+mind_body::chat_client: const PENDING : & str
+mind_body::chat_client: const PENDING_REQUEST : & str
+mind_body::chat_client: const SEND_RECEIPT : & str
+mind_body::chat_client: const SEND_REQUEST : & str
+mind_body::chat_client: fn decode < T : DeserializeOwned > (bytes : & [u8]) -> Result < T >
+mind_body::chat_client: fn encode < T : Serialize > (document : & T) -> Result < Vec < u8 > >
+mind_body::chat_client: pub trait Chat { fn pending (& self , after_seq : u64) -> Result < Vec < ChatDelivery > > ; fn send (& self , request : & ChatSendRequest) -> Result < ChatSendReceipt > ; fn ack (& self , through_seq : u64) -> Result < () > ; }
+mind_body::chat_client: struct ChatAck # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, through_seq: u64]
+mind_body::chat_client: struct ChatDelivery # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seq: u64, room_alias: String, room_id: String, event_id: String, sender: String, sender_display: String, text: String, at_unix_ms: u64, context: Vec < ContextLine >]
+mind_body::chat_client: struct ChatPending # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, deliveries: Vec < ChatDelivery >]
+mind_body::chat_client: struct ChatPendingRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, after_seq: u64]
+mind_body::chat_client: struct ChatSendReceipt # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, event_id: Option < String >, refusal: Option < String >]
+mind_body::chat_client: struct ChatSendRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, persona: String, room_alias: String, text: String]
+mind_body::chat_client: struct ContextLine # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[sender: String, text: String, at_unix_ms: u64]
+mind_body::chat_rudp: fn connection_id (key_file_text : & str) -> u32
+mind_body::chat_rudp: impl Chat for RudpChat
+mind_body::chat_rudp: impl Drop for RudpChat
+mind_body::chat_rudp: impl RudpChat
+mind_body::chat_rudp: impl RudpChat: fn new (remote : SocketAddr , connection_id : u32 , persona : impl Into < String > , reply_timeout : Duration) -> Self
+mind_body::chat_rudp: struct RudpChat  pub-fields[]
 mind_body::cli: fn instance_and_endpoint (args : & [String] , env_endpoint : Option < String > , usage : & str) -> Result < (Slug , SocketAddr) >
 mind_body::cli: fn operator_name (sudo_user : Option < String > , user : Option < String >) -> String
 mind_body::cli: fn run (args : & [String] , root : & Path , set_by : & str , now : DateTime < Utc > , out : & mut impl Write , stop_units : & mut dyn FnMut (& Slug) -> Result < () > ,) -> Result < () >
+mind_body::connector: const MAX_OUTPUT_TOKENS : u32
+mind_body::connector: fn endpoint (text : & str) -> Result < SocketAddr >
+mind_body::connector: fn key (key_file_text : & str) -> String
+mind_body::connector: impl Connector for KitConnector
+mind_body::connector: impl KitConnector
+mind_body::connector: impl KitConnector: fn new (endpoint : SocketAddr , key_text : & str , model : impl Into < String > , caller : impl Into < String >) -> Result < Self >
+mind_body::connector: struct KitConnector  pub-fields[]
 mind_body::control: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum HeldReason { BrakeAbsent , BrakeHeld , DialAbsent , DialOutOfBounds , HeatZero , ShareOutOfBounds , Undecodable , }
 mind_body::control: # [derive (Debug , PartialEq , Eq)] pub enum Effective { Held { reason : HeldReason } , Released (Grant) , }
 mind_body::control: # [derive (Debug , PartialEq , Eq)] pub enum SwarmEffective { Held (HeldReason) , Released (Envelope) , }
@@ -87,6 +119,45 @@ mind_body::launch: struct Ports< 'a >  pub-fields[mind: & 'a dyn MindPort, launc
 mind_body::launch: struct SystemClock  pub-fields[]
 mind_body::launch: struct SystemctlReply  pub-fields[success: bool, code: Option < i32 >, stdout: String]
 mind_body::launch: struct SystemdLauncher  pub-fields[]
+mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Readout , Connector , Undecodable , RoomNotAllowed , Send , SelfRun , Ack , }
+mind_body::persona: # [derive (Debug , PartialEq , Eq)] pub enum Outcome { Dead (HeldReason) , NoRun (Declined) , Served { run : PipelineRef , answered : u32 , failure : Option < Failure > , self_run : Option < PipelineRef > } , }
+mind_body::persona: const AGENT : & str
+mind_body::persona: const ENV_BURN_ROOM : & str
+mind_body::persona: const ENV_OPERATOR : & str
+mind_body::persona: const ENV_ROOMS : & str
+mind_body::persona: const ENV_SELF_SENDER : & str
+mind_body::persona: const MAX_TURNS_PER_START : u32
+mind_body::persona: fn burn_line (readout : & SpendReadout , caller : & str , heat : Option < Decimal > , live_runs : usize) -> Option < String >
+mind_body::persona: fn reply_schema (rooms : & [String]) -> String
+mind_body::persona: fn start (organs : & Organs , control : & impl ControlSource , config : & Config) -> Result < Outcome >
+mind_body::persona: impl Config
+mind_body::persona: impl Config: fn from_args (args : & [String] , usage : & str) -> Result < (Self , Vec < String >) >
+mind_body::persona: impl Config: fn from_args_and_env (args : & [String] , lookup : impl Fn (& str) -> Option < String > , usage : & str) -> Result < (Self , Vec < String >) >
+mind_body::persona: impl FileTrace
+mind_body::persona: impl FileTrace: fn new (path : impl Into < PathBuf >) -> Self
+mind_body::persona: impl HuginnPersona
+mind_body::persona: impl HuginnPersona: fn new (client : HuginnClient) -> Self
+mind_body::persona: impl Launcher for ThisUnit
+mind_body::persona: impl PersonaState for HuginnPersona
+mind_body::persona: impl Sender
+mind_body::persona: impl Trace for FileTrace
+mind_body::persona: impl Trace for Noted < '_ >
+mind_body::persona: impl fmt :: Display for Failure
+mind_body::persona: impl fmt :: Display for Outcome
+mind_body::persona: pub trait Connector { fn turn (& self , request : & TurnRequest) -> Result < String > ; fn spend_readout (& self) -> Result < SpendReadout > ; }
+mind_body::persona: pub trait PersonaState { fn instructions (& self) -> Result < String > ; }
+mind_body::persona: pub trait Trace { fn record (& self , trace : & TurnTrace) -> Result < () > ; }
+mind_body::persona: pub use model_connector :: { CallerSpend , PlanQuota , SpendReadout } ;
+mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[rooms: Vec < String >, burn_room: String, operators: Vec < String >, own_sender: String, max_turns: u32]
+mind_body::persona: struct FileTrace  pub-fields[]
+mind_body::persona: struct HuginnPersona  pub-fields[]
+mind_body::persona: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, chat: & 'a dyn Chat, connector: & 'a dyn Connector, persona: & 'a dyn PersonaState, trace: & 'a dyn Trace]
+mind_body::persona: struct PersonaReply # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[say: Vec < Say >, start_self_run: Option < StartSelfRun >]
+mind_body::persona: struct Say # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[room: String, text: String]
+mind_body::persona: struct StartSelfRun # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[brief: String, repo: String, campaign: String]
+mind_body::persona: struct TraceItem # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[provenance: String, room: String, text: String]
+mind_body::persona: struct TurnRequest # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[caller: String, request_id: String, max_cost_micro_usd: u64, instructions: String, input: String, output_schema_json: String]
+mind_body::persona: struct TurnTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[run: String, turn: u32, at: DateTime < Utc >, inputs: Vec < TraceItem >, outputs: Vec < TraceItem >, outcome: String]
 mind_body::queue: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Breaker { Clear , Trip , }
 mind_body::queue: const CONSECUTIVE : usize
 mind_body::queue: const EMPTY_SHARE : usize

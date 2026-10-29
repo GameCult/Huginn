@@ -18,6 +18,14 @@ publish.workspace = true
 # money-adjacent and the tests pin exact products, which a float would blur. It
 # serialises as a string, so the stored document carries no float.
 #
+# The Persona organ (`persona`, the `mind-persona` binary) drains her pending chat
+# through ports. The connector transport is ModelConnector's kit client, pinned to
+# the kit's revision (`connector`); the chat transport is cultnet-rs's RUDP client
+# to Bifrost's mouth (`chat_rudp`). `rmp-serde` is the chat documents' positional
+# MessagePack codec (`chat_client`); `sha2` derives the mouth's connection id from
+# the chat credential. The kit pins its own CultLib revision, so the graph holds
+# two until the workspace pin and the kit's meet.
+#
 # `serde_json` reads Claude Code's stream-json, a foreign owner's wire (`self_run`);
 # `uuid`'s v5 makes a Self run's session id derivable from the run's id.
 [dependencies]
@@ -28,9 +36,12 @@ cultnet-rs.workspace = true
 eureka-pipeline = { path = "../eureka-pipeline" }
 eureka-state = { path = "../eureka-state", default-features = false }
 huginn-mind = { path = "../huginn-mind" }
+model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "480cf941c8b56ff34cd641fdcccbb72bcdce80c6", package = "model-connector" }
 rust_decimal = { version = "1", default-features = false, features = ["std", "serde"] }
+rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 uuid = { version = "1", default-features = false, features = ["v5"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -40,6 +51,9 @@ libc = "0.2"
 # tests/public_surface.rs, which pins its public surface. All three are already
 # in the workspace's graph (serde's derive uses them); they are test-only.
 [dev-dependencies]
+# The kit's serve loop and service, for the test that runs the connector client
+# against the real server with a fake provider behind it.
+model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "480cf941c8b56ff34cd641fdcccbb72bcdce80c6", package = "model-connector", features = ["daemon"] }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
@@ -60,3 +74,7 @@ path = "src/bin/mind-wake.rs"
 [[bin]]
 name = "mind-self-run"
 path = "src/bin/mind-self-run.rs"
+
+[[bin]]
+name = "mind-persona"
+path = "src/bin/mind-persona.rs"
