@@ -164,6 +164,7 @@ mod tests {
     use crate::fixtures::{INSTANCE, OTHER_INSTANCE, epoch, instance, opened, prepare, provenance, seed, slug};
     use crate::receipt::Faculty;
     use crate::store::test_stores::{MemoryStore, RefusingStore, SwapCommand};
+    use cultnet_rs::Selection;
     use eureka_pipeline::PipelineKind;
     use serde_json::json;
 
@@ -304,6 +305,70 @@ mod tests {
             assert_eq!(mind.persona().unwrap().unwrap().receipt_id, receipt, "after put {second}");
             previous = Some(stamp);
         }
+    }
+
+    /// The persona is the one identity replaced by design: a second put is a
+    /// second receipt naming it, and every pipeline read still answers.
+    #[test]
+    fn reads_answer_after_a_second_persona_put() {
+        let store = MemoryStore::new();
+        let mut mind = seeded_over(&store);
+        committed(put(&mut mind, persona(INSTANCE, T1), None));
+        let second = committed(put(&mut mind, persona(INSTANCE, T2), Some(T1)));
+        committed(put(&mut mind, persona(INSTANCE, T3), Some(T2)));
+        assert_eq!(mind.persona().unwrap().unwrap().updated_at, T3);
+        assert_reads_answer(&mind);
+        assert_ne!(mind.persona().unwrap().unwrap().receipt_id, second);
+        assert_reads_answer(&opened(store.clone(), INSTANCE));
+    }
+
+    /// The same, over a real store file closed and reopened.
+    #[test]
+    fn a_reopened_disk_store_reads_after_two_persona_puts() {
+        let root = tempfile::tempdir().unwrap();
+        {
+            let mut mind = Mind::open(root.path(), &slug(INSTANCE)).unwrap();
+            seed(&mut mind);
+            committed(put(&mut mind, persona(INSTANCE, T1), None));
+            committed(put(&mut mind, persona(INSTANCE, T2), Some(T1)));
+        }
+        let mind = Mind::open(root.path(), &slug(INSTANCE)).unwrap();
+        assert_eq!(mind.persona().unwrap().unwrap().updated_at, T2);
+        assert_reads_answer(&mind);
+    }
+
+    /// The exemption is the persona's alone: a pipeline document written by
+    /// two receipts still refuses, persona re-puts or not.
+    #[test]
+    fn a_doubled_pipeline_write_still_refuses_beside_persona_reputs() {
+        let store = MemoryStore::new();
+        let mut mind = seeded_over(&store);
+        committed(put(&mut mind, persona(INSTANCE, T1), None));
+        committed(put(&mut mind, persona(INSTANCE, T2), Some(T1)));
+        let doubled = MemoryStore::new();
+        for row in store.rows() {
+            doubled.plant(row);
+        }
+        let head = crate::receipt::head(&mind).unwrap();
+        let again = crate::fixtures::prepare(&crate::fixtures::instance(INSTANCE));
+        let forged = crate::receipt::candidate(&slug(INSTANCE), provenance(Faculty::Soul), &[], &[again], head + 1, crate::fixtures::now())
+            .unwrap();
+        doubled.plant(crate::mind::schema_cache().unwrap().prepare_entry_named(&forged.receipt_id, &forged).unwrap().0);
+        let refusal = opened(doubled, INSTANCE).query(&Selection::default()).err();
+        assert!(
+            matches!(&refusal, Some(MindRefusal::Unavailable { detail }) if detail.ends_with("is written by two receipts")),
+            "{refusal:?}"
+        );
+    }
+
+    fn assert_reads_answer(mind: &Mind<impl MindStore>) {
+        let page = mind.query(&Selection::default()).unwrap();
+        assert!(page.matched > 0);
+        let first = match &page.items {
+            crate::query::PipelinePageItems::Headers(headers) => headers[0].id.clone(),
+            crate::query::PipelinePageItems::Documents(views) => views[0].id.clone(),
+        };
+        assert!(mind.view(&first).unwrap().is_some());
     }
 
     #[test]

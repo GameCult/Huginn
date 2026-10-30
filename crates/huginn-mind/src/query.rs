@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cultcache_rs::DatabaseEntry;
 use cultnet_rs::{
     Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, Row, Selection, select, validate,
 };
@@ -35,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::docs::{CitationRole, Docs, Held, citations, kind_of_type};
 use crate::mind::{Mind, schema_cache};
+use crate::persona::HuginnPersonaEntry;
 use crate::receipt::{self, PipelineProvenance};
 use crate::refusal::MindRefusal;
 use crate::rows::{SelectionRow, Vocabulary, refuse_values};
@@ -310,8 +312,12 @@ pub struct Ranked {
 
 /// The admission facts of every stored document, built once per read call from
 /// the receipts. `writes` only: a document a later batch cited as a strong read
-/// keeps the receipt that wrote it. A10 admits one write per identity, so two
-/// receipts naming one document is an integrity fault, not a choice to make.
+/// keeps the receipt that wrote it. A10 admits one write per pipeline identity,
+/// so two receipts naming one pipeline document is an integrity fault, not a
+/// choice to make. The persona document is the one identity replaced by design
+/// (`put_persona` is a compare-and-swap on `updatedAt`) and is not a pipeline
+/// document: it has no admission facts here, and `Mind::persona` reads its own
+/// receipt.
 pub(crate) struct AdmissionIndex(BTreeMap<(String, String), AdmissionFacts>);
 
 impl AdmissionIndex {
@@ -323,7 +329,7 @@ impl AdmissionIndex {
         receipt::head(mind)?;
         let mut facts = BTreeMap::new();
         for receipt in mind.receipts()? {
-            for write in receipt.writes.iter() {
+            for write in receipt.writes.iter().filter(|write| write.document_type != HuginnPersonaEntry::TYPE) {
                 let identity = (write.document_type.clone(), write.document_key.clone());
                 let landed = AdmissionFacts {
                     receipt_id: receipt.receipt_id.clone(),
