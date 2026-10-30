@@ -17,6 +17,7 @@
 //! owns no file and stops no unit through the `Launcher` port: stopping her
 //! units is the operator's brake hold, through `SystemdLauncher::stop_all`.
 
+
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 use cultnet_rs::Selection;
@@ -450,7 +451,6 @@ fn breaker_question(item: &PipelineRef, label: &Label, now: DateTime<Utc>) -> Pi
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
-    use std::time::Duration as StdDuration;
 
     use eureka_pipeline::PipelineKind as K;
     use huginn_mind::{PipelineAdmissionOutcome as Outcome, PipelineSelectionPage, PipelineStatus};
@@ -480,7 +480,7 @@ mod tests {
 
         fn try_launch_through(&self, mind: &dyn MindPort, turn: RunTurn, claims: &[PipelineRef], cap: Decimal) -> Result<LaunchOutcome> {
             let ports = Ports { mind, launcher: &self.launcher, clock: &self.clock, host: "yggdrasil-host" };
-            let grant = Grant::for_test(Slug(INSTANCE.into()), StdDuration::from_secs(60), cap);
+            let grant = Grant::for_test(Slug(INSTANCE.into()), cap);
             open_and_launch(&ports, LaunchRequest { turn, claims: claims.to_vec(), agent: "agent-x".into(), grant })
         }
 
@@ -1048,7 +1048,7 @@ mod tests {
     fn gated(mind: &Named, grant: &str, turn: RunTurn, claims: Vec<PipelineRef>) -> Result<LaunchOutcome> {
         let (launcher, clock) = (Recording::default(), Fixed(Cell::new(at(0))));
         let ports = Ports { mind, launcher: &launcher, clock: &clock, host: "yggdrasil-host" };
-        let grant = Grant::for_test(Slug(grant.into()), StdDuration::from_secs(60), five());
+        let grant = Grant::for_test(Slug(grant.into()), five());
         let outcome = open_and_launch(&ports, LaunchRequest { turn, claims, agent: "agent-x".into(), grant });
         assert!(launcher.started.borrow().is_empty());
         outcome

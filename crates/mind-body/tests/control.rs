@@ -19,58 +19,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
 use eureka_pipeline::Slug;
-use mind_body::control::{BurnRate, ControlWriter, FileSource, SwarmWriter, control_path, load_state, swarm_path};
-use rust_decimal::Decimal;
-use std::str::FromStr;
-
-fn dec(text: &str) -> Decimal {
-    Decimal::from_str(text).unwrap()
-}
+use mind_body::control::{ControlWriter, FileSource, SwarmWriter, control_path, load_state, swarm_path};
 
 fn at(seconds: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(1_800_000_000 + seconds, 0).unwrap()
-}
-
-fn dial(heat: &str, cooldown: u32, run_usd: &str) -> BurnRate {
-    BurnRate { heat: dec(heat), base_cooldown_s: cooldown, base_run_usd: dec(run_usd), set_at: at(0), set_by: "op".into() }
-}
-
-/// The store of the instance `eureka` under the root `dir`.
-fn store_path(dir: &Path) -> PathBuf {
-    dir.join("eureka").join("control.cc")
-}
-
-/// A written store: brake released and the given dial, through the real writer.
-fn released_store(dir: &Path, dial: BurnRate) -> PathBuf {
-    let path = store_path(dir);
-    let mut writer = ControlWriter::open(&path).unwrap();
-    writer.set_brake(true, at(0), "op").unwrap();
-    writer.set_dial(dial).unwrap();
-    path
-}
-
-#[test]
-fn setting_the_dial_replaces_it_whole_and_keeps_the_brake() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = released_store(dir.path(), dial("1", 3600, "1"));
-    let mut next = dial("0.5", 100, "8");
-    next.set_at = at(30);
-    next.set_by = "carol".into();
-    ControlWriter::open(&path).unwrap().set_dial(next.clone()).unwrap();
-    let state = load_state(&FileSource::new(&path)).unwrap();
-    assert_eq!(state.dial, Some(next));
-    assert!(state.brake.unwrap().released);
-}
-
-#[test]
-fn the_writer_refuses_an_out_of_bounds_dial_and_leaves_the_store_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = released_store(dir.path(), dial("1", 3600, "1"));
-    let before = std::fs::read(&path).unwrap();
-    for bad in [dial("2.0001", 3600, "1"), dial("0.0499", 3600, "1"), dial("1", 0, "1"), dial("1", 3600, "0")] {
-        assert!(ControlWriter::open(&path).unwrap().set_dial(bad).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-    }
 }
 
 #[test]
@@ -107,7 +59,6 @@ mod modes {
             "write" => {
                 let mut writer = ControlWriter::open(&path).unwrap();
                 writer.set_brake(true, at(0), "op").unwrap();
-                writer.set_dial(dial("1", 3600, "1")).unwrap();
             }
             "brake" => {
                 ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").unwrap();
@@ -339,11 +290,7 @@ mod unsafe_installs {
             .unwrap();
         let bin = env!("CARGO_BIN_EXE_mind-control");
         for round in 0..100 {
-            let verb: &[&str] = if round % 2 == 0 {
-                &["brake", "release"]
-            } else {
-                &["dial", "set", "--heat", "1", "--base-cooldown-s", "60", "--base-run-usd", "1"]
-            };
+            let verb: &[&str] = if round % 2 == 0 { &["brake", "release"] } else { &["show"] };
             let status = Command::new("sh")
                 .args(["-c", "umask 000; exec \"$@\"", "sh", bin, "--root", minds.to_str().unwrap(), "--instance", &instance])
                 .args(verb)

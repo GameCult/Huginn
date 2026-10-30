@@ -15,8 +15,7 @@ use std::path::Path;
 
 use chrono::{TimeZone, Utc};
 use eureka_pipeline::Slug;
-use mind_body::control::{BurnRate, ControlWriter, Effective, HeldReason, control_path, read_effective};
-use rust_decimal::Decimal;
+use mind_body::control::{ControlWriter, Effective, HeldReason, control_path, read_effective};
 
 /// A name no real install has a store for under the real root.
 const FORGED: &str = "forge-probe-instance";
@@ -26,9 +25,6 @@ fn release(root: &Path, instance: &str) {
     let mut writer = ControlWriter::open(control_path(root, &Slug(instance.into())).unwrap()).unwrap();
     let at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
     writer.set_brake(true, at, "forger").unwrap();
-    writer
-        .set_dial(BurnRate { heat: Decimal::ONE, base_cooldown_s: 3600, base_run_usd: Decimal::new(5, 0), set_at: at, set_by: "forger".into() })
-        .unwrap();
 }
 
 fn reads(instance: &str) -> Effective {

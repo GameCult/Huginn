@@ -26,7 +26,7 @@ use eureka_state::HuginnClient;
 use mind_body::chat_rudp::{RudpChat, connection_id};
 use mind_body::cli::instance_and_endpoint;
 use mind_body::connector::{self, KitConnector};
-use mind_body::control::{CONTROL_ROOT, FileSource, control_path};
+use mind_body::control::{CONTROL_ROOT, FileSource, control_path, swarm_path};
 use mind_body::launch::{SystemClock, SystemdLauncher};
 use mind_body::persona::{Config, FileTrace, HuginnPersona, Organs, start};
 use mind_body::queue::HuginnMind;
@@ -69,7 +69,7 @@ fn run() -> Result<String> {
         .and_then(|address| address.parse().ok())
         .ok_or_else(|| anyhow!("BIFROST_CHAT_ENDPOINT is not rudp://<ip>:<port>"))?;
     let chat = RudpChat::new(chat_endpoint, connection_id(&credential("BIFROST_CHAT_KEY_FILE")?), instance.0.clone(), CHAT_TIMEOUT);
-    let connector = KitConnector::new(connector::endpoint(&required("MIND_CONNECTOR_ENDPOINT")?)?, &credential("MIND_CONNECTOR_KEY_FILE")?, required("MIND_CONNECTOR_MODEL")?, instance.0.clone())?;
+    let connector = KitConnector::new(connector::endpoint(&required("MIND_CONNECTOR_ENDPOINT")?).context("MIND_CONNECTOR_ENDPOINT must be <ip>:<port> or tcp://<ip>:<port>")?, &credential("MIND_CONNECTOR_KEY_FILE")?, required("MIND_CONNECTOR_MODEL")?, instance.0.clone())?;
     let source = FileSource::new(control_path(Path::new(CONTROL_ROOT), &instance)?);
     let mind = HuginnMind::new(HuginnClient::new(address, instance.clone(), TIMEOUT));
     let persona = HuginnPersona::new(HuginnClient::new(address, instance, TIMEOUT));
@@ -77,7 +77,8 @@ fn run() -> Result<String> {
     let launcher = SystemdLauncher::new();
     let host = host();
     let organs = Organs { mind: &mind, launcher: &launcher, clock: &SystemClock, host: &host, chat: &chat, connector: &connector, persona: &persona, trace: &trace };
-    Ok(start(&organs, &source, &config)?.to_string())
+    let swarm = FileSource::new(swarm_path(Path::new(CONTROL_ROOT)));
+    Ok(start(&organs, &source, &swarm, &config)?.to_string())
 }
 
 fn main() {

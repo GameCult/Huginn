@@ -5,6 +5,7 @@
 
 use super::*;
 
+const REFUSAL_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_refusal.v1.msgpack");
 const ACK_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
 const PENDING_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_pending.v1.msgpack");
 const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
@@ -35,8 +36,15 @@ fn a_pending_answer_is_the_mouths_bytes_with_its_context() {
         text: "hello eureka".into(),
         at_unix_ms: 1_761_700_000_000,
         context: vec![ContextLine { sender: "@eureka:gamecult.org".into(), text: "earlier".into(), at_unix_ms: 1_761_699_999_000 }],
+        mentions: vec!["@eureka:gamecult.org".into(), "@nova:gamecult.org".into()],
+        is_direct: true,
     };
     golden(PENDING_BYTES, &ChatPending { persona: "eureka".into(), deliveries: vec![delivery] });
+}
+
+#[test]
+fn a_refusal_is_the_mouths_bytes_and_a_typed_name() {
+    golden(REFUSAL_BYTES, &ChatRefusal { persona: "ghost".into(), refusal: Refusal::UnknownPersona });
 }
 
 #[test]

@@ -2,12 +2,11 @@
 //! chat.
 //!
 //! A start (ruling `eureka-body:ruling:persona-turn-drains-deliveries`) reads the
-//! brake and the dial once, and a brake held or a dial out of bounds ends it
+//! instance brake and the swarm envelope once, and a held brake or envelope ends it
 //! dead before the mind, the chat or the connector is touched. Otherwise it
-//! adopts the Persona run the waker opened for it, or opens one (a start rung by
-//! the chat ear has none; the unit is already running, so `ThisUnit` stands in
-//! for the launcher and starts nothing). Then it takes up to `max_turns` turns.
-//! The first turn is taken whether or not anything is pending (an unprompted
+//! adopts the Persona run the heartbeat opened for it; a start with no such run
+//! opens none and ends `NoRun`, because only the heartbeat opens Persona turns.
+//! Then it takes up to `max_turns` turns. The first turn is taken whether or not anything is pending (an unprompted
 //! start is a wake: she may speak or start work); later turns need pending
 //! deliveries. The run's own budget (the Grant's cap) bounds the start: when the
 //! caller's ledger spend has grown by the cap since the first turn, it stops.
@@ -51,8 +50,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::chat_client::{Chat, ChatDelivery, ChatSendRequest};
-use crate::control::{ControlSource, Effective, HeldReason, load_state};
-use crate::launch::{Clock, Declined, LaunchOutcome, LaunchRequest, Launcher, Ports, open_and_launch};
+use crate::control::{ControlSource, Effective, HeldReason, derive, load_swarm_state};
+use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
 use crate::queue::{MindPort, any_of, citing, headers, in_force, of_kind};
 
 /// The admitting agent's name on everything this organ admits.
@@ -267,7 +266,7 @@ pub struct TurnRequest {
     /// Names this turn of this run, so a repeat of the call is the same request
     /// to the connector (its replay store answers it without a second provider call).
     pub request_id: String,
-    /// The most this call may cost, in micro-USD: the run's own budget.
+    /// The most this call may cost, in micro-USD: what is left of the run's cap.
     pub max_cost_micro_usd: u64,
     pub instructions: String,
     pub input: String,
@@ -399,20 +398,6 @@ pub struct Organs<'a> {
     pub trace: &'a dyn Trace,
 }
 
-/// The launcher of the run this very unit carries: its unit is running (it is
-/// this process), so a holder is live and starting it is nothing to do.
-struct ThisUnit;
-
-impl Launcher for ThisUnit {
-    fn start(&self, _instance: &Slug, _turn: RunTurn) -> Result<()> {
-        Ok(())
-    }
-
-    fn alive(&self, _instance: &Slug, _turn: RunTurn) -> bool {
-        true
-    }
-}
-
 /// Why a turn did not complete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
@@ -451,8 +436,9 @@ impl fmt::Display for Failure {
 pub enum Outcome {
     /// The brake or the dial did not allow it; nothing was touched.
     Dead(HeldReason),
-    /// No run could be opened for this start.
-    NoRun(Declined),
+    /// No Persona run is held for this unit: only the heartbeat opens one, so
+    /// a start the heartbeat did not make runs nothing and opens nothing.
+    NoRun,
     Served { run: PipelineRef, answered: u32, failure: Option<Failure>, self_run: Option<PipelineRef> },
 }
 
@@ -460,7 +446,7 @@ impl fmt::Display for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dead(reason) => write!(f, "dead: {reason:?}"),
-            Self::NoRun(_) => f.write_str("no run could be opened"),
+            Self::NoRun => f.write_str("no run is held for this start"),
             Self::Served { run, answered, failure, self_run } => {
                 write!(f, "served: {} answered {answered}", run.id.0)?;
                 if let Some(failure) = failure {
@@ -483,15 +469,11 @@ enum Step {
     Failed(Failure),
 }
 
-/// The control store read once: what it allows and the dial's heat.
-fn read(control: &impl ControlSource, instance: &Slug) -> (Effective, Option<Decimal>) {
-    match load_state(control) {
-        Ok(state) => {
-            let heat = state.dial.as_ref().map(|dial| dial.heat);
-            (state.effective(instance), heat)
-        }
-        Err(_) => (Effective::Held { reason: HeldReason::Undecodable }, None),
-    }
+/// The instance brake and the swarm store read once: what they allow and the
+/// swarm dial's heat.
+fn read(control: &impl ControlSource, swarm: &impl ControlSource, instance: &Slug) -> (Effective, Option<Decimal>) {
+    let heat = load_swarm_state(swarm).ok().and_then(|state| state.dial).map(|dial| dial.heat);
+    (derive(control, swarm, instance), heat)
 }
 
 fn label_of(run: &PipelineRef) -> &str {
@@ -502,8 +484,8 @@ fn date(now: DateTime<Utc>) -> Date {
     Date(now.format("%Y-%m-%d").to_string())
 }
 
-/// One start. `control` is the instance's control store.
-pub fn start(organs: &Organs, control: &impl ControlSource, config: &Config) -> Result<Outcome> {
+/// One start. `control` is the instance's control store and `swarm` the swarm's.
+pub fn start(organs: &Organs, control: &impl ControlSource, swarm: &impl ControlSource, config: &Config) -> Result<Outcome> {
     let noted = Noted { inner: organs.trace, failures: std::cell::Cell::new(0) };
     let organs = &Organs {
         mind: organs.mind,
@@ -516,27 +498,22 @@ pub fn start(organs: &Organs, control: &impl ControlSource, config: &Config) -> 
         trace: &noted,
     };
     let instance = organs.mind.instance().clone();
-    let grant = match read(control, &instance).0 {
+    let grant = match read(control, swarm, &instance).0 {
         Effective::Held { reason } => return Ok(Outcome::Dead(reason)),
         Effective::Released(grant) => grant,
     };
     let budget_micro = (grant.run_cap_usd() * Decimal::from(1_000_000)).trunc().to_u64().unwrap_or(u64::MAX);
-    let own = Ports { mind: organs.mind, launcher: &ThisUnit, clock: organs.clock, host: organs.host };
-    let request = LaunchRequest { turn: RunTurn::PersonaTurn, claims: vec![], agent: AGENT.into(), grant };
-    // A holder is the run the waker opened for this unit; none means the chat ear rang.
-    let run = match open_and_launch(&own, request)? {
-        LaunchOutcome::Launched { run } | LaunchOutcome::Busy { run } => run,
-        LaunchOutcome::Refused(declined) => return Ok(Outcome::NoRun(declined)),
-        LaunchOutcome::NotQueued { .. } | LaunchOutcome::Tripped { .. } => bail!("the launch answered a Persona turn with an answer only a Self run has"),
-    };
+    // The run is the one the heartbeat opened for this unit; none held, none run.
+    let Some(holder) = holders(organs.mind, &instance, RunTurn::PersonaTurn)?.into_iter().next() else { return Ok(Outcome::NoRun) };
+    let run = holder.id;
     let mut after_seq = 0;
     let mut answered = 0;
     let mut failure = None;
     let mut self_run = None;
-    let mut spent_at_start = None;
+    let mut start = None;
     for turn in 0..config.max_turns {
-        let budget = Budget { micro: budget_micro, spent_at_start: &mut spent_at_start };
-        match one_turn(organs, control, config, &run, turn, &mut after_seq, budget, &mut self_run)? {
+        let budget = Budget { micro: budget_micro, start: &mut start };
+        match one_turn(organs, control, swarm, config, &run, turn, &mut after_seq, budget, &mut self_run)? {
             Step::Idle | Step::Spent => break,
             Step::Answered => answered += 1,
             Step::Failed(why) => {
@@ -552,13 +529,15 @@ pub fn start(organs: &Organs, control: &impl ControlSource, config: &Config) -> 
 /// The run's budget and where the caller's ledger stood at its first turn.
 struct Budget<'a> {
     micro: u64,
-    spent_at_start: &'a mut Option<u64>,
+    /// The caller's total and window at the run's first turn.
+    start: &'a mut Option<(u64, u64)>,
 }
 
 #[allow(clippy::too_many_arguments, reason = "one turn's state is these few things, and a struct for them would be a second owner")]
 fn one_turn(
     organs: &Organs,
     control: &impl ControlSource,
+    swarm: &impl ControlSource,
     config: &Config,
     run: &PipelineRef,
     turn: u32,
@@ -568,33 +547,44 @@ fn one_turn(
 ) -> Result<Step> {
     let instance = organs.mind.instance().clone();
     // The gate runs before every connector call.
-    let (effective, heat) = read(control, &instance);
+    let (effective, heat) = read(control, swarm, &instance);
     if let Effective::Held { reason } = effective {
         return Ok(Step::Failed(Failure::Held(reason)));
     }
-    let Ok(deliveries) = organs.chat.pending(*after_seq) else { return Ok(Step::Failed(Failure::Chat)) };
+    let Ok(pending) = organs.chat.pending(*after_seq) else { return Ok(Step::Failed(Failure::Chat)) };
+    let deliveries = next_batch(pending);
     if deliveries.is_empty() && turn > 0 {
         return Ok(Step::Idle);
     }
     let Ok(instructions) = organs.persona.instructions() else { return Ok(Step::Failed(Failure::Persona)) };
     let Ok(readout) = organs.connector.spend_readout() else { return Ok(Step::Failed(Failure::Readout)) };
-    let spent = readout.callers.iter().find(|row| row.caller_id == instance.0).map(|row| row.spent_micro_usd);
-    if let Some(spent) = spent {
-        let start = *budget.spent_at_start.get_or_insert(spent);
-        if spent.saturating_sub(start) >= budget.micro {
-            return Ok(Step::Spent);
-        }
+    // The ledger resets at a window boundary: a run that sees the window turn is charged its whole grant, as the heartbeat charges it.
+    // A readout with no row for her caller cannot say what is left of the run's cap: the run holds, no turn is taken.
+    let Some(row) = readout.callers.iter().find(|row| row.caller_id == instance.0) else {
+        let inputs = trace_inputs(config, &deliveries);
+        let outcome = "held: the spend readout has no row for her caller".to_string();
+        organs.trace.record(&TurnTrace { run: label_of(run).into(), turn, at: organs.clock.now(), inputs, outputs: vec![], outcome })?;
+        return Ok(Step::Failed(Failure::Readout));
+    };
+    let window = readout.at_unix_ms.checked_div(row.window_ms).unwrap_or(0);
+    let (spent_then, window_then) = *budget.start.get_or_insert((row.spent_micro_usd, window));
+    let used = row.spent_micro_usd.saturating_sub(spent_then);
+    if window != window_then || used >= budget.micro {
+        return Ok(Step::Spent);
     }
+    // This turn may cost what is left of the run's cap, never the whole of it.
+    let remaining = budget.micro - used;
     let live = live_runs(organs.mind, &instance)?;
     let Some(burn) = burn_line(&readout, &instance.0, heat, live) else { return Ok(Step::Failed(Failure::Readout)) };
     let history = recent_runs(organs.mind, &instance)?;
+    let rooms = reply_rooms(config, &deliveries);
     let request = TurnRequest {
         caller: instance.0.clone(),
         request_id: format!("{}-t{turn}", label_of(run)),
-        max_cost_micro_usd: budget.micro.max(1),
+        max_cost_micro_usd: remaining,
         instructions,
         input: render_input(config, &deliveries, &history, &burn),
-        output_schema_json: reply_schema(&config.rooms),
+        output_schema_json: reply_schema(&rooms),
     };
     let inputs = trace_inputs(config, &deliveries);
     let now = organs.clock.now();
@@ -604,7 +594,7 @@ fn one_turn(
         organs.trace.record(&record(vec![], "failed: connector".into()))?;
         return Ok(Step::Failed(Failure::Connector));
     };
-    let reply = match decode_reply(&text, config) {
+    let reply = match decode_reply(&text, &rooms) {
         Ok(reply) => reply,
         Err(why) => {
             let raw = TraceItem { provenance: "her own".into(), room: String::new(), text: text.chars().take(TRACE_RAW_MAX).collect() };
@@ -620,6 +610,11 @@ fn one_turn(
     };
     let mut outputs = Vec::new();
     for (index, say) in reply.say.iter().enumerate() {
+        // The gate binds the send as it bound the call: a hold placed while the model was answering stops the reply.
+        if let Effective::Held { reason } = read(control, swarm, &instance).0 {
+            organs.trace.record(&record(outputs, format!("failed: {}", Failure::Held(reason))))?;
+            return Ok(Step::Failed(Failure::Held(reason)));
+        }
         let text = if say.room == config.burn_room { format!("{burn}\n{}", say.text) } else { say.text.clone() };
         let sent = ChatSendRequest { request_id: format!("{batch}-{index}"), persona: instance.0.clone(), room_alias: say.room.clone(), text: text.clone() };
         let delivered = organs.chat.send(&sent).is_ok_and(|receipt| receipt.refusal.is_none() && receipt.event_id.is_some());
@@ -631,7 +626,7 @@ fn one_turn(
     }
     if let Some(ask) = &reply.start_self_run {
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("start_self_run {} {}: {}", ask.campaign, ask.repo, ask.brief) });
-        match start_self_run(organs, control, run, &batch, ask)? {
+        match start_self_run(organs, control, swarm, run, &batch, ask)? {
             Ok(started) => *self_run = Some(started),
             Err(why) => {
                 organs.trace.record(&record(outputs, format!("failed: {why}")))?;
@@ -649,13 +644,38 @@ fn one_turn(
     Ok(Step::Answered)
 }
 
-/// The reply as the one type it must be, with every room one of hers.
-fn decode_reply(text: &str, config: &Config) -> Result<PersonaReply, Failure> {
+/// The oldest deliveries that share a conversation: the public rooms together, or one direct
+/// message room alone. A prefix by seq, so an ack through its last never passes an unanswered one,
+/// and one member's DM text never enters another room's turn.
+fn next_batch(mut deliveries: Vec<ChatDelivery>) -> Vec<ChatDelivery> {
+    deliveries.sort_by_key(|delivery| delivery.seq);
+    let Some(first) = deliveries.first() else { return deliveries };
+    let (direct, room) = (first.is_direct, first.room_id.clone());
+    let end = deliveries.iter().position(|delivery| delivery.is_direct != direct || (direct && delivery.room_id != room)).unwrap_or(deliveries.len());
+    deliveries.truncate(end);
+    deliveries
+}
+
+/// The rooms a reply to these deliveries may name: hers, and the room each
+/// direct message arrived under (a DM's alias is its room id, which the mouth
+/// sends into). Never a room no delivery came from and she was not given.
+fn reply_rooms(config: &Config, deliveries: &[ChatDelivery]) -> Vec<String> {
+    let mut rooms = config.rooms.clone();
+    for delivery in deliveries.iter().filter(|delivery| delivery.is_direct) {
+        if !rooms.contains(&delivery.room_alias) {
+            rooms.push(delivery.room_alias.clone());
+        }
+    }
+    rooms
+}
+
+/// The reply as the one type it must be, with every room one of `rooms`.
+fn decode_reply(text: &str, rooms: &[String]) -> Result<PersonaReply, Failure> {
     let reply: PersonaReply = serde_json::from_str(text).map_err(|_| Failure::Undecodable)?;
     if reply.start_self_run.as_ref().is_some_and(|ask| !start_in_bounds(ask)) {
         return Err(Failure::Undecodable);
     }
-    if reply.say.iter().any(|say| !config.rooms.contains(&say.room) || say.text.trim().is_empty()) {
+    if reply.say.iter().any(|say| !rooms.contains(&say.room) || say.text.trim().is_empty()) {
         return Err(Failure::RoomNotAllowed);
     }
     Ok(reply)
@@ -667,6 +687,7 @@ fn decode_reply(text: &str, config: &Config) -> Result<PersonaReply, Failure> {
 fn start_self_run(
     organs: &Organs,
     control: &impl ControlSource,
+    swarm: &impl ControlSource,
     run: &PipelineRef,
     batch: &str,
     ask: &StartSelfRun,
@@ -690,7 +711,7 @@ fn start_self_run(
         PipelineAdmissionOutcome::Committed { .. } | PipelineAdmissionOutcome::AlreadyAdmitted { .. } => {}
         _ => return Ok(Err(Failure::SelfRun)),
     }
-    let Effective::Released(grant) = read(control, organs.mind.instance()).0 else { return Ok(Err(Failure::SelfRun)) };
+    let Effective::Released(grant) = read(control, swarm, organs.mind.instance()).0 else { return Ok(Err(Failure::SelfRun)) };
     let ports = Ports { mind: organs.mind, launcher: organs.launcher, clock: organs.clock, host: organs.host };
     let request = LaunchRequest { turn: RunTurn::SelfRun, claims: vec![claim], agent: AGENT.into(), grant };
     Ok(match open_and_launch(&ports, request)? {
@@ -806,9 +827,15 @@ fn trace_inputs(config: &Config, deliveries: &[ChatDelivery]) -> Vec<TraceItem> 
 }
 
 /// A string as a JSON string literal on one line: whatever it holds, it cannot
-/// end its line or open another.
-fn quoted(text: &str) -> String {
-    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
+/// end its line or open another. JSON leaves U+2028, U+2029 and U+0085 raw; they
+/// are escaped here so no line-separator reader splits the line.
+pub(crate) fn quoted(text: &str) -> String {
+    let json = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
+    json.chars().map(|c| match c {
+        '\u{2028}' | '\u{2029}' | '\u{0085}' => format!("\\u{:04x}", u32::from(c)),
+        other => other.to_string(),
+    })
+    .collect()
 }
 
 /// One message line: the sender id and the role the organ derived from it stand

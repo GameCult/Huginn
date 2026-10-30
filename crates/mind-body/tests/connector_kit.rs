@@ -6,6 +6,8 @@
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
+use mind_body::heartbeat::Models;
+use rust_decimal::Decimal;
 use mind_body::connector::{KitConnector, endpoint, key};
 use mind_body::persona::{Connector, TurnRequest};
 use model_connector::{
@@ -16,6 +18,8 @@ use model_connector::{
 const CALLER: &str = "eureka";
 const MODEL: &str = "claude-test-model";
 const KEY: &str = "connector-key-for-test";
+const HEARTBEAT: &str = "heartbeat";
+const HEARTBEAT_KEY: &str = "the-heartbeats-own-key";
 
 enum Behaviour {
     Reply(&'static str),
@@ -81,11 +85,13 @@ fn daemon(behaviour: Behaviour) -> Daemon {
     let prices = PriceTable::from([(MODEL.to_string(), ModelPrice { rates: rate, long_context: None, overhead_tokens: 0 })]);
     let admission =
         CallerAdmission::new(CALLER, key(KEY), 1, [MODEL.to_string()], 2, 64 * 1024, 8192, SpendCeiling(1 << 40), SpendWindowMs(3_600_000)).unwrap();
+    let observer =
+        CallerAdmission::new(HEARTBEAT, key(HEARTBEAT_KEY), 1, [MODEL.to_string()], 2, 64 * 1024, 8192, SpendCeiling(1 << 40), SpendWindowMs(3_600_000)).unwrap();
     let limits = ServeLimits { max_frame_bytes: 256 * 1024, max_connections: 8, socket_timeout_ms: 5_000, max_expiry_skew_ms: 300_000 };
     let provider = Arc::new(FakeProvider { behaviour, seen: Mutex::default() });
     let backend = provider.clone();
     std::thread::spawn(move || {
-        let _ = serve(listener, limits, vec![admission], prices, &replay, backend);
+        let _ = serve(listener, limits, vec![admission, observer], prices, &replay, backend);
     });
     Daemon { endpoint, provider, _store: store }
 }
@@ -160,4 +166,15 @@ fn endpoints_are_the_connectors_loopback_tcp_address_and_a_rudp_url_is_refused()
     }
     assert_eq!(key("secret\r\n"), "secret");
     assert_eq!(key("a b\n\n"), "a b");
+}
+
+#[test]
+fn the_heartbeat_reads_a_personas_spend_as_itself_and_picks_her_row() {
+    let daemon = daemon(Behaviour::Reply("{}"));
+    connector(&daemon, MODEL).turn(&turn_request()).unwrap();
+    let heartbeat = KitConnector::new(endpoint(&daemon.endpoint).unwrap(), HEARTBEAT_KEY, MODEL, HEARTBEAT).unwrap();
+    let spent = Models::spent(&heartbeat, CALLER).expect("a persona's row, asked under the heartbeat's own key");
+    assert_eq!(spent.usd, Decimal::new(13, 6));
+    assert_eq!(Models::spent(&heartbeat, HEARTBEAT).unwrap().usd, Decimal::ZERO, "its own row is there too");
+    assert!(Models::spent(&heartbeat, "nobody").is_err(), "a caller with no row is an error, not zero");
 }

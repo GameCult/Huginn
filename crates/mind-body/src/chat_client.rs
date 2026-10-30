@@ -22,6 +22,7 @@ pub const PENDING: &str = "gamecult.persona.chat_pending.v1";
 pub const ACK: &str = "gamecult.persona.chat_ack.v1";
 pub const SEND_REQUEST: &str = "gamecult.persona.chat_send_request.v1";
 pub const SEND_RECEIPT: &str = "gamecult.persona.chat_send_receipt.v1";
+pub const REFUSAL: &str = "gamecult.persona.chat_refusal.v1";
 
 /// One earlier line of a room, delivered with a message for its context.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +44,10 @@ pub struct ChatDelivery {
     pub text: String,
     pub at_unix_ms: u64,
     pub context: Vec<ContextLine>,
+    /// The Matrix user ids the event's `m.mentions` names, as the mouth carries them.
+    pub mentions: Vec<String>,
+    /// Whether the room is a direct message.
+    pub is_direct: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +66,56 @@ pub struct ChatPending {
 pub struct ChatAck {
     pub persona: String,
     pub through_seq: u64,
+}
+
+/// Why the mouth refused a request, as its typed names (Bifrost
+/// `tools/persona-chat-documents.mjs` `refusals`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Brake,
+    PersonaMismatch,
+    UnknownRoom,
+    EmptyText,
+    SendFailed,
+    UnknownPersona,
+}
+
+impl Refusal {
+    /// The mouth's spelling: a MessagePack string, whatever the codec does with unit variants.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Brake => "Brake",
+            Self::PersonaMismatch => "PersonaMismatch",
+            Self::UnknownRoom => "UnknownRoom",
+            Self::EmptyText => "EmptyText",
+            Self::SendFailed => "SendFailed",
+            Self::UnknownPersona => "UnknownPersona",
+        }
+    }
+}
+
+impl Serialize for Refusal {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for Refusal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        [Self::Brake, Self::PersonaMismatch, Self::UnknownRoom, Self::EmptyText, Self::SendFailed, Self::UnknownPersona]
+            .into_iter()
+            .find(|refusal| refusal.name() == name)
+            .ok_or_else(|| serde::de::Error::custom("the mouth named a refusal this side does not know"))
+    }
+}
+
+/// The mouth's typed answer to a request that names a Persona it does not
+/// serve: the pending request, the ack and the send alike.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatRefusal {
+    pub persona: String,
+    pub refusal: Refusal,
 }
 
 /// A send. `request_id` is the mouth's transaction id, so a repeat of the same
@@ -93,7 +148,8 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 
 /// The Persona organ's chat: what is waiting, what to say, what is done.
 pub trait Chat {
-    /// Deliveries after `after_seq`, oldest first.
+    /// Deliveries after `after_seq`, oldest first. A `chat_refusal` answer is an
+    /// error that names the refusal.
     fn pending(&self, after_seq: u64) -> Result<Vec<ChatDelivery>>;
     fn send(&self, request: &ChatSendRequest) -> Result<ChatSendReceipt>;
     /// Every delivery up to and including `through_seq` is answered; the mouth

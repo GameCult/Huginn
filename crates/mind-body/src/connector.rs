@@ -6,7 +6,9 @@
 //! `ProviderRequest` for the instance as caller, its output constrained to the
 //! turn's schema, and its answer the assistant text of a `Completed` result; a
 //! refusal, a failure or a stop other than the end of the turn is an error. The
-//! readout is the kit's spend readout for the same caller.
+//! readout is the kit's spend readout asked as this client's own caller: the
+//! service answers every caller's row to any admitted asker, and the asker is
+//! decrypted with its own key, so nobody asks as another caller.
 //!
 //! The connector reads its connection key as the file's text without the
 //! trailing line break; the same rule applies here (`key`). The endpoint is the
@@ -54,7 +56,7 @@ pub struct KitConnector {
 
 impl KitConnector {
     /// `key_text` is the connection key file's text (`key` is applied here);
-    /// `caller` is the instance the key belongs to, whose spend the readout asks for.
+    /// `caller` is the caller id the key belongs to: the asker of every call.
     pub fn new(endpoint: SocketAddr, key_text: &str, model: impl Into<String>, caller: impl Into<String>) -> Result<Self> {
         let client = ConnectorClient::new(endpoint, key(key_text), MAX_FRAME_BYTES, Some(RESPONSE_TIMEOUT)).map_err(|_| anyhow!("the connector client could not be configured"))?;
         Ok(Self { client, model: model.into(), caller: caller.into() })

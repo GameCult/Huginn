@@ -1,4 +1,4 @@
-//! `mind-control`: the operator's hand on a Mind's brake and burn-rate dial.
+//! `mind-control`: the operator's hand on a Mind's brake and the swarm dial.
 //! All behaviour is `mind_body::cli`; this reads the process's environment and
 //! clock, the two things the library never reads, and owns the process umask.
 

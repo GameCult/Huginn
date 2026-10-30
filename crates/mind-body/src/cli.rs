@@ -6,7 +6,6 @@
 //! mind-control [--root <dir>] --instance <slug> show
 //! mind-control --instance <slug> brake hold        (also stops her running units)
 //! mind-control --instance <slug> brake release
-//! mind-control --instance <slug> dial set --heat H --base-cooldown-s S --base-run-usd U
 //! mind-control [--root <dir>] --instance <slug> check
 //! mind-control [--root <dir>] swarm show
 //! mind-control swarm brake hold | release
@@ -17,7 +16,7 @@
 //! The `swarm` verbs write `<root>/swarm.cc` and stop no unit: the swarm's
 //! brake and heat 0 are read by the organs that act on the swarm's behalf.
 //!
-//! `check` exits 0 only when the brake is released and the dial in bounds; a
+//! `check` exits 0 only when the instance brake and the swarm envelope are released; a
 //! systemd unit runs it as its `ExecCondition`. It writes nothing.
 //!
 //! `brake hold` writes the brake held and then, whatever the write's outcome,
@@ -35,12 +34,12 @@ use eureka_pipeline::{RunTurn, Slug};
 use rust_decimal::Decimal;
 
 use crate::control::{
-    BurnRate, ControlWriter, Effective, FileSource, Share, SwarmDial, SwarmWriter, control_path, derive, derive_swarm, load_state, load_swarm_state, swarm_path,
+    ControlWriter, Effective, FileSource, Share, SwarmDial, SwarmWriter, control_path, derive, derive_swarm, load_state, load_swarm_state, swarm_path,
 };
 use crate::launch::unit;
 
 const USAGE: &str =
-    "usage: mind-control [--root <dir>] --instance <slug> show | check | brake hold | brake release | dial set --heat H --base-cooldown-s S --base-run-usd U | mind-control [--root <dir>] swarm show | brake hold | brake release | dial set --heat H --base-rate R --base-run U --k K | share set <instance> <weight>";
+    "usage: mind-control [--root <dir>] --instance <slug> show | check | brake hold | brake release | mind-control [--root <dir>] swarm show | brake hold | brake release | dial set --heat H --base-rate R --base-run U --k K | share set <instance> <weight>";
 
 /// The arguments every organ binary shares: `--instance <slug>` and an optional
 /// `--endpoint rudp://<ip>:<port>`, which `env_endpoint` (the binary's reading of
@@ -108,7 +107,7 @@ pub fn run(
     let words: Vec<&str> = command.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["show"] => show(root, &instance, out),
-        ["check"] => check(&path, &instance, out),
+        ["check"] => check(root, &path, &instance, out),
         ["brake", "hold"] => {
             let written = ControlWriter::open(&path).and_then(|mut writer| writer.set_brake(false, now, set_by));
             let stopped = stop_units(&instance);
@@ -123,10 +122,6 @@ pub fn run(
             }
         }
         ["brake", "release"] => ControlWriter::open(&path)?.set_brake(true, now, set_by),
-        ["dial", "set", flags @ ..] => {
-            let dial = parse_dial(flags, now, set_by)?;
-            ControlWriter::open(&path)?.set_dial(dial)
-        }
         _ => bail!("{USAGE}"),
     }
 }
@@ -212,30 +207,6 @@ fn show_swarm(path: &Path, out: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-fn parse_dial(flags: &[&str], now: DateTime<Utc>, set_by: &str) -> Result<BurnRate> {
-    let (mut heat, mut cooldown, mut run_usd) = (None, None, None);
-    let mut rest = flags.iter();
-    while let Some(flag) = rest.next() {
-        let value = rest.next().ok_or_else(|| anyhow!("{flag} needs a value"))?;
-        let slot = match *flag {
-            "--heat" => &mut heat,
-            "--base-cooldown-s" => &mut cooldown,
-            "--base-run-usd" => &mut run_usd,
-            other => bail!("unknown flag {other:?}"),
-        };
-        if slot.replace(*value).is_some() {
-            bail!("{flag} given twice");
-        }
-    }
-    Ok(BurnRate {
-        heat: Decimal::from_str(need(heat, "--heat")?).context("--heat is not a decimal")?,
-        base_cooldown_s: need(cooldown, "--base-cooldown-s")?.parse().context("--base-cooldown-s is not a whole number of seconds")?,
-        base_run_usd: Decimal::from_str(need(run_usd, "--base-run-usd")?).context("--base-run-usd is not a decimal")?,
-        set_at: now,
-        set_by: set_by.to_string(),
-    })
-}
-
 fn need<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str> {
     value.ok_or_else(|| anyhow!("{name} is required"))
 }
@@ -245,8 +216,8 @@ fn need<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str> {
 /// read through `FileSource`: it opens no writer and creates no file or
 /// directory. Any other reading is an error, which `main` turns into exit 2,
 /// and systemd's `ExecCondition` skips the unit on 1-254.
-fn check(path: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {
-    let effective = derive(&FileSource::new(path), instance);
+fn check(root: &Path, path: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {
+    let effective = derive(&FileSource::new(path), &FileSource::new(swarm_path(root)), instance);
     writeln!(out, "effective: {effective:?}")?;
     match effective {
         Effective::Released(_) => Ok(()),
@@ -269,21 +240,9 @@ fn show(root: &Path, instance: &Slug, out: &mut impl Write) -> Result<()> {
                 )?,
                 None => writeln!(out, "brake: absent")?,
             }
-            match &state.dial {
-                Some(dial) => writeln!(
-                    out,
-                    "dial: heat {} base_cooldown_s {} base_run_usd {} (set_at {}, set_by {})",
-                    dial.heat,
-                    dial.base_cooldown_s,
-                    dial.base_run_usd,
-                    dial.set_at.to_rfc3339(),
-                    dial.set_by
-                )?,
-                None => writeln!(out, "dial: absent")?,
-            }
         }
         Err(error) => writeln!(out, "store: undecodable ({error:#})")?,
     }
-    writeln!(out, "effective: {:?}", derive(&source, instance))?;
+    writeln!(out, "effective: {:?}", derive(&source, &FileSource::new(swarm_path(root)), instance))?;
     Ok(())
 }

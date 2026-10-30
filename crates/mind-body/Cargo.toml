@@ -10,11 +10,11 @@ publish.workspace = true
 # store (`control`), the operator's CLI over it (`cli`, the `mind-control`
 # binary) and the one fail-closed reader every acting organ calls
 # (`control::read_effective`). It also holds the launch primitive (`launch`,
-# `queue`): the one way her organs open a run and start its unit. The waker
-# (`wake`, the `mind-wake` binary) is one cycle over them. The actuator
+# `queue`): the one way her organs open a run and start its unit. The heartbeat
+# (`heartbeat`, the `mind-heartbeat` binary) runs the initiative timeline over them. The actuator
 # (`self_run`, the `mind-self-run` binary) carries her one open Self run.
 #
-# `rust_decimal` is the dial's number type: heat, cadence and the run cap are
+# `rust_decimal` is the dial's number type: heat, the spend rate and the run cap are
 # money-adjacent and the tests pin exact products, which a float would blur. It
 # serialises as a string, so the stored document carries no float.
 #
@@ -73,13 +73,13 @@ name = "mind-control"
 path = "src/main.rs"
 
 [[bin]]
-name = "mind-wake"
-path = "src/bin/mind-wake.rs"
-
-[[bin]]
 name = "mind-self-run"
 path = "src/bin/mind-self-run.rs"
 
 [[bin]]
 name = "mind-persona"
 path = "src/bin/mind-persona.rs"
+
+[[bin]]
+name = "mind-heartbeat"
+path = "src/bin/mind-heartbeat.rs"

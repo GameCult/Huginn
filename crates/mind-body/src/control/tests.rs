@@ -4,7 +4,6 @@
 //! touches `/etc`. They run as root in the verify container like the writer's.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
 use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
@@ -22,8 +21,16 @@ fn at(seconds: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(1_800_000_000 + seconds, 0).unwrap()
 }
 
-fn dial(heat: &str, cooldown: u32, run_usd: &str) -> BurnRate {
-    BurnRate { heat: dec(heat), base_cooldown_s: cooldown, base_run_usd: dec(run_usd), set_at: at(0), set_by: "op".into() }
+/// A swarm dial at `heat` whose per-run cap before heat is `run_usd`.
+fn dial(heat: &str, _unused: u32, run_usd: &str) -> SwarmDial {
+    SwarmDial { heat: dec(heat), base_rate_usd_per_h: dec("5"), base_run_usd: dec(run_usd), k: 2, set_at: at(0), set_by: "op".into() }
+}
+
+/// The swarm store at `<root>/swarm.cc`: brake released and the given dial.
+fn release_swarm(root: &Path, dial: SwarmDial) {
+    let mut writer = SwarmWriter::open(swarm_path(root)).unwrap();
+    writer.set_brake(true, at(0), "op").unwrap();
+    writer.set_dial(dial).unwrap();
 }
 
 /// The store of the instance `eureka` under the root `dir`.
@@ -35,12 +42,11 @@ fn held(reason: HeldReason) -> Effective {
     Effective::Held { reason }
 }
 
-/// A written store: brake released and the given dial, through the real writer.
-fn released_store(dir: &Path, dial: BurnRate) -> PathBuf {
+/// A written instance store with its brake released, and a released swarm.
+fn released_store(dir: &Path, dial: SwarmDial) -> PathBuf {
     let path = store_path(dir);
-    let mut writer = ControlWriter::open(&path).unwrap();
-    writer.set_brake(true, at(0), "op").unwrap();
-    writer.set_dial(dial).unwrap();
+    ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").unwrap();
+    release_swarm(dir, dial);
     path
 }
 
@@ -52,17 +58,6 @@ fn effective(path: &Path) -> Effective {
     with_root(directory.parent().unwrap(), || read_effective(&instance))
 }
 
-/// A dial written around the writer's bounds check, so the reader's own check
-/// is what is under test.
-fn write_unchecked_dial(path: &Path, dial: &BurnRate) {
-    let mut cache = CultCache::new();
-    cache.register_entry_type::<BurnRate>().unwrap();
-    cache.register_entry_type::<Brake>().unwrap();
-    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(path)).unwrap();
-    cache.pull_all_backing_stores().unwrap();
-    cache.put(DIAL_KEY, dial).unwrap();
-}
-
 #[test]
 fn a_source_that_fails_reads_as_held() {
     struct Failing;
@@ -71,7 +66,7 @@ fn a_source_that_fails_reads_as_held() {
             Err(anyhow::anyhow!("disk gone"))
         }
     }
-    assert_eq!(derive(&Failing, &Slug("eureka".into())), Effective::Held { reason: HeldReason::Undecodable });
+    assert_eq!(derive(&Failing, &Failing, &Slug("eureka".into())), Effective::Held { reason: HeldReason::Undecodable });
 }
 
 #[test]
@@ -82,10 +77,10 @@ fn an_absent_store_reads_as_held() {
 }
 
 #[test]
-fn an_absent_brake_reads_as_held_even_with_a_dial() {
+fn an_absent_brake_reads_as_held_even_with_a_released_swarm() {
     let dir = tempfile::tempdir().unwrap();
     let path = store_path(dir.path());
-    ControlWriter::open(&path).unwrap().set_dial(dial("1", 3600, "1")).unwrap();
+    release_swarm(dir.path(), dial("1", 0, "1"));
     assert_eq!(effective(&path), held(HeldReason::BrakeAbsent));
 }
 
@@ -164,78 +159,6 @@ fn a_decode_failure_outranks_a_held_brake() {
 }
 
 #[test]
-fn a_released_brake_with_no_dial_reads_held_dial_absent() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = store_path(dir.path());
-    ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").unwrap();
-    assert_eq!(effective(&path), held(HeldReason::DialAbsent));
-}
-
-#[test]
-fn dial_bounds_are_inclusive_at_both_ends() {
-    for (heat, expected_in) in [("0.05", true), ("2.0", true), ("0.0499", false), ("2.0001", false), ("0", false), ("-1", false), ("3", false)] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = released_store_unchecked(dir.path(), dial(heat, 3600, "1"));
-        let got = effective(&path);
-        if expected_in {
-            assert!(matches!(got, Effective::Released(_)), "heat {heat}: {got:?}");
-        } else {
-            assert_eq!(got, held(HeldReason::DialOutOfBounds), "heat {heat}");
-        }
-    }
-}
-
-#[test]
-fn a_zero_base_cooldown_or_a_non_positive_run_cost_is_out_of_bounds() {
-    for bad in [dial("1", 0, "1"), dial("1", 3600, "0"), dial("1", 3600, "-0.5")] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = released_store_unchecked(dir.path(), bad.clone());
-        assert_eq!(effective(&path), held(HeldReason::DialOutOfBounds), "{bad:?}");
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let smallest = released_store_unchecked(dir.path(), dial("1", 1, "0.000001"));
-    assert!(matches!(effective(&smallest), Effective::Released(_)));
-}
-
-#[test]
-fn the_check_gate_refuses_a_released_brake_over_an_out_of_bounds_dial() {
-    // The writers refuse such a dial, so the store is built unchecked.
-    for bad in [dial("3", 3600, "1"), dial("1", 0, "1"), dial("1", 3600, "0")] {
-        let dir = tempfile::tempdir().unwrap();
-        released_store_unchecked(dir.path(), bad.clone());
-        let args: Vec<String> = ["--instance", "eureka", "check"].iter().map(|a| a.to_string()).collect();
-        let mut out = Vec::new();
-        let result = crate::cli::run(&args, dir.path(), "op", at(1), &mut out, &mut |_| Ok(()));
-        assert!(format!("{:#}", result.unwrap_err()).contains("DialOutOfBounds"), "{bad:?}");
-    }
-}
-
-fn released_store_unchecked(dir: &Path, bad: BurnRate) -> PathBuf {
-    let path = store_path(dir);
-    ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").unwrap();
-    write_unchecked_dial(&path, &bad);
-    path
-}
-
-#[test]
-fn cadence_and_run_cap_are_the_dial_divided_and_multiplied_by_heat() {
-    for (heat, cooldown, run_usd, cadence, cap) in [
-        ("0.5", 3600u32, "5", Duration::from_secs(7200), dec("2.5")),
-        ("2.0", 3600, "5", Duration::from_secs(1800), dec("10.0")),
-        ("1", 600, "3", Duration::from_secs(600), dec("3")),
-        ("0.05", 90, "4", Duration::from_secs(1800), dec("0.20")),
-        ("1.5", 10, "2", Duration::new(6, 666_666_667), dec("3.0")),
-        ("2.0", 1, "0.25", Duration::from_millis(500), dec("0.500")),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = released_store(dir.path(), dial(heat, cooldown, run_usd));
-        let Effective::Released(grant) = effective(&path) else { panic!("heat {heat} cooldown {cooldown} run {run_usd}: not released") };
-        assert_eq!(grant.cadence(), cadence, "heat {heat} cooldown {cooldown} run {run_usd}");
-        assert_eq!(grant.run_cap_usd(), cap, "heat {heat} cooldown {cooldown} run {run_usd}");
-    }
-}
-
-#[test]
 fn the_operators_last_write_is_what_is_in_force_and_provenance_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let path = released_store(dir.path(), dial("1", 3600, "1"));
@@ -246,8 +169,6 @@ fn the_operators_last_write_is_what_is_in_force_and_provenance_round_trips() {
     let state = load_state(&FileSource::new(&path)).unwrap();
     let brake = state.brake.unwrap();
     assert_eq!((brake.released, brake.set_at, brake.set_by.as_str()), (false, at(60), "alice"));
-    // The dial survives the brake write untouched.
-    assert_eq!(state.dial.unwrap().set_by, "op");
 
     ControlWriter::open(&path).unwrap().set_brake(true, at(120), "bob").unwrap();
     assert!(matches!(effective(&path), Effective::Released(_)));
@@ -278,40 +199,6 @@ fn reading_writes_nothing_and_takes_no_lock_file() {
 }
 
 
-/// A dial document under the dial's type id whose payload is not a dial.
-#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "eureka.control.burn_rate.v1", schema = "ControlBurnRate")]
-struct WrongDial {
-    #[cultcache(key = 0)]
-    heat: String,
-}
-
-fn write_wrong_dial(path: &Path, heat: &str) {
-    let mut cache = CultCache::new();
-    cache.register_entry_type::<WrongDial>().unwrap();
-    cache.register_entry_type::<crate::control::Brake>().unwrap();
-    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(path)).unwrap();
-    cache.pull_all_backing_stores().unwrap();
-    cache.put(crate::control::DIAL_KEY, &WrongDial { heat: heat.into() }).unwrap();
-}
-
-#[test]
-fn a_dial_that_does_not_decode_reads_held_whatever_the_brake_says() {
-    for brake_released in [true, false] {
-        for heat in ["not a number", "NaN", ""] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = store_path(dir.path());
-            ControlWriter::open(&path).unwrap().set_brake(brake_released, at(0), "op").unwrap();
-            write_wrong_dial(&path, heat);
-            assert_eq!(
-                effective(&path),
-                held(HeldReason::Undecodable),
-                "brake released={brake_released}, dial heat {heat:?}: a dial that cannot be read is never replaced by a default"
-            );
-        }
-    }
-}
-
 
 mod grant {
     //! A Grant is the proof that this instance's own control store released: the
@@ -332,9 +219,8 @@ mod grant {
     }
 
     fn release(root: &Path, instance: &str) {
-        let mut writer = ControlWriter::open(control_path(root, &slug(instance)).unwrap()).unwrap();
-        writer.set_brake(true, at(0), "op").unwrap();
-        writer.set_dial(dial("1", 3600, "5")).unwrap();
+        ControlWriter::open(control_path(root, &slug(instance)).unwrap()).unwrap().set_brake(true, at(0), "op").unwrap();
+        release_swarm(root, dial("1", 0, "5"));
     }
 
     fn read(root: &Path, instance: &str) -> Effective {
@@ -543,6 +429,24 @@ mod swarm {
     }
 
     #[test]
+    fn the_swarm_dial_has_calibration_ceilings() {
+        for (what, dial) in [
+            ("base rate over the ceiling", swarm_dial("1", "100.01", "2", 2)),
+            ("base run over the ceiling", swarm_dial("1", "5", "50.01", 2)),
+            ("k over the ceiling", swarm_dial("1", "5", "2", 17)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(SwarmWriter::open(swarm_file(dir.path())).unwrap().set_dial(dial.clone()).is_err(), "{what}: the writer refuses it");
+            write_unchecked(&swarm_file(dir.path()), &dial);
+            SwarmWriter::open(swarm_file(dir.path())).unwrap().set_brake(true, at(0), "op").unwrap();
+            assert_eq!(envelope_at(dir.path()), SwarmEffective::Held(HeldReason::DialOutOfBounds), "{what}: the reader holds on it");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        released_swarm(dir.path(), swarm_dial("2", "100", "50", 16));
+        assert!(matches!(envelope_at(dir.path()), SwarmEffective::Released(_)), "the ceilings are inclusive");
+    }
+
+    #[test]
     fn envelope_scales_by_heat() {
         for (heat, rate, run_cap) in [("0.5", "2.5", "1.25"), ("2", "10", "5")] {
             let dir = tempfile::tempdir().unwrap();
@@ -568,9 +472,8 @@ mod swarm {
     fn instance_reading(instance: &str, run_usd: &str) -> Effective {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(instance).join("control.cc");
-        let mut writer = ControlWriter::open(&path).unwrap();
-        writer.set_brake(true, at(0), "op").unwrap();
-        writer.set_dial(dial("1", 600, run_usd)).unwrap();
+        ControlWriter::open(&path).unwrap().set_brake(true, at(0), "op").unwrap();
+        release_swarm(dir.path(), dial("1", 0, run_usd));
         with_root(dir.path(), || read_effective(&slug(instance)))
     }
 
@@ -587,18 +490,6 @@ mod swarm {
         }
         let grant = envelope.grant_for(&eureka, &own, dec("1")).unwrap();
         assert_eq!(grant.instance(), &eureka);
-        assert_eq!(grant.cadence(), Duration::from_secs(600), "the instance cadence is carried, not invented");
-    }
-
-    #[test]
-    fn grant_for_does_not_widen_the_instance_own_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        released_swarm(dir.path(), swarm_dial("1", "5", "2", 2));
-        let envelope = released(dir.path());
-        let eureka = slug("eureka");
-        let own = instance_reading("eureka", "0.5");
-        assert!(envelope.grant_for(&eureka, &own, dec("0.51")).is_none());
-        assert_eq!(envelope.grant_for(&eureka, &own, dec("0.5")).unwrap().run_cap_usd(), dec("0.5"));
     }
 
     #[test]

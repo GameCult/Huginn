@@ -1007,9 +1007,11 @@ mod process {
         }
     }
 
-    /// Whether a process of this id still exists.
+    /// Whether a process of this id still runs. A zombie is dead: with no init to reap
+    /// it (cargo as PID 1 in a one-command job) it stays in the table after it is killed.
     fn alive(pid: &str) -> bool {
-        Command::new("kill").args(["-0", pid]).stderr(Stdio::null()).status().unwrap().success()
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+        stat.rsplit_once(')').is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
     }
 
     #[test]

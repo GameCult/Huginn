@@ -29,8 +29,8 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::chat_client::{
-    ACK, Chat, ChatAck, ChatDelivery, ChatPending, ChatPendingRequest, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, SEND_RECEIPT, SEND_REQUEST, decode,
-    encode,
+    ACK, Chat, ChatAck, ChatDelivery, ChatPending, ChatPendingRequest, ChatRefusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, REFUSAL, SEND_RECEIPT,
+    SEND_REQUEST, decode, encode,
 };
 
 /// The tag every chat document carries; the mouth refuses any other.
@@ -95,7 +95,7 @@ impl RudpChat {
     /// Puts one document and, when `answer` names a kind and record key, waits for
     /// the document the mouth answers it with. Documents of other kinds or keys
     /// (a late receipt of an earlier send) are skipped.
-    fn exchange<T: Serialize>(&self, kind: &str, record_key: &str, document: &T, answer: Option<(&str, &str)>) -> Result<Option<Vec<u8>>> {
+    fn exchange<T: Serialize>(&self, kind: &str, record_key: &str, document: &T, answer: Option<(&[&str], &str)>) -> Result<Option<(String, Vec<u8>)>> {
         let mut slot = self.link.borrow_mut();
         if slot.is_none() {
             *slot = Some(self.open()?);
@@ -117,7 +117,7 @@ impl RudpChat {
         };
         link.transport.send_schema_message(&message)?;
         let deadline = Instant::now() + self.reply_timeout;
-        let Some((answer_kind, answer_key)) = answer else {
+        let Some((answer_kinds, answer_key)) = answer else {
             // Nothing is answered; the ack is done when the mouth has the packet.
             let left = deadline.saturating_duration_since(Instant::now());
             link.transport.flush_reliable(left)?;
@@ -130,15 +130,15 @@ impl RudpChat {
             link.transport.poll_resends()?;
             if let Some(CultNetMessage::DocumentPutRaw { document, .. }) = link.transport.receive_schema_message_once()? {
                 let tagged = document.tags.as_deref() == Some(&[TAG.to_string()][..]);
-                if tagged && document.schema_id == answer_kind && document.record_key == answer_key {
-                    return Ok(Some(document.payload));
+                if tagged && answer_kinds.contains(&document.schema_id.as_str()) && document.record_key == answer_key {
+                    return Ok(Some((document.schema_id, document.payload)));
                 }
             }
         }
     }
 
     fn call<Q: Serialize, A: DeserializeOwned>(&self, kind: &str, key: &str, request: &Q, answer: (&str, &str)) -> Result<A> {
-        let payload = self.exchange(kind, key, request, Some(answer))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        let (_, payload) = self.exchange(kind, key, request, Some((&[answer.0][..], answer.1)))?.ok_or_else(|| anyhow!("no answer payload"))?;
         decode(&payload)
     }
 }
@@ -146,7 +146,13 @@ impl RudpChat {
 impl Chat for RudpChat {
     fn pending(&self, after_seq: u64) -> Result<Vec<ChatDelivery>> {
         let request = ChatPendingRequest { persona: self.persona.clone(), after_seq };
-        let pending: ChatPending = self.call(PENDING_REQUEST, &self.persona, &request, (PENDING, &self.persona))?;
+        let kinds: &[&str] = &[PENDING, REFUSAL];
+        let (kind, payload) = self.exchange(PENDING_REQUEST, &self.persona, &request, Some((kinds, self.persona.as_str())))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        if kind == REFUSAL {
+            let refusal: ChatRefusal = decode(&payload)?;
+            bail!("the mouth refused the pending request: {}", refusal.refusal.name());
+        }
+        let pending: ChatPending = decode(&payload)?;
         if pending.persona != self.persona {
             bail!("the mouth answered for another Persona");
         }

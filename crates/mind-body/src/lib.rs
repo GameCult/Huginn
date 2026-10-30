@@ -9,7 +9,8 @@
 //! repetition breaker, the one-live-Self-run rule, and the single path that
 //! opens a run in the mind and only then starts its unit.
 //!
-//! `wake` is the waker's one cycle over them: the `mind-wake` binary.
+//! `heartbeat` runs the swarm's initiative timeline over them: the one process,
+//! the `mind-heartbeat` binary, that decides who wakes and when.
 //!
 //! `persona` is the Persona organ: one start of `mind-persona@<instance>` drains her
 //! pending chat through the connector, one typed reply per turn (`chat_client` is
@@ -34,12 +35,12 @@ pub mod chat_rudp;
 pub mod cli;
 pub mod connector;
 pub mod control;
+pub mod heartbeat;
 pub mod launch;
 pub mod lease_client;
 pub mod persona;
 pub mod queue;
 pub mod self_run;
-pub mod wake;
 
 #[cfg(test)]
 mod testkit;

@@ -3,24 +3,31 @@ mind_body: mod chat_rudp
 mind_body: mod cli
 mind_body: mod connector
 mind_body: mod control
+mind_body: mod heartbeat
 mind_body: mod launch
 mind_body: mod lease_client
 mind_body: mod persona
 mind_body: mod queue
 mind_body: mod self_run
-mind_body: mod wake
+mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Refusal { Brake , PersonaMismatch , UnknownRoom , EmptyText , SendFailed , UnknownPersona , }
 mind_body::chat_client: const ACK : & str
 mind_body::chat_client: const PENDING : & str
 mind_body::chat_client: const PENDING_REQUEST : & str
+mind_body::chat_client: const REFUSAL : & str
 mind_body::chat_client: const SEND_RECEIPT : & str
 mind_body::chat_client: const SEND_REQUEST : & str
 mind_body::chat_client: fn decode < T : DeserializeOwned > (bytes : & [u8]) -> Result < T >
 mind_body::chat_client: fn encode < T : Serialize > (document : & T) -> Result < Vec < u8 > >
+mind_body::chat_client: impl Refusal
+mind_body::chat_client: impl Refusal: fn name (self) -> & 'static str
+mind_body::chat_client: impl Serialize for Refusal
+mind_body::chat_client: impl< 'de > Deserialize < 'de > for Refusal
 mind_body::chat_client: pub trait Chat { fn pending (& self , after_seq : u64) -> Result < Vec < ChatDelivery > > ; fn send (& self , request : & ChatSendRequest) -> Result < ChatSendReceipt > ; fn ack (& self , through_seq : u64) -> Result < () > ; }
 mind_body::chat_client: struct ChatAck # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, through_seq: u64]
-mind_body::chat_client: struct ChatDelivery # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seq: u64, room_alias: String, room_id: String, event_id: String, sender: String, sender_display: String, text: String, at_unix_ms: u64, context: Vec < ContextLine >]
+mind_body::chat_client: struct ChatDelivery # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seq: u64, room_alias: String, room_id: String, event_id: String, sender: String, sender_display: String, text: String, at_unix_ms: u64, context: Vec < ContextLine >, mentions: Vec < String >, is_direct: bool]
 mind_body::chat_client: struct ChatPending # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, deliveries: Vec < ChatDelivery >]
 mind_body::chat_client: struct ChatPendingRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, after_seq: u64]
+mind_body::chat_client: struct ChatRefusal # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, refusal: Refusal]
 mind_body::chat_client: struct ChatSendReceipt # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, event_id: Option < String >, refusal: Option < String >]
 mind_body::chat_client: struct ChatSendRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, persona: String, room_alias: String, text: String]
 mind_body::chat_client: struct ContextLine # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[sender: String, text: String, at_unix_ms: u64]
@@ -46,23 +53,22 @@ mind_body::control: # [derive (Debug , PartialEq , Eq)] pub enum SwarmEffective 
 mind_body::control: const BRAKE_KEY : & str
 mind_body::control: const CONTROL_ROOT : & str
 mind_body::control: const DIAL_KEY : & str
+mind_body::control: const K_MAX : u32
 mind_body::control: const SWARM_FILE : & str
+mind_body::control: fn base_rate_max () -> Decimal
+mind_body::control: fn base_run_max () -> Decimal
 mind_body::control: fn control_path (root : & Path , instance : & Slug) -> Result < PathBuf >
 mind_body::control: fn heat_max () -> Decimal
-mind_body::control: fn heat_min () -> Decimal
 mind_body::control: fn load_state (source : & impl ControlSource) -> Result < ControlState >
 mind_body::control: fn load_swarm_state (source : & impl ControlSource) -> Result < SwarmState >
 mind_body::control: fn read_effective (instance : & Slug) -> Effective
 mind_body::control: fn read_envelope () -> SwarmEffective
 mind_body::control: fn swarm_path (root : & Path) -> PathBuf
-mind_body::control: impl BurnRate
-mind_body::control: impl BurnRate: fn in_bounds (& self) -> bool
 mind_body::control: impl ControlSource for FileSource
 mind_body::control: impl ControlState
 mind_body::control: impl ControlWriter
 mind_body::control: impl ControlWriter: fn open (path : impl Into < PathBuf >) -> Result < Self >
 mind_body::control: impl ControlWriter: fn set_brake (& mut self , released : bool , set_at : DateTime < Utc > , set_by : & str) -> Result < () >
-mind_body::control: impl ControlWriter: fn set_dial (& mut self , dial : BurnRate) -> Result < () >
 mind_body::control: impl Envelope
 mind_body::control: impl Envelope: fn grant_for (& self , instance : & Slug , instance_effective : & Effective , budget_usd : Decimal) -> Option < Grant >
 mind_body::control: impl Envelope: fn k (& self) -> u32
@@ -72,7 +78,6 @@ mind_body::control: impl Envelope: fn share (& self , instance : & Slug) -> Deci
 mind_body::control: impl FileSource
 mind_body::control: impl FileSource: fn new (path : impl Into < PathBuf >) -> Self
 mind_body::control: impl Grant
-mind_body::control: impl Grant: fn cadence (& self) -> Duration
 mind_body::control: impl Grant: fn instance (& self) -> & Slug
 mind_body::control: impl Grant: fn run_cap_usd (& self) -> Decimal
 mind_body::control: impl Share
@@ -89,8 +94,7 @@ mind_body::control: impl std :: error :: Error for UnsafeStore
 mind_body::control: impl std :: fmt :: Display for UnsafeStore
 mind_body::control: pub trait ControlSource { fn snapshot (& self) -> Result < Vec < CultCacheEnvelope > > ; }
 mind_body::control: struct Brake # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[released: bool, set_at: DateTime < Utc >, set_by: String]
-mind_body::control: struct BurnRate # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[heat: Decimal, base_cooldown_s: u32, base_run_usd: Decimal, set_at: DateTime < Utc >, set_by: String]
-mind_body::control: struct ControlState # [derive (Clone , Debug , PartialEq , Eq , Default)] pub-fields[brake: Option < Brake >, dial: Option < BurnRate >]
+mind_body::control: struct ControlState # [derive (Clone , Debug , PartialEq , Eq , Default)] pub-fields[brake: Option < Brake >]
 mind_body::control: struct ControlWriter  pub-fields[]
 mind_body::control: struct Envelope # [derive (Debug , PartialEq , Eq)] pub-fields[]
 mind_body::control: struct FileSource  pub-fields[]
@@ -100,6 +104,46 @@ mind_body::control: struct SwarmDial # [derive (Clone , Debug , PartialEq , Eq ,
 mind_body::control: struct SwarmState # [derive (Clone , Debug , PartialEq , Eq , Default)] pub-fields[brake: Option < Brake >, dial: Option < SwarmDial >, shares: Vec < Share >]
 mind_body::control: struct SwarmWriter  pub-fields[]
 mind_body::control: struct UnsafeStore # [derive (Debug)] pub-fields[path: PathBuf, mode: u32, uid: u32]
+mind_body::heartbeat: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Outcome { Held (HeldReason) , Polled { launched : Vec < Slug > , } , }
+mind_body::heartbeat: const AGENT : & str
+mind_body::heartbeat: const CLASSIFIER_CALLER : & str
+mind_body::heartbeat: fn poll (organs : & Organs , config : & Config) -> Result < Outcome >
+mind_body::heartbeat: fn store_classifier_config (path : impl Into < PathBuf > , config : & ClassifierConfig) -> Result < () >
+mind_body::heartbeat: impl ClassifierConfig
+mind_body::heartbeat: impl ClassifierConfig: fn standard () -> Self
+mind_body::heartbeat: impl ClassifierConfig: fn validate (& self) -> Result < () >
+mind_body::heartbeat: impl Config
+mind_body::heartbeat: impl Config: fn new (personas : Vec < PersonaId > , operators : Vec < String >) -> Result < Self >
+mind_body::heartbeat: impl Control for FileControl
+mind_body::heartbeat: impl FileStore
+mind_body::heartbeat: impl FileStore: fn new (path : impl Into < PathBuf >) -> Self
+mind_body::heartbeat: impl FileTunables
+mind_body::heartbeat: impl FileTunables: fn new (path : impl Into < PathBuf >) -> Self
+mind_body::heartbeat: impl Initiative
+mind_body::heartbeat: impl Models for KitConnector
+mind_body::heartbeat: impl PersonaId
+mind_body::heartbeat: impl PersonaId: fn parse (spec : & str) -> Result < Self >
+mind_body::heartbeat: impl Store for FileStore
+mind_body::heartbeat: impl Tunables for FileTunables
+mind_body::heartbeat: impl fmt :: Display for Outcome
+mind_body::heartbeat: impl fmt :: Display for PollTrace
+mind_body::heartbeat: pub trait Control { fn envelope (& self) -> SwarmEffective ; fn effective (& self , instance : & Slug) -> Effective ; }
+mind_body::heartbeat: pub trait Models { fn classify (& self , request : & TurnRequest) -> Result < String > ; fn spent (& self , caller : & str) -> Result < Spend > ; }
+mind_body::heartbeat: pub trait Store { fn load (& self , instance : & Slug) -> Result < Option < Initiative > > ; fn save (& self , instance : & Slug , initiative : & Initiative) -> Result < () > ; fn record (& self , trace : & PollTrace) -> Result < () > ; fn latest (& self) -> Result < Option < PollTrace > > ; }
+mind_body::heartbeat: pub trait Tunables { fn classifier (& self) -> Result < ClassifierConfig > ; }
+mind_body::heartbeat: struct BurnTrace # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[run: String, spend_usd: Decimal, source: String]
+mind_body::heartbeat: struct ClassifierConfig # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[instructions: String, show_idle: bool, show_urgency: bool, show_completions: bool, urgency_min: Decimal, urgency_max: Decimal, urgency_ttl_s: u32]
+mind_body::heartbeat: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[personas: Vec < PersonaId >, operators: Vec < String >]
+mind_body::heartbeat: struct FileControl  pub-fields[]
+mind_body::heartbeat: struct FileStore  pub-fields[]
+mind_body::heartbeat: struct FileTunables  pub-fields[]
+mind_body::heartbeat: struct Initiative # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[initiative_usd: Decimal, as_of: DateTime < Utc >, urgency: Decimal, urgency_at: DateTime < Utc >, last_burned_run: String, filled_events: Vec < String >, classified_seq: String, launched_run: String, launch_spend_usd: Decimal, launch_spend_known: bool, completions_through: String, launch_window: u64]
+mind_body::heartbeat: struct InstanceTrace # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[instance: String, initiative_usd: Decimal, rate_usd_per_h: Decimal, urgency: Decimal, urgency_age_s: i64, busy: bool, released: bool, crossing_at: String, waited_s: i64, idle_s: i64, filled_by: String, fill_reason: String, note: String]
+mind_body::heartbeat: struct Organs< 'a >  pub-fields[seats: & 'a [Seat < 'a >], control: & 'a dyn Control, models: & 'a dyn Models, tunables: & 'a dyn Tunables, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, store: & 'a dyn Store]
+mind_body::heartbeat: struct PersonaId # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[slug: Slug, public_name: String, handle: String, matrix_id: String, huginn: SocketAddr]
+mind_body::heartbeat: struct PollTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[at: DateTime < Utc >, instances: Vec < InstanceTrace >, launches: Vec < String >, burns: Vec < BurnTrace >, classifier: String]
+mind_body::heartbeat: struct Seat< 'a >  pub-fields[who: PersonaId, mind: & 'a dyn MindPort, chat: & 'a dyn Chat]
+mind_body::heartbeat: struct Spend # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub-fields[usd: Decimal, window: u64]
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Declined { Admission (MindRefusal) , Conflict , AlreadyAdmitted , StartFailed , GrantForOtherInstance , PersonaRunTakesNoClaims , }
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum LaunchOutcome { Launched { run : PipelineRef , } , NotQueued { item : PipelineRef , } , Tripped { item : PipelineRef , question : PipelineRef , } , Busy { run : PipelineRef , } , Refused (Declined) , }
 mind_body::launch: const START_GRACE_S : i64
@@ -144,7 +188,7 @@ mind_body::lease_client: struct TokenFd  pub-fields[]
 mind_body::lease_client: struct TokenUsage # [derive (Clone , Debug , Default , PartialEq , Eq , Serialize , Deserialize)] pub-fields[input_tokens: u64, cache_read_tokens: u64, cache_write_tokens: u64, output_tokens: u64, reasoning_tokens: Option < u64 >]
 mind_body::lease_client::socket: impl Lease for Granted
 mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Readout , Connector , Undecodable , RoomNotAllowed , Send , SelfRun , Ack , }
-mind_body::persona: # [derive (Debug , PartialEq , Eq)] pub enum Outcome { Dead (HeldReason) , NoRun (Declined) , Served { run : PipelineRef , answered : u32 , failure : Option < Failure > , self_run : Option < PipelineRef > } , }
+mind_body::persona: # [derive (Debug , PartialEq , Eq)] pub enum Outcome { Dead (HeldReason) , NoRun , Served { run : PipelineRef , answered : u32 , failure : Option < Failure > , self_run : Option < PipelineRef > } , }
 mind_body::persona: const AGENT : & str
 mind_body::persona: const ENV_BURN_ROOM : & str
 mind_body::persona: const ENV_OPERATOR : & str
@@ -153,7 +197,7 @@ mind_body::persona: const ENV_SELF_SENDER : & str
 mind_body::persona: const MAX_TURNS_PER_START : u32
 mind_body::persona: fn burn_line (readout : & SpendReadout , caller : & str , heat : Option < Decimal > , live_runs : usize) -> Option < String >
 mind_body::persona: fn reply_schema (rooms : & [String]) -> String
-mind_body::persona: fn start (organs : & Organs , control : & impl ControlSource , config : & Config) -> Result < Outcome >
+mind_body::persona: fn start (organs : & Organs , control : & impl ControlSource , swarm : & impl ControlSource , config : & Config) -> Result < Outcome >
 mind_body::persona: impl Config
 mind_body::persona: impl Config: fn from_args (args : & [String] , usage : & str) -> Result < (Self , Vec < String >) >
 mind_body::persona: impl Config: fn from_args_and_env (args : & [String] , lookup : impl Fn (& str) -> Option < String > , usage : & str) -> Result < (Self , Vec < String >) >
@@ -161,7 +205,6 @@ mind_body::persona: impl FileTrace
 mind_body::persona: impl FileTrace: fn new (path : impl Into < PathBuf >) -> Self
 mind_body::persona: impl HuginnPersona
 mind_body::persona: impl HuginnPersona: fn new (client : HuginnClient) -> Self
-mind_body::persona: impl Launcher for ThisUnit
 mind_body::persona: impl PersonaState for HuginnPersona
 mind_body::persona: impl Sender
 mind_body::persona: impl Trace for FileTrace
@@ -230,7 +273,3 @@ mind_body::self_run: impl fmt :: Display for SelfRunOutcome
 mind_body::self_run: pub trait Child { fn write_line (& mut self , line : & str) ; fn close_input (& mut self) ; fn next (& mut self , timeout : StdDuration) -> Read ; fn stop (& mut self , how : Stop) -> bool ; }
 mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String] , token : & TokenFd) -> Result < Box < dyn Child > > ; }
 mind_body::self_run: struct ClaudeSpawner  pub-fields[]
-mind_body::wake: # [derive (Clone , Debug , PartialEq , Eq)] pub enum WakeOutcome { Held { reason : HeldReason } , NotYet { until : DateTime < Utc > } , Busy { run : PipelineRef } , Launched { run : PipelineRef } , Refused (Declined) , }
-mind_body::wake: const AGENT : & str
-mind_body::wake: fn cycle (ports : & Ports , control : & impl ControlSource) -> Result < WakeOutcome >
-mind_body::wake: impl fmt :: Display for WakeOutcome

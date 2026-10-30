@@ -53,6 +53,11 @@ impl Recording {
         self.running.borrow_mut().retain(|unit| *unit != (Slug(INSTANCE.into()), turn));
     }
 
+    /// One named instance's unit ends.
+    pub(crate) fn stop(&self, instance: &Slug, turn: RunTurn) {
+        self.running.borrow_mut().retain(|unit| *unit != (instance.clone(), turn));
+    }
+
     pub(crate) fn revive(&self, turn: RunTurn) {
         self.running.borrow_mut().push((Slug(INSTANCE.into()), turn));
     }
@@ -84,10 +89,15 @@ impl TestMind {
     /// A mind holding its identity, the repo's stewardship, the campaign and a
     /// first target.
     pub(crate) fn seeded() -> Self {
+        Self::seeded_as(INSTANCE)
+    }
+
+    /// The same, for another instance name.
+    pub(crate) fn seeded_as(name: &str) -> Self {
         let dir = TempDir::new().unwrap();
-        let mind = Mind::open(dir.path(), &Slug(INSTANCE.into())).unwrap();
-        let this = Self { _dir: dir, instance: Slug(INSTANCE.into()), mind: RefCell::new(mind), now: Cell::new(at(0)) };
-        this.put(vec![instance(), stewardship(), campaign(), target()]);
+        let mind = Mind::open(dir.path(), &Slug(name.into())).unwrap();
+        let this = Self { _dir: dir, instance: Slug(name.into()), mind: RefCell::new(mind), now: Cell::new(at(0)) };
+        this.put(vec![instance(name), stewardship(name), campaign(), target()]);
         this
     }
 
@@ -95,7 +105,7 @@ impl TestMind {
     pub(crate) fn put(&self, documents: Vec<PipelineDocument>) -> PipelineAdmissionOutcome {
         self.now.set(self.now.get() + Duration::seconds(1));
         let batch = PipelineAdmissionBatch {
-            instance: Slug(INSTANCE.into()),
+            instance: self.instance.clone(),
             provenance: PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into() },
             documents,
         };
@@ -146,7 +156,7 @@ impl MindPort for TestMind {
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
         self.now.set(self.now.get() + Duration::seconds(1));
         let batch = PipelineAdmissionBatch {
-            instance: Slug(INSTANCE.into()),
+            instance: self.instance.clone(),
             provenance: PipelineProvenance { faculty: Faculty::SelfFaculty, agent: agent.into(), session: session.into(), tool: "mind-body".into() },
             documents,
         };
@@ -178,18 +188,18 @@ fn doc_ref() -> DocRef {
     DocRef { path: "docs/eureka-body-target.md".into(), start_line: 1, end_line: 9, commit: Sha("df7507b".into()) }
 }
 
-fn instance() -> PipelineDocument {
+fn instance(name: &str) -> PipelineDocument {
     PipelineDocument::Instance(PipelineInstance {
-        instance: Slug(INSTANCE.into()),
+        instance: Slug(name.into()),
         display_name: "test mind".into(),
         created_at: Date("2026-10-09".into()),
         host: "test".into(),
     })
 }
 
-fn stewardship() -> PipelineDocument {
+fn stewardship(name: &str) -> PipelineDocument {
     PipelineDocument::Stewardship(PipelineStewardship {
-        instance: Slug(INSTANCE.into()),
+        instance: Slug(name.into()),
         repo: REPO.into(),
         sequence: 1,
         assigned_on: Date("2026-10-09".into()),
@@ -326,8 +336,12 @@ pub(crate) fn run_ref(label: &str) -> PipelineRef {
 }
 
 pub(crate) fn run(label: &str, turn: RunTurn, operated_by: RunOperator, claims: &[PipelineRef]) -> PipelineDocument {
+    run_in(INSTANCE, label, turn, operated_by, claims)
+}
+
+pub(crate) fn run_in(instance: &str, label: &str, turn: RunTurn, operated_by: RunOperator, claims: &[PipelineRef]) -> PipelineDocument {
     PipelineDocument::Run(PipelineRun {
-        instance: Slug(INSTANCE.into()),
+        instance: Slug(instance.into()),
         label: label.into(),
         operated_by,
         turn,

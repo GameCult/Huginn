@@ -36,18 +36,16 @@ fn show_reports_every_rung_from_an_absent_store_to_released() {
     let root = tempfile::tempdir().unwrap();
     let (r, out) = go(root.path(), &["--instance", "eureka", "show"], "op", 0);
     r.unwrap();
-    assert!(out.contains("brake: absent") && out.contains("dial: absent") && out.contains("BrakeAbsent"), "{out}");
+    assert!(out.contains("brake: absent") && out.contains("BrakeAbsent"), "{out}");
 
     go(root.path(), &["--instance", "eureka", "brake", "release"], "alice", 1).0.unwrap();
     let (_, out) = go(root.path(), &["--instance", "eureka", "show"], "op", 2);
-    assert!(out.contains("brake: released") && out.contains("set_by alice") && out.contains("DialAbsent"), "{out}");
+    assert!(out.contains("brake: released") && out.contains("set_by alice") && out.contains("BrakeAbsent"), "the swarm is still unreleased: {out}");
 
-    go(root.path(), &["--instance", "eureka", "dial", "set", "--heat", "0.5", "--base-cooldown-s", "3600", "--base-run-usd", "5"], "bob", 3)
-        .0
-        .unwrap();
+    go(root.path(), &["swarm", "brake", "release"], "bob", 3).0.unwrap();
+    go(root.path(), &["swarm", "dial", "set", "--heat", "0.5", "--base-rate", "4", "--base-run", "5", "--k", "2"], "bob", 3).0.unwrap();
     let (_, out) = go(root.path(), &["--instance", "eureka", "show"], "op", 4);
-    assert!(out.contains("heat 0.5") && out.contains("base_cooldown_s 3600") && out.contains("set_by bob"), "{out}");
-    assert!(out.contains("Released") && out.contains("7200s"), "{out}");
+    assert!(out.contains("Released") && out.contains("run_cap_usd: 2.5"), "{out}");
 
     go(root.path(), &["--instance", "eureka", "brake", "hold"], "alice", 5).0.unwrap();
     let (_, out) = go(root.path(), &["--instance", "eureka", "show"], "op", 6);
@@ -64,27 +62,6 @@ fn instances_do_not_share_a_store() {
 }
 
 #[test]
-fn a_dial_set_outside_bounds_refuses_and_leaves_the_store_unchanged() {
-    let root = tempfile::tempdir().unwrap();
-    go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 0).0.unwrap();
-    go(root.path(), &["--instance", "eureka", "dial", "set", "--heat", "1", "--base-cooldown-s", "60", "--base-run-usd", "1"], "op", 1).0.unwrap();
-    let path = root.path().join("eureka").join("control.cc");
-    let before = std::fs::read(&path).unwrap();
-    for heat in ["2.0001", "0.0499", "0", "-1"] {
-        let (r, _) =
-            go(root.path(), &["--instance", "eureka", "dial", "set", "--heat", heat, "--base-cooldown-s", "60", "--base-run-usd", "1"], "op", 9);
-        assert!(r.is_err(), "heat {heat} must be refused");
-        assert_eq!(std::fs::read(&path).unwrap(), before, "heat {heat} changed the store");
-    }
-
-    // A refusal on a store that does not exist yet must not create it.
-    let fresh = tempfile::tempdir().unwrap();
-    let (r, _) = go(fresh.path(), &["--instance", "eureka", "dial", "set", "--heat", "5", "--base-cooldown-s", "60", "--base-run-usd", "1"], "op", 0);
-    assert!(r.is_err());
-    assert!(!fresh.path().join("eureka").join("control.cc").exists());
-}
-
-#[test]
 fn malformed_commands_are_refused_and_write_nothing() {
     let root = tempfile::tempdir().unwrap();
     let bad: &[&[&str]] = &[
@@ -94,11 +71,6 @@ fn malformed_commands_are_refused_and_write_nothing() {
         &["--instance", "eureka", "brake"],
         &["--instance", "eureka", "brake", "toggle"],
         &["--instance", "eureka", "dial", "set", "--heat", "1"],
-        &["--instance", "eureka", "dial", "set", "--heat", "1", "--heat", "1", "--base-cooldown-s", "60", "--base-run-usd", "1"],
-        &["--instance", "eureka", "dial", "set", "--heat", "x", "--base-cooldown-s", "60", "--base-run-usd", "1"],
-        &["--instance", "eureka", "dial", "set", "--heat", "1", "--base-cooldown-s", "1.5", "--base-run-usd", "1"],
-        &["--instance", "eureka", "dial", "set", "--heat", "1", "--base-cooldown-s", "60", "--base-run-usd", "1", "--extra", "1"],
-        &["--instance", "eureka", "dial", "set", "--heat"],
         &["--instance", "../evil", "brake", "release"],
         &["--instances", "eureka", "brake", "release"],
         &["eureka", "eureka", "brake", "release"],
@@ -129,7 +101,7 @@ fn the_binary_exits_nonzero_with_the_usage_when_refused() {
 }
 
 #[test]
-fn the_binary_exits_2_for_check_while_held_and_0_after_release_with_a_dial() {
+fn the_binary_exits_2_for_check_while_held_and_0_after_release_with_a_swarm() {
     let root = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_mind-control"))
@@ -146,10 +118,14 @@ fn the_binary_exits_2_for_check_while_held_and_0_after_release_with_a_dial() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("held: BrakeAbsent"));
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 
-    // Released with no dial is still refused; with a dial it opens.
+    // Released with no swarm is still refused; with a released swarm it opens.
     assert!(run(&["brake", "release"]).status.success());
     assert_eq!(run(&["check"]).status.code(), Some(2));
-    assert!(run(&["dial", "set", "--heat", "0.5", "--base-cooldown-s", "3600", "--base-run-usd", "5"]).status.success());
+    let swarm = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_mind-control")).arg("--root").arg(root.path()).arg("swarm").args(args).output().unwrap()
+    };
+    assert!(swarm(&["brake", "release"]).status.success());
+    assert!(swarm(&["dial", "set", "--heat", "0.5", "--base-rate", "4", "--base-run", "5", "--k", "2"]).status.success());
     let open = run(&["check"]);
     assert_eq!(open.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&open.stdout).contains("Released"));
@@ -212,6 +188,8 @@ fn check_refuses_every_reading_but_released() {
     go(root.path(), &["--instance", "eureka", "brake", "hold"], "op", 1).0.unwrap();
     held(root.path(), "BrakeHeld");
     go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 2).0.unwrap();
+    held(root.path(), "BrakeAbsent");
+    go(root.path(), &["swarm", "brake", "release"], "op", 3).0.unwrap();
     held(root.path(), "DialAbsent");
     // DialOutOfBounds cannot be written through the CLI: it is pinned in the crate's own tests.
     // An undecodable store is a held reading too.
@@ -222,12 +200,11 @@ fn check_refuses_every_reading_but_released() {
 }
 
 #[test]
-fn check_opens_on_release_with_a_dial_and_is_per_instance() {
+fn check_opens_on_release_with_a_swarm_and_is_per_instance() {
     let root = tempfile::tempdir().unwrap();
     go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 0).0.unwrap();
-    go(root.path(), &["--instance", "eureka", "dial", "set", "--heat", "0.5", "--base-cooldown-s", "3600", "--base-run-usd", "5"], "op", 1)
-        .0
-        .unwrap();
+    go(root.path(), &["swarm", "brake", "release"], "op", 1).0.unwrap();
+    go(root.path(), &["swarm", "dial", "set", "--heat", "0.5", "--base-rate", "4", "--base-run", "5", "--k", "2"], "op", 1).0.unwrap();
     let (result, out) = check_out(root.path());
     result.unwrap();
     assert!(out.contains("Released"), "{out}");
@@ -240,13 +217,12 @@ fn check_opens_on_release_with_a_dial_and_is_per_instance() {
 fn check_holds_for_the_named_instance_with_a_released_prefix_neighbour() {
     let root = tempfile::tempdir().unwrap();
     go(root.path(), &["--instance", "eureka", "brake", "hold"], "op", 0).0.unwrap();
+    go(root.path(), &["swarm", "brake", "release"], "op", 0).0.unwrap();
+    go(root.path(), &["swarm", "dial", "set", "--heat", "0.5", "--base-rate", "4", "--base-run", "5", "--k", "2"], "op", 0).0.unwrap();
     // Neighbours that share the held instance's text as a prefix, or only an edge of it, are released with a dial.
     for (i, neighbour) in ["eureka-two", "eureka2", "xeureka"].into_iter().enumerate() {
         let at = 1 + 2 * i as i64;
         go(root.path(), &["--instance", neighbour, "brake", "release"], "op", at).0.unwrap();
-        go(root.path(), &["--instance", neighbour, "dial", "set", "--heat", "0.5", "--base-cooldown-s", "3600", "--base-run-usd", "5"], "op", at + 1)
-            .0
-            .unwrap();
         let (open, _) = go(root.path(), &["--instance", neighbour, "check"], "op", 10);
         open.unwrap_or_else(|error| panic!("{neighbour} is released and must open: {error:#}"));
     }
@@ -304,14 +280,14 @@ fn brake_hold_stops_once_with_the_instance_and_the_store_already_held() {
 #[test]
 fn only_brake_hold_calls_the_stopper() {
     let root = tempfile::tempdir().unwrap();
-    let dial = ["--instance", "eureka", "dial", "set", "--heat", "1", "--base-cooldown-s", "60", "--base-run-usd", "1"];
+    let dial = ["swarm", "dial", "set", "--heat", "1", "--base-rate", "4", "--base-run", "1", "--k", "2"];
     let commands: &[&[&str]] = &[
         &["--instance", "eureka", "brake", "release"],
         &dial,
         &["--instance", "eureka", "show"],
         &["--instance", "eureka", "brake"],
         &["--instance", "eureka", "brake", "toggle"],
-        &["--instance", "eureka", "dial", "set", "--heat", "99", "--base-cooldown-s", "60", "--base-run-usd", "1"],
+        &["swarm", "dial", "set", "--heat", "99", "--base-rate", "4", "--base-run", "1", "--k", "2"],
         &["--instance", "../evil", "brake", "release"],
         &["--instance", "eureka", "brake", "hold", "now"],
         &[],
