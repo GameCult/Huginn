@@ -58,6 +58,7 @@ impl Remote {
 
 struct FakeForge {
     repos: Vec<(SourceRepo, PathBuf)>,
+    shortfall: Option<String>,
 }
 
 impl FakeForge {
@@ -67,13 +68,14 @@ impl FakeForge {
                 .iter()
                 .map(|(name, remote)| (SourceRepo { name: (*name).into(), default_branch: "main".into() }, remote.path()))
                 .collect(),
+            shortfall: None,
         }
     }
 }
 
 impl Forge for FakeForge {
-    fn catalog(&mut self) -> Result<Vec<SourceRepo>> {
-        Ok(self.repos.iter().map(|(repo, _)| repo.clone()).collect())
+    fn catalog(&mut self) -> Result<Catalog> {
+        Ok(Catalog { repos: self.repos.iter().map(|(repo, _)| repo.clone()).collect(), shortfall: self.shortfall.clone() })
     }
 
     fn clone_url(&self, name: &str) -> String {
@@ -302,6 +304,37 @@ fn retired_repo_leaves_nothing() {
     assert_eq!(rig.index.held(), [held("Keep", "a.rs", 0, &k)]);
     assert_eq!(rig.index.cursors().keys().collect::<Vec<_>>(), ["Keep"]);
     assert!(!rig.mirror("Gone").exists() && rig.mirror("Keep").exists());
+}
+
+/// An empty catalog, and a catalog the forge says is short, retire nothing and
+/// the run says why; the same forge answering whole retires what it dropped.
+#[test]
+fn an_empty_or_short_catalog_retires_nothing() {
+    let (keep, gone) = (Remote::new(), Remote::new());
+    let k = keep.commit(&[("a.rs", b"a\n")], &[]);
+    gone.commit(&[("b.rs", b"b\n")], &[]);
+    let mut rig = Rig::new();
+    rig.converged(&mut FakeForge::of(&[("Keep", &keep), ("Gone", &gone)]));
+    let both = rig.index.held();
+
+    let mut empty = FakeForge::of(&[]);
+    let (refreshed, reports) = rig.run(&mut empty);
+    let refreshed = refreshed.unwrap();
+    assert!(reports.is_empty() && refreshed.retirement_withheld.as_deref().unwrap().contains("no indexable repos"));
+    assert_eq!(rig.index.held(), both, "an empty answer deleted nothing");
+    assert!(rig.mirror("Gone").exists() && rig.mirror("Keep").exists());
+    assert_eq!(rig.index.cursors().len(), 2);
+
+    let mut short = FakeForge::of(&[("Keep", &keep)]);
+    short.shortfall = Some("the forge counts 2 repos and 1 were listed".into());
+    let (refreshed, _) = rig.run(&mut short);
+    assert!(refreshed.unwrap().retirement_withheld.unwrap().contains("incomplete"));
+    assert_eq!(rig.index.held(), both, "a short answer deleted nothing");
+    assert!(rig.mirror("Gone").exists());
+
+    let (refreshed, _) = rig.run(&mut FakeForge::of(&[("Keep", &keep)]));
+    assert_eq!(refreshed.unwrap().retirement_withheld, None);
+    assert_eq!(rig.index.held(), [held("Keep", "a.rs", 0, &k)], "a whole answer retires what the forge dropped");
 }
 
 /// A mirror no cursor knows (a first ingest that never finished) is retired

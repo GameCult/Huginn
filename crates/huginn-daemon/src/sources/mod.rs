@@ -131,9 +131,19 @@ pub struct SourceRepo {
     pub default_branch: String,
 }
 
+/// The repos the forge listed as indexable, and whether the list is the whole
+/// of what the forge holds. A list that is not whole cannot say which repos
+/// are gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Catalog {
+    pub repos: Vec<SourceRepo>,
+    /// Why the list may be missing repos; `None` when it is the forge's count.
+    pub shortfall: Option<String>,
+}
+
 /// The forge: which repos exist, and where to fetch them from.
 pub trait Forge {
-    fn catalog(&mut self) -> Result<Vec<SourceRepo>>;
+    fn catalog(&mut self) -> Result<Catalog>;
     fn clone_url(&self, name: &str) -> String;
 }
 
@@ -180,10 +190,13 @@ fn extension(path: &str) -> String {
     name.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase()).unwrap_or_default()
 }
 
-/// The names the refresh reports as failed; empty when every repo converged.
+/// What a refresh reports: the names that failed, and why nothing was retired
+/// if the catalog could not be trusted to say which repos are gone.
 #[derive(Debug, Default)]
 pub struct Refreshed {
     pub failed: Vec<String>,
+    /// Set when retirement was skipped because the catalog was empty or short.
+    pub retirement_withheld: Option<String>,
 }
 
 /// Brings the collection to the forge's current state. A collection that
@@ -224,10 +237,24 @@ pub fn refresh<E: Embedder, S: SourceIndex, F: Forge>(
 
     let catalog = forge.catalog().context("listing the forge's repos")?;
     let mirrors = mirrors_dir(state_root);
-    retire(index, &catalog, &mirrors, &mut cursors)?;
-
     let mut refreshed = Refreshed::default();
-    for repo in &catalog {
+    // Retirement reads the catalog as the complete list of what exists. An
+    // empty or short list would retire everything it fails to name, so then
+    // nothing is retired and the run says so.
+    let withheld = match (&catalog.shortfall, catalog.repos.is_empty()) {
+        (Some(why), _) => Some(format!("the forge's catalog is incomplete ({why})")),
+        (None, true) => Some("the forge's catalog lists no indexable repos".to_owned()),
+        (None, false) => None,
+    };
+    match withheld {
+        Some(why) => {
+            eprintln!("huginn-sources: retiring nothing: {why}");
+            refreshed.retirement_withheld = Some(why);
+        }
+        None => retire(index, &catalog.repos, &mirrors, &mut cursors)?,
+    }
+
+    for repo in &catalog.repos {
         let started = Instant::now();
         match refresh_repo(embedder, index, forge, &mirrors, repo, &identity.dimensions, &mut cursors) {
             Ok(mut report) => {
