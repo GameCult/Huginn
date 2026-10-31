@@ -58,14 +58,9 @@ pub type Hits = Vec<(PipelineRef, f32)>;
 /// `Daemon::finish` with the index's answer.
 pub struct Search {
     pub ticket: SearchTicket,
-    pending: Pending,
-}
-
-/// What the asker is owed: a ranked page of the mind's documents, or the
-/// source index's chunks as the index holds them.
-enum Pending {
-    Mind(Box<MindSearch>),
-    Sources,
+    /// What the mind owes the asker of a mind search; `None` for a source
+    /// search, whose answer is the source index's hits as it holds them.
+    mind: Option<MindSearch>,
 }
 
 /// A mind search in flight: the asked selection and query, and the members the
@@ -201,7 +196,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
                     return Handled::Answered(HuginnMindResponse::Refused(refusal));
                 }
                 return match self.index.search_sources(&query) {
-                    Ok(ticket) => Handled::Searching(Search { ticket, pending: Pending::Sources }),
+                    Ok(ticket) => Handled::Searching(Search { ticket, mind: None }),
                     Err(detail) => Handled::Answered(HuginnMindResponse::Refused(MindRefusal::Unavailable { detail })),
                 };
             }
@@ -228,7 +223,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         }
         let among = members.ids.iter().map(|id| id.id.0.clone()).collect();
         match self.index.search(&semantic.text.0, semantic.top_k, among) {
-            Ok(ticket) => Handled::Searching(Search { ticket, pending: Pending::Mind(Box::new(MindSearch { selection, semantic, members })) }),
+            Ok(ticket) => Handled::Searching(Search { ticket, mind: Some(MindSearch { selection, semantic, members }) }),
             Err(detail) => refused(MindRefusal::Unavailable { detail }),
         }
     }
@@ -256,10 +251,10 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
     /// `Unavailable`. Never an empty page in place of a failure.
     pub fn finish(&mut self, search: Search, found: Found) -> HuginnMindResponse {
         let unavailable = |detail: String| HuginnMindResponse::Refused(MindRefusal::Unavailable { detail });
-        let (selection, semantic, members, hits) = match (search.pending, found) {
+        let (selection, semantic, members, hits) = match (search.mind, found) {
             (_, Found::Failed(detail)) => return unavailable(detail),
-            (Pending::Sources, Found::Sources(hits)) => return HuginnMindResponse::Sources(hits),
-            (Pending::Mind(asked), Found::Mind(hits)) => (asked.selection, asked.semantic, asked.members, hits),
+            (None, Found::Sources(hits)) => return HuginnMindResponse::Sources(hits),
+            (Some(asked), Found::Mind(hits)) => (asked.selection, asked.semantic, asked.members, hits),
             _ => return unavailable("the index answered another kind of search than the one asked".into()),
         };
         match self.mind.rank(&selection, &semantic, &members, &hits) {
