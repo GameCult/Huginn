@@ -9,7 +9,9 @@
 //! The unit's `persona.env` and credentials name everything else:
 //! `MIND_PERSONA_ROOMS` (a,b), `MIND_PERSONA_BURN_ROOM`, `MIND_PERSONA_OPERATOR`
 //! (id[,id]) and `MIND_PERSONA_SELF_SENDER`, each also a flag that overrides it
-//! (`--rooms`, `--burn-room`, `--operator`, `--self-sender`);
+//! (`--rooms`, `--burn-room`, `--operator`, `--self-sender`); `MIND_PERSONA_DOCTRINE`
+//! (optional, absolute paths separated by `:`) names the doctrine files read at each
+//! turn start and put ahead of her persona;
 //! `MIND_CONNECTOR_ENDPOINT` (`<ip>:<port>`, the connector's loopback listener),
 //! `MIND_CONNECTOR_KEY_FILE` and `MIND_CONNECTOR_MODEL`; `BIFROST_CHAT_ENDPOINT`
 //! (`rudp://<ip>:<port>`, the mouth) and `BIFROST_CHAT_KEY_FILE`. Without

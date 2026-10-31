@@ -63,6 +63,10 @@ pub const ENV_ROOMS: &str = "MIND_PERSONA_ROOMS";
 pub const ENV_BURN_ROOM: &str = "MIND_PERSONA_BURN_ROOM";
 pub const ENV_OPERATOR: &str = "MIND_PERSONA_OPERATOR";
 pub const ENV_SELF_SENDER: &str = "MIND_PERSONA_SELF_SENDER";
+/// Colon-separated absolute paths of the doctrine files whose text leads every turn's instructions, in order.
+pub const ENV_DOCTRINE: &str = "MIND_PERSONA_DOCTRINE";
+/// The most doctrine text, in bytes, one turn's instructions may carry.
+pub const DOCTRINE_MAX_BYTES: usize = 96 * 1024;
 /// How many of her latest runs a turn's input lists.
 const RECENT_RUNS: u32 = 5;
 /// The longest raw reply a trace keeps.
@@ -81,6 +85,8 @@ pub struct Config {
     /// Her own sender id: lines from it are her own.
     pub own_sender: String,
     pub max_turns: u32,
+    /// Doctrine files, read at every turn start and put ahead of her persona, in this order. Empty is legal.
+    pub doctrine: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,7 +143,7 @@ impl Config {
         if !rooms.contains(&burn_room) || max_turns == 0 {
             bail!("{usage}");
         }
-        let config = Self { rooms, burn_room, operators: list(operators)?, own_sender: own.ok_or_else(|| anyhow!("{usage}"))?, max_turns };
+        let config = Self { rooms, burn_room, operators: list(operators)?, own_sender: own.ok_or_else(|| anyhow!("{usage}"))?, max_turns, doctrine: Vec::new() };
         Ok((config, rest))
     }
 
@@ -145,7 +151,8 @@ impl Config {
     /// environment (`MIND_PERSONA_ROOMS`, `MIND_PERSONA_BURN_ROOM`,
     /// `MIND_PERSONA_OPERATOR`, `MIND_PERSONA_SELF_SENDER`) through `lookup`, which
     /// the binary supplies because this library reads no environment. A flag on
-    /// the command line wins; an empty variable is unset.
+    /// the command line wins; an empty variable is unset. `MIND_PERSONA_DOCTRINE`
+    /// (absolute paths separated by `:`) fills `doctrine`; a relative path is refused.
     pub fn from_args_and_env(args: &[String], lookup: impl Fn(&str) -> Option<String>, usage: &str) -> Result<(Self, Vec<String>)> {
         let mut args = args.to_vec();
         for (flag, name) in [("--rooms", ENV_ROOMS), ("--burn-room", ENV_BURN_ROOM), ("--operator", ENV_OPERATOR), ("--self-sender", ENV_SELF_SENDER)] {
@@ -155,7 +162,14 @@ impl Config {
                 args.extend([flag.to_string(), value]);
             }
         }
-        Self::from_args(&args, usage)
+        let (mut config, rest) = Self::from_args(&args, usage)?;
+        if let Some(paths) = lookup(ENV_DOCTRINE) {
+            config.doctrine = paths.split(':').filter(|path| !path.is_empty()).map(PathBuf::from).collect();
+            if config.doctrine.iter().any(|path| !path.is_absolute()) {
+                bail!("{ENV_DOCTRINE} names a path that is not absolute");
+            }
+        }
+        Ok((config, rest))
     }
 
     fn sender(&self, id: &str) -> Sender {
@@ -199,7 +213,6 @@ pub struct StartSelfRun {
 /// constrains the answer to and for `decode_reply`, which checks the same.
 const BRIEF_MAX_CHARS: usize = 1000;
 const REPO_PATTERN: &str = "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$";
-const CAMPAIGN_PATTERN: &str = "^[A-Za-z0-9_.-]{1,64}$";
 
 fn repo_in_bounds(repo: &str) -> bool {
     let mut parts = repo.split('/');
@@ -219,8 +232,29 @@ fn start_in_bounds(ask: &StartSelfRun) -> bool {
 }
 
 /// The JSON Schema the connector constrains the answer to, with the room enum
-/// from the config. Text, because the contract carries it as text.
-pub fn reply_schema(rooms: &[String]) -> String {
+/// from the config and the campaign enum from the mind's campaigns in force
+/// (none in force: `start_self_run` can only be null). Text, because the
+/// contract carries it as text.
+pub fn reply_schema(rooms: &[String], campaigns: &[String]) -> String {
+    let start = if campaigns.is_empty() {
+        json!({ "type": "null" })
+    } else {
+        json!({
+            "anyOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["brief", "repo", "campaign"],
+                    "properties": {
+                        "brief": { "type": "string", "minLength": 1, "maxLength": BRIEF_MAX_CHARS },
+                        "repo": { "type": "string", "pattern": REPO_PATTERN },
+                        "campaign": { "type": "string", "enum": campaigns }
+                    }
+                }
+            ]
+        })
+    };
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -238,21 +272,7 @@ pub fn reply_schema(rooms: &[String]) -> String {
                     }
                 }
             },
-            "start_self_run": {
-                "anyOf": [
-                    { "type": "null" },
-                    {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["brief", "repo", "campaign"],
-                        "properties": {
-                            "brief": { "type": "string", "minLength": 1, "maxLength": BRIEF_MAX_CHARS },
-                            "repo": { "type": "string", "pattern": REPO_PATTERN },
-                            "campaign": { "type": "string", "pattern": CAMPAIGN_PATTERN }
-                        }
-                    }
-                ]
-            }
+            "start_self_run": start
         }
     })
     .to_string()
@@ -364,6 +384,49 @@ impl PersonaState for HuginnPersona {
     }
 }
 
+/// The doctrine files' text in the configured order, each under a heading that
+/// names the file; empty when none is configured. Read afresh at every call, so
+/// a changed file needs no restart. Text is passed verbatim.
+fn read_doctrine(paths: &[PathBuf]) -> Result<String, Failure> {
+    let mut out = String::new();
+    let mut total = 0usize;
+    for path in paths {
+        let text = std::fs::read_to_string(path).map_err(|_| Failure::Doctrine)?;
+        total += text.len();
+        if total > DOCTRINE_MAX_BYTES {
+            return Err(Failure::DoctrineTooLarge);
+        }
+        out.push_str(&format!("# Doctrine: {}\n\n{text}\n\n", path.display()));
+    }
+    Ok(out)
+}
+
+/// The campaigns in force in her own mind as (slug, title), by slug: the one
+/// selection both the turn's instructions and `start_self_run`'s check use.
+fn campaigns_in_force(mind: &dyn MindPort) -> Result<Vec<(String, String)>> {
+    let mut found: Vec<(String, String)> = headers(mind, &in_force(of_kind(PipelineKind::Campaign)))?
+        .iter()
+        .filter_map(|campaign| match &campaign.facts {
+            PipelineFacts::Campaign { title, .. } => Some((campaign.id.id.0.split_once(":campaign:")?.0.to_string(), title.0.clone())),
+            _ => None,
+        })
+        .collect();
+    found.sort();
+    found.dedup_by(|a, b| a.0 == b.0);
+    Ok(found)
+}
+
+fn render_campaigns(campaigns: &[(String, String)]) -> String {
+    if campaigns.is_empty() {
+        return "No campaign is in force in your mind, so you cannot start a Self run: start_self_run must be null.".into();
+    }
+    let mut out = String::from("Campaigns in force in your mind. start_self_run's campaign must be one of these slugs:\n");
+    for (slug, title) in campaigns {
+        out.push_str(&format!("- {slug}: {title}\n"));
+    }
+    out
+}
+
 fn render_instructions(state: &Value) -> String {
     let rendered = serde_json::to_string_pretty(state).unwrap_or_default();
     format!("You are the persona whose state follows. Speak and act as it, in your own voice.\n\n{rendered}")
@@ -404,6 +467,10 @@ pub enum Failure {
     Held(HeldReason),
     Chat,
     Persona,
+    /// A configured doctrine file is missing, unreadable or not text.
+    Doctrine,
+    /// The doctrine files together exceed `DOCTRINE_MAX_BYTES`.
+    DoctrineTooLarge,
     Readout,
     Connector,
     Undecodable,
@@ -419,6 +486,8 @@ impl fmt::Display for Failure {
             Self::Held(reason) => write!(f, "held: {reason:?}"),
             Self::Chat => f.write_str("the chat could not be read"),
             Self::Persona => f.write_str("no persona state"),
+            Self::Doctrine => f.write_str("a configured doctrine file could not be read"),
+            Self::DoctrineTooLarge => f.write_str("the doctrine files exceed the size bound"),
             Self::Readout => f.write_str("no spend readout"),
             Self::Connector => f.write_str("the connector call failed"),
             Self::Undecodable => f.write_str("the reply is not a persona reply"),
@@ -556,7 +625,11 @@ fn one_turn(
     if deliveries.is_empty() && turn > 0 {
         return Ok(Step::Idle);
     }
-    let Ok(instructions) = organs.persona.instructions() else { return Ok(Step::Failed(Failure::Persona)) };
+    let Ok(persona) = organs.persona.instructions() else { return Ok(Step::Failed(Failure::Persona)) };
+    let doctrine = match read_doctrine(&config.doctrine) {
+        Ok(doctrine) => doctrine,
+        Err(why) => return Ok(Step::Failed(why)),
+    };
     let Ok(readout) = organs.connector.spend_readout() else { return Ok(Step::Failed(Failure::Readout)) };
     // The ledger resets at a window boundary: a run that sees the window turn is charged its whole grant, as the heartbeat charges it.
     // A readout with no row for her caller cannot say what is left of the run's cap: the run holds, no turn is taken.
@@ -577,6 +650,8 @@ fn one_turn(
     let live = live_runs(organs.mind, &instance)?;
     let Some(burn) = burn_line(&readout, &instance.0, heat, live) else { return Ok(Step::Failed(Failure::Readout)) };
     let history = recent_runs(organs.mind, &instance)?;
+    let campaigns = campaigns_in_force(organs.mind)?;
+    let instructions = format!("{doctrine}{persona}\n\n{}", render_campaigns(&campaigns));
     let rooms = reply_rooms(config, &deliveries);
     let request = TurnRequest {
         caller: instance.0.clone(),
@@ -584,7 +659,7 @@ fn one_turn(
         max_cost_micro_usd: remaining,
         instructions,
         input: render_input(config, &deliveries, &history, &burn),
-        output_schema_json: reply_schema(&rooms),
+        output_schema_json: reply_schema(&rooms, &campaigns.iter().map(|(slug, _)| slug.clone()).collect::<Vec<_>>()),
     };
     let inputs = trace_inputs(config, &deliveries);
     let now = organs.clock.now();
@@ -692,8 +767,7 @@ fn start_self_run(
     batch: &str,
     ask: &StartSelfRun,
 ) -> Result<Result<PipelineRef, Failure>> {
-    let known = format!("{}:campaign:", ask.campaign);
-    if !headers(organs.mind, &in_force(of_kind(PipelineKind::Campaign)))?.iter().any(|campaign| campaign.id.id.0.starts_with(&known)) {
+    if !campaigns_in_force(organs.mind)?.iter().any(|(slug, _)| *slug == ask.campaign) {
         return Ok(Err(Failure::SelfRun));
     }
     let follow_up = PipelineDocument::FollowUp(PipelineFollowUp {

@@ -208,9 +208,13 @@ fn stewardship(name: &str) -> PipelineDocument {
 }
 
 fn campaign() -> PipelineDocument {
+    campaign_named(CAMPAIGN, "Eureka body")
+}
+
+pub(crate) fn campaign_named(slug: &str, title: &str) -> PipelineDocument {
     PipelineDocument::Campaign(PipelineCampaign {
-        slug: Slug(CAMPAIGN.into()),
-        title: "Eureka body".into(),
+        slug: Slug(slug.into()),
+        title: title.into(),
         repos: vec![REPO.into()],
         working_branch: "main".into(),
         target_doc: doc_ref(),

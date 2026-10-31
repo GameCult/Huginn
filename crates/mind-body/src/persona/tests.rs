@@ -153,6 +153,7 @@ fn config() -> Config {
         operators: vec!["@op:chat".into()],
         own_sender: "@eureka:chat".into(),
         max_turns: 4,
+        doctrine: vec![],
     }
 }
 
@@ -569,10 +570,10 @@ fn the_decoder_holds_the_bounds_the_schema_states() {
         assert!(!ok(brief, repo, campaign), "{repo:?} {campaign:?} brief of {}", brief.chars().count());
     }
     // The decoder's bounds are the schema's, read from one place.
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&c.rooms)).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&c.rooms, &[CAMPAIGN.to_string()])).unwrap();
     let ask = &schema["properties"]["start_self_run"]["anyOf"][1]["properties"];
     assert_eq!(ask["repo"]["pattern"], REPO_PATTERN);
-    assert_eq!(ask["campaign"]["pattern"], CAMPAIGN_PATTERN);
+    assert_eq!(ask["campaign"]["enum"], json!([CAMPAIGN]));
     assert_eq!(ask["brief"]["maxLength"], BRIEF_MAX_CHARS);
 }
 
@@ -810,7 +811,7 @@ fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them(
     let (config, rest) = Config::from_args_and_env(&args("--instance eureka"), env, "usage").unwrap();
     assert_eq!(
         config,
-        Config { rooms: vec!["swarm".into(), "burn".into()], burn_room: "burn".into(), operators: vec!["@op:chat".into(), "@op2:chat".into()], own_sender: "@eureka:chat".into(), max_turns: MAX_TURNS_PER_START }
+        Config { rooms: vec!["swarm".into(), "burn".into()], burn_room: "burn".into(), operators: vec!["@op:chat".into(), "@op2:chat".into()], own_sender: "@eureka:chat".into(), max_turns: MAX_TURNS_PER_START, doctrine: vec![] }
     );
     assert_eq!(rest, ["--instance", "eureka"]);
     // A flag wins over its variable, one at a time.
@@ -984,4 +985,131 @@ fn deliveries_from_different_dm_rooms_are_never_in_one_turn() {
     assert!(inputs[3].contains("again-a"), "one room's consecutive deliveries share its turn");
     assert!(!inputs[0].contains("again-a"), "a later delivery waits for its turn");
     assert_eq!(*rig.chat.acked.borrow(), vec![1, 2, 3, 5]);
+}
+
+fn write_doctrine(rig: &Rig, name: &str, text: &str) -> PathBuf {
+    let path = rig.dir.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+fn instructions_of(rig: &Rig) -> String {
+    rig.connector.requests.borrow()[0].instructions.clone()
+}
+
+#[test]
+fn doctrine_files_lead_the_instructions_in_the_configured_order_ahead_of_the_persona() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
+    let (first, second) = (write_doctrine(&rig, "b.md", "SECOND-ALPHABETICALLY"), write_doctrine(&rig, "a.md", "FIRST-ALPHABETICALLY"));
+    rig.go_with(&Config { doctrine: vec![first.clone(), second.clone()], ..config() });
+    let text = instructions_of(&rig);
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} in {text}"));
+    assert!(at(&first.display().to_string()) < at("SECOND-ALPHABETICALLY"), "each file under a heading naming it");
+    assert!(at("SECOND-ALPHABETICALLY") < at(&second.display().to_string()));
+    assert!(at(&second.display().to_string()) < at("FIRST-ALPHABETICALLY"));
+    assert!(at("FIRST-ALPHABETICALLY") < at("You are Eureka."), "doctrine precedes the persona");
+}
+
+#[test]
+fn doctrine_is_read_at_every_turn_start() {
+    let rig = Rig::new(vec![operator_says(1, "a"), operator_says(2, "b")], &[says(&[("swarm", "x")]), says(&[])]);
+    let path = write_doctrine(&rig, "d.md", "BEFORE-BUMP");
+    rig.chat.on_send.replace(Some(Box::new({
+        let path = path.clone();
+        move || std::fs::write(&path, "AFTER-BUMP").unwrap()
+    })));
+    rig.go_with(&Config { doctrine: vec![path], max_turns: 3, ..config() });
+    let requests = rig.connector.requests.borrow();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].instructions.contains("BEFORE-BUMP") && requests[1].instructions.contains("AFTER-BUMP") && !requests[1].instructions.contains("BEFORE-BUMP"));
+}
+
+#[test]
+fn a_missing_doctrine_file_fails_the_turn_before_the_connector_is_called() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "never")])]);
+    let present = write_doctrine(&rig, "ok.md", "x");
+    let Outcome::Served { answered, failure, .. } = rig.go_with(&Config { doctrine: vec![present, rig.dir.path().join("absent.md")], ..config() }) else { panic!("served") };
+    assert_eq!((answered, failure), (0, Some(Failure::Doctrine)));
+    assert_eq!(rig.turns(), 0);
+    assert!(rig.chat.sent.borrow().is_empty() && rig.chat.acked.borrow().is_empty());
+    assert!(rig.closing_reason().contains("doctrine"), "{}", rig.closing_reason());
+}
+
+#[test]
+fn doctrine_over_the_bound_is_refused_and_exactly_the_bound_is_not() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
+    let big = write_doctrine(&rig, "big.md", &"x".repeat(DOCTRINE_MAX_BYTES + 1));
+    let Outcome::Served { failure, .. } = rig.go_with(&Config { doctrine: vec![big], ..config() }) else { panic!("served") };
+    assert_eq!(failure, Some(Failure::DoctrineTooLarge));
+    assert_eq!(rig.turns(), 0);
+    // The bound is on the total, not on each file.
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
+    let half = "x".repeat(DOCTRINE_MAX_BYTES / 2);
+    let (one, two) = (write_doctrine(&rig, "1.md", &half), write_doctrine(&rig, "2.md", &(half.clone() + "y")));
+    let Outcome::Served { failure, .. } = rig.go_with(&Config { doctrine: vec![one, two], ..config() }) else { panic!("served") };
+    assert_eq!(failure, Some(Failure::DoctrineTooLarge));
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
+    let exact = write_doctrine(&rig, "exact.md", &"x".repeat(DOCTRINE_MAX_BYTES));
+    let Outcome::Served { failure, .. } = rig.go_with(&Config { doctrine: vec![exact], ..config() }) else { panic!("served") };
+    assert_eq!(failure, None);
+}
+
+#[test]
+fn with_no_doctrine_configured_the_instructions_begin_with_the_persona() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
+    rig.go();
+    let text = instructions_of(&rig);
+    assert!(text.starts_with("You are Eureka."), "{text}");
+    assert!(!text.contains("Doctrine"));
+}
+
+#[test]
+fn doctrine_comes_from_the_environment_as_absolute_paths_in_order() {
+    let env = |doctrine: &'static str| {
+        move |name: &str| match name {
+            ENV_ROOMS | ENV_BURN_ROOM => Some("swarm".to_string()),
+            ENV_OPERATOR => Some("@op:chat".to_string()),
+            ENV_SELF_SENDER => Some("@eureka:chat".to_string()),
+            ENV_DOCTRINE => Some(doctrine.to_string()),
+            _ => None,
+        }
+    };
+    let (config, _) = Config::from_args_and_env(&[], env("/a/CLAUDE.md:/b/gamecult.md"), "usage").unwrap();
+    assert_eq!(config.doctrine, [PathBuf::from("/a/CLAUDE.md"), PathBuf::from("/b/gamecult.md")]);
+    assert!(Config::from_args_and_env(&[], env(""), "usage").unwrap().0.doctrine.is_empty());
+    assert!(Config::from_args_and_env(&[], env("/a:relative/b"), "usage").is_err());
+}
+
+#[test]
+fn the_campaigns_in_force_are_listed_and_are_the_schemas_campaign_enum() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
+    rig.mind.committed(vec![campaign_named("zeta", "Zeta work")]);
+    rig.go();
+    let requests = rig.connector.requests.borrow();
+    let text = &requests[0].instructions;
+    assert!(text.contains(&format!("- {CAMPAIGN}: Eureka body\n")) && text.contains("- zeta: Zeta work\n"), "{text}");
+    assert!(text.find(CAMPAIGN).unwrap() < text.find("zeta").unwrap(), "listed by slug");
+    let schema: serde_json::Value = serde_json::from_str(&requests[0].output_schema_json).unwrap();
+    assert_eq!(schema["properties"]["start_self_run"]["anyOf"][1]["properties"]["campaign"]["enum"], json!([CAMPAIGN, "zeta"]));
+}
+
+#[test]
+fn a_self_run_naming_a_listed_campaign_passes_the_campaign_check() {
+    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": CAMPAIGN } }).to_string();
+    let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
+    let Outcome::Served { failure, self_run, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, None);
+    assert!(self_run.is_some());
+}
+
+#[test]
+fn with_no_campaign_in_force_the_instructions_say_so_and_the_schema_allows_no_start() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
+    rig.mind.committed(vec![close(PipelineRef { kind: K::Campaign, id: format!("{CAMPAIGN}:campaign:self").as_str().into() }, recorded())]);
+    rig.go();
+    let requests = rig.connector.requests.borrow();
+    assert!(requests[0].instructions.contains("No campaign is in force"), "{}", requests[0].instructions);
+    assert!(!requests[0].instructions.contains("- eureka-body:"));
+    let schema: serde_json::Value = serde_json::from_str(&requests[0].output_schema_json).unwrap();
+    assert_eq!(schema["properties"]["start_self_run"], json!({ "type": "null" }));
 }
