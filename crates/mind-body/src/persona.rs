@@ -648,7 +648,7 @@ fn one_turn(
         caller: instance.0.clone(),
         request_id: format!("{}-t{turn}", label_of(run)),
         instructions,
-        input: render_input(config, &deliveries, &history, &format!("{usage}\n\n{tempo}")),
+        input: render_input(config, &deliveries, &history, &goals, &format!("{usage}\n\n{tempo}")),
         output_schema_json: reply_schema(&rooms, &campaigns.iter().map(|(slug, _)| slug.clone()).collect::<Vec<_>>()),
     };
     let inputs = trace_inputs(config, &deliveries);
