@@ -1563,7 +1563,22 @@ fn a_brief_told_mid_turn_by_the_hook_is_never_told_again_by_the_actuator() {
     let printed = printed.borrow();
     assert!(printed[0].contains(&brief_ref("b2").id.0) && printed[0].contains("Wire the shader uniforms."), "{printed:?}");
     assert_eq!(printed[1], "", "the second call finds nothing: each brief enters once");
-    assert!(tells(&ran).is_empty(), "the hook told it; the actuator did not: {:?}", ran.written());
+    assert_eq!(ran.written().len(), 1, "the hook told it; the actuator wrote nothing but the start: {:?}", ran.written());
+}
+
+#[test]
+fn a_brief_the_run_claims_is_told_once_in_the_start_message_and_not_listed_again() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x")]);
+    mind.committed(vec![brief("c1", "Claimed work."), brief("c2", "Other work.")]);
+    let PipelineDocument::Run(mut document) = self_run("selfrun-a", "5") else { unreachable!() };
+    document.claims = vec![brief_ref("c1")];
+    mind.committed(vec![PipelineDocument::Run(document)]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
+    let start = &ran.written()[0];
+    assert_eq!(start.matches("Claimed work.").count(), 1, "{start}");
+    let (task, also) = start.split_once("Also open for you").expect("the other brief is listed");
+    assert!(task.contains("Claimed work.") && also.contains("Other work.") && !also.contains("Claimed work."), "{start}");
 }
 
 #[test]
