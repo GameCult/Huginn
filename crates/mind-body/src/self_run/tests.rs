@@ -1385,3 +1385,12 @@ fn a_run_without_claims_gets_the_identity_lines_alone() {
     let ran = go(vec![Out(result_line())]);
     assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a")));
 }
+
+#[test]
+fn the_cut_keeps_exactly_the_limit_whole_characters_and_marks_only_a_real_cut() {
+    assert_eq!(cut_at("abcd".into(), 4), "abcd");
+    assert_eq!(cut_at("abcde".into(), 4), "abcd\n[task truncated]");
+    // "\u{e9}" is two bytes: a limit inside one keeps the characters before it.
+    assert_eq!(cut_at("a\u{e9}\u{e9}".into(), 4), "a\u{e9}\n[task truncated]");
+    assert_eq!(cut_at("a\u{e9}\u{e9}".into(), 5), "a\u{e9}\u{e9}");
+}

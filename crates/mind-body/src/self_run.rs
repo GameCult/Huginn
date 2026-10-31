@@ -131,16 +131,10 @@ fn task_section(mind: &dyn MindPort, claims: &[PipelineRef]) -> String {
             _ => task.push_str(&format!("\n\nThe run claims `{}`, which could not be read as a follow-up: its task is unknown.", claim.id.0)),
         }
     }
-    if task.len() > TASK_LIMIT {
-        let mut end = TASK_LIMIT;
-        while !task.is_char_boundary(end) {
-            end -= 1;
-        }
-        task.truncate(end);
-        task.push_str("\n[task truncated]");
-    }
-    task
+    cut_at(task, TASK_LIMIT)
 }
+/// `text` cut at a character boundary to `limit` bytes, marked when cut.fn cut_at(mut text: String, limit: usize) -> String {    if text.len() > limit {        let mut end = limit;        while !text.is_char_boundary(end) {            end -= 1;        }        text.truncate(end);        text.push_str("
+[task truncated]");    }    text}
 
 /// What the child is told once, at the context ceiling.
 pub const FLUSH_MESSAGE: &str = "The context ceiling is reached. Admit to the mind what it lacks, close your run, and end.";
