@@ -181,9 +181,27 @@ struct Fake {
     child: RefCell<Option<Scripted>>,
     spawns: RefCell<Vec<Vec<String>>>,
     refuse: bool,
+    hooks: Hooks,
+}
+
+impl Fake {
+    fn with(child: Option<Scripted>, refuse: bool) -> Self {
+        Self { child: RefCell::new(child), spawns: RefCell::new(Vec::new()), refuse, hooks: test_hooks() }
+    }
+}
+
+/// A spool of its own under the system temporary directory, so that tests running side by side share nothing.
+fn test_hooks() -> Hooks {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Hooks { spool: std::env::temp_dir().join(format!("mind-self-run-spool-{}-{n}", std::process::id())), injector: PathBuf::from("/opt/mind-self-run") }
 }
 
 impl Spawner for Fake {
+    fn hooks(&self) -> Hooks {
+        self.hooks.clone()
+    }
+
     fn spawn(&self, args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
         self.spawns.borrow_mut().push(args.to_vec());
         if self.refuse {
@@ -310,6 +328,7 @@ impl MindPort for Seen<'_> {
 }
 
 struct Ran {
+    hooks: Hooks,
     outcome: Result<SelfRunOutcome>,
     out: String,
     events: Vec<Event>,
@@ -370,11 +389,7 @@ fn carry_signalled(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Op
 fn carry_scripted(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Option<Stop>, refuses: &[Stop], hangs: bool) -> Ran {
     let log = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(Fixed(Cell::new(at_start())));
-    let fake = Fake {
-        child: RefCell::new(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false, asked: 0 })),
-        spawns: RefCell::new(Vec::new()),
-        refuse: false,
-    };
+    let fake = Fake::with(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false, asked: 0 }), false);
     let lender = FakeLender::logging(log.clone(), Answer::Grant);
     let mut out = Vec::new();
     let outcome = carry(seen, &*clock, &lender, &fake, TEST_CAP_S, &mut out);
@@ -382,7 +397,7 @@ fn carry_scripted(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Opt
     // The child's own events; the lease's are in `all`, in order with them.
     let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Abandoned)).cloned().collect();
     let spawns = fake.spawns.borrow().clone();
-    Ran { outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
+    Ran { hooks: fake.hooks(), outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
 }
 
 fn at_start() -> chrono::DateTime<chrono::Utc> {
@@ -449,7 +464,7 @@ fn without_exactly_one_open_self_run_of_hers_it_is_no_run_and_no_child_is_spawne
 fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_outcome() {
     let mind = with_run();
     let clock = Rc::new(Fixed(Cell::new(at_start())));
-    let refusing = Fake { child: RefCell::new(None), spawns: RefCell::new(Vec::new()), refuse: true };
+    let refusing = Fake::with(RefCell::new(None), true);
     assert!(carry(&Seen::of(&mind), &*clock, &FakeLender::new(Answer::Grant), &refusing, TEST_CAP_S, &mut Vec::new()).is_err());
     assert_eq!(refusing.spawns.borrow().len(), 1, "it tried exactly once");
 
@@ -466,7 +481,7 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
             unreachable!()
         }
     }
-    let never = Fake { child: RefCell::new(None), spawns: RefCell::new(Vec::new()), refuse: false };
+    let never = Fake::with(RefCell::new(None), false);
     assert!(carry(&Down, &*clock, &FakeLender::new(Answer::Grant), &never, TEST_CAP_S, &mut Vec::new()).is_err());
     assert!(never.spawns.borrow().is_empty());
 }
@@ -476,7 +491,8 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
 #[test]
 fn claude_args_is_exactly_the_fixed_list_for_a_session() {
     let session = Uuid::parse_str(SESSION_OF_RUN_A).unwrap();
-    let args = claude_args(session);
+    let hooks = test_hooks();
+    let args = claude_args(session, &hooks);
     assert_eq!(
         args,
         [
@@ -496,6 +512,8 @@ fn claude_args_is_exactly_the_fixed_list_for_a_session() {
             "none",
             "--setting-sources",
             "user",
+            "--settings",
+            hooks.settings().as_str(),
         ]
     );
     // Those belong to the run measure or to the unit's managed settings.
@@ -523,7 +541,7 @@ fn the_child_is_started_for_her_run_with_the_fixed_list_whatever_the_run_record_
         mind.committed(vec![self_run("selfrun-b", budget)]);
         let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
         assert_eq!(ran.spawns.len(), 1, "{budget}");
-        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap()), "{budget}");
+        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap(), &ran.hooks), "{budget}");
     }
 }
 
@@ -980,7 +998,7 @@ fn the_clock_is_read_once_per_event_so_a_step_of_the_wall_clock_cannot_split_a_p
     }
     let steps: VecDeque<Step> = vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", CEILING_TOKENS + 1)), Idle(0)].into();
     let child = Scripted { steps, log: log.clone(), clock: Rc::new(Fixed(Cell::new(at_start()))), code: Some(0), dies_on: None, refuses: vec![], hangs: false, exited: false, eof: false, asked: 0 };
-    let fake = Fake { child: RefCell::new(Some(child)), spawns: RefCell::new(Vec::new()), refuse: false };
+    let fake = Fake::with(RefCell::new(Some(child)), false);
     let outcome = carry(&Seen::of(&mind), &Stepped(clock.clone()), &FakeLender::new(Answer::Grant), &fake, TEST_CAP_S, &mut Vec::new()).unwrap();
     let events = log.borrow().clone();
     let reads = events.iter().filter(|event| matches!(event, Event::Asked(_))).count() as u32;
@@ -1203,6 +1221,9 @@ mod process {
 
     struct Spawn(PathBuf);
     impl Spawner for Spawn {
+        fn hooks(&self) -> Hooks {
+            test_hooks()
+        }
         fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
             Ok(Box::new(Prompt(start_with(&self.0, args, token))))
         }
@@ -1229,6 +1250,9 @@ mod process {
 
     struct Patient(PathBuf);
     impl Spawner for Patient {
+        fn hooks(&self) -> Hooks {
+            test_hooks()
+        }
         fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
             Ok(Box::new(Bounded(start_with(&self.0, args, token), std::time::Instant::now())))
         }

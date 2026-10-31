@@ -26,7 +26,7 @@ fn granted_fd_reaches_child_env_var() {
     let dir = tempfile::tempdir().unwrap();
     let program = script(&dir, READS_ITS_CREDENTIAL);
     let token = token_holding("tok-canary-7f3a");
-    let mut child = start_with(&program, &claude_args(session_id(&run_ref("selfrun-a"))), &token);
+    let mut child = start_with(&program, &claude_args(session_id(&run_ref("selfrun-a")), &Hooks { spool: PathBuf::from("/run/spool"), injector: PathBuf::from("/bin/x") }), &token);
     child.close_input();
     let (lines, code) = drain(&mut *child);
     assert_eq!(code, Some(0), "{lines:?}");
@@ -128,11 +128,11 @@ fn each_run_gets_a_fresh_owner_only_configuration_that_what_it_writes_does_not_o
 
 #[test]
 fn the_spawner_needs_the_units_runtime_directory_and_reads_the_seed_from_the_units_environment() {
-    assert!(ClaudeSpawner::new(Vec::new()).is_err(), "no scratch directory named");
-    assert!(ClaudeSpawner::new([("RUNTIME_DIRECTORY".into(), "".into())]).is_err(), "an empty one is none");
-    let named = ClaudeSpawner::new([("RUNTIME_DIRECTORY".into(), "/run/mind".into()), ("MIND_SELF_CONFIG_SEED".into(), "/etc/seed".into())]).unwrap();
+    assert!(ClaudeSpawner::new(Vec::new(), PathBuf::from("/bin/x")).is_err(), "no scratch directory named");
+    assert!(ClaudeSpawner::new([("RUNTIME_DIRECTORY".into(), "".into())], PathBuf::from("/bin/x")).is_err(), "an empty one is none");
+    let named = ClaudeSpawner::new([("RUNTIME_DIRECTORY".into(), "/run/mind".into()), ("MIND_SELF_CONFIG_SEED".into(), "/etc/seed".into())], PathBuf::from("/bin/x")).unwrap();
     assert_eq!((named.scratch.as_path(), named.seed.as_deref()), (Path::new("/run/mind"), Some(Path::new("/etc/seed"))));
-    let bare = ClaudeSpawner::new([("RUNTIME_DIRECTORY".into(), "/run/mind".into())]).unwrap();
+    let bare = ClaudeSpawner::new([("RUNTIME_DIRECTORY".into(), "/run/mind".into())], PathBuf::from("/bin/x")).unwrap();
     assert_eq!(bare.seed, None);
 }
 

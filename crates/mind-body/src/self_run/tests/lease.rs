@@ -7,7 +7,7 @@ use eureka_pipeline::ResolutionOutcome;
 use super::*;
 
 fn never_spawns() -> Fake {
-    Fake { child: RefCell::new(None), spawns: RefCell::new(Vec::new()), refuse: false }
+    Fake::with(RefCell::new(None), false)
 }
 
 #[test]
