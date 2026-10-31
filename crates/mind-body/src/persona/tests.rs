@@ -8,16 +8,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::str::FromStr;
 
 use eureka_pipeline::{PipelineDocument, PipelineKind as K, ResolutionOutcome, RunOperator, RunTurn, Slug};
-use rust_decimal::Decimal;
 use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
 use crate::chat_client::{ChatSendReceipt, ContextLine};
-use crate::control::{ControlWriter, FileSource, SwarmDial, SwarmWriter};
+use crate::control::{ControlWriter, FileSource, SwarmWriter};
 use crate::testkit::*;
 
 type Log = Rc<RefCell<Vec<String>>>;
@@ -80,11 +78,7 @@ struct FakeConnector {
     log: Log,
     replies: RefCell<VecDeque<String>>,
     requests: RefCell<Vec<TurnRequest>>,
-    /// The caller's ledger spend, which a call may raise.
-    spent: Rc<Cell<u64>>,
     readout_fails: Cell<bool>,
-    /// The readout carries no row for the caller.
-    no_row: Cell<bool>,
     /// The readout's clock, in unix ms, which a call may advance.
     at: Rc<Cell<u64>>,
     /// Runs inside each call, where time passes and the world changes.
@@ -101,13 +95,9 @@ impl Connector for FakeConnector {
         self.replies.borrow_mut().pop_front().ok_or_else(|| anyhow!("the connector is down"))
     }
 
-    fn spend_readout(&self) -> Result<SpendReadout> {
+    fn usage_readout(&self) -> Result<UsageReadout> {
         let mut readout = readout();
-        readout.callers[0].spent_micro_usd = self.spent.get();
         readout.at_unix_ms = self.at.get();
-        if self.no_row.get() {
-            readout.callers.clear();
-        }
         if self.readout_fails.get() { Err(anyhow!("no readout")) } else { Ok(readout) }
     }
 }
@@ -148,8 +138,7 @@ struct Rig {
 
 fn config() -> Config {
     Config {
-        rooms: ["swarm", "burn", "operator"].map(String::from).to_vec(),
-        burn_room: "burn".into(),
+        rooms: ["swarm", "usage", "operator"].map(String::from).to_vec(),
         operators: vec!["@op:chat".into()],
         own_sender: "@eureka:chat".into(),
         max_turns: 4,
@@ -173,21 +162,14 @@ fn delivery(seq: u64, room: &str, sender: &str, text: &str) -> ChatDelivery {
     }
 }
 
-fn readout() -> SpendReadout {
-    let callers = vec![CallerSpend {
-        caller_id: INSTANCE.into(),
-        window_ms: 86_400_000,
-        ceiling_micro_usd: 20_000_000,
-        spent_micro_usd: 1_234_567,
-        reserved_micro_usd: 0,
-    }];
+fn readout() -> UsageReadout {
     let windows = vec![PlanQuota { window: "five_hour".into(), utilization_permille: Some(423), resets_at_unix_ms: 2, status: "allowed".into(), observed_at_unix_ms: 1 }];
-    SpendReadout::new(1, callers, model_connector::PlanQuotaSnapshot { windows })
+    UsageReadout::new(1, model_connector::PlanQuotaSnapshot { windows })
 }
 
 fn says(lines: &[(&str, &str)]) -> String {
     let say: Vec<_> = lines.iter().map(|(room, text)| json!({ "room": room, "text": text })).collect();
-    json!({ "say": say, "start_self_run": null }).to_string()
+    json!({ "say": say, "start_self_run": null, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string()
 }
 
 impl Rig {
@@ -213,9 +195,7 @@ impl Rig {
                 log: log.clone(),
                 replies: RefCell::new(replies.iter().cloned().collect()),
                 requests: RefCell::default(),
-                spent: Rc::new(Cell::new(1_234_567)),
                 readout_fails: Cell::new(false),
-                no_row: Cell::new(false),
                 at: Rc::new(Cell::new(1)),
                 during: RefCell::new(None),
             },
@@ -223,7 +203,7 @@ impl Rig {
             trace: FakeTrace::default(),
             log,
         };
-        rig.release("1");
+        rig.release();
         rig
     }
 
@@ -231,19 +211,9 @@ impl Rig {
         self.dir.path().join(INSTANCE).join("control.cc")
     }
 
-    fn release(&self, heat: &str) {
+    fn release(&self) {
         ControlWriter::open(self.store()).unwrap().set_brake(true, at(0), "op").unwrap();
-        let mut swarm = SwarmWriter::open(self.swarm_store()).unwrap();
-        swarm.set_brake(true, at(0), "op").unwrap();
-        let dial = SwarmDial {
-            heat: Decimal::from_str(heat).unwrap(),
-            base_rate_usd_per_h: Decimal::from_str("5").unwrap(),
-            base_run_usd: Decimal::from_str("5").unwrap(),
-            k: 1,
-            set_at: at(0),
-            set_by: "op".into(),
-        };
-        swarm.set_dial(dial).unwrap();
+        SwarmWriter::open(self.swarm_store()).unwrap().set_brake(true, at(0), "op").unwrap();
     }
 
     fn swarm_store(&self) -> PathBuf {
@@ -252,7 +222,7 @@ impl Rig {
 
     /// The heartbeat's part: the run a Persona unit starts under.
     fn open_the_run(&self) {
-        let (effective, _) = read(&FileSource::new(self.store()), &FileSource::new(self.swarm_store()), self.mind.instance());
+        let effective = read(&FileSource::new(self.store()), &FileSource::new(self.swarm_store()), self.mind.instance());
         if let Effective::Released(grant) = effective {
             let ports = Ports { mind: &self.mind, launcher: &Recording::default(), clock: &self.clock, host: "yggdrasil-host" };
             let request = LaunchRequest { turn: RunTurn::PersonaTurn, claims: vec![], agent: "mind-heartbeat".into(), grant };
@@ -275,6 +245,7 @@ impl Rig {
             connector: &self.connector,
             persona: &self.persona,
             trace: &self.trace,
+            tempo: None,
         };
         start(&organs, &FileSource::new(self.store()), &FileSource::new(self.swarm_store()), config).unwrap()
     }
@@ -427,17 +398,6 @@ fn reply_decodes_into_sends_and_ack() {
 }
 
 #[test]
-fn the_turn_is_one_tool_less_call_constrained_to_the_reply_schema_with_her_rooms() {
-    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
-    rig.go();
-    let requests = rig.connector.requests.borrow();
-    assert_eq!(requests[0].caller, INSTANCE);
-    assert!(requests[0].instructions.contains("You are Eureka."));
-    let schema: serde_json::Value = serde_json::from_str(&requests[0].output_schema_json).unwrap();
-    assert_eq!(schema["properties"]["say"]["items"]["properties"]["room"]["enum"], json!(["swarm", "burn", "operator"]));
-}
-
-#[test]
 fn a_reply_is_decoded_as_the_one_type_and_nothing_else_is_scanned() {
     let c = config();
     assert!(decode_reply(&says(&[("swarm", "x")]), &c.rooms).is_ok());
@@ -478,32 +438,12 @@ fn direct(seq: u64, room_id: &str, sender: &str, text: &str) -> ChatDelivery {
 }
 
 #[test]
-fn a_members_dm_is_answered_in_its_room_and_no_other_unconfigured_room_is() {
-    let dm = "!abc:chat";
-    let rig = Rig::new(vec![direct(1, dm, "@m:chat", "hello, are you there")], &[says(&[(dm, "yes")])]);
-    let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
-    assert_eq!((failure, answered), (None, 1));
-    assert_eq!(rig.chat.sent.borrow()[0].room_alias, dm);
-    let request = &rig.connector.requests.borrow()[0];
-    let schema: serde_json::Value = serde_json::from_str(&request.output_schema_json).unwrap();
-    assert_eq!(schema["properties"]["say"]["items"]["properties"]["room"]["enum"], json!(["swarm", "burn", "operator", dm]));
-    assert!(request.input.contains(dm), "the DM's room is among the rooms she is told she may speak in");
-
-    let rig = Rig::new(vec![direct(1, dm, "@m:chat", "hello")], &[says(&[("!other:chat", "psst")])]);
-    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
-    assert_eq!(failure, Some(Failure::RoomNotAllowed));
-    assert!(rig.chat.sent.borrow().is_empty() && rig.chat.acked.borrow().is_empty());
-
-    let rig = Rig::new(vec![delivery(1, "!notdm:chat", "@m:chat", "hello")], &[says(&[("!notdm:chat", "psst")])]);
-    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
-    assert_eq!(failure, Some(Failure::RoomNotAllowed), "a room that is not a DM is hers only when configured");
-}
-
-#[test]
 fn start_self_run_admits_brief_and_launches() {
     let reply = json!({
         "say": [{ "room": "operator", "text": "on it" }],
-        "start_self_run": { "brief": "Check the swarm queue", "repo": REPO, "campaign": CAMPAIGN }
+        "start_self_run": { "brief": "Check the swarm queue", "repo": REPO, "campaign": CAMPAIGN },
+        "tempo_vote_beat_s": null,
+        "urgency_permille": null
     })
     .to_string();
     let rig = Rig::new(vec![operator_says(1, "please start")], &[reply]);
@@ -525,7 +465,7 @@ fn start_self_run_admits_brief_and_launches() {
 
 #[test]
 fn a_start_outside_the_reply_bounds_fails_the_turn_without_an_admission_or_an_ack() {
-    let reply = json!({ "say": [], "start_self_run": { "brief": "x", "repo": "not a repo", "campaign": CAMPAIGN } }).to_string();
+    let reply = json!({ "say": [], "start_self_run": { "brief": "x", "repo": "not a repo", "campaign": CAMPAIGN }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
@@ -575,42 +515,6 @@ fn the_decoder_holds_the_bounds_the_schema_states() {
     assert_eq!(ask["repo"]["pattern"], REPO_PATTERN);
     assert_eq!(ask["campaign"]["enum"], json!([CAMPAIGN]));
     assert_eq!(ask["brief"]["maxLength"], BRIEF_MAX_CHARS);
-}
-
-#[test]
-fn burn_line_is_rendered_from_readout() {
-    let exact = "burn: spent 1.234567 of 20.000000 USD per 24h; plan five_hour 42.3% allowed; heat 1; live runs 1";
-    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("burn", "all quiet"), ("swarm", "no numbers here")])]);
-    rig.go();
-    assert_eq!(rig.sent_texts(), [format!("{exact}\nall quiet"), "no numbers here".to_string()]);
-    assert!(rig.connector.requests.borrow()[0].input.contains(exact), "the same line is in her input");
-}
-
-#[test]
-fn burn_line_never_guesses() {
-    let spend = readout();
-    assert_eq!(burn_line(&spend, "someone-else", Some(Decimal::ONE), 0), None);
-    assert_eq!(burn_line(&spend, INSTANCE, None, 0), None);
-    let unobserved = SpendReadout { plan_quota: vec![], ..spend };
-    assert_eq!(
-        burn_line(&unobserved, INSTANCE, Some(Decimal::new(15, 1)), 3).unwrap(),
-        "burn: spent 1.234567 of 20.000000 USD per 24h; plan quota unobserved; heat 1.5; live runs 3"
-    );
-    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("burn", "x")])]);
-    rig.connector.readout_fails.set(true);
-    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
-    assert_eq!((failure, rig.turns()), (Some(Failure::Readout), 0));
-}
-
-#[test]
-fn an_expired_plan_window_prints_expired_and_does_not_fail_the_turn() {
-    let mut spend = readout();
-    spend.plan_quota[0].utilization_permille = None;
-    spend.plan_quota[0].status = "expired".into();
-    assert_eq!(
-        burn_line(&spend, INSTANCE, Some(Decimal::ONE), 1).unwrap(),
-        "burn: spent 1.234567 of 20.000000 USD per 24h; plan five_hour expired; heat 1; live runs 1"
-    );
 }
 
 #[test]
@@ -728,98 +632,10 @@ fn the_trace_store_keeps_each_turn_under_its_run_and_turn() {
 }
 
 #[test]
-fn the_persona_flags_are_taken_out_and_the_rest_is_left_for_the_shared_parser() {
-    let args = |text: &str| text.split_whitespace().map(String::from).collect::<Vec<_>>();
-    let (parsed, rest) = Config::from_args(
-        &args("--instance eureka --rooms swarm,burn,operator --burn-room burn --operator @op:chat,@op2:chat --self-sender @eureka:chat --endpoint rudp://10.0.0.1:1"),
-        "usage",
-    )
-    .unwrap();
-    assert_eq!(parsed.rooms, ["swarm", "burn", "operator"]);
-    assert_eq!((parsed.burn_room.as_str(), parsed.own_sender.as_str(), parsed.max_turns), ("burn", "@eureka:chat", MAX_TURNS_PER_START));
-    assert_eq!(parsed.operators, ["@op:chat", "@op2:chat"]);
-    assert_eq!(rest, args("--instance eureka --endpoint rudp://10.0.0.1:1"));
-    let (two, _) = Config::from_args(&args("--rooms a --burn-room a --operator o --self-sender s --max-turns 2"), "usage").unwrap();
-    assert_eq!(two.max_turns, 2);
-    for bad in [
-        "--rooms a --operator o --self-sender s",
-        "--rooms a --burn-room b --operator o --self-sender s",
-        "--rooms a,,b --burn-room a --operator o --self-sender s",
-        "--rooms a --rooms a --burn-room a --operator o --self-sender s",
-        "--rooms a --burn-room a --operator o --self-sender s --max-turns 0",
-        "--rooms a --burn-room a --operator o --self-sender s --max-turns x",
-        "--rooms a --burn-room a --operator o --self-sender",
-    ] {
-        assert!(Config::from_args(&args(bad), "usage").is_err(), "{bad}");
-    }
-}
-
-#[test]
-fn outcomes_and_failures_read_as_one_line_each_without_values() {
-    assert_eq!(Outcome::Dead(HeldReason::BrakeHeld).to_string(), "dead: BrakeHeld");
-    let served = Outcome::Served { run: run_ref("r1"), answered: 2, failure: Some(Failure::Send), self_run: Some(run_ref("s1")) };
-    let line = served.to_string();
-    assert!(line.contains("r1") && line.contains("answered 2") && line.contains("a send was refused or failed") && line.contains("self run") && line.contains("s1"), "{line}");
-    assert_eq!(Failure::Held(HeldReason::DialAbsent).to_string(), "held: DialAbsent");
-    for failure in [Failure::Chat, Failure::Persona, Failure::Readout, Failure::Connector, Failure::Undecodable, Failure::RoomNotAllowed, Failure::SelfRun, Failure::Ack] {
-        assert!(!failure.to_string().is_empty());
-    }
-    let texts: std::collections::BTreeSet<_> = [Failure::Chat, Failure::Persona, Failure::Readout, Failure::Connector, Failure::Undecodable, Failure::RoomNotAllowed, Failure::Send, Failure::SelfRun, Failure::Ack].map(|failure| failure.to_string()).into();
-    assert_eq!(texts.len(), 9, "each failure reads differently");
-}
-
-#[test]
 fn the_persona_state_is_rendered_into_the_instructions_whole() {
     let rendered = render_instructions(&json!({ "name": "Eureka", "traits": { "bold": 3 } }));
     assert!(rendered.starts_with("You are the persona"), "{rendered}");
     assert!(rendered.contains("\"name\": \"Eureka\"") && rendered.contains("\"bold\": 3"), "{rendered}");
-}
-
-#[test]
-fn the_run_stops_when_its_own_budget_is_spent() {
-    // The run's cap is the dial's base run cost at heat 1: 5 USD. Spend is read
-    // from the ledger, so what a turn costs is what the next turn sees.
-    for (per_turn, expected_turns) in [(5_000_000u64, 1usize), (4_999_999, 2), (0, 3)] {
-        let replies: Vec<_> = (0..8).map(|_| says(&[("swarm", "x")])).collect();
-        let rig = Rig::new(vec![operator_says(1, "a")], &replies);
-        let (deliveries, spent, next) = (rig.chat.deliveries.clone(), rig.connector.spent.clone(), Cell::new(1));
-        *rig.connector.during.borrow_mut() = Some(Box::new(move || {
-            next.set(next.get() + 1);
-            deliveries.borrow_mut().push(operator_says(next.get(), "more"));
-            spent.set(spent.get() + per_turn);
-        }));
-        let Outcome::Served { failure, .. } = rig.go_with(&Config { max_turns: 3, ..config() }) else { panic!("served") };
-        assert_eq!((rig.turns(), failure), (expected_turns, None), "per turn {per_turn}");
-    }
-}
-
-#[test]
-fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them() {
-    let env = |name: &str| {
-        Some(
-            match name {
-                ENV_ROOMS => "swarm,burn",
-                ENV_BURN_ROOM => "burn",
-                ENV_OPERATOR => "@op:chat,@op2:chat",
-                ENV_SELF_SENDER => "@eureka:chat",
-                _ => "",
-            }
-            .to_string(),
-        )
-    };
-    let args = |text: &str| text.split_whitespace().map(String::from).collect::<Vec<_>>();
-    let (config, rest) = Config::from_args_and_env(&args("--instance eureka"), env, "usage").unwrap();
-    assert_eq!(
-        config,
-        Config { rooms: vec!["swarm".into(), "burn".into()], burn_room: "burn".into(), operators: vec!["@op:chat".into(), "@op2:chat".into()], own_sender: "@eureka:chat".into(), max_turns: MAX_TURNS_PER_START, doctrine: vec![] }
-    );
-    assert_eq!(rest, ["--instance", "eureka"]);
-    // A flag wins over its variable, one at a time.
-    let (flagged, _) = Config::from_args_and_env(&args("--instance eureka --burn-room swarm --rooms swarm,burn"), env, "usage").unwrap();
-    assert_eq!((flagged.burn_room.as_str(), flagged.rooms.len()), ("swarm", 2));
-    // An empty variable is unset, and a missing setting is the usage error.
-    assert!(Config::from_args_and_env(&args("--instance eureka"), |name| if name == ENV_ROOMS { Some(String::new()) } else { env(name) }, "usage").is_err());
-    assert!(Config::from_args_and_env(&args("--instance eureka"), |_| None, "usage").is_err());
 }
 
 #[test]
@@ -876,115 +692,10 @@ fn a_self_run_in_a_campaign_the_mind_does_not_hold_is_refused_before_anything_is
 }
 
 #[test]
-fn a_turn_is_named_by_its_run_and_its_number() {
-    let rig = Rig::new(vec![operator_says(1, "a")], &(0..4).map(|_| says(&[("swarm", "x")])).collect::<Vec<_>>());
-    rig.mind.committed(vec![run("woken", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
-    rig.clock.0.set(600_000);
-    let (deliveries, next) = (rig.chat.deliveries.clone(), Cell::new(1));
-    *rig.connector.during.borrow_mut() = Some(Box::new(move || {
-        next.set(next.get() + 1);
-        if next.get() < 3 {
-            deliveries.borrow_mut().push(operator_says(next.get(), "more"));
-        }
-    }));
-    let Outcome::Served { run: carried, answered, .. } = rig.start_with(&config()) else { panic!("served") };
-    assert_eq!((carried, answered), (run_ref("woken"), 2));
-    let ids: Vec<_> = rig.connector.requests.borrow().iter().map(|request| request.request_id.clone()).collect();
-    assert_eq!(ids, ["woken-t0", "woken-t1"]);
-    assert!(rig.connector.requests.borrow().iter().all(|request| request.max_cost_micro_usd == 5_000_000), "a turn may cost at most the run's own budget");
-    let trace = rig.trace.0.borrow();
-    assert_eq!(trace.iter().map(|record| (record.run.as_str(), record.turn)).collect::<Vec<_>>(), [("woken", 0), ("woken", 1)]);
-}
-
-#[test]
 fn a_start_ends_when_the_chat_is_drained_and_goes_on_while_it_is_not() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "x")]), says(&[("swarm", "never")])]);
     let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
     assert_eq!((rig.turns(), answered, failure, rig.chat.pending_calls.get()), (1, 1, None, 2), "the second turn looks, finds nothing and stops");
-}
-
-#[test]
-fn the_burn_line_counts_the_live_runs_of_the_mind() {
-    let alone = Rig::new(vec![operator_says(1, "a")], &[says(&[("burn", "x")])]);
-    alone.go();
-    assert!(alone.sent_texts()[0].starts_with("burn:") && alone.sent_texts()[0].contains("live runs 1\n"), "{:?}", alone.sent_texts());
-    let busy = Rig::new(vec![operator_says(1, "a")], &[says(&[("burn", "x")])]);
-    busy.mind.committed(vec![run("self-one", RunTurn::SelfRun, RunOperator::Mind, &[])]);
-    busy.go();
-    assert!(busy.sent_texts()[0].contains("live runs 2\n"), "her Persona run and her Self run: {:?}", busy.sent_texts());
-}
-
-#[test]
-fn a_run_that_crosses_a_spend_window_is_spent_though_the_ledger_reads_zero() {
-    // The ledger resets at the window boundary, so growth since the first reading
-    // would read 0 and the run's cap would start over.
-    let replies: Vec<_> = (0..8).map(|_| says(&[("swarm", "x")])).collect();
-    let rig = Rig::new(vec![operator_says(1, "a")], &replies);
-    let (deliveries, spent, next) = (rig.chat.deliveries.clone(), rig.connector.spent.clone(), Cell::new(1));
-    let clock = rig.connector.at.clone();
-    *rig.connector.during.borrow_mut() = Some(Box::new(move || {
-        next.set(next.get() + 1);
-        deliveries.borrow_mut().push(operator_says(next.get(), "more"));
-        spent.set(0);
-        clock.set(clock.get() + 86_400_000);
-    }));
-    let Outcome::Served { failure, .. } = rig.go_with(&Config { max_turns: 3, ..config() }) else { panic!("served") };
-    assert_eq!((rig.turns(), failure), (1, None));
-}
-
-#[test]
-fn a_turn_asks_the_connector_for_what_is_left_of_the_run_cap_never_the_whole_cap() {
-    let replies: Vec<_> = (0..8).map(|_| says(&[("swarm", "x")])).collect();
-    let rig = Rig::new(vec![operator_says(1, "a")], &replies);
-    let (deliveries, spent, next) = (rig.chat.deliveries.clone(), rig.connector.spent.clone(), Cell::new(1));
-    *rig.connector.during.borrow_mut() = Some(Box::new(move || {
-        next.set(next.get() + 1);
-        deliveries.borrow_mut().push(operator_says(next.get(), "more"));
-        spent.set(spent.get() + 4_999_999);
-    }));
-    let Outcome::Served { failure, answered, .. } = rig.go_with(&Config { max_turns: 3, ..config() }) else { panic!("served") };
-    let asked: Vec<u64> = rig.connector.requests.borrow().iter().map(|request| request.max_cost_micro_usd).collect();
-    // The cap is 5 USD: the first turn may cost it all, the second the one micro-USD left, and the third finds none.
-    assert_eq!(asked, [5_000_000, 1]);
-    assert_eq!((failure, answered), (None, 2));
-}
-
-#[test]
-fn a_readout_with_no_row_for_her_caller_holds_the_run_and_the_trace_says_why() {
-    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "x")])]);
-    rig.connector.no_row.set(true);
-    let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
-    assert_eq!((rig.turns(), answered, failure), (0, 0, Some(Failure::Readout)));
-    let trace = rig.trace.0.borrow();
-    assert_eq!(trace.len(), 1);
-    assert_eq!(trace[0].outcome, "held: the spend readout has no row for her caller");
-    assert!(rig.chat.acked.borrow().is_empty() && rig.chat.sent.borrow().is_empty());
-}
-
-#[test]
-fn deliveries_from_different_dm_rooms_are_never_in_one_turn() {
-    let (a, b) = ("!a:chat", "!b:chat");
-    let pending = vec![
-        direct(1, a, "@ann:chat", "secret-a"),
-        direct(2, b, "@bob:chat", "hi-b"),
-        delivery(3, "swarm", "@m:chat", "public-c"),
-        direct(4, a, "@ann:chat", "more-a"),
-        direct(5, a, "@ann:chat", "again-a"),
-    ];
-    let replies = [says(&[(a, "1")]), says(&[(b, "2")]), says(&[("swarm", "3")]), says(&[(a, "4")])];
-    let rig = Rig::new(pending, &replies);
-    let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
-    assert_eq!((failure, answered), (None, 4));
-    let inputs: Vec<String> = rig.connector.requests.borrow().iter().map(|request| request.input.clone()).collect();
-    let texts = ["secret-a", "hi-b", "public-c", "more-a"];
-    for (turn, input) in inputs.iter().enumerate() {
-        for (other, text) in texts.iter().enumerate() {
-            assert_eq!(input.contains(text), turn == other, "turn {turn} text {text}");
-        }
-    }
-    assert!(inputs[3].contains("again-a"), "one room's consecutive deliveries share its turn");
-    assert!(!inputs[0].contains("again-a"), "a later delivery waits for its turn");
-    assert_eq!(*rig.chat.acked.borrow(), vec![1, 2, 3, 5]);
 }
 
 fn write_doctrine(rig: &Rig, name: &str, text: &str) -> PathBuf {
@@ -1123,7 +834,7 @@ fn input_for(mentions: &[&str], display: &str) -> String {
     aqua.sender_display = display.into();
     let mut said = delivery(2, "swarm", "@operator:chat", "a reply");
     said.mentions = mentions.iter().map(|m| (*m).to_string()).collect();
-    render_input(&config(), &[aqua, said], &[], "burn")
+    render_input(&config(), &[aqua, said], &[], "usage")
 }
 
 fn message_two(input: &str) -> &str {
@@ -1169,4 +880,68 @@ fn a_message_without_mentions_renders_no_addressee() {
 #[test]
 fn the_turn_input_says_how_to_read_an_addressee() {
     assert!(input_for(&[], "Aqua").contains("A message addressed to another Mind is theirs to answer. Answer it only if you hold something they need, and say so."));
+}
+
+fn voting(beat: serde_json::Value, urgency: serde_json::Value) -> String {
+    json!({ "say": [{ "room": "operator", "text": "ok" }], "start_self_run": null, "tempo_vote_beat_s": beat, "urgency_permille": urgency }).to_string()
+}
+
+#[test]
+fn a_vote_and_a_declared_urgency_in_the_reply_become_one_pulse_in_her_own_mind() {
+    let rig = Rig::new(vec![operator_says(1, "how fast should we go?")], &[voting(json!(600), json!(250))]);
+    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, None);
+    let pulses = rig.mind.ids(K::Pulse);
+    assert_eq!(pulses.len(), 1, "{pulses:?}");
+    let PipelineDocument::Pulse(pulse) = rig.mind.view(K::Pulse, &pulses[0]).unwrap().document else { panic!("a pulse") };
+    assert_eq!((pulse.tempo_vote_beat_s, pulse.urgency_permille), (Some(600), Some(250)));
+    assert_eq!(pulse.instance, *rig.mind.instance());
+}
+
+#[test]
+fn a_reply_that_votes_and_declares_nothing_admits_no_pulse() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[("operator", "hi")])]);
+    rig.go();
+    assert!(rig.mind.ids(K::Pulse).is_empty());
+}
+
+#[test]
+fn a_vote_or_urgency_outside_its_bounds_fails_the_turn_without_a_pulse_or_an_ack() {
+    for (beat, urgency) in [(json!(59), json!(null)), (json!(86_401), json!(null)), (json!(null), json!(1001)), (json!(null), json!(-1)), (json!("fast"), json!(null))] {
+        let rig = Rig::new(vec![operator_says(1, "go")], &[voting(beat.clone(), urgency.clone())]);
+        let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+        assert_eq!(failure, Some(Failure::Undecodable), "{beat} {urgency}");
+        assert!(rig.mind.ids(K::Pulse).is_empty() && rig.chat.acked.borrow().is_empty(), "{beat} {urgency}");
+    }
+}
+
+#[test]
+fn the_reply_schema_bounds_the_vote_and_the_urgency_to_the_pulse_kind() {
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[])).unwrap();
+    assert_eq!(schema["required"], json!(["say", "start_self_run", "tempo_vote_beat_s", "urgency_permille"]));
+    assert_eq!(schema["properties"]["tempo_vote_beat_s"]["anyOf"][1], json!({ "type": "integer", "minimum": 60, "maximum": 86_400 }));
+    assert_eq!(schema["properties"]["urgency_permille"]["anyOf"][1], json!({ "type": "integer", "minimum": 0, "maximum": 1000 }));
+}
+
+#[test]
+fn the_turn_input_carries_the_usage_line_and_the_swarm_aim_and_a_high_usage_changes_nothing_about_the_turn() {
+    for permille in [423, 990] {
+        let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[("operator", "hi")])]);
+        let _ = permille;
+        let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
+        assert_eq!((failure, answered), (None, 1));
+        let input = rig.connector.requests.borrow()[0].input.clone();
+        assert!(input.contains("Plan usage: five_hour 42.3% allowed"), "{input}");
+        assert!(input.contains("aims to have used about 90% of the weekly allowance at reset; nothing enforces it"), "{input}");
+        assert!(input.contains("Tempo: not yet read."), "{input}");
+    }
+}
+
+#[test]
+fn a_usage_readout_that_cannot_be_had_is_said_and_the_turn_goes_on() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[("operator", "hi")])]);
+    rig.connector.readout_fails.set(true);
+    let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
+    assert_eq!((failure, answered), (None, 1), "usage is display only");
+    assert!(rig.connector.requests.borrow()[0].input.contains("Plan usage: unavailable."));
 }

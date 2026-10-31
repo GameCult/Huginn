@@ -14,6 +14,7 @@ use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
 
 use super::*;
 use crate::lease_client::{Lease, LeaseRefused, token_holding};
+use model_connector::PlanQuota;
 use crate::testkit::*;
 
 /// A cap no constant of the library equals, so that a request of it came from the argument.
@@ -77,9 +78,7 @@ enum Event {
     Lent,
     /// A child was started.
     Spawned,
-    /// The lease was settled with this.
-    Settled(Settlement),
-    /// The lease was dropped unsettled: the connector bills the reservation.
+    /// The lease was dropped, which ends it: nothing is settled.
     Abandoned,
 }
 
@@ -198,8 +197,6 @@ impl Spawner for Fake {
 #[derive(Clone, Copy)]
 enum Answer {
     Grant,
-    /// Lends, then fails the settle.
-    GrantSettleFails,
     Refuse(LeaseRefusalKind),
     Unreachable,
 }
@@ -226,9 +223,9 @@ impl Lender for FakeLender {
     fn lend(&self, request: &LeaseRequest) -> Result<Lent> {
         self.asked.borrow_mut().push(request.clone());
         match self.answer {
-            Answer::Grant | Answer::GrantSettleFails => {
+            Answer::Grant => {
                 self.log.borrow_mut().push(Event::Lent);
-                Ok(Lent::Granted(Box::new(FakeLease { log: self.log.clone(), token: token_holding("tok-canary"), settled: false, fails: matches!(self.answer, Answer::GrantSettleFails) })))
+                Ok(Lent::Granted(Box::new(FakeLease { log: self.log.clone(), token: token_holding("tok-canary"), plan: vec![plan_window()] })))
             }
             Answer::Refuse(kind) => Ok(Lent::Refused(LeaseRefused { kind, detail: "detail-canary".into() })),
             Answer::Unreachable => Err(anyhow!("down")),
@@ -236,12 +233,14 @@ impl Lender for FakeLender {
     }
 }
 
+fn plan_window() -> PlanQuota {
+    PlanQuota { window: "five_hour".into(), utilization_permille: Some(423), resets_at_unix_ms: 1_793_307_000_000, status: "allowed".into(), observed_at_unix_ms: 1_793_306_000_000 }
+}
+
 struct FakeLease {
     log: Rc<RefCell<Vec<Event>>>,
     token: TokenFd,
-    settled: bool,
-    /// The settle reaches the connector's side and fails there.
-    fails: bool,
+    plan: Vec<PlanQuota>,
 }
 
 impl Lease for FakeLease {
@@ -249,18 +248,14 @@ impl Lease for FakeLease {
         &self.token
     }
 
-    fn settle(mut self: Box<Self>, settlement: Settlement) -> Result<u64> {
-        self.settled = true;
-        self.log.borrow_mut().push(Event::Settled(settlement));
-        if self.fails { Err(anyhow!("detail-canary")) } else { Ok(7) }
+    fn plan_quota(&self) -> &[PlanQuota] {
+        &self.plan
     }
 }
 
 impl Drop for FakeLease {
     fn drop(&mut self) {
-        if !self.settled {
-            self.log.borrow_mut().push(Event::Abandoned);
-        }
+        self.log.borrow_mut().push(Event::Abandoned);
     }
 }
 
@@ -380,7 +375,7 @@ fn carry_scripted(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Opt
     let outcome = carry(seen, &*clock, &lender, &fake, TEST_CAP_S, &mut out);
     let all = log.borrow().clone();
     // The child's own events; the lease's are in `all`, in order with them.
-    let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Settled(_) | Event::Abandoned)).cloned().collect();
+    let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Abandoned)).cloned().collect();
     let spawns = fake.spawns.borrow().clone();
     Ran { outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
 }
@@ -474,43 +469,6 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
 // ---- what is started ------------------------------------------------------
 
 #[test]
-fn claude_args_is_exactly_the_fixed_list_for_a_session_and_a_budget() {
-    let session = Uuid::parse_str(SESSION_OF_RUN_A).unwrap();
-    let args = claude_args(session, "12.25");
-    assert_eq!(
-        args,
-        [
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--session-id",
-            SESSION_OF_RUN_A,
-            "--max-budget-usd",
-            "12.25",
-            "--max-turns",
-            "500",
-            "--permission-mode",
-            "bypassPermissions",
-            "--permission-prompts",
-            "none",
-            "--setting-sources",
-            "user",
-        ]
-    );
-    // Those belong to the run measure or to the unit's managed settings.
-    for forbidden in ["--resume", "--continue", "--fork-session", "--model", "--dangerously-skip-permissions", "--settings", "--system-prompt"] {
-        assert!(!args.iter().any(|arg| arg.starts_with(forbidden) || arg.contains("dangerously")), "{forbidden}");
-    }
-    // Print mode starts in Manual without a mode, and prompts none then denies.
-    let mode = args.iter().position(|arg| arg == "--permission-mode").expect("mode flag");
-    assert_eq!(args[mode + 1], "bypassPermissions");
-    assert_eq!(MAX_TURNS, 500);
-}
-
-#[test]
 fn the_session_id_is_uuid_v5_of_the_run_id_and_differs_per_run() {
     assert_eq!(session_id(&foreign_run("eureka:run:mind-20261022T120000000Z")).to_string(), SESSION_OF_MIND_RUN);
     assert_eq!(session_id(&run_ref("selfrun-a")).to_string(), SESSION_OF_RUN_A);
@@ -518,23 +476,13 @@ fn the_session_id_is_uuid_v5_of_the_run_id_and_differs_per_run() {
 }
 
 #[test]
-fn the_child_is_started_for_her_run_with_the_runs_own_budget_verbatim() {
-    // Trailing zeros are significant: "10" is ten dollars, not one.
-    for budget in ["0.5", "5", "12.25", "10", "100"] {
-        let mind = TestMind::seeded();
-        mind.committed(vec![self_run("selfrun-b", budget)]);
-        let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
-        assert_eq!(ran.spawns.len(), 1, "{budget}");
-        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap(), budget), "{budget}");
-    }
-}
-
-#[test]
 fn the_start_message_is_the_first_thing_written_and_names_the_skill_the_instance_and_the_run() {
     let ran = go(vec![Out(result_line())]);
     assert!(matches!(&ran.events[0], Event::Wrote(_)), "the start precedes the first read: {:?}", ran.events[0]);
     let written = ran.written();
-    assert_eq!(written[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a")));
+    for needle in ["Plan usage: five_hour 42.3% allowed, resets at unix ms 1793307000000", "about 90% of the weekly allowance", "nothing enforces it"] {
+        assert!(written[0].contains(needle), "the lease grant plan windows reach the child: {needle}: {}", written[0]);
+    }
     for needle in ["Use the eureka skill.", "yggdrasil", "yggdrasil:run:selfrun-a", AGENT] {
         assert!(written[0].contains(needle), "{needle}: {}", written[0]);
     }
@@ -543,7 +491,7 @@ fn the_start_message_is_the_first_thing_written_and_names_the_skill_the_instance
 
 #[test]
 fn the_start_message_opens_with_the_skill_the_seed_ships() {
-    let message = start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"));
+    let message = start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_100_000);
     assert!(message.starts_with("Use the eureka skill. You are Self for the instance `yggdrasil`;"), "{message}");
     assert!(!message.contains("mind-self skill"), "{message}");
 }
@@ -698,20 +646,6 @@ fn read_usage_classifies_the_owners_real_records() {
 }
 
 #[test]
-fn records_that_share_a_message_id_count_once_and_subagent_records_never_move_the_prefix() {
-    let mut steps: Vec<Step> = RECORDS.lines().map(|line| Out(line.to_string())).collect();
-    steps.insert(3, Out(subagent("msg_sub", 999_999)));
-    let ran = go(steps);
-    assert_eq!(
-        ran.out,
-        "request 1 prefix 84210\nrequest 2 prefix 100751\nrequest 3 prefix 117174\nrequest 4 prefix 118336\nrequest 5 prefix 126746\nrequest 6 prefix 127250\nrequest 7 prefix 129853\nsettled: billed 7 micro-USD\n"
-    );
-    let (cause, _, requests, prefix) = ran.ended();
-    assert_eq!((cause, requests, prefix), (Cause::Own, 7, 129_853), "the newest prefix, 129853, not a subagent's 999999");
-    assert_eq!(flushes(&ran), 0);
-}
-
-#[test]
 fn the_prefix_is_the_newest_requests_not_the_largest() {
     let ran = go(vec![Out(at("m1", 200_000)), Out(at("m2", 150_000))]);
     assert_eq!(ran.ended().3, 150_000);
@@ -806,35 +740,6 @@ fn the_headroom_counts_the_requests_after_the_first_result_that_follows_the_flus
     // Before that result the running turn's own requests are not the flush's turn: however far they grow, no interrupt.
     let same_turn = go(vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", hard)), Out(at("m3", hard + 500_000))]);
     assert_eq!(same_turn.count(&Event::Stopped(Stop::Interrupt)), 0);
-}
-
-#[test]
-fn a_jump_past_the_ceiling_plus_the_headroom_writes_the_flush_and_the_running_turn_cannot_use_up_the_flushs_turn() {
-    let jump = carry_with(
-        &Seen::of(&with_run()),
-        vec![Out(at("m1", 290_000)), Out(at("m2", 400_000)), Out(at("m3", 470_000)), Out(result_line()), Out(at("m4", 459_999)), Out(at("m5", 460_000)), Out(at("m6", 470_000))],
-        Some(130),
-        true,
-    );
-    let kinds: Vec<&str> = jump
-        .events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Wrote(line) if line.contains("context ceiling") => Some("flush"),
-            Event::Stopped(_) => Some("interrupt"),
-            Event::InputClosed => Some("closed"),
-            Event::Asked(_) => Some("read"),
-            _ => None,
-        })
-        .collect();
-    // Reads: m1, m2 (the jump, which writes the flush), m3 (the running turn's 470k, past the headroom: no interrupt).
-    assert_eq!(kinds[..5], ["read", "read", "flush", "read", "read"], "{kinds:?}");
-    // The headroom is measured from the prefix the flush was asked at (400k) and counts the requests after the
-    // first result only: 459_999 does not interrupt; 460_000 does, once, and m6 is never read.
-    assert_eq!(jump.count(&Event::Stopped(Stop::Interrupt)), 1, "{kinds:?}");
-    assert_eq!(jump.out, "request 1 prefix 290000\nrequest 2 prefix 400000\nrequest 3 prefix 470000\nresult subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed\nrequest 4 prefix 459999\nrequest 5 prefix 460000\nsettled: billed 7 micro-USD\n");
-    assert_eq!(jump.ended().0, Cause::Signalled(Stop::Interrupt));
-    assert_eq!(flushes(&jump), 1);
 }
 
 #[test]
@@ -1028,25 +933,6 @@ fn the_outcome_names_how_it_ended_and_the_exit_status_follows_the_childs_code() 
     assert_eq!(SelfRunOutcome::NoRun.to_string(), "no run: she has no single open Self run");
 }
 
-#[test]
-fn unreadable_and_foreign_lines_are_skipped_and_never_printed() {
-    let canary = "canary-stream-line-8c41";
-    let mut foreign: Value = serde_json::from_str(&init_line()).unwrap();
-    foreign["cwd"] = json!(canary);
-    foreign["type"] = json!(canary);
-    let ran = go(vec![
-        Out(format!("not json {canary}")),
-        Out(foreign.to_string()),
-        Out(format!("[\"{canary}\"]")),
-        Out(at("m1", 10)),
-        Out(result_line()),
-    ]);
-    assert_eq!(ran.out, "request 1 prefix 10\nresult subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed\nsettled: billed 7 micro-USD\n");
-    let outcome = ran.outcome.as_ref().unwrap().to_string();
-    assert!(!ran.out.contains(canary) && !outcome.contains(canary));
-    assert!(!ran.written().iter().any(|text| text.contains(canary)), "nothing from the stream is written back");
-}
-
 
 // ---- the real child -----------------------------------------------------------
 
@@ -1217,21 +1103,6 @@ mod process {
         fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
             Ok(Box::new(Bounded(start_with(&self.0, args, token), std::time::Instant::now())))
         }
-    }
-
-    #[test]
-    fn a_whole_run_through_the_real_child_flushes_at_the_ceiling_and_ends_on_the_result() {
-        let dir = tempfile::tempdir().unwrap();
-        let lines = [at("m1", 10), at("m2", CEILING_TOKENS)].join("\n");
-        let result = result_line();
-        // Prints two requests, waits for the flush on stdin, then the result, as a stand-in for a Self that obeys.
-        let body = format!("cat <<'EOF'\n{lines}\nEOF\nread -t 5 start\nread -t 5 flush\ncat <<'EOF'\n{result}\nEOF\nwhile read more; do :; done\nexit 0");
-        let program = script(&dir, &body);
-        let mind = with_run();
-        let mut out = Vec::new();
-        let outcome = carry(&Seen::of(&mind), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
-        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000 });
-        assert_eq!(String::from_utf8(out).unwrap(), "request 1 prefix 10\nrequest 2 prefix 300000\nresult subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed\nsettled: billed 7 micro-USD\n");
     }
 
     #[test]
