@@ -259,3 +259,46 @@ mod socket_wire {
         served.join().unwrap();
     }
 }
+
+/// The connector published bytes of lease v2, vendored under `lease_v2/` from
+/// ModelConnector `c1802d8` (`crates/claude-connector/tests/fixtures/lease_v2`).
+/// The client decodes every one of them and encodes each back to the same bytes.
+mod connector_goldens {
+    use super::*;
+
+    const REQUEST: &[u8] = include_bytes!("lease_v2/request.bin");
+    const GRANT: &[u8] = include_bytes!("lease_v2/grant.bin");
+    const REFUSALS: [(&[u8], LeaseRefusalKind); 4] = [
+        (include_bytes!("lease_v2/refusal_unknown_caller.bin"), LeaseRefusalKind::UnknownCaller),
+        (include_bytes!("lease_v2/refusal_expired.bin"), LeaseRefusalKind::Expired),
+        (include_bytes!("lease_v2/refusal_busy.bin"), LeaseRefusalKind::Busy),
+        (include_bytes!("lease_v2/refusal_provider_rejected.bin"), LeaseRefusalKind::ProviderRejected),
+    ];
+
+    #[test]
+    fn the_request_encodes_to_exactly_the_published_bytes() {
+        let Some(LeaseMessage::Request(request)) = decode_frame(REQUEST) else { panic!("request.bin is a request") };
+        assert_eq!(request.expires_at_unix_ms, 0x0000_01a1_896d_3cc0);
+        assert_eq!(encode_frame(&LeaseMessage::Request(LeaseRequest { expires_at_unix_ms: 0x0000_01a1_896d_3cc0 })).unwrap(), REQUEST);
+    }
+
+    #[test]
+    fn every_published_refusal_decodes_to_its_kind_and_encodes_back_to_its_bytes() {
+        for (bytes, kind) in REFUSALS {
+            let message = decode_frame(bytes).unwrap_or_else(|| panic!("{kind:?} decodes"));
+            let LeaseMessage::Refusal(refused) = &message else { panic!("{kind:?}: a refusal") };
+            assert_eq!(refused.kind, kind);
+            assert_eq!(encode_frame(&message).unwrap(), bytes, "{kind:?} re-encodes to the connector bytes");
+        }
+    }
+
+    #[test]
+    fn the_published_grant_decodes_with_both_plan_windows_and_encodes_back_to_its_bytes() {
+        let message = decode_frame(GRANT).expect("grant.bin decodes");
+        let LeaseMessage::Grant(grant) = &message else { panic!("a grant") };
+        assert!(!grant.lease_id.is_empty());
+        let windows: Vec<&str> = grant.plan_quota.iter().map(|plan| plan.window.as_str()).collect();
+        assert_eq!(windows, ["five_hour", "seven_day"]);
+        assert_eq!(encode_frame(&message).unwrap(), GRANT);
+    }
+}

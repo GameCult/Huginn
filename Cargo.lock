@@ -1156,7 +1156,7 @@ dependencies = [
 [[package]]
 name = "model-connector"
 version = "0.1.0"
-source = "git+https://eureka.gamecult.org/forge/GameCult/ModelConnector.git?rev=9db62027eb1e6a2f7a47fdfb3cb5f118c5b96da7#9db62027eb1e6a2f7a47fdfb3cb5f118c5b96da7"
+source = "git+https://eureka.gamecult.org/forge/GameCult/ModelConnector.git?rev=c1802d85bee3ae04b0c5737563c8343c1fef515d#c1802d85bee3ae04b0c5737563c8343c1fef515d"
 dependencies = [
  "aes-gcm",
  "base64",

@@ -33,7 +33,7 @@ cultnet-rs.workspace = true
 eureka-pipeline = { path = "../eureka-pipeline" }
 eureka-state = { path = "../eureka-state", default-features = false }
 huginn-mind = { path = "../huginn-mind" }
-model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "9db62027eb1e6a2f7a47fdfb3cb5f118c5b96da7", package = "model-connector" }
+model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "c1802d85bee3ae04b0c5737563c8343c1fef515d", package = "model-connector" }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -53,7 +53,7 @@ rustix = { version = "1", default-features = false, features = ["std", "net"] }
 [dev-dependencies]
 # The kit's serve loop and service, for the test that runs the connector client
 # against the real server with a fake provider behind it.
-model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "9db62027eb1e6a2f7a47fdfb3cb5f118c5b96da7", package = "model-connector", features = ["daemon"] }
+model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "c1802d85bee3ae04b0c5737563c8343c1fef515d", package = "model-connector", features = ["daemon"] }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
