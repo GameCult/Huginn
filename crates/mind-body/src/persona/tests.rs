@@ -913,7 +913,7 @@ fn a_reply_that_votes_and_declares_nothing_admits_no_pulse() {
 #[test]
 fn a_vote_or_urgency_outside_its_bounds_fails_the_turn_without_a_pulse_or_an_ack() {
     for (beat, urgency) in [(json!(59), json!(null)), (json!(86_401), json!(null)), (json!(null), json!(1001)), (json!(null), json!(-1)), (json!("fast"), json!(null))] {
-        let rig = Rig::new(vec![operator_says(1, "go")], &[voting(beat.clone(), urgency.clone())]);
+        let rig = Rig::new(vec![operator_says(1, "go")], &[voting(Some(beat.clone()), urgency.clone())]);
         let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
         assert_eq!(failure, Some(Failure::Undecodable), "{beat} {urgency}");
         assert!(rig.mind.ids(K::Pulse).is_empty() && rig.chat.acked.borrow().is_empty(), "{beat} {urgency}");
