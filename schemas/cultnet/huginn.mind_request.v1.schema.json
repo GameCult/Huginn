@@ -132,6 +132,31 @@
       "required": [
         "PersonaPut"
       ]
+    },
+    {
+      "description": "Semantic search over the source index: the public forge repos' code and\ndocs, which no mind holds. The daemon embeds the text and asks the\nindex it does not write.",
+      "type": "object",
+      "properties": {
+        "SearchSources": {
+          "type": "object",
+          "properties": {
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            },
+            "query": {
+              "$ref": "#/$defs/SourceQuery"
+            }
+          },
+          "required": [
+            "instance",
+            "query"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "SearchSources"
+      ]
     }
   ],
   "$defs": {
@@ -1894,6 +1919,34 @@
       "type": "string",
       "maxLength": 64
     },
+    "SourceQuery": {
+      "description": "A source search: the text to find chunks near, how many, and optionally the\none forge repo (by name) to look in.",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Short"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "$ref": "#/$defs/Line"
+        },
+        "top_k": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "text",
+        "top_k"
+      ]
+    },
     "StructuralDelta": {
       "type": "object",
       "properties": {
@@ -2046,6 +2099,7 @@
         },
         "pins": {
           "$ref": "#/$defs/Line"
+ygg-verify: exit 0
         }
       },
       "required": [

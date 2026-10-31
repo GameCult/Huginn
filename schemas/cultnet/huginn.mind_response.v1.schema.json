@@ -102,6 +102,18 @@
       ]
     },
     {
+      "type": "object",
+      "properties": {
+        "Sources": {
+          "$ref": "#/$defs/SourceHits"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Sources"
+      ]
+    },
+    {
       "description": "The answer did not fit one send and is being held for the client to\nfetch. Nothing in a mind produces this: the daemon's serve module does,\nin place of an answer, and the answer it stands for is the named\nMessagePack of the `HuginnMindResponse` the mind gave.",
       "type": "object",
       "properties": {
@@ -4149,6 +4161,82 @@
       "description": "A campaign slug or key segment: label parts joined by `.`.",
       "type": "string",
       "maxLength": 64
+    },
+    "SourceHit": {
+      "description": "One chunk the index holds, as the index holds it: the repo it belongs to,\nthe path in that repo, the commit whose blob it was cut from, its 1-based\ninclusive line range, and its text.",
+      "type": "object",
+      "properties": {
+        "commit": {
+          "type": "string"
+        },
+        "line_end": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "line_start": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number",
+          "format": "float"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "path",
+        "commit",
+        "line_start",
+        "line_end",
+        "score",
+        "text"
+      ]
+    },
+    "SourceHits": {
+      "description": "The answer to a source search, nearest first.",
+      "type": "object",
+      "properties": {
+        "hits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceHit"
+          }
+        },
+        "indexed_under": {
+          "$ref": "#/$defs/SourceModel"
+        }
+      },
+      "required": [
+        "indexed_under",
+        "hits"
+      ]
+    },
+    "SourceModel": {
+      "description": "The model a source collection was built under, and so the one a query must\nbe embedded by. The address of the embedder is no part of it.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "digest"
+      ]
     },
     "StructuralDelta": {
       "type": "object",
