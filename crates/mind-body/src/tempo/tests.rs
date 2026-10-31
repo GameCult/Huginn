@@ -44,10 +44,22 @@ fn the_tally_does_not_depend_on_the_order_the_votes_came_in() {
 
 #[test]
 fn waiting_alone_round_robins() {
-    let rows = [mind("ann", Some(100)), mind("bob", Some(400)), mind("cy", Some(250))];
-    assert_eq!(pick(&rows, 100), Some(1), "the longest waiter takes the beat");
+    let rows = [
+        mind("ann", Some(100)),
+        mind("bob", Some(400)),
+        mind("cy", Some(250)),
+    ];
+    assert_eq!(
+        pick(&rows, 100),
+        Some(1),
+        "the longest waiter takes the beat"
+    );
     // After bob's turn he has waited least; the next longest waiter goes.
-    let after = [mind("ann", Some(200)), mind("bob", Some(0)), mind("cy", Some(350))];
+    let after = [
+        mind("ann", Some(200)),
+        mind("bob", Some(0)),
+        mind("cy", Some(350)),
+    ];
     assert_eq!(pick(&after, 100), Some(2));
 }
 
@@ -57,7 +69,11 @@ fn a_full_urgency_equals_ten_times_the_wait_at_one_order() {
     let steady = mind("ann", Some(100));
     let mut urgent = mind("bob", Some(11));
     urgent.self_permille = 1000;
-    assert_eq!(pick(&[steady.clone(), urgent.clone()], 100), Some(1), "eleven seconds at full urgency beat a hundred waiting");
+    assert_eq!(
+        pick(&[steady.clone(), urgent.clone()], 100),
+        Some(1),
+        "eleven seconds at full urgency beat a hundred waiting"
+    );
     urgent.waited_s = Some(9);
     urgent.last_turn_ms = Some(1_000_000 - 9000);
     assert_eq!(pick(&[steady, urgent], 100), Some(0), "nine do not");
@@ -84,7 +100,11 @@ fn urgency_is_the_strongest_of_self_topic_and_a_member_addressing_her() {
     row.addressed_by_member = false;
     row.topic_permille = 0;
     row.self_permille = 5000;
-    assert_eq!(urgency_permille(&row), 1000, "an urgency past the scale is the scale");
+    assert_eq!(
+        urgency_permille(&row),
+        1000,
+        "an urgency past the scale is the scale"
+    );
 }
 
 #[test]
@@ -93,14 +113,26 @@ fn a_tie_goes_to_the_oldest_last_turn_then_to_the_slug() {
     old.last_turn_ms = Some(10);
     let mut new = mind("ann", Some(100));
     new.last_turn_ms = Some(20);
-    assert_eq!(pick(&[new.clone(), old.clone()], 100), Some(1), "the older last turn wins the tie, whatever the slug");
+    assert_eq!(
+        pick(&[new.clone(), old.clone()], 100),
+        Some(1),
+        "the older last turn wins the tie, whatever the slug"
+    );
     new.last_turn_ms = Some(10);
-    assert_eq!(pick(&[old, new], 100), Some(1), "equal turns: the lower slug");
+    assert_eq!(
+        pick(&[old, new], 100),
+        Some(1),
+        "equal turns: the lower slug"
+    );
 }
 
 #[test]
 fn a_mind_that_never_acted_goes_first_and_the_never_acted_tie_by_slug() {
-    let rows = [mind("ann", Some(86_400)), mind("cy", None), mind("bob", None)];
+    let rows = [
+        mind("ann", Some(86_400)),
+        mind("cy", None),
+        mind("bob", None),
+    ];
     assert_eq!(pick(&rows, 900), Some(2));
 }
 

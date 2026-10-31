@@ -50,15 +50,25 @@ pub struct Standing {
 /// The urgency in force for a Mind, in thousandths: the strongest of what she
 /// declared, what her topics say and a member addressing her (which is 1000).
 pub fn urgency_permille(standing: &Standing) -> u16 {
-    let addressed = if standing.addressed_by_member { 1000 } else { 0 };
-    standing.self_permille.max(standing.topic_permille).max(addressed).min(1000)
+    let addressed = if standing.addressed_by_member {
+        1000
+    } else {
+        0
+    };
+    standing
+        .self_permille
+        .max(standing.topic_permille)
+        .max(addressed)
+        .min(1000)
 }
 
 /// `(waited / beat) x 10^(LOG_BOUND_ORDERS x urgency / 1000)`. A Mind that has
 /// never had a turn has waited forever: infinite, so she is first, and the tie
 /// rule orders the never-acted among themselves.
 pub fn score(standing: &Standing, beat_s: u32) -> f64 {
-    let waited = standing.waited_s.map_or(f64::INFINITY, |waited| waited as f64);
+    let waited = standing
+        .waited_s
+        .map_or(f64::INFINITY, |waited| waited as f64);
     let exponent = LOG_BOUND_ORDERS * f64::from(urgency_permille(standing)) / 1000.0;
     waited / f64::from(beat_s.max(1)) * 10f64.powf(exponent)
 }
@@ -73,7 +83,11 @@ pub fn pick(rows: &[Standing], beat_s: u32) -> Option<usize> {
             .then_with(|| a.1.last_turn_ms.cmp(&b.1.last_turn_ms))
             .then_with(|| a.1.slug.cmp(&b.1.slug))
     };
-    rows.iter().enumerate().filter(|(_, row)| row.eligible).min_by(order).map(|(index, _)| index)
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| row.eligible)
+        .min_by(order)
+        .map(|(index, _)| index)
 }
 
 #[cfg(test)]
