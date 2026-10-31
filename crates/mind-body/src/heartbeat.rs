@@ -713,7 +713,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
                 launched.push(rows[winner].slug().clone());
                 break;
             }
-            Launched::Busy => rows[winner].busy = turn == RunTurn::PersonaTurn,
+            Launched::Busy => rows[winner].busy = true,
             Launched::Refused(why) => rows[winner].note = why,
         }
         passed[winner].eligible = false;

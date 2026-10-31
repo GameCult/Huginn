@@ -825,7 +825,17 @@ fn the_beat_won_by_a_mind_whose_self_holds_briefs_is_one_self_run_claiming_them_
     assert_eq!(claimed, vec!["eureka-body:follow_up:first".to_string(), "eureka-body:follow_up:second".to_string()]);
     assert_eq!(rig.launcher.started.borrow().iter().filter(|(_, turn)| *turn == RunTurn::SelfRun).count(), 1);
     assert!(self_runs(&rig, BOB).is_empty(), "bob holds no brief");
-    assert_eq!(rig.store.traces.borrow().last().unwrap().launches.len(), 1);
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.launches.len(), 1);
+    assert!(!trace.instances[ANN].busy, "a Self run is not her Persona's turn: she is not busy");
+}
+
+#[test]
+fn a_beat_won_by_a_mind_with_no_brief_is_a_persona_turn_and_marks_her_busy() {
+    let (rig, _source) = rig_with_a_persona_turn();
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
+    assert!(self_runs(&rig, ANN).is_empty());
+    assert!(rig.store.traces.borrow().last().unwrap().instances[ANN].busy);
 }
 
 #[test]
