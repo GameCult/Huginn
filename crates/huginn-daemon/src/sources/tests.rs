@@ -311,7 +311,8 @@ fn rebuild_on_model_or_chunker_change() {
     let before = rig.index.held();
     let (refreshed, _) = rig.run(&mut forge);
     assert!(format!("{:#}", refreshed.unwrap_err()).contains("no Huginn metadata"));
-    assert_eq!((rig.index.state.lock().unwrap().recreated, rig.index.held()), (3, before), "untouched");
+    let recreated = rig.index.state.lock().unwrap().recreated;
+    assert_eq!((recreated, rig.index.held()), (3, before), "untouched");
 }
 
 /// A NUL blob, an LFS pointer, an oversize file, Unity YAML and a lock file
