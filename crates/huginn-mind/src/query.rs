@@ -1788,7 +1788,7 @@ mod tests {
 
         let fu2 = r(K::FollowUp, &id("follow_up", "FU-2"));
         assert!(
-            admit(&mut mind, vec![resolution(fu2, ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) })]).is_err(),
+            matches!(admit(&mut mind, vec![resolution(fu2, ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) })]), PipelineAdmissionOutcome::Refused(_)),
             "Answered stays a question's outcome"
         );
         assert_eq!(open_follow_ups(&mind), vec![id("follow_up", "FU-2")]);
