@@ -517,6 +517,39 @@ mod tests {
         assert_eq!(pool.model_identity(WITHIN).unwrap().digest, "d1", "no collection, the pool adopts again");
     }
 
+    /// A batch waits only for what is coming: with every primary out and not due,
+    /// the reserve takes it at once, and with nothing left it fails at once,
+    /// however long the caller's budget.
+    #[test]
+    fn a_batch_does_not_wait_for_reads_that_are_not_running() {
+        let (pool, fakes) = pool(&[("raven", "d1"), ("starfire", "d1")], &[("yggdrasil", "d1")]);
+        let mut pool = pool.retrying_after(Duration::from_secs(3600));
+        warm(&pool);
+        let budget = Duration::from_secs(10);
+        down(&fakes[0], true);
+        down(&fakes[1], true);
+        let started = Instant::now();
+        pool.embed(&texts(2), budget).unwrap();
+        assert_eq!(used(&fakes[2]), 2);
+        assert!(started.elapsed() < Duration::from_secs(2), "the reserve waited {:?} for GPUs that are not being read", started.elapsed());
+        down(&fakes[2], true);
+        let started = Instant::now();
+        assert!(pool.embed(&texts(1), budget).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2), "the failure waited {:?} for reads that are not running", started.elapsed());
+    }
+
+    /// An endpoint whose read failed is not read again before its retry time.
+    #[test]
+    fn an_endpoint_that_failed_its_read_is_not_read_again_before_its_retry_time() {
+        let (pool, fakes) = pool(&[("raven", "d1"), ("starfire", "d1")], &[]);
+        let pool = pool.retrying_after(Duration::from_secs(3600));
+        down(&fakes[0], true);
+        warm(&pool);
+        let reads = fakes[0].state.lock().unwrap().identity_bounds.len();
+        warm(&pool);
+        assert_eq!(fakes[0].state.lock().unwrap().identity_bounds.len(), reads);
+    }
+
     /// A primary that is still being read keeps the reserve waiting, so the
     /// first batch goes to the GPU and not to the CPU that answered first.
     #[test]
