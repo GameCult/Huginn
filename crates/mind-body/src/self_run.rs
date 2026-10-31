@@ -48,8 +48,9 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use eureka_pipeline::{PipelineRef, ResolutionOutcome, RunTurn, Slug};
-use huginn_mind::PipelineAdmissionOutcome;
+use cultnet_rs::Selection;
+use eureka_pipeline::{PipelineDocument, PipelineRef, ResolutionOutcome, RunTurn, Slug};
+use huginn_mind::{PipelineAdmissionOutcome, PipelinePageItems};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
