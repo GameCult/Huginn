@@ -271,12 +271,14 @@ struct Seen<'a> {
     instance: Slug,
     doubled: bool,
     admit_fails: bool,
+    /// A query for this key fails.
+    query_fails_on: Option<String>,
     admits: Cell<usize>,
 }
 
 impl<'a> Seen<'a> {
     fn of(inner: &'a TestMind) -> Self {
-        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, admits: Cell::new(0) }
+        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, query_fails_on: None, admits: Cell::new(0) }
     }
 }
 
@@ -286,6 +288,11 @@ impl MindPort for Seen<'_> {
     }
 
     fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage> {
+        if let (Some(key), Some(keys)) = (&self.query_fails_on, &selection.keys)
+            && keys.contains(key)
+        {
+            return Err(anyhow!("mind-down-canary"));
+        }
         let mut page = self.inner.query(selection)?;
         if self.doubled
             && let PipelinePageItems::Headers(items) = &mut page.items
@@ -1355,42 +1362,54 @@ fn follow_up_campaign() -> String {
 }
 
 #[test]
-fn a_claim_that_cannot_be_read_as_a_follow_up_is_named_not_dropped() {
-    // A cut spec is claimable but is no brief.
+fn a_claim_that_is_no_brief_is_named_not_dropped() {
+    // A claimed cut spec is the task: named with its id, to be read with huginn view.
     let mind = claiming(&[spec_ref("x")], vec![]);
     let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
     let first = &ran.written()[0];
-    assert!(first.contains(&spec_ref("x").id.0) && first.contains("its task is unknown"), "{first}");
+    assert!(first.contains(&format!("claimed cut spec `{}`", spec_ref("x").id.0)) && first.contains("huginn view"), "{first}");
+    assert!(!first.contains("unknown"), "{first}");
     // A claim the mind does not hold at all.
     let absent = reference(K::FollowUp, &id("follow_up", "absent"));
-    let task = task_section(&mind, std::slice::from_ref(&absent));
-    assert!(task.contains(&absent.id.0) && task.contains("its task is unknown"), "{task}");
+    let task = task_section(&mind, std::slice::from_ref(&absent)).unwrap();
+    assert!(task.contains(&absent.id.0) && task.contains("does not hold"), "{task}");
+    // A document of another kind is named by id and kind.
+    let other = run_ref("selfrun-a");
+    let task = task_section(&mind, std::slice::from_ref(&other)).unwrap();
+    assert!(task.contains(&other.id.0) && task.contains("no brief"), "{task}");
 }
 
 #[test]
-fn the_task_is_bounded_and_marked_when_cut() {
-    let big = "\u{e9}".repeat(480);
-    let docs: Vec<_> = (0..40).map(|n| follow_up_saying(&format!("big-{n}"), &big)).collect();
+fn every_claim_of_sixty_four_full_items_is_named_by_id() {
+    let big = "\u{e9}".repeat(500);
+    let docs: Vec<_> = (0..64).map(|n| follow_up_saying(&format!("big-{n}"), &big)).collect();
     let claims: Vec<_> = docs.iter().map(|(_, claim)| claim.clone()).collect();
     let mind = claiming(&claims, docs.into_iter().map(|(document, _)| document).collect());
-    let task = task_section(&mind, &claims);
-    assert!(task.len() <= TASK_LIMIT + "\n[task truncated]".len(), "{}", task.len());
-    assert!(task.ends_with("\n[task truncated]"));
-    let small = task_section(&mind, &claims[..2]);
-    assert!(!small.contains("truncated") && small.contains(&claims[1].id.0));
+    let task = task_section(&mind, &claims).unwrap();
+    for claim in &claims {
+        assert!(task.contains(&claim.id.0), "{}", claim.id.0);
+    }
+    assert_eq!(task.matches(&big).count(), 64, "every item verbatim");
+    assert!(!task.contains("truncated"));
+    // Claim order is kept.
+    assert!(task.find(&claims[0].id.0) < task.find(&claims[63].id.0));
+}
+
+#[test]
+fn a_mind_query_failure_on_a_claim_fails_the_run_with_the_cause_and_starts_no_child() {
+    let (brief, claim) = follow_up_saying("brief-a", "Fix the thing.");
+    let mind = claiming(std::slice::from_ref(&claim), vec![brief]);
+    let mut seen = Seen::of(&mind);
+    seen.query_fails_on = Some(claim.id.0.clone());
+    let ran = carry_with(&seen, vec![Out(result_line())], Some(0), false);
+    let error = format!("{:#}", ran.outcome.as_ref().unwrap_err());
+    assert!(error.contains("mind-down-canary") && error.contains(&claim.id.0), "{error}");
+    assert!(ran.spawns.is_empty() && ran.events.is_empty() && !ran.all.iter().any(|event| matches!(event, Event::Lent)), "no lease, no child");
+    assert!(!ran.out.contains("unknown"));
 }
 
 #[test]
 fn a_run_without_claims_gets_the_identity_lines_alone() {
     let ran = go(vec![Out(result_line())]);
     assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a")));
-}
-
-#[test]
-fn the_cut_keeps_exactly_the_limit_whole_characters_and_marks_only_a_real_cut() {
-    assert_eq!(cut_at("abcd".into(), 4), "abcd");
-    assert_eq!(cut_at("abcde".into(), 4), "abcd\n[task truncated]");
-    // "\u{e9}" is two bytes: a limit inside one keeps the characters before it.
-    assert_eq!(cut_at("a\u{e9}\u{e9}".into(), 4), "a\u{e9}\n[task truncated]");
-    assert_eq!(cut_at("a\u{e9}\u{e9}".into(), 5), "a\u{e9}\u{e9}");
 }

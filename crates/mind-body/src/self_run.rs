@@ -107,44 +107,41 @@ pub fn start_message(instance: &Slug, run: &PipelineRef) -> String {
     )
 }
 
-/// The most of the task that reaches the start message, in bytes.
-const TASK_LIMIT: usize = 8 * 1024;
-
-/// The task section of the start message: each claimed follow-up's id,
-/// campaign and `item` text verbatim, because the brief lives in the claim and a
-/// run that cannot reach its mind would never see its job. A claim that cannot
-/// be read as a follow-up is named, never dropped and never replaced by an
-/// invented task. The section is cut at a character boundary to `TASK_LIMIT`,
-/// marked when cut.
-fn task_section(mind: &dyn MindPort, claims: &[PipelineRef]) -> String {
+/// The task section of the start message: one section per claim, in claim
+/// order. A claimed follow-up gives its id, campaign and `item` verbatim,
+/// because the brief lives in the claim and a run that cannot reach its mind
+/// would never see its job; a claimed cut spec is named as the task, to be read
+/// with `huginn view`; a claim the mind does not hold, or of another kind, is
+/// named by id. The claims are bounded by their types, so nothing is cut. A mind
+/// that cannot answer is an error: the run is not started on a guessed task.
+fn task_section(mind: &dyn MindPort, claims: &[PipelineRef]) -> Result<String> {
     let mut task = String::new();
     for claim in claims {
         let one = Selection { keys: Some(vec![claim.id.0.clone()]), projection: "document".into(), ..Selection::default() };
-        let read = mind.query(&one).ok().and_then(|page| match page.items {
-            PipelinePageItems::Documents(views) => views.into_iter().next().map(|view| view.document),
-            _ => None,
-        });
-        match read {
+        let page = mind.query(&one).with_context(|| format!("the claim `{}` could not be read from the mind", claim.id.0))?;
+        let PipelinePageItems::Documents(views) = page.items else { bail!("the mind answered headers to a document selection") };
+        let id = &claim.id.0;
+        match views.into_iter().next().map(|view| view.document) {
             Some(PipelineDocument::FollowUp(follow_up)) => {
-                task.push_str(&format!("\n\nTask, claimed follow-up `{}` (campaign `{}`):\n{}", claim.id.0, follow_up.campaign.0, follow_up.item.0));
-            }
-            _ => task.push_str(&format!("\n\nThe run claims `{}`, which could not be read as a follow-up: its task is unknown.", claim.id.0)),
-        }
-    }
-    cut_at(task, TASK_LIMIT)
-}
+                task.push_str(&format!("
 
-/// `text` cut at a character boundary to `limit` bytes, marked when cut.
-fn cut_at(mut text: String, limit: usize) -> String {
-    if text.len() > limit {
-        let mut end = limit;
-        while !text.is_char_boundary(end) {
-            end -= 1;
+Task, claimed follow-up `{id}` (campaign `{}`):
+{}", follow_up.campaign.0, follow_up.item.0));
+            }
+            Some(PipelineDocument::CutSpec(spec)) => {
+                task.push_str(&format!("
+
+Task, claimed cut spec `{id}` (campaign `{}`): the spec is the task; read it with `huginn view`.", spec.campaign.0));
+            }
+            Some(_) => task.push_str(&format!("
+
+The run claims `{id}` ({:?}), which is no brief: its task is unknown.", claim.kind)),
+            None => task.push_str(&format!("
+
+The run claims `{id}`, which the mind does not hold: its task is unknown.")),
         }
-        text.truncate(end);
-        text.push_str("\n[task truncated]");
     }
-    text
+    Ok(task)
 }
 
 /// What the child is told once, at the context ceiling.
@@ -491,7 +488,7 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 /// error, and the launch that opens the next run closes the run left open.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let Some((run, budget, claims)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
-    let start = format!("{}{}", start_message(mind.instance(), &run), task_section(mind, &claims));
+    let start = format!("{}{}", start_message(mind.instance(), &run), task_section(mind, &claims)?);
     let mut spent = Spent::default();
     let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &budget, &start), &mut spent);
     let closed = close_if_open(mind, clock, &run, &ran, &spent);
@@ -524,7 +521,7 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
             return Err(error);
         }
     };
-    let outcome = drive(mind, clock, child, run, start, spent, out)?;
+    let outcome = drive(clock, child, start, spent, out)?;
     // A child that could not even be killed may still be spending: that lease is
     // dropped, and the connector bills the reservation.
     if !matches!(outcome, SelfRunOutcome::Ended { cause: Cause::Unstoppable, .. }) {
@@ -574,7 +571,7 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
 }
 
 /// The loop: facts in, one clock read per fact, actions out.
-fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run: &PipelineRef, start: &str, spent: &mut Spent, out: &mut dyn Write) -> Result<SelfRunOutcome> {
+fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, start: &str, spent: &mut Spent, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
     child.write_line(&user_line(start));
 
