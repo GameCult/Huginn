@@ -1766,6 +1766,34 @@ mod tests {
         assert_eq!(open(standing(of_kinds(&[K::Question]))).len(), 2);
     }
 
+    /// A follow-up answered in the doing closes Recorded: it commits, and the
+    /// follow-up stops reading as open work. Outcomes the follow-up row does
+    /// not name stay refused.
+    #[test]
+    fn a_follow_up_recorded_is_no_longer_open() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, elsewhere("Q1")));
+        committed(admit(&mut mind, vec![question_n(1)]));
+        let q1 = id("question", "Q1");
+        committed(admit(&mut mind, vec![follow_up("FU-1", r(K::Question, &q1)), follow_up("FU-2", r(K::Question, &q1))]));
+        let open_follow_ups = |mind: &Mind<MemoryStore>| {
+            let selection = with(with(of_kinds(&[K::FollowUp]), any_of("root", &[CAMPAIGN])), any_of("in_force", &["true"]));
+            ids(&mind.query(&selection).unwrap())
+        };
+        assert_eq!(open_follow_ups(&mind), vec![id("follow_up", "FU-1"), id("follow_up", "FU-2")]);
+
+        let fu1 = r(K::FollowUp, &id("follow_up", "FU-1"));
+        committed(admit(&mut mind, vec![resolution(fu1, ResolutionOutcome::Recorded { reason: "answered: done".into() })]));
+        assert_eq!(open_follow_ups(&mind), vec![id("follow_up", "FU-2")]);
+
+        let fu2 = r(K::FollowUp, &id("follow_up", "FU-2"));
+        assert!(
+            admit(&mut mind, vec![resolution(fu2, ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) })]).is_err(),
+            "Answered stays a question's outcome"
+        );
+        assert_eq!(open_follow_ups(&mind), vec![id("follow_up", "FU-2")]);
+    }
+
     fn hit(kind: K, key: &str, score: f32) -> (PipelineRef, f32) {
         (r(kind, key), score)
     }

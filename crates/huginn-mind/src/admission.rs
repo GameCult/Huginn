@@ -711,6 +711,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Finding, O::Deferred { to }) => matches!(to.kind, K::FollowUp | K::CutSpec),
         (K::Finding, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::FollowUp, O::Fixed { by, .. }) => by.as_ref().is_none_or(|report| report.kind == K::CutReport),
+        (K::FollowUp, O::Recorded { .. }) => true,
         (K::FollowUp, O::Superseded { by }) => all(by, K::FollowUp),
         (K::FollowUp, O::Withdrawn { .. }) => true,
         (K::Stewardship, O::Superseded { by }) => all(by, K::Stewardship),
