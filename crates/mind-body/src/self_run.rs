@@ -114,8 +114,12 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
 }
 
 /// The argument list of the child, and nothing else: no resume, continue or
-/// fork, no model, no permission mode and no settings of its own belong to this
-/// actuator. Only the user's settings load (the fresh configuration directory
+/// fork, no model and no settings of its own belong to this actuator. It fixes
+/// the permission mode: print mode starts in Manual when nothing on the command
+/// line sets a mode (the managed `defaultMode` was not applied in print mode,
+/// 2026-10-31), and `--permission-prompts none` then denies every tool that
+/// needs approval, so a Mind's reach within her slice is granted here. Only the
+/// user's settings load (the fresh configuration directory
 /// the seed fills); the working directory's project and local settings, which a
 /// run could have written, do not.
 /// `budget_usd` is the run's, as stored.
@@ -133,6 +137,8 @@ pub fn claude_args(session: Uuid, budget_usd: &str) -> Vec<String> {
         budget_usd,
         "--max-turns",
         &MAX_TURNS.to_string(),
+        "--permission-mode",
+        "bypassPermissions",
         "--permission-prompts",
         "none",
         "--setting-sources",
