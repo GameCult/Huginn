@@ -721,6 +721,28 @@ fn an_urgency_is_consumed_by_a_turn_admitted_after_it_by_ordinal_not_by_the_cloc
 }
 
 #[test]
+fn an_urgency_admitted_in_the_batch_of_her_turn_is_consumed_by_it() {
+    let rig = Rig::new();
+    rig.turn(BOB, 3000);
+    rig.minds[ANN].admit_at(rig.now() - Duration::seconds(3000));
+    rig.minds[ANN].committed(vec![
+        run_in(NAMES[ANN], "joint", RunTurn::PersonaTurn, RunOperator::Mind, &[]),
+        eureka_pipeline::PipelineDocument::Pulse(eureka_pipeline::PipelinePulse {
+            instance: Slug(NAMES[ANN].into()),
+            label: eureka_pipeline::Label("joint-p".into()),
+            tempo_vote_beat_s: None,
+            tempo_vote_withdrawn: false,
+            urgency_permille: Some(800),
+            note: "test".into(),
+        }),
+    ]);
+    rig.minds[ANN].committed(vec![close(reference(K::Run, &format!("{}:run:joint", NAMES[ANN])), recorded())]);
+    rig.poll();
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.instances[ANN].urgency_permille, 0, "one receipt is one ordinal: a declaration is pending only when admitted strictly after her turn");
+}
+
+#[test]
 fn every_newest_read_asks_for_exactly_one_header() {
     let rig = Rig::new();
     rig.turn(ANN, 3000);
