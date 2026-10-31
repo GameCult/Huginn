@@ -265,17 +265,18 @@ impl Drop for FakeLease {
 }
 
 /// The mind as the actuator sees it, over a `TestMind`: another instance's name,
-/// doubled run headers, and a count of admissions it must never receive.
+/// admissions counted, and optionally refused as a mind that cannot be reached would.
 struct Seen<'a> {
     inner: &'a TestMind,
     instance: Slug,
     doubled: bool,
+    admit_fails: bool,
     admits: Cell<usize>,
 }
 
 impl<'a> Seen<'a> {
     fn of(inner: &'a TestMind) -> Self {
-        Self { inner, instance: inner.instance().clone(), doubled: false, admits: Cell::new(0) }
+        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, admits: Cell::new(0) }
     }
 }
 
@@ -295,9 +296,12 @@ impl MindPort for Seen<'_> {
         Ok(page)
     }
 
-    fn admit(&self, _agent: &str, _session: &str, _documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
+    fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
         self.admits.set(self.admits.get() + 1);
-        Err(anyhow!("the actuator admits nothing"))
+        if self.admit_fails {
+            return Err(anyhow!("down"));
+        }
+        self.inner.admit(agent, session, documents)
     }
 }
 
@@ -967,9 +971,9 @@ fn the_clock_is_read_once_per_event_so_a_step_of_the_wall_clock_cannot_split_a_p
     let outcome = carry(&Seen::of(&mind), &Stepped(clock.clone()), &FakeLender::new(Answer::Grant), &fake, TEST_CAP_S, &mut Vec::new()).unwrap();
     let events = log.borrow().clone();
     let reads = events.iter().filter(|event| matches!(event, Event::Asked(_))).count() as u32;
-    // One read for the lease's expiry, one before the first wait, then one per fact heard:
+    // One read for the lease's expiry, one before the first wait, then one per fact heard, and one for the closure:
     // never a second read inside a pass.
-    assert_eq!(clock.1.get(), 2 + reads, "{events:?}");
+    assert_eq!(clock.1.get(), 3 + reads, "{events:?}");
     // The flush was written on the first request at time 0; the very next pass sees the stepped clock.
     // The flush pass itself has no interrupt, whatever the step: the interrupt is on a later event.
     let flush_at = events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains("context ceiling"))).unwrap();
@@ -1043,16 +1047,6 @@ fn unreadable_and_foreign_lines_are_skipped_and_never_printed() {
     assert!(!ran.written().iter().any(|text| text.contains(canary)), "nothing from the stream is written back");
 }
 
-#[test]
-fn the_actuator_admits_nothing_to_the_mind_through_a_whole_flushed_run() {
-    let mind = with_run();
-    let seen = Seen::of(&mind);
-    let ran = carry_with(&seen, vec![Out(at("m1", CEILING_TOKENS)), Out(result_line())], Some(0), false);
-    assert_eq!(ran.admits, 0);
-    assert!(ran.outcome.is_ok());
-    // And the run is exactly as she left it: still in force until her flush, or the next launch, closes it.
-    assert_eq!(mind.ids(K::Resolution), Vec::<String>::new());
-}
 
 // ---- the real child -----------------------------------------------------------
 
@@ -1320,3 +1314,4 @@ mod process {
 }
 
 mod lease;
+mod closure;

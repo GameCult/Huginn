@@ -70,9 +70,9 @@ echo done");
 #[test]
 fn only_the_allow_listed_names_pass_from_the_units_environment() {
     let unit: Vec<(std::ffi::OsString, std::ffi::OsString)> =
-        ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "LCX", "XDG_DATA_HOME"].map(|name| (name.into(), "v".into())).to_vec();
+        ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "EUREKA_INSTANCE", "HUGINN_ENDPOINT", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "HUGINN_TOKEN", "EUREKA_INSTANCE_X", "LCX", "XDG_DATA_HOME"].map(|name| (name.into(), "v".into())).to_vec();
     let passed: Vec<String> = child_environment(&unit).into_iter().map(|(name, _)| name.to_string_lossy().into_owned()).collect();
-    assert_eq!(passed, ["PATH", "LANG", "LC_ALL", "TERM"], "home and the configuration directory are the spawn's, never the unit's");
+    assert_eq!(passed, ["PATH", "LANG", "LC_ALL", "TERM", "EUREKA_INSTANCE", "HUGINN_ENDPOINT"], "the CLI's two names pass; home, the configuration directory, credentials and look-alikes do not");
 }
 
 /// Reports where the child's configuration is, its mode, and what is in it; leaves a file and a

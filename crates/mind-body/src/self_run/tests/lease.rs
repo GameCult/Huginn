@@ -86,14 +86,17 @@ fn a_lease_refused_for_its_length_is_a_configuration_error_that_starts_nothing_a
 }
 
 #[test]
-fn a_connector_that_cannot_be_reached_is_an_error_that_starts_nothing_and_leaves_the_run_open() {
+fn a_connector_that_cannot_be_reached_is_an_error_that_starts_nothing_and_closes_the_run_recorded() {
     let mind = with_run();
     let lender = FakeLender::new(Answer::Unreachable);
     let never = never_spawns();
     let clock = Rc::new(Fixed(Cell::new(at_start())));
     assert!(carry(&mind, &*clock, &lender, &never, TEST_CAP_S, &mut Vec::new()).is_err());
     assert!(never.spawns.borrow().is_empty());
-    assert_eq!(mind.ids(K::Resolution), Vec::<String>::new(), "an unreachable connector is no refusal: the run stays open");
+    // No refusal, so no refusal kind: the actuator failed after the run opened, and the run does not stay in force.
+    let closure = mind.view(K::Resolution, &format!("{INSTANCE}:resolution:run.selfrun-a.n1")).expect("the run is closed");
+    let PipelineDocument::Resolution(closure) = closure.document else { panic!("not a resolution") };
+    assert!(matches!(&closure.outcome, ResolutionOutcome::Recorded { reason } if reason.0.contains("the actuator failed")), "{:?}", closure.outcome);
 }
 
 #[test]
