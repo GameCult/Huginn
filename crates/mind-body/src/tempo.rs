@@ -5,8 +5,7 @@
 //! The Minds jointly hold the lever to one heartbeat. `tally` turns their votes
 //! into the beat; `pick` chooses who takes the turn when a beat falls. The
 //! heartbeat owns when a beat falls and what it launches; this module owns only
-//! the two decisions. If the operator picks another tally
-//! (`eureka-body:question:tempo-lever-tally`), only `tally` changes.
+//! the two decisions.
 
 use std::cmp::Ordering;
 
@@ -17,11 +16,12 @@ pub const DEFAULT_BEAT_S: u32 = 900;
 /// Interim, per `swarm-shares-log-bound`, until the swarm's governance sets it.
 pub const LOG_BOUND_ORDERS: f64 = 1.0;
 
-/// The swarm's tempo: the lower median of the votes (seconds per beat), each
-/// Mind's newest. No votes is `DEFAULT_BEAT_S`. One outlier cannot move the
-/// median, and the median is always a beat some Mind voted for.
-pub fn tally(votes: &[u32]) -> u32 {
-    let mut sorted = votes.to_vec();
+/// The swarm's tempo (ruling `eureka-body:ruling:tempo-silent-means-default`):
+/// the lower median over every Mind in the roster, each her newest vote in seconds
+/// per beat. A Mind with no standing vote, or whose mind cannot be read, is
+/// `None` and counts as `DEFAULT_BEAT_S`, so a lone voter cannot move the beat.
+pub fn tally(votes: &[Option<u32>]) -> u32 {
+    let mut sorted: Vec<u32> = votes.iter().map(|vote| vote.unwrap_or(DEFAULT_BEAT_S)).collect();
     sorted.sort_unstable();
     match sorted.len() {
         0 => DEFAULT_BEAT_S,

@@ -619,8 +619,8 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
         rows.push(row);
     }
 
-    // The tempo is the tally of every readable Mind newest vote, braked or not.
-    let votes: Vec<u32> = rows.iter().filter_map(|row| row.read.as_ref().and_then(MindRead::vote)).collect();
+    // The tempo is the tally over every Mind of the roster, braked or not; a Mind with no vote or no readable mind counts as the default beat.
+    let votes: Vec<Option<u32>> = rows.iter().map(|row| row.read.as_ref().and_then(MindRead::vote)).collect();
     let beat_s = tempo::tally(&votes);
 
     let mut launches: Vec<String> = Vec::new();

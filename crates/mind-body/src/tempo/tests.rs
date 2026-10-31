@@ -30,6 +30,7 @@ fn the_score_is_the_wait_in_beats_times_ten_to_the_urgency_in_orders() {
 #[test]
 fn no_votes_is_the_default_beat() {
     assert_eq!(tally(&[]), DEFAULT_BEAT_S);
+    assert_eq!(tally(&[None, None]), DEFAULT_BEAT_S);
     assert_eq!(DEFAULT_BEAT_S, 900);
 }
 
@@ -45,13 +46,21 @@ fn the_tally_is_the_lower_median_and_one_outlier_cannot_move_it() {
         (&[60, 60, 86_400, 86_400, 600], 600),
     ];
     for (votes, want) in table {
-        assert_eq!(tally(votes), want, "{votes:?}");
+        let votes: Vec<Option<u32>> = votes.iter().copied().map(Some).collect();
+        assert_eq!(tally(&votes), want, "{votes:?}");
     }
 }
 
 #[test]
+fn a_silent_or_unreadable_mind_counts_as_the_default_beat() {
+    let silent = |voters: usize, vote: u32, total: usize| -> Vec<Option<u32>> { (0..total).map(|i| (i < voters).then_some(vote)).collect() };
+    assert_eq!(tally(&silent(1, 60, 8)), 900, "one voter among seven silent Minds cannot move the beat");
+    assert_eq!(tally(&silent(5, 60, 8)), 60, "a majority of the roster moves it");
+}
+
+#[test]
 fn the_tally_does_not_depend_on_the_order_the_votes_came_in() {
-    assert_eq!(tally(&[900, 60, 300, 600]), tally(&[60, 300, 600, 900]));
+    assert_eq!(tally(&[Some(900), Some(60), None, Some(600)]), tally(&[None, Some(60), Some(600), Some(900)]));
 }
 
 #[test]

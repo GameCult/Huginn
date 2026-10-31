@@ -332,6 +332,21 @@ fn a_standing_vote_stands_until_she_replaces_it_whatever_else_she_writes() {
 }
 
 #[test]
+fn her_newest_vote_is_found_across_pages_of_pulses() {
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.pulse(ANN, 2000, Some(600), None);
+    for n in 1..=12 {
+        rig.pulse(ANN, 2000 - n * 10, None, Some(1));
+    }
+    rig.pulse(ANN, 1000, Some(7200), None);
+    rig.poll();
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.instances[ANN].vote_beat_s, Some(7200));
+}
+
+#[test]
 fn her_newest_vote_is_the_latest_admitted_not_the_highest_label() {
     let rig = Rig::new();
     rig.turn(ANN, 3000);
@@ -359,6 +374,19 @@ fn a_mind_whose_launch_keeps_failing_neither_starves_the_beat_nor_reads_as_never
         assert!(trace.instances[ANN].idle_s >= 5000, "beat {beat}: she acted before; withdrawn launches do not erase that: {:?}", trace.instances[ANN]);
     }
     assert_eq!(rig.launched().iter().filter(|slug| slug.0 == "bob").count(), 12);
+}
+
+#[test]
+fn a_mind_that_cannot_be_read_votes_the_default_beat() {
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.pulse(ANN, 100, Some(7200), None);
+    rig.down[BOB].set(true);
+    rig.poll();
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.instances[ANN].vote_beat_s, Some(7200));
+    assert_eq!(trace.tempo_s, 900, "her 7200 and the unreadable Mind's default: the lower median is the default");
 }
 
 #[test]
