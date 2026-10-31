@@ -246,6 +246,6 @@ mind_body::tempo: const DEFAULT_BEAT_S : u32
 mind_body::tempo: const LOG_BOUND_ORDERS : f64
 mind_body::tempo: fn pick (rows : & [Standing] , beat_s : u32) -> Option < usize >
 mind_body::tempo: fn score (standing : & Standing , beat_s : u32) -> f64
-mind_body::tempo: fn tally (votes : & [u32]) -> u32
+mind_body::tempo: fn tally (votes : & [Option < u32 >]) -> u32
 mind_body::tempo: fn urgency_permille (standing : & Standing) -> u16
 mind_body::tempo: struct Standing # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[slug: String, eligible: bool, waited_s: Option < u64 >, last_turn_ms: Option < i64 >, self_permille: u16, topic_permille: u16, addressed_by_member: bool]
