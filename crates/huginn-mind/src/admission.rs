@@ -311,6 +311,7 @@ fn refuse_foreign_instance(document: &PipelineDocument, mind: &Slug) -> Result<(
         PipelineDocument::Instance(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Stewardship(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Run(value) if value.instance != *mind => Err(foreign(&value.instance)),
+        PipelineDocument::Pulse(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::HandOff(value) if value.from_instance != *mind && value.to_instance != *mind => {
             Err(foreign(&value.from_instance))
         }
@@ -620,7 +621,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
             run_rule(docs, key, run, replay)
         }
-        D::FollowUp(_) | D::Instance(_) => Ok(()),
+        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) => Ok(()),
     }
 }
 

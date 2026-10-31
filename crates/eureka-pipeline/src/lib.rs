@@ -112,7 +112,7 @@ macro_rules! unbounded_scalars {
     )*};
 }
 
-unbounded_scalars!(u32, u64, bool);
+unbounded_scalars!(u16, u32, u64, bool);
 
 fn bound(field: &str, limit: usize, actual: usize) -> Result<(), PipelineRefusal> {
     if actual > limit {
@@ -572,6 +572,31 @@ fn run_is_well_formed(run: &PipelineRun, at: &str) -> Result<(), PipelineRefusal
     }
 }
 
+/// The longest and shortest beat a Mind may vote for, in seconds.
+pub const TEMPO_VOTE_MIN_S: u32 = 60;
+pub const TEMPO_VOTE_MAX_S: u32 = 86_400;
+/// Urgency is in thousandths: 0 declares none, 1000 the most.
+pub const URGENCY_MAX_PERMILLE: u16 = 1000;
+
+/// A pulse votes a tempo or declares an urgency, in bounds, or says nothing it
+/// could be read for: an empty pulse is refused.
+fn pulse_is_well_formed(pulse: &PipelinePulse, at: &str) -> Result<(), PipelineRefusal> {
+    if let Some(beat) = pulse.tempo_vote_beat_s
+        && !(TEMPO_VOTE_MIN_S..=TEMPO_VOTE_MAX_S).contains(&beat)
+    {
+        return Err(format_error(&format!("{at}.tempo_vote_beat_s"), &beat.to_string()));
+    }
+    if let Some(urgency) = pulse.urgency_permille
+        && urgency > URGENCY_MAX_PERMILLE
+    {
+        return Err(format_error(&format!("{at}.urgency_permille"), &urgency.to_string()));
+    }
+    if pulse.tempo_vote_beat_s.is_none() && pulse.urgency_permille.is_none() {
+        return Err(format_error(&format!("{at}.tempo_vote_beat_s"), "a pulse that votes and declares nothing"));
+    }
+    Ok(())
+}
+
 unit_enums! {
     EvidenceKind { Command, Test, Mutation, Probe, SourceRead, Capture }
     ClaimOutcome { Holds, Falsified, Unproven }
@@ -710,6 +735,14 @@ value_types! {
         instance: Slug, label: Label, operated_by: RunOperator, turn: RunTurn, host: Short, started_on: Date,
         budget_usd: Short, claims: Vec<PipelineRef>[64], campaigns: Vec<Slug>[8],
     } => run_is_well_formed
+    /// One Mind's heartbeat vote, in her own mind: the beat she wants (the swarm's
+    /// tempo is the lower median of every Mind's newest vote) and the urgency she
+    /// declares for herself until her next Persona turn. Either may be absent, not
+    /// both. Instance-rooted: the key is `<instance>:pulse:<label>`, the label
+    /// time-ordered like a run's.
+    pub struct PipelinePulse {
+        instance: Slug, label: Label, tempo_vote_beat_s: Option<u32>, urgency_permille: Option<u16>, note: Line,
+    } => pulse_is_well_formed
 }
 
 /// A reference to another document. The id is parsed as a full pipeline id of
@@ -812,7 +845,7 @@ macro_rules! pipeline_kinds {
         /// because a value is a named map of its own and an internal tag would
         /// have to be merged into it; the tag stays beside the value instead.
         /// This is not a published schema: `schemas/cultnet` publishes the
-        /// fourteen per-kind value documents, and the envelope is the wire's
+        /// fifteen per-kind value documents, and the envelope is the wire's
         /// shape, not a document's.
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -931,6 +964,8 @@ pipeline_kinds! {
         "epiphany.pipeline.hand_off.v2", "EpiphanyPipelineHandOffDocument";
     Run(PipelineRun) => EpiphanyPipelineRunDocument, "run",
         "epiphany.pipeline.run.v2", "EpiphanyPipelineRunDocument";
+    Pulse(PipelinePulse) => EpiphanyPipelinePulseDocument, "pulse",
+        "epiphany.pipeline.pulse.v2", "EpiphanyPipelinePulseDocument";
 }
 
 /// Parses a full document id: the grammar read backwards. A key and an id are
@@ -1126,6 +1161,7 @@ pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefus
         }
         // A run hangs off its instance too: its label is its whole local.
         D::Run(value) => ("run.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
+        D::Pulse(value) => ("pulse.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Target(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&format!("r{}", value.revision)])?),
         D::Question(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Ruling(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
@@ -1370,6 +1406,10 @@ mod tests {
                 claims: vec![PipelineRef { kind: PipelineKind::CutSpec, id: id("cut_spec", "cut-run-kind.r2") }],
                 campaigns: vec![slug(CAMPAIGN)],
             }), format!("{INSTANCE}:run:mind-2026-10-09-1")),
+            (D::Pulse(PipelinePulse {
+                instance: slug(INSTANCE), label: l("2026-10-31t041200-t0"), tempo_vote_beat_s: Some(600), urgency_permille: Some(250),
+                note: "The swarm is idle; a shorter beat.".into(),
+            }), format!("{INSTANCE}:pulse:2026-10-31t041200-t0")),
         ]
     }
 
@@ -3213,11 +3253,11 @@ mod tests {
         };
         let document_schema = serde_json::to_value(schemars::schema_for!(PipelineDocument))?;
         let variants = document_schema["oneOf"].as_array().expect("the document schema is a oneOf");
-        assert_eq!(PipelineKind::ALL.len(), 14, "fourteen kinds");
+        assert_eq!(PipelineKind::ALL.len(), 15, "fifteen kinds");
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
-            "the document schema lists exactly the fourteen kinds, by name"
+            "the document schema lists exactly the fifteen kinds, by name"
         );
 
         let refusal_schema = serde_json::to_value(schemars::schema_for!(PipelineRefusal))?;

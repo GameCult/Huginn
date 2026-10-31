@@ -73,7 +73,7 @@ fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefu
 }
 
 /// A cache that knows the seventeen types a mind's store may hold: the leaf's
-/// fourteen through its registrar, the epoch record, the commit receipt and
+/// fifteen through its registrar, the epoch record, the commit receipt and
 /// the persona entry. It is the cache every envelope is prepared against.
 pub(crate) fn schema_cache() -> Result<CultCache, MindRefusal> {
     let mut cache = CultCache::new();

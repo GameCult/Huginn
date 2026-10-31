@@ -337,7 +337,8 @@ pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
         | D::Resolution(_)
         | D::Instance(_)
         | D::HandOff(_)
-        | D::Run(_) => None,
+        | D::Run(_)
+        | D::Pulse(_) => None,
     }
 }
 
@@ -537,7 +538,7 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
             hand_off.documents.iter().filter_map(|to| kind_of_id(&to.0).map(|kind| (R::Documents, cited(kind, to)))),
         ),
         D::Run(run) => edges.extend(run.claims.iter().map(|to| (R::Claims, to.clone()))),
-        D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) => {}
+        D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) | D::Pulse(_) => {}
     }
     edges
 }
