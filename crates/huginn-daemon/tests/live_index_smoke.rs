@@ -141,8 +141,10 @@ struct OneRepo {
 }
 
 impl huginn_daemon::sources::Forge for OneRepo {
-    fn catalog(&mut self) -> anyhow::Result<Vec<huginn_daemon::sources::SourceRepo>> {
-        Ok(self.inner.catalog()?.into_iter().filter(|repo| repo.name == self.name).collect())
+    fn catalog(&mut self) -> anyhow::Result<huginn_daemon::sources::Catalog> {
+        // One repo of the forge on purpose: this list is a subset, not the forge's count.
+        let repos = self.inner.catalog()?.repos.into_iter().filter(|repo| repo.name == self.name).collect();
+        Ok(huginn_daemon::sources::Catalog { repos, shortfall: None })
     }
 
     fn clone_url(&self, name: &str) -> String {
@@ -168,7 +170,7 @@ fn a_small_repo_is_refreshed_into_a_scratch_source_collection_and_found() {
     let mut embedder = OllamaEmbedder::new(&ollama, &model);
     let mut index = QdrantIndex::new(&qdrant).with_sources_collection(&scratch);
     let mut forge = OneRepo { inner: HttpForge::new(&forge), name: repo.clone() };
-    assert_eq!(forge.catalog().unwrap().len(), 1, "{repo} is a public, live, non-empty repo on this forge");
+    assert_eq!(forge.catalog().unwrap().repos.len(), 1, "{repo} is a public, live, non-empty repo on this forge");
     let mut lines = Vec::new();
     let refreshed = refresh(&mut embedder, &mut index, &mut forge, &root, &mut |report| lines.push(report.to_string()));
     let found = refreshed
