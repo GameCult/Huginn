@@ -1821,3 +1821,15 @@ mod live_session {
         }
     }
 }
+
+#[test]
+fn a_brief_the_run_claims_is_in_the_task_once_and_not_again_under_also_open() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x"), run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    mind.committed(vec![brief("claimed", "Do the claimed thing.")]);
+    mind.committed(vec![run("selfrun-a", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("claimed")])]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(echo())], Some(0), false);
+    let start = &ran.written()[0];
+    assert_eq!(start.matches("claimed follow-up").count(), 1, "{start}");
+    assert!(start.contains("Do the claimed thing.") && !start.contains("Also open for you"), "{start}");
+}

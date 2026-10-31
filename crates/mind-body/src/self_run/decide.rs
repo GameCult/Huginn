@@ -132,7 +132,7 @@ pub(super) struct State {
 impl State {
     /// A session whose start message was just written.
     pub(super) fn started(at: DateTime<Utc>, run_cap_s: u64) -> Self {
-        Self { written: 1, cap: Some((at, i64::try_from(run_cap_s).unwrap_or(i64::MAX))), at: Some(at), ..Self::default() }
+        Self { written: 1, cap: Some((at, i64::try_from(run_cap_s).unwrap_or(i64::MAX))), ..Self::default() }
     }
 
     fn idle(&self) -> bool {
