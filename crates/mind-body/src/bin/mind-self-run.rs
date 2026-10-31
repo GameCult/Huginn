@@ -1,8 +1,3 @@
-//! `mind-self-run inject --spool <dir> [--pre-compact]` is the hook `claude` runs
-//! inside the session: it prints the briefs waiting in the spool as context for
-//! the next request, and with `--pre-compact` blocks an auto-compaction (exit 2).
-//! It reads the hook's JSON on stdin and the spool, nothing else.
-//!
 //! `mind-self-run --instance <slug> [--endpoint rudp://<ip>:<port>]`: carries
 //! her one open Self run (`mind_body::self_run::carry`) inside
 //! `mind-self@<instance>`. This reads the process's arguments and environment,
@@ -18,8 +13,6 @@
 //! The connector's lease socket is `CLAUDE_LEASE_SOCKET`: the token itself is
 //! never in this process's environment, only the descriptor the lease grants.
 
-use std::io::Read;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -28,7 +21,6 @@ use mind_body::cli::instance_and_endpoint;
 use mind_body::launch::SystemClock;
 use mind_body::lease_client::{LEASE_SOCKET_VARIABLE, SocketLender};
 use mind_body::queue::HuginnMind;
-use mind_body::self_run::inbox::inject;
 use mind_body::self_run::{ClaudeSpawner, RUN_CAP_VARIABLE, carry};
 
 /// How long one call to the mind may take.
@@ -41,9 +33,6 @@ const USAGE: &str = "usage: mind-self-run --instance <slug> [--endpoint rudp://<
 #[allow(clippy::disallowed_methods, reason = "the binary reads its own arguments and environment, and hands them to the library")]
 fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("inject") {
-        return hook(&args[1..]);
-    }
     let (instance, address) = instance_and_endpoint(&args, std::env::var("HUGINN_ENDPOINT").ok(), USAGE)?;
     let socket = std::env::var_os(LEASE_SOCKET_VARIABLE).ok_or_else(|| anyhow!("{LEASE_SOCKET_VARIABLE} is not set"))?;
     let run_cap_s: u64 = std::env::var(RUN_CAP_VARIABLE)
@@ -52,22 +41,9 @@ fn run() -> Result<i32> {
         .filter(|seconds| *seconds > 0)
         .ok_or_else(|| anyhow!("{RUN_CAP_VARIABLE} is not set to the unit's RuntimeMaxSec in seconds"))?;
     let mind = HuginnMind::new(HuginnClient::new(address, instance, TIMEOUT));
-    let outcome = carry(&mind, &SystemClock, &SocketLender::new(socket), &ClaudeSpawner::new(std::env::vars_os(), std::env::current_exe()?)?, run_cap_s, &mut std::io::stdout())?;
+    let outcome = carry(&mind, &SystemClock, &SocketLender::new(socket), &ClaudeSpawner::new(std::env::vars_os())?, run_cap_s, &mut std::io::stdout())?;
     println!("{outcome}");
     Ok(outcome.exit_status())
-}
-
-/// The hook: the spool named by `--spool`, the hook's input on stdin.
-fn hook(args: &[String]) -> Result<i32> {
-    let spool = args.iter().position(|arg| arg == "--spool").and_then(|at| args.get(at + 1)).map(PathBuf::from).ok_or_else(|| anyhow!("inject needs --spool <dir>"))?;
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
-    let injection = inject(&spool, &input, args.iter().any(|arg| arg == "--pre-compact"))?;
-    if injection.exit == 2 {
-        eprintln!("compaction blocked: the actuator asks for the flush");
-    }
-    print!("{}", injection.stdout);
-    Ok(injection.exit)
 }
 
 fn main() {

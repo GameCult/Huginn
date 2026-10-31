@@ -14,12 +14,17 @@
 //!
 //! One run is one live session (ruling `eureka-body:ruling:live-mind-sessions`).
 //! A result ends a turn, not the session. What her Self is asked is derived from
-//! her mind (the `inbox` module): an open follow-up with owner `self-run` is a
-//! brief not yet answered. The actuator polls for briefs and tells them to the
-//! session, between tool calls through the PostToolBatch hook and between turns
-//! as a user line; a result closes every brief told to that turn. The session
-//! ends where its cache would be evicted, near the unit's cap, at the context
-//! ceiling, or after the flush each of those asks.
+//! her mind (the `inbox` module): an open follow-up with owner `self-run` sourced
+//! from a Persona turn is a brief. `drive` is the one writer into her session: the
+//! start message, every tell and the flush are stdin lines, a tell written whenever
+//! a brief waits and the flush has not been written, mid-turn or idle. The CLI
+//! echoes each line it takes into a request (`--replay-user-messages`); the echo is
+//! the consumption point, folded or queued, and idle is derived from the lines
+//! written and the lines echoed. Her Self resolves each brief she answers; the
+//! actuator closes only what she left open at an idle end. Compaction is off in
+//! the CLI (`DISABLE_COMPACT=1`): the organ's own ceiling, flush, end and rehydrate
+//! is the only path. The session ends where its cache would be evicted, near the
+//! unit's cap, at the context ceiling, or after the flush each of those asks.
 //!
 //! Every timing decision is one pure function, `decide` (the `decide` module,
 //! ruling `eureka-body:ruling:self-run-decider`). `carry` is the loop that turns
@@ -46,7 +51,7 @@
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
 //! parsed is stored.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
@@ -69,8 +74,8 @@ use crate::lease_client::{LeaseRefusalKind, LeaseRequest, Lender, Lent, TokenFd}
 use model_connector::PlanQuota;
 use crate::queue::MindPort;
 
-use decide::{Action, Event, State, decide, next_deadline};
-use inbox::{Brief, Hooks};
+use decide::{Action, Event, State, Why, decide, next_deadline};
+use inbox::Brief;
 
 /// The measured Self ceiling: at this prefix the flush is asked for.
 pub const CEILING_TOKENS: u64 = 300_000;
@@ -84,10 +89,11 @@ pub const ESCALATE_AFTER_S: i64 = 120;
 /// How long a stream may stay open after the child has exited (a descendant
 /// holding its stdout) before the run is over without it.
 pub const EXIT_DRAIN_S: i64 = 2;
-/// How long before the unit's cap an idle session is closed for rotation.
-pub const ROTATE_MARGIN_S: i64 = 20 * 60;
-/// How long before the unit's cap a working session is asked for its flush.
-pub const FLUSH_MARGIN_S: i64 = 10 * 60;
+/// How long before the unit's cap the session is asked for its flush, idle or working.
+pub const ROTATE_MARGIN_S: i64 = 25 * 60;
+/// The signal ladder's length: three escalations, the stream drain and a minute of slack. The grace interrupt is never later than the cap less this.
+pub const LADDER_S: i64 = 3 * ESCALATE_AFTER_S + EXIT_DRAIN_S + 60;
+const _: () = assert!(FLUSH_GRACE_S + LADDER_S < ROTATE_MARGIN_S, "the flush and the whole ladder must finish before the unit's cap");
 /// How often the mind is asked for new briefs.
 pub const INBOX_POLL_S: i64 = 30;
 /// The prompt cache's lifetimes, and how long before one runs out the session ends.
@@ -110,6 +116,8 @@ pub const SCRATCH_VARIABLE: &str = "RUNTIME_DIRECTORY";
 pub const SEED_VARIABLE: &str = "MIND_SELF_CONFIG_SEED";
 /// Names the descriptor the child reads its credential from.
 const TOKEN_FD_VARIABLE: &str = "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR";
+/// Turns off the CLI's compaction, auto, idle and manual: the mind is the one summary.
+const DISABLE_COMPACT_VARIABLE: &str = "DISABLE_COMPACT";
 /// Tells `claude` to scrub credentials from the environment of what it starts.
 const ENV_SCRUB_VARIABLE: &str = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB";
 /// Optional, set by the unit: `off` turns that scrub off for a run whose user holds root, where it
@@ -127,7 +135,7 @@ const POLL: StdDuration = StdDuration::from_secs(INBOX_POLL_S as u64);
 /// skill: it names the skill, the instance and the run id.
 pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
     format!(
-        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks, and each answer you give closes the brief it answers. Work you take on beyond an answer is a follow-up of your own.\n\n{}",
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own.\n\n{}",
         instance.0,
         run.id.0,
         render_plan(plan_quota, now_ms)
@@ -171,8 +179,18 @@ The run claims `{id}`, which the mind does not hold: its task is unknown.")),
     Ok(task)
 }
 
-/// What the child is told once, at the context ceiling.
+/// What the child is told once, when its session must end: the ceiling, the cap or the cache.
 pub const FLUSH_MESSAGE: &str = "The context ceiling is reached. Admit to the mind what it lacks, close your run, and end.";
+
+/// The flush as written: the one message, and what she does with the briefs she holds.
+fn flush_text(why: Why) -> String {
+    let cause = match why {
+        Why::Ceiling => "",
+        Why::Rotation => " (This session ends soon: the unit's time is nearly up.)",
+        Why::Idle => " (This session ends because nothing is waiting and its cache would lapse.)",
+    };
+    format!("{FLUSH_MESSAGE}{cause} Resolve each brief you answered (Recorded, your answer as rationale); a brief you are still working stays open and the next session continues it.")
+}
 
 /// The session id of a run: UUIDv5 over the run's id. Derived, never stored.
 pub fn session_id(run: &PipelineRef) -> Uuid {
@@ -180,17 +198,19 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
 }
 
 /// The argument list of the child, and nothing else: no resume, continue or
-/// fork, no model and no settings of its own belong to this actuator, except the
-/// hooks the actuator builds on its own argv (`--settings`, never a file in her
-/// sandbox): the tell between tool calls and the block on auto-compaction. It fixes
-/// the permission mode: print mode starts in Manual when nothing on the command
+/// fork, no model, no settings and no hooks belong to this actuator. It asks the
+/// CLI to echo each stdin line it takes into a request (`--replay-user-messages`),
+/// which is how delivery is counted. It fixes the permission mode: print mode starts in Manual when nothing on the command
 /// line sets a mode (the managed `defaultMode` was not applied in print mode,
 /// 2026-10-31), and `--permission-prompts none` then denies every tool that
-/// needs approval, so a Mind's reach within her slice is granted here. Only the
+/// needs approval, so a Mind's reach within her slice is granted here, but
+/// with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` set the CLI forces the mode to
+/// default (probe, claude 2.1.312): the flag has no effect there and only the
+/// seed's allow list decides tools. Only the
 /// user's settings load (the fresh configuration directory
 /// the seed fills); the working directory's project and local settings, which a
 /// run could have written, do not.
-pub fn claude_args(session: Uuid, hooks: &Hooks) -> Vec<String> {
+pub fn claude_args(session: Uuid) -> Vec<String> {
     [
         "-p",
         "--input-format",
@@ -208,8 +228,7 @@ pub fn claude_args(session: Uuid, hooks: &Hooks) -> Vec<String> {
         "none",
         "--setting-sources",
         "user",
-        "--settings",
-        &hooks.settings(),
+        "--replay-user-messages",
     ]
     .map(String::from)
     .to_vec()
@@ -221,7 +240,10 @@ pub enum Usage {
     /// A request of the main thread: the message's id and the context it
     /// read (input, cache read and cache write tokens).
     Request { id: String, prefix: u64 },
-    Result,
+    /// A user line of the main thread that the CLI took into a request (a replay echo): ours, never a tool result.
+    Echo,
+    /// A turn ended. `ok`: not an error. `blocked`: the CLI refused the context (`blocking_limit`).
+    Result { ok: bool, blocked: bool },
     /// Valid JSON that is none of the above, or a request of a subagent.
     Other,
     /// Not a JSON object.
@@ -244,7 +266,17 @@ pub fn writes_hour_cache(line: &str) -> Option<bool> {
 pub fn read_usage(line: &str) -> Usage {
     let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return Usage::Unreadable };
     match event.get("type").and_then(Value::as_str) {
-        Some("result") => Usage::Result,
+        Some("result") => Usage::Result {
+            ok: !event.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+            blocked: event.get("terminal_reason").and_then(Value::as_str) == Some("blocking_limit"),
+        },
+        Some("user")
+            if event.get("isReplay").and_then(Value::as_bool) == Some(true)
+                && event.get("parent_tool_use_id").is_none_or(Value::is_null)
+                && event.get("message").and_then(|message| message.get("content")).is_some_and(Value::is_string) =>
+        {
+            Usage::Echo
+        }
         Some("assistant") if event.get("parent_tool_use_id").is_none_or(Value::is_null) => {
             let message = event.get("message");
             let Some(id) = message.and_then(|message| message.get("id")).and_then(Value::as_str) else { return Usage::Other };
@@ -300,8 +332,6 @@ impl Stop {
 }
 
 pub trait Spawner {
-    /// The spool the child's hooks drain and the program they run.
-    fn hooks(&self) -> Hooks;
     /// Starts the child with `token` as its credential descriptor.
     fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>>;
 }
@@ -382,15 +412,23 @@ fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, Vec<PipelineRef>)
 /// What the stream said at the end of the run: its head becomes the closure's reason, its text (bounded) the rationale.
 #[derive(Default)]
 struct Heard {
-    /// The last result heard: its head line and its text cut to `RATIONALE_RESULT_LIMIT`.
+    /// The last result heard, ok or not: its head line and its text cut to `RATIONALE_RESULT_LIMIT`.
     concluded: Option<(String, String)>,
+    /// The text of the last ok result: what an idle end records as her answer.
+    answer: Option<String>,
+    /// The idle flush was answered by an ok result.
+    idle_end: bool,
 }
 
 impl Heard {
     fn hear(&mut self, line: &str) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         if event.get("type").and_then(Value::as_str) == Some("result") {
-            self.concluded = Some((result_head(&event), cut_text(result_text(&event), RATIONALE_RESULT_LIMIT)));
+            let text = cut_text(result_text(&event), RATIONALE_RESULT_LIMIT);
+            if !event.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+                self.answer = Some(text.clone());
+            }
+            self.concluded = Some((result_head(&event), text));
         }
     }
 }
@@ -469,25 +507,24 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 /// error, and the launch that opens the next run closes the run left open.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let Some((run, claims)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
-    let hooks = spawner.hooks();
-    // The briefs a closed run claimed were answered by that run: closed now, before anything is told.
-    inbox::reset(&hooks.spool)?;
-    inbox::close_past(mind, clock.now(), session_label(&run))?;
     let mut task = task_section(mind, &claims)?;
-    let open = inbox::derive(mind, &hooks.spool)?;
-    let also: Vec<&Brief> = open.iter().filter(|brief| !claims.iter().any(|claim| claim.id.0 == brief.id)).collect();
+    let mut told: Vec<Brief> = inbox::derive(mind, &HashSet::new())?;
+    let also: Vec<&Brief> = told.iter().filter(|brief| !claims.iter().any(|claim| claim.id.0 == brief.id)).collect();
     if !also.is_empty() {
         task.push_str("
 
 Also open for you:");
         for brief in also {
             task.push_str(&format!("
-- follow-up `{}` (campaign `{}`, repo `{}`): {}", brief.id, brief.campaign, brief.repo, brief.item));
+- follow-up `{}` (campaign `{}`, repo `{}`): {} {}", brief.id, brief.campaign, brief.repo, brief.item, inbox::resolving_sentence(&brief.id)));
         }
     }
-    inbox::mark_told(&hooks.spool, &open)?;
     let mut heard = Heard::default();
-    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &task), &mut heard);
+    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &task), &mut told, &mut heard);
+    // An idle end answered by an ok result: what she left open is closed, saying so. After a rotation, a ceiling, an error or a crash the told briefs stay open for the successor.
+    if heard.idle_end && ran.is_ok() {
+        close_left_open(mind, clock, &run, &told, &heard, out);
+    }
     let closed = close_if_open(mind, clock, &run, &ran, &heard);
     if closed.is_err() {
         let _ = writeln!(out, "the run could not be closed: the next launch closes it");
@@ -500,7 +537,7 @@ Also open for you:");
 }
 
 #[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
-fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, task): (&PipelineRef, &str), heard: &mut Heard) -> Result<SelfRunOutcome> {
+fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, task): (&PipelineRef, &str), told: &mut Vec<Brief>, heard: &mut Heard) -> Result<SelfRunOutcome> {
     let started_ms = unix_ms(clock.now());
     let request = LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
@@ -511,9 +548,8 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         }
         Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
-    let hooks = spawner.hooks();
-    let child = spawner.spawn(&claude_args(session_id(run), &hooks), lease.token())?;
-    drive(mind, clock, child, &hooks, (run, task), (lease.plan_quota(), started_ms, run_cap_s), heard, out)
+    let child = spawner.spawn(&claude_args(session_id(run)), lease.token())?;
+    drive(mind, clock, child, (run, task), (lease.plan_quota(), started_ms, run_cap_s), told, heard, out)
 }
 
 /// The most of a result's text that reaches the journal.
@@ -563,51 +599,43 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
     writeln!(out, "{}", describe_result(&event, RESULT_TEXT_LIMIT))
 }
 
-/// What a brief's closing resolution says when the result had no text.
+/// What a brief's closing resolution says when her last answer had no text.
 const NO_ANSWER_TEXT: &str = "The turn ended with no answer text.";
 
-/// Resolves Recorded every brief told to the session that this result answers.
-/// A failed close leaves them told: the next result tries again.
-fn close_told(mind: &dyn MindPort, clock: &dyn Clock, hooks: &Hooks, session: &str, heard: &Heard, out: &mut dyn Write) -> Result<usize> {
-    let rationale = heard.concluded.as_ref().map(|(_, text)| text.as_str()).filter(|text| !text.is_empty()).unwrap_or(NO_ANSWER_TEXT);
-    let closed = inbox::told(&hooks.spool).and_then(|told| {
-        let answered: Vec<(Brief, String)> = told.iter().map(|brief| (brief.clone(), rationale.to_string())).collect();
-        let count = inbox::close(mind, clock.now(), session, &answered, "answered by the turn's result")?;
-        inbox::forget(&hooks.spool, &told);
-        Ok(count)
-    });
-    match closed {
-        Ok(count) => Ok(count),
-        Err(_) => {
-            writeln!(out, "briefs could not be closed: the next result tries again")?;
-            Ok(0)
-        }
+/// At an idle end: resolves Recorded the told briefs she left in force, the last ok result's text as the rationale. One try; a failure is logged and the briefs stay open for the successor.
+fn close_left_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, told: &[Brief], heard: &Heard, out: &mut dyn Write) {
+    let rationale = heard.answer.as_deref().filter(|text| !text.is_empty()).unwrap_or(NO_ANSWER_TEXT);
+    let label = session_label(run);
+    let reason = format!("told to Self run {label}; the session went idle and ended without her resolving it");
+    let answered: Vec<(Brief, String)> = told.iter().map(|brief| (brief.clone(), rationale.to_string())).collect();
+    if inbox::close(mind, clock.now(), label, &answered, &reason).is_err() {
+        let _ = writeln!(out, "briefs could not be closed: they stay open for the next session");
     }
 }
 
-/// The loop: facts in, one clock read per fact, actions out.
+/// The loop: facts in, one clock read per fact, actions out. The one writer into her session.
 #[allow(clippy::too_many_arguments, reason = "the loop's ports and the run's facts, passed on whole")]
 fn drive(
     mind: &dyn MindPort,
     clock: &dyn Clock,
     mut child: Box<dyn Child>,
-    hooks: &Hooks,
     (run, task): (&PipelineRef, &str),
     (plan_quota, now_ms, run_cap_s): (&[PlanQuota], u64, u64),
+    told: &mut Vec<Brief>,
     heard: &mut Heard,
     out: &mut dyn Write,
 ) -> Result<SelfRunOutcome> {
     let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
     let plan = render_plan(plan_quota, now_ms);
-    inbox::write_plan(&hooks.spool, &plan)?;
     child.write_line(&user_line(&format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms))));
 
-    let session = session_label(run);
     let mut now = clock.now();
     let mut state = State::started(now, run_cap_s);
     let mut polled = now;
     let mut ttl_1h = false;
     let mut closed = false;
+    // The briefs derived at the last poll that no line has carried yet.
+    let mut waiting: Vec<Brief> = Vec::new();
     loop {
         let poll_due = polled + ChronoDuration::seconds(INBOX_POLL_S);
         let wake = next_deadline(&state).into_iter().chain((!closed).then_some(poll_due)).min();
@@ -621,7 +649,8 @@ fn drive(
                 }
                 match read_usage(&line) {
                     Usage::Request { id, prefix } => Event::Request { id, prefix },
-                    Usage::Result => Event::Result { ttl_1h },
+                    Usage::Echo => Event::Echo,
+                    Usage::Result { ok, blocked } => Event::Result { ok, blocked, ttl_1h },
                     Usage::Other | Usage::Unreadable => Event::Tick,
                 }
             }
@@ -633,13 +662,14 @@ fn drive(
         let mut events = VecDeque::from([fact]);
         if !closed && now >= poll_due {
             polled = now;
-            match inbox::derive(mind, &hooks.spool).and_then(|briefs| inbox::spool(&hooks.spool, &briefs)).and_then(|()| inbox::pending(&hooks.spool)) {
-                Ok(pending) => events.push_back(Event::Inbox { pending }),
+            let held: HashSet<String> = told.iter().map(|brief| brief.id.clone()).collect();
+            match inbox::derive(mind, &held) {
+                Ok(briefs) => {
+                    events.push_back(Event::Inbox { pending: !briefs.is_empty() });
+                    waiting = briefs;
+                }
                 Err(_) => writeln!(out, "inbox poll failed")?,
             }
-        }
-        if inbox::take_pre_compact(&hooks.spool) {
-            events.push_back(Event::PreCompact);
         }
         while let Some(heard_event) = events.pop_front() {
             let counted = state.requests;
@@ -647,28 +677,16 @@ fn drive(
             let (ttl_s, inbox, idle_s) = (state.ttl_s, state.inbox, state.idle_s(now));
             let (next, action) = decide(state, heard_event, now);
             state = next;
+            heard.idle_end = state.idle_end_answered();
             if state.requests != counted {
                 writeln!(out, "request {} prefix {}", state.requests, state.prefix)?;
             }
-            let mut briefs_closed = 0;
             match &action {
                 Action::None => {}
-                Action::WriteFlush => child.write_line(&user_line(FLUSH_MESSAGE)),
-                Action::WriteTells => match inbox::claim(&hooks.spool) {
-                    Ok(briefs) if !briefs.is_empty() => {
-                        child.write_line(&user_line(&inbox::render(&briefs, &plan)));
-                        events.push_front(Event::Told);
-                    }
-                    Ok(_) => events.push_front(Event::Inbox { pending: false }),
-                    Err(_) => {
-                        writeln!(out, "inbox claim failed")?;
-                        events.push_front(Event::Inbox { pending: false });
-                    }
-                },
-                Action::CloseBriefs => {
-                    briefs_closed = close_told(mind, clock, hooks, session, heard, out)?;
-                    // The result's own pass goes on to the lifecycle: a waiting brief is told, a finished flush closes the input.
-                    events.push_front(Event::Tick);
+                Action::WriteFlush(why) => child.write_line(&user_line(&flush_text(*why))),
+                Action::WriteTells => {
+                    child.write_line(&user_line(&inbox::render(&waiting, &plan)));
+                    told.append(&mut waiting);
                 }
                 Action::CloseStdin => {
                     child.close_input();
@@ -679,7 +697,7 @@ fn drive(
             }
             if !matches!(action, Action::None | Action::Finish(_)) {
                 let idle = idle_s.map_or_else(|| "working".to_string(), |seconds| seconds.to_string());
-                writeln!(out, "decision {action:?} prefix {} ttl_s {ttl_s} idle_s {idle} inbox {inbox} briefs_closed {briefs_closed}", state.prefix)?;
+                writeln!(out, "decision {action:?} prefix {} ttl_s {ttl_s} idle_s {idle} inbox {inbox} written {} consumed {}", state.prefix, state.written, state.consumed)?;
             }
             if let Action::Finish(outcome) = action {
                 return Ok(outcome);
@@ -697,31 +715,21 @@ pub struct ClaudeSpawner {
     unit_environment: Vec<(OsString, OsString)>,
     scratch: PathBuf,
     seed: Option<PathBuf>,
-    /// The program the child's hooks run: this actuator's own binary.
-    injector: PathBuf,
 }
 
 impl ClaudeSpawner {
     /// From the unit's environment: it must name [`SCRATCH_VARIABLE`], and may name [`SEED_VARIABLE`].
-    /// `injector` is the absolute path of `mind-self-run`, which the hooks run as `inject`.
-    pub fn new(unit_environment: impl IntoIterator<Item = (OsString, OsString)>, injector: PathBuf) -> Result<Self> {
+    pub fn new(unit_environment: impl IntoIterator<Item = (OsString, OsString)>) -> Result<Self> {
         let unit_environment: Vec<(OsString, OsString)> = unit_environment.into_iter().collect();
         let named = |variable: &str| unit_environment.iter().find(|(name, _)| name == variable).map(|(_, value)| PathBuf::from(value));
         // systemd lists several runtime directories colon-separated; the unit names one.
         let scratch = named(SCRATCH_VARIABLE).filter(|path| !path.as_os_str().is_empty()).ok_or_else(|| anyhow!("{SCRATCH_VARIABLE} is not set: the unit needs RuntimeDirectory="))?;
         let seed = named(SEED_VARIABLE).filter(|path| !path.as_os_str().is_empty());
-        Ok(Self { unit_environment, scratch, seed, injector })
+        Ok(Self { unit_environment, scratch, seed })
     }
 }
 
-/// The directory name of the spool inside the scratch directory.
-const SPOOL_DIR_NAME: &str = "inbox";
-
 impl Spawner for ClaudeSpawner {
-    fn hooks(&self) -> Hooks {
-        Hooks { spool: self.scratch.join(SPOOL_DIR_NAME), injector: self.injector.clone() }
-    }
-
     fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
         let config = FreshConfig::create(&self.scratch, self.seed.as_deref())?;
         spawn_program(Path::new("claude"), args, token, &self.unit_environment, config)
@@ -863,7 +871,7 @@ fn spawn_program(program: &Path, args: &[String], token: &TokenFd, unit: &[(OsSt
     command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     command.env_clear().envs(child_environment(unit));
     command.env("HOME", &config.0).env(CONFIG_DIR_VARIABLE, &config.0);
-    command.env(TOKEN_FD_VARIABLE, inheritable.number().to_string()).env(ENV_SCRUB_VARIABLE, if scrub_is_off(unit) { "0" } else { "1" });
+    command.env(DISABLE_COMPACT_VARIABLE, "1").env(TOKEN_FD_VARIABLE, inheritable.number().to_string()).env(ENV_SCRUB_VARIABLE, if scrub_is_off(unit) { "0" } else { "1" });
     // Its own process group, so that a signal reaches what the child started too.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);

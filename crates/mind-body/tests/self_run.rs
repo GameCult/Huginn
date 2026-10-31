@@ -46,46 +46,6 @@ fn the_run_cap_must_be_a_positive_number_of_seconds_and_the_runtime_directory_mu
     assert!(!message.contains("MIND_SELF_RUN_CAP_S") && message.contains("RUNTIME_DIRECTORY is not set"), "{message}");
 }
 
-/// The hook `claude` runs in the session: `mind-self-run inject --spool <dir>` reads the hook's
-/// JSON on stdin and prints what the spool holds as context, exit 0; with `--pre-compact` it
-/// blocks the compaction with exit 2; without a spool it is a usage error.
-#[test]
-fn inject_prints_the_spooled_briefs_as_hook_context_and_blocks_a_compaction() {
-    use std::io::Write;
-    use std::process::Stdio;
-    let spool = std::env::temp_dir().join(format!("mind-self-run-inject-{}", std::process::id()));
-    std::fs::create_dir_all(&spool).unwrap();
-    std::fs::write(
-        spool.join("00000000000000000007-b7.json"),
-        r#"{"id":"eureka-body:follow_up:b7","campaign":"eureka-body","repo":"GameCult/Huginn","item":"Wire the thing.","ordinal":7}"#,
-    )
-    .unwrap();
-    let inject = |extra: &[&str], input: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_mind-self-run"))
-            .args(["inject", "--spool", spool.to_str().unwrap()])
-            .args(extra)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
-        child.wait_with_output().unwrap()
-    };
-    let blocked = inject(&["--pre-compact"], "{}");
-    assert_eq!((blocked.status.code(), blocked.stdout.is_empty()), (Some(2), true));
-    assert!(String::from_utf8_lossy(&blocked.stderr).contains("compaction blocked"), "the block says why");
-    let printed = inject(&[], r#"{"hook_event_name":"PostToolBatch"}"#);
-    assert_eq!(printed.status.code(), Some(0));
-    assert!(printed.stderr.is_empty(), "a tell prints nothing on stderr");
-    let text = String::from_utf8_lossy(&printed.stdout);
-    assert!(text.contains("hookSpecificOutput") && text.contains("eureka-body:follow_up:b7") && text.contains("Wire the thing."), "{text}");
-    assert!(inject(&[], "{}").stdout.is_empty(), "claimed once");
-    let bare = Command::new(env!("CARGO_BIN_EXE_mind-self-run")).arg("inject").stdin(Stdio::null()).output().unwrap();
-    assert_eq!(bare.status.code(), Some(2));
-    std::fs::remove_dir_all(&spool).unwrap();
-}
-
 #[test]
 fn without_an_instance_or_with_a_stray_argument_it_exits_2_with_the_usage_and_echoes_nothing() {
     let canary = "canary-argument-3f9a";
@@ -96,6 +56,8 @@ fn without_an_instance_or_with_a_stray_argument_it_exits_2_with_the_usage_and_ec
         vec!["--instance", NO_SUCH_INSTANCE, "--instance", canary],
         vec![canary],
         vec!["--resume", canary],
+        // The hook subcommand is gone: it is a stray argument now.
+        vec!["inject", "--spool", canary],
     ] {
         let output = self_run(&args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -361,9 +323,10 @@ mod lane {
         let body = format!(
             "read -r -u \"$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR\" cred
 echo journal-line >&2
-echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho \"$SELF_RUN_ENV_CANARY\" >> {record}\necho \"$cred\" >> {record}\necho '{{\"type\":\"result\"}}'\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0",
+echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho \"$SELF_RUN_ENV_CANARY\" >> {record}\necho \"$cred\" >> {record}\necho '{echo}'\necho '{echo}'\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0",
             first = request("msg_1", 100),
             second = request("msg_2", 299_999),
+            echo = r#"{"type":"user","isReplay":true,"message":{"role":"user","content":"x"}}"#,
             record = bin.path().join("record").display(),
         );
         let record = fake_claude(bin.path(), &body);
@@ -382,7 +345,7 @@ echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start
         let mut lines = recorded.lines();
         let argv = lines.next().unwrap();
         assert!(argv.contains(&format!("--session-id {LANE_SESSION}")) && !argv.contains("--max-budget-usd"), "{argv}");
-        assert!(argv.starts_with("-p --input-format stream-json"), "{argv}");
+        assert!(argv.starts_with("-p --input-format stream-json") && argv.contains("--replay-user-messages") && !argv.contains("--settings"), "{argv}");
         assert!(lines.next().unwrap().contains("yggdrasil:run:selfrun-lane"), "the start message names her run");
         let flush = lines.next().unwrap();
         assert!(flush.contains(FLUSH_MESSAGE) && flush.contains("\"type\":\"user\""), "the flush went to the child's stdin: {flush}");
