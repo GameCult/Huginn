@@ -1985,9 +1985,11 @@ fn each_open_list_holds_its_own_bound_exactly_and_counts_what_it_drops() {
             crate::testkit::memory(&format!("a{index}"), MemorySort::Asked, &"a".repeat(900), &[]),
         ]);
     }
-    mind.committed(vec![open_follow_up("later", &spec_ref("x"), "Wire the thing.")]);
+    mind.committed(vec![ruling("R1", None)]);
+    mind.committed(vec![open_follow_up("later", &spec_ref("x"), "Wire the thing, per eureka-body:ruling:R1.")]);
     let goals = render_responsibilities(&mind, &slug, &names).unwrap();
     assert!(goals.text.contains("eureka-body/later"), "{}", goals.text);
+    assert!(goals.text.contains("- eureka-body:ruling:R1: A ruling"), "the cited ruling still has its room: {}", goals.text);
     assert!(goals.text.len() > GOALS_MAX_BYTES, "the open lists sit outside the goals bound");
     assert!(goals.text.contains("older commitments not shown") && goals.text.contains("older asks not shown"));
     assert!(goals.open.len() < 12 && goals.open.iter().all(|id| goals.text.contains(id.as_str())), "open is exactly what was shown");
@@ -2008,4 +2010,24 @@ fn newest_open_items_come_first_with_their_commitments_before_their_asks_and_aft
     let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} in {text}"));
     assert!(at("steward of") < at("You committed to:") && at("You committed to:") < at("Asked of you, not yet taken on:") && at("Asked of you, not yet taken on:") < at("Open follow-ups"), "{text}");
     assert!(at("newer part") < at("older part") && at("newer ask") < at("older ask"), "{text}");
+}
+
+#[test]
+fn whoever_a_shown_memory_or_open_item_names_may_be_named_in_the_next_reply() {
+    // A recalled memory heard from @dave about @carol, and an open ask by @erin: none of them spoke, none is a Mind or an operator.
+    let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "hello")], &[says(&[("swarm", "hi")])]);
+    rig.mind.committed(vec![crate::testkit::memory_from(
+        "seen",
+        MemorySort::Learned,
+        "Carol is on leave",
+        &["@carol:chat"],
+        MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec!["@dave:chat".into()] },
+        500,
+    )]);
+    rig.mind.committed(vec![crate::testkit::memory("open", MemorySort::Asked, "Review the notes", &["@erin:chat"])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let allowed = about_enum(&rig, 0);
+    for who in ["@carol:chat", "@dave:chat", "@erin:chat"] {
+        assert!(allowed.contains(&who.to_string()), "{who} in {allowed:?}");
+    }
 }

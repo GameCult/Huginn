@@ -246,10 +246,7 @@ fn fill(lane: Lane, candidates: Vec<PipelineDocumentView>, matched: usize, limit
             elsewhere += 1;
             continue;
         }
-        let Some(line) = line_of(&view, &cue.names) else {
-            elsewhere += 1;
-            continue;
-        };
+        let Some(line) = line_of(&view, &cue.names) else { continue };
         if entries.len() == limit || bytes + line.len() > budget {
             continue;
         }

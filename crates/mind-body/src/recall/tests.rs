@@ -222,6 +222,8 @@ fn equal_weights_keep_the_newest_first() {
 #[test]
 fn lane_limits_and_budgets_fit_the_total_and_nothing_exceeds_them() {
     assert_eq!(MAX_BYTES, ABOUT_BYTES + RELEVANT_BYTES + SALIENT_BYTES);
+    assert_eq!((ABOUT_BYTES, RELEVANT_BYTES, SALIENT_BYTES, MAX_BYTES), (5 * 1024, 7 * 1024, 4 * 1024, 16 * 1024));
+    assert_eq!((ABOUT_LIMIT, RELEVANT_LIMIT, SALIENT_LIMIT), (6, 8, 4));
     assert_eq!(ABOUT_LIMIT + RELEVANT_LIMIT + SALIENT_LIMIT, 18);
     let mind = TestMind::seeded();
     for index in 0..40 {
