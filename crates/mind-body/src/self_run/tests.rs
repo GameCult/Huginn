@@ -1587,6 +1587,15 @@ fn a_brief_told_mid_turn_by_the_hook_is_closed_by_that_turns_result_and_never_to
     assert!(tells(&ran).is_empty(), "the hook told it; the actuator did not: {:?}", ran.written());
     let closures = resolutions_of(&mind, &brief_ref("b2"));
     assert_eq!((closures.len(), closures[0].rationale.0.as_str()), (1, answer_text().as_str()));
+    // The closure is admitted under the run's own label.
+    let sessions: Vec<String> = mind
+        .ids(K::Resolution)
+        .iter()
+        .filter_map(|resolution| mind.view(K::Resolution, resolution))
+        .filter(|view| matches!(&view.document, PipelineDocument::Resolution(document) if document.subject == brief_ref("b2")))
+        .map(|view| view.admission.provenance.session)
+        .collect();
+    assert_eq!(sessions, vec!["selfrun-a".to_string()]);
 }
 
 #[test]
