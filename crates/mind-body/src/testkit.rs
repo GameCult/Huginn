@@ -110,6 +110,11 @@ impl TestMind {
         this
     }
 
+    /// The next admission lands exactly at `when`.
+    pub(crate) fn admit_at(&self, when: DateTime<Utc>) {
+        self.now.set(when - Duration::seconds(1));
+    }
+
     /// Admits as Hands, one second after the last admission.
     pub(crate) fn put(&self, documents: Vec<PipelineDocument>) -> PipelineAdmissionOutcome {
         self.now.set(self.now.get() + Duration::seconds(1));

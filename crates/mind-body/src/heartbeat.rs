@@ -335,10 +335,7 @@ impl fmt::Display for Outcome {
 }
 
 struct Turn {
-    label: String,
     admitted: DateTime<Utc>,
-    /// When it was resolved, and whether the resolution withdrew it unrun.
-    resolved: Option<(DateTime<Utc>, bool)>,
 }
 
 fn parse_time(text: &str) -> Result<DateTime<Utc>> {
@@ -398,16 +395,14 @@ fn recent_turns(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<Turn>> {
     };
     let mut turns = Vec::new();
     for run in runs {
-        let PipelineFacts::Run { label, .. } = &run.facts else {
+        if !matches!(run.facts, PipelineFacts::Run { .. }) {
             continue;
-        };
-        let ending = latest_resolution(mind, &run.id)?
-            .map(|(at, outcome)| (at, matches!(outcome, ResolutionOutcome::Withdrawn { .. })));
-        turns.push(Turn {
-            label: label.0.clone(),
-            admitted: parse_time(&run.admission.admitted_at)?,
-            resolved: ending,
-        });
+        }
+        // A turn withdrawn unrun never happened: it neither resets her wait nor counts as her last turn.
+        if let Some((_, ResolutionOutcome::Withdrawn { .. })) = latest_resolution(mind, &run.id)? {
+            continue;
+        }
+        turns.push(Turn { admitted: parse_time(&run.admission.admitted_at)? });
     }
     Ok(turns)
 }
