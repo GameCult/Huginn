@@ -156,3 +156,22 @@ fn the_parent_closes_the_duplicate_it_lent_the_child() {
     child.stop(Stop::Kill);
     drain(&mut *child);
 }
+
+#[test]
+fn the_child_scrubs_its_subprocesses_unless_the_unit_says_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = script(&dir, "echo \"scrub=$CLAUDE_CODE_SUBPROCESS_ENV_SCRUB\"");
+    let scrub_with = |value: Option<&str>| {
+        let mut unit = unit_environment();
+        unit.extend(value.map(|value| (SCRUB_VARIABLE.into(), value.into())));
+        let config = FreshConfig::create(dir.path(), None).unwrap();
+        let mut child = spawn_program(&program, &[], &token_holding("tok-canary-7f3a"), &unit, config).unwrap();
+        child.close_input();
+        let (lines, _) = drain(&mut *child);
+        field(&lines, "scrub")
+    };
+    assert_eq!(scrub_with(None), "1", "unset keeps the scrub on");
+    assert_eq!(scrub_with(Some("on")), "1", "any other value keeps it on");
+    assert_eq!(scrub_with(Some("OFF")), "1", "only the exact word turns it off");
+    assert_eq!(scrub_with(Some("off")), "0", "a unit for a user that holds root turns it off");
+}
