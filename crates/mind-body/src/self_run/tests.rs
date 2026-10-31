@@ -1024,9 +1024,9 @@ fn the_clock_is_read_once_per_event_so_a_step_of_the_wall_clock_cannot_split_a_p
     let outcome = carry(&Seen::of(&mind), &Stepped(clock.clone()), &FakeLender::new(Answer::Grant), &fake, TEST_CAP_S, &mut Vec::new()).unwrap();
     let events = log.borrow().clone();
     let reads = events.iter().filter(|event| matches!(event, Event::Asked(_))).count() as u32;
-    // One read for the lease's expiry, one before the first wait, then one per fact heard, and one for the closure:
+    // One read for the lease's expiry, one for closing the past, one before the first wait, then one per fact heard, and one for the closure:
     // never a second read inside a pass.
-    assert_eq!(clock.1.get(), 3 + reads, "{events:?}");
+    assert_eq!(clock.1.get(), 4 + reads, "{events:?}");
     // The flush was written on the first request at time 0; the very next pass sees the stepped clock.
     // The flush pass itself has no interrupt, whatever the step: the interrupt is on a later event.
     let flush_at = events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains("context ceiling"))).unwrap();
@@ -1606,8 +1606,9 @@ fn a_brief_her_self_resolved_is_not_resolved_again_and_one_not_yet_told_stays_op
     let steps = vec![Out(at("m1", 10)), admits(&mind, 31, vec![brief("b3", "Mine.")]), claim_and_resolve, admits(&mind, 31, vec![brief("b4", "Later.")]), Out(result_line())];
     let ran = carry_hooked(&Seen::of(&mind), steps, (Some(0), None, NO_SIGNALS, false), hooks);
     assert_eq!(resolutions_of(&mind, &brief_ref("b3")).len(), 1, "her own resolution stands alone");
-    assert!(resolutions_of(&mind, &brief_ref("b4")).is_empty(), "spooled, never told: this result did not answer it");
-    assert!(tells(&ran).is_empty());
+    assert!(resolutions_of(&mind, &brief_ref("b4")).is_empty(), "told after the close: this result did not answer it");
+    assert_eq!(tells(&ran).len(), 1, "b4 is told once, in the result's own pass, after the close: {:?}", ran.written());
+    assert!(tells(&ran)[0].contains(&brief_ref("b4").id.0));
 }
 
 #[test]
