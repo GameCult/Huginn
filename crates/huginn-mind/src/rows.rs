@@ -48,7 +48,7 @@ pub(crate) enum Alias {
     /// unrun, so a reader of her last real turn skips the withdrawn ones in the
     /// index instead of walking past them.
     Ran,
-    /// `true` on a pulse that casts a tempo vote.
+    /// `true` on a pulse that casts a tempo vote or withdraws the standing one.
     Voted,
     /// `true` on a pulse that declares an urgency.
     Urged,
@@ -244,7 +244,7 @@ impl SelectionRow {
                 put(Alias::Ran, if withdrawn { Vec::new() } else { vec!["true".into()] });
             }
             D::Pulse(pulse) => {
-                put(Alias::Voted, if pulse.tempo_vote_beat_s.is_some() { vec!["true".into()] } else { Vec::new() });
+                put(Alias::Voted, if pulse.tempo_vote_beat_s.is_some() || pulse.tempo_vote_withdrawn { vec!["true".into()] } else { Vec::new() });
                 put(Alias::Urged, if pulse.urgency_permille.is_some() { vec!["true".into()] } else { Vec::new() });
             }
             _ => {}

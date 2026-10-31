@@ -450,12 +450,13 @@ fn label_of(run: &eureka_pipeline::PipelineRef) -> String {
     run.id.0.rsplit(':').next().unwrap_or_default().to_string()
 }
 
-/// Her standing vote: the newest pulse that carries one, by admission ordinal. A
-/// vote stands until she replaces it, however many pulses of other kinds follow.
+/// Her standing vote: the newest pulse that votes or withdraws, by admission
+/// ordinal. A vote stands until she casts another or withdraws it, however many
+/// pulses of other kinds follow; a withdrawal leaves her silent.
 fn standing_vote(mind: &dyn MindPort, instance: &Slug) -> Result<Option<u32>> {
     let pulses = any_of(any_of(of_kind(PipelineKind::Pulse), "root", &[&instance.0]), "voted", &["true"]);
     Ok(newest(mind, pulses)?.and_then(|header| match header.facts {
-        PipelineFacts::Pulse { tempo_vote_beat_s, .. } => tempo_vote_beat_s,
+        PipelineFacts::Pulse { tempo_vote_beat_s, tempo_vote_withdrawn: false, .. } => tempo_vote_beat_s,
         _ => None,
     }))
 }

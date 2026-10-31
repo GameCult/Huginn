@@ -169,7 +169,7 @@ fn readout() -> UsageReadout {
 
 fn says(lines: &[(&str, &str)]) -> String {
     let say: Vec<_> = lines.iter().map(|(room, text)| json!({ "room": room, "text": text })).collect();
-    json!({ "say": say, "start_self_run": null, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string()
+    json!({ "say": say, "start_self_run": null, "urgency_permille": null }).to_string()
 }
 
 impl Rig {
@@ -403,7 +403,7 @@ fn a_reply_is_decoded_as_the_one_type_and_nothing_else_is_scanned() {
     assert!(decode_reply(&says(&[("swarm", "x")]), &c.rooms).is_ok());
     for bad in [
         "I will start_self_run now",
-        r#"{"say":[],"start_self_run":null,"tempo_vote_beat_s":null,"urgency_permille":null} and more"#,
+        r#"{"say":[],"start_self_run":null,"urgency_permille":null} and more"#,
         r#"{"say":[],"start_self_run":null,"extra":1}"#,
         "",
     ] {
@@ -465,7 +465,7 @@ fn start_self_run_admits_brief_and_launches() {
 
 #[test]
 fn a_start_outside_the_reply_bounds_fails_the_turn_without_an_admission_or_an_ack() {
-    let reply = json!({ "say": [], "start_self_run": { "brief": "x", "repo": "not a repo", "campaign": CAMPAIGN }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
+    let reply = json!({ "say": [], "start_self_run": { "brief": "x", "repo": "not a repo", "campaign": CAMPAIGN }, "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
@@ -477,7 +477,7 @@ fn a_start_outside_the_reply_bounds_fails_the_turn_without_an_admission_or_an_ac
 fn a_reply_without_start_self_run_is_not_a_reply_though_null_is() {
     let c = config();
     assert_eq!(decode_reply(r#"{"say":[]}"#, &c.rooms), Err(Failure::Undecodable), "the schema requires the field, so does the decoder");
-    assert!(decode_reply(r#"{"say":[],"start_self_run":null,"tempo_vote_beat_s":null,"urgency_permille":null}"#, &c.rooms).is_ok());
+    assert!(decode_reply(r#"{"say":[],"start_self_run":null,"urgency_permille":null}"#, &c.rooms).is_ok());
     let rig = Rig::new(vec![operator_says(1, "go")], &[r#"{"say":[{"room":"operator","text":"hi"}]}"#.into()]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
@@ -487,7 +487,7 @@ fn a_reply_without_start_self_run_is_not_a_reply_though_null_is() {
 #[test]
 fn the_decoder_holds_the_bounds_the_schema_states() {
     let c = config();
-    let start = |brief: &str, repo: &str, campaign: &str| json!({ "say": [], "start_self_run": { "brief": brief, "repo": repo, "campaign": campaign }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
+    let start = |brief: &str, repo: &str, campaign: &str| json!({ "say": [], "start_self_run": { "brief": brief, "repo": repo, "campaign": campaign }, "urgency_permille": null }).to_string();
     let ok = |brief: &str, repo: &str, campaign: &str| decode_reply(&start(brief, repo, campaign), &c.rooms).is_ok();
     assert!(ok("b", "GameCult/Huginn", "eureka-body"));
     assert!(ok(&"b".repeat(1000), "a-b/c.d_e-f", &"c".repeat(64)));
@@ -676,7 +676,7 @@ fn no_member_text_name_or_context_can_read_as_an_operator_line() {
 
 #[test]
 fn a_self_run_in_a_campaign_the_mind_does_not_hold_is_refused_before_anything_is_admitted() {
-    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": "no-such-campaign" }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
+    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": "no-such-campaign" }, "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
     let Outcome::Served { failure, self_run, .. } = rig.go() else { panic!("served") };
     assert_eq!((failure, self_run), (Some(Failure::SelfRun), None));
@@ -684,7 +684,7 @@ fn a_self_run_in_a_campaign_the_mind_does_not_hold_is_refused_before_anything_is
     assert!(rig.launcher.started.borrow().is_empty());
     assert!(rig.chat.acked.borrow().is_empty());
     // A prefix of a real campaign's name is not that campaign.
-    let prefix = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": &CAMPAIGN[..CAMPAIGN.len() - 1] }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
+    let prefix = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": &CAMPAIGN[..CAMPAIGN.len() - 1] }, "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[prefix]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::SelfRun));
@@ -810,7 +810,7 @@ fn the_campaigns_in_force_are_listed_and_are_the_schemas_campaign_enum() {
 
 #[test]
 fn a_self_run_naming_a_listed_campaign_passes_the_campaign_check() {
-    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": CAMPAIGN }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
+    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": CAMPAIGN }, "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
     let Outcome::Served { failure, self_run, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, None);
@@ -882,13 +882,18 @@ fn the_turn_input_says_how_to_read_an_addressee() {
     assert!(input_for(&[], "Aqua").contains("A message addressed to another Mind is theirs to answer. Answer it only if you hold something they need, and say so."));
 }
 
-fn voting(beat: serde_json::Value, urgency: serde_json::Value) -> String {
-    json!({ "say": [{ "room": "operator", "text": "ok" }], "start_self_run": null, "tempo_vote_beat_s": beat, "urgency_permille": urgency }).to_string()
+/// A reply that votes `beat` (`None` leaves the key out; `Some(null)` withdraws) and declares `urgency`.
+fn voting(beat: Option<serde_json::Value>, urgency: serde_json::Value) -> String {
+    let mut reply = json!({ "say": [{ "room": "operator", "text": "ok" }], "start_self_run": null, "urgency_permille": urgency });
+    if let Some(beat) = beat {
+        reply["tempo_vote_beat_s"] = beat;
+    }
+    reply.to_string()
 }
 
 #[test]
 fn a_vote_and_a_declared_urgency_in_the_reply_become_one_pulse_in_her_own_mind() {
-    let rig = Rig::new(vec![operator_says(1, "how fast should we go?")], &[voting(json!(600), json!(250))]);
+    let rig = Rig::new(vec![operator_says(1, "how fast should we go?")], &[voting(Some(json!(600)), json!(250))]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, None);
     let pulses = rig.mind.ids(K::Pulse);
@@ -918,7 +923,7 @@ fn a_vote_or_urgency_outside_its_bounds_fails_the_turn_without_a_pulse_or_an_ack
 #[test]
 fn the_reply_schema_bounds_the_vote_and_the_urgency_to_the_pulse_kind() {
     let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[])).unwrap();
-    assert_eq!(schema["required"], json!(["say", "start_self_run", "tempo_vote_beat_s", "urgency_permille"]));
+    assert_eq!(schema["required"], json!(["say", "start_self_run", "urgency_permille"]));
     assert_eq!(schema["properties"]["tempo_vote_beat_s"]["anyOf"][1], json!({ "type": "integer", "minimum": 60, "maximum": 86_400 }));
     assert_eq!(schema["properties"]["urgency_permille"]["anyOf"][1], json!({ "type": "integer", "minimum": 0, "maximum": 1000 }));
 }
@@ -1108,13 +1113,27 @@ fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them(
 
 #[test]
 fn a_vote_alone_or_an_urgency_alone_is_still_one_pulse() {
-    for (beat, urgency) in [(json!(600), json!(null)), (json!(null), json!(250))] {
+    for (beat, urgency) in [(Some(json!(600)), json!(null)), (None, json!(250))] {
         let rig = Rig::new(vec![operator_says(1, "go")], &[voting(beat.clone(), urgency.clone())]);
         let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
-        assert_eq!(failure, None, "{beat} {urgency}");
+        assert_eq!(failure, None, "{beat:?} {urgency}");
         let pulses = rig.mind.ids(K::Pulse);
-        assert_eq!(pulses.len(), 1, "{beat} {urgency}");
+        assert_eq!(pulses.len(), 1, "{beat:?} {urgency}");
         let PipelineDocument::Pulse(pulse) = rig.mind.view(K::Pulse, &pulses[0]).unwrap().document else { panic!("a pulse") };
-        assert_eq!((pulse.tempo_vote_beat_s.map(i64::from), pulse.urgency_permille.map(i64::from)), (beat.as_i64(), urgency.as_i64()));
+        assert_eq!((pulse.tempo_vote_beat_s.map(i64::from), pulse.urgency_permille.map(i64::from)), (beat.as_ref().and_then(|beat| beat.as_i64()), urgency.as_i64()));
     }
+}
+
+#[test]
+fn an_explicit_null_vote_is_a_pulse_that_withdraws_and_an_omitted_vote_is_no_vote_at_all() {
+    let rig = Rig::new(vec![operator_says(1, "withdraw")], &[voting(Some(json!(null)), json!(null))]);
+    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, None);
+    let pulses = rig.mind.ids(K::Pulse);
+    assert_eq!(pulses.len(), 1);
+    let PipelineDocument::Pulse(pulse) = rig.mind.view(K::Pulse, &pulses[0]).unwrap().document else { panic!("a pulse") };
+    assert_eq!((pulse.tempo_vote_beat_s, pulse.tempo_vote_withdrawn, pulse.urgency_permille), (None, true, None));
+    let silent = Rig::new(vec![operator_says(1, "nothing")], &[voting(None, json!(null))]);
+    let Outcome::Served { .. } = silent.go() else { panic!("served") };
+    assert!(silent.mind.ids(K::Pulse).is_empty(), "no vote key and no urgency is no pulse");
 }

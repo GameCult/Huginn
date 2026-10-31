@@ -19,7 +19,10 @@ pub const LOG_BOUND_ORDERS: f64 = 1.0;
 /// The swarm's tempo (ruling `eureka-body:ruling:tempo-silent-means-default`):
 /// the lower median over every Mind in the roster, each her newest vote in seconds
 /// per beat. A Mind with no standing vote, or whose mind cannot be read, is
-/// `None` and counts as `DEFAULT_BEAT_S`, so a lone voter cannot move the beat.
+/// `None` and counts as `DEFAULT_BEAT_S`. The lower median moves below the
+/// default only when at least half the roster, rounded up, votes at or below it
+/// (ruling `eureka-body:ruling:tempo-lower-median-stands`): on a roster of one or
+/// two a single Mind decides, on the live eight it takes four.
 pub fn tally(votes: &[Option<u32>]) -> u32 {
     let mut sorted: Vec<u32> = votes.iter().map(|vote| vote.unwrap_or(DEFAULT_BEAT_S)).collect();
     sorted.sort_unstable();

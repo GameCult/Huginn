@@ -220,6 +220,7 @@ impl Rig {
             instance: Slug(NAMES[who].into()),
             label: eureka_pipeline::Label(label),
             tempo_vote_beat_s: beat,
+            tempo_vote_withdrawn: false,
             urgency_permille: urgency,
             note: "test".into(),
         })]);
@@ -603,6 +604,7 @@ fn ann_queries_with(pulses: usize, beat: Option<u32>, urgency: Option<u16>) -> u
                         instance: Slug("ann".into()),
                         label: eureka_pipeline::Label(format!("c{}", done + n)),
                         tempo_vote_beat_s: beat,
+                        tempo_vote_withdrawn: false,
                         urgency_permille: urgency,
                         note: "cost".into(),
                     })
@@ -654,4 +656,29 @@ fn her_standing_vote_is_the_newest_by_admission_not_by_the_clock() {
     rig.poll();
     let trace = rig.store.traces.borrow().last().cloned().unwrap();
     assert_eq!(trace.instances[ANN].vote_beat_s, Some(7200), "admitted second, stamped earlier");
+}
+
+#[test]
+fn a_null_vote_withdraws_the_standing_one_and_an_urgency_only_pulse_leaves_it() {
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.pulse(ANN, 300, Some(60), None);
+    rig.pulse(ANN, 200, None, Some(5));
+    rig.poll();
+    let kept = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(kept.instances[ANN].vote_beat_s, Some(60), "an urgency-only pulse leaves her vote standing");
+    rig.minds[ANN].admit_at(rig.now() - Duration::seconds(100));
+    rig.minds[ANN].committed(vec![eureka_pipeline::PipelineDocument::Pulse(eureka_pipeline::PipelinePulse {
+        instance: Slug("ann".into()),
+        label: eureka_pipeline::Label("withdraw".into()),
+        tempo_vote_beat_s: None,
+        tempo_vote_withdrawn: true,
+        urgency_permille: None,
+        note: "test".into(),
+    })]);
+    rig.poll();
+    let withdrawn = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(withdrawn.instances[ANN].vote_beat_s, None, "an explicit null withdraws it");
+    assert_eq!(withdrawn.tempo_s, 900, "she counts as silent again");
 }

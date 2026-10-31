@@ -96,6 +96,12 @@ impl<T> Absent for Option<T> {
     }
 }
 
+impl Absent for bool {
+    fn absent(&self) -> bool {
+        !*self
+    }
+}
+
 impl<T> Absent for Vec<T> {
     fn absent(&self) -> bool {
         self.is_empty()
@@ -591,7 +597,10 @@ fn pulse_is_well_formed(pulse: &PipelinePulse, at: &str) -> Result<(), PipelineR
     {
         return Err(format_error(&format!("{at}.urgency_permille"), &urgency.to_string()));
     }
-    if pulse.tempo_vote_beat_s.is_none() && pulse.urgency_permille.is_none() {
+    if pulse.tempo_vote_withdrawn && pulse.tempo_vote_beat_s.is_some() {
+        return Err(format_error(&format!("{at}.tempo_vote_withdrawn"), "a pulse that votes a beat and withdraws the vote"));
+    }
+    if pulse.tempo_vote_beat_s.is_none() && !pulse.tempo_vote_withdrawn && pulse.urgency_permille.is_none() {
         return Err(format_error(&format!("{at}.tempo_vote_beat_s"), "a pulse that votes and declares nothing"));
     }
     Ok(())
@@ -736,12 +745,14 @@ value_types! {
         budget_usd: Short, claims: Vec<PipelineRef>[64], campaigns: Vec<Slug>[8],
     } => run_is_well_formed
     /// One Mind's heartbeat vote, in her own mind: the beat she wants (the swarm's
-    /// tempo is the lower median of every Mind's newest vote) and the urgency she
-    /// declares for herself until her next Persona turn. Either may be absent, not
-    /// both. Instance-rooted: the key is `<instance>:pulse:<label>`, the label
+    /// tempo is the lower median of every Mind's newest vote), the withdrawal of
+    /// her standing vote (`tempo_vote_withdrawn`, an explicit null: she counts as
+    /// silent again), and the urgency she declares for herself until her next
+    /// Persona turn. A pulse says at least one of the three; a withdrawal and a
+    /// beat are never both. Instance-rooted: the key is `<instance>:pulse:<label>`, the label
     /// time-ordered like a run's.
     pub struct PipelinePulse {
-        instance: Slug, label: Label, tempo_vote_beat_s: Option<u32>, urgency_permille: Option<u16>, note: Line,
+        instance: Slug, label: Label, tempo_vote_beat_s: Option<u32>, tempo_vote_withdrawn: bool = absent, urgency_permille: Option<u16>, note: Line,
     } => pulse_is_well_formed
 }
 
@@ -1407,7 +1418,7 @@ mod tests {
                 campaigns: vec![slug(CAMPAIGN)],
             }), format!("{INSTANCE}:run:mind-2026-10-09-1")),
             (D::Pulse(PipelinePulse {
-                instance: slug(INSTANCE), label: l("2026-10-31t041200-t0"), tempo_vote_beat_s: Some(600), urgency_permille: Some(250),
+                instance: slug(INSTANCE), label: l("2026-10-31t041200-t0"), tempo_vote_beat_s: Some(600), tempo_vote_withdrawn: false, urgency_permille: Some(250),
                 note: "The swarm is idle; a shorter beat.".into(),
             }), format!("{INSTANCE}:pulse:2026-10-31t041200-t0")),
         ]
@@ -1703,7 +1714,7 @@ mod tests {
     #[test]
     fn a_pulse_is_in_bounds_and_says_something() {
         let validated = |beat: Option<u32>, urgency: Option<u16>| {
-            PipelineDocument::Pulse(PipelinePulse { instance: slug(INSTANCE), label: l("2026-10-31t041200-t0"), tempo_vote_beat_s: beat, urgency_permille: urgency, note: "".into() }).validate()
+            PipelineDocument::Pulse(PipelinePulse { instance: slug(INSTANCE), label: l("2026-10-31t041200-t0"), tempo_vote_beat_s: beat, tempo_vote_withdrawn: false, urgency_permille: urgency, note: "".into() }).validate()
         };
         for (beat, urgency) in [(Some(60), None), (Some(86_400), None), (None, Some(0)), (None, Some(1000)), (Some(600), Some(250))] {
             assert_eq!(validated(beat, urgency), Ok(()), "{beat:?} {urgency:?}");

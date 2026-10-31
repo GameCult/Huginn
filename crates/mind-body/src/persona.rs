@@ -179,6 +179,11 @@ impl Config {
     }
 }
 
+/// A key that is present, null or not, reads as `Some`; an omitted key stays `None`.
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
 /// Her one reply to a turn. The connector is asked for exactly this and the
 /// answer is decoded into exactly this.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,9 +193,10 @@ pub struct PersonaReply {
     /// Required, null when she starts nothing: a reply that omits it is not a reply.
     #[serde(deserialize_with = "Option::deserialize")]
     pub start_self_run: Option<StartSelfRun>,
-    /// The beat she votes for, in seconds; null votes nothing.
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub tempo_vote_beat_s: Option<u32>,
+    /// The beat she votes for, in seconds. Omitted, she says nothing about her
+    /// vote and her standing one stands; an explicit null withdraws it.
+    #[serde(default, deserialize_with = "present")]
+    pub tempo_vote_beat_s: Option<Option<u32>>,
     /// The urgency she declares for herself until her next turn, in thousandths; null declares none.
     #[serde(deserialize_with = "Option::deserialize")]
     pub urgency_permille: Option<u16>,
@@ -230,7 +236,7 @@ fn campaign_in_bounds(campaign: &str) -> bool {
 }
 
 fn vote_in_bounds(reply: &PersonaReply) -> bool {
-    reply.tempo_vote_beat_s.is_none_or(|beat| (TEMPO_VOTE_MIN_S..=TEMPO_VOTE_MAX_S).contains(&beat)) && reply.urgency_permille.is_none_or(|urgency| urgency <= URGENCY_MAX_PERMILLE)
+    reply.tempo_vote_beat_s.flatten().is_none_or(|beat| (TEMPO_VOTE_MIN_S..=TEMPO_VOTE_MAX_S).contains(&beat)) && reply.urgency_permille.is_none_or(|urgency| urgency <= URGENCY_MAX_PERMILLE)
 }
 
 fn start_in_bounds(ask: &StartSelfRun) -> bool {
@@ -264,7 +270,7 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String]) -> String {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["say", "start_self_run", "tempo_vote_beat_s", "urgency_permille"],
+        "required": ["say", "start_self_run", "urgency_permille"],
         "properties": {
             "say": {
                 "type": "array",
@@ -815,7 +821,8 @@ fn admit_pulse(organs: &Organs, run: &PipelineRef, turn: u32, reply: &PersonaRep
     let pulse = PipelineDocument::Pulse(PipelinePulse {
         instance: organs.mind.instance().clone(),
         label: Label(format!("{}-t{turn}", label_of(run))),
-        tempo_vote_beat_s: reply.tempo_vote_beat_s,
+        tempo_vote_beat_s: reply.tempo_vote_beat_s.flatten(),
+        tempo_vote_withdrawn: reply.tempo_vote_beat_s == Some(None),
         urgency_permille: reply.urgency_permille,
         note: "Voted in a Persona turn.".into(),
     });
@@ -825,7 +832,7 @@ fn admit_pulse(organs: &Organs, run: &PipelineRef, turn: u32, reply: &PersonaRep
 /// The tempo the Minds hold between them, from the newest `heartbeat.cc` trace:
 /// the tally, and each Mind vote and declared urgency, her own marked.
 fn render_tempo(view: Option<&dyn TempoView>, instance: &Slug) -> String {
-    let guidance = "The swarm beat is the lower median of every Mind newest vote. You vote with tempo_vote_beat_s (60 to 86400 seconds per beat, null to vote nothing) and declare your own urgency with urgency_permille (0 to 1000, null for none); an urgency lasts until your next turn, so use it as etiquette, not as a habit.";
+    let guidance = "The swarm beat is the lower median of every Mind newest vote. You vote with tempo_vote_beat_s (60 to 86400 seconds per beat; omit the key to leave your standing vote as it is, and send null to withdraw it so you count as silent again) and declare your own urgency with urgency_permille (0 to 1000, null for none); an urgency lasts until your next turn, so use it as etiquette, not as a habit.";
     let latest: Option<PollTrace> = view.and_then(|view| view.latest().ok().flatten());
     let Some(trace) = latest else { return format!("Tempo: not yet read. {guidance}") };
     let mut out = format!("Tempo: the beat is {} s. {guidance}\nMinds:\n", trace.tempo_s);

@@ -141,7 +141,7 @@ pub enum PipelineFacts {
     Stewardship { instance: Slug, repo: OrgRepo, sequence: u32, assigned_on: Date, note: Line },
     HandOff { from_instance: Slug, to_instance: Slug, repo: OrgRepo, handed_on: Date },
     Run { label: Label, operated_by: RunOperator, turn: RunTurn, started_on: Date, claims: Vec<PipelineRef> },
-    Pulse { label: Label, tempo_vote_beat_s: Option<u32>, urgency_permille: Option<u16> },
+    Pulse { label: Label, tempo_vote_beat_s: Option<u32>, #[serde(default)] tempo_vote_withdrawn: bool, urgency_permille: Option<u16> },
 }
 
 impl PipelineFacts {
@@ -243,6 +243,7 @@ impl PipelineFacts {
             D::Pulse(value) => Self::Pulse {
                 label: value.label.clone(),
                 tempo_vote_beat_s: value.tempo_vote_beat_s,
+                tempo_vote_withdrawn: value.tempo_vote_withdrawn,
                 urgency_permille: value.urgency_permille,
             },
         }
@@ -1468,6 +1469,7 @@ mod tests {
                 instance: Slug(INSTANCE.into()),
                 label: Label(label.into()),
                 tempo_vote_beat_s: beat,
+                tempo_vote_withdrawn: false,
                 urgency_permille: urgency,
                 note: "n".into(),
             })

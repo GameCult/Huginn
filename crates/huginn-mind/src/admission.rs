@@ -2453,7 +2453,7 @@ mod tests {
     fn a_pulse_of_another_mind_is_a_foreign_instance_and_her_own_is_admitted() {
         let mut mind = with_specs();
         let pulse = |instance: &str| {
-            D::Pulse(eureka_pipeline::PipelinePulse { instance: slug(instance), label: l("p1"), tempo_vote_beat_s: Some(600), urgency_permille: None, note: "".into() })
+            D::Pulse(eureka_pipeline::PipelinePulse { instance: slug(instance), label: l("p1"), tempo_vote_beat_s: Some(600), tempo_vote_withdrawn: false, urgency_permille: None, note: "".into() })
         };
         assert_eq!(
             refusal(admit(&mut mind, vec![pulse(OTHER_INSTANCE)])),
