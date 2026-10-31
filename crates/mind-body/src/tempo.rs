@@ -9,26 +9,25 @@
 
 use std::cmp::Ordering;
 
-/// The beat, in seconds, when no Mind has voted.
+/// The beat, in seconds, when no vote is cast.
 pub const DEFAULT_BEAT_S: u32 = 900;
 
 /// How many orders of magnitude a full urgency may multiply a Mind's wait by.
 /// Interim, per `swarm-shares-log-bound`, until the swarm's governance sets it.
 pub const LOG_BOUND_ORDERS: f64 = 1.0;
 
-/// The swarm's tempo (ruling `eureka-body:ruling:tempo-silent-means-default`):
-/// the lower median over every Mind in the roster, each her newest vote in seconds
-/// per beat. A Mind with no standing vote, or whose mind cannot be read, is
-/// `None` and counts as `DEFAULT_BEAT_S`. The lower median moves below the
-/// default only when at least half the roster, rounded up, votes at or below it
-/// (ruling `eureka-body:ruling:tempo-lower-median-stands`): on a roster of one or
-/// two a single Mind decides, on the live eight it takes four.
+/// The swarm's tempo (ruling `eureka-body:ruling:tempo-silence-is-abstention`):
+/// the lower median of the votes actually cast, each a Mind's newest standing
+/// vote in seconds per beat. Silence is abstention: a Mind with no standing vote
+/// (never voted, or withdrew) or whose mind cannot be read is `None` and is not
+/// counted, so the beat follows those who care to vote. With no vote cast it is
+/// `DEFAULT_BEAT_S`. On one voter that voter decides; on two the lower of them.
 pub fn tally(votes: &[Option<u32>]) -> u32 {
-    let mut sorted: Vec<u32> = votes.iter().map(|vote| vote.unwrap_or(DEFAULT_BEAT_S)).collect();
-    sorted.sort_unstable();
-    match sorted.len() {
+    let mut cast: Vec<u32> = votes.iter().flatten().copied().collect();
+    cast.sort_unstable();
+    match cast.len() {
         0 => DEFAULT_BEAT_S,
-        n => sorted[(n - 1) / 2],
+        n => cast[(n - 1) / 2],
     }
 }
 

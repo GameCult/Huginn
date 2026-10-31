@@ -285,7 +285,7 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String]) -> String {
                 }
             },
             "start_self_run": start,
-            "tempo_vote_beat_s": { "description": "Omit this key to leave your standing vote unchanged. A number votes that many seconds per beat. null only withdraws your vote, so you count as silent again.", "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": TEMPO_VOTE_MIN_S, "maximum": TEMPO_VOTE_MAX_S }] },
+            "tempo_vote_beat_s": { "description": "Omit this key to leave your standing vote unchanged. A number votes that many seconds per beat. null only withdraws your vote, so you abstain again and are not counted.", "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": TEMPO_VOTE_MIN_S, "maximum": TEMPO_VOTE_MAX_S }] },
             "urgency_permille": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0, "maximum": URGENCY_MAX_PERMILLE }] }
         }
     })
@@ -692,7 +692,7 @@ fn one_turn(
             }
         }
     }
-    if reply.tempo_vote_beat_s.is_some() || reply.urgency_permille.is_some() {
+    if reply.tempo_vote_beat_s.is_some() || reply.urgency_permille.is_some_and(|urgency| urgency > 0) {
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("pulse tempo_vote_beat_s={:?} urgency_permille={:?}", reply.tempo_vote_beat_s, reply.urgency_permille) });
         if !admit_pulse(organs, run, turn, &reply)? {
             organs.trace.record(&record(outputs, "failed: pulse".into()))?;
@@ -832,7 +832,7 @@ fn admit_pulse(organs: &Organs, run: &PipelineRef, turn: u32, reply: &PersonaRep
 /// The tempo the Minds hold between them, from the newest `heartbeat.cc` trace:
 /// the tally, and each Mind vote and declared urgency, her own marked.
 fn render_tempo(view: Option<&dyn TempoView>, instance: &Slug) -> String {
-    let guidance = "The swarm beat is the lower median of every Mind newest vote. You vote with tempo_vote_beat_s (60 to 86400 seconds per beat; omit the key to leave your standing vote as it is, and send null to withdraw it so you count as silent again) and declare your own urgency with urgency_permille (0 to 1000, null for none); an urgency lasts until your next turn, so use it as etiquette, not as a habit.";
+    let guidance = "The swarm beat is the lower median of the votes cast: a Mind with no standing vote abstains and is not counted, and with no vote cast the beat is 900 s. A vote only needs changing when conditions change; leave it standing otherwise. You vote with tempo_vote_beat_s (60 to 86400 seconds per beat; omit the key to leave your standing vote as it is, and send null to withdraw it and abstain) and declare your own urgency with urgency_permille (0 to 1000, null for none); an urgency lasts until your next turn, so use it as etiquette, not as a habit.";
     let latest: Option<PollTrace> = view.and_then(|view| view.latest().ok().flatten());
     let Some(trace) = latest else { return format!("Tempo: not yet read. {guidance}") };
     let mut out = format!("Tempo: the beat is {} s. {guidance}\nMinds:\n", trace.tempo_s);

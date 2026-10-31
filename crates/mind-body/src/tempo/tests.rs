@@ -52,10 +52,13 @@ fn the_tally_is_the_lower_median_and_one_outlier_cannot_move_it() {
 }
 
 #[test]
-fn a_silent_or_unreadable_mind_counts_as_the_default_beat() {
-    let silent = |voters: usize, vote: u32, total: usize| -> Vec<Option<u32>> { (0..total).map(|i| (i < voters).then_some(vote)).collect() };
-    assert_eq!(tally(&silent(1, 60, 8)), 900, "one voter among seven silent Minds cannot move the beat");
-    assert_eq!(tally(&silent(5, 60, 8)), 60, "a majority of the roster moves it");
+fn silence_is_abstention_and_only_cast_votes_are_counted() {
+    let mut eight = vec![None; 8];
+    eight[0] = Some(60);
+    assert_eq!(tally(&eight), 60, "one voter among eight silent Minds decides");
+    assert_eq!(tally(&[None; 8]), DEFAULT_BEAT_S, "none cast is the default");
+    assert_eq!(tally(&[Some(3600), None, Some(60)]), 60, "two cast: the lower median");
+    assert_eq!(tally(&[Some(3600), Some(1800), None, None, Some(60)]), 1800, "abstainers do not dilute the median");
 }
 
 #[test]

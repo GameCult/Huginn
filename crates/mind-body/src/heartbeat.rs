@@ -586,7 +586,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
         rows.push(row);
     }
 
-    // The tempo is the tally over every Mind of the roster, braked or not; a Mind with no vote or no readable mind counts as the default beat.
+    // The tempo is the tally over the votes cast by the Minds of the roster, braked or not; a Mind with no vote or no readable mind abstains and is not counted.
     let votes: Vec<Option<u32>> = rows.iter().map(|row| row.read.as_ref().and_then(|read| read.vote)).collect();
     let beat_s = tempo::tally(&votes);
 

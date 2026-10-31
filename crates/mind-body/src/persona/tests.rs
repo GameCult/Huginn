@@ -1143,6 +1143,14 @@ fn an_explicit_null_vote_is_a_pulse_that_withdraws_and_an_omitted_vote_is_no_vot
     assert!(silent.mind.ids(K::Pulse).is_empty(), "no vote key and no urgency is no pulse");
 }
 
+#[test]
+fn a_zero_urgency_alone_is_no_pulse() {
+    let rig = Rig::new(vec![operator_says(1, "go")], &[voting(None, json!(0))]);
+    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, None);
+    assert!(rig.mind.ids(K::Pulse).is_empty(), "urgency 0 declares nothing");
+}
+
 /// A Self run of hers, closed Recorded with `rationale`.
 fn self_run_closed_with(rig: &Rig, label: &str, rationale: &str) {
     rig.mind.committed(vec![run(label, RunTurn::SelfRun, RunOperator::Mind, &[])]);

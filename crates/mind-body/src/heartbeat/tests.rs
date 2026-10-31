@@ -689,7 +689,7 @@ fn a_null_vote_withdraws_the_standing_one_and_an_urgency_only_pulse_leaves_it() 
     rig.poll();
     let withdrawn = rig.store.traces.borrow().last().cloned().unwrap();
     assert_eq!(withdrawn.instances[ANN].vote_beat_s, None, "an explicit null withdraws it");
-    assert_eq!(withdrawn.tempo_s, 900, "she counts as silent again");
+    assert_eq!(withdrawn.tempo_s, 900, "she abstains again");
 }
 
 #[test]
