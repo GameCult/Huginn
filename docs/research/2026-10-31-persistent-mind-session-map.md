@@ -28,7 +28,9 @@ Two kinds of session, one identity and one memory. Reasons, in the order they we
 
 The operator's ruling asks that the Self "communicates with me about the stuff I asked you to work on". In this design the Persona is that voice and the Self is her worker; the person who asked talks to one Mind. Whether the Self should also speak to the asker directly is question `mind-sessions-talk-and-work`.
 
-Per-conversation Persona sessions follow `persona-memory-written-not-transcript`: one session spanning a DM and a public room would carry the DM's transcript into the public turn, which is the transcript standing in for memory. Letta keeps one agent, many conversations, shared memory (PA B3); `next_batch` already splits DMs from public rooms (PA A1). This is question `persona-session-per-conversation` because `persona-is-append-only-session` speaks of "a" session.
+Per-conversation Persona sessions are decided, not open: `dm-turns-separate-by-default` says a turn that answers a DM "sees only that DM room's deliveries plus her own state", and `persona-memory-written-not-transcript` says cross-room transcript in a turn is the transcript standing in for memory. One session spanning a DM and a public room would break both. What crosses conversations is memory, marked private where it was learned privately. Letta keeps one agent, many conversations, shared memory (PA B3); `next_batch` already splits DMs from public rooms (PA A1). A per-conversation session also serves `reply-sees-full-exchange`: the exchange is already in the session, and Matrix context is needed only for the first message after a refresh.
+
+`operator-persona-in-mind` (eureka-substrate) already pictured the split: "she can speak for herself on Discord, and act by her Self with Eureka."
 
 ### 2.2 How a message reaches her, and how she replies
 
