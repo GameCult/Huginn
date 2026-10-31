@@ -155,6 +155,13 @@ pub struct CollectionMeta {
     pub index_text_version: u32,
 }
 
+impl CollectionMeta {
+    /// The model the collection was built with.
+    pub fn model_identity(&self) -> ModelIdentity {
+        ModelIdentity { name: self.model.clone(), digest: self.model_digest.clone(), dimensions: self.dimensions }
+    }
+}
+
 /// What the vector store holds under a collection's name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Described {
@@ -192,6 +199,10 @@ pub struct Hit {
 }
 
 pub trait Embedder {
+    /// The model the collection about to be served was built with, or `None`
+    /// when there is no collection yet. Called before `model_identity`. One
+    /// endpoint has nothing to do with it; a pool holds its endpoints to it.
+    fn built_under(&mut self, _built: Option<&ModelIdentity>) {}
     /// The model's identity, or an error once `within` has passed.
     fn model_identity(&mut self, within: Duration) -> Result<ModelIdentity>;
     /// One vector per text, in order, or an error once `within` has passed.
@@ -417,10 +428,12 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         let Some(mind) = self.mind.clone() else {
             return Err(StepError::Unavailable(anyhow::anyhow!("the mind has no identity yet")));
         };
+        let described = self.index.describe(&self.collection, INDEX_CALL_TIMEOUT).context("describing the collection")?;
+        self.embedder.built_under(if let Described::Labelled(found) = &described { Some(found.model_identity()) } else { None }.as_ref());
         let identity =
             self.embedder.model_identity(BULK_EMBED_TIMEOUT).context("reading the embedding model's identity")?;
         let wanted = self.collection_meta(&mind, &identity);
-        match self.index.describe(&self.collection, INDEX_CALL_TIMEOUT).context("describing the collection")? {
+        match described {
             Described::Absent => {
                 // A collection lost while the worker ran was an index; one that
                 // was never made is a first build.

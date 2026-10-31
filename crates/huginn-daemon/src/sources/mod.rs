@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use huginn_mind::{SourceHit, SourceHits, SourceModel, SourceQuery};
 
-use crate::index::{BATCH, BULK_EMBED_TIMEOUT, Budget, Embedder, INDEX_CALL_TIMEOUT, MANAGED_BY, point_id};
+use crate::index::{BATCH, BULK_EMBED_TIMEOUT, Budget, Embedder, INDEX_CALL_TIMEOUT, MANAGED_BY, ModelIdentity, point_id};
 use chunk::{CHUNKER_VERSION, embedded_text};
 use git::{BLOB_BYTES_MAX, Mirror, TreeFile};
 
@@ -57,6 +57,13 @@ pub struct SourcesMeta {
     pub model_digest: String,
     pub dimensions: u32,
     pub chunker_version: u32,
+}
+
+impl SourcesMeta {
+    /// The model the collection was built with.
+    pub fn model_identity(&self) -> ModelIdentity {
+        ModelIdentity { name: self.model.clone(), digest: self.model_digest.clone(), dimensions: self.dimensions }
+    }
 }
 
 /// What the vector store holds under `COLLECTION`.
@@ -187,6 +194,8 @@ pub fn refresh<E: Embedder, S: SourceIndex, F: Forge>(
     state_root: &Path,
     on_repo: &mut dyn FnMut(&Report),
 ) -> Result<Refreshed> {
+    let described = index.describe_sources(INDEX_CALL_TIMEOUT).context("describing the source collection")?;
+    embedder.built_under(if let DescribedSources::Labelled { meta, .. } = &described { Some(meta.model_identity()) } else { None }.as_ref());
     let identity = embedder.model_identity(BULK_EMBED_TIMEOUT).context("reading the embedding model's identity")?;
     let wanted = SourcesMeta {
         managed_by: MANAGED_BY.into(),
@@ -196,7 +205,7 @@ pub fn refresh<E: Embedder, S: SourceIndex, F: Forge>(
         dimensions: identity.dimensions,
         chunker_version: CHUNKER_VERSION,
     };
-    let mut cursors = match index.describe_sources(INDEX_CALL_TIMEOUT).context("describing the source collection")? {
+    let mut cursors = match described {
         DescribedSources::Absent => {
             index.recreate_sources(&wanted).context("creating the source collection")?;
             BTreeMap::new()
@@ -368,12 +377,12 @@ impl Batch {
 /// was built under another model, because vectors of two models do not compare.
 pub fn search<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, query: &SourceQuery, within: Duration) -> Result<SourceHits> {
     let budget = Budget::new(within);
-    let identity = embedder.model_identity(budget.left()?).context("reading the embedding model's identity")?;
     let built = match index.describe_sources(budget.left()?).context("describing the source collection")? {
         DescribedSources::Absent => bail!("source index not built"),
         DescribedSources::Unlabelled => bail!("source index not built: {COLLECTION} carries no Huginn metadata"),
         DescribedSources::Labelled { meta, .. } => meta,
     };
+    let identity = embedder.model_identity(budget.left()?).context("reading the embedding model's identity")?;
     ensure!(
         built.model == identity.name && built.model_digest == identity.digest && built.dimensions == identity.dimensions,
         "the source index was built under {} {} ({} dimensions) and this daemon embeds under {} {} ({} dimensions)",
