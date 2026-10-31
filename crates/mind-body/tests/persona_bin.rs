@@ -16,6 +16,7 @@ fn run(dir: &Path, drop: &[&str], extra: &[(&str, &str)], args: &[&str]) -> Outp
         ("STATE_DIRECTORY", dir.to_string_lossy().into_owned()),
         ("MIND_PERSONA_ROOMS", "#swarm:chat,#ops:chat".to_string()),
         ("MIND_PERSONA_OPERATOR", "@op:chat".to_string()),
+        ("MIND_PERSONA_MINDS", "@eureka:chat,@libby:chat".to_string()),
         ("MIND_PERSONA_SELF_SENDER", "@eureka:chat".to_string()),
         ("MIND_CONNECTOR_ENDPOINT", "127.0.0.1:4110".to_string()),
         ("MIND_CONNECTOR_KEY_FILE", key("connector-key")),
@@ -54,8 +55,9 @@ fn a_flag_overrides_the_environment() {
 #[test]
 fn a_setting_that_is_missing_or_wrong_ends_two_naming_the_setting_and_no_value() {
     let dir = tempfile::tempdir().unwrap();
-    let cases: [Case; 6] = [
+    let cases: [Case; 7] = [
         (&["MIND_PERSONA_ROOMS"], &[], "usage"),
+        (&["MIND_PERSONA_MINDS"], &[], "usage"),
         (&["MIND_CONNECTOR_MODEL"], &[], "MIND_CONNECTOR_MODEL"),
         (&["MIND_CONNECTOR_KEY_FILE"], &[], "MIND_CONNECTOR_KEY_FILE"),
         (&[], &[("MIND_CONNECTOR_ENDPOINT", "rudp://10.77.0.1:17871")], "connector endpoint"),

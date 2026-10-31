@@ -8,8 +8,8 @@
 //!
 //! The unit's `persona.env` and credentials name everything else:
 //! `MIND_PERSONA_ROOMS` (a,b), `MIND_PERSONA_OPERATOR`
-//! (id[,id]) and `MIND_PERSONA_SELF_SENDER`, each also a flag that overrides it
-//! (`--rooms`, `--operator`, `--self-sender`), and `MIND_HEARTBEAT_STATE` (optional: the path of the
+//! (id[,id]), `MIND_PERSONA_MINDS` (id[,id]: every Mind of the swarm, required) and `MIND_PERSONA_SELF_SENDER`, each also a flag that overrides it
+//! (`--rooms`, `--operator`, `--minds`, `--self-sender`), and `MIND_HEARTBEAT_STATE` (optional: the path of the
 //! heartbeat's `heartbeat.cc`, which the unit reads and never writes, for the tempo in her input); `MIND_PERSONA_DOCTRINE`
 //! (optional, absolute paths separated by `:`) names the doctrine files read at each
 //! turn start and put ahead of her persona;
@@ -40,7 +40,7 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the mouth may take to answer one chat request (a send is a Matrix PUT).
 const CHAT_TIMEOUT: Duration = Duration::from_secs(20);
 
-const USAGE: &str = "usage: mind-persona --instance <slug> [--endpoint rudp://<ip>:<port>] [--max-turns n] [--rooms a,b] [--operator id[,id]] [--self-sender id]";
+const USAGE: &str = "usage: mind-persona --instance <slug> [--endpoint rudp://<ip>:<port>] [--max-turns n] [--rooms a,b] [--operator id[,id]] [--minds id[,id]] [--self-sender id]";
 
 fn host() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname").map(|name| name.trim().to_string()).ok().filter(|name| !name.is_empty()).unwrap_or_else(|| "unknown".into())

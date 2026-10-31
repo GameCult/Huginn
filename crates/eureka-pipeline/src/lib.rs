@@ -606,6 +606,31 @@ fn pulse_is_well_formed(pulse: &PipelinePulse, at: &str) -> Result<(), PipelineR
     Ok(())
 }
 
+/// The most thousandths a memory's salience may carry.
+pub const SALIENCE_MAX_PERMILLE: u16 = 1000;
+
+/// A memory says something (its text is not empty), its salience is in
+/// thousandths, and it consolidates only memories.
+fn memory_is_well_formed(memory: &PipelineMemory, at: &str) -> Result<(), PipelineRefusal> {
+    if memory.text.0.trim().is_empty() {
+        return Err(format_error(&format!("{at}.text"), "an empty memory"));
+    }
+    if let MemoryOrigin::Direct { with, .. } = &memory.origin
+        && with.is_empty()
+    {
+        return Err(format_error(&format!("{at}.origin.with"), "a direct memory that names no one she heard it from"));
+    }
+    if memory.salience_permille > SALIENCE_MAX_PERMILLE {
+        return Err(format_error(&format!("{at}.salience_permille"), &memory.salience_permille.to_string()));
+    }
+    for (index, entry) in memory.consolidates.iter().enumerate() {
+        if entry.kind != PipelineKind::Memory {
+            return Err(format_error(&format!("{at}.consolidates[{index}].kind"), entry.kind.name()));
+        }
+    }
+    Ok(())
+}
+
 unit_enums! {
     EvidenceKind { Command, Test, Mutation, Probe, SourceRead, Capture }
     ClaimOutcome { Holds, Falsified, Unproven }
@@ -615,6 +640,7 @@ unit_enums! {
     FindingOrigin { Introduced, PreExisting }
     RunOperator { Operator, Mind }
     RunTurn { PersonaTurn, SelfRun }
+    MemorySort { Asked, Decided, Committed, Learned, Did, Idea, Rapport }
 }
 
 value_types! {
@@ -754,6 +780,19 @@ value_types! {
     pub struct PipelinePulse {
         instance: Slug, label: Label, tempo_vote_beat_s: Option<u32>, tempo_vote_withdrawn: bool = absent, urgency_permille: Option<u16>, note: Line,
     } => pulse_is_well_formed
+    /// One thing a Mind keeps for herself, in her own mind: what she was asked,
+    /// decided, committed to, learned or did, an idea, or the rapport between
+    /// her and another Mind or person. `text` is her own words. `about` names
+    /// the Matrix users it concerns (Minds included) and nothing about where it
+    /// came from; `origin` is where and from whom she learned it, and `sources`
+    /// the event ids, commits or documents it rests on; the organ fills both,
+    /// not the model. `salience_permille` ranks it and decides nothing.
+    /// `consolidates` names the memories a consolidating memory replaces.
+    /// Instance-rooted: the key is `<instance>:memory:<label>`.
+    pub struct PipelineMemory {
+        instance: Slug, label: Label, sort: MemorySort, text: Line, about: Vec<Short>[8], origin: MemoryOrigin,
+        sources: Vec<Short>[8], salience_permille: u16, consolidates: Vec<PipelineRef>[16],
+    } => memory_is_well_formed
 }
 
 /// A reference to another document. The id is parsed as a full pipeline id of
@@ -789,6 +828,47 @@ impl PipelineRef {
     /// every in-crate caller holding a `PipelineRef`.
     pub fn validate_ref(&self) -> Result<(), PipelineRefusal> {
         self.validate("ref")
+    }
+}
+
+/// Where a memory came from and whom she heard it from. The organ derives it
+/// from the batch of the turn that wrote the memory; the model never writes it.
+/// `about` names whom a memory concerns, this names the room and the voices.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum MemoryOrigin {
+    /// A turn in rooms: their aliases comma-joined, and the batch's other senders.
+    Room {
+        rooms: Short,
+        #[schemars(extend("maxItems" = 8))]
+        heard_from: Vec<Short>,
+    },
+    /// A direct message: the DM's room id, and the others who spoke in it (whom
+    /// she heard it from in confidence).
+    Direct {
+        room: Short,
+        #[schemars(extend("maxItems" = 8))]
+        with: Vec<Short>,
+    },
+    /// A wake: no one spoke.
+    Wake,
+    /// A Self run of hers, by its label.
+    SelfRun { run: Short },
+}
+
+impl Bounded for MemoryOrigin {
+    fn validate(&self, field: &str) -> Result<(), PipelineRefusal> {
+        match self {
+            Self::Room { rooms, heard_from } => {
+                rooms.validate(&format!("{field}.rooms"))?;
+                list(&format!("{field}.heard_from"), heard_from, 8)
+            }
+            Self::Direct { room, with } => {
+                room.validate(&format!("{field}.room"))?;
+                list(&format!("{field}.with"), with, 8)
+            }
+            Self::Wake => Ok(()),
+            Self::SelfRun { run } => run.validate(&format!("{field}.run")),
+        }
     }
 }
 
@@ -856,7 +936,7 @@ macro_rules! pipeline_kinds {
         /// because a value is a named map of its own and an internal tag would
         /// have to be merged into it; the tag stays beside the value instead.
         /// This is not a published schema: `schemas/cultnet` publishes the
-        /// fifteen per-kind value documents, and the envelope is the wire's
+        /// sixteen per-kind value documents, and the envelope is the wire's
         /// shape, not a document's.
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -977,6 +1057,8 @@ pipeline_kinds! {
         "epiphany.pipeline.run.v2", "EpiphanyPipelineRunDocument";
     Pulse(PipelinePulse) => EpiphanyPipelinePulseDocument, "pulse",
         "epiphany.pipeline.pulse.v2", "EpiphanyPipelinePulseDocument";
+    Memory(PipelineMemory) => EpiphanyPipelineMemoryDocument, "memory",
+        "epiphany.pipeline.memory.v2", "EpiphanyPipelineMemoryDocument";
 }
 
 /// Parses a full document id: the grammar read backwards. A key and an id are
@@ -1173,6 +1255,7 @@ pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefus
         // A run hangs off its instance too: its label is its whole local.
         D::Run(value) => ("run.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Pulse(value) => ("pulse.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
+        D::Memory(value) => ("memory.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Target(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&format!("r{}", value.revision)])?),
         D::Question(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Ruling(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
@@ -1421,6 +1504,11 @@ mod tests {
                 instance: slug(INSTANCE), label: l("2026-10-31t041200-t0"), tempo_vote_beat_s: Some(600), tempo_vote_withdrawn: false, urgency_permille: Some(250),
                 note: "The swarm is idle; a shorter beat.".into(),
             }), format!("{INSTANCE}:pulse:2026-10-31t041200-t0")),
+            (D::Memory(PipelineMemory {
+                instance: slug(INSTANCE), label: l("2026-10-31t041200-t0-m0"), sort: MemorySort::Committed,
+                text: "I take the background shaders; Libby holds the sounds.".into(), about: vec![s("@libby:chat")],
+                origin: MemoryOrigin::Room { rooms: s("swarm"), heard_from: vec![s("@libby:chat")] }, sources: vec![s("$e1")], salience_permille: 700, consolidates: vec![],
+            }), format!("{INSTANCE}:memory:2026-10-31t041200-t0-m0")),
         ]
     }
 
@@ -1751,6 +1839,68 @@ mod tests {
         ] {
             assert!(matches!(validated(beat, urgency), Err(PipelineRefusal::InvalidFormat { field: f, .. }) if f == field), "{beat:?} {urgency:?}");
         }
+    }
+
+    fn memory_sample() -> PipelineMemory {
+        let PipelineDocument::Memory(memory) = samples().remove(15).0 else { unreachable!() };
+        memory
+    }
+
+    /// A memory says something, its salience is in thousandths, and it consolidates only memories.
+    #[test]
+    fn a_memory_says_something_in_bounds_and_consolidates_only_memories() {
+        let validated = |change: &dyn Fn(&mut PipelineMemory)| {
+            let mut memory = memory_sample();
+            change(&mut memory);
+            PipelineDocument::Memory(memory).validate()
+        };
+        assert_eq!(validated(&|_| {}), Ok(()));
+        assert_eq!(validated(&|memory| memory.salience_permille = 1000), Ok(()));
+        let bad = |outcome: Result<(), PipelineRefusal>, expected: &str| {
+            assert!(matches!(outcome, Err(PipelineRefusal::InvalidFormat { field, .. }) if field == expected), "{expected}");
+        };
+        bad(validated(&|memory| memory.text = "   ".into()), "memory.text");
+        bad(validated(&|memory| memory.text = "".into()), "memory.text");
+        bad(validated(&|memory| memory.salience_permille = 1001), "memory.salience_permille");
+        bad(validated(&|memory| memory.consolidates = vec![PipelineRef { kind: PipelineKind::Ruling, id: id("ruling", "R8") }]), "memory.consolidates[0].kind");
+        let own = PipelineRef { kind: PipelineKind::Memory, id: Short(format!("{INSTANCE}:memory:older")) };
+        assert_eq!(validated(&|memory| memory.consolidates = vec![own.clone()]), Ok(()));
+        assert!(matches!(validated(&|memory| memory.about = vec![s("@a:chat"); 9]), Err(PipelineRefusal::FieldBound { limit: 8, .. })));
+        assert!(matches!(validated(&|memory| memory.sources = vec![s("$e"); 9]), Err(PipelineRefusal::FieldBound { limit: 8, .. })));
+        assert!(matches!(validated(&|memory| memory.text = Line("x".repeat(1001))), Err(PipelineRefusal::FieldBound { limit: 1000, .. })));
+    }
+
+    /// A memory's origin is bounded field by field, and a private one names whom she heard it from.
+    #[test]
+    fn a_memory_origin_is_bounded_and_a_direct_one_names_who_she_heard_it_from() {
+        let validated = |origin: MemoryOrigin| {
+            let mut memory = memory_sample();
+            memory.origin = origin;
+            PipelineDocument::Memory(memory).validate()
+        };
+        let long = Short("r".repeat(201));
+        let bound_200 = |outcome: Result<(), PipelineRefusal>| assert!(matches!(outcome, Err(PipelineRefusal::FieldBound { limit: 200, .. })), "{outcome:?}");
+        let bound_8 = |outcome: Result<(), PipelineRefusal>| assert!(matches!(outcome, Err(PipelineRefusal::FieldBound { limit: 8, .. })), "{outcome:?}");
+        assert_eq!(validated(MemoryOrigin::Wake), Ok(()));
+        assert_eq!(validated(MemoryOrigin::SelfRun { run: s("run-7") }), Ok(()));
+        assert_eq!(validated(MemoryOrigin::Room { rooms: s("swarm"), heard_from: vec![s("@a:chat"); 8] }), Ok(()));
+        assert_eq!(validated(MemoryOrigin::Direct { room: s("!dm:chat"), with: vec![s("@a:chat"); 8] }), Ok(()));
+        bound_200(validated(MemoryOrigin::Room { rooms: long.clone(), heard_from: vec![] }));
+        bound_8(validated(MemoryOrigin::Room { rooms: s("swarm"), heard_from: vec![s("@a:chat"); 9] }));
+        bound_200(validated(MemoryOrigin::Direct { room: long.clone(), with: vec![s("@a:chat")] }));
+        bound_8(validated(MemoryOrigin::Direct { room: s("!dm:chat"), with: vec![s("@a:chat"); 9] }));
+        bound_200(validated(MemoryOrigin::SelfRun { run: long }));
+        assert!(
+            matches!(validated(MemoryOrigin::Direct { room: s("!dm:chat"), with: vec![] }), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "memory.origin.with"),
+            "a private memory names no one"
+        );
+    }
+
+    /// A memory is instance-rooted and its label is its whole local.
+    #[test]
+    fn a_memory_is_keyed_under_its_instance_by_its_label() -> Result<()> {
+        assert_eq!(pipeline_key(&PipelineDocument::Memory(memory_sample()))?, format!("{INSTANCE}:memory:2026-10-31t041200-t0-m0"));
+        Ok(())
     }
 
     /// Bounds: a run's campaigns and claims stop at their maximums.
@@ -3307,11 +3457,11 @@ mod tests {
         };
         let document_schema = serde_json::to_value(schemars::schema_for!(PipelineDocument))?;
         let variants = document_schema["oneOf"].as_array().expect("the document schema is a oneOf");
-        assert_eq!(PipelineKind::ALL.len(), 15, "fifteen kinds");
+        assert_eq!(PipelineKind::ALL.len(), 16, "sixteen kinds");
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
-            "the document schema lists exactly the fifteen kinds, by name"
+            "the document schema lists exactly the sixteen kinds, by name"
         );
 
         let refusal_schema = serde_json::to_value(schemars::schema_for!(PipelineRefusal))?;

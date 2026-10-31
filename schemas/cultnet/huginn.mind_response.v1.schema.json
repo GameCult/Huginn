@@ -228,7 +228,8 @@
         "resolved_by",
         "deferred_to",
         "documents",
-        "claims"
+        "claims",
+        "consolidates"
       ]
     },
     "ClaimOutcome": {
@@ -670,6 +671,107 @@
       "description": "Text of at most 1,000 UTF-8 bytes.",
       "type": "string",
       "maxLength": 1000
+    },
+    "MemoryOrigin": {
+      "description": "Where a memory came from and whom she heard it from. The organ derives it\nfrom the batch of the turn that wrote the memory; the model never writes it.\n`about` names whom a memory concerns, this names the room and the voices.",
+      "oneOf": [
+        {
+          "description": "A turn in rooms: their aliases comma-joined, and the batch's other senders.",
+          "type": "object",
+          "properties": {
+            "Room": {
+              "type": "object",
+              "properties": {
+                "heard_from": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Short"
+                  },
+                  "maxItems": 8
+                },
+                "rooms": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "rooms",
+                "heard_from"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Room"
+          ]
+        },
+        {
+          "description": "A direct message: the DM's room id, and the others who spoke in it (whom\nshe heard it from in confidence).",
+          "type": "object",
+          "properties": {
+            "Direct": {
+              "type": "object",
+              "properties": {
+                "room": {
+                  "$ref": "#/$defs/Short"
+                },
+                "with": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Short"
+                  },
+                  "maxItems": 8
+                }
+              },
+              "required": [
+                "room",
+                "with"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Direct"
+          ]
+        },
+        {
+          "description": "A wake: no one spoke.",
+          "type": "string",
+          "const": "Wake"
+        },
+        {
+          "description": "A Self run of hers, by its label.",
+          "type": "object",
+          "properties": {
+            "SelfRun": {
+              "type": "object",
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "run"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "SelfRun"
+          ]
+        }
+      ]
+    },
+    "MemorySort": {
+      "type": "string",
+      "enum": [
+        "Asked",
+        "Decided",
+        "Committed",
+        "Learned",
+        "Did",
+        "Idea",
+        "Rapport"
+      ]
     },
     "MindRefusal": {
       "description": "Every way a mind refuses. `Document` wraps the leaf's four (bounds,\nformats, key identity, foreign type); the rest are the organ's: store\nidentity, epoch, ownership, batch shape, references, and every cross-field\nand cross-document rule of admission.\n\nThe two sequenced kinds refuse in the same pair of shapes: an\n`OutOfSequence` when the writer's `sequence` is not the previous plus one,\nand `AlreadyResolved`/`AlreadyStewarded` when a record of that scope is\nstill in force.",
@@ -2161,7 +2263,7 @@
       ]
     },
     "PipelineDocument": {
-      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\nfifteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
+      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\nsixteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
       "oneOf": [
         {
           "type": "object",
@@ -2396,6 +2498,22 @@
             },
             "value": {
               "$ref": "#/$defs/PipelinePulse"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "memory"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineMemory"
             }
           },
           "required": [
@@ -3119,6 +3237,52 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "memory"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "about": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Short"
+                  }
+                },
+                "label": {
+                  "$ref": "#/$defs/Label"
+                },
+                "origin": {
+                  "$ref": "#/$defs/MemoryOrigin"
+                },
+                "salience_permille": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0
+                },
+                "sort": {
+                  "$ref": "#/$defs/MemorySort"
+                }
+              },
+              "required": [
+                "label",
+                "sort",
+                "about",
+                "origin",
+                "salience_permille"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -3317,7 +3481,67 @@
         "Stewardship",
         "HandOff",
         "Run",
-        "Pulse"
+        "Pulse",
+        "Memory"
+      ]
+    },
+    "PipelineMemory": {
+      "description": "One thing a Mind keeps for herself, in her own mind: what she was asked,\ndecided, committed to, learned or did, an idea, or the rapport between\nher and another Mind or person. `text` is her own words. `about` names\nthe Matrix users it concerns (Minds included) and nothing about where it\ncame from; `origin` is where and from whom she learned it, and `sources`\nthe event ids, commits or documents it rests on; the organ fills both,\nnot the model. `salience_permille` ranks it and decides nothing.\n`consolidates` names the memories a consolidating memory replaces.\nInstance-rooted: the key is `<instance>:memory:<label>`.",
+      "type": "object",
+      "properties": {
+        "about": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 8
+        },
+        "consolidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 16
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "origin": {
+          "$ref": "#/$defs/MemoryOrigin"
+        },
+        "salience_permille": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "sort": {
+          "$ref": "#/$defs/MemorySort"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 8
+        },
+        "text": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "instance",
+        "label",
+        "sort",
+        "text",
+        "about",
+        "origin",
+        "sources",
+        "salience_permille",
+        "consolidates"
       ]
     },
     "PipelinePageItems": {

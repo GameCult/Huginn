@@ -86,6 +86,7 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
         }
         D::Resolution(resolution) => lines.push(&resolution.rationale.0),
         D::HandOff(hand_off) => lines.push(&hand_off.reason.0),
+        D::Memory(memory) => lines.push(&memory.text.0),
         D::Instance(_) | D::Stewardship(_) | D::Run(_) | D::Pulse(_) => {}
     }
     lines.retain(|line| !line.is_empty());
@@ -155,7 +156,7 @@ mod tests {
     use crate::receipt::Faculty;
     use crate::store::test_stores::MemoryStore;
     use eureka_pipeline::{
-        ClaimOutcome, Deviation, FindingConfidence, PipelineDocument as D, PipelineKind as K, RulingAuthority,
+        ClaimOutcome, Deviation, FindingConfidence, MemorySort, PipelineDocument as D, PipelineKind as K, RulingAuthority,
     };
     use std::collections::BTreeMap;
 
@@ -201,6 +202,7 @@ mod tests {
                 D::Finding(finding("1", 1, "F1", FindingConfidence::Confirmed)),
             ],
         ));
+        committed(admit(&mut mind, vec![memory("M1", MemorySort::Idea, "A shared idea.", &[])]));
         let (_, writes) = committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
         let hand_off_key = writes.iter().find(|write| write.kind == K::HandOff).unwrap().id.0.clone();
         (mind, hand_off_key)
@@ -231,6 +233,7 @@ mod tests {
             // The withdrawn closure of Q1, admitted by hand.
             (id("resolution", "resolution.question.Q1.n1.n1"), "Resolved."),
             (hand_off_key, "The workstation mind takes the campaign."),
+            (format!("{INSTANCE}:memory:M1"), "A shared idea."),
         ];
         let held = texts(&mind);
         for (key, text) in &expected {

@@ -6,9 +6,9 @@ use chrono::{DateTime, TimeZone, Utc};
 use cultcache_rs::CultCacheEnvelope;
 use eureka_pipeline::{
     AuthorityMap, ClaimOutcome, CodeLocation, CommitRange, CutVerification, Date, DocRef, Evidence, EvidenceKind,
-    FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MutationRecord, OrgRepo, PipelineCampaign,
+    FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MemoryOrigin, MemorySort, MutationRecord, OrgRepo, PipelineCampaign,
     PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFinding, PipelineFollowUp, PipelineHandOff,
-    PipelineInstance, PipelineKind, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling,
+    PipelineInstance, PipelineKind, PipelineMemory, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling,
     PipelineRun, PipelineStewardship, PipelineTarget, PipelineVerdict, Promise, QuestionOption, ReportCommit,
     ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Short, Slug, StructuralDelta, TargetInvariant, VerdictClaim,
 };
@@ -351,6 +351,21 @@ fn run_of(label: &str, operated_by: RunOperator, turn: RunTurn, claims: &[Pipeli
         budget_usd: s("5"),
         claims: claims.to_vec(),
         campaigns: vec![slug(CAMPAIGN)],
+    })
+}
+
+/// One of her memories: the sort and the text, about `about`, learned in a room, not direct.
+pub(crate) fn memory(label: &str, sort: MemorySort, text: &str, about: &[&str]) -> PipelineDocument {
+    PipelineDocument::Memory(PipelineMemory {
+        instance: slug(INSTANCE),
+        label: l(label),
+        sort,
+        text: text.into(),
+        about: about.iter().map(|who| s(who)).collect(),
+        origin: MemoryOrigin::Room { rooms: s("swarm"), heard_from: vec![] },
+        sources: vec![],
+        salience_permille: 500,
+        consolidates: vec![],
     })
 }
 

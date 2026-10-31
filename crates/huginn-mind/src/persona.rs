@@ -595,7 +595,7 @@ mod tests {
             Mind::open_with(planted(with_one), &yggdrasil).err(),
             Some(MindRefusal::ForeignStore { r#type: HuginnPersonaEntry::TYPE.into() })
         );
-        // The opener still refuses a type that is not one of the seventeen.
+        // The opener still refuses a type that is not one of the nineteen.
         let mut stranger = base();
         let mut foreign = entry(INSTANCE, persona(INSTANCE, T1));
         foreign.r#type = "gamecult.persona_state.v1".into();
