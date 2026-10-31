@@ -570,8 +570,25 @@ impl std::error::Error for SeedLinkRefused {}
 /// the same target, never followed into the copy. A link is refused with
 /// [`SeedLinkRefused`] unless its target is relative and, resolved through
 /// every link on its way in the source, lands under the canonical seed root.
+/// The source check refuses early; but a link's text resolves from where the
+/// copy sits, so once the copy is whole every reproduced link is resolved again
+/// in `to`, and one that lands outside it is refused the same way.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
-    copy_level(&from.canonicalize()?, from, to)
+    copy_level(&from.canonicalize()?, from, to)?;
+    check_links(&to.canonicalize()?, to)
+}
+
+fn check_links(root: &Path, dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            check_links(root, &entry.path())?;
+        } else if kind.is_symlink() && !entry.path().canonicalize().is_ok_and(|resolved| resolved.starts_with(root)) {
+            return Err(std::io::Error::other(SeedLinkRefused { link: entry.path(), target: std::fs::read_link(entry.path())? }));
+        }
+    }
+    Ok(())
 }
 
 fn copy_level(root: &Path, from: &Path, to: &Path) -> std::io::Result<()> {

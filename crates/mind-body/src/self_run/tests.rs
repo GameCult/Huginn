@@ -585,6 +585,41 @@ mod seed_links {
         let refused = error.get_ref().and_then(|inner| inner.downcast_ref::<SeedLinkRefused>());
         assert_eq!(refused.map(|r| r.target.as_path()), Some(Path::new("c/..")), "{error}");
     }
+
+    /// A seed whose parent is not the config dir's parent, and a sibling of the
+    /// config dir named `seed` holding the same file name: the copy's link text
+    /// resolves there, though in the source it lands under the seed root.
+    fn refused_in_the_copy(plant: impl Fn(&Path), expected: &str) {
+        let source = tempfile::tempdir().unwrap();
+        let seed = source.path().join("seed");
+        std::fs::create_dir(&seed).unwrap();
+        std::fs::write(seed.join("f"), "seed").unwrap();
+        plant(&seed);
+        let runtime = tempfile::tempdir().unwrap();
+        std::fs::create_dir(runtime.path().join("seed")).unwrap();
+        std::fs::write(runtime.path().join("seed/f"), "planted").unwrap();
+        let out = runtime.path().join("claude-config");
+        std::fs::create_dir(&out).unwrap();
+        let error = copy_tree(&seed, &out).unwrap_err();
+        let refused = error.get_ref().and_then(|inner| inner.downcast_ref::<SeedLinkRefused>());
+        assert_eq!(refused.map(|r| r.target.as_path()), Some(Path::new(expected)), "{error}");
+    }
+
+    #[test]
+    fn a_link_that_leaves_the_seed_and_returns_by_its_name_is_refused() {
+        refused_in_the_copy(|seed| symlink("../seed/f", seed.join("x")).unwrap(), "../seed/f");
+    }
+
+    #[test]
+    fn a_link_through_a_dot_link_to_the_seeds_name_is_refused() {
+        refused_in_the_copy(
+            |seed| {
+                symlink(".", seed.join("c")).unwrap();
+                symlink("c/../seed/f", seed.join("a")).unwrap();
+            },
+            "c/../seed/f",
+        );
+    }
 }
 
 // ---- what is read -----------------------------------------------------------
