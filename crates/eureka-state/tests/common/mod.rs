@@ -92,6 +92,12 @@ impl<S: MindStore> IndexSink<S> for Inert {
     fn search(&mut self, _text: &str, _top_k: u32, _among: Vec<String>) -> Result<SearchTicket, String> {
         Err("this index cannot search".into())
     }
+    fn search_sources(&mut self, _query: &huginn_mind::SourceQuery) -> Result<SearchTicket, String> {
+        Err("this index cannot search".into())
+    }
+    fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)> {
+        Vec::new()
+    }
     fn search_deadline(&self) -> Duration {
         Duration::ZERO
     }

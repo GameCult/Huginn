@@ -31,7 +31,7 @@ use cultnet_rs::{PROJECTION_DOCUMENT, Selection};
 use huginn_mind::eureka_pipeline::{Line, PipelineDocument, PipelineRef, Short, Slug, pipeline_key};
 use huginn_mind::{
     BATCH_MAX, Faculty, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionBatch, PipelineAdmissionOutcome,
-    PipelinePageItems, PipelineProvenance, PipelineSelectionPage, SemanticQuery,
+    PipelinePageItems, PipelineProvenance, PipelineSelectionPage, SemanticQuery, SourceQuery,
 };
 use serde_json::Value;
 
@@ -82,6 +82,20 @@ enum Command {
         /// Print each item as `view` does.
         #[arg(long)]
         documents: bool,
+    },
+    /// Search the public forge repos' code and docs by meaning.
+    Sources {
+        /// What to find, in words.
+        text: String,
+        /// Look in this repo alone (its forge name).
+        #[arg(long)]
+        repo: Option<String>,
+        /// How many chunks (default 10, at most 50).
+        #[arg(long)]
+        top_k: Option<u32>,
+        /// Print the answer as JSON.
+        #[arg(long)]
+        json: bool,
     },
     #[command(flatten)]
     Recipe(Recipe),
@@ -168,6 +182,7 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
             let semantic = near.map(|text| SemanticQuery { text: Line(text), top_k: top_k.unwrap_or(DEFAULT_TOP_K) });
             query(settings, selection, semantic, None, documents)
         }
+        Command::Sources { text, repo, top_k, json } => sources(settings, text, repo, top_k, json),
         Command::Recipe(recipe) => {
             let ask = recipe.ask()?;
             query(settings, door::selection_value(&ask.selection)?, ask.semantic, ask.page.cursor, ask.page.documents)
@@ -242,6 +257,22 @@ fn query(
     match settings.ask(|instance| HuginnMindRequest::Query { instance: instance.clone(), selection, semantic })? {
         HuginnMindResponse::Query(page) => {
             show(&page);
+            Ok(0)
+        }
+        HuginnMindResponse::Refused(refusal) => Ok(refused(&refusal)),
+        other => Err(unexpected(&other)),
+    }
+}
+
+fn sources(settings: &Settings, text: String, repo: Option<String>, top_k: Option<u32>, json: bool) -> Result<u8, Trouble> {
+    let query = SourceQuery { text: Line(text), top_k: top_k.unwrap_or(DEFAULT_TOP_K), repo: repo.map(Short) };
+    match settings.ask(|instance| HuginnMindRequest::SearchSources { instance: instance.clone(), query })? {
+        HuginnMindResponse::Sources(found) => {
+            if json {
+                say(serde_json::to_string_pretty(&found).map_err(|error| Trouble::Internal(error.to_string()))?);
+            } else {
+                say(render::source_hits(&found));
+            }
             Ok(0)
         }
         HuginnMindResponse::Refused(refusal) => Ok(refused(&refusal)),
@@ -392,6 +423,7 @@ fn unexpected(answer: &HuginnMindResponse) -> Trouble {
         HuginnMindResponse::Query(_) => "query",
         HuginnMindResponse::Persona(_) => "a persona",
         HuginnMindResponse::PersonaPut(_) => "a persona put",
+        HuginnMindResponse::Sources(_) => "source hits",
         HuginnMindResponse::Refused(_) => "a refusal",
         HuginnMindResponse::Deferred(_) => "a deferral",
     };
