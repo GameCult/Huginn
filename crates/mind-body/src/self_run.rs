@@ -28,9 +28,13 @@
 //! stream reported; a run that ends without settling (killed by the brake, a
 //! crash) is billed its reservation by the connector.
 //!
-//! The actuator admits only the closure of a run whose lease was refused. It
-//! reads neither the brake nor the environment and stops no unit: the gate and
-//! the brake hold own those. It never echoes an argument, an endpoint, a
+//! The actuator admits only closures of Self runs, nothing else. Every exit of
+//! `carry` that leaves her run open resolves it Recorded exactly once (the
+//! child's result, or that it gave none, in the reason), and a run found open at
+//! the start besides the one carried is an orphan of a process that ended
+//! without closing it: one Self unit per Mind runs at a time (the systemd
+//! template instance), so the older runs are closed first. It reads neither the
+//! brake nor the environment and stops no unit: the gate and the brake hold own those. It never echoes an argument, an endpoint, a
 //! connector's refusal text or a stream line. Stream-json is Claude Code's wire, a
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
 //! parsed is stored.
@@ -284,11 +288,22 @@ impl fmt::Display for SelfRunOutcome {
     }
 }
 
-/// Her one open Self run and its budget, read through the launch primitive's
-/// holder reader. Anything but exactly one run is none.
-fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, String)>> {
+/// Why a run found open beside the carried one was closed.
+const ORPHANED: &str = "orphaned: the run's process ended without closing it";
+
+/// Her open Self run and its budget, read through the launch primitive's holder
+/// reader. The newest in force is the one this unit carries; any older one is an
+/// orphan (its process ended without closing it, and one Self unit per Mind runs
+/// at a time), closed here before anything is claimed. None when she has none.
+fn her_run(mind: &dyn MindPort, clock: &dyn Clock, out: &mut dyn Write) -> Result<Option<(PipelineRef, String)>> {
     let mut held = holders(mind, mind.instance(), RunTurn::SelfRun)?;
-    let (Some(run), None) = (held.pop(), held.pop()) else { return Ok(None) };
+    held.sort_by(|a, b| (&a.admission.admitted_at, &a.id.id.0).cmp(&(&b.admission.admitted_at, &b.id.id.0)));
+    held.dedup_by(|a, b| a.id == b.id);
+    let Some(run) = held.pop() else { return Ok(None) };
+    for orphan in held {
+        admit_closure(mind, clock, &orphan.id, ResolutionOutcome::Recorded { reason: ORPHANED.into() }, "An earlier Self run's process ended without closing it; the next start closed it.")?;
+        let _ = writeln!(out, "closed an orphaned run");
+    }
     let one = Selection { keys: Some(vec![run.id.id.0.clone()]), projection: "document".into(), ..Selection::default() };
     let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
     match views.into_iter().next().map(|view| view.document) {
@@ -310,6 +325,8 @@ struct Spent {
     reported: Option<BTreeMap<String, TokenUsage>>,
     /// The message ids heard when `reported` was stated: its total already holds them.
     counted: BTreeSet<String>,
+    /// The last result heard, as the reason of the run's closure: bounded.
+    concluded: Option<String>,
 }
 
 /// The model of a message that names none; the connector prices it as it sees fit.
@@ -320,7 +337,10 @@ impl Spent {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         match event.get("type").and_then(Value::as_str) {
             Some("assistant") => {}
-            Some("result") => return self.hear_result(&event),
+            Some("result") => {
+                self.concluded = Some(describe_result(&event, REASON_EXCERPT_LIMIT));
+                return self.hear_result(&event);
+            }
             _ => return,
         }
         let message = event.get("message");
@@ -385,12 +405,36 @@ fn unix_ms(at: DateTime<Utc>) -> u64 {
 /// run that cannot be paid for counts as an empty run and trips the breaker.
 fn close_refused(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, kind: LeaseRefusalKind) -> Result<SelfRunOutcome> {
     let reason = format!("the connector refused the credential lease: {kind:?}");
-    let document = closure(mind, run, clock.now(), ResolutionOutcome::Recorded { reason: reason.as_str().into() }, "The Self run's credential lease was refused, so no claude was started.")?;
+    admit_closure(mind, clock, run, ResolutionOutcome::Recorded { reason: reason.as_str().into() }, "The Self run's credential lease was refused, so no claude was started.")?;
+    Ok(SelfRunOutcome::LeaseRefused { kind })
+}
+
+/// Admits the closing resolution of `run`: the one writer of a closure.
+fn admit_closure(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, outcome: ResolutionOutcome, rationale: &str) -> Result<()> {
+    let document = closure(mind, run, clock.now(), outcome, rationale)?;
     let label = run.id.0.rsplit(':').next().unwrap_or(&run.id.0);
     match mind.admit(AGENT, label, vec![document])? {
-        PipelineAdmissionOutcome::Committed { .. } => Ok(SelfRunOutcome::LeaseRefused { kind }),
-        _ => Err(anyhow!("the run whose lease was refused could not be closed")),
+        PipelineAdmissionOutcome::Committed { .. } => Ok(()),
+        _ => Err(anyhow!("the run could not be closed")),
     }
+}
+
+/// Resolves `run` Recorded if it is still in force: the child may have closed it
+/// itself in its flush, and a refused lease was closed already. One try; a mind
+/// that cannot be reached leaves it to the next start's orphan sweep.
+fn close_if_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, ran: &Result<SelfRunOutcome>, spent: &Spent) -> Result<()> {
+    if !holders(mind, mind.instance(), RunTurn::SelfRun)?.iter().any(|held| held.id == *run) {
+        return Ok(());
+    }
+    let how = match ran {
+        Ok(outcome) => outcome.to_string(),
+        Err(_) => "the actuator failed after the run opened".to_string(),
+    };
+    let reason = match &spent.concluded {
+        Some(concluded) => format!("{how}; {concluded}"),
+        None => format!("{how}; claude gave no result"),
+    };
+    admit_closure(mind, clock, run, ResolutionOutcome::Recorded { reason: reason.as_str().into() }, "The Self run's carrier closed the run its claude left open.")
 }
 
 /// Closes a run whose lease was refused for its length: Withdrawn, because no
@@ -398,12 +442,7 @@ fn close_refused(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, kind
 /// counts nothing and a launch that finds the unit dead has no open run to close.
 fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef) -> Result<()> {
     let outcome = ResolutionOutcome::Withdrawn { reason: "the connector refused the lease as too long".into() };
-    let document = closure(mind, run, clock.now(), outcome, "The unit's runtime cap exceeds the connector's lease length, so no claude was started.")?;
-    let label = run.id.0.rsplit(':').next().unwrap_or(&run.id.0);
-    match mind.admit(AGENT, label, vec![document])? {
-        PipelineAdmissionOutcome::Committed { .. } => Ok(()),
-        _ => Err(anyhow!("the run whose lease was too long could not be withdrawn")),
-    }
+    admit_closure(mind, clock, run, outcome, "The unit's runtime cap exceeds the connector's lease length, so no claude was started.")
 }
 
 /// Carries her one open Self run: one `claude` child from the lease to its
@@ -415,18 +454,39 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 /// `run_cap_s` is the unit's `RuntimeMaxSec`: a connector that finds the lease
 /// too long is misconfigured, which is an error naming the mismatch and not a
 /// refusal of the run: the run is withdrawn, so the breaker counts nothing.
+///
+/// Whatever happens after the run is found, it is resolved Recorded exactly once
+/// before `carry` returns: the child's result (or that it gave none) in the
+/// reason. A resolve that fails is logged and tried no more: the outcome (or the
+/// original error) stands, a failed close of a run that ended normally is an
+/// error, and the next start closes the run as an orphan.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
-    let Some((run, budget)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
+    let Some((run, budget)) = her_run(mind, clock, out)? else { return Ok(SelfRunOutcome::NoRun) };
+    let mut spent = Spent::default();
+    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &budget), &mut spent);
+    let closed = close_if_open(mind, clock, &run, &ran, &spent);
+    if closed.is_err() {
+        let _ = writeln!(out, "the run could not be closed: the next start closes it as an orphan");
+    }
+    match (ran, closed) {
+        (Err(error), _) => Err(error),
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(error)) => Err(error.context("the run's process ended but its run could not be closed")),
+    }
+}
+
+#[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
+fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, budget): (&PipelineRef, &str), spent: &mut Spent) -> Result<SelfRunOutcome> {
     let request = LeaseRequest { expires_at_unix_ms: unix_ms(clock.now()).saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
         Lent::Granted(lease) => lease,
         Lent::Refused(refused) if refused.kind == LeaseRefusalKind::Expired => {
-            withdraw_misconfigured(mind, clock, &run)?;
+            withdraw_misconfigured(mind, clock, run)?;
             bail!("the connector refused a {run_cap_s} s lease as too long: raise its --lease-max-ms to at least the unit's RuntimeMaxSec ({RUN_CAP_VARIABLE}) plus slack");
         }
-        Lent::Refused(refused) => return close_refused(mind, clock, &run, refused.kind),
+        Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
-    let child = match spawner.spawn(&claude_args(session_id(&run), &budget), lease.token()) {
+    let child = match spawner.spawn(&claude_args(session_id(run), budget), lease.token()) {
         Ok(child) => child,
         Err(error) => {
             // No child ever held the token; the empty report is the connector's cue to bill the reservation.
@@ -434,8 +494,7 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawne
             return Err(error);
         }
     };
-    let mut spent = Spent::default();
-    let outcome = drive(mind, clock, child, &run, &mut spent, out)?;
+    let outcome = drive(mind, clock, child, run, spent, out)?;
     // A child that could not even be killed may still be spending: that lease is
     // dropped, and the connector bills the reservation.
     if !matches!(outcome, SelfRunOutcome::Ended { cause: Cause::Unstoppable, .. }) {
@@ -452,15 +511,12 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawne
 
 /// The most of a result's text that reaches the journal.
 const RESULT_TEXT_LIMIT: usize = 4096;
+/// The most of a result's text that reaches the closing resolution's reason.
+const REASON_EXCERPT_LIMIT: usize = 800;
 
-/// What `claude` concluded: a result event's text, with its subtype and error
-/// flag when it has them, written to the unit's stdout so it reaches the journal
-/// before the transcript goes with the runtime directory. Bounded, marked when cut.
-fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
-    let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return Ok(()) };
-    if event.get("type").and_then(Value::as_str) != Some("result") {
-        return Ok(());
-    }
+/// A result event as one line: its subtype and error flag when it has them, then
+/// its text cut at a character boundary to `limit` bytes, marked when cut.
+fn describe_result(event: &serde_json::Map<String, Value>, limit: usize) -> String {
     let mut head = String::from("result");
     if let Some(subtype) = event.get("subtype").and_then(Value::as_str) {
         head.push_str(&format!(" subtype={subtype}"));
@@ -469,12 +525,23 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
         head.push_str(&format!(" is_error={is_error}"));
     }
     let text = event.get("result").and_then(Value::as_str).unwrap_or("");
-    let mut end = text.len().min(RESULT_TEXT_LIMIT);
+    let mut end = text.len().min(limit);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     let marker = if end < text.len() { "\n[truncated]" } else { "" };
-    writeln!(out, "{head}: {}{marker}", &text[..end])
+    format!("{head}: {}{marker}", &text[..end])
+}
+
+/// What `claude` concluded, written to the unit's stdout so it reaches the
+/// journal before the transcript goes with the runtime directory.
+fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
+    let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return Ok(()) };
+    if event.get("type").and_then(Value::as_str) != Some("result") {
+        return Ok(());
+    }
+    writeln!(out, "{}", describe_result(&event, RESULT_TEXT_LIMIT))
+}
 }
 
 /// The loop: facts in, one clock read per fact, actions out.
