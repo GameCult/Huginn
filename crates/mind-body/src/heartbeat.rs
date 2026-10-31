@@ -596,13 +596,12 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     // Off the beat: the operator naming her, once per message, and her Self run
     // having ended since her last turn. Neither waits for the beat; both need her
     // idle and released.
-    for index in 0..rows.len() {
-        if !rows[index].idle() {
+    for row in &mut rows {
+        if !row.idle() {
             continue;
         }
-        let slug = rows[index].slug().clone();
+        let slug = row.slug().clone();
         let mentioned = {
-            let row = &rows[index];
             let mut pending: Vec<&ChatDelivery> = row.pending.iter().collect();
             pending.sort_by_key(|delivery| delivery.seq);
             pending
@@ -611,7 +610,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
                 .map(|delivery| format!("{}:{}", slug.0, delivery.event_id))
                 .find(|key| !state.handled_mentions.contains(key))
         };
-        let self_ended = rows[index].read.as_ref().is_some_and(|read| match (read.self_end, read.last_turn) {
+        let self_ended = row.read.as_ref().is_some_and(|read| match (read.self_end, read.last_turn) {
             (Some(ended), Some(turn)) => ended > turn,
             (Some(_), None) => true,
             _ => false,
@@ -619,19 +618,19 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
         if mentioned.is_none() && !self_ended {
             continue;
         }
-        match launch(organs, &rows[index])? {
+        match launch(organs, row)? {
             Launched::Run(label) => {
                 if let Some(key) = mentioned {
                     state.handled_mentions.push(key);
                     let excess = state.handled_mentions.len().saturating_sub(MENTIONS_KEPT);
                     state.handled_mentions.drain(..excess);
                 }
-                rows[index].busy = true;
+                row.busy = true;
                 launches.push(label);
                 launched.push(slug);
             }
-            Launched::Busy => rows[index].busy = true,
-            Launched::Refused(why) => rows[index].note = why,
+            Launched::Busy => row.busy = true,
+            Launched::Refused(why) => row.note = why,
         }
     }
 

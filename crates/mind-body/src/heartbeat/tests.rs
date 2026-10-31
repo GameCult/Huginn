@@ -589,7 +589,7 @@ fn an_old_heartbeat_store_fails_closed_naming_the_file_and_is_never_migrated() {
     cache.pull_all_backing_stores().unwrap();
     cache.put("eureka", &OldInitiative { initiative: "3.5".into() }).unwrap();
     let store = FileStore::new(&path);
-    for result in [store.check().map(|()| ()), store.load().map(|_| ()), store.latest().map(|_| ()), store.save(&HeartbeatState { last_beat_at: crate::testkit::at(1), handled_mentions: vec![] }), store.record(&trace_at(1, 900))] {
+    for result in [store.check(), store.load().map(|_| ()), store.latest().map(|_| ()), store.save(&HeartbeatState { last_beat_at: crate::testkit::at(1), handled_mentions: vec![] }), store.record(&trace_at(1, 900))] {
         let error = format!("{:#}", result.unwrap_err());
         assert!(error.contains(&path.display().to_string()) && error.contains("archive it, nothing migrates it"), "{error}");
     }

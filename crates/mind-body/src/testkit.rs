@@ -55,11 +55,6 @@ impl Recording {
         self.running.borrow_mut().retain(|unit| *unit != (Slug(INSTANCE.into()), turn));
     }
 
-    /// One named instance's unit ends.
-    pub(crate) fn stop(&self, instance: &Slug, turn: RunTurn) {
-        self.running.borrow_mut().retain(|unit| *unit != (instance.clone(), turn));
-    }
-
     pub(crate) fn revive(&self, turn: RunTurn) {
         self.running.borrow_mut().push((Slug(INSTANCE.into()), turn));
     }
