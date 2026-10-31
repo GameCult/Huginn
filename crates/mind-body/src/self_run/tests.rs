@@ -13,6 +13,7 @@ use eureka_pipeline::{PipelineDocument, PipelineKind as K, PipelineRef, RunOpera
 use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
 
 use super::*;
+use cultnet_rs::Selection;
 use crate::lease_client::{Lease, LeaseRefused, token_holding};
 use model_connector::PlanQuota;
 use crate::testkit::*;

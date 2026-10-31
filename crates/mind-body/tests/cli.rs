@@ -43,9 +43,8 @@ fn show_reports_every_rung_from_an_absent_store_to_released() {
     assert!(out.contains("brake: released") && out.contains("set_by alice") && out.contains("BrakeAbsent"), "the swarm is still unreleased: {out}");
 
     go(root.path(), &["swarm", "brake", "release"], "bob", 3).0.unwrap();
-    go(root.path(), &["swarm", "dial", "set", "--heat", "0.5", "--base-rate", "4", "--base-run", "5", "--k", "2"], "bob", 3).0.unwrap();
     let (_, out) = go(root.path(), &["--instance", "eureka", "show"], "op", 4);
-    assert!(out.contains("Released") && out.contains("run_cap_usd: 2.5"), "{out}");
+    assert!(out.contains("Released"), "{out}");
 
     go(root.path(), &["--instance", "eureka", "brake", "hold"], "alice", 5).0.unwrap();
     let (_, out) = go(root.path(), &["--instance", "eureka", "show"], "op", 6);
@@ -125,7 +124,6 @@ fn the_binary_exits_2_for_check_while_held_and_0_after_release_with_a_swarm() {
         std::process::Command::new(env!("CARGO_BIN_EXE_mind-control")).arg("--root").arg(root.path()).arg("swarm").args(args).output().unwrap()
     };
     assert!(swarm(&["brake", "release"]).status.success());
-    assert!(swarm(&["dial", "set", "--heat", "0.5", "--base-rate", "4", "--base-run", "5", "--k", "2"]).status.success());
     let open = run(&["check"]);
     assert_eq!(open.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&open.stdout).contains("Released"));
@@ -204,7 +202,6 @@ fn check_opens_on_release_with_a_swarm_and_is_per_instance() {
     let root = tempfile::tempdir().unwrap();
     go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 0).0.unwrap();
     go(root.path(), &["swarm", "brake", "release"], "op", 1).0.unwrap();
-    go(root.path(), &["swarm", "dial", "set", "--heat", "0.5", "--base-rate", "4", "--base-run", "5", "--k", "2"], "op", 1).0.unwrap();
     let (result, out) = check_out(root.path());
     result.unwrap();
     assert!(out.contains("Released"), "{out}");
@@ -218,7 +215,6 @@ fn check_holds_for_the_named_instance_with_a_released_prefix_neighbour() {
     let root = tempfile::tempdir().unwrap();
     go(root.path(), &["--instance", "eureka", "brake", "hold"], "op", 0).0.unwrap();
     go(root.path(), &["swarm", "brake", "release"], "op", 0).0.unwrap();
-    go(root.path(), &["swarm", "dial", "set", "--heat", "0.5", "--base-rate", "4", "--base-run", "5", "--k", "2"], "op", 0).0.unwrap();
     // Neighbours that share the held instance's text as a prefix, or only an edge of it, are released with a dial.
     for (i, neighbour) in ["eureka-two", "eureka2", "xeureka"].into_iter().enumerate() {
         let at = 1 + 2 * i as i64;
@@ -280,10 +276,8 @@ fn brake_hold_stops_once_with_the_instance_and_the_store_already_held() {
 #[test]
 fn only_brake_hold_calls_the_stopper() {
     let root = tempfile::tempdir().unwrap();
-    let dial = ["swarm", "dial", "set", "--heat", "1", "--base-rate", "4", "--base-run", "1", "--k", "2"];
     let commands: &[&[&str]] = &[
         &["--instance", "eureka", "brake", "release"],
-        &dial,
         &["--instance", "eureka", "show"],
         &["--instance", "eureka", "brake"],
         &["--instance", "eureka", "brake", "toggle"],
@@ -441,24 +435,22 @@ fn swarm_show(root: &std::path::Path) -> String {
 fn swarm_verbs_round_trip() {
     let root = tempfile::tempdir().unwrap();
     let shown = swarm_show(root.path());
-    assert!(shown.contains("brake: absent") && shown.contains("dial: absent") && shown.contains("BrakeAbsent"), "{shown}");
+    assert!(shown.contains("brake: absent") && shown.contains("BrakeAbsent"), "{shown}");
 
     for args in [
         &["swarm", "brake", "release"][..],
-        &["swarm", "dial", "set", "--heat", "1.5", "--base-rate", "4", "--base-run", "2", "--k", "3"],
-        &["swarm", "share", "set", "weksa", "2.5"],
     ] {
         go(root.path(), args, "alice", 5).0.unwrap();
     }
     let shown = swarm_show(root.path());
     assert!(shown.contains("brake: released") && shown.contains("set_by alice"), "{shown}");
-    assert!(shown.contains("dial: heat 1.5 base_rate_usd_per_h 4 base_run_usd 2 k 3"), "{shown}");
-    assert!(shown.contains("share: weksa 2.5"), "{shown}");
-    assert!(shown.contains("Released") && shown.contains("rate_usd_per_h: 6.0") && shown.contains("run_cap_usd: 3.0"), "{shown}");
+    assert!(shown.contains("Released"), "{shown}");
+    assert!(!shown.contains("dial") && !shown.contains("share"), "the swarm store holds a brake and nothing else: {shown}");
 
-    // Heat 0 stops the swarm and is one command away; the hold stops it too.
-    go(root.path(), &["swarm", "dial", "set", "--heat", "0", "--base-rate", "4", "--base-run", "2", "--k", "3"], "alice", 6).0.unwrap();
-    assert!(swarm_show(root.path()).contains("HeatZero"));
+    // The dollar-metering verbs are gone: they are refused, not read as something else.
+    for args in [&["swarm", "dial", "set", "--heat", "0", "--base-rate", "4", "--base-run", "2", "--k", "3"][..], &["swarm", "share", "set", "weksa", "2.5"]] {
+        assert!(go(root.path(), args, "alice", 6).0.is_err(), "{args:?}");
+    }
     go(root.path(), &["swarm", "brake", "hold"], "alice", 7).0.unwrap();
     assert!(swarm_show(root.path()).contains("BrakeHeld"));
 }

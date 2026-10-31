@@ -26,7 +26,7 @@ fn granted_fd_reaches_child_env_var() {
     let dir = tempfile::tempdir().unwrap();
     let program = script(&dir, READS_ITS_CREDENTIAL);
     let token = token_holding("tok-canary-7f3a");
-    let mut child = start_with(&program, &claude_args(session_id(&run_ref("selfrun-a")), "5"), &token);
+    let mut child = start_with(&program, &claude_args(session_id(&run_ref("selfrun-a"))), &token);
     child.close_input();
     let (lines, code) = drain(&mut *child);
     assert_eq!(code, Some(0), "{lines:?}");

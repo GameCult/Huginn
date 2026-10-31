@@ -235,9 +235,13 @@ fn an_old_swarm_store_holding_a_dial_or_a_share_reads_as_held_undecodable_and_is
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(swarm_path(dir.path()))).unwrap();
         cache.pull_all_backing_stores().unwrap();
         match old {
-            "dial" => cache.put("dial", &OldDial { heat: "1".into() }).unwrap(),
-            _ => cache.put("eureka", &OldShare { weight: "1".into() }).unwrap(),
-        };
+            "dial" => {
+                cache.put("dial", &OldDial { heat: "1".into() }).unwrap();
+            }
+            _ => {
+                cache.put("eureka", &OldShare { weight: "1".into() }).unwrap();
+            }
+        }
         assert_eq!(effective(&path), held(HeldReason::Undecodable), "{old}: the brake in the same file does not rescue it");
         assert_eq!(read_swarm_for_test(dir.path()), SwarmEffective::Held(HeldReason::Undecodable));
     }
@@ -260,4 +264,10 @@ fn the_stores_are_written_world_readable_and_root_only_writable() {
     }
     #[cfg(not(unix))]
     let _ = path;
+}
+
+/// A named instance store with its brake released, and a released swarm.
+fn release(root: &Path, name: &str) {
+    ControlWriter::open(root.join(name).join("control.cc")).unwrap().set_brake(true, at(0), "op").unwrap();
+    release_swarm(root);
 }

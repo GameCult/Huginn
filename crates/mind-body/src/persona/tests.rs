@@ -782,7 +782,7 @@ fn with_no_doctrine_configured_the_instructions_begin_with_the_persona() {
 fn doctrine_comes_from_the_environment_as_absolute_paths_in_order() {
     let env = |doctrine: &'static str| {
         move |name: &str| match name {
-            ENV_ROOMS | ENV_BURN_ROOM => Some("swarm".to_string()),
+            ENV_ROOMS => Some("swarm".to_string()),
             ENV_OPERATOR => Some("@op:chat".to_string()),
             ENV_SELF_SENDER => Some("@eureka:chat".to_string()),
             ENV_DOCTRINE => Some(doctrine.to_string()),
