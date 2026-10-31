@@ -245,3 +245,71 @@ fn recall_reads_only_the_memory_follow_up_and_ruling_kinds() {
         assert!(selection.schemas.iter().flatten().all(|schema| allowed.contains(schema)), "{selection:?}");
     }
 }
+
+#[test]
+fn each_lane_is_limited_and_the_merge_stops_at_twenty_items_from_disjoint_lanes() {
+    let mind = TestMind::seeded();
+    for index in 0..10 {
+        mind.committed(vec![memory(&format!("a{index:02}"), MemorySort::Asked, &format!("ask {index}"), &["@op:chat"])]);
+    }
+    for index in 0..8 {
+        mind.committed(vec![memory(&format!("b{index:02}"), MemorySort::Learned, &format!("about {index}"), &[LIBBY])]);
+    }
+    for index in 0..8 {
+        mind.committed(vec![memory(&format!("z{index:02}"), MemorySort::Learned, "zebra zebra", &[])]);
+    }
+    for index in 0..4 {
+        mind.committed(vec![memory(&format!("n{index:02}"), MemorySort::Did, &format!("newest {index}"), &[])]);
+    }
+    let recalled = select(&Recording::over(&mind), &cue(&[LIBBY], &["zebra"], &[])).unwrap();
+    assert_eq!(recalled.asks.len(), 8, "the asks lane is limited to eight");
+    let lane = |lane: Lane| recalled.others.iter().filter(|entry| entry.lane == lane).count();
+    assert_eq!(lane(Lane::About), 6, "the about lane is limited to six");
+    assert_eq!(recalled.asks.len() + recalled.others.len(), MAX_ITEMS, "twenty items, the later lanes cut");
+    assert_eq!(lane(Lane::Newest), 0, "the newest lane is last and is cut first");
+    // A wake: the newest lane is limited to four.
+    let wake = select(&Recording::over(&mind), &cue(&[], &[], &[])).unwrap();
+    assert_eq!(wake.others.len(), 4);
+}
+
+#[test]
+fn the_byte_cap_stops_the_merge_before_it_is_crossed() {
+    let mind = TestMind::seeded();
+    for index in 0..8 {
+        mind.committed(vec![memory(&format!("a{index:02}"), MemorySort::Asked, &"a".repeat(1000), &["@op:chat"])]);
+    }
+    for index in 0..6 {
+        mind.committed(vec![memory(&format!("b{index:02}"), MemorySort::Learned, &"b".repeat(1000), &[LIBBY])]);
+    }
+    for index in 0..8 {
+        mind.committed(vec![memory(&format!("z{index:02}"), MemorySort::Learned, &format!("{} zebra", "z".repeat(1000)), &[])]);
+    }
+    let recalled = select(&Recording::over(&mind), &cue(&[LIBBY], &["zebra"], &[])).unwrap();
+    let bytes: usize = recalled.asks.iter().chain(&recalled.others).map(|entry| entry.line.len()).sum();
+    assert!(bytes <= MAX_BYTES, "{bytes}");
+    assert!(bytes > MAX_BYTES - 1300, "the cap is reached, not undershot: {bytes}");
+    assert!(recalled.asks.len() + recalled.others.len() < MAX_ITEMS);
+}
+
+#[test]
+fn a_follow_up_and_a_ruling_read_as_what_she_set_herself_and_what_was_ruled() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x")]);
+    mind.committed(vec![follow_up("fork-it", &spec_ref("x")), ruling("R1", None)]);
+    let recalled = select(&Recording::over(&mind), &cue(&[LIBBY], &["Later"], &[])).unwrap();
+    let lines: Vec<&str> = recalled.others.iter().map(|entry| entry.line.as_str()).collect();
+    assert!(lines.contains(&"- You set yourself to: \"Later.\"\n"), "{lines:?}");
+    assert!(lines.contains(&"- Ruled: \"A ruling\"\n"), "{lines:?}");
+}
+
+#[test]
+fn the_empty_notice_appears_only_when_nothing_is_remembered() {
+    let asks_only = TestMind::seeded();
+    asks_only.committed(vec![memory("ask", MemorySort::Asked, "Do it", &["@op:chat"])]);
+    let section = render(&Recalled { asks: select(&Recording::over(&asks_only), &cue(&[], &[], &[])).unwrap().asks, others: vec![], search: Search::Skipped });
+    assert!(!section.contains("nothing is remembered yet") && section.contains("Asked of you"), "{section}");
+    let others_only = TestMind::seeded();
+    others_only.committed(vec![memory("did", MemorySort::Did, "Did it", &[])]);
+    let section = render(&select(&Recording::over(&others_only), &cue(&[], &[], &[])).unwrap());
+    assert!(!section.contains("nothing is remembered yet") && section.contains("Also remembered"), "{section}");
+}
