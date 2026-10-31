@@ -31,6 +31,7 @@
 //! The organ admits only a follow-up, a run's closing resolution and, through
 //! `open_and_launch`, a Self run. It never writes the brake or the dial.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -912,12 +913,26 @@ pub(crate) fn quoted(text: &str) -> String {
     .collect()
 }
 
+/// The addressees of a message, from the mentions its delivery carries: "you"
+/// for this Persona, a display name where this turn's senders showed one, else
+/// the Matrix id. Empty when the message names no one.
+fn addressees(config: &Config, mentions: &[String], names: &BTreeMap<&str, &str>) -> String {
+    mentions
+        .iter()
+        .map(|id| if *id == config.own_sender { "you" } else { names.get(id.as_str()).copied().unwrap_or(id.as_str()) })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// One message line: the sender id and the role the organ derived from it stand
 /// beside the member's room, display name and text, which are quoted. Only the
 /// `role` field says who is the operator, and no quoted text can write one.
-fn message_line(config: &Config, label: &str, room: &str, sender: &str, display: Option<&str>, text: &str) -> String {
+/// `to` is the addressees, shown only when the message names some; it is quoted.
+fn message_line(config: &Config, label: &str, room: &str, sender: &str, display: Option<&str>, to: &str, text: &str) -> String {
     let name = display.map_or_else(String::new, |display| format!(" name={}", quoted(display)));
-    format!("{label} room={} sender={} role={}{name} text={}\n", quoted(room), quoted(sender), config.sender(sender).tag(), quoted(text))
+    let to = if to.is_empty() { String::new() } else { format!(" to={}", quoted(to)) };
+    format!("{label} room={} sender={} role={}{name}{to} text={}
+", quoted(room), quoted(sender), config.sender(sender).tag(), quoted(text))
 }
 
 /// The turn's input: the rooms, the burn line, her latest runs, and the
@@ -937,11 +952,13 @@ fn render_input(config: &Config, deliveries: &[ChatDelivery], history: &[String]
     if deliveries.is_empty() {
         out.push_str("No new messages. This is a scheduled wake: decide whether to speak or to start work.\n");
     }
+    let names: BTreeMap<&str, &str> = deliveries.iter().map(|d| (d.sender.as_str(), d.sender_display.as_str())).filter(|(_, name)| !name.is_empty()).collect();
     for delivery in deliveries {
         for earlier in &delivery.context {
-            out.push_str(&message_line(config, "earlier", &delivery.room_alias, &earlier.sender, None, &earlier.text));
+            out.push_str(&message_line(config, "earlier", &delivery.room_alias, &earlier.sender, None, "", &earlier.text));
         }
-        out.push_str(&message_line(config, "message", &delivery.room_alias, &delivery.sender, Some(&delivery.sender_display), &delivery.text));
+        let to = addressees(config, &delivery.mentions, &names);
+        out.push_str(&message_line(config, "message", &delivery.room_alias, &delivery.sender, Some(&delivery.sender_display), &to, &delivery.text));
     }
     out
 }

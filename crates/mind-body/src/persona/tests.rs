@@ -376,7 +376,7 @@ fn recent_runs_are_the_newest_five_newest_first() {
 fn line_separators_in_member_text_cannot_end_its_line() {
     let seps = [char::from_u32(0x2028).unwrap(), char::from_u32(0x2029).unwrap(), char::from_u32(0x85).unwrap()];
     let text = format!("a{}b{}c{}d", seps[0], seps[1], seps[2]);
-    let line = message_line(&config(), "message", "swarm", "@m:chat", Some("M"), &text);
+    let line = message_line(&config(), "message", "swarm", "@m:chat", Some("M"), "", &text);
     assert_eq!(line.matches('\n').count(), 1, "{line:?}");
     assert!(seps.iter().all(|sep| !line.contains(*sep)), "{line:?}");
 }
@@ -1116,4 +1116,40 @@ fn with_no_campaign_in_force_the_instructions_say_so_and_the_schema_allows_no_st
     assert!(!requests[0].instructions.contains("- eureka-body:"));
     let schema: serde_json::Value = serde_json::from_str(&requests[0].output_schema_json).unwrap();
     assert_eq!(schema["properties"]["start_self_run"], json!({ "type": "null" }));
+}
+
+fn input_for(mentions: &[&str]) -> String {
+    let mut aqua = delivery(1, "swarm", "@aqua:chat", "hello");
+    aqua.sender_display = "Aqua".into();
+    let mut said = delivery(2, "swarm", "@operator:chat", "a reply");
+    said.mentions = mentions.iter().map(|m| (*m).to_string()).collect();
+    render_input(&config(), &[aqua, said], &[], "burn")
+}
+
+fn message_two(input: &str) -> &str {
+    input.lines().find(|line| line.contains("a reply")).unwrap()
+}
+
+#[test]
+fn a_message_mentioning_another_persona_renders_its_name() {
+    let input = input_for(&["@aqua:chat"]);
+    assert!(message_two(&input).contains(" to=\"Aqua\" "), "{input}");
+}
+
+#[test]
+fn a_message_mentioning_this_persona_renders_you() {
+    let own = config().own_sender;
+    let input = input_for(&[own.as_str(), "@kiko:chat"]);
+    assert!(message_two(&input).contains(&format!(" to=\"you, @kiko:chat\" ")), "{input}");
+}
+
+#[test]
+fn a_message_without_mentions_renders_no_addressee() {
+    let input = input_for(&[]);
+    assert!(!input.lines().filter(|line| line.starts_with("message ")).any(|line| line.contains(" to=")), "{input}");
+}
+
+#[test]
+fn the_turn_input_says_how_to_read_an_addressee() {
+    assert!(input_for(&[]).contains("A message addressed to another Mind is theirs to answer. Answer it only if you hold something they need, and say so."));
 }
