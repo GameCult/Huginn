@@ -261,7 +261,6 @@ mind_body::self_run::inbox: fn backlog (mind : & dyn MindPort) -> Result < Vec <
 mind_body::self_run::inbox: fn derive (mind : & dyn MindPort , told : & HashSet < String >) -> Result < Vec < Brief > >
 mind_body::self_run::inbox: fn render (briefs : & [Brief] , plan : & str) -> String
 mind_body::self_run::inbox: fn resolving_sentence (id : & str) -> String
-mind_body::self_run::inbox: impl Brief
 mind_body::self_run::inbox: struct Brief # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[id: String, campaign: String, repo: String, item: String, ordinal: u64]
 mind_body::tempo: const DEFAULT_BEAT_S : u32
 mind_body::tempo: const LOG_BOUND_ORDERS : f64
