@@ -64,8 +64,16 @@ pub struct Search {
 /// What the asker is owed: a ranked page of the mind's documents, or the
 /// source index's chunks as the index holds them.
 enum Pending {
-    Mind { selection: Selection, semantic: SemanticQuery, members: Members },
+    Mind(Box<MindSearch>),
     Sources,
+}
+
+/// A mind search in flight: the asked selection and query, and the members the
+/// mind chose before the index was asked.
+struct MindSearch {
+    selection: Selection,
+    semantic: SemanticQuery,
+    members: Members,
 }
 
 /// What a finished search came to: the mind's candidates, the source index's
@@ -220,7 +228,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         }
         let among = members.ids.iter().map(|id| id.id.0.clone()).collect();
         match self.index.search(&semantic.text.0, semantic.top_k, among) {
-            Ok(ticket) => Handled::Searching(Search { ticket, pending: Pending::Mind { selection, semantic, members } }),
+            Ok(ticket) => Handled::Searching(Search { ticket, pending: Pending::Mind(Box::new(MindSearch { selection, semantic, members })) }),
             Err(detail) => refused(MindRefusal::Unavailable { detail }),
         }
     }
@@ -251,7 +259,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         let (selection, semantic, members, hits) = match (search.pending, found) {
             (_, Found::Failed(detail)) => return unavailable(detail),
             (Pending::Sources, Found::Sources(hits)) => return HuginnMindResponse::Sources(hits),
-            (Pending::Mind { selection, semantic, members }, Found::Mind(hits)) => (selection, semantic, members, hits),
+            (Pending::Mind(asked), Found::Mind(hits)) => (asked.selection, asked.semantic, asked.members, hits),
             _ => return unavailable("the index answered another kind of search than the one asked".into()),
         };
         match self.mind.rank(&selection, &semantic, &members, &hits) {
