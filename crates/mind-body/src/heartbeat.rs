@@ -9,8 +9,13 @@
 //! waited, bent by the urgency she declared for herself, a member addressing her
 //! and (a later cut) topics she subscribed to. Two things launch a Persona off
 //! the beat: the operator tagging or naming her, once per message, and her own
-//! Self run having ended since her last turn. Nothing is metered here: no
-//! meter and no model call.
+//! Self run having ended since her last turn. A beat's launch for a Mind whose
+//! Self holds briefs (`inbox::derive`) is a Self run claiming them, in place of
+//! her Persona turn: a session that ended with a brief open, or a brief admitted
+//! after its flush, is never an orphan, and a Self start takes the beat like any
+//! launch. A brief with an open question raised in it (the repetition breaker's
+//! trip) is not claimed until that question is answered. Nothing is metered here:
+//! no meter and no model call.
 //!
 //! The heartbeat owns `heartbeat.cc` and is its only writer; Persona units read
 //! it. The brakes stay the operator's and are read on every poll. Busy and idle
@@ -21,6 +26,7 @@
 //! A held swarm brake ends the poll before the mind or the mouth is touched.
 
 use std::fmt;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -34,7 +40,8 @@ use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 use crate::chat_client::{Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
-use crate::queue::{MindPort, any_of, citing, headers, of_kind};
+use crate::queue::{MindPort, any_of, citing, headers, in_force, of_kind};
+use crate::self_run::inbox;
 use crate::tempo::{self, Standing};
 
 /// The admitting agent's name on every run the heartbeat opens.
@@ -548,18 +555,46 @@ enum Launched {
     Refused(String),
 }
 
-/// The one way the heartbeat starts a Persona turn: the same brake read and the
-/// same opener for a beat, an operator mention and a Self run that ended.
-fn launch(organs: &Organs, row: &Row) -> Result<Launched> {
+/// The one way the heartbeat starts a run: the same brake read and the same
+/// opener for a Persona turn (a beat, an operator mention, a Self run that ended)
+/// and for the Self run a beat gives to the briefs her Self holds.
+fn launch(organs: &Organs, row: &Row, turn: RunTurn, claims: Vec<PipelineRef>) -> Result<Launched> {
     let Effective::Released(grant) = organs.control.effective(row.slug()) else { return Ok(Launched::Refused("the brake is held".into())) };
     let ports = Ports { mind: row.seat.mind, launcher: organs.launcher, clock: organs.clock, host: organs.host };
-    let request = LaunchRequest { turn: RunTurn::PersonaTurn, claims: vec![], agent: AGENT.into(), grant };
+    let request = LaunchRequest { turn, claims, agent: AGENT.into(), grant };
     Ok(match open_and_launch(&ports, request) {
         Ok(LaunchOutcome::Launched { run }) => Launched::Run(label_of(&run)),
         Ok(LaunchOutcome::Busy { .. }) => Launched::Busy,
         Ok(_) => Launched::Refused("launch refused".into()),
         Err(error) => Launched::Refused(format!("launch failed: {error}")),
     })
+}
+
+/// The most briefs one Self run claims.
+const BRIEFS_PER_SELF_RUN: usize = 64;
+
+/// The briefs a Self run would claim for this Mind: those in force that no live
+/// Self run holds and that no open question blocks. A question raised in a brief
+/// is the repetition breaker's trip; it stays blocking until it is answered or
+/// withdrawn, so a trip is a stop and never a fresh count.
+fn claimable(row: &Row) -> Result<Vec<PipelineRef>> {
+    let mind = row.seat.mind;
+    if !holders(mind, row.slug(), RunTurn::SelfRun)?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let blocked: Vec<PipelineRef> = headers(mind, &in_force(of_kind(PipelineKind::Question)))?
+        .into_iter()
+        .filter_map(|header| match header.facts {
+            PipelineFacts::Question { raised_in: Some(item), .. } => Some(item),
+            _ => None,
+        })
+        .collect();
+    Ok(inbox::derive(mind, &HashSet::new())?
+        .into_iter()
+        .map(|brief| PipelineRef { kind: PipelineKind::FollowUp, id: brief.id.as_str().into() })
+        .filter(|claim| !blocked.contains(claim))
+        .take(BRIEFS_PER_SELF_RUN)
+        .collect())
 }
 
 /// One poll.
@@ -626,7 +661,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
         if mentioned.is_none() && !self_ended {
             continue;
         }
-        match launch(organs, row)? {
+        match launch(organs, row, RunTurn::PersonaTurn, vec![])? {
             Launched::Run(label) => {
                 if let Some(key) = mentioned {
                     state.handled_mentions.push(key);
@@ -664,15 +699,21 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     // one failing Mind never starves the others; a launch ends the beat.
     let mut passed: Vec<Standing> = standings.clone();
     while due && let Some(winner) = tempo::pick(&passed, beat_s) {
-        match launch(organs, &rows[winner])? {
+        // Her Self holds briefs: the beat is a Self run for them; otherwise a Persona turn.
+        let claims = claimable(&rows[winner]).unwrap_or_else(|error| {
+            rows[winner].note = format!("briefs: {error}");
+            Vec::new()
+        });
+        let turn = if claims.is_empty() { RunTurn::PersonaTurn } else { RunTurn::SelfRun };
+        match launch(organs, &rows[winner], turn, claims)? {
             Launched::Run(label) => {
                 state.last_beat_at = now;
-                rows[winner].busy = true;
+                rows[winner].busy = turn == RunTurn::PersonaTurn;
                 launches.push(label);
                 launched.push(rows[winner].slug().clone());
                 break;
             }
-            Launched::Busy => rows[winner].busy = true,
+            Launched::Busy => rows[winner].busy = turn == RunTurn::PersonaTurn,
             Launched::Refused(why) => rows[winner].note = why,
         }
         passed[winner].eligible = false;
