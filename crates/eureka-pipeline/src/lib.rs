@@ -1462,6 +1462,30 @@ mod tests {
         ruling
     }
 
+    /// A withdrawal is a pulse that says only `tempo_vote_withdrawn`: it must survive
+    /// encoding to an envelope, JSON and named MessagePack as a withdrawal, and an
+    /// unwithdrawn pulse must not write the key.
+    #[test]
+    fn a_withdrawal_pulse_encodes_and_reads_back_as_a_withdrawal() -> Result<()> {
+        let cache = schema_cache()?;
+        let pulse = |withdrawn: bool, urgency: Option<u16>| {
+            PipelineDocument::Pulse(PipelinePulse { instance: slug(INSTANCE), label: l("2026-10-31t041200-t0"), tempo_vote_beat_s: None, tempo_vote_withdrawn: withdrawn, urgency_permille: urgency, note: "".into() })
+        };
+        let withdrawal = pulse(true, None);
+        withdrawal.validate()?;
+        let read_back = PipelineDocument::decode(&withdrawal.prepare(&cache)?)?;
+        assert!(matches!(&read_back, PipelineDocument::Pulse(read) if read.tempo_vote_withdrawn), "{read_back:?}");
+        let json = serde_json::to_value(&withdrawal)?;
+        assert_eq!(json["value"]["tempo_vote_withdrawn"], true);
+        assert!(matches!(serde_json::from_value::<PipelineDocument>(json)?, PipelineDocument::Pulse(read) if read.tempo_vote_withdrawn));
+        let packed = rmp_serde::to_vec_named(&withdrawal)?;
+        assert!(matches!(rmp_serde::from_slice::<PipelineDocument>(&packed)?, PipelineDocument::Pulse(read) if read.tempo_vote_withdrawn));
+        let urging = pulse(false, Some(5));
+        assert!(serde_json::to_value(&urging)?["value"].get("tempo_vote_withdrawn").is_none(), "an unwithdrawn pulse writes no key");
+        assert!(matches!(PipelineDocument::decode(&urging.prepare(&cache)?)?, PipelineDocument::Pulse(read) if !read.tempo_vote_withdrawn));
+        Ok(())
+    }
+
     #[test]
     fn a_ruling_with_authority_mind_keys_encodes_and_round_trips_like_any_ruling() -> Result<()> {
         let cache = schema_cache()?;

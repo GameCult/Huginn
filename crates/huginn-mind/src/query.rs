@@ -1486,6 +1486,37 @@ mod tests {
         assert!(invalid("fields[0].values", "false")(&refused(&mind, &outside)));
     }
 
+    /// A withdrawal pulse admitted into the mind is read back as a withdrawal: its
+    /// facts say so, `voted` selects it, and a later plain vote is not one.
+    #[test]
+    fn an_admitted_withdrawal_pulse_reads_back_as_a_withdrawal() {
+        let mut mind = seeded();
+        let pulse = |label: &str, beat: Option<u32>, withdrawn: bool| {
+            D::Pulse(eureka_pipeline::PipelinePulse {
+                instance: Slug(INSTANCE.into()),
+                label: Label(label.into()),
+                tempo_vote_beat_s: beat,
+                tempo_vote_withdrawn: withdrawn,
+                urgency_permille: None,
+                note: "n".into(),
+            })
+        };
+        committed(admit(&mut mind, vec![pulse("vote", Some(60), false)]));
+        committed(admit(&mut mind, vec![pulse("withdraw", None, true)]));
+        let newest = || {
+            let selection = Selection { descending: true, limit: Some(1), ..with(of_kinds(&[K::Pulse]), any_of("voted", &["true"])) };
+            let page = mind.query(&selection).unwrap();
+            headers(&page).to_vec()
+        };
+        let found = newest();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.id.0, format!("{INSTANCE}:pulse:withdraw"));
+        assert!(matches!(found[0].facts, PipelineFacts::Pulse { tempo_vote_beat_s: None, tempo_vote_withdrawn: true, .. }), "{:?}", found[0].facts);
+        committed(admit(&mut mind, vec![pulse("again", Some(90), false)]));
+        let found = newest();
+        assert!(matches!(found[0].facts, PipelineFacts::Pulse { tempo_vote_beat_s: Some(90), tempo_vote_withdrawn: false, .. }), "{:?}", found[0].facts);
+    }
+
     /// The substrate's own refusals cross as themselves: an undeclared alias
     /// is a `SelectionInvalid` from the substrate's door, before the organ's.
     #[test]
