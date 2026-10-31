@@ -844,7 +844,9 @@ fn render_tempo(view: Option<&dyn TempoView>, instance: &Slug) -> String {
     out
 }
 
-/// Her latest runs with how each ended, one line each, newest first.
+/// Her latest runs with how each ended, one entry each, newest first. A Self
+/// run's entry carries its closure's rationale too: that is where its result
+/// text lives, and it is the only account she has of what her last run said.
 fn recent_runs(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<String>> {
     let mine = any_of(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]), "operated_by", &[&format!("{:?}", RunOperator::Mind)]);
     let selection = Selection { descending: true, limit: Some(RECENT_RUNS), ..mine };
@@ -853,15 +855,25 @@ fn recent_runs(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<String>> {
     for run in runs {
         let PipelineFacts::Run { label, turn, .. } = &run.facts else { continue };
         let closures = Selection { cites: Some(citing(&run.id, Some("subject"))), ..of_kind(PipelineKind::Resolution) };
-        let ending = headers(mind, &closures)?
+        let last = headers(mind, &closures)?
             .into_iter()
             .filter_map(|header| match header.facts {
-                PipelineFacts::Resolution { sequence, outcome, .. } => Some((sequence, outcome)),
+                PipelineFacts::Resolution { sequence, outcome, .. } => Some((sequence, header.id, outcome)),
                 _ => None,
             })
-            .max_by_key(|(sequence, _)| *sequence)
-            .map_or_else(|| "open".to_string(), |(_, outcome)| format!("{outcome:?}"));
-        lines.push(format!("{} {turn:?}: {ending}", label.0));
+            .max_by_key(|(sequence, ..)| *sequence);
+        let mut line = format!("{} {turn:?}: {}", label.0, last.as_ref().map_or_else(|| "open".to_string(), |(.., outcome)| format!("{outcome:?}")));
+        if let (RunTurn::SelfRun, Some((_, id, _))) = (turn, &last) {
+            let one = Selection { keys: Some(vec![id.id.0.clone()]), projection: "document".into(), ..Selection::default() };
+            let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
+            if let Some(PipelineDocument::Resolution(closing)) = views.into_iter().next().map(|view| view.document) {
+                // Indented, so no line of a result can pass for a framed message.
+                for text_line in closing.rationale.0.lines() {
+                    line.push_str(&format!("\n    {text_line}"));
+                }
+            }
+        }
+        lines.push(line);
     }
     Ok(lines)
 }

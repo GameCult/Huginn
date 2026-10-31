@@ -31,7 +31,7 @@
 //!
 //! The actuator admits only closures of Self runs, nothing else. Every exit of
 //! `carry` that leaves her run open resolves it Recorded exactly once (the
-//! child's result, or that it gave none, in the reason). It reads neither the
+//! child's result in the rationale, or that it gave none in the reason). It reads neither the
 //! brake nor the environment and stops no unit: the gate and the brake hold own those.
 //! It never echoes an argument, an endpoint, a
 //! connector's refusal text or a stream line. Stream-json is Claude Code's wire, a
@@ -341,18 +341,18 @@ fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, Vec<PipelineRef>)
     }
 }
 
-/// What the stream said at the end of the run, as the reason of its closure.
+/// What the stream said at the end of the run: its head becomes the closure's reason, its text (bounded) the rationale.
 #[derive(Default)]
 struct Heard {
-    /// The last result heard: bounded.
-    concluded: Option<String>,
+    /// The last result heard: its head line and its text cut to `RATIONALE_RESULT_LIMIT`.
+    concluded: Option<(String, String)>,
 }
 
 impl Heard {
     fn hear(&mut self, line: &str) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         if event.get("type").and_then(Value::as_str) == Some("result") {
-            self.concluded = Some(describe_result(&event, REASON_EXCERPT_LIMIT));
+            self.concluded = Some((result_head(&event), cut_text(result_text(&event), RATIONALE_RESULT_LIMIT)));
         }
     }
 }
@@ -390,12 +390,16 @@ fn close_if_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, ran:
         Ok(outcome) => outcome.to_string(),
         Err(_) => "the actuator failed after the run opened".to_string(),
     };
-    let reason = match &heard.concluded {
-        Some(concluded) => format!("{how}; {concluded}"),
-        None => format!("{how}; claude gave no result"),
+    let (reason, rationale) = match &heard.concluded {
+        Some((head, text)) if !text.is_empty() => (format!("{how}; {head}"), text.as_str()),
+        Some((head, _)) => (format!("{how}; {head}"), CARRIER_CLOSED),
+        None => (format!("{how}; claude gave no result"), CARRIER_CLOSED),
     };
-    admit_closure(mind, clock, run, ResolutionOutcome::Recorded { reason: reason.as_str().into() }, "The Self run's carrier closed the run its claude left open.")
+    admit_closure(mind, clock, run, ResolutionOutcome::Recorded { reason: reason.as_str().into() }, rationale)
 }
+
+/// The rationale of a closure that has no result text to give.
+const CARRIER_CLOSED: &str = "The Self run's carrier closed the run its claude left open.";
 
 /// Closes a run whose lease was refused for its length: Withdrawn, because no
 /// claude ever ran and a misconfiguration is not an empty run; the breaker
@@ -454,12 +458,12 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
 
 /// The most of a result's text that reaches the journal.
 const RESULT_TEXT_LIMIT: usize = 4096;
-/// The most of a result's text that reaches the closing resolution's reason.
-const REASON_EXCERPT_LIMIT: usize = 800;
+/// The most of a result's text that reaches the closing resolution's rationale
+/// (a `Para` holds 4000 bytes; the cut marker rides inside the rest).
+const RATIONALE_RESULT_LIMIT: usize = 3800;
 
-/// A result event as one line: its subtype and error flag when it has them, then
-/// its text cut at a character boundary to `limit` bytes, marked when cut.
-fn describe_result(event: &serde_json::Map<String, Value>, limit: usize) -> String {
+/// A result event's subtype and error flag when it has them, as one line.
+fn result_head(event: &serde_json::Map<String, Value>) -> String {
     let mut head = String::from("result");
     if let Some(subtype) = event.get("subtype").and_then(Value::as_str) {
         head.push_str(&format!(" subtype={subtype}"));
@@ -467,13 +471,26 @@ fn describe_result(event: &serde_json::Map<String, Value>, limit: usize) -> Stri
     if let Some(is_error) = event.get("is_error").and_then(Value::as_bool) {
         head.push_str(&format!(" is_error={is_error}"));
     }
-    let text = event.get("result").and_then(Value::as_str).unwrap_or("");
+    head
+}
+
+fn result_text(event: &serde_json::Map<String, Value>) -> &str {
+    event.get("result").and_then(Value::as_str).unwrap_or("")
+}
+
+/// `text` cut at a character boundary to `limit` bytes, marked when cut.
+fn cut_text(text: &str, limit: usize) -> String {
     let mut end = text.len().min(limit);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     let marker = if end < text.len() { "\n[truncated]" } else { "" };
-    format!("{head}: {}{marker}", &text[..end])
+    format!("{}{marker}", &text[..end])
+}
+
+/// A result event as one line: its head, then its text cut to `limit` bytes.
+fn describe_result(event: &serde_json::Map<String, Value>, limit: usize) -> String {
+    format!("{}: {}", result_head(event), cut_text(result_text(event), limit))
 }
 
 /// What `claude` concluded, written to the unit's stdout so it reaches the
