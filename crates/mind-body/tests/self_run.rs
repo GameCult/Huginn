@@ -75,9 +75,9 @@ fn inject_prints_the_spooled_briefs_as_hook_context_and_blocks_a_compaction() {
     let blocked = inject(&["--pre-compact"], "{}");
     assert_eq!((blocked.status.code(), blocked.stdout.is_empty()), (Some(2), true));
     assert!(String::from_utf8_lossy(&blocked.stderr).contains("compaction blocked"), "the block says why");
-    assert!(inject(&[], "{}").stderr.is_empty(), "a tell prints nothing on stderr");
     let printed = inject(&[], r#"{"hook_event_name":"PostToolBatch"}"#);
     assert_eq!(printed.status.code(), Some(0));
+    assert!(printed.stderr.is_empty(), "a tell prints nothing on stderr");
     let text = String::from_utf8_lossy(&printed.stdout);
     assert!(text.contains("hookSpecificOutput") && text.contains("eureka-body:follow_up:b7") && text.contains("Wire the thing."), "{text}");
     assert!(inject(&[], "{}").stdout.is_empty(), "claimed once");
