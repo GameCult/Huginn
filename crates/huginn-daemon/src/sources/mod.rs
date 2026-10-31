@@ -13,6 +13,8 @@
 //! lives in the collection's own metadata, so it is lost with the collection
 //! and the two cannot disagree about what is held. It is advanced only after
 //! the repo's deletes and upserts are acknowledged: it may lag and never leads.
+//! It is dropped before the repo's first delete, so a run that fails between
+//! the delete and the upserts leaves no cursor, and the repo is ingested whole.
 //! The cursors object is written whole by this job alone, once per repo.
 
 pub mod chunk;
@@ -295,6 +297,14 @@ fn refresh_repo<E: Embedder, S: SourceIndex, F: Forge>(
         Some(old) if mirror.is_ancestor(old, &head) => Some(mirror.changed_paths(old, &head)?.into_iter().collect()),
         _ => None,
     };
+    // From the first delete on, the collection holds no single commit's chunks
+    // for this repo until the run finishes. Say so before changing anything:
+    // the cursor is dropped, so a run that dies half way leaves a repo the next
+    // run re-ingests whole, whatever head it finds then. A cursor left at the
+    // old commit would let a later head that reverts the files hide the hole.
+    if cursors.remove(&repo.name).is_some() {
+        index.set_cursors(cursors).context("dropping the cursor before the repo's chunks change")?;
+    }
     match &changed {
         Some(paths) => {
             let paths: Vec<String> = paths.iter().cloned().collect();

@@ -182,7 +182,7 @@ fn unchanged_repo_makes_no_embed_call() {
     assert_eq!((reports[0].files, reports[0].chunks), (0, 0));
 }
 
-/// An upsert that fails mid-repo leaves the cursor on the old commit, and the
+/// An upsert that fails mid-repo leaves no cursor (no commit is held whole), and the
 /// next run converges to the points a clean run of the same history makes.
 #[test]
 fn cursor_never_leads() {
@@ -203,13 +203,52 @@ fn cursor_never_leads() {
     }
     let (refreshed, _) = rig.run(&mut forge);
     assert_eq!(refreshed.unwrap().failed, ["Demo"], "one repo failed, the run finished");
-    assert_eq!(rig.index.cursors().get("Demo"), Some(&a), "the cursor never leads the points");
+    assert_eq!(rig.index.cursors().get("Demo"), None, "no commit's chunks are held whole, so no cursor says one is");
+    assert_ne!(a, b);
 
     rig.index.state.lock().unwrap().fail_upserts_after = None;
     rig.converged(&mut forge);
     assert_eq!(rig.index.cursors().get("Demo"), Some(&b));
     let mut clean = Rig::new();
     clean.converged(&mut forge);
+    assert_eq!(rig.index.held(), clean.index.held());
+    assert_eq!(rig.index.ids(), clean.index.ids());
+}
+
+/// A run that fails between a repo's deletes and its upserts leaves chunks of
+/// no single commit. A head that then reverts the files to the old content
+/// makes an empty diff from the old commit, which would keep the deleted
+/// chunks deleted; the repo is ingested whole instead.
+#[test]
+fn a_failed_run_then_a_revert_converges() {
+    let remote = Remote::new();
+    let at_a: Vec<(String, Vec<u8>)> = (0..40).map(|n| (format!("f{n}.rs"), format!("file {n}
+").into_bytes())).collect();
+    let original: Vec<(&str, &[u8])> = at_a.iter().map(|(path, bytes)| (path.as_str(), bytes.as_slice())).collect();
+    remote.commit(&original, &[]);
+    let mut rig = Rig::new();
+    let mut forge = FakeForge::of(&[("Demo", &remote)]);
+    rig.converged(&mut forge);
+
+    let at_b: Vec<(String, Vec<u8>)> = (0..40).map(|n| (format!("f{n}.rs"), format!("file {n} edited
+").into_bytes())).collect();
+    let edited: Vec<(&str, &[u8])> = at_b.iter().map(|(path, bytes)| (path.as_str(), bytes.as_slice())).collect();
+    remote.commit(&edited, &[]);
+    {
+        let mut state = rig.index.state.lock().unwrap();
+        state.fail_upserts_after = Some(state.upsert_calls + 1);
+    }
+    let (refreshed, _) = rig.run(&mut forge);
+    assert_eq!(refreshed.unwrap().failed, ["Demo"]);
+    assert!(rig.index.held().len() < 40, "the failed run left a partial repo");
+
+    rig.index.state.lock().unwrap().fail_upserts_after = None;
+    let c = remote.commit(&original, &[]);
+    rig.converged(&mut forge);
+    assert_eq!(rig.index.cursors().get("Demo"), Some(&c));
+    let mut clean = Rig::new();
+    clean.converged(&mut forge);
+    assert_eq!(rig.index.held().len(), 40, "every file of the reverted head is held");
     assert_eq!(rig.index.held(), clean.index.held());
     assert_eq!(rig.index.ids(), clean.index.ids());
 }
