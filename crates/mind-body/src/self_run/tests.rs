@@ -1327,7 +1327,9 @@ fn follow_up_saying(label: &str, item: &str) -> (PipelineDocument, PipelineRef) 
 fn claiming(claims: &[PipelineRef], documents: Vec<PipelineDocument>) -> TestMind {
     let mind = TestMind::seeded();
     mind.committed(vec![spec("x")]);
-    mind.committed(documents);
+    if !documents.is_empty() {
+        mind.committed(documents);
+    }
     let PipelineDocument::Run(mut document) = self_run("selfrun-a", "5") else { unreachable!() };
     document.claims = claims.to_vec();
     mind.committed(vec![PipelineDocument::Run(document)]);
