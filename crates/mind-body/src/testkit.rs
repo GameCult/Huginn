@@ -8,8 +8,8 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{
-    CommitRange, CutVerification, Date, DocRef, PipelineCampaign, PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
-    PipelineInstance, PipelineKind, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, PipelineStewardship,
+    CommitRange, CutVerification, Date, DocRef, MemorySort, PipelineCampaign, PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
+    PipelineInstance, PipelineKind, PipelineMemory, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, PipelineStewardship,
     PipelineTarget, QuestionOption, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Slug, StructuralDelta, TargetInvariant,
 };
 use huginn_mind::{
@@ -173,6 +173,23 @@ impl MindPort for TestMind {
         self.mind.borrow().query(selection).map_err(|_| anyhow!("refused"))
     }
 
+    /// A stand-in for the daemon's index, which this crate does not own: the selection's members
+    /// ranked by the words they share with `text`, ties in the mind's order. The tests pin what is
+    /// asked (`Seen`-style ports record it); what the index would rank is the daemon's.
+    fn query_near(&self, selection: &Selection, text: &str, top_k: u32) -> Result<PipelineSelectionPage> {
+        let mut page = self.query(selection)?;
+        let words: std::collections::BTreeSet<String> = text.split_whitespace().map(str::to_lowercase).collect();
+        if let huginn_mind::PipelinePageItems::Documents(views) = &mut page.items {
+            let shared = |view: &PipelineDocumentView| {
+                let own = serde_json::to_string(&view.document).unwrap_or_default().to_lowercase();
+                words.iter().filter(|word| own.contains(word.as_str())).count()
+            };
+            views.sort_by_key(|view| std::cmp::Reverse(shared(view)));
+            views.truncate(top_k as usize);
+        }
+        Ok(page)
+    }
+
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
         self.now.set(self.now.get() + Duration::seconds(1));
         let batch = PipelineAdmissionBatch {
@@ -202,6 +219,22 @@ impl MindPort for Answering<'_> {
     fn admit(&self, _agent: &str, _session: &str, _documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
         Ok(self.outcome.clone())
     }
+}
+
+/// One of her memories: `sort` and `text`, about `about`, learned in #swarm, not direct.
+pub(crate) fn memory(label: &str, sort: MemorySort, text: &str, about: &[&str]) -> PipelineDocument {
+    PipelineDocument::Memory(PipelineMemory {
+        instance: Slug(INSTANCE.into()),
+        label: eureka_pipeline::Label(label.into()),
+        sort,
+        text: text.into(),
+        about: about.iter().map(|who| (*who).into()).collect(),
+        learned_in: "swarm".into(),
+        direct: false,
+        sources: vec![],
+        salience_permille: 500,
+        consolidates: vec![],
+    })
 }
 
 fn doc_ref() -> DocRef {

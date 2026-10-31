@@ -8,11 +8,11 @@
 
 use anyhow::{Result, anyhow, bail};
 use cultnet_rs::{Citation, FieldPredicate, Incoming, RecordRef, Selection};
-use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
+use eureka_pipeline::{Line, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
 use eureka_state::{ClientError, HuginnClient};
 use huginn_mind::{
     Faculty, HuginnMindRequest, HuginnMindResponse, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts,
-    PipelinePageItems, PipelineProvenance, PipelineSelectionPage, PipelineStatusSummary,
+    PipelinePageItems, PipelineProvenance, PipelineSelectionPage, PipelineStatusSummary, SemanticQuery,
 };
 
 /// The last `CONSECUTIVE` ended runs over an item, all empty, trip its breaker.
@@ -31,6 +31,11 @@ pub trait MindPort {
     /// One page of the selection. A refusal is an error here and names no
     /// value.
     fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage>;
+    /// The `top_k` documents of the selection nearest `text` by meaning, ranked: the same read as
+    /// `query` with a semantic ask, so one call path carries both. A port with no index refuses.
+    fn query_near(&self, _selection: &Selection, _text: &str, _top_k: u32) -> Result<PipelineSelectionPage> {
+        bail!("this mind port has no semantic index")
+    }
     /// Admits `documents` as one batch, attributed to `agent` in `session`.
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome>;
 }
@@ -55,6 +60,16 @@ impl<'a> HuginnMind<'a> {
     pub(crate) fn over(instance: Slug, call: Call<'a>) -> Self {
         Self { instance, call }
     }
+
+    /// The one query path: `semantic` None is a selection, Some is a ranked ask.
+    fn ask(&self, selection: &Selection, semantic: Option<SemanticQuery>) -> Result<PipelineSelectionPage> {
+        let request = HuginnMindRequest::Query { instance: self.instance().clone(), selection: selection.clone(), semantic };
+        match (self.call)(request).map_err(|error| anyhow!("the mind could not be asked: {}", client_error_code(&error)))? {
+            HuginnMindResponse::Query(page) => Ok(page),
+            HuginnMindResponse::Refused(_) => bail!("the mind refused the query"),
+            _ => bail!("the mind answered a query with something else"),
+        }
+    }
 }
 
 impl MindPort for HuginnMind<'_> {
@@ -63,12 +78,11 @@ impl MindPort for HuginnMind<'_> {
     }
 
     fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage> {
-        let request = HuginnMindRequest::Query { instance: self.instance().clone(), selection: selection.clone(), semantic: None };
-        match (self.call)(request).map_err(|error| anyhow!("the mind could not be asked: {}", client_error_code(&error)))? {
-            HuginnMindResponse::Query(page) => Ok(page),
-            HuginnMindResponse::Refused(_) => bail!("the mind refused the query"),
-            _ => bail!("the mind answered a query with something else"),
-        }
+        self.ask(selection, None)
+    }
+
+    fn query_near(&self, selection: &Selection, text: &str, top_k: u32) -> Result<PipelineSelectionPage> {
+        self.ask(selection, Some(SemanticQuery { text: Line(text.to_string()), top_k }))
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
@@ -426,8 +440,30 @@ mod tests {
         assert!(!format!("{refused:#}").contains("canary"), "{refused:#}");
     }
 
+    /// The ranked ask goes out as the one Query request with a semantic part; a plain query carries none.
+    #[test]
+    fn a_near_query_is_the_same_wire_request_with_a_semantic_part() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let mind = TestMind::seeded();
+        let port = HuginnMind::over(Slug(INSTANCE.into()), Box::new(|request| {
+            if let HuginnMindRequest::Query { selection, semantic, .. } = &request {
+                seen.borrow_mut().push((selection.clone(), semantic.clone()));
+            }
+            Ok(mind.answer(request))
+        }));
+        let selection = in_force(of_kind(PipelineKind::Ruling));
+        port.query(&selection).unwrap();
+        // The test mind answers the selection and ignores the ask, as a mind without an index would.
+        port.query_near(&selection, "the fork", 8).unwrap();
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], (selection.clone(), None));
+        assert_eq!(seen[1], (selection.clone(), Some(SemanticQuery { text: Line("the fork".into()), top_k: 8 })));
+    }
+
     #[test]
     fn runs_of_another_item_are_not_this_items_runs() {
+
         let mind = TestMind::seeded();
         mind.committed(vec![spec("x"), spec("y")]);
         history_as(&mind, &spec_ref("x"), "x", &[E, E]);

@@ -40,6 +40,7 @@ pub mod launch;
 pub mod lease_client;
 pub mod persona;
 pub mod queue;
+mod recall;
 pub mod self_run;
 pub mod tempo;
 

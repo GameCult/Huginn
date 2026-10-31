@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use eureka_pipeline::{PipelineDocument, PipelineKind as K, ResolutionOutcome, RunOperator, RunTurn, Slug};
+use eureka_pipeline::{PipelineDocument, PipelineKind as K, PipelineMemory, ResolutionOutcome, RunOperator, RunTurn, Short, Slug};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -169,7 +169,7 @@ fn readout() -> UsageReadout {
 
 fn says(lines: &[(&str, &str)]) -> String {
     let say: Vec<_> = lines.iter().map(|(room, text)| json!({ "room": room, "text": text })).collect();
-    json!({ "say": say, "start_self_run": null, "urgency_permille": null }).to_string()
+    json!({ "say": say, "start_self_run": null, "remember": [], "settle": [], "urgency_permille": null }).to_string()
 }
 
 impl Rig {
@@ -400,17 +400,17 @@ fn reply_decodes_into_sends_and_ack() {
 #[test]
 fn a_reply_is_decoded_as_the_one_type_and_nothing_else_is_scanned() {
     let c = config();
-    assert!(decode_reply(&says(&[("swarm", "x")]), &c.rooms).is_ok());
+    assert!(decode_reply(&says(&[("swarm", "x")]), &c.rooms, &[], &[]).is_ok());
     for bad in [
         "I will start_self_run now",
-        r#"{"say":[],"start_self_run":null,"urgency_permille":null} and more"#,
+        r#"{"say":[],"start_self_run":null,"remember":[],"settle":[],"urgency_permille":null} and more"#,
         r#"{"say":[],"start_self_run":null,"extra":1}"#,
         "",
     ] {
-        assert_eq!(decode_reply(bad, &c.rooms), Err(Failure::Undecodable), "{bad}");
+        assert_eq!(decode_reply(bad, &c.rooms, &[], &[]), Err(Failure::Undecodable), "{bad}");
     }
-    assert_eq!(decode_reply(&says(&[("elsewhere", "x")]), &c.rooms), Err(Failure::RoomNotAllowed));
-    assert_eq!(decode_reply(&says(&[("swarm", "  ")]), &c.rooms), Err(Failure::RoomNotAllowed));
+    assert_eq!(decode_reply(&says(&[("elsewhere", "x")]), &c.rooms, &[], &[]), Err(Failure::RoomNotAllowed));
+    assert_eq!(decode_reply(&says(&[("swarm", "  ")]), &c.rooms, &[], &[]), Err(Failure::RoomNotAllowed));
 }
 
 #[test]
@@ -441,7 +441,9 @@ fn direct(seq: u64, room_id: &str, sender: &str, text: &str) -> ChatDelivery {
 fn start_self_run_admits_brief_and_launches() {
     let reply = json!({
         "say": [{ "room": "operator", "text": "on it" }],
-        "start_self_run": { "brief": "Check the swarm queue", "repo": REPO, "campaign": CAMPAIGN },
+        "start_self_run": { "brief": "Check the swarm queue", "repo": REPO, "campaign": CAMPAIGN, "for_ask": null },
+        "remember": [],
+        "settle": [],
         "tempo_vote_beat_s": null,
         "urgency_permille": null
     })
@@ -465,7 +467,7 @@ fn start_self_run_admits_brief_and_launches() {
 
 #[test]
 fn a_start_outside_the_reply_bounds_fails_the_turn_without_an_admission_or_an_ack() {
-    let reply = json!({ "say": [], "start_self_run": { "brief": "x", "repo": "not a repo", "campaign": CAMPAIGN }, "urgency_permille": null }).to_string();
+    let reply = json!({ "say": [], "start_self_run": { "brief": "x", "repo": "not a repo", "campaign": CAMPAIGN, "for_ask": null }, "remember": [], "settle": [], "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
@@ -476,8 +478,8 @@ fn a_start_outside_the_reply_bounds_fails_the_turn_without_an_admission_or_an_ac
 #[test]
 fn a_reply_without_start_self_run_is_not_a_reply_though_null_is() {
     let c = config();
-    assert_eq!(decode_reply(r#"{"say":[]}"#, &c.rooms), Err(Failure::Undecodable), "the schema requires the field, so does the decoder");
-    assert!(decode_reply(r#"{"say":[],"start_self_run":null,"urgency_permille":null}"#, &c.rooms).is_ok());
+    assert_eq!(decode_reply(r#"{"say":[]}"#, &c.rooms, &[], &[]), Err(Failure::Undecodable), "the schema requires the field, so does the decoder");
+    assert!(decode_reply(r#"{"say":[],"start_self_run":null,"remember":[],"settle":[],"urgency_permille":null}"#, &c.rooms, &[], &[]).is_ok());
     let rig = Rig::new(vec![operator_says(1, "go")], &[r#"{"say":[{"room":"operator","text":"hi"}]}"#.into()]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
@@ -487,8 +489,8 @@ fn a_reply_without_start_self_run_is_not_a_reply_though_null_is() {
 #[test]
 fn the_decoder_holds_the_bounds_the_schema_states() {
     let c = config();
-    let start = |brief: &str, repo: &str, campaign: &str| json!({ "say": [], "start_self_run": { "brief": brief, "repo": repo, "campaign": campaign }, "urgency_permille": null }).to_string();
-    let ok = |brief: &str, repo: &str, campaign: &str| decode_reply(&start(brief, repo, campaign), &c.rooms).is_ok();
+    let start = |brief: &str, repo: &str, campaign: &str| json!({ "say": [], "start_self_run": { "brief": brief, "repo": repo, "campaign": campaign, "for_ask": null }, "remember": [], "settle": [], "urgency_permille": null }).to_string();
+    let ok = |brief: &str, repo: &str, campaign: &str| decode_reply(&start(brief, repo, campaign), &c.rooms, &[], &[]).is_ok();
     assert!(ok("b", "GameCult/Huginn", "eureka-body"));
     assert!(ok(&"b".repeat(1000), "a-b/c.d_e-f", &"c".repeat(64)));
     assert!(ok(&"\u{e9}".repeat(1000), "a/b", "c._-"), "the brief bound counts characters, as the schema does");
@@ -510,7 +512,7 @@ fn the_decoder_holds_the_bounds_the_schema_states() {
         assert!(!ok(brief, repo, campaign), "{repo:?} {campaign:?} brief of {}", brief.chars().count());
     }
     // The decoder's bounds are the schema's, read from one place.
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&c.rooms, &[CAMPAIGN.to_string()])).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&c.rooms, &[CAMPAIGN.to_string()], &[], &[])).unwrap();
     let ask = &schema["properties"]["start_self_run"]["anyOf"][1]["properties"];
     assert_eq!(ask["repo"]["pattern"], REPO_PATTERN);
     assert_eq!(ask["campaign"]["enum"], json!([CAMPAIGN]));
@@ -676,7 +678,7 @@ fn no_member_text_name_or_context_can_read_as_an_operator_line() {
 
 #[test]
 fn a_self_run_in_a_campaign_the_mind_does_not_hold_is_refused_before_anything_is_admitted() {
-    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": "no-such-campaign" }, "urgency_permille": null }).to_string();
+    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": "no-such-campaign", "for_ask": null }, "remember": [], "settle": [], "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
     let Outcome::Served { failure, self_run, .. } = rig.go() else { panic!("served") };
     assert_eq!((failure, self_run), (Some(Failure::SelfRun), None));
@@ -684,7 +686,7 @@ fn a_self_run_in_a_campaign_the_mind_does_not_hold_is_refused_before_anything_is
     assert!(rig.launcher.started.borrow().is_empty());
     assert!(rig.chat.acked.borrow().is_empty());
     // A prefix of a real campaign's name is not that campaign.
-    let prefix = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": &CAMPAIGN[..CAMPAIGN.len() - 1] }, "urgency_permille": null }).to_string();
+    let prefix = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": &CAMPAIGN[..CAMPAIGN.len() - 1], "for_ask": null }, "remember": [], "settle": [], "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[prefix]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::SelfRun));
@@ -810,7 +812,7 @@ fn the_campaigns_in_force_are_listed_and_are_the_schemas_campaign_enum() {
 
 #[test]
 fn a_self_run_naming_a_listed_campaign_passes_the_campaign_check() {
-    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": CAMPAIGN }, "urgency_permille": null }).to_string();
+    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": CAMPAIGN, "for_ask": null }, "remember": [], "settle": [], "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
     let Outcome::Served { failure, self_run, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, None);
@@ -879,7 +881,7 @@ fn a_turn_shows_her_stewardships_follow_ups_and_the_rulings_they_cite() {
 
 #[test]
 fn a_mind_with_nothing_to_answer_for_says_so() {
-    let text = render_responsibilities(&TestMind::bare(), &Slug(INSTANCE.into())).unwrap();
+    let text = render_responsibilities(&TestMind::bare(), &Slug(INSTANCE.into())).unwrap().text;
     assert!(text.contains("no stewardship is in force") && text.contains("no follow-up is open"), "{text}");
     assert!(!text.contains("Rulings these cite") && !text.contains("Open follow-ups, newest first:"), "{text}");
 }
@@ -897,7 +899,7 @@ fn rulings_named_in_a_note_or_an_item_are_resolved_by_their_own_title() {
     let src = reference(K::Ruling, &id("ruling", "src"));
     rig.mind.committed(vec![steward_of("GameCult/cinny", "law: eureka-body:ruling:from-note, and eureka-body:ruling:ghost.")]);
     rig.mind.committed(vec![open_follow_up("fu", &src, "See eureka-body:ruling:from-item; not x:ruling or :ruling:y.")]);
-    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap().text;
     for line in ["- eureka-body:ruling:from-note: Note law", "- eureka-body:ruling:from-item: Item law", "- eureka-body:ruling:src: Source", "- eureka-body:ruling:ghost: not in your mind"] {
         assert!(text.contains(line), "{text}");
     }
@@ -911,7 +913,7 @@ fn more_than_the_most_cited_rulings_are_counted_not_listed() {
     let rig = Rig::new(vec![], &[]);
     let cites: Vec<String> = (0..14).map(|n| format!("eureka-body:ruling:r{n:02}")).collect();
     rig.mind.committed(vec![steward_of("GameCult/cinny", &cites.join(" "))]);
-    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap().text;
     assert_eq!(text.matches("- eureka-body:ruling:r").count(), GOALS_RULINGS_MAX, "{text}");
     assert!(text.contains("(2 more cited rulings not shown.)"), "{text}");
 }
@@ -925,7 +927,7 @@ fn the_responsibilities_hold_their_bound_and_mark_what_they_drop() {
     for n in 0..30 {
         rig.mind.committed(vec![open_follow_up(&format!("fu-{n:02}"), &source, &long)]);
     }
-    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap().text;
     assert!(text.len() <= GOALS_MAX_BYTES, "{}", text.len());
     assert!(text.contains("older open follow-ups not shown"), "{text}");
     assert!(text.contains("fu-29") && !text.contains("fu-00"), "{text}");
@@ -941,7 +943,7 @@ fn input_for(mentions: &[&str], display: &str) -> String {
     aqua.sender_display = display.into();
     let mut said = delivery(2, "swarm", "@operator:chat", "a reply");
     said.mentions = mentions.iter().map(|m| (*m).to_string()).collect();
-    render_input(&config(), &[aqua, said], &[], "", "usage")
+    render_input(&config(), &[aqua, said], &[], "", "", "usage")
 }
 
 fn message_two(input: &str) -> &str {
@@ -991,7 +993,7 @@ fn the_turn_input_says_how_to_read_an_addressee() {
 
 /// A reply that votes `beat` (`None` leaves the key out; `Some(null)` withdraws) and declares `urgency`.
 fn voting(beat: Option<serde_json::Value>, urgency: serde_json::Value) -> String {
-    let mut reply = json!({ "say": [{ "room": "operator", "text": "ok" }], "start_self_run": null, "urgency_permille": urgency });
+    let mut reply = json!({ "say": [{ "room": "operator", "text": "ok" }], "start_self_run": null, "remember": [], "settle": [], "urgency_permille": urgency });
     if let Some(beat) = beat {
         reply["tempo_vote_beat_s"] = beat;
     }
@@ -1029,8 +1031,8 @@ fn a_vote_or_urgency_outside_its_bounds_fails_the_turn_without_a_pulse_or_an_ack
 
 #[test]
 fn the_reply_schema_bounds_the_vote_and_the_urgency_to_the_pulse_kind() {
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[])).unwrap();
-    assert_eq!(schema["required"], json!(["say", "start_self_run", "urgency_permille"]));
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[], &["@op:chat".to_string()], &[])).unwrap();
+    assert_eq!(schema["required"], json!(["say", "start_self_run", "remember", "settle", "urgency_permille"]));
     assert_eq!(schema["properties"]["tempo_vote_beat_s"]["anyOf"][1], json!({ "type": "integer", "minimum": 60, "maximum": 86_400 }));
     let described = schema["properties"]["tempo_vote_beat_s"]["description"].as_str().expect("the vote key is described to the model");
     assert!(
@@ -1139,7 +1141,7 @@ fn outcomes_and_failures_read_as_one_line_each_without_values() {
         Failure::RoomNotAllowed,
         Failure::Send,
         Failure::SelfRun,
-        Failure::Pulse,
+        Failure::Memory,
         Failure::Ack,
     ];
     for failure in all {
@@ -1307,4 +1309,266 @@ fn each_self_run_shows_its_own_rationale() {
     let of = |label: &str| lines.iter().find(|line| line.starts_with(label)).unwrap().clone();
     assert!(of("self-first ").contains("alpha report") && !of("self-first ").contains("beta"), "{lines:?}");
     assert!(of("self-second ").contains("beta report") && !of("self-second ").contains("alpha"), "{lines:?}");
+}
+
+// ---- memory: what she keeps, settles and takes on, and what the next turn reads back ----
+
+fn reply(say: &[(&str, &str)], remember: serde_json::Value, settle: serde_json::Value, start: serde_json::Value) -> String {
+    let say: Vec<_> = say.iter().map(|(room, text)| json!({ "room": room, "text": text })).collect();
+    json!({ "say": say, "start_self_run": start, "remember": remember, "settle": settle, "urgency_permille": null }).to_string()
+}
+
+fn keeps(sort: &str, text: &str, about: &[&str]) -> serde_json::Value {
+    json!({ "sort": sort, "text": text, "about": about, "salience_permille": 600 })
+}
+
+fn starting(for_ask: serde_json::Value) -> serde_json::Value {
+    json!({ "brief": "Fork the Cinny client", "repo": REPO, "campaign": CAMPAIGN, "for_ask": for_ask })
+}
+
+fn memories(rig: &Rig) -> Vec<(String, PipelineMemory)> {
+    let mut found: Vec<_> = rig
+        .mind
+        .ids(K::Memory)
+        .into_iter()
+        .map(|id| {
+            let PipelineDocument::Memory(memory) = rig.mind.view(K::Memory, &id).unwrap().document else { panic!("a memory") };
+            (id, memory)
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
+/// How the one resolution of `subject` closed it, if any.
+fn outcome_of(rig: &Rig, subject: &str) -> Option<ResolutionOutcome> {
+    rig.mind.ids(K::Resolution).into_iter().find_map(|id| match rig.mind.view(K::Resolution, &id).unwrap().document {
+        PipelineDocument::Resolution(resolution) if resolution.subject.id.0 == subject => Some(resolution.outcome),
+        _ => None,
+    })
+}
+
+fn input_of(rig: &Rig, turn: usize) -> String {
+    rig.connector.requests.borrow()[turn].input.clone()
+}
+
+fn failure_of(outcome: Outcome) -> Option<Failure> {
+    let Outcome::Served { failure, .. } = outcome else { panic!("served") };
+    failure
+}
+
+#[test]
+fn an_ask_survives_a_lost_context() {
+    let ask = reply(&[("swarm", "On it.")], json!([keeps("Asked", "Put the Cinny client fork first", &["@op:chat"])]), json!([]), json!(null));
+    let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "prioritise the Cinny client fork, please")], &[ask, says(&[("swarm", "It is going.")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let kept = memories(&rig);
+    assert_eq!(kept.len(), 1);
+    // A new start: no context line, and the first turn's message is gone from the chat.
+    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "how did it go"));
+    assert_eq!(failure_of(rig.go()), None);
+    let second = input_of(&rig, 1);
+    let at = second.find("Asked of you, not yet taken on:").expect("the open ask is shown");
+    let shown = &second[at..];
+    assert!(shown.contains(&kept[0].0) && shown.contains("2026-10-09") && shown.contains("in #swarm") && shown.contains("\"op\""), "{shown}");
+    assert!(shown.contains("Put the Cinny client fork first"));
+    assert!(!second.contains("prioritise the Cinny client fork, please"), "no message text of the first turn is in the second");
+}
+
+#[test]
+fn parts_ideas_and_rapport_survive_and_come_back_about_their_people() {
+    let (aqua, libby) = ("@aqua:chat", "@libby:chat");
+    let plan = reply(
+        &[("swarm", "Agreed.")],
+        json!([
+            keeps("Committed", "I integrate the Cinny fork", &[]),
+            keeps("Decided", "Aqua does sounds, Libby does shaders", &[aqua, libby]),
+            keeps("Idea", "Libby: shaders could react to scroll", &[libby]),
+            keeps("Rapport", "Libby answers fast and asks sharp questions", &[libby]),
+        ]),
+        json!([]),
+        json!(null),
+    );
+    let rig = Rig::new(vec![delivery(1, "swarm", aqua, "plan the fork"), delivery(2, "swarm", libby, "I will do shaders")], &[plan, says(&[("swarm", "ok")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(memories(&rig).len(), 4);
+    rig.chat.deliveries.borrow_mut().push(delivery(3, "swarm", libby, "any news"));
+    assert_eq!(failure_of(rig.go()), None);
+    let second = input_of(&rig, 1);
+    for text in ["Aqua does sounds, Libby does shaders", "Libby: shaders could react to scroll", "Libby answers fast and asks sharp questions"] {
+        assert_eq!(second.matches(text).count(), 1, "{text} once: {second}");
+    }
+    assert!(second.contains("Idea about \"libby\"") && second.contains("Rapport about \"libby\""), "{second}");
+}
+
+#[test]
+fn taking_an_ask_on_defers_it_to_the_follow_up_and_the_next_turn_lists_the_follow_up_not_the_ask() {
+    let ask = reply(&[("swarm", "Starting.")], json!([keeps("Asked", "Fork the Cinny client", &["@op:chat"])]), json!([]), starting(json!("new:0")));
+    let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "fork it")], &[ask, says(&[("swarm", "hi")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let kept = memories(&rig);
+    let follow_ups = rig.mind.ids(K::FollowUp);
+    assert_eq!((kept.len(), follow_ups.len()), (1, 1));
+    assert_eq!(outcome_of(&rig, &kept[0].0), Some(ResolutionOutcome::Deferred { to: reference(K::FollowUp, &follow_ups[0]) }));
+    let PipelineDocument::FollowUp(follow_up) = rig.mind.view(K::FollowUp, &follow_ups[0]).unwrap().document else { panic!("a follow-up") };
+    assert_eq!(follow_up.source.kind, K::Run, "the follow-up keeps her Persona run as its source");
+    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "status?"));
+    assert_eq!(failure_of(rig.go()), None);
+    let second = input_of(&rig, 1);
+    assert!(!second.contains("Asked of you, not yet taken on"), "{second}");
+    assert!(second.contains("Open follow-ups") && second.contains("Fork the Cinny client"), "{second}");
+}
+
+#[test]
+fn an_ask_shown_earlier_can_be_taken_on_by_its_id() {
+    let first = reply(&[], json!([keeps("Asked", "Fork the Cinny client", &["@op:chat"])]), json!([]), json!(null));
+    let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "fork it")], &[first]);
+    assert_eq!(failure_of(rig.go()), None);
+    let id = memories(&rig).remove(0).0;
+    rig.connector.replies.borrow_mut().push_back(reply(&[], json!([]), json!([]), starting(json!(id))));
+    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "go"));
+    assert_eq!(failure_of(rig.go()), None);
+    let follow_ups = rig.mind.ids(K::FollowUp);
+    assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Deferred { to: reference(K::FollowUp, &follow_ups[0]) }));
+}
+
+#[test]
+fn settling_an_ask_records_or_withdraws_it_with_the_reason() {
+    let asks = json!([keeps("Asked", "one", &["@op:chat"]), keeps("Asked", "two", &["@op:chat"]), keeps("Asked", "three", &["@op:chat"])]);
+    let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "three things")], &[reply(&[], asks, json!([]), json!(null))]);
+    assert_eq!(failure_of(rig.go()), None);
+    let ids: Vec<String> = memories(&rig).into_iter().map(|(id, _)| id).collect();
+    let settle = json!([
+        { "ask": ids[0], "outcome": "done", "why": "finished it" },
+        { "ask": ids[1], "outcome": "declined", "why": "not mine" },
+        { "ask": ids[2], "outcome": "wrong", "why": "misread" },
+    ]);
+    rig.connector.replies.borrow_mut().push_back(reply(&[], json!([]), settle, json!(null)));
+    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "status"));
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(outcome_of(&rig, &ids[0]), Some(ResolutionOutcome::Recorded { reason: "finished it".into() }));
+    assert_eq!(outcome_of(&rig, &ids[1]), Some(ResolutionOutcome::Withdrawn { reason: "not mine".into() }));
+    assert_eq!(outcome_of(&rig, &ids[2]), Some(ResolutionOutcome::Withdrawn { reason: "misread".into() }));
+    // Settled asks leave the open list.
+    rig.connector.replies.borrow_mut().push_back(says(&[]));
+    rig.chat.deliveries.borrow_mut().push(delivery(3, "swarm", "@op:chat", "again"));
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(!input_of(&rig, 2).contains("Asked of you, not yet taken on"));
+}
+
+#[test]
+fn an_ask_not_shown_this_turn_is_a_decode_failure_and_nothing_is_sent() {
+    let bad_settle = json!([{ "ask": format!("{INSTANCE}:memory:nope"), "outcome": "done", "why": "x" }]);
+    let bad_take = starting(json!(format!("{INSTANCE}:memory:nope")));
+    let not_asked = |for_ask: &str| reply(&[("swarm", "x")], json!([keeps("Idea", "an idea", &[])]), json!([]), starting(json!(for_ask)));
+    for text in [
+        reply(&[("swarm", "x")], json!([]), bad_settle, json!(null)),
+        reply(&[("swarm", "x")], json!([]), json!([]), bad_take),
+        not_asked("new:0"),
+        not_asked("new:1"),
+        not_asked("new:00"),
+    ] {
+        let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "hi")], std::slice::from_ref(&text));
+        assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable), "{text}");
+        assert!(rig.sent_texts().is_empty() && rig.chat.acked.borrow().is_empty() && rig.mind.ids(K::Memory).is_empty());
+    }
+}
+
+#[test]
+fn an_ask_cannot_be_settled_and_taken_on_in_one_reply() {
+    let first = reply(&[], json!([keeps("Asked", "Fork the Cinny client", &["@op:chat"])]), json!([]), json!(null));
+    let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "fork it")], &[first]);
+    assert_eq!(failure_of(rig.go()), None);
+    let id = memories(&rig).remove(0).0;
+    rig.connector.replies.borrow_mut().push_back(reply(&[], json!([]), json!([{ "ask": id, "outcome": "done", "why": "x" }]), starting(json!(id))));
+    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "go"));
+    assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable));
+}
+
+#[test]
+fn provenance_comes_from_the_batch_and_no_model_field_can_write_it() {
+    let rig = Rig::new(
+        vec![delivery(1, "swarm", "@aqua:chat", "hello"), delivery(2, "usage", "@libby:chat", "hi")],
+        &[reply(&[], json!([keeps("Learned", "Aqua and Libby are in", &["@aqua:chat"])]), json!([]), json!(null))],
+    );
+    assert_eq!(failure_of(rig.go()), None);
+    let (_, memory) = memories(&rig).remove(0);
+    assert_eq!((memory.learned_in.0.as_str(), memory.direct), ("swarm, usage", false));
+    assert_eq!(memory.sources, vec![Short("$e1".into()), Short("$e2".into())]);
+    // A direct message: the room id, direct, and its own event ids only.
+    let dm = Rig::new(vec![direct(1, "dm", "@aqua:chat", "psst")], &[reply(&[], json!([keeps("Learned", "a secret", &["@aqua:chat"])]), json!([]), json!(null))]);
+    assert_eq!(failure_of(dm.go_with(&config())), None);
+    let (_, memory) = memories(&dm).remove(0);
+    assert_eq!((memory.learned_in.0.as_str(), memory.direct, memory.sources.len()), ("!dm:chat", true, 1));
+    // A wake: her first room, indirect, no sources.
+    let wake = Rig::new(vec![], &[reply(&[], json!([keeps("Did", "looked around", &[])]), json!([]), json!(null))]);
+    assert_eq!(failure_of(wake.go()), None);
+    let (_, memory) = memories(&wake).remove(0);
+    assert_eq!((memory.learned_in.0.as_str(), memory.direct, memory.sources.len()), ("swarm", false, 0));
+    // The schema has no such fields and the decoder refuses them.
+    let schema = reply_schema(&["swarm".to_string()], &[CAMPAIGN.to_string()], &["@op:chat".to_string()], &[]);
+    for field in ["learned_in", "\"direct\"", "sources"] {
+        assert!(!schema.contains(field), "{field}");
+    }
+    let forged = json!({ "say": [], "start_self_run": null, "urgency_permille": null, "settle": [],
+        "remember": [{ "sort": "Learned", "text": "x", "about": [], "salience_permille": 1, "learned_in": "elsewhere" }] })
+    .to_string();
+    assert_eq!(decode_reply(&forged, &["swarm".to_string()], &[], &[]), Err(Failure::Undecodable));
+}
+
+#[test]
+fn what_she_keeps_names_only_this_batchs_people_and_stays_in_bounds() {
+    let c = config();
+    let rooms = c.rooms.clone();
+    let people = ["@aqua:chat".to_string(), "@op:chat".to_string()];
+    let with = |remember: serde_json::Value| reply(&[], remember, json!([]), json!(null));
+    let ok = |remember: serde_json::Value| decode_reply(&with(remember), &rooms, &people, &[]).is_ok();
+    assert!(ok(json!([keeps("Idea", "x", &["@aqua:chat", "@op:chat"])])));
+    assert!(ok(json!([keeps("Idea", &"x".repeat(1000), &[])])));
+    assert!(ok(json!((0..8).map(|_| keeps("Did", "x", &[])).collect::<Vec<_>>())));
+    assert!(!ok(json!([keeps("Idea", "x", &["@stranger:chat"])])), "a person not in this batch or the operators");
+    assert!(!ok(json!([keeps("Idea", "x", &["@aqua:chat", "@aqua:chat"])])));
+    assert!(!ok(json!([keeps("Idea", &"x".repeat(1001), &[])])));
+    assert!(!ok(json!([keeps("Idea", "  ", &[])])));
+    assert!(!ok(json!([keeps("Opinion", "x", &[])])));
+    assert!(!ok(json!((0..9).map(|_| keeps("Did", "x", &[])).collect::<Vec<_>>())));
+    assert!(!ok(json!([{ "sort": "Idea", "text": "x", "about": [], "salience_permille": 1001 }])));
+    let without = reply(&[], json!([]), json!([]), json!(null)).replace("\"remember\":[],", "");
+    assert_eq!(decode_reply(&without, &rooms, &people, &[]), Err(Failure::Undecodable), "remember is required");
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &[], &people, &["a".into()])).unwrap();
+    let items = &schema["properties"]["remember"]["items"]["properties"];
+    assert_eq!(items["about"]["items"]["enum"], json!(people));
+    assert_eq!(items["sort"]["enum"], json!(["Asked", "Decided", "Committed", "Learned", "Did", "Idea", "Rapport"]));
+    let described = schema["properties"]["remember"]["description"].as_str().unwrap();
+    for word in ["asks of you", "your own commitments", "who holds the other parts", "brainstorming", "rapport", "Atlas"] {
+        assert!(described.contains(word), "{word}: {described}");
+    }
+}
+
+#[test]
+fn a_mind_that_refuses_the_turns_documents_fails_the_turn_after_the_says_with_no_ack_and_no_self_run() {
+    // A sender id longer than a `Short`: she may write it in `about`, and admission refuses it.
+    let long = format!("@{}:chat", "a".repeat(220));
+    let text = reply(&[("swarm", "said")], json!([keeps("Learned", "x", &[&long])]), json!([]), starting(json!(null)));
+    let rig = Rig::new(vec![delivery(1, "swarm", &long, "hi")], &[text]);
+    let Outcome::Served { failure, self_run, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, Some(Failure::Memory));
+    assert_eq!(rig.sent_texts(), vec!["said".to_string()]);
+    assert!(rig.chat.acked.borrow().is_empty() && self_run.is_none() && rig.mind.ids(K::FollowUp).is_empty());
+    assert!(rig.launcher.started.borrow().is_empty());
+}
+
+#[test]
+fn memories_and_the_pulse_are_one_admission_after_the_says_and_before_the_self_run_and_ack() {
+    let mut text: serde_json::Value = serde_json::from_str(&reply(&[("swarm", "ok")], json!([keeps("Did", "answered", &[])]), json!([]), starting(json!(null)))).unwrap();
+    text["urgency_permille"] = json!(300);
+    let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "hi")], &[text.to_string()]);
+    assert_eq!(failure_of(rig.go()), None);
+    let memory = memories(&rig).remove(0).0;
+    let pulse = rig.mind.ids(K::Pulse).remove(0);
+    let (m, p) = (rig.mind.view(K::Memory, &memory).unwrap().admission, rig.mind.view(K::Pulse, &pulse).unwrap().admission);
+    assert_eq!(m.receipt_id, p.receipt_id, "one admission");
+    let follow_up = rig.mind.view(K::FollowUp, &rig.mind.ids(K::FollowUp)[0]).unwrap().admission;
+    assert!(follow_up.ordinal > m.ordinal);
+    assert_eq!(rig.log.borrow().as_slice(), ["turn", "send", "ack"], "says, then the rest, then the ack");
 }
