@@ -366,7 +366,8 @@ fn the_operator_naming_a_persona_launches_her_at_once_off_the_beat_and_once_per_
     // Her turn fails without acking; the same message does not launch her again.
     rig.end_run(BOB);
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
-    assert_eq!(rig.runs(BOB), 3);
+    assert_eq!(rig.runs(BOB), 2, "her old turn and the one launch, no second launch for the same message");
+    assert_eq!(rig.launched(), vec![Slug("bob".into())]);
     // A tag in m.mentions counts as naming.
     rig.say(ANN, delivery(2, "@op:chat", "please look", &["@ann:chat"]));
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });

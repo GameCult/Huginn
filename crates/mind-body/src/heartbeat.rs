@@ -10,7 +10,7 @@
 //! and (a later cut) topics she subscribed to. Two things launch a Persona off
 //! the beat: the operator tagging or naming her, once per message, and her own
 //! Self run having ended since her last turn. Nothing is metered here: no
-//! dollars, no budget, no model call.
+//! meter and no model call.
 //!
 //! The heartbeat owns `heartbeat.cc` and is its only writer; Persona units read
 //! it. The brakes stay the operator's and are read on every poll. Busy and idle
@@ -49,7 +49,7 @@ const PENDING_PAGES: usize = 16;
 /// Who a Persona is, for the two things the heartbeat matches on: the Matrix
 /// user id its tags carry, and the names a message may call it by. Each Mind is
 /// its own Huginn daemon, so the entry also carries the daemon the Persona's
-/// control, initiative and launches are read from.
+/// control, runs and launches are read from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersonaId {
     pub slug: Slug,
@@ -203,7 +203,7 @@ pub trait TempoView {
 
 /// The store as a CultCache single-file store under the unit's state directory.
 /// It registers the state and the trace and nothing else: a file still holding
-/// the dollar initiative documents does not decode, and every use of it fails
+/// any older document does not decode, and every use of it fails
 /// naming the file. It is never migrated.
 pub struct FileStore {
     path: PathBuf,

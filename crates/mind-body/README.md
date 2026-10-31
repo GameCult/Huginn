@@ -12,7 +12,7 @@ wrong or the mind cannot be reached.
 
 ## The heartbeat
 
-`mind-heartbeat` is the one process that decides who wakes and when: acting burns initiative by spend, the classifier's urgency multiplies how fast it regains, and the operator tagging or naming a Persona fills it. `mind-heartbeat timeline` prints its latest record.
+`mind-heartbeat` is the one process that decides who wakes and when: each beat falls when the Minds' voted tempo has passed and goes to the Mind that has waited longest, bent by the urgency she declares and a member addressing her; the operator tagging or naming a Persona launches her at once. `mind-heartbeat timeline` prints its latest record.
 
 The actuator has its own ignored test, `the_real_bin_finds_her_run_...` in
 `tests/self_run.rs`: the real `mind-self-run` against the real daemon with a

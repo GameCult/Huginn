@@ -69,7 +69,6 @@ fn malformed_commands_are_refused_and_write_nothing() {
         &["--instance", "eureka"],
         &["--instance", "eureka", "brake"],
         &["--instance", "eureka", "brake", "toggle"],
-        &["--instance", "eureka", "dial", "set", "--heat", "1"],
         &["--instance", "../evil", "brake", "release"],
         &["--instances", "eureka", "brake", "release"],
         &["eureka", "eureka", "brake", "release"],
@@ -187,9 +186,10 @@ fn check_refuses_every_reading_but_released() {
     held(root.path(), "BrakeHeld");
     go(root.path(), &["--instance", "eureka", "brake", "release"], "op", 2).0.unwrap();
     held(root.path(), "BrakeAbsent");
-    go(root.path(), &["swarm", "brake", "release"], "op", 3).0.unwrap();
-    held(root.path(), "DialAbsent");
-    // DialOutOfBounds cannot be written through the CLI: it is pinned in the crate's own tests.
+    go(root.path(), &["swarm", "brake", "hold"], "op", 3).0.unwrap();
+    held(root.path(), "BrakeHeld");
+    go(root.path(), &["swarm", "brake", "release"], "op", 4).0.unwrap();
+    check_out(root.path()).0.unwrap();
     // An undecodable store is a held reading too.
     let broken = tempfile::tempdir().unwrap();
     std::fs::create_dir(broken.path().join("eureka")).unwrap();
@@ -215,7 +215,7 @@ fn check_holds_for_the_named_instance_with_a_released_prefix_neighbour() {
     let root = tempfile::tempdir().unwrap();
     go(root.path(), &["--instance", "eureka", "brake", "hold"], "op", 0).0.unwrap();
     go(root.path(), &["swarm", "brake", "release"], "op", 0).0.unwrap();
-    // Neighbours that share the held instance's text as a prefix, or only an edge of it, are released with a dial.
+    // Neighbours that share the held instance's text as a prefix, or only an edge of it, are released.
     for (i, neighbour) in ["eureka-two", "eureka2", "xeureka"].into_iter().enumerate() {
         let at = 1 + 2 * i as i64;
         go(root.path(), &["--instance", neighbour, "brake", "release"], "op", at).0.unwrap();
@@ -281,7 +281,6 @@ fn only_brake_hold_calls_the_stopper() {
         &["--instance", "eureka", "show"],
         &["--instance", "eureka", "brake"],
         &["--instance", "eureka", "brake", "toggle"],
-        &["swarm", "dial", "set", "--heat", "99", "--base-rate", "4", "--base-run", "1", "--k", "2"],
         &["--instance", "../evil", "brake", "release"],
         &["--instance", "eureka", "brake", "hold", "now"],
         &[],
@@ -470,14 +469,6 @@ fn swarm_commands_refuse_bad_input_and_write_nothing() {
     let root = tempfile::tempdir().unwrap();
     for args in [
         &["swarm"][..],
-        &["swarm", "dial", "set", "--heat", "1"],
-        &["swarm", "dial", "set", "--heat", "3", "--base-rate", "4", "--base-run", "2", "--k", "3"],
-        &["swarm", "dial", "set", "--heat", "1", "--base-rate", "4", "--base-run", "2", "--k", "0"],
-        &["swarm", "dial", "set", "--heat", "1", "--heat", "1", "--base-rate", "4", "--base-run", "2", "--k", "3"],
-        &["swarm", "share", "set", "weksa", "0"],
-        &["swarm", "share", "set", "weksa", "heavy"],
-        &["swarm", "share", "set", "Not A Slug", "1"],
-        &["swarm", "share", "set", "weksa"],
         &["swarm", "brake", "release", "now"],
     ] {
         assert!(go(root.path(), args, "op", 0).0.is_err(), "{args:?} was accepted");

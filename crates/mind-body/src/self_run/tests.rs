@@ -471,10 +471,57 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
 // ---- what is started ------------------------------------------------------
 
 #[test]
+fn claude_args_is_exactly_the_fixed_list_for_a_session() {
+    let session = Uuid::parse_str(SESSION_OF_RUN_A).unwrap();
+    let args = claude_args(session);
+    assert_eq!(
+        args,
+        [
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--session-id",
+            SESSION_OF_RUN_A,
+            "--max-turns",
+            "500",
+            "--permission-mode",
+            "bypassPermissions",
+            "--permission-prompts",
+            "none",
+            "--setting-sources",
+            "user",
+        ]
+    );
+    // Those belong to the run measure or to the unit's managed settings.
+    for forbidden in ["--resume", "--continue", "--fork-session", "--model", "--dangerously-skip-permissions", "--settings", "--system-prompt", "--max-budget"] {
+        assert!(!args.iter().any(|arg| arg.starts_with(forbidden) || arg.contains("dangerously")), "{forbidden}");
+    }
+    // Print mode starts in Manual without a mode, and prompts none then denies.
+    let mode = args.iter().position(|arg| arg == "--permission-mode").expect("mode flag");
+    assert_eq!(args[mode + 1], "bypassPermissions");
+    assert_eq!(MAX_TURNS, 500);
+}
+
+#[test]
 fn the_session_id_is_uuid_v5_of_the_run_id_and_differs_per_run() {
     assert_eq!(session_id(&foreign_run("eureka:run:mind-20261022T120000000Z")).to_string(), SESSION_OF_MIND_RUN);
     assert_eq!(session_id(&run_ref("selfrun-a")).to_string(), SESSION_OF_RUN_A);
     assert_eq!(session_id(&run_ref("selfrun-b")).to_string(), SESSION_OF_RUN_B);
+}
+
+#[test]
+fn the_child_is_started_for_her_run_with_the_fixed_list_whatever_the_run_record_says() {
+    // The run's budget field is a dead record; nothing in what is started depends on it.
+    for budget in ["0", "0.5", "10", "100"] {
+        let mind = TestMind::seeded();
+        mind.committed(vec![self_run("selfrun-b", budget)]);
+        let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
+        assert_eq!(ran.spawns.len(), 1, "{budget}");
+        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap()), "{budget}");
+    }
 }
 
 #[test]
@@ -648,6 +695,27 @@ fn read_usage_classifies_the_owners_real_records() {
 }
 
 #[test]
+fn records_that_share_a_message_id_count_once_and_subagent_records_never_move_the_prefix() {
+    let mut steps: Vec<Step> = RECORDS.lines().map(|line| Out(line.to_string())).collect();
+    steps.insert(3, Out(subagent("msg_sub", 999_999)));
+    let ran = go(steps);
+    assert_eq!(
+        ran.out,
+        "request 1 prefix 84210
+request 2 prefix 100751
+request 3 prefix 117174
+request 4 prefix 118336
+request 5 prefix 126746
+request 6 prefix 127250
+request 7 prefix 129853
+"
+    );
+    let (cause, _, requests, prefix) = ran.ended();
+    assert_eq!((cause, requests, prefix), (Cause::Own, 7, 129_853), "the newest prefix, 129853, not a subagent's 999999");
+    assert_eq!(flushes(&ran), 0);
+}
+
+#[test]
 fn the_prefix_is_the_newest_requests_not_the_largest() {
     let ran = go(vec![Out(at("m1", 200_000)), Out(at("m2", 150_000))]);
     assert_eq!(ran.ended().3, 150_000);
@@ -742,6 +810,41 @@ fn the_headroom_counts_the_requests_after_the_first_result_that_follows_the_flus
     // Before that result the running turn's own requests are not the flush's turn: however far they grow, no interrupt.
     let same_turn = go(vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", hard)), Out(at("m3", hard + 500_000))]);
     assert_eq!(same_turn.count(&Event::Stopped(Stop::Interrupt)), 0);
+}
+
+#[test]
+fn a_jump_past_the_ceiling_plus_the_headroom_writes_the_flush_and_the_running_turn_cannot_use_up_the_flushs_turn() {
+    let jump = carry_with(
+        &Seen::of(&with_run()),
+        vec![Out(at("m1", 290_000)), Out(at("m2", 400_000)), Out(at("m3", 470_000)), Out(result_line()), Out(at("m4", 459_999)), Out(at("m5", 460_000)), Out(at("m6", 470_000))],
+        Some(130),
+        true,
+    );
+    let kinds: Vec<&str> = jump
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Wrote(line) if line.contains("context ceiling") => Some("flush"),
+            Event::Stopped(_) => Some("interrupt"),
+            Event::InputClosed => Some("closed"),
+            Event::Asked(_) => Some("read"),
+            _ => None,
+        })
+        .collect();
+    // Reads: m1, m2 (the jump, which writes the flush), m3 (the running turn's 470k, past the headroom: no interrupt).
+    assert_eq!(kinds[..5], ["read", "read", "flush", "read", "read"], "{kinds:?}");
+    // The headroom is measured from the prefix the flush was asked at (400k) and counts the requests after the
+    // first result only: 459_999 does not interrupt; 460_000 does, once, and m6 is never read.
+    assert_eq!(jump.count(&Event::Stopped(Stop::Interrupt)), 1, "{kinds:?}");
+    assert_eq!(jump.out, "request 1 prefix 290000
+request 2 prefix 400000
+request 3 prefix 470000
+result subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed
+request 4 prefix 459999
+request 5 prefix 460000
+");
+    assert_eq!(jump.ended().0, Cause::Signalled(Stop::Interrupt));
+    assert_eq!(flushes(&jump), 1);
 }
 
 #[test]
@@ -938,6 +1041,27 @@ fn the_outcome_names_how_it_ended_and_the_exit_status_follows_the_childs_code() 
 
 // ---- the real child -----------------------------------------------------------
 
+#[test]
+fn unreadable_and_foreign_lines_are_skipped_and_never_printed() {
+    let canary = "canary-stream-line-8c41";
+    let mut foreign: Value = serde_json::from_str(&init_line()).unwrap();
+    foreign["cwd"] = json!(canary);
+    foreign["type"] = json!(canary);
+    let ran = go(vec![
+        Out(format!("not json {canary}")),
+        Out(foreign.to_string()),
+        Out(format!("[\"{canary}\"]")),
+        Out(at("m1", 10)),
+        Out(result_line()),
+    ]);
+    assert_eq!(ran.out, "request 1 prefix 10
+result subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed
+");
+    let outcome = ran.outcome.as_ref().unwrap().to_string();
+    assert!(!ran.out.contains(canary) && !outcome.contains(canary));
+    assert!(!ran.written().iter().any(|text| text.contains(canary)), "nothing from the stream is written back");
+}
+
 #[cfg(unix)]
 mod process {
     mod lease_child;
@@ -1105,6 +1229,34 @@ mod process {
         fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
             Ok(Box::new(Bounded(start_with(&self.0, args, token), std::time::Instant::now())))
         }
+    }
+
+    #[test]
+    fn a_whole_run_through_the_real_child_flushes_at_the_ceiling_and_ends_on_the_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = [at("m1", 10), at("m2", CEILING_TOKENS)].join("
+");
+        let result = result_line();
+        // Prints two requests, waits for the flush on stdin, then the result, as a stand-in for a Self that obeys.
+        let body = format!("cat <<'EOF'
+{lines}
+EOF
+read -t 5 start
+read -t 5 flush
+cat <<'EOF'
+{result}
+EOF
+while read more; do :; done
+exit 0");
+        let program = script(&dir, &body);
+        let mind = with_run();
+        let mut out = Vec::new();
+        let outcome = carry(&Seen::of(&mind), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
+        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000 });
+        assert_eq!(String::from_utf8(out).unwrap(), "request 1 prefix 10
+request 2 prefix 300000
+result subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed
+");
     }
 
     #[test]

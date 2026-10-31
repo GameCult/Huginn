@@ -945,3 +945,163 @@ fn a_usage_readout_that_cannot_be_had_is_said_and_the_turn_goes_on() {
     assert_eq!((failure, answered), (None, 1), "usage is display only");
     assert!(rig.connector.requests.borrow()[0].input.contains("Plan usage: unavailable."));
 }
+
+#[test]
+fn the_turn_is_one_tool_less_call_constrained_to_the_reply_schema_with_her_rooms() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
+    rig.go();
+    let requests = rig.connector.requests.borrow();
+    assert_eq!(requests[0].caller, INSTANCE);
+    assert!(requests[0].instructions.contains("You are Eureka."));
+    let schema: serde_json::Value = serde_json::from_str(&requests[0].output_schema_json).unwrap();
+    assert_eq!(schema["properties"]["say"]["items"]["properties"]["room"]["enum"], json!(["swarm", "usage", "operator"]));
+}
+
+#[test]
+fn a_members_dm_is_answered_in_its_room_and_no_other_unconfigured_room_is() {
+    let dm = "!abc:chat";
+    let rig = Rig::new(vec![direct(1, dm, "@m:chat", "hello, are you there")], &[says(&[(dm, "yes")])]);
+    let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
+    assert_eq!((failure, answered), (None, 1));
+    assert_eq!(rig.chat.sent.borrow()[0].room_alias, dm);
+    let request = &rig.connector.requests.borrow()[0];
+    let schema: serde_json::Value = serde_json::from_str(&request.output_schema_json).unwrap();
+    assert_eq!(schema["properties"]["say"]["items"]["properties"]["room"]["enum"], json!(["swarm", "usage", "operator", dm]));
+    assert!(request.input.contains(dm), "the DM's room is among the rooms she is told she may speak in");
+
+    let rig = Rig::new(vec![direct(1, dm, "@m:chat", "hello")], &[says(&[("!other:chat", "psst")])]);
+    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, Some(Failure::RoomNotAllowed));
+    assert!(rig.chat.sent.borrow().is_empty() && rig.chat.acked.borrow().is_empty());
+
+    let rig = Rig::new(vec![delivery(1, "!notdm:chat", "@m:chat", "hello")], &[says(&[("!notdm:chat", "psst")])]);
+    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, Some(Failure::RoomNotAllowed), "a room that is not a DM is hers only when configured");
+}
+
+#[test]
+fn deliveries_from_different_dm_rooms_are_never_in_one_turn() {
+    let (a, b) = ("!a:chat", "!b:chat");
+    let pending = vec![
+        direct(1, a, "@ann:chat", "secret-a"),
+        direct(2, b, "@bob:chat", "hi-b"),
+        delivery(3, "swarm", "@m:chat", "public-c"),
+        direct(4, a, "@ann:chat", "more-a"),
+        direct(5, a, "@ann:chat", "again-a"),
+    ];
+    let replies = [says(&[(a, "1")]), says(&[(b, "2")]), says(&[("swarm", "3")]), says(&[(a, "4")])];
+    let rig = Rig::new(pending, &replies);
+    let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
+    assert_eq!((failure, answered), (None, 4));
+    let inputs: Vec<String> = rig.connector.requests.borrow().iter().map(|request| request.input.clone()).collect();
+    let texts = ["secret-a", "hi-b", "public-c", "more-a"];
+    for (turn, input) in inputs.iter().enumerate() {
+        for (other, text) in texts.iter().enumerate() {
+            assert_eq!(input.contains(text), turn == other, "turn {turn} text {text}");
+        }
+    }
+    assert!(inputs[3].contains("again-a"), "one room's consecutive deliveries share its turn");
+    assert!(!inputs[0].contains("again-a"), "a later delivery waits for its turn");
+    assert_eq!(*rig.chat.acked.borrow(), vec![1, 2, 3, 5]);
+}
+
+#[test]
+fn outcomes_and_failures_read_as_one_line_each_without_values() {
+    assert_eq!(Outcome::Dead(HeldReason::BrakeHeld).to_string(), "dead: BrakeHeld");
+    let served = Outcome::Served { run: run_ref("r1"), answered: 2, failure: Some(Failure::Send), self_run: Some(run_ref("s1")) };
+    let line = served.to_string();
+    assert!(line.contains("r1") && line.contains("answered 2") && line.contains("a send was refused or failed") && line.contains("self run") && line.contains("s1"), "{line}");
+    assert_eq!(Failure::Held(HeldReason::BrakeAbsent).to_string(), "held: BrakeAbsent");
+    let all = [
+        Failure::Chat,
+        Failure::Persona,
+        Failure::Doctrine,
+        Failure::DoctrineTooLarge,
+        Failure::Connector,
+        Failure::Undecodable,
+        Failure::RoomNotAllowed,
+        Failure::Send,
+        Failure::SelfRun,
+        Failure::Pulse,
+        Failure::Ack,
+    ];
+    for failure in all {
+        assert!(!failure.to_string().is_empty());
+    }
+    let texts: std::collections::BTreeSet<_> = all.map(|failure| failure.to_string()).into();
+    assert_eq!(texts.len(), all.len(), "each failure reads differently");
+}
+
+#[test]
+fn a_turn_is_named_by_its_run_and_its_number() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &(0..4).map(|_| says(&[("swarm", "x")])).collect::<Vec<_>>());
+    rig.mind.committed(vec![run("woken", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    rig.clock.0.set(600_000);
+    let (deliveries, next) = (rig.chat.deliveries.clone(), Cell::new(1));
+    *rig.connector.during.borrow_mut() = Some(Box::new(move || {
+        next.set(next.get() + 1);
+        if next.get() < 3 {
+            deliveries.borrow_mut().push(operator_says(next.get(), "more"));
+        }
+    }));
+    let Outcome::Served { run: carried, answered, .. } = rig.start_with(&config()) else { panic!("served") };
+    assert_eq!((carried, answered), (run_ref("woken"), 2));
+    let ids: Vec<_> = rig.connector.requests.borrow().iter().map(|request| request.request_id.clone()).collect();
+    assert_eq!(ids, ["woken-t0", "woken-t1"]);
+    let trace = rig.trace.0.borrow();
+    assert_eq!(trace.iter().map(|record| (record.run.as_str(), record.turn)).collect::<Vec<_>>(), [("woken", 0), ("woken", 1)]);
+}
+
+#[test]
+fn the_persona_flags_are_taken_out_and_the_rest_is_left_for_the_shared_parser() {
+    let args = |text: &str| text.split_whitespace().map(String::from).collect::<Vec<_>>();
+    let (parsed, rest) = Config::from_args(
+        &args("--instance eureka --rooms swarm,usage,operator --operator @op:chat,@op2:chat --self-sender @eureka:chat --endpoint rudp://10.0.0.1:1"),
+        "usage",
+    )
+    .unwrap();
+    assert_eq!(parsed.rooms, ["swarm", "usage", "operator"]);
+    assert_eq!((parsed.own_sender.as_str(), parsed.max_turns), ("@eureka:chat", MAX_TURNS_PER_START));
+    assert_eq!(parsed.operators, ["@op:chat", "@op2:chat"]);
+    assert_eq!(rest, args("--instance eureka --endpoint rudp://10.0.0.1:1"));
+    let (two, _) = Config::from_args(&args("--rooms a --operator o --self-sender s --max-turns 2"), "usage").unwrap();
+    assert_eq!(two.max_turns, 2);
+    for bad in [
+        "--rooms a --operator o",
+        "--rooms a,,b --operator o --self-sender s",
+        "--rooms a --rooms a --operator o --self-sender s",
+        "--rooms a --operator o --self-sender s --max-turns 0",
+        "--rooms a --operator o --self-sender s --max-turns x",
+        "--rooms a --operator o --self-sender",
+    ] {
+        assert!(Config::from_args(&args(bad), "usage").is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them() {
+    let env = |name: &str| {
+        Some(
+            match name {
+                ENV_ROOMS => "swarm,usage",
+                ENV_OPERATOR => "@op:chat,@op2:chat",
+                ENV_SELF_SENDER => "@eureka:chat",
+                _ => "",
+            }
+            .to_string(),
+        )
+    };
+    let args = |text: &str| text.split_whitespace().map(String::from).collect::<Vec<_>>();
+    let (config, rest) = Config::from_args_and_env(&args("--instance eureka"), env, "usage").unwrap();
+    assert_eq!(
+        config,
+        Config { rooms: vec!["swarm".into(), "usage".into()], operators: vec!["@op:chat".into(), "@op2:chat".into()], own_sender: "@eureka:chat".into(), max_turns: MAX_TURNS_PER_START, doctrine: vec![] }
+    );
+    assert_eq!(rest, ["--instance", "eureka"]);
+    // A flag wins over its variable, one at a time.
+    let (flagged, _) = Config::from_args_and_env(&args("--instance eureka --rooms swarm"), env, "usage").unwrap();
+    assert_eq!((flagged.rooms.len(), flagged.operators.len()), (1, 2));
+    // An empty variable is unset, and a missing setting is the usage error.
+    assert!(Config::from_args_and_env(&args("--instance eureka"), |name| if name == ENV_ROOMS { Some(String::new()) } else { env(name) }, "usage").is_err());
+    assert!(Config::from_args_and_env(&args("--instance eureka"), |_| None, "usage").is_err());
+}
