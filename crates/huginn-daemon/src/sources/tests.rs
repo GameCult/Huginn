@@ -406,6 +406,7 @@ fn a_chunk_id_is_its_content_address() {
         assert_ne!(base, other);
     }
     assert_ne!(chunk_id("R", "pb", "lob", 0), chunk_id("R", "p", "blob", 0), "fields are separated, not concatenated");
+}
 
 /// Chunks are embedded in batches of at most `BATCH`, however many a repo has.
 #[test]
@@ -419,5 +420,4 @@ fn chunks_are_embedded_in_bounded_batches() {
     let sizes: Vec<usize> = rig.embedder.state.lock().unwrap().embedded.iter().map(Vec::len).collect();
     assert_eq!(sizes, [BATCH, BATCH, 6]);
     assert_eq!(rig.index.held().len(), 70);
-}
 }
