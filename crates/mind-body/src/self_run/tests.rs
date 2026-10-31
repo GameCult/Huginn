@@ -1315,3 +1315,71 @@ mod process {
 
 mod lease;
 mod closure;
+
+// ---- the task in the start message ---------------------------------------
+
+fn follow_up_saying(label: &str, item: &str) -> (PipelineDocument, PipelineRef) {
+    let PipelineDocument::FollowUp(mut document) = follow_up(label, &spec_ref("x")) else { unreachable!() };
+    document.item = item.into();
+    (PipelineDocument::FollowUp(document), reference(K::FollowUp, &id("follow_up", label)))
+}
+
+fn claiming(claims: &[PipelineRef], documents: Vec<PipelineDocument>) -> TestMind {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x")]);
+    mind.committed(documents);
+    let PipelineDocument::Run(mut document) = self_run("selfrun-a", "5") else { unreachable!() };
+    document.claims = claims.to_vec();
+    mind.committed(vec![PipelineDocument::Run(document)]);
+    mind
+}
+
+#[test]
+fn the_start_message_carries_the_claimed_follow_ups_item_and_id_verbatim() {
+    let (brief, claim) = follow_up_saying("brief-a", "Fix the thing.\nThen report \u{e9}.");
+    let mind = claiming(std::slice::from_ref(&claim), vec![brief]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
+    let first = &ran.written()[0];
+    assert!(first.starts_with(&start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"))), "{first}");
+    for needle in ["Fix the thing.\nThen report \u{e9}.", claim.id.0.as_str(), "Use the eureka skill."] {
+        assert!(first.contains(needle), "{needle}: {first}");
+    }
+    assert!(first.contains(&format!("(campaign `{}`)", follow_up_campaign())), "{first}");
+}
+
+fn follow_up_campaign() -> String {
+    let PipelineDocument::FollowUp(document) = follow_up("c", &spec_ref("x")) else { unreachable!() };
+    document.campaign.0
+}
+
+#[test]
+fn a_claim_that_cannot_be_read_as_a_follow_up_is_named_not_dropped() {
+    // A cut spec is claimable but is no brief.
+    let mind = claiming(&[spec_ref("x")], vec![]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
+    let first = &ran.written()[0];
+    assert!(first.contains(&spec_ref("x").id.0) && first.contains("its task is unknown"), "{first}");
+    // A claim the mind does not hold at all.
+    let absent = reference(K::FollowUp, &id("follow_up", "absent"));
+    let task = task_section(&mind, std::slice::from_ref(&absent));
+    assert!(task.contains(&absent.id.0) && task.contains("its task is unknown"), "{task}");
+}
+
+#[test]
+fn the_task_is_bounded_and_marked_when_cut() {
+    let big = "\u{e9}".repeat(480);
+    let docs: Vec<_> = (0..40).map(|n| follow_up_saying(&format!("big-{n}"), &big)).collect();
+    let claims: Vec<_> = docs.iter().map(|(_, claim)| claim.clone()).collect();
+    let mind = claiming(&claims, docs.into_iter().map(|(document, _)| document).collect());
+    let task = task_section(&mind, &claims);
+    assert!(task.len() <= TASK_LIMIT + "\n[task truncated]".len(), "{}", task.len());
+    assert!(task.ends_with("\n[task truncated]"));
+    let small = task_section(&mind, &claims[..2]);
+    assert!(!small.contains("truncated") && small.contains(&claims[1].id.0));
+}
+
+#[test]
+fn a_run_without_claims_gets_the_identity_lines_alone() {
+    let ran = go(vec![Out(result_line())]);
+    assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a")));
+}

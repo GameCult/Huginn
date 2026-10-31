@@ -107,6 +107,41 @@ pub fn start_message(instance: &Slug, run: &PipelineRef) -> String {
     )
 }
 
+/// The most of the task that reaches the start message, in bytes.
+const TASK_LIMIT: usize = 8 * 1024;
+
+/// The task section of the start message: each claimed follow-up's id,
+/// campaign and `item` text verbatim, because the brief lives in the claim and a
+/// run that cannot reach its mind would never see its job. A claim that cannot
+/// be read as a follow-up is named, never dropped and never replaced by an
+/// invented task. The section is cut at a character boundary to `TASK_LIMIT`,
+/// marked when cut.
+fn task_section(mind: &dyn MindPort, claims: &[PipelineRef]) -> String {
+    let mut task = String::new();
+    for claim in claims {
+        let one = Selection { keys: Some(vec![claim.id.0.clone()]), projection: "document".into(), ..Selection::default() };
+        let read = mind.query(&one).ok().and_then(|page| match page.items {
+            PipelinePageItems::Documents(views) => views.into_iter().next().map(|view| view.document),
+            _ => None,
+        });
+        match read {
+            Some(PipelineDocument::FollowUp(follow_up)) => {
+                task.push_str(&format!("\n\nTask, claimed follow-up `{}` (campaign `{}`):\n{}", claim.id.0, follow_up.campaign.0, follow_up.item.0));
+            }
+            _ => task.push_str(&format!("\n\nThe run claims `{}`, which could not be read as a follow-up: its task is unknown.", claim.id.0)),
+        }
+    }
+    if task.len() > TASK_LIMIT {
+        let mut end = TASK_LIMIT;
+        while !task.is_char_boundary(end) {
+            end -= 1;
+        }
+        task.truncate(end);
+        task.push_str("\n[task truncated]");
+    }
+    task
+}
+
 /// What the child is told once, at the context ceiling.
 pub const FLUSH_MESSAGE: &str = "The context ceiling is reached. Admit to the mind what it lacks, close your run, and end.";
 
@@ -290,13 +325,13 @@ impl fmt::Display for SelfRunOutcome {
 /// holder reader. Anything but exactly one run is none: the mind admits at most
 /// one Self run of hers in force, and the launch that opens the next closes a
 /// dead one.
-fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, String)>> {
+fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, String, Vec<PipelineRef>)>> {
     let mut held = holders(mind, mind.instance(), RunTurn::SelfRun)?;
     let (Some(run), None) = (held.pop(), held.pop()) else { return Ok(None) };
     let one = Selection { keys: Some(vec![run.id.id.0.clone()]), projection: "document".into(), ..Selection::default() };
     let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
     match views.into_iter().next().map(|view| view.document) {
-        Some(PipelineDocument::Run(document)) => Ok(Some((run.id, document.budget_usd.0))),
+        Some(PipelineDocument::Run(document)) => Ok(Some((run.id, document.budget_usd.0, document.claims))),
         _ => Err(anyhow!("the run's document could not be read")),
     }
 }
@@ -450,9 +485,10 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 /// original error) stands, a failed close of a run that ended normally is an
 /// error, and the launch that opens the next run closes the run left open.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
-    let Some((run, budget)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
+    let Some((run, budget, claims)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
+    let start = format!("{}{}", start_message(mind.instance(), &run), task_section(mind, &claims));
     let mut spent = Spent::default();
-    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &budget), &mut spent);
+    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &budget, &start), &mut spent);
     let closed = close_if_open(mind, clock, &run, &ran, &spent);
     if closed.is_err() {
         let _ = writeln!(out, "the run could not be closed: the next launch closes it");
@@ -465,7 +501,7 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawne
 }
 
 #[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
-fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, budget): (&PipelineRef, &str), spent: &mut Spent) -> Result<SelfRunOutcome> {
+fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, budget, start): (&PipelineRef, &str, &str), spent: &mut Spent) -> Result<SelfRunOutcome> {
     let request = LeaseRequest { expires_at_unix_ms: unix_ms(clock.now()).saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
         Lent::Granted(lease) => lease,
@@ -483,7 +519,7 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
             return Err(error);
         }
     };
-    let outcome = drive(mind, clock, child, run, spent, out)?;
+    let outcome = drive(mind, clock, child, run, start, spent, out)?;
     // A child that could not even be killed may still be spending: that lease is
     // dropped, and the connector bills the reservation.
     if !matches!(outcome, SelfRunOutcome::Ended { cause: Cause::Unstoppable, .. }) {
@@ -533,9 +569,9 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
 }
 
 /// The loop: facts in, one clock read per fact, actions out.
-fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run: &PipelineRef, spent: &mut Spent, out: &mut dyn Write) -> Result<SelfRunOutcome> {
+fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run: &PipelineRef, start: &str, spent: &mut Spent, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
-    child.write_line(&user_line(&start_message(mind.instance(), run)));
+    child.write_line(&user_line(start));
 
     let mut state = State::default();
     let mut now = clock.now();
