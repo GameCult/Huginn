@@ -265,8 +265,6 @@ mod lane {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("lease.sock");
         let listener = UnixListener::bind(&path).unwrap();
-        let settles = Arc::new(Mutex::new(Vec::new()));
-        let kept = settles.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
