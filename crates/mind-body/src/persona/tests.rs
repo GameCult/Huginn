@@ -829,12 +829,119 @@ fn with_no_campaign_in_force_the_instructions_say_so_and_the_schema_allows_no_st
     assert_eq!(schema["properties"]["start_self_run"], json!({ "type": "null" }));
 }
 
+fn steward_of(repo: &str, note: &str) -> PipelineDocument {
+    PipelineDocument::Stewardship(eureka_pipeline::PipelineStewardship {
+        instance: Slug(INSTANCE.into()),
+        repo: repo.into(),
+        sequence: 1,
+        assigned_on: eureka_pipeline::Date("2026-10-09".into()),
+        note: note.into(),
+    })
+}
+
+fn open_follow_up(label: &str, source: &PipelineRef, item: &str) -> PipelineDocument {
+    PipelineDocument::FollowUp(eureka_pipeline::PipelineFollowUp {
+        campaign: Slug(CAMPAIGN.into()),
+        label: label.into(),
+        source: source.clone(),
+        repo: REPO.into(),
+        locations: vec![],
+        item: item.into(),
+        why_it_can_wait: "It can.".into(),
+        owner: "Hands".into(),
+    })
+}
+
+fn first_input(rig: &Rig) -> String {
+    rig.go();
+    let requests = rig.connector.requests.borrow();
+    requests[0].input.clone()
+}
+
+#[test]
+fn a_turn_shows_her_stewardships_follow_ups_and_the_rulings_they_cite() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    let ruling_ref = reference(K::Ruling, &id("ruling", "client-first"));
+    rig.mind.committed(vec![ruling("client-first", None)]);
+    rig.mind.committed(vec![steward_of("GameCult/cinny", "the chat client; design law in eureka-body:ruling:client-first.")]);
+    rig.mind.committed(vec![open_follow_up("older", &ruling_ref, "Wire the thing.")]);
+    rig.mind.committed(vec![open_follow_up("newer", &ruling_ref, "Ship the other thing.\nSecond line.")]);
+    let input = first_input(&rig);
+    assert!(input.contains("What you are responsible for"), "{input}");
+    assert!(input.contains("Open follow-ups, newest first:"), "{input}");
+    assert!(input.contains("- steward of GameCult/cinny: the chat client; design law in eureka-body:ruling:client-first."), "{input}");
+    let (newer, older) = (input.find("eureka-body/newer").unwrap(), input.find("eureka-body/older").unwrap());
+    assert!(newer < older, "{input}");
+    assert!(input.contains("Ship the other thing.") && !input.contains("Second line."), "{input}");
+    assert!(input.contains("- eureka-body:ruling:client-first: A ruling"), "{input}");
+    assert!(input.find("What you are responsible for").unwrap() < input.find("No new messages").unwrap());
+}
+
+#[test]
+fn a_mind_with_nothing_to_answer_for_says_so() {
+    let text = render_responsibilities(&TestMind::bare(), &Slug(INSTANCE.into())).unwrap();
+    assert!(text.contains("no stewardship is in force") && text.contains("no follow-up is open"), "{text}");
+    assert!(!text.contains("Rulings these cite") && !text.contains("Open follow-ups, newest first:"), "{text}");
+}
+
+fn titled(label: &str, title: &str) -> PipelineDocument {
+    let PipelineDocument::Ruling(mut ruling) = ruling(label, None) else { unreachable!() };
+    ruling.title = title.into();
+    PipelineDocument::Ruling(ruling)
+}
+
+#[test]
+fn rulings_named_in_a_note_or_an_item_are_resolved_by_their_own_title() {
+    let rig = Rig::new(vec![], &[]);
+    rig.mind.committed(vec![titled("src", "Source"), titled("from-note", "Note law"), titled("from-item", "Item law"), titled("other", "Not cited")]);
+    let src = reference(K::Ruling, &id("ruling", "src"));
+    rig.mind.committed(vec![steward_of("GameCult/cinny", "law: eureka-body:ruling:from-note, and eureka-body:ruling:ghost.")]);
+    rig.mind.committed(vec![open_follow_up("fu", &src, "See eureka-body:ruling:from-item; not x:ruling or :ruling:y.")]);
+    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    for line in ["- eureka-body:ruling:from-note: Note law", "- eureka-body:ruling:from-item: Item law", "- eureka-body:ruling:src: Source", "- eureka-body:ruling:ghost: not in your mind"] {
+        assert!(text.contains(line), "{text}");
+    }
+    let listed = text.split("Rulings these cite").nth(1).unwrap();
+    assert_eq!(listed.lines().filter(|line| line.starts_with("- ")).count(), 4, "{text}");
+    assert!(!listed.contains("Not cited"), "{text}");
+}
+
+#[test]
+fn more_than_the_most_cited_rulings_are_counted_not_listed() {
+    let rig = Rig::new(vec![], &[]);
+    let cites: Vec<String> = (0..14).map(|n| format!("eureka-body:ruling:r{n:02}")).collect();
+    rig.mind.committed(vec![steward_of("GameCult/cinny", &cites.join(" "))]);
+    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    assert_eq!(text.matches("- eureka-body:ruling:r").count(), GOALS_RULINGS_MAX, "{text}");
+    assert!(text.contains("(2 more cited rulings not shown.)"), "{text}");
+}
+
+#[test]
+fn the_responsibilities_hold_their_bound_and_mark_what_they_drop() {
+    let rig = Rig::new(vec![], &[]);
+    rig.mind.committed(vec![ruling("src", None)]);
+    let source = reference(K::Ruling, &id("ruling", "src"));
+    let long = "w".repeat(400);
+    for n in 0..30 {
+        rig.mind.committed(vec![open_follow_up(&format!("fu-{n:02}"), &source, &long)]);
+    }
+    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    assert!(text.len() <= GOALS_MAX_BYTES, "{}", text.len());
+    assert!(text.contains("older open follow-ups not shown"), "{text}");
+    assert!(text.contains("fu-29") && !text.contains("fu-00"), "{text}");
+    let listed = text.matches("- eureka-body/fu-").count();
+    let said: usize = text.split('(').find_map(|part| part.split_once(" older open").and_then(|(n, _)| n.parse().ok())).unwrap();
+    assert_eq!(listed + said, 30, "{text}");
+    let held = text.split("Rulings these cite").next().unwrap().len();
+    assert!(held <= GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE && held + 420 > GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE, "{held}");
+}
+
 fn input_for(mentions: &[&str], display: &str) -> String {
     let mut aqua = delivery(1, "swarm", "@aqua:chat", "hello");
     aqua.sender_display = display.into();
     let mut said = delivery(2, "swarm", "@operator:chat", "a reply");
     said.mentions = mentions.iter().map(|m| (*m).to_string()).collect();
-    render_input(&config(), &[aqua, said], &[], "usage")
+    render_input(&config(), &[aqua, said], &[], "", "usage")
 }
 
 fn message_two(input: &str) -> &str {
