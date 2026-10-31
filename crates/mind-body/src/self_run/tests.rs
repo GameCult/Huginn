@@ -1634,6 +1634,16 @@ fn near_the_cap_an_idle_session_closes_for_rotation_and_a_working_one_is_asked_f
 }
 
 #[test]
+fn a_session_starts_with_an_empty_spool_whatever_an_earlier_one_left() {
+    let hooks = test_hooks();
+    inbox::spool(&hooks.spool, &[Brief { id: "eureka-body:follow_up:stale".into(), campaign: "eureka-body".into(), repo: "GameCult/Huginn".into(), item: "Stale.".into(), ordinal: 1 }]).unwrap();
+    let mind = with_run();
+    let ran = carry_hooked(&Seen::of(&mind), vec![Out(result_line())], (Some(0), None, NO_SIGNALS, false), hooks);
+    assert!(!inbox::pending(&ran.hooks.spool).unwrap(), "the stale entry is gone");
+    assert_eq!(ran.written().len(), 1, "and was never told: {:?}", ran.written());
+}
+
+#[test]
 fn a_pre_compact_block_leaves_a_marker_and_the_session_asks_for_the_flush_once() {
     let hooks = test_hooks();
     let fire = {
