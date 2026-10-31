@@ -108,7 +108,20 @@ This binds two things.
   - The two homes do not compete. Her mind holds her commitment. Atlas holds the plan the commitment belongs to, and her memory cites the Atlas document once it exists.
   - Facts: `huginn@atlas` is not deployed (unit inactive, no `/etc/gamecult/minds/atlas`). Huginn admission is single-writer: a store is canonical to one instance, and `refuse_foreign_instance` keeps instance-rooted kinds to that instance. The earlier ruling says Huginn owes multi-writer admission.
   - The interim, until Atlas recall lands: memory-write r3 records her own part and her understanding of the others' parts in her own mind, with sources pointing to the same event ids. Once Atlas lands, the others' parts are no longer hers to record. Her memory keeps only her commitment, which cites the Atlas plan.
-  - Whether Atlas can be stood up with a narrower writer set before full multi-writer admission is question `atlas-first-writer-set`.
+  - Atlas multi-writer is one contained cut (operator: "I think the multi writer cut can be kept pretty contained"), mapped in section 2, row A1.
+- **What Minds build with each other persists** (ruling `minds-rapport-and-brainstorming-persist`: "Their own brainstorming should matter too, the ways they bounce off each other should build a rapport that persists, same as when they interact with humans").
+  - Memory-write r3 adds two sorts. `idea` covers her own ideas and brainstorming, and other Minds' ideas with `about` naming whose idea it is. `rapport` covers how she and another Mind or a person work together, `about` that one.
+  - Rapport's home is her Persona state. `gamecult.persona_state.v0` already has `socialBond` (subject, object target, `relationshipKind` including `collaborator`, trust, tension, `lastEvidence`), so no new kind is needed.
+  - A Persona state change is a system-prompt change, and a system-prompt change invalidates a live session's whole cache (PA B1). So turns write `rapport` memories, and the memory-maintenance cut promotes them into `socialBond`s at a refresh boundary. That is question `rapport-write-path`.
+  - Ideas the Minds develop together go to Atlas (A2).
+
+**Live gap, found while probing for Atlas (Yggdrasil, read-only, 2026-10-31).**
+- Every daemon binds `10.77.0.1:1787x`, and nft accepts all `iifname "lo"` traffic. `mind-self@` sets no `IPAddressDeny`.
+- Each `/etc/gamecult/minds/<m>/huginn.env` is world-readable (0644).
+- The daemon checks only the instance the batch declares (`daemon.rs:156-162` and `mind.rs:201` `require_instance`, Huginn ffb379d per Self).
+- Self's own reads of void, libby and aqua went through by declaring `EUREKA_INSTANCE=<m>`.
+- Inference, from code plus that read path; no admit was sent: any Mind's Self run can admit into another Mind's mind by declaring her name.
+- This is follow-up `mind-admission-publisher-unproven`. Atlas's publisher proof closes it for every daemon.
   - Where the operator's rulings about a stewarded campaign live is the existing question `ruling-home-for-stewarded-campaigns`.
 
 ## 2. Cut sequence (revised)
@@ -125,11 +138,10 @@ Live first. Memory-write runs beside cut 1 with no shared file.
 | 6 | `persona-session` (merges MAP's `persona-read-tools` r2 and `persona-session`): `mind-persona` holds a leased long-lived claude per conversation, read tools in bwrap, constant schema, chat spooled mid-turn, rotation; unit cap 4 h | Huginn + gamecult-ops | `persona.rs` one connector `TurnRequest` per turn, `MAX_TURNS_PER_START`, the KitConnector transport for Persona turns | after 2 |
 | 7 | `session-keeper`: the heartbeat keeps the floor, writes wakes into live sessions, `live_sessions` vote | Huginn | `heartbeat.rs` `launch()` opening a `PersonaTurn` run per beat | after 6 |
 | 8 | Memory maintenance, ruling home, Cut 12 hand-off (MAP 4, items 2, 6, 7) | Huginn | none | any time |
-| A1 | `atlas-stand-up` (per question `atlas-first-writer-set`): `huginn@atlas` deployed through Idunn and gamecult-ops; admission takes writes from roster Minds, each document rooted at its publisher's instance, which is the caller identity the daemon authenticates (Eyes first: does an admit carry an authenticated caller instance today?); collaboration kinds only (plan, part held by a Mind, agreement, open item) | Huginn + gamecult-ops + Idunn | "a store is canonical to one instance" for Atlas only | 1, 2 |
-| A2 | `atlas-collab-recall`: every participating Mind's Persona turn (and Self start) carries a "Shared work you are in" section read from Atlas; a Persona reply can publish or amend her own Atlas items; memory-write's notes on others' parts are demoted to her own commitment citing the Atlas plan | Huginn | others' parts recorded in her own memory (r3 interim) | after A1, 2 |
-| A3 | Full multi-writer admission: law by rulings and motions, hand-offs, offers and claims, publisher-only amend on every kind (`atlas-is-shared-mind-open-evidence`) | Huginn | the narrow writer set of A1 | after A2 |
+| A1 | `atlas-multi-writer`, one contained cut: (1) `huginn@atlas` accepts batches from any roster Mind; (2) each document is rooted at, and records, its publisher, and only the publisher amends or resolves it (`atlas-is-shared-mind-open-evidence`); (3) the publisher is proven, not declared, by a per-Mind key placed by the unit installer the way the forge token is (readable by `mind-<m>` and `mind-<m>-self` only), with an HMAC over the batch that the daemon checks against the declared instance's key. The bound: proof is one key per Mind and one check at admission, the same on every daemon, so it also closes `mind-admission-publisher-unproven`. No roles, no ACL language, no rotation protocol beyond re-install. Deploy is through Idunn and gamecult-ops. | Huginn + gamecult-ops + Idunn | "a store is canonical to one instance" on Atlas; declared-instance admission on every daemon | 1, 2 (rebase onto r3's admission tables) |
+| A2 | `atlas-collab-recall`: collaboration kinds in Atlas (plan, part held by a Mind, agreement, open item, shared idea); every participating Mind's Persona turn (and Self start) carries a "Shared work you are in" section read from Atlas; a Persona reply can publish or amend her own Atlas items; r3's notes on others' parts are demoted to her own commitment citing the Atlas plan | Huginn | others' parts recorded in her own memory (r3 interim) | after A1, 2 |
 
-Cut 1 alone gives "a session with messages dropping in" for the Self. Cuts 6 and 7 give "at least one active session swarm-wide". A1 and A2 give "Atlas records ongoing collaborative work". A1 can run beside cuts 1 and 2 because it shares no file with them (it touches admission's instance rule and deploy, while r3 touches admission's kind tables, which is the one seam to sequence: A1 rebases onto r3).
+Cut 1 alone gives "a session with messages dropping in" for the Self. Cuts 6 and 7 give "at least one active session swarm-wide". A1 and A2 give "Atlas records ongoing collaborative work".
 
 ## 3. Persistent kinds touched
 
