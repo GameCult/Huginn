@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "MemorySort": {
+      "enum": [
+        "Asked",
+        "Decided",
+        "Committed",
+        "Learned",
+        "Did",
+        "Idea",
+        "Rapport"
+      ],
+      "type": "string"
+    },
+    "PipelineKind": {
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff",
+        "Run",
+        "Pulse",
+        "Memory"
+      ],
+      "type": "string"
+    },
+    "PipelineRef": {
+      "description": "A reference to another document. The id is parsed as a full pipeline id of\nthe declared `kind`, so the kind and the id's kind segment cannot disagree.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.memory.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One thing a Mind keeps for herself, in her own mind: what she was asked,\ndecided, committed to, learned or did, an idea, or the rapport between\nher and another Mind or person. `text` is her own words. `about` names\nthe Matrix users it concerns (Minds included), `learned_in` where she\nlearned it (a room alias, a DM's room id, or `self run <label>`),\n`direct` whether it came in a direct message, and `sources` the event\nids, commits or documents it rests on; the organ fills the last three,\nnot the model. `salience_permille` ranks it and decides nothing.\n`consolidates` names the memories a consolidating memory replaces.\nInstance-rooted: the key is `<instance>:memory:<label>`.",
+  "properties": {
+    "about": {
+      "items": {
+        "$ref": "#/$defs/Short"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "consolidates": {
+      "items": {
+        "$ref": "#/$defs/PipelineRef"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "direct": {
+      "type": "boolean"
+    },
+    "instance": {
+      "$ref": "#/$defs/Slug"
+    },
+    "label": {
+      "$ref": "#/$defs/Label"
+    },
+    "learned_in": {
+      "$ref": "#/$defs/Short"
+    },
+    "salience_permille": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "sort": {
+      "$ref": "#/$defs/MemorySort"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/Short"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "text": {
+      "$ref": "#/$defs/Line"
+    }
+  },
+  "required": [
+    "instance",
+    "label",
+    "sort",
+    "text",
+    "about",
+    "learned_in",
+    "direct",
+    "sources",
+    "salience_permille",
+    "consolidates"
+  ],
+  "title": "PipelineMemory",
+  "type": "object"
+}

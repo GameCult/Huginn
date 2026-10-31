@@ -27,7 +27,7 @@ use cultnet_rs::{
     Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, Row, Selection, select, validate,
 };
 use eureka_pipeline::{
-    ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, OrgRepo,
+    ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MemorySort, OrgRepo,
     PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha,
     Short, Slug, Title, pipeline_key,
 };
@@ -142,6 +142,7 @@ pub enum PipelineFacts {
     HandOff { from_instance: Slug, to_instance: Slug, repo: OrgRepo, handed_on: Date },
     Run { label: Label, operated_by: RunOperator, turn: RunTurn, started_on: Date, claims: Vec<PipelineRef> },
     Pulse { label: Label, tempo_vote_beat_s: Option<u32>, #[serde(default)] tempo_vote_withdrawn: bool, urgency_permille: Option<u16> },
+    Memory { label: Label, sort: MemorySort, about: Vec<Short>, direct: bool, learned_in: Short, salience_permille: u16 },
 }
 
 impl PipelineFacts {
@@ -245,6 +246,14 @@ impl PipelineFacts {
                 tempo_vote_beat_s: value.tempo_vote_beat_s,
                 tempo_vote_withdrawn: value.tempo_vote_withdrawn,
                 urgency_permille: value.urgency_permille,
+            },
+            D::Memory(value) => Self::Memory {
+                label: value.label.clone(),
+                sort: value.sort,
+                about: value.about.clone(),
+                direct: value.direct,
+                learned_in: value.learned_in.clone(),
+                salience_permille: value.salience_permille,
             },
         }
     }
@@ -749,7 +758,7 @@ mod tests {
     use crate::store::test_stores::MemoryStore;
     use chrono::{TimeZone, Utc};
     use eureka_pipeline::{
-        ClaimOutcome, FindingConfidence, PipelineDocument as D, PipelineKind as K, PipelineRefusal, ResolutionOutcome,
+        ClaimOutcome, FindingConfidence, MemorySort, PipelineDocument as D, PipelineKind as K, PipelineRefusal, ResolutionOutcome,
     };
 
     fn view(mind: &Mind<MemoryStore>, kind: K, key: &str) -> PipelineDocumentView {
@@ -1486,6 +1495,41 @@ mod tests {
         assert!(invalid("fields[0].values", "false")(&refused(&mind, &outside)));
     }
 
+    /// A memory is selected by its sort, by each user it is about (a memory about two users answers
+    /// for both) and by whether it was learned in a direct message; a value outside the domain is
+    /// refused, and its header carries the triage facts but no text.
+    #[test]
+    fn memories_are_selected_by_sort_about_and_direct() {
+        let mut mind = seeded();
+        let D::Memory(mut direct) = memory("dm", MemorySort::Asked, "Prioritise the fork.", &["@op:chat"]) else { panic!() };
+        direct.direct = true;
+        committed(admit(&mut mind, vec![
+            D::Memory(direct),
+            memory("plan", MemorySort::Committed, "I take the shaders.", &["@aqua:chat", "@libby:chat"]),
+            memory("bond", MemorySort::Rapport, "Libby asks sharp questions.", &["@libby:chat"]),
+        ]));
+        let key = |label: &str| format!("{INSTANCE}:memory:{label}");
+        let asking = |alias: &str, values: &[&str]| {
+            let mut found = ids(&mind.query(&with(of_kinds(&[K::Memory]), any_of(alias, values))).unwrap());
+            found.sort();
+            found
+        };
+        assert_eq!(asking("sort", &["Asked"]), vec![key("dm")]);
+        assert_eq!(asking("sort", &["Committed", "Rapport"]), vec![key("bond"), key("plan")]);
+        assert_eq!(asking("about", &["@libby:chat"]), vec![key("bond"), key("plan")]);
+        assert_eq!(asking("about", &["@aqua:chat", "@op:chat"]), vec![key("dm"), key("plan")]);
+        assert_eq!(asking("direct", &["true"]), vec![key("dm")]);
+        assert_eq!(asking("direct", &["false"]), vec![key("bond"), key("plan")]);
+        for sort in MemorySort::NAMES {
+            assert!(mind.query(&with(of_kinds(&[K::Memory]), any_of("sort", &[sort]))).is_ok(), "{sort}");
+        }
+        assert!(invalid("fields[0].values", "Opinion")(&refused(&mind, &with(of_kinds(&[K::Memory]), any_of("sort", &["Opinion"])))));
+        assert!(invalid("fields[0].values", "")(&refused(&mind, &with(of_kinds(&[K::Memory]), any_of("about", &[""])))));
+        let page = mind.query(&with(of_kinds(&[K::Memory]), any_of("sort", &["Rapport"]))).unwrap();
+        let PipelinePageItems::Headers(found) = page.items else { panic!("headers") };
+        assert!(matches!(&found[0].facts, PipelineFacts::Memory { sort: MemorySort::Rapport, direct: false, salience_permille: 500, .. }), "{:?}", found[0].facts);
+    }
+
     /// A withdrawal pulse admitted into the mind is read back as a withdrawal: its
     /// facts say so, `voted` selects it, and a later plain vote is not one.
     #[test]
@@ -1592,6 +1636,11 @@ mod tests {
         let handoff = landed.iter().find(|write| write.kind == K::HandOff).expect("the hand-off landed").id.0.clone();
         let (_, landed) = committed(admit(&mut mind, vec![run("w1", &[r(K::CutSpec, &id("cut_spec", "cut-1.r2")), r(K::FollowUp, &fu)])]));
         let run_id = landed[0].id.0.clone();
+        let (older, newer) = (format!("{INSTANCE}:memory:m1"), format!("{INSTANCE}:memory:m2"));
+        committed(admit(&mut mind, vec![memory("m1", MemorySort::Idea, "one", &[])]));
+        let D::Memory(mut consolidating) = memory("m2", MemorySort::Idea, "two", &[]) else { unreachable!() };
+        consolidating.consolidates = vec![r(K::Memory, &older)];
+        committed(admit(&mut mind, vec![D::Memory(consolidating)]));
 
         let (n1, f1_closed, f2_closed) = (
             id("resolution", "question.Q1.n1"),
@@ -1625,8 +1674,9 @@ mod tests {
             (CitationRole::Documents, &handoff, &q1),
             (CitationRole::Claims, &run_id, &spec_r2),
             (CitationRole::Claims, &run_id, &fu),
+            (CitationRole::Consolidates, &newer, &older),
         ];
-        assert_eq!(CitationRole::ALL.len(), 16);
+        assert_eq!(CitationRole::ALL.len(), 17);
         for role in CitationRole::ALL {
             let selection =
                 Selection { cited: Some(Incoming { role: role.name().into(), exists: true }), ..Selection::default() };

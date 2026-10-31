@@ -228,7 +228,8 @@
         "resolved_by",
         "deferred_to",
         "documents",
-        "claims"
+        "claims",
+        "consolidates"
       ]
     },
     "ClaimOutcome": {
@@ -670,6 +671,18 @@
       "description": "Text of at most 1,000 UTF-8 bytes.",
       "type": "string",
       "maxLength": 1000
+    },
+    "MemorySort": {
+      "type": "string",
+      "enum": [
+        "Asked",
+        "Decided",
+        "Committed",
+        "Learned",
+        "Did",
+        "Idea",
+        "Rapport"
+      ]
     },
     "MindRefusal": {
       "description": "Every way a mind refuses. `Document` wraps the leaf's four (bounds,\nformats, key identity, foreign type); the rest are the organ's: store\nidentity, epoch, ownership, batch shape, references, and every cross-field\nand cross-document rule of admission.\n\nThe two sequenced kinds refuse in the same pair of shapes: an\n`OutOfSequence` when the writer's `sequence` is not the previous plus one,\nand `AlreadyResolved`/`AlreadyStewarded` when a record of that scope is\nstill in force.",
@@ -2161,7 +2174,7 @@
       ]
     },
     "PipelineDocument": {
-      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\nfifteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
+      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\nsixteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
       "oneOf": [
         {
           "type": "object",
@@ -2396,6 +2409,22 @@
             },
             "value": {
               "$ref": "#/$defs/PipelinePulse"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "memory"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineMemory"
             }
           },
           "required": [
@@ -3119,6 +3148,56 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "memory"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "about": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Short"
+                  }
+                },
+                "direct": {
+                  "type": "boolean"
+                },
+                "label": {
+                  "$ref": "#/$defs/Label"
+                },
+                "learned_in": {
+                  "$ref": "#/$defs/Short"
+                },
+                "salience_permille": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0
+                },
+                "sort": {
+                  "$ref": "#/$defs/MemorySort"
+                }
+              },
+              "required": [
+                "label",
+                "sort",
+                "about",
+                "direct",
+                "learned_in",
+                "salience_permille"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -3317,7 +3396,71 @@
         "Stewardship",
         "HandOff",
         "Run",
-        "Pulse"
+        "Pulse",
+        "Memory"
+      ]
+    },
+    "PipelineMemory": {
+      "description": "One thing a Mind keeps for herself, in her own mind: what she was asked,\ndecided, committed to, learned or did, an idea, or the rapport between\nher and another Mind or person. `text` is her own words. `about` names\nthe Matrix users it concerns (Minds included), `learned_in` where she\nlearned it (a room alias, a DM's room id, or `self run <label>`),\n`direct` whether it came in a direct message, and `sources` the event\nids, commits or documents it rests on; the organ fills the last three,\nnot the model. `salience_permille` ranks it and decides nothing.\n`consolidates` names the memories a consolidating memory replaces.\nInstance-rooted: the key is `<instance>:memory:<label>`.",
+      "type": "object",
+      "properties": {
+        "about": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 8
+        },
+        "consolidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 16
+        },
+        "direct": {
+          "type": "boolean"
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "learned_in": {
+          "$ref": "#/$defs/Short"
+        },
+        "salience_permille": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "sort": {
+          "$ref": "#/$defs/MemorySort"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 8
+        },
+        "text": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "instance",
+        "label",
+        "sort",
+        "text",
+        "about",
+        "learned_in",
+        "direct",
+        "sources",
+        "salience_permille",
+        "consolidates"
       ]
     },
     "PipelinePageItems": {

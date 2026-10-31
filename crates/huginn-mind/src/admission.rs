@@ -312,6 +312,7 @@ fn refuse_foreign_instance(document: &PipelineDocument, mind: &Slug) -> Result<(
         PipelineDocument::Stewardship(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Run(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Pulse(value) if value.instance != *mind => Err(foreign(&value.instance)),
+        PipelineDocument::Memory(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::HandOff(value) if value.from_instance != *mind && value.to_instance != *mind => {
             Err(foreign(&value.from_instance))
         }
@@ -621,7 +622,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
             run_rule(docs, key, run, replay)
         }
-        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) => Ok(()),
+        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Memory(_) => Ok(()),
     }
 }
 
@@ -716,6 +717,9 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Stewardship, O::Superseded { by }) => all(by, K::Stewardship),
         (K::Stewardship, O::Withdrawn { .. }) => true,
         (K::Run, O::Recorded { .. } | O::Withdrawn { .. }) => true,
+        (K::Memory, O::Deferred { to }) => to.kind == K::FollowUp,
+        (K::Memory, O::Recorded { .. } | O::Withdrawn { .. }) => true,
+        (K::Memory, O::Superseded { by }) => all(by, K::Memory),
         (K::Resolution, O::Withdrawn { .. }) => true,
         _ => false,
     }
@@ -843,7 +847,7 @@ mod tests {
     use crate::receipt::{DocumentVersion, Faculty, HuginnCommitReceipt};
     use crate::store::test_stores::{MemoryStore, RefusingStore, SwapCommand};
     use cultcache_rs::DatabaseEntry;
-    use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument as D, PipelineKind as K, RunTurn};
+    use eureka_pipeline::{MemorySort, PIPELINE_SCHEMA_EPOCH, PipelineDocument as D, PipelineKind as K, RunTurn};
     use sha2::{Digest, Sha256};
 
     fn receipt_count<S: MindStore>(mind: &Mind<S>) -> usize {
@@ -2460,6 +2464,82 @@ mod tests {
             MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() }
         );
         committed(admit(&mut mind, vec![pulse(INSTANCE)]));
+    }
+
+    fn memory_key(label: &str) -> String {
+        format!("{INSTANCE}:memory:{label}")
+    }
+
+    /// A memory is her own: one of another mind is a ForeignInstance, and her own is admitted.
+    #[test]
+    fn a_memory_of_another_mind_is_a_foreign_instance_and_her_own_is_admitted() {
+        let mut mind = with_specs();
+        let D::Memory(mut foreign) = memory("m1", MemorySort::Asked, "Prioritise the fork.", &["@op:chat"]) else { panic!() };
+        foreign.instance = slug(OTHER_INSTANCE);
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Memory(foreign)])),
+            MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() }
+        );
+        committed(admit(&mut mind, vec![memory("m1", MemorySort::Asked, "Prioritise the fork.", &["@op:chat"])]));
+    }
+
+    /// A memory is taken on (Deferred to a follow-up), recorded, withdrawn or superseded by a
+    /// memory; Fixed, Answered, and Deferred or Superseded to anything else are refused.
+    #[test]
+    fn a_memory_resolves_deferred_to_a_follow_up_recorded_withdrawn_or_superseded_by_a_memory_only() {
+        let incompatible = |outcome: &str| MindRefusal::IncompatibleResolution { subject_kind: K::Memory, outcome: outcome.into() };
+        let subject = || r(K::Memory, &memory_key("m1"));
+        let follow = || r(K::FollowUp, &id("follow_up", "FU"));
+        let open = || {
+            let mut mind = with_specs();
+            committed(admit(&mut mind, vec![
+                D::Ruling(ruling("R1")),
+                follow_up("FU", r(K::CutSpec, &id("cut_spec", "cut-1.r1"))),
+                memory("m1", MemorySort::Asked, "Prioritise the fork.", &[]),
+                memory("m2", MemorySort::Idea, "A newer way.", &[]),
+            ]));
+            mind
+        };
+        for outcome in [
+            ResolutionOutcome::Deferred { to: follow() },
+            ResolutionOutcome::Recorded { reason: "done".into() },
+            withdrawn(),
+            superseded(&[r(K::Memory, &memory_key("m2"))]),
+        ] {
+            committed(admit(&mut open(), vec![resolution(subject(), outcome)]));
+        }
+        let refused = [
+            (ResolutionOutcome::Deferred { to: r(K::CutSpec, &id("cut_spec", "cut-1.r1")) }, "Deferred"),
+            (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
+            (ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) }, "Answered"),
+            (superseded(&[r(K::Ruling, &id("ruling", "R1"))]), "Superseded"),
+        ];
+        for (outcome, name) in refused {
+            assert_eq!(refusal(admit(&mut open(), vec![resolution(subject(), outcome)])), incompatible(name), "{name}");
+        }
+    }
+
+    /// A memory consolidates memories of this mind: a ruling is refused by the leaf, another mind's
+    /// memory is a missing reference, her own is cited.
+    #[test]
+    fn a_memory_consolidates_only_memories_in_this_mind() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), memory("m1", MemorySort::Idea, "One.", &[])]));
+        let consolidating = |cites: PipelineRef| {
+            let D::Memory(mut memory) = memory("m2", MemorySort::Idea, "One and more.", &[]) else { panic!() };
+            memory.consolidates = vec![cites];
+            D::Memory(memory)
+        };
+        assert!(matches!(
+            refusal(admit(&mut mind, vec![consolidating(r(K::Ruling, &id("ruling", "R1")))])),
+            MindRefusal::Document(PipelineRefusal::InvalidFormat { .. })
+        ));
+        let elsewhere = format!("{OTHER_INSTANCE}:memory:m1");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![consolidating(r(K::Memory, &elsewhere))])),
+            MindRefusal::MissingReference { kind: K::Memory, id: elsewhere }
+        );
+        committed(admit(&mut mind, vec![consolidating(r(K::Memory, &memory_key("m1")))]));
     }
 
     /// A run ends: Recorded or Withdrawn, and no other outcome.

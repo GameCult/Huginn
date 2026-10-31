@@ -172,7 +172,8 @@
         "Stewardship",
         "HandOff",
         "Run",
-        "Pulse"
+        "Pulse",
+        "Memory"
       ],
       "type": "string"
     },

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use cultnet_rs::{Row, RowSet, Selection};
 use eureka_pipeline::{
-    FindingConfidence, FindingOrigin, FindingSeverity, Label, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome,
+    FindingConfidence, FindingOrigin, FindingSeverity, Label, MemorySort, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome,
     RulingAuthority, RunOperator, RunTurn, Slug,
 };
 
@@ -52,6 +52,12 @@ pub(crate) enum Alias {
     Voted,
     /// `true` on a pulse that declares an urgency.
     Urged,
+    /// A memory's `sort`, from its fields.
+    Sort,
+    /// The Matrix users a memory is about, one value each.
+    About,
+    /// `true` or `false` on a memory: whether it was learned in a direct message.
+    Direct,
 }
 
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
@@ -61,7 +67,7 @@ const BOOLEANS: [&str; 2] = ["true", "false"];
 const PRESENT: [&str; 1] = ["true"];
 
 impl Alias {
-    const ALL: [Alias; 16] = [
+    const ALL: [Alias; 19] = [
         Self::Root,
         Self::InForce,
         Self::Faculty,
@@ -78,6 +84,9 @@ impl Alias {
         Self::Ran,
         Self::Voted,
         Self::Urged,
+        Self::Sort,
+        Self::About,
+        Self::Direct,
     ];
 
     fn name(self) -> &'static str {
@@ -98,6 +107,9 @@ impl Alias {
             Self::Ran => "ran",
             Self::Voted => "voted",
             Self::Urged => "urged",
+            Self::Sort => "sort",
+            Self::About => "about",
+            Self::Direct => "direct",
         }
     }
 
@@ -119,6 +131,7 @@ impl Alias {
             Self::Outcome => kind == K::Resolution,
             Self::Turn | Self::OperatedBy | Self::Ran => kind == K::Run,
             Self::Voted | Self::Urged => kind == K::Pulse,
+            Self::Sort | Self::About | Self::Direct => kind == K::Memory,
         }
     }
 
@@ -136,7 +149,9 @@ impl Alias {
             Self::Turn => Some(RunTurn::NAMES),
             Self::OperatedBy => Some(RunOperator::NAMES),
             Self::Ran | Self::Voted | Self::Urged => Some(&PRESENT),
-            Self::Root | Self::Repo | Self::Cut => None,
+            Self::Sort => Some(MemorySort::NAMES),
+            Self::Direct => Some(&BOOLEANS),
+            Self::Root | Self::Repo | Self::Cut | Self::About => None,
         }
     }
 
@@ -147,6 +162,7 @@ impl Alias {
             Self::Root => Slug(value.into()).validate_slug().is_ok(),
             Self::Repo => OrgRepo(value.into()).validate_org_repo().is_ok(),
             Self::Cut => Label(value.into()).validate_label().is_ok(),
+            Self::About => !value.is_empty() && value.len() <= 200,
             closed => closed.closed().is_some_and(|set| set.contains(&value)),
         }
     }
@@ -211,7 +227,7 @@ impl SelectionRow {
                 D::FollowUp(follow_up) => vec![follow_up.repo.identity()],
                 D::Stewardship(stewardship) => vec![stewardship.repo.identity()],
                 D::HandOff(hand_off) => vec![hand_off.repo.identity()],
-                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) => {
+                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Memory(_) => {
                     Vec::new()
                 }
             },
@@ -247,6 +263,11 @@ impl SelectionRow {
                 put(Alias::Voted, if pulse.tempo_vote_beat_s.is_some() || pulse.tempo_vote_withdrawn { vec!["true".into()] } else { Vec::new() });
                 put(Alias::Urged, if pulse.urgency_permille.is_some() { vec!["true".into()] } else { Vec::new() });
             }
+            D::Memory(memory) => {
+                put(Alias::Sort, vec![format!("{:?}", memory.sort)]);
+                put(Alias::About, memory.about.iter().map(|who| who.0.clone()).collect());
+                put(Alias::Direct, vec![memory.direct.to_string()]);
+            }
             _ => {}
         }
         Self { kind: held.kind, key: held.key.clone(), ordinal: view.admission.ordinal, values, refs, view }
@@ -279,7 +300,7 @@ impl Row for SelectionRow {
     }
 }
 
-/// The organ's closed lists: fifteen schemas, sixteen aliases, sixteen roles.
+/// The organ's closed lists: sixteen schemas, nineteen aliases, seventeen roles.
 /// A schema's name is its id, so the substrate's alias matching resolves
 /// nothing beyond exact ids.
 pub(crate) struct Vocabulary;
@@ -325,7 +346,7 @@ fn invalid(field: impl Into<String>, value: &str, message: impl Into<String>) ->
 /// because `OrgRepo` identity is case-insensitive.
 ///
 /// Refuses, naming the field the client sent: a `schemas` entry that is not
-/// one of the fifteen ids; a `keys` entry that is not a full id whose kind
+/// one of the sixteen ids; a `keys` entry that is not a full id whose kind
 /// segment reads and passes the leaf's ref grammar; an `any_of` value outside
 /// its alias's domain; and a `cites.target` whose key fails the ref grammar
 /// for its schema's kind (V24's rule, at this door). Whether the target
@@ -392,7 +413,7 @@ mod tests {
     /// refused at the substrate's door.
     #[test]
     fn each_kind_declares_exactly_its_aliases_and_none_is_numeric() {
-        let table: [(K, &[&str]); 15] = [
+        let table: [(K, &[&str]); 16] = [
             (K::Campaign, &["repo"]),
             (K::Target, &[]),
             (K::Question, &[]),
@@ -408,6 +429,7 @@ mod tests {
             (K::HandOff, &["repo"]),
             (K::Run, &["turn", "operated_by", "ran"]),
             (K::Pulse, &["voted", "urged"]),
+            (K::Memory, &["sort", "about", "direct"]),
         ];
         for (kind, extra) in table {
             let want = [&["root", "in_force", "faculty"][..], extra].concat();
@@ -420,10 +442,10 @@ mod tests {
 
     /// Each role is declared by the one kind whose field carries it, and its
     /// targets are the kinds that field is typed to, "any" spelled as all
-    /// fifteen.
+    /// sixteen.
     #[test]
     fn each_kind_declares_the_roles_it_carries_and_their_targets() {
-        let table: [(K, &[&str]); 15] = [
+        let table: [(K, &[&str]); 16] = [
             (K::Campaign, &[]),
             (K::Target, &[]),
             (K::Question, &["raised_in"]),
@@ -439,13 +461,14 @@ mod tests {
             (K::HandOff, &["documents"]),
             (K::Run, &["claims"]),
             (K::Pulse, &[]),
+            (K::Memory, &["consolidates"]),
         ];
         for (kind, roles) in table {
             assert_eq!(sorted(Vocabulary.declared_roles(kind.type_id())), strings(roles), "{kind:?}");
         }
         assert_eq!(Vocabulary.target_leaves("answers"), vec![K::Question.type_id().to_string()]);
         assert_eq!(Vocabulary.target_leaves("rulings"), vec![K::Ruling.type_id().to_string()]);
-        assert_eq!(Vocabulary.target_leaves("subject").len(), 15);
+        assert_eq!(Vocabulary.target_leaves("subject").len(), 16);
         assert_eq!(
             sorted(Vocabulary.target_leaves("claims")),
             sorted([K::CutSpec, K::Finding, K::FollowUp].iter().map(|kind| kind.type_id().to_string()).collect())

@@ -317,6 +317,9 @@ pub(crate) enum Lineage<'a> {
     Cut(&'a Slug, &'a Label),
     /// A stewardship: the instance and the repo.
     Assignment(&'a Slug, &'a OrgRepo),
+    /// A memory: the instance whose mind holds it, so a consolidating memory
+    /// replaces only her own.
+    Memories(&'a Slug),
     /// A ruling or a follow-up: operator directions and re-homed work cut
     /// across campaigns.
     Global,
@@ -328,6 +331,7 @@ pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
         D::Target(target) => Some(Lineage::Campaign(&target.campaign)),
         D::CutSpec(spec) => Some(Lineage::Cut(&spec.campaign, &spec.cut)),
         D::Stewardship(stewardship) => Some(Lineage::Assignment(&stewardship.instance, &stewardship.repo)),
+        D::Memory(memory) => Some(Lineage::Memories(&memory.instance)),
         D::Ruling(_) | D::FollowUp(_) => Some(Lineage::Global),
         D::Campaign(_)
         | D::Question(_)
@@ -382,10 +386,11 @@ pub enum CitationRole {
     DeferredTo,
     Documents,
     Claims,
+    Consolidates,
 }
 
 impl CitationRole {
-    pub const ALL: [CitationRole; 16] = [
+    pub const ALL: [CitationRole; 17] = [
         Self::RaisedIn,
         Self::Answers,
         Self::Rulings,
@@ -402,6 +407,7 @@ impl CitationRole {
         Self::DeferredTo,
         Self::Documents,
         Self::Claims,
+        Self::Consolidates,
     ];
 
     /// The wire spelling, equal to the referring field's name.
@@ -423,6 +429,7 @@ impl CitationRole {
             Self::DeferredTo => "deferred_to",
             Self::Documents => "documents",
             Self::Claims => "claims",
+            Self::Consolidates => "consolidates",
         }
     }
 
@@ -444,6 +451,7 @@ impl CitationRole {
             Self::Subject | Self::SupersededBy | Self::ResolvedBy | Self::DeferredTo => K::Resolution,
             Self::Documents => K::HandOff,
             Self::Claims => K::Run,
+            Self::Consolidates => K::Memory,
         }
     }
 
@@ -460,6 +468,7 @@ impl CitationRole {
             Self::Findings => vec![K::Finding],
             Self::Verdict => vec![K::Verdict],
             Self::Claims => vec![K::CutSpec, K::Finding, K::FollowUp],
+            Self::Consolidates => vec![K::Memory],
             Self::RaisedIn
             | Self::Source
             | Self::Subject
@@ -538,6 +547,7 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
             hand_off.documents.iter().filter_map(|to| kind_of_id(&to.0).map(|kind| (R::Documents, cited(kind, to)))),
         ),
         D::Run(run) => edges.extend(run.claims.iter().map(|to| (R::Claims, to.clone()))),
+        D::Memory(memory) => edges.extend(memory.consolidates.iter().map(|to| (R::Consolidates, to.clone()))),
         D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) | D::Pulse(_) => {}
     }
     edges
