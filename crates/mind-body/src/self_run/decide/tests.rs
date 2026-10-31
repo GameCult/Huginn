@@ -376,7 +376,7 @@ fn a_child_that_has_exited_is_never_signalled_and_the_run_ends_with_its_stream_o
 
 #[test]
 fn without_a_flush_nothing_is_ever_signalled_and_a_finished_run_decides_nothing_more() {
-    let quiet = vec![(req("a", 10), 0), (OK, 1), (Event::Tick, 100_000)];
+    let quiet = vec![(Event::Echo, 0), (req("a", 10), 0), (OK, 1), (Event::Tick, 100_000)];
     assert!(run(quiet).1.iter().all(|action| !matches!(action, Action::Signal(_))));
     let (state, actions) = run(vec![(Event::ChildExited(Some(3)), 0), (Event::StdoutEof, 0)]);
     assert_eq!(actions[1], ended(Cause::Own, Some(3), 0, 0));
@@ -446,7 +446,7 @@ fn play(symbols: &[Sym]) {
                 closed = true;
                 closes += 1;
             }
-            Action::Signal(_) => assert!(flushed, "a signal with no flush: {symbols:?}"),
+            Action::Signal(_) => assert!(state.flush.is_some(), "a signal with no flush asked: {symbols:?}"),
             Action::None | Action::Finish(_) => {}
         }
         assert_eq!(state.written, 1 + writes, "every write is counted once: {symbols:?}");

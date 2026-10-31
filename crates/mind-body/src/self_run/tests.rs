@@ -772,7 +772,7 @@ fn below_the_ceiling_no_flush_is_written_and_at_it_exactly_one() {
     assert_eq!(flushes(&below), 0);
     assert_eq!(below.ended().0, Cause::Own);
 
-    let at_it = go(vec![Out(at("m1", CEILING_TOKENS - 1)), Out(at("m2", CEILING_TOKENS)), Out(at("m3", CEILING_TOKENS + 10_000))]);
+    let at_it = go(vec![Out(echo()), Out(at("m1", CEILING_TOKENS - 1)), Out(at("m2", CEILING_TOKENS)), Out(at("m3", CEILING_TOKENS + 10_000))]);
     assert_eq!(flushes(&at_it), 1, "{:?}", at_it.written());
     assert_eq!(at_it.written().len(), 2, "the start and the flush");
     assert_eq!(at_it.ended().0, Cause::FlushRequested);
@@ -906,7 +906,7 @@ fn a_child_that_ends_before_the_grace_is_never_interrupted() {
 fn the_grace_is_the_full_grace_from_the_moment_the_flush_was_asked_whichever_request_that_was() {
     let grace = FLUSH_GRACE_S;
     // Five requests, time passing before the ceiling, then the flush on the sixth.
-    let before: Vec<Step> = vec![Out(at("m1", 10)), Idle(500), Out(at("m2", 20)), Out(at("m3", 30)), Out(at("m4", 40)), Out(at("m5", 50)), Out(at("m6", CEILING_TOKENS))];
+    let before: Vec<Step> = vec![Out(echo()), Out(at("m1", 10)), Idle(500), Out(at("m2", 20)), Out(at("m3", 30)), Out(at("m4", 40)), Out(at("m5", 50)), Out(at("m6", CEILING_TOKENS))];
     let early = carry_with(&Seen::of(&with_run()), [before.clone(), vec![Idle(grace - 1)]].concat(), Some(0), true);
     assert_eq!((flushes(&early), early.count(&Event::Stopped(Stop::Interrupt))), (1, 0), "one second short of the grace, flush on request 6");
     let on_time = carry_with(&Seen::of(&with_run()), [before, vec![Idle(grace - 1), Idle(1)]].concat(), Some(0), true);
@@ -933,7 +933,7 @@ fn a_usage_sum_that_overflows_is_at_or_over_the_ceiling_not_a_panic_or_a_wrap() 
     assert_eq!(read_usage(&request("m", 1, u64::MAX, 1)), Usage::Request { id: "m".into(), prefix: u64::MAX });
     // Through the actuator: the flush is asked for, and the headroom beyond a saturated prefix does not overflow
     // either, and the pass that wrote the flush does not interrupt.
-    let ran = go(vec![Out(request("m1", u64::MAX, 7, 0)), Out(request("m2", 0, 0, 0))]);
+    let ran = go(vec![Out(echo()), Out(request("m1", u64::MAX, 7, 0)), Out(request("m2", 0, 0, 0))]);
     assert_eq!(flushes(&ran), 1);
     assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 0);
 }

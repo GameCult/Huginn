@@ -258,7 +258,6 @@ mind_body::self_run: struct ClaudeSpawner  pub-fields[]
 mind_body::self_run::decide: impl State
 mind_body::self_run::inbox: const OWNER : & str
 mind_body::self_run::inbox: fn backlog (mind : & dyn MindPort) -> Result < Vec < (Brief , String) > >
-mind_body::self_run::inbox: fn close (mind : & dyn MindPort , now : DateTime < Utc > , session : & str , briefs : & [(Brief , String)] , reason : & str) -> Result < usize >
 mind_body::self_run::inbox: fn derive (mind : & dyn MindPort , told : & HashSet < String >) -> Result < Vec < Brief > >
 mind_body::self_run::inbox: fn render (briefs : & [Brief] , plan : & str) -> String
 mind_body::self_run::inbox: fn resolving_sentence (id : & str) -> String

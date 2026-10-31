@@ -85,9 +85,9 @@ pub const CEILING_TOKENS: u64 = 300_000;
 /// The context window the CLI reports for the model a Self runs (`modelUsage.contextWindow` in every result of the
 /// `claude-2.1.312-live-session-*` fixtures: the default model, `claude-opus-5-5`, 1M). The seed sets no model, so the CLI's default is the model.
 /// The window under the real subscription is read from a result's `contextWindow` and not otherwise observed here.
-pub const SELF_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
+const SELF_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
 /// What the CLI keeps free below its window before it refuses a prompt (`blocking_limit`): the blocking-limit fixture sends a 990k request and refuses the next.
-pub const CLI_BLOCKING_BUFFER_TOKENS: u64 = 10_000;
+const CLI_BLOCKING_BUFFER_TOKENS: u64 = 10_000;
 /// What the prefix may grow by beyond the prefix the flush was asked at before
 /// the actuator interrupts. Relative to the flush, never an absolute limit.
 pub const FLUSH_HEADROOM_TOKENS: u64 = 60_000;
