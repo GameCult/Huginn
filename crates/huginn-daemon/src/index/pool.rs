@@ -24,6 +24,10 @@ use super::{Embedder, ModelIdentity};
 /// How long an endpoint that dropped out is left alone by default.
 pub const RETRY_AFTER: Duration = Duration::from_secs(60);
 
+/// One piece's outcome: the member that took it, where it starts, how long it is,
+/// and what came back.
+type Answer = (usize, usize, usize, Result<Vec<Vec<f32>>>);
+
 struct Member<E> {
     name: String,
     embedder: E,
@@ -134,7 +138,7 @@ impl<E: Embedder + Send> Embedder for EmbedderPool<E> {
                     jobs.push((active[n % active.len()], start, share.min(first + length - start)));
                 }
             }
-            let mut answers: Vec<(usize, usize, usize, Result<Vec<Vec<f32>>>)> = Vec::new();
+            let mut answers: Vec<Answer> = Vec::new();
             std::thread::scope(|scope| {
                 let mut taken: Vec<Option<&mut Member<E>>> = self.members.iter_mut().map(Some).collect();
                 let mut running = Vec::new();
@@ -275,6 +279,8 @@ mod tests {
         pool.embed(&texts(2), WITHIN).unwrap();
         assert_eq!((used(&fakes[1]), used(&fakes[2])), (0, 2), "starfire is skipped for the CPU, which serves the pool's model");
         fakes[2].state.lock().unwrap().identity.dimensions = 8;
+        down(&fakes[2], true);
+        assert!(pool.embed(&texts(1), WITHIN).is_err(), "nothing left that serves the pool's model");
         down(&fakes[2], false);
         let error = format!("{:#}", pool.embed(&texts(1), WITHIN).unwrap_err());
         assert!(error.contains("raven") && error.contains("starfire") && error.contains("yggdrasil"), "{error}");
