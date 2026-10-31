@@ -21,6 +21,8 @@ struct Counting<'a> {
     inner: &'a TestMind,
     calls: &'a Cell<u32>,
     down: &'a Cell<bool>,
+    /// Queries of a newest-shaped read (`ran`, `voted`, `urged`) that did not ask for one header.
+    unbounded: &'a Cell<u32>,
 }
 
 impl MindPort for Counting<'_> {
@@ -33,6 +35,10 @@ impl MindPort for Counting<'_> {
             return Err(anyhow!("the daemon is down"));
         }
         self.calls.set(self.calls.get() + 1);
+        let newest_shaped = selection.fields.iter().flatten().any(|predicate| matches!(predicate.index.as_str(), "ran" | "voted" | "urged"));
+        if newest_shaped && selection.limit != Some(1) {
+            self.unbounded.set(self.unbounded.get() + 1);
+        }
         self.inner.query(selection)
     }
 
@@ -137,6 +143,7 @@ struct Rig {
     minds: Vec<TestMind>,
     calls: Vec<Cell<u32>>,
     down: Vec<Cell<bool>>,
+    unbounded: Vec<Cell<u32>>,
     chats: Vec<FakeChat>,
     control: FakeControl,
     launcher: Recording,
@@ -153,6 +160,7 @@ impl Rig {
             minds: vec![TestMind::seeded_as("ann"), TestMind::seeded_as("bob")],
             calls: vec![Cell::new(0), Cell::new(0)],
             down: vec![Cell::new(false), Cell::new(false)],
+            unbounded: vec![Cell::new(0), Cell::new(0)],
             chats: vec![FakeChat::default(), FakeChat::default()],
             control: FakeControl::new(),
             launcher: Recording::default(),
@@ -180,7 +188,7 @@ impl Rig {
         for mind in &self.minds {
             mind.admit_at(self.now());
         }
-        let ports: Vec<Counting> = self.minds.iter().zip(self.calls.iter().zip(&self.down)).map(|(inner, (calls, down))| Counting { inner, calls, down }).collect();
+        let ports: Vec<Counting> = self.minds.iter().zip(self.calls.iter().zip(self.down.iter().zip(&self.unbounded))).map(|(inner, (calls, (down, unbounded)))| Counting { inner, calls, down, unbounded }).collect();
         let seats: Vec<Seat> = self.config.personas.iter().enumerate().map(|(index, who)| Seat { who: who.clone(), mind: &ports[index], chat: &self.chats[index] }).collect();
         let organs = Organs { seats: &seats, control: &self.control, launcher: &self.launcher, clock: &self.clock, host: "test-host", store: &self.store };
         poll(&organs, &self.config).unwrap()
@@ -685,12 +693,44 @@ fn a_null_vote_withdraws_the_standing_one_and_an_urgency_only_pulse_leaves_it() 
 }
 
 #[test]
-fn an_urgency_declared_in_the_second_of_her_turn_is_already_consumed() {
+fn an_urgency_is_consumed_by_a_turn_admitted_after_it_by_ordinal_not_by_the_clock() {
+    // Same second, urgency first: the turn consumed it.
+    let rig = Rig::new();
+    rig.pulse(ANN, 3000, None, Some(900));
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.poll();
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.instances[ANN].urgency_permille, 0, "a declaration admitted before her turn is consumed");
+    // Same second, turn first: the urgency is pending.
     let rig = Rig::new();
     rig.turn(ANN, 3000);
     rig.turn(BOB, 3000);
     rig.pulse(ANN, 3000, None, Some(900));
     rig.poll();
     let trace = rig.store.traces.borrow().last().cloned().unwrap();
-    assert_eq!(trace.instances[ANN].urgency_permille, 0, "a declaration is pending only when admitted after her turn");
+    assert_eq!(trace.instances[ANN].urgency_permille, 900, "a declaration admitted after her turn is pending, whatever second it is stamped");
+    // Admitted after her turn but stamped earlier than it: still pending.
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.pulse(ANN, 4000, None, Some(700));
+    rig.poll();
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.instances[ANN].urgency_permille, 700, "the clock stepping back does not consume it");
+}
+
+#[test]
+fn every_newest_read_asks_for_exactly_one_header() {
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    for n in 0..5 {
+        rig.pulse(ANN, 2000 - n, Some(600 + u32::try_from(n).unwrap()), None);
+        rig.pulse(ANN, 1000 - n, None, Some(3));
+    }
+    rig.poll();
+    assert_eq!(rig.unbounded[ANN].get(), 0, "the ran, voted and urged reads each take limit 1");
+    let queries = rig.calls[ANN].get();
+    assert!(queries >= 3, "the poll did read her mind ({queries} queries)");
 }

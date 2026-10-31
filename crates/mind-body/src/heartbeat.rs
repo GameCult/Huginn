@@ -372,7 +372,7 @@ fn latest_resolution(
 /// of the runs the mind indexes as `ran`. A turn withdrawn unrun never happened,
 /// so it neither resets her wait nor counts as her last turn, and the cost of
 /// finding the last real turn does not grow with how many were withdrawn.
-fn last_turn(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime<Utc>>> {
+fn last_turn(mind: &dyn MindPort, instance: &Slug) -> Result<Option<PipelineDocumentSummary>> {
     let turn = format!("{:?}", RunTurn::PersonaTurn);
     let operator = format!("{:?}", RunOperator::Mind);
     let runs = any_of(
@@ -388,7 +388,7 @@ fn last_turn(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime<Utc
         "ran",
         &["true"],
     );
-    Ok(newest(mind, runs)?.map(|header| header.admission.admitted_at).map(|at| parse_time(&at)).transpose()?)
+    newest(mind, runs)
 }
 
 /// The newest document a selection holds, by admission ordinal: one query.
@@ -462,13 +462,13 @@ fn standing_vote(mind: &dyn MindPort, instance: &Slug) -> Result<Option<u32>> {
 }
 
 /// The urgency she declared for herself and no turn has consumed: her newest
-/// declaration, if it is newer than her newest Persona turn.
-fn pending_urgency(mind: &dyn MindPort, instance: &Slug, last_turn: Option<DateTime<Utc>>) -> Result<u16> {
+/// declaration, if it was admitted after her newest Persona turn, by admission
+/// ordinal like the vote: the wall clock never decides what a turn consumed.
+fn pending_urgency(mind: &dyn MindPort, instance: &Slug, last_turn: Option<&PipelineDocumentSummary>) -> Result<u16> {
     let pulses = any_of(any_of(of_kind(PipelineKind::Pulse), "root", &[&instance.0]), "urged", &["true"]);
     let Some(header) = newest(mind, pulses)? else { return Ok(0) };
     let PipelineFacts::Pulse { urgency_permille: Some(urgency), .. } = header.facts else { return Ok(0) };
-    let declared = parse_time(&header.admission.admitted_at)?;
-    Ok(if last_turn.is_none_or(|turn| declared > turn) { urgency } else { 0 })
+    Ok(if last_turn.is_none_or(|turn| header.admission.ordinal > turn.admission.ordinal) { urgency } else { 0 })
 }
 
 /// When her Self runs last ended: the latest resolution among her recent Self runs.
@@ -500,12 +500,12 @@ struct MindRead {
 }
 
 fn read_mind(mind: &dyn MindPort, slug: &Slug) -> Result<MindRead> {
-    let last_turn = last_turn(mind, slug)?;
+    let turn = last_turn(mind, slug)?;
     Ok(MindRead {
         busy: !holders(mind, slug, RunTurn::PersonaTurn)?.is_empty(),
-        last_turn,
+        last_turn: turn.as_ref().map(|header| parse_time(&header.admission.admitted_at)).transpose()?,
         vote: standing_vote(mind, slug)?,
-        urgency: pending_urgency(mind, slug, last_turn)?,
+        urgency: pending_urgency(mind, slug, turn.as_ref())?,
         self_end: last_self_end(mind, slug)?,
     })
 }
