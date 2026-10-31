@@ -723,9 +723,11 @@ fn copy_level(root: &Path, from: &Path, to: &Path) -> std::io::Result<()> {
 /// from `ANTHROPIC_BASE_URL`, so the child gets only what a shell needs to find
 /// its way; nothing credential-shaped is on the list. Its `HOME` and
 /// `CLAUDE_CONFIG_DIR` are its fresh configuration directory, set by the spawn.
+/// `EUREKA_INSTANCE` and `HUGINN_ENDPOINT` are the `huginn` CLI's whole identity
+/// (ruling `eureka-body:ruling:cli-over-mcp-agent-surface`): a name and an address, no secret.
 fn child_may_see(name: &OsStr) -> bool {
     let name = name.to_string_lossy();
-    matches!(name.as_ref(), "PATH" | "LANG" | "TERM") || name.starts_with("LC_")
+    matches!(name.as_ref(), "PATH" | "LANG" | "TERM" | "EUREKA_INSTANCE" | "HUGINN_ENDPOINT") || name.starts_with("LC_")
 }
 
 /// The unit's environment as the child sees it: the allow-list, and nothing else.
