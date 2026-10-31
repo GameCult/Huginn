@@ -6,7 +6,7 @@
 
 use cultcache_rs::DatabaseEntry;
 use cultnet_rs::{CultMeshCdnArtifactManifest, Selection};
-use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Slug};
+use eureka_pipeline::{Line, PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Short, Slug};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,6 +88,73 @@ pub enum HuginnMindRequest {
         state: Value,
         expected_updated_at: Option<String>,
     },
+    /// Semantic search over the source index: the public forge repos' code and
+    /// docs, which no mind holds. The daemon embeds the text and asks the
+    /// index it does not write.
+    SearchSources { instance: Slug, query: SourceQuery },
+}
+
+/// The most hits a source search answers.
+pub const SOURCE_TOP_K_MAX: u32 = 50;
+
+/// A source search: the text to find chunks near, how many, and optionally the
+/// one forge repo (by name) to look in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SourceQuery {
+    pub text: Line,
+    pub top_k: u32,
+    pub repo: Option<Short>,
+}
+
+impl SourceQuery {
+    /// The door: text that says something, and between one and
+    /// `SOURCE_TOP_K_MAX` hits. A refusal names the field.
+    pub fn check(&self) -> Result<(), MindRefusal> {
+        let refused = |field: &str, value: Option<String>, message: &str| MindRefusal::SelectionInvalid {
+            field: field.into(),
+            value,
+            message: message.into(),
+        };
+        if self.text.0.trim().is_empty() {
+            return Err(refused("text", None, "a source search needs text to find"));
+        }
+        if !(1..=SOURCE_TOP_K_MAX).contains(&self.top_k) {
+            return Err(refused("top_k", Some(self.top_k.to_string()), "a source search asks for 1 to 50 hits"));
+        }
+        if self.repo.as_ref().is_some_and(|repo| repo.0.trim().is_empty()) {
+            return Err(refused("repo", None, "a repo filter names a repo or is absent"));
+        }
+        Ok(())
+    }
+}
+
+/// The model a source collection was built under, and so the one a query must
+/// be embedded by. The address of the embedder is no part of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SourceModel {
+    pub name: String,
+    pub digest: String,
+}
+
+/// One chunk the index holds, as the index holds it: the repo it belongs to,
+/// the path in that repo, the commit whose blob it was cut from, its 1-based
+/// inclusive line range, and its text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SourceHit {
+    pub repo: String,
+    pub path: String,
+    pub commit: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub score: f32,
+    pub text: String,
+}
+
+/// The answer to a source search, nearest first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SourceHits {
+    pub indexed_under: SourceModel,
+    pub hits: Vec<SourceHit>,
 }
 
 impl HuginnMindRequest {
@@ -100,6 +167,7 @@ impl HuginnMindRequest {
             Self::Query { .. } => "query",
             Self::PersonaGet { .. } => "persona_get",
             Self::PersonaPut { .. } => "persona_put",
+            Self::SearchSources { .. } => "search_sources",
         }
     }
 
@@ -111,7 +179,8 @@ impl HuginnMindRequest {
             Self::View { instance, .. }
             | Self::Query { instance, .. }
             | Self::PersonaGet { instance }
-            | Self::PersonaPut { instance, .. } => Some(instance),
+            | Self::PersonaPut { instance, .. }
+            | Self::SearchSources { instance, .. } => Some(instance),
         }
     }
 }
@@ -128,6 +197,7 @@ pub enum HuginnMindResponse {
     Refused(MindRefusal),
     Persona(Option<PersonaStateView>),
     PersonaPut(PersonaPutOutcome),
+    Sources(SourceHits),
     /// The answer did not fit one send and is being held for the client to
     /// fetch. Nothing in a mind produces this: the daemon's serve module does,
     /// in place of an answer, and the answer it stands for is the named
@@ -259,6 +329,10 @@ mod tests {
                 state: serde_json::json!({ "updatedAt": "2026-10-10T10:00:00Z", "n": [1, 2.5, null, "x"] }),
                 expected_updated_at: Some("2026-10-10T09:00:00Z".into()),
             },
+            HuginnMindRequest::SearchSources {
+                instance: slug(INSTANCE),
+                query: SourceQuery { text: Line("reconcile".into()), top_k: 5, repo: Some(Short("Huginn".into())) },
+            },
         ]
     }
 
@@ -296,6 +370,18 @@ mod tests {
             })),
             HuginnMindResponse::PersonaPut(PersonaPutOutcome::Committed { receipt_id: "mind-commit-2".into() }),
             HuginnMindResponse::PersonaPut(PersonaPutOutcome::Refused(MindRefusal::PersonaNotCanonical)),
+            HuginnMindResponse::Sources(SourceHits {
+                indexed_under: SourceModel { name: "m".into(), digest: "d".into() },
+                hits: vec![SourceHit {
+                    repo: "Huginn".into(),
+                    path: "a.rs".into(),
+                    commit: "abc".into(),
+                    line_start: 1,
+                    line_end: 2,
+                    score: 0.5,
+                    text: "x".into(),
+                }],
+            }),
             HuginnMindResponse::Deferred(DeferredAnswer {
                 manifest: cultnet_rs::pack_content("huginn.mind_response", "package", "", "", "", b"body", 4)
                     .unwrap()
@@ -310,7 +396,7 @@ mod tests {
     #[test]
     fn the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response() {
         let names: Vec<&str> = requests().iter().map(|request| request.operation()).collect();
-        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put"]);
+        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources"]);
         for request in requests() {
             let declared = request.instance().is_none();
             assert_eq!(declared, matches!(request, HuginnMindRequest::Whoami), "{request:?}");
@@ -334,6 +420,27 @@ mod tests {
             let bytes = rmp_serde::to_vec_named(&response).unwrap();
             assert_eq!(rmp_serde::from_slice::<HuginnMindResponse>(&bytes).unwrap(), response);
         }
+    }
+
+    /// A source search is refused before any index is asked when it says
+    /// nothing, asks for no hits or more than the cap, or names a blank repo.
+    #[test]
+    fn a_source_query_without_text_or_within_one_to_fifty_hits_is_refused_by_field() {
+        let query = |text: &str, top_k: u32, repo: Option<&str>| SourceQuery {
+            text: Line(text.into()),
+            top_k,
+            repo: repo.map(|repo| Short(repo.into())),
+        };
+        let field = |query: SourceQuery| match query.check() {
+            Err(MindRefusal::SelectionInvalid { field, .. }) => field,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        assert_eq!(query("x", 1, None).check(), Ok(()));
+        assert_eq!(query("x", SOURCE_TOP_K_MAX, Some("Huginn")).check(), Ok(()));
+        assert_eq!(field(query("  ", 5, None)), "text");
+        assert_eq!(field(query("x", 0, None)), "top_k");
+        assert_eq!(field(query("x", SOURCE_TOP_K_MAX + 1, None)), "top_k");
+        assert_eq!(field(query("x", 5, Some(" "))), "repo");
     }
 
     /// A new client reads an old daemon's page: the five fields it had, no

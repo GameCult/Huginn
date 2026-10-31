@@ -56,6 +56,7 @@ pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{
     DeferredAnswer, HuginnMindRequest, HuginnMindResponse, IndexStatus, MAX_DEFERRED_BODY_BYTES, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON,
     MIND_RESPONSE_SCHEMA, MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus, PersonaStatus,
+    SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery,
 };
 
 /// The leaf, whole, through the one crate that pins its rev: the daemon and
