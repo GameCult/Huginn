@@ -218,9 +218,9 @@ fn the_journal_says_what_was_billed_and_that_a_failed_settle_leaves_the_reservat
         (outcome, String::from_utf8(out).unwrap())
     };
     let (outcome, out) = run(Answer::Grant);
-    assert_eq!(out, "request 1 prefix 10\nsettled: billed 7 micro-USD\n");
+    assert_eq!(out, "request 1 prefix 10\nresult subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed\nsettled: billed 7 micro-USD\n");
     let (failed, out) = run(Answer::GrantSettleFails);
-    assert_eq!(out, "request 1 prefix 10\nsettle failed: the connector bills the reservation\n", "the connector's words are not echoed");
+    assert_eq!(out, "request 1 prefix 10\nresult subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed\nsettle failed: the connector bills the reservation\n", "the connector's words are not echoed");
     assert_eq!(failed, outcome, "the run's own outcome stands");
 }
 

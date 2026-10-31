@@ -444,6 +444,33 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawne
     Ok(outcome)
 }
 
+/// The most of a result's text that reaches the journal.
+const RESULT_TEXT_LIMIT: usize = 4096;
+
+/// What `claude` concluded: a result event's text, with its subtype and error
+/// flag when it has them, written to the unit's stdout so it reaches the journal
+/// before the transcript goes with the runtime directory. Bounded, marked when cut.
+fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
+    let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return Ok(()) };
+    if event.get("type").and_then(Value::as_str) != Some("result") {
+        return Ok(());
+    }
+    let mut head = String::from("result");
+    if let Some(subtype) = event.get("subtype").and_then(Value::as_str) {
+        head.push_str(&format!(" subtype={subtype}"));
+    }
+    if let Some(is_error) = event.get("is_error").and_then(Value::as_bool) {
+        head.push_str(&format!(" is_error={is_error}"));
+    }
+    let text = event.get("result").and_then(Value::as_str).unwrap_or("");
+    let mut end = text.len().min(RESULT_TEXT_LIMIT);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let marker = if end < text.len() { "\n[truncated]" } else { "" };
+    writeln!(out, "{head}: {}{marker}", &text[..end])
+}
+
 /// The loop: facts in, one clock read per fact, actions out.
 fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run: &PipelineRef, spent: &mut Spent, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
@@ -456,6 +483,7 @@ fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run:
         let fact = match child.next(wait) {
             Read::Line(line) => {
                 spent.hear(&line);
+                write_result(&line, out)?;
                 match read_usage(&line) {
                     Usage::Request { id, prefix } => Event::Request { id, prefix },
                     Usage::Result => Event::Result,

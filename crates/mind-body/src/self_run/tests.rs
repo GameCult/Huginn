@@ -622,6 +622,24 @@ mod seed_links {
     }
 }
 
+#[test]
+fn a_result_events_text_reaches_the_journal_with_its_subtype_and_error_flag() {
+    let line = json!({"type": "result", "subtype": "success", "is_error": false, "result": "all done"}).to_string();
+    let ran = go(vec![Out(line)]);
+    assert!(ran.out.contains("result subtype=success is_error=false: all done\n"), "{}", ran.out);
+}
+
+#[test]
+fn a_long_result_is_cut_at_the_limit_on_a_character_boundary_and_marked() {
+    // One ASCII byte first, so the limit falls in the middle of a two-byte character.
+    let text = format!("a{}", "é".repeat(RESULT_TEXT_LIMIT));
+    let line = json!({"type": "result", "result": text}).to_string();
+    let ran = go(vec![Out(line)]);
+    let written = ran.out.lines().find(|l| l.starts_with("result")).unwrap();
+    assert_eq!(written, format!("result: a{}", "é".repeat(RESULT_TEXT_LIMIT / 2 - 1)));
+    assert!(ran.out.contains("\n[truncated]\n"), "{}", ran.out);
+}
+
 // ---- what is read -----------------------------------------------------------
 
 #[test]
@@ -805,7 +823,7 @@ fn a_jump_past_the_ceiling_plus_the_headroom_writes_the_flush_and_the_running_tu
     // The headroom is measured from the prefix the flush was asked at (400k) and counts the requests after the
     // first result only: 459_999 does not interrupt; 460_000 does, once, and m6 is never read.
     assert_eq!(jump.count(&Event::Stopped(Stop::Interrupt)), 1, "{kinds:?}");
-    assert_eq!(jump.out, "request 1 prefix 290000\nrequest 2 prefix 400000\nrequest 3 prefix 470000\nrequest 4 prefix 459999\nrequest 5 prefix 460000\nsettled: billed 7 micro-USD\n");
+    assert_eq!(jump.out, "request 1 prefix 290000\nrequest 2 prefix 400000\nrequest 3 prefix 470000\nresult subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed\nrequest 4 prefix 459999\nrequest 5 prefix 460000\nsettled: billed 7 micro-USD\n");
     assert_eq!(jump.ended().0, Cause::Signalled(Stop::Interrupt));
     assert_eq!(flushes(&jump), 1);
 }
@@ -1014,7 +1032,7 @@ fn unreadable_and_foreign_lines_are_skipped_and_never_printed() {
         Out(at("m1", 10)),
         Out(result_line()),
     ]);
-    assert_eq!(ran.out, "request 1 prefix 10\nsettled: billed 7 micro-USD\n");
+    assert_eq!(ran.out, "request 1 prefix 10\nresult subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed\nsettled: billed 7 micro-USD\n");
     let outcome = ran.outcome.as_ref().unwrap().to_string();
     assert!(!ran.out.contains(canary) && !outcome.contains(canary));
     assert!(!ran.written().iter().any(|text| text.contains(canary)), "nothing from the stream is written back");
@@ -1214,7 +1232,7 @@ mod process {
         let mut out = Vec::new();
         let outcome = carry(&Seen::of(&mind), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
         assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000 });
-        assert_eq!(String::from_utf8(out).unwrap(), "request 1 prefix 10\nrequest 2 prefix 300000\nsettled: billed 7 micro-USD\n");
+        assert_eq!(String::from_utf8(out).unwrap(), "request 1 prefix 10\nrequest 2 prefix 300000\nresult subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed\nsettled: billed 7 micro-USD\n");
     }
 
     #[test]
