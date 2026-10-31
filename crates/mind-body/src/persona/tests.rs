@@ -1040,6 +1040,7 @@ fn a_missing_doctrine_file_fails_the_turn_before_the_connector_is_called() {
 
 #[test]
 fn doctrine_over_the_bound_is_refused_and_exactly_the_bound_is_not() {
+    assert_eq!(DOCTRINE_MAX_BYTES, 98_304, "96 KiB");
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
     let big = write_doctrine(&rig, "big.md", &"x".repeat(DOCTRINE_MAX_BYTES + 1));
     let Outcome::Served { failure, .. } = rig.go_with(&Config { doctrine: vec![big], ..config() }) else { panic!("served") };
