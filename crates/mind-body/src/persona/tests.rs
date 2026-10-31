@@ -865,8 +865,7 @@ fn a_turn_shows_her_stewardships_follow_ups_and_the_rulings_they_cite() {
     rig.mind.committed(vec![ruling("client-first", None)]);
     rig.mind.committed(vec![steward_of("GameCult/cinny", "the chat client; design law in eureka-body:ruling:client-first.")]);
     rig.mind.committed(vec![open_follow_up("older", &ruling_ref, "Wire the thing.")]);
-    rig.mind.committed(vec![open_follow_up("newer", &spec_ref("x"), "Ship the other thing.
-Second line.")]);
+    rig.mind.committed(vec![open_follow_up("newer", &ruling_ref, "Ship the other thing.\nSecond line.")]);
     let input = first_input(&rig);
     assert!(input.contains("What you are responsible for"), "{input}");
     assert!(input.contains("- steward of GameCult/cinny: the chat client; design law in eureka-body:ruling:client-first."), "{input}");
@@ -887,7 +886,8 @@ fn a_mind_with_nothing_to_answer_for_says_so() {
 #[test]
 fn the_responsibilities_hold_their_bound_and_mark_what_they_drop() {
     let rig = Rig::new(vec![], &[]);
-    let source = spec_ref("x");
+    rig.mind.committed(vec![ruling("src", None)]);
+    let source = reference(K::Ruling, &id("ruling", "src"));
     let long = "w".repeat(400);
     for n in 0..30 {
         rig.mind.committed(vec![open_follow_up(&format!("fu-{n:02}"), &source, &long)]);

@@ -867,8 +867,7 @@ fn ruling_ids_in(text: &str) -> Vec<String> {
 /// bound drops is counted in the text.
 fn render_responsibilities(mind: &dyn MindPort, instance: &Slug) -> Result<String> {
     let claimed: Vec<PipelineRef> = live_claims(mind, instance, &[])?;
-    let mut out = String::from("What you are responsible for (from your own mind; `huginn view <id>` reads a record):
-");
+    let mut out = String::from("What you are responsible for (from your own mind; `huginn view <id>` reads a record):\n");
     let mut cited: Vec<String> = Vec::new();
     let mut cite = |ids: Vec<String>| {
         for id in ids {
@@ -880,15 +879,13 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug) -> Result<Strin
     let mut stewarded = 0;
     for steward in headers(mind, &in_force(of_kind(PipelineKind::Stewardship)))? {
         if let PipelineFacts::Stewardship { repo, note, .. } = &steward.facts {
-            out.push_str(&format!("- steward of {}: {}
-", repo.0, note.0));
+            out.push_str(&format!("- steward of {}: {}\n", repo.0, note.0));
             cite(ruling_ids_in(&note.0));
             stewarded += 1;
         }
     }
     if stewarded == 0 {
-        out.push_str("- no stewardship is in force in your mind.
-");
+        out.push_str("- no stewardship is in force in your mind.\n");
     }
     let open = Selection { descending: true, ..in_force(of_kind(PipelineKind::FollowUp)) };
     let follow_ups = headers(mind, &open)?;
@@ -898,17 +895,14 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug) -> Result<Strin
         let PipelineFacts::FollowUp { label, source, repo, item, .. } = &follow_up.facts else { continue };
         let campaign = follow_up.id.id.0.split_once(":follow_up:").map_or("", |(campaign, _)| campaign);
         let held = if claimed.contains(&follow_up.id) { " [claimed by a run]" } else { "" };
-        let line = format!("- {campaign}/{} ({}){held}: {}
-", label.0, repo.0, item.0.lines().next().unwrap_or(""));
-        let heading_cost = if heading { 0 } else { "Open follow-ups, newest first:
-".len() };
+        let line = format!("- {campaign}/{} ({}){held}: {}\n", label.0, repo.0, item.0.lines().next().unwrap_or(""));
+        let heading_cost = if heading { 0 } else { "Open follow-ups, newest first:\n".len() };
         if out.len() + heading_cost + line.len() > GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE {
             dropped += 1;
             continue;
         }
         if !heading {
-            out.push_str("Open follow-ups, newest first:
-");
+            out.push_str("Open follow-ups, newest first:\n");
             heading = true;
         }
         if source.kind == PipelineKind::Ruling {
@@ -919,18 +913,15 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug) -> Result<Strin
         shown += 1;
     }
     if shown + dropped == 0 {
-        out.push_str("- no follow-up is open in your mind.
-");
+        out.push_str("- no follow-up is open in your mind.\n");
     }
     if dropped > 0 {
-        out.push_str(&format!("({dropped} older open follow-ups not shown: `huginn query` lists them all.)
-"));
+        out.push_str(&format!("({dropped} older open follow-ups not shown: `huginn query` lists them all.)\n"));
     }
     let mut dropped_rulings = cited.len().saturating_sub(GOALS_RULINGS_MAX);
     cited.truncate(GOALS_RULINGS_MAX);
     if !cited.is_empty() {
-        out.push_str("Rulings these cite:
-");
+        out.push_str("Rulings these cite:\n");
     }
     for id in &cited {
         let keys = Selection { keys: Some(vec![id.clone()]), ..of_kind(PipelineKind::Ruling) };
@@ -941,8 +932,7 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug) -> Result<Strin
             }),
             _ => None,
         });
-        let line = format!("- {id}: {}
-", title.as_deref().unwrap_or("not in your mind"));
+        let line = format!("- {id}: {}\n", title.as_deref().unwrap_or("not in your mind"));
         if out.len() + line.len() > GOALS_MAX_BYTES {
             dropped_rulings += 1;
         } else {
@@ -950,8 +940,7 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug) -> Result<Strin
         }
     }
     if dropped_rulings > 0 {
-        out.push_str(&format!("({dropped_rulings} more cited rulings not shown.)
-"));
+        out.push_str(&format!("({dropped_rulings} more cited rulings not shown.)\n"));
     }
     Ok(out)
 }
@@ -1050,6 +1039,8 @@ fn render_input(config: &Config, deliveries: &[ChatDelivery], history: &[String]
     for line in history {
         out.push_str(&format!("- {line}\n"));
     }
+    out.push('\n');
+    out.push_str(goals);
     out.push('\n');
     if deliveries.is_empty() {
         out.push_str("No new messages. This is a scheduled wake: decide whether to speak or to start work.\n");
