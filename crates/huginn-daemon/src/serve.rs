@@ -101,7 +101,7 @@ impl Default for ServeOptions {
     }
 }
 
-/// The six things the operator supplies. Nothing here reads the environment:
+/// The things the operator supplies. Nothing here reads the environment:
 /// how Idunn supplies `--bind` is Cut 14's. The index has no off switch: an
 /// unreachable Qdrant or Ollama is a degraded projection, reported by
 /// `whoami`, not a configuration.
@@ -111,23 +111,34 @@ pub struct Options {
     pub instance: Slug,
     pub bind: SocketAddr,
     pub qdrant_url: String,
-    pub ollama_url: String,
+    /// The GPU hosts: all take embedding at once. One is the plain case.
+    pub ollama_urls: Vec<String>,
+    /// The CPU host: takes embedding only while no GPU host can.
+    pub reserve_ollama_urls: Vec<String>,
     pub embedding_model: String,
 }
 
 /// Exactly `--state-root`, `--instance`, `--bind`, `--qdrant-url`,
-/// `--ollama-url` and `--embedding-model`, each required, each once. The two
-/// URLs are plain `http://`: this build carries no TLS.
+/// `--ollama-url` and `--embedding-model`, each required, each once, except
+/// `--ollama-url`, which repeats for each GPU host, and the optional
+/// `--reserve-ollama-url`, which repeats for each CPU host. The URLs are plain
+/// `http://`: this build carries no TLS.
 pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     let mut args = args;
     let mut values: BTreeMap<String, String> = BTreeMap::new();
+    let (mut ollama_urls, mut reserve_ollama_urls) = (Vec::new(), Vec::new());
     while let Some(name) = args.next() {
         let name = name.strip_prefix("--").with_context(|| format!("expected --option, got {name:?}"))?;
         ensure!(
-            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "embedding-model"),
+            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model"),
             "unsupported Huginn option --{name}"
         );
         let value = args.next().with_context(|| format!("missing value for --{name}"))?;
+        if name == "ollama-url" || name == "reserve-ollama-url" {
+            ensure!(value.starts_with("http://"), "--{name} must be a plain http:// address, got {value:?}");
+            if name == "ollama-url" { ollama_urls.push(value) } else { reserve_ollama_urls.push(value) }
+            continue;
+        }
         ensure!(values.insert(name.to_owned(), value).is_none(), "duplicate Huginn option --{name}");
     }
     let take = |name: &str| -> Result<String> {
@@ -148,7 +159,11 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
         instance: Slug(take("instance")?),
         bind: bind.parse().with_context(|| format!("--bind must be an ip:port, got {bind:?}"))?,
         qdrant_url: url("qdrant-url")?,
-        ollama_url: url("ollama-url")?,
+        ollama_urls: {
+            ensure!(!ollama_urls.is_empty(), "--ollama-url is required; repeat it for each GPU host");
+            ollama_urls
+        },
+        reserve_ollama_urls,
         embedding_model,
     })
 }
@@ -1347,7 +1362,8 @@ mod tests {
             instance: slug(INSTANCE),
             bind: port,
             qdrant_url: "http://127.0.0.1:1".into(),
-            ollama_url: "http://127.0.0.1:1".into(),
+            ollama_urls: vec!["http://127.0.0.1:1".into()],
+            reserve_ollama_urls: Vec::new(),
             embedding_model: "a-model".into(),
         };
         let started = |options: &Options| {
@@ -1369,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn options_are_exactly_the_six_the_operator_supplies() {
+    fn options_are_the_ones_the_operator_supplies() {
         let root = if cfg!(windows) { r"C:\state" } else { "/state" };
         let args = |values: &[&str]| values.iter().map(|value| value.to_string()).collect::<Vec<_>>().into_iter();
         let good = [
@@ -1383,7 +1399,8 @@ mod tests {
                 instance: slug("yggdrasil"),
                 bind: "127.0.0.1:17872".parse().unwrap(),
                 qdrant_url: "http://127.0.0.1:6333".into(),
-                ollama_url: "http://10.77.0.4:11434".into(),
+                ollama_urls: vec!["http://10.77.0.4:11434".into()],
+                reserve_ollama_urls: Vec::new(),
                 embedding_model: "qwen3-embedding:0.6b".into(),
             }
         );
@@ -1411,5 +1428,11 @@ mod tests {
         ] {
             assert!(parse_options(args(&bad)).is_err(), "{bad:?}");
         }
+        // The GPU hosts and the CPU host repeat; a lone --ollama-url is the plain case.
+        let pooled = [good.to_vec(), vec!["--ollama-url", "http://10.77.0.2:11434", "--reserve-ollama-url", "http://127.0.0.1:11434"]].concat();
+        let parsed = parse_options(args(&pooled)).unwrap();
+        assert_eq!(parsed.ollama_urls, ["http://10.77.0.4:11434", "http://10.77.0.2:11434"]);
+        assert_eq!(parsed.reserve_ollama_urls, ["http://127.0.0.1:11434"]);
+        assert!(parse_options(args(&[good.to_vec(), vec!["--reserve-ollama-url", "127.0.0.1:11434"]].concat())).is_err());
     }
 }

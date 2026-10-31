@@ -73,3 +73,11 @@ impl Embedder for OllamaEmbedder {
             .collect()
     }
 }
+
+/// One pool over Ollama endpoints serving `model`: the `primaries` (GPU hosts)
+/// share the work and the `reserve` (CPU hosts) serve only when none of them
+/// can. The one embedder client of every Huginn process that embeds.
+pub fn pool(primaries: &[String], reserve: &[String], model: &str) -> super::pool::EmbedderPool<OllamaEmbedder> {
+    let endpoint = |url: &String| (url.clone(), OllamaEmbedder::new(url, model));
+    super::pool::EmbedderPool::new(primaries.iter().map(endpoint).collect(), reserve.iter().map(endpoint).collect())
+}

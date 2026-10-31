@@ -7,8 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, ensure};
-use huginn_daemon::index::ollama::OllamaEmbedder;
-use huginn_daemon::index::pool::EmbedderPool;
+use huginn_daemon::index::ollama::pool;
 use huginn_daemon::index::qdrant::QdrantIndex;
 use huginn_daemon::sources::forge::HttpForge;
 use huginn_daemon::sources::refresh;
@@ -77,8 +76,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let endpoint = |url: &String| (url.clone(), OllamaEmbedder::new(url, &options.embedding_model));
-    let mut embedder = EmbedderPool::new(options.ollama_urls.iter().map(endpoint).collect(), options.reserve_urls.iter().map(endpoint).collect());
+    let mut embedder = pool(&options.ollama_urls, &options.reserve_urls, &options.embedding_model);
     let mut index = QdrantIndex::new(&options.qdrant_url);
     let mut forge = HttpForge::new(&options.forge_url);
     let mut journal = |report: &huginn_daemon::sources::Report| println!("{report}");
