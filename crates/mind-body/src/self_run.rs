@@ -110,6 +110,43 @@ pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota
     )
 }
 
+/// The task section of the start message: one section per claim, in claim
+/// order. A claimed follow-up gives its id, campaign and `item` verbatim,
+/// because the brief lives in the claim and a run that cannot reach its mind
+/// would never see its job; a claimed cut spec is named as the task, to be read
+/// with `huginn view`; a claim the mind does not hold, or of another kind, is
+/// named by id. The claims are bounded by their types, so nothing is cut. A mind
+/// that cannot answer is an error: the run is not started on a guessed task.
+fn task_section(mind: &dyn MindPort, claims: &[PipelineRef]) -> Result<String> {
+    let mut task = String::new();
+    for claim in claims {
+        let one = Selection { keys: Some(vec![claim.id.0.clone()]), projection: "document".into(), ..Selection::default() };
+        let page = mind.query(&one).with_context(|| format!("the claim `{}` could not be read from the mind", claim.id.0))?;
+        let PipelinePageItems::Documents(views) = page.items else { bail!("the mind answered headers to a document selection") };
+        let id = &claim.id.0;
+        match views.into_iter().next().map(|view| view.document) {
+            Some(PipelineDocument::FollowUp(follow_up)) => {
+                task.push_str(&format!("
+
+Task, claimed follow-up `{id}` (campaign `{}`):
+{}", follow_up.campaign.0, follow_up.item.0));
+            }
+            Some(PipelineDocument::CutSpec(spec)) => {
+                task.push_str(&format!("
+
+Task, claimed cut spec `{id}` (campaign `{}`): the spec is the task; read it with `huginn view`.", spec.campaign.0));
+            }
+            Some(_) => task.push_str(&format!("
+
+The run claims `{id}` ({:?}), which is no brief: its task is unknown.", claim.kind)),
+            None => task.push_str(&format!("
+
+The run claims `{id}`, which the mind does not hold: its task is unknown.")),
+        }
+    }
+    Ok(task)
+}
+
 /// What the child is told once, at the context ceiling.
 pub const FLUSH_MESSAGE: &str = "The context ceiling is reached. Admit to the mind what it lacks, close your run, and end.";
 
@@ -286,13 +323,18 @@ impl fmt::Display for SelfRunOutcome {
     }
 }
 
-/// Her one open Self run, read through the launch primitive holder reader.
-/// Anything but exactly one run is none: the mind admits at most one Self run of
-/// hers in force, and the launch that opens the next closes a dead one.
-fn her_run(mind: &dyn MindPort) -> Result<Option<PipelineRef>> {
+/// Her one open Self run and its claims, read through the launch primitive holder
+/// reader. Anything but exactly one run is none: the mind admits at most one Self
+/// run of hers in force, and the launch that opens the next closes a dead one.
+fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, Vec<PipelineRef>)>> {
     let mut held = holders(mind, mind.instance(), RunTurn::SelfRun)?;
     let (Some(run), None) = (held.pop(), held.pop()) else { return Ok(None) };
-    Ok(Some(run.id))
+    let one = Selection { keys: Some(vec![run.id.id.0.clone()]), projection: "document".into(), ..Selection::default() };
+    let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
+    match views.into_iter().next().map(|view| view.document) {
+        Some(PipelineDocument::Run(document)) => Ok(Some((run.id, document.claims))),
+        _ => Err(anyhow!("the run's document could not be read")),
+    }
 }
 
 /// What the stream said at the end of the run, as the reason of its closure.
@@ -375,9 +417,10 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 /// original error) stands, a failed close of a run that ended normally is an
 /// error, and the launch that opens the next run closes the run left open.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
-    let Some(run) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
+    let Some((run, claims)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
+    let task = task_section(mind, &claims)?;
     let mut heard = Heard::default();
-    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, &run, &mut heard);
+    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &task), &mut heard);
     let closed = close_if_open(mind, clock, &run, &ran, &heard);
     if closed.is_err() {
         let _ = writeln!(out, "the run could not be closed: the next launch closes it");
@@ -390,7 +433,7 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawne
 }
 
 #[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
-fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, run: &PipelineRef, heard: &mut Heard) -> Result<SelfRunOutcome> {
+fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, task): (&PipelineRef, &str), heard: &mut Heard) -> Result<SelfRunOutcome> {
     let started_ms = unix_ms(clock.now());
     let request = LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
@@ -402,7 +445,7 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
     let child = spawner.spawn(&claude_args(session_id(run)), lease.token())?;
-    drive(mind, clock, child, run, (lease.plan_quota(), started_ms), heard, out)
+    drive(mind, clock, child, (run, task), (lease.plan_quota(), started_ms), heard, out)
 }
 
 /// The most of a result's text that reaches the journal.
@@ -440,9 +483,9 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
 }
 
 /// The loop: facts in, one clock read per fact, actions out.
-fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run: &PipelineRef, (plan_quota, now_ms): (&[PlanQuota], u64), heard: &mut Heard, out: &mut dyn Write) -> Result<SelfRunOutcome> {
+fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, (run, task): (&PipelineRef, &str), (plan_quota, now_ms): (&[PlanQuota], u64), heard: &mut Heard, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
-    child.write_line(&user_line(&start_message(mind.instance(), run, plan_quota, now_ms)));
+    child.write_line(&user_line(&format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms))));
 
     let mut state = State::default();
     let mut now = clock.now();
