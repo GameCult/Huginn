@@ -187,16 +187,18 @@ mind_body::lease_client: struct SocketLender  pub-fields[]
 mind_body::lease_client: struct TokenFd  pub-fields[]
 mind_body::lease_client: struct TokenUsage # [derive (Clone , Debug , Default , PartialEq , Eq , Serialize , Deserialize)] pub-fields[input_tokens: u64, cache_read_tokens: u64, cache_write_tokens: u64, output_tokens: u64, reasoning_tokens: Option < u64 >]
 mind_body::lease_client::socket: impl Lease for Granted
-mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Readout , Connector , Undecodable , RoomNotAllowed , Send , SelfRun , Ack , }
+mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Doctrine , DoctrineTooLarge , Readout , Connector , Undecodable , RoomNotAllowed , Send , SelfRun , Ack , }
 mind_body::persona: # [derive (Debug , PartialEq , Eq)] pub enum Outcome { Dead (HeldReason) , NoRun , Served { run : PipelineRef , answered : u32 , failure : Option < Failure > , self_run : Option < PipelineRef > } , }
 mind_body::persona: const AGENT : & str
+mind_body::persona: const DOCTRINE_MAX_BYTES : usize
 mind_body::persona: const ENV_BURN_ROOM : & str
+mind_body::persona: const ENV_DOCTRINE : & str
 mind_body::persona: const ENV_OPERATOR : & str
 mind_body::persona: const ENV_ROOMS : & str
 mind_body::persona: const ENV_SELF_SENDER : & str
 mind_body::persona: const MAX_TURNS_PER_START : u32
 mind_body::persona: fn burn_line (readout : & SpendReadout , caller : & str , heat : Option < Decimal > , live_runs : usize) -> Option < String >
-mind_body::persona: fn reply_schema (rooms : & [String]) -> String
+mind_body::persona: fn reply_schema (rooms : & [String] , campaigns : & [String]) -> String
 mind_body::persona: fn start (organs : & Organs , control : & impl ControlSource , swarm : & impl ControlSource , config : & Config) -> Result < Outcome >
 mind_body::persona: impl Config
 mind_body::persona: impl Config: fn from_args (args : & [String] , usage : & str) -> Result < (Self , Vec < String >) >
@@ -215,7 +217,7 @@ mind_body::persona: pub trait Connector { fn turn (& self , request : & TurnRequ
 mind_body::persona: pub trait PersonaState { fn instructions (& self) -> Result < String > ; }
 mind_body::persona: pub trait Trace { fn record (& self , trace : & TurnTrace) -> Result < () > ; }
 mind_body::persona: pub use model_connector :: { CallerSpend , PlanQuota , SpendReadout } ;
-mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[rooms: Vec < String >, burn_room: String, operators: Vec < String >, own_sender: String, max_turns: u32]
+mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[rooms: Vec < String >, burn_room: String, operators: Vec < String >, own_sender: String, max_turns: u32, doctrine: Vec < PathBuf >]
 mind_body::persona: struct FileTrace  pub-fields[]
 mind_body::persona: struct HuginnPersona  pub-fields[]
 mind_body::persona: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, chat: & 'a dyn Chat, connector: & 'a dyn Connector, persona: & 'a dyn PersonaState, trace: & 'a dyn Trace]
