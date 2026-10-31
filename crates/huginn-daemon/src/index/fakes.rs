@@ -258,6 +258,8 @@ pub(crate) struct SourcesState {
     pub(crate) fail_upserts_after: Option<u32>,
     pub(crate) cursor_writes: Vec<std::collections::BTreeMap<String, String>>,
     pub(crate) deletes: Vec<(String, Option<Vec<String>>)>,
+    /// A delete naming this repo refuses.
+    pub(crate) fail_deletes_of: Option<String>,
     /// The repo filter and limit of every search, in order.
     pub(crate) searches: Vec<(Option<String>, u32)>,
 }
@@ -327,6 +329,9 @@ impl SourceIndex for FakeSources {
 
     fn delete_by(&mut self, repo: &str, paths: Option<&[String]>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+        if state.fail_deletes_of.as_deref() == Some(repo) {
+            bail!("the vector store refused the delete");
+        }
         state.deletes.push((repo.to_owned(), paths.map(<[String]>::to_vec)));
         state.points.retain(|_, point| {
             !(point.payload.repo == repo && paths.is_none_or(|paths| paths.contains(&point.payload.path)))

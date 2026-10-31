@@ -251,7 +251,7 @@ pub fn refresh<E: Embedder, S: SourceIndex, F: Forge>(
             eprintln!("huginn-sources: retiring nothing: {why}");
             refreshed.retirement_withheld = Some(why);
         }
-        None => retire(index, &catalog.repos, &mirrors, &mut cursors)?,
+        None => retire(index, &catalog.repos, &mirrors, &mut cursors, &mut refreshed.failed),
     }
 
     for repo in &catalog.repos {
@@ -272,13 +272,17 @@ pub fn refresh<E: Embedder, S: SourceIndex, F: Forge>(
 
 /// Drops every repo the catalog no longer lists: its chunks, its cursor and
 /// its mirror, in that order, so a failure leaves the cursor to find it again.
+/// One repo's failure is logged and named in `failed`; the others go on. Names
+/// are compared as written: a repo renamed only by case is a new repo to the
+/// index (its points carry the old spelling), so the old one is retired.
 fn retire<S: SourceIndex>(
     index: &mut S,
     catalog: &[SourceRepo],
     mirrors: &Path,
     cursors: &mut BTreeMap<String, String>,
-) -> Result<()> {
-    let listed = |name: &str| catalog.iter().any(|repo| repo.name.eq_ignore_ascii_case(name));
+    failed: &mut Vec<String>,
+) {
+    let listed = |name: &str| catalog.iter().any(|repo| repo.name == name);
     let mut gone: BTreeSet<String> = cursors.keys().filter(|name| !listed(name)).cloned().collect();
     if let Ok(entries) = std::fs::read_dir(mirrors) {
         for entry in entries.flatten() {
@@ -290,14 +294,21 @@ fn retire<S: SourceIndex>(
         }
     }
     for name in gone {
-        index.delete_by(&name, None).with_context(|| format!("deleting the chunks of retired {name}"))?;
-        if cursors.remove(&name).is_some() {
-            index.set_cursors(cursors).context("dropping a retired repo's cursor")?;
+        if let Err(error) = retire_one(index, &name, mirrors, cursors) {
+            eprintln!("huginn-sources: retiring {name} failed, the others go on: {error:#}");
+            failed.push(name);
         }
-        let mirror = Mirror::path_for(mirrors, &name);
-        if mirror.exists() {
-            std::fs::remove_dir_all(&mirror).with_context(|| format!("removing {}", mirror.display()))?;
-        }
+    }
+}
+
+fn retire_one<S: SourceIndex>(index: &mut S, name: &str, mirrors: &Path, cursors: &mut BTreeMap<String, String>) -> Result<()> {
+    index.delete_by(name, None).with_context(|| format!("deleting the chunks of retired {name}"))?;
+    if cursors.remove(name).is_some() {
+        index.set_cursors(cursors).context("dropping a retired repo's cursor")?;
+    }
+    let mirror = Mirror::path_for(mirrors, name);
+    if mirror.exists() {
+        std::fs::remove_dir_all(&mirror).with_context(|| format!("removing {}", mirror.display()))?;
     }
     Ok(())
 }

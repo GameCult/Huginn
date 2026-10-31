@@ -337,6 +337,49 @@ fn an_empty_or_short_catalog_retires_nothing() {
     assert_eq!(rig.index.held(), [held("Keep", "a.rs", 0, &k)], "a whole answer retires what the forge dropped");
 }
 
+/// A retirement that fails is that repo's failure alone: it is named, the
+/// other retirements and the live repos go on, and the failed one keeps its
+/// cursor and mirror so the next run finds it again.
+#[test]
+fn a_retire_error_skips_that_repo_and_the_run_goes_on() {
+    let (keep, first, second) = (Remote::new(), Remote::new(), Remote::new());
+    let k = keep.commit(&[("a.rs", b"a\n")], &[]);
+    first.commit(&[("b.rs", b"b\n")], &[]);
+    second.commit(&[("c.rs", b"c\n")], &[]);
+    let mut rig = Rig::new();
+    rig.converged(&mut FakeForge::of(&[("Keep", &keep), ("First", &first), ("Second", &second)]));
+    let edited = keep.commit(&[("a.rs", b"a edited\n")], &[]);
+    rig.index.state.lock().unwrap().fail_deletes_of = Some("First".into());
+
+    let (refreshed, reports) = rig.run(&mut FakeForge::of(&[("Keep", &keep)]));
+    assert_eq!(refreshed.unwrap().failed, ["First"]);
+    assert!(!rig.mirror("Second").exists() && rig.mirror("First").exists());
+    assert_eq!(rig.index.cursors().into_keys().collect::<Vec<_>>(), ["First", "Keep"]);
+    assert_eq!(reports.len(), 1, "the live repo was refreshed after the failed retirement");
+    assert_ne!(k, edited);
+
+    rig.index.state.lock().unwrap().fail_deletes_of = None;
+    rig.converged(&mut FakeForge::of(&[("Keep", &keep)]));
+    assert!(!rig.mirror("First").exists());
+    assert_eq!(rig.index.cursors().into_keys().collect::<Vec<_>>(), ["Keep"]);
+    assert_eq!(rig.index.held(), [held("Keep", "a.rs", 0, &edited)]);
+}
+
+/// A repo the forge now spells with another case is another repo to the
+/// index: the points under the old spelling do not stay behind.
+#[test]
+fn a_repo_renamed_only_by_case_keeps_no_stale_points() {
+    let remote = Remote::new();
+    remote.commit(&[("a.rs", b"a\n")], &[]);
+    let mut rig = Rig::new();
+    rig.converged(&mut FakeForge::of(&[("Demo", &remote)]));
+    let head = remote.commit(&[("b.rs", b"b\n")], &[]);
+    rig.converged(&mut FakeForge::of(&[("demo", &remote)]));
+    let repos: BTreeSet<String> = rig.index.held().into_iter().map(|(repo, _, _, _)| repo).collect();
+    assert_eq!(repos, BTreeSet::from(["demo".to_owned()]));
+    assert_eq!(rig.index.cursors().into_iter().collect::<Vec<_>>(), [("demo".to_owned(), head)]);
+}
+
 /// A mirror no cursor knows (a first ingest that never finished) is retired
 /// with its points too.
 #[test]
