@@ -436,11 +436,7 @@ fn swarm_verbs_round_trip() {
     let shown = swarm_show(root.path());
     assert!(shown.contains("brake: absent") && shown.contains("BrakeAbsent"), "{shown}");
 
-    for args in [
-        &["swarm", "brake", "release"][..],
-    ] {
-        go(root.path(), args, "alice", 5).0.unwrap();
-    }
+    go(root.path(), &["swarm", "brake", "release"], "alice", 5).0.unwrap();
     let shown = swarm_show(root.path());
     assert!(shown.contains("brake: released") && shown.contains("set_by alice"), "{shown}");
     assert!(shown.contains("Released"), "{shown}");
