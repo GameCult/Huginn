@@ -457,3 +457,51 @@ fn the_heartbeat_holds_no_usage_port_so_usage_cannot_change_a_launch() {
     again.turn(BOB, 1000);
     assert_eq!(first, again.poll());
 }
+
+/// A document of the dollar-initiative days, standing in for what an old `heartbeat.cc` holds.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "eureka.heartbeat.initiative.v1", schema = "OldInitiative")]
+struct OldInitiative {
+    #[cultcache(key = 0)]
+    initiative: String,
+}
+
+fn trace_at(seconds: i64, tempo_s: u32) -> PollTrace {
+    PollTrace { at: crate::testkit::at(seconds), tempo_s, instances: vec![], launches: vec!["ann".into()] }
+}
+
+#[test]
+fn the_file_store_keeps_the_state_and_the_traces_and_the_tempo_view_reads_the_newest_trace() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("heartbeat.cc");
+    let store = FileStore::new(&path);
+    store.check().unwrap();
+    assert_eq!((store.load().unwrap(), store.latest().unwrap()), (None, None), "no file is no state");
+    let state = HeartbeatState { last_beat_at: crate::testkit::at(5), handled_mentions: vec!["ann:e1".into()] };
+    store.save(&state).unwrap();
+    assert_eq!(store.load().unwrap(), Some(state));
+    store.record(&trace_at(20, 600)).unwrap();
+    store.record(&trace_at(10, 900)).unwrap();
+    assert_eq!(store.latest().unwrap().map(|trace| trace.tempo_s), Some(600), "the newest by time, not by write order");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644, "Persona units read it");
+    }
+}
+
+#[test]
+fn an_old_heartbeat_store_fails_closed_naming_the_file_and_is_never_migrated() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("heartbeat.cc");
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<OldInitiative>().unwrap();
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    cache.pull_all_backing_stores().unwrap();
+    cache.put("eureka", &OldInitiative { initiative: "3.5".into() }).unwrap();
+    let store = FileStore::new(&path);
+    for result in [store.check().map(|()| ()), store.load().map(|_| ()), store.latest().map(|_| ()), store.save(&HeartbeatState { last_beat_at: crate::testkit::at(1), handled_mentions: vec![] }), store.record(&trace_at(1, 900))] {
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(error.contains(&path.display().to_string()) && error.contains("archive it, nothing migrates it"), "{error}");
+    }
+}

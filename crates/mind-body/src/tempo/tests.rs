@@ -16,6 +16,18 @@ fn mind(slug: &str, waited_s: Option<u64>) -> Standing {
 }
 
 #[test]
+fn the_score_is_the_wait_in_beats_times_ten_to_the_urgency_in_orders() {
+    let mut standing = mind("a", Some(1800));
+    assert_eq!(score(&standing, 900), 2.0, "two beats waited, no urgency");
+    assert_eq!(score(&standing, 600), 3.0);
+    standing.self_permille = 1000;
+    assert_eq!(score(&standing, 900), 20.0, "full urgency is worth one order of magnitude");
+    standing.self_permille = 500;
+    assert!((score(&standing, 900) - 2.0 * 10f64.sqrt()).abs() < 1e-9);
+    assert_eq!(score(&mind("never", None), 900), f64::INFINITY);
+}
+
+#[test]
 fn no_votes_is_the_default_beat() {
     assert_eq!(tally(&[]), DEFAULT_BEAT_S);
     assert_eq!(DEFAULT_BEAT_S, 900);

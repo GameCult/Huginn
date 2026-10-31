@@ -2448,6 +2448,20 @@ mod tests {
         );
     }
 
+    /// A pulse is her own: one of another mind is a ForeignInstance, her own is admitted.
+    #[test]
+    fn a_pulse_of_another_mind_is_a_foreign_instance_and_her_own_is_admitted() {
+        let mut mind = with_specs();
+        let pulse = |instance: &str| {
+            D::Pulse(eureka_pipeline::PipelinePulse { instance: slug(instance), label: l("p1"), tempo_vote_beat_s: Some(600), urgency_permille: None, note: "".into() })
+        };
+        assert_eq!(
+            refusal(admit(&mut mind, vec![pulse(OTHER_INSTANCE)])),
+            MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() }
+        );
+        committed(admit(&mut mind, vec![pulse(INSTANCE)]));
+    }
+
     /// A run ends: Recorded or Withdrawn, and no other outcome.
     #[test]
     fn a_run_resolves_recorded_or_withdrawn_and_nothing_else() {

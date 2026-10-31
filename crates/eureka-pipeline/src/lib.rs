@@ -1699,6 +1699,25 @@ mod tests {
         }
     }
 
+    /// A pulse votes a tempo in bounds, declares an urgency in bounds, or does both; a pulse that does neither is refused.
+    #[test]
+    fn a_pulse_is_in_bounds_and_says_something() {
+        let validated = |beat: Option<u32>, urgency: Option<u16>| {
+            PipelineDocument::Pulse(PipelinePulse { instance: slug(INSTANCE), label: l("2026-10-31t041200-t0"), tempo_vote_beat_s: beat, urgency_permille: urgency, note: "".into() }).validate()
+        };
+        for (beat, urgency) in [(Some(60), None), (Some(86_400), None), (None, Some(0)), (None, Some(1000)), (Some(600), Some(250))] {
+            assert_eq!(validated(beat, urgency), Ok(()), "{beat:?} {urgency:?}");
+        }
+        for (beat, urgency, field) in [
+            (Some(59), None, "pulse.tempo_vote_beat_s"),
+            (Some(86_401), None, "pulse.tempo_vote_beat_s"),
+            (None, Some(1001), "pulse.urgency_permille"),
+            (None, None, "pulse.tempo_vote_beat_s"),
+        ] {
+            assert!(matches!(validated(beat, urgency), Err(PipelineRefusal::InvalidFormat { field: f, .. }) if f == field), "{beat:?} {urgency:?}");
+        }
+    }
+
     /// Bounds: a run's campaigns and claims stop at their maximums.
     #[test]
     fn a_runs_lists_are_bounded() {
