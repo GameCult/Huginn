@@ -2099,7 +2099,6 @@
         },
         "pins": {
           "$ref": "#/$defs/Line"
-ygg-verify: exit 0
         }
       },
       "required": [
