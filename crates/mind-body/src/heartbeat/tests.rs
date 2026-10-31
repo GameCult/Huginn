@@ -594,7 +594,7 @@ fn ann_queries_with(pulses: usize, beat: Option<u32>, urgency: Option<u16>) -> u
     rig.turn(BOB, 100_000);
     let mut done = 0;
     while done < pulses {
-        let batch = (pulses - done).min(250);
+        let batch = (pulses - done).min(50);
         rig.minds[ANN].admit_at(rig.now() - Duration::seconds(90_000));
         rig.minds[ANN].committed(
             (0..batch)

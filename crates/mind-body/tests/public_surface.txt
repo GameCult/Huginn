@@ -94,7 +94,6 @@ mind_body::heartbeat: impl Control for FileControl
 mind_body::heartbeat: impl FileStore
 mind_body::heartbeat: impl FileStore: fn check (& self) -> Result < () >
 mind_body::heartbeat: impl FileStore: fn new (path : impl Into < PathBuf >) -> Self
-mind_body::heartbeat: impl MindRead
 mind_body::heartbeat: impl PersonaId
 mind_body::heartbeat: impl PersonaId: fn parse (spec : & str) -> Result < Self >
 mind_body::heartbeat: impl Row < '_ >
