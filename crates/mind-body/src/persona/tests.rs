@@ -883,6 +883,36 @@ fn a_mind_with_nothing_to_answer_for_says_so() {
     assert!(!text.contains("Rulings these cite"), "{text}");
 }
 
+fn titled(label: &str, title: &str) -> PipelineDocument {
+    let PipelineDocument::Ruling(mut ruling) = ruling(label, None) else { unreachable!() };
+    ruling.title = title.into();
+    PipelineDocument::Ruling(ruling)
+}
+
+#[test]
+fn rulings_named_in_a_note_or_an_item_are_resolved_by_their_own_title() {
+    let rig = Rig::new(vec![], &[]);
+    rig.mind.committed(vec![titled("src", "Source"), titled("from-note", "Note law"), titled("from-item", "Item law"), titled("other", "Not cited")]);
+    let src = reference(K::Ruling, &id("ruling", "src"));
+    rig.mind.committed(vec![steward_of("GameCult/cinny", "law: eureka-body:ruling:from-note, and eureka-body:ruling:ghost.")]);
+    rig.mind.committed(vec![open_follow_up("fu", &src, "See eureka-body:ruling:from-item; not x:ruling or :ruling:y.")]);
+    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    for line in ["- eureka-body:ruling:from-note: Note law", "- eureka-body:ruling:from-item: Item law", "- eureka-body:ruling:src: Source", "- eureka-body:ruling:ghost: not in your mind"] {
+        assert!(text.contains(line), "{text}");
+    }
+    assert!(!text.contains("Not cited") && !text.contains("x:ruling") && !text.contains("- :ruling:y"), "{text}");
+}
+
+#[test]
+fn more_than_the_most_cited_rulings_are_counted_not_listed() {
+    let rig = Rig::new(vec![], &[]);
+    let cites: Vec<String> = (0..14).map(|n| format!("eureka-body:ruling:r{n:02}")).collect();
+    rig.mind.committed(vec![steward_of("GameCult/cinny", &cites.join(" "))]);
+    let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    assert_eq!(text.matches("- eureka-body:ruling:r").count(), GOALS_RULINGS_MAX, "{text}");
+    assert!(text.contains("(2 more cited rulings not shown.)"), "{text}");
+}
+
 #[test]
 fn the_responsibilities_hold_their_bound_and_mark_what_they_drop() {
     let rig = Rig::new(vec![], &[]);
@@ -896,6 +926,11 @@ fn the_responsibilities_hold_their_bound_and_mark_what_they_drop() {
     assert!(text.len() <= GOALS_MAX_BYTES, "{}", text.len());
     assert!(text.contains("older open follow-ups not shown"), "{text}");
     assert!(text.contains("fu-29") && !text.contains("fu-00"), "{text}");
+    let listed = text.matches("- eureka-body/fu-").count();
+    let said: usize = text.split('(').find_map(|part| part.split_once(" older open").and_then(|(n, _)| n.parse().ok())).unwrap();
+    assert_eq!(listed + said, 30, "{text}");
+    let held = text.split("Rulings these cite").next().unwrap().len();
+    assert!(held <= GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE && held + 420 > GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE, "{held}");
 }
 
 fn input_for(mentions: &[&str], display: &str) -> String {

@@ -876,43 +876,38 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug) -> Result<Strin
             }
         }
     };
-    let mut stewarded = 0;
-    for steward in headers(mind, &in_force(of_kind(PipelineKind::Stewardship)))? {
+    let stewards = headers(mind, &in_force(of_kind(PipelineKind::Stewardship)))?;
+    for steward in &stewards {
         if let PipelineFacts::Stewardship { repo, note, .. } = &steward.facts {
             out.push_str(&format!("- steward of {}: {}\n", repo.0, note.0));
             cite(ruling_ids_in(&note.0));
-            stewarded += 1;
         }
     }
-    if stewarded == 0 {
+    if stewards.is_empty() {
         out.push_str("- no stewardship is in force in your mind.\n");
     }
     let open = Selection { descending: true, ..in_force(of_kind(PipelineKind::FollowUp)) };
     let follow_ups = headers(mind, &open)?;
-    let (mut shown, mut dropped) = (0, 0);
-    let mut heading = false;
+    let mut dropped = 0;
+    if !follow_ups.is_empty() {
+        out.push_str("Open follow-ups, newest first:\n");
+    }
     for follow_up in &follow_ups {
         let PipelineFacts::FollowUp { label, source, repo, item, .. } = &follow_up.facts else { continue };
         let campaign = follow_up.id.id.0.split_once(":follow_up:").map_or("", |(campaign, _)| campaign);
         let held = if claimed.contains(&follow_up.id) { " [claimed by a run]" } else { "" };
         let line = format!("- {campaign}/{} ({}){held}: {}\n", label.0, repo.0, item.0.lines().next().unwrap_or(""));
-        let heading_cost = if heading { 0 } else { "Open follow-ups, newest first:\n".len() };
-        if out.len() + heading_cost + line.len() > GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE {
+        if out.len() + line.len() > GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE {
             dropped += 1;
             continue;
-        }
-        if !heading {
-            out.push_str("Open follow-ups, newest first:\n");
-            heading = true;
         }
         if source.kind == PipelineKind::Ruling {
             cite(vec![source.id.0.clone()]);
         }
         cite(ruling_ids_in(&item.0));
         out.push_str(&line);
-        shown += 1;
     }
-    if shown + dropped == 0 {
+    if follow_ups.is_empty() {
         out.push_str("- no follow-up is open in your mind.\n");
     }
     if dropped > 0 {
