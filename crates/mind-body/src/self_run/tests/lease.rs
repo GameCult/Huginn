@@ -6,19 +6,6 @@ use eureka_pipeline::ResolutionOutcome;
 
 use super::*;
 
-/// A real assistant record with all four counters of its usage set.
-fn billed(id: &str, input: u64, read: u64, write: u64, output: u64) -> String {
-    let mut event: Value = serde_json::from_str(&request(id, input, read, write)).unwrap();
-    event["message"]["usage"]["output_tokens"] = json!(output);
-    event.to_string()
-}
-
-fn subagent_billed(id: &str, input: u64, read: u64, write: u64, output: u64) -> String {
-    let mut event: Value = serde_json::from_str(&billed(id, input, read, write, output)).unwrap();
-    event["parent_tool_use_id"] = json!("toolu_0001");
-    event.to_string()
-}
-
 fn never_spawns() -> Fake {
     Fake { child: RefCell::new(None), spawns: RefCell::new(Vec::new()), refuse: false }
 }
@@ -62,16 +49,6 @@ fn a_connector_that_cannot_be_reached_is_an_error_that_starts_nothing_and_closes
     let closure = mind.view(K::Resolution, &format!("{INSTANCE}:resolution:run.selfrun-a.n1")).expect("the run is closed");
     let PipelineDocument::Resolution(closure) = closure.document else { panic!("not a resolution") };
     assert!(matches!(&closure.outcome, ResolutionOutcome::Recorded { reason } if reason.0.contains("the actuator failed")), "{:?}", closure.outcome);
-}
-
-fn result_stating(models: Value) -> String {
-    let mut event: Value = serde_json::from_str(&result_line()).unwrap();
-    event["modelUsage"] = models;
-    event.to_string()
-}
-
-fn stated(input: u64, read: u64, write: u64, output: u64) -> Value {
-    json!({"inputTokens": input, "cacheReadInputTokens": read, "cacheCreationInputTokens": write, "outputTokens": output, "costUSD": 0.5, "contextWindow": 200000})
 }
 
 #[test]

@@ -156,24 +156,6 @@ mod grant {
     }
 }
 
-/// The swarm store: `<root>/swarm.cc`, read by `read_envelope`.
-mod swarm {
-    use super::*;
-
-    fn swarm_file(dir: &Path) -> PathBuf {
-        swarm_path(dir)
-    }
-
-    fn envelope_at(dir: &Path) -> SwarmEffective {
-        with_root(dir, read_envelope)
-    }
-
-    fn slug(name: &str) -> Slug {
-        Slug(name.into())
-    }
-
-}
-
 /// The swarm store with its brake released, and nothing else in it.
 fn release_swarm(root: &Path) {
     SwarmWriter::open(swarm_path(root)).unwrap().set_brake(true, at(0), "op").unwrap();

@@ -343,10 +343,6 @@ impl Ran {
             .collect()
     }
 
-    fn count_all(&self, wanted: &Event) -> usize {
-        self.all.iter().filter(|event| *event == wanted).count()
-    }
-
     fn count(&self, wanted: &Event) -> usize {
         self.events.iter().filter(|event| *event == wanted).count()
     }
