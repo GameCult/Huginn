@@ -99,7 +99,7 @@ enum Step {
     Do(i64, Rc<dyn Fn()>),
 }
 
-use Step::{Eof, Exit, Idle, Line as Out};
+use Step::{After, Eof, Exit, Idle, Line as Out};
 
 struct Scripted {
     steps: VecDeque<Step>,

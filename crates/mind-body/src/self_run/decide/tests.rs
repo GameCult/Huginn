@@ -287,43 +287,6 @@ fn without_a_flush_nothing_is_ever_signalled_and_a_finished_run_decides_nothing_
 
 // ---- every order of events ------------------------------------------------------
 
-/// What can happen next, each at a time after the last.
-#[derive(Clone, Copy, Debug)]
-enum Sym {
-    Low,
-    AtCeiling,
-    Huge,
-    Repeat,
-    Result,
-    Exit(Option<i32>),
-    Eof,
-    Soon,
-    Bound,
-    Grace,
-}
-
-const ALPHABET: [Sym; 11] = [
-    Sym::Low,
-    Sym::AtCeiling,
-    Sym::Huge,
-    Sym::Repeat,
-    Sym::Result,
-    Sym::Exit(Some(0)),
-    Sym::Exit(None),
-    Sym::Eof,
-    Sym::Soon,
-    Sym::Bound,
-    Sym::Grace,
-];
-
-/// Which signals the operating system lets through.
-#[derive(Clone, Copy, Debug)]
-enum Policy {
-    All,
-    Nothing,
-    NoKill,
-}
-
 /// The facts of the history, kept apart from `State`: what the invariants are asked of.
 #[derive(Default)]
 struct Oracle {
