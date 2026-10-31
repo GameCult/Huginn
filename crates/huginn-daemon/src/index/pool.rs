@@ -109,15 +109,17 @@ impl Roster {
         }
         let pinned = self.pinned.clone();
         for member in &mut self.members {
-            let why = match (&pinned, member.seen.take()) {
+            let why = match (&pinned, &member.seen) {
                 (_, None) | (None, Some(Ok(_))) => continue,
-                (_, Some(Err(why))) => why,
-                (Some(pinned), Some(Ok(identity))) if *pinned == identity => {
+                (_, Some(Err(why))) => why.clone(),
+                (Some(pinned), Some(Ok(identity))) if pinned == identity => {
                     member.out = None;
+                    member.seen = None;
                     continue;
                 }
                 (Some(pinned), Some(Ok(identity))) => format!("serves {identity:?}, not {pinned:?}"),
             };
+            member.seen = None;
             eprintln!("huginn embedder pool: {} is out of the pool: {why}", member.name);
             member.out = Some((Instant::now() + retry_after, why));
         }
