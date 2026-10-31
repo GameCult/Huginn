@@ -82,6 +82,14 @@ fn a_result_ends_a_turn_and_never_closes_the_input_while_a_brief_waits_or_the_ca
     assert_eq!(last(vec![(RESULT, 0), (Event::Inbox { pending: true }, 10), (Event::Told, 10), (Event::Tick, 11)]), Action::None);
     let waiting = |seconds: i64| last(vec![(RESULT, 0), (Event::Inbox { pending: true }, 10), (Event::Tick, seconds)]);
     assert_eq!(waiting(TTL_1H_S * 3), Action::WriteTells, "a waiting brief outranks the cache's end");
+    // The loop is woken at once for a waiting brief, and for a finished flush, not at the cache's end.
+    let (state, _) = run(vec![(RESULT, 5), (Event::Inbox { pending: true }, 6)]);
+    assert_eq!(next_deadline(&state), Some(t(5)));
+    let (state, _) = run(vec![(RESULT, 5), (Event::Tick, 5 + TTL_1H_S - TTL_MARGIN_S)]);
+    assert_eq!(next_deadline(&state), Some(t(5 + TTL_1H_S - TTL_MARGIN_S + GRACE)), "the flush's own grace: the turn runs");
+    let (state, _) = run(vec![(RESULT, 5), (Event::Tick, 5 + TTL_1H_S - TTL_MARGIN_S), (SHORT_RESULT, 6 + TTL_1H_S)]);
+    assert_eq!(state.idle_s(t(10 + TTL_1H_S)), Some(4));
+    assert_eq!(working().idle_s(t(1)), None);
     // Mid-turn, a brief is the hook's: the actuator writes nothing, and the next result comes.
     assert_eq!(last(vec![(Event::Inbox { pending: true }, 10)]), Action::None);
     assert_eq!(last(vec![(Event::Inbox { pending: true }, 10), (RESULT, 20), (Event::Tick, 20)]), Action::WriteTells);

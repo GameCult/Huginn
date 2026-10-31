@@ -1603,6 +1603,8 @@ fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_
     let flush_at = hour.events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains(FLUSH_MESSAGE))).unwrap();
     let closed_at = hour.events.iter().position(|event| *event == Event::InputClosed).unwrap();
     assert!(flush_at < closed_at && hour.count(&Event::InputClosed) == 1, "{:?}", hour.events);
+    assert!(hour.out.contains("decision WriteFlush prefix 10 ttl_s 3600 idle_s 3540 inbox false
+"), "{}", hour.out);
     // Five minutes' cache: the flush at 240 s.
     let short = go(vec![Out(five_minute_request("m1", 10)), Out(result_line()), Idle(239), Idle(1), Out(result_line()), Idle(1)]);
     assert_eq!(flushes(&short), 1);
