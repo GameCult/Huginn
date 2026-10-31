@@ -1472,13 +1472,13 @@ mod tests {
                 note: "n".into(),
             })
         };
-        committed(admit(&mut mind, vec![pulse("both", Some(60), Some(1)), pulse("vote", Some(60), None), pulse("urge", None, Some(1)), pulse("none", None, None)]));
+        committed(admit(&mut mind, vec![pulse("vote", Some(60), None), pulse("urge", None, Some(1)), pulse("vote2", Some(90), None)]));
         let asking = |alias: &str| {
             let selection = Selection { descending: true, limit: Some(1), ..with(of_kinds(&[K::Pulse]), any_of(alias, &["true"])) };
             ids(&mind.query(&selection).unwrap())
         };
         let pulse_id = |label: &str| format!("{INSTANCE}:pulse:{label}");
-        assert_eq!(asking("voted"), vec![pulse_id("vote")]);
+        assert_eq!(asking("voted"), vec![pulse_id("vote2")]);
         assert_eq!(asking("urged"), vec![pulse_id("urge")]);
         let outside = with(of_kinds(&[K::Pulse]), any_of("voted", &["false"]));
         assert!(invalid("fields[0].values", "false")(&refused(&mind, &outside)));
