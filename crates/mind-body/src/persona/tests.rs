@@ -900,7 +900,9 @@ fn rulings_named_in_a_note_or_an_item_are_resolved_by_their_own_title() {
     for line in ["- eureka-body:ruling:from-note: Note law", "- eureka-body:ruling:from-item: Item law", "- eureka-body:ruling:src: Source", "- eureka-body:ruling:ghost: not in your mind"] {
         assert!(text.contains(line), "{text}");
     }
-    assert!(!text.contains("Not cited") && !text.contains("x:ruling") && !text.contains("- :ruling:y"), "{text}");
+    let listed = text.split("Rulings these cite").nth(1).unwrap();
+    assert_eq!(listed.lines().filter(|line| line.starts_with("- ")).count(), 4, "{text}");
+    assert!(!listed.contains("Not cited"), "{text}");
 }
 
 #[test]
