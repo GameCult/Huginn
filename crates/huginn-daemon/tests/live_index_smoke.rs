@@ -132,3 +132,62 @@ fn serde_json_free_query(vector: &[f32]) -> String {
     let numbers: Vec<String> = vector.iter().map(|value| value.to_string()).collect();
     format!("{{\"vector\":[{}],\"limit\":1}}", numbers.join(","))
 }
+
+/// One forge repo, however many the forge lists: the live check refreshes a
+/// single small repo, not the corpus.
+struct OneRepo {
+    inner: huginn_daemon::sources::forge::HttpForge,
+    name: String,
+}
+
+impl huginn_daemon::sources::Forge for OneRepo {
+    fn catalog(&mut self) -> anyhow::Result<huginn_daemon::sources::Catalog> {
+        // One repo of the forge on purpose: this list is a subset, not the forge's count.
+        let repos = self.inner.catalog()?.repos.into_iter().filter(|repo| repo.name == self.name).collect();
+        Ok(huginn_daemon::sources::Catalog { repos, shortfall: None })
+    }
+
+    fn clone_url(&self, name: &str) -> String {
+        self.inner.clone_url(name)
+    }
+}
+
+/// Refreshes one small public repo into a scratch source collection, searches
+/// it, and deletes the collection. Needs `HUGINN_SMOKE_FORGE` (the forge's
+/// loopback address, so run it on Yggdrasil) and `HUGINN_SMOKE_REPO` beside
+/// the other three variables. The collection is the scratch one alone;
+/// `huginn_sources` is never named.
+#[test]
+#[ignore = "needs a live Qdrant, Ollama and forge, and writes a scratch collection"]
+fn a_small_repo_is_refreshed_into_a_scratch_source_collection_and_found() {
+    use huginn_daemon::sources::{Forge, forge::HttpForge, refresh};
+    let (qdrant, ollama, model) = (env("HUGINN_SMOKE_QDRANT"), env("HUGINN_SMOKE_OLLAMA"), env("HUGINN_SMOKE_MODEL"));
+    let (forge, repo) = (env("HUGINN_SMOKE_FORGE"), env("HUGINN_SMOKE_REPO"));
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let scratch = format!("huginn-smoke-sources-{:x}-{stamp:x}", std::process::id());
+    let root = std::env::temp_dir().join(&scratch);
+
+    let mut embedder = OllamaEmbedder::new(&ollama, &model);
+    let mut index = QdrantIndex::new(&qdrant).with_sources_collection(&scratch);
+    let mut forge = OneRepo { inner: HttpForge::new(&forge), name: repo.clone() };
+    assert_eq!(forge.catalog().unwrap().repos.len(), 1, "{repo} is a public, live, non-empty repo on this forge");
+    let mut lines = Vec::new();
+    let refreshed = refresh(&mut embedder, &mut index, &mut forge, &root, &mut |report| lines.push(report.to_string()));
+    let found = refreshed
+        .as_ref()
+        .ok()
+        .and_then(|_| {
+            let query = huginn_mind::SourceQuery {
+                text: huginn_mind::eureka_pipeline::Line("what does this repository do".into()),
+                top_k: 3,
+                repo: None,
+            };
+            huginn_daemon::sources::search(&mut embedder, &mut index, &query, Duration::from_secs(60)).ok()
+        });
+    let _ = raw("DELETE", &format!("{qdrant}/collections/{scratch}?wait=true"), None);
+    let _ = std::fs::remove_dir_all(&root);
+    println!("journal: {lines:?}");
+    assert!(refreshed.unwrap().failed.is_empty());
+    let found = found.expect("a search answers from the scratch collection");
+    assert!(!found.hits.is_empty() && found.hits.iter().all(|hit| hit.repo == repo));
+}

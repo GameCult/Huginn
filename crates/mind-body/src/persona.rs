@@ -894,7 +894,7 @@ struct Addressees {
 }
 
 fn addressees(config: &Config, mentions: &[String], names: &BTreeMap<&str, &str>) -> Addressees {
-    let to_you = mentions.iter().any(|id| *id == config.own_sender);
+    let to_you = mentions.contains(&config.own_sender);
     let others = mentions.iter().filter(|id| **id != config.own_sender).map(|id| names.get(id.as_str()).copied().unwrap_or(id.as_str()).to_string()).collect();
     Addressees { to_you, others }
 }

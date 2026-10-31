@@ -1143,6 +1143,8 @@ fn shared_with(
             closed,
             searches: searches.into(),
             found: Vec::new(),
+            source_searches: VecDeque::new(),
+            sources_found: Vec::new(),
             next_ticket: 0,
         }),
         Condvar::new(),
@@ -1967,4 +1969,118 @@ fn the_sink_owns_the_searchs_deadline_and_tells_the_loop() {
     assert!(due >= asked + deadline && due <= Instant::now() + deadline, "stamped with the sink's deadline");
     assert_eq!(<WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search_deadline(&sink), deadline);
     assert_eq!(Daemon::new(mind, sink).search_deadline(), deadline);
+}
+
+fn ask_sources(sink: &mut WorkerSink, text: &str) -> Result<SearchTicket, String> {
+    let query = SourceQuery { text: huginn_mind::eureka_pipeline::Line(text.into()), top_k: 5, repo: None };
+    <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search_sources(sink, &query)
+}
+
+fn sources_answers(sink: &mut WorkerSink, count: usize) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+    let mut all = Vec::new();
+    eventually("the source searches being answered", || {
+        all.extend(<WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::sources_searched(sink));
+        all.len() >= count
+    });
+    all
+}
+
+/// The mind's reconciliation does not gate a source search: where the sink
+/// refuses a mind search because the mind's index is being rebuilt, failing or
+/// refused, it takes a source search.
+#[test]
+fn source_search_is_not_gated_by_the_minds_index_state() {
+    use IndexStatus as S;
+    for status in [
+        S::Reconciling { pending: 4 },
+        S::Failing { pending: 1, attempts: 1, error: "boom".into() },
+        S::Refused { pending: 1, attempts: 1, reason: "not ours".into() },
+    ] {
+        let shared = shared_with(Vec::new(), None, Vec::new(), false);
+        lock(&shared).status = status.clone();
+        let mut sink = WorkerSink { shared, identified: true, deadline: SEARCH_DEADLINE };
+        assert!(ask_sink(&mut sink, "anything", 3).is_err(), "{status:?} refuses a mind search");
+        assert!(ask_sources(&mut sink, "anything").is_ok(), "{status:?} must not refuse a source search");
+    }
+}
+
+/// A worker whose mind collection is another mind's (it cannot advance and
+/// backs off) still answers a source search while it waits, and the answer is
+/// the source collection's, not an error from the mind's.
+#[test]
+fn a_worker_stuck_on_the_minds_collection_still_answers_a_source_search() {
+    use crate::sources::{DescribedSources, SourcePayload, SourcePoint, SourcesMeta};
+    let (embedder, index) = pair();
+    let mind_label = Described::Labelled(CollectionMeta {
+        managed_by: MANAGED_BY.into(),
+        instance: INSTANCE.into(),
+        mind: "another-mind".into(),
+        model: "model".into(),
+        model_digest: "d1".into(),
+        dimensions: 4,
+        index_text_version: INDEX_TEXT_VERSION,
+    });
+    index.plant(&collection_name(&slug(INSTANCE)), mind_label);
+    let meta = SourcesMeta {
+        managed_by: MANAGED_BY.into(),
+        corpus: "forge:GameCult".into(),
+        model: "model".into(),
+        model_digest: "d1".into(),
+        dimensions: 4,
+        chunker_version: 1,
+    };
+    index.sources.plant(DescribedSources::Labelled { meta, cursors: Default::default() });
+    index.sources.state.lock().unwrap().points.insert(
+        "p1".into(),
+        SourcePoint {
+            id: "p1".into(),
+            vector: vec![1.0; 4],
+            payload: SourcePayload {
+                repo: "Huginn".into(),
+                path: "a.rs".into(),
+                commit: "abc".into(),
+                blob: "b".into(),
+                line_start: 1,
+                line_end: 2,
+                chunk_index: 0,
+                ext: "rs".into(),
+                text: "fn a() {}".into(),
+            },
+        },
+    );
+    let mut sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), Some(MIND.into()), entries_of(1), quick());
+    let refused = sink.wait_status(|status| matches!(status, IndexStatus::Refused { .. }));
+    assert!(matches!(refused, IndexStatus::Refused { .. }), "{refused:?}");
+    ask_sources(&mut sink, "a function").unwrap();
+    let answered = sources_answers(&mut sink, 1).remove(0).1.expect("the source search answers");
+    assert_eq!(answered.hits.len(), 1);
+    assert_eq!((answered.hits[0].repo.as_str(), answered.hits[0].path.as_str()), ("Huginn", "a.rs"));
+    assert_eq!(answered.indexed_under.digest, "d1");
+}
+
+/// Source searches take their own tickets, share the queue's bound with the
+/// mind's searches, and an abandon removes the one ticket named from either.
+#[test]
+fn source_searches_have_distinct_tickets_share_the_queue_bound_and_abandon_by_ticket() {
+    let shared = shared_with(Vec::new(), None, Vec::new(), false);
+    let mut sink = WorkerSink { shared, identified: true, deadline: SEARCH_DEADLINE };
+    let first = ask_sources(&mut sink, "a").unwrap();
+    let second = ask_sources(&mut sink, "b").unwrap();
+    let mind = ask_sink(&mut sink, "m", 3).unwrap();
+    assert!(first != second && second != mind && first != mind, "{first:?} {second:?} {mind:?}");
+
+    abandon(&mut sink, first);
+    {
+        let guard = lock(&sink.shared);
+        let left: Vec<SearchTicket> = guard.source_searches.iter().map(|queued| queued.ticket).collect();
+        assert_eq!((left, guard.searches.len()), (vec![second], 1), "only the named ticket went");
+    }
+
+    for _ in 0..SEARCHES_QUEUED_MAX - 2 {
+        ask_sources(&mut sink, "fill").unwrap();
+    }
+    assert!(ask_sources(&mut sink, "over").is_err(), "the bound counts both kinds");
+    assert!(ask_sink(&mut sink, "over", 3).is_err(), "and refuses both kinds");
+    abandon(&mut sink, second);
+    assert!(ask_sink(&mut sink, "now", 3).is_ok(), "a freed slot is a slot");
 }

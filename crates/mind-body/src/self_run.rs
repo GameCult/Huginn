@@ -92,6 +92,9 @@ pub const SEED_VARIABLE: &str = "MIND_SELF_CONFIG_SEED";
 const TOKEN_FD_VARIABLE: &str = "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR";
 /// Tells `claude` to scrub credentials from the environment of what it starts.
 const ENV_SCRUB_VARIABLE: &str = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB";
+/// Optional, set by the unit: `off` turns that scrub off for a run whose user holds root, where it
+/// protects nothing and its sandbox's no_new_privs would only stop `sudo`. Anything else keeps it on.
+const SCRUB_VARIABLE: &str = "MIND_SELF_SCRUB";
 /// The name the start message tells her to admit as.
 pub const AGENT: &str = "mind-self-run";
 /// The namespace of the session id: the run id is the name in it.
@@ -674,6 +677,11 @@ fn child_environment(unit: &[(OsString, OsString)]) -> Vec<(&OsString, &OsString
     unit.iter().filter(|(name, _)| child_may_see(name)).map(|(name, value)| (name, value)).collect()
 }
 
+/// Whether the unit turned the child's subprocess scrub off: only `MIND_SELF_SCRUB=off` does.
+fn scrub_is_off(unit: &[(OsString, OsString)]) -> bool {
+    unit.iter().any(|(name, value)| name == SCRUB_VARIABLE && value == "off")
+}
+
 /// Starts `program` with a duplicate of the token descriptor open in it, and
 /// closes that duplicate here the moment the child exists. The lease's own
 /// descriptor is close-on-exec, so this duplicate is the child's only way to the
@@ -686,7 +694,7 @@ fn spawn_program(program: &Path, args: &[String], token: &TokenFd, unit: &[(OsSt
     command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     command.env_clear().envs(child_environment(unit));
     command.env("HOME", &config.0).env(CONFIG_DIR_VARIABLE, &config.0);
-    command.env(TOKEN_FD_VARIABLE, inheritable.number().to_string()).env(ENV_SCRUB_VARIABLE, "1");
+    command.env(TOKEN_FD_VARIABLE, inheritable.number().to_string()).env(ENV_SCRUB_VARIABLE, if scrub_is_off(unit) { "0" } else { "1" });
     // Its own process group, so that a signal reaches what the child started too.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);

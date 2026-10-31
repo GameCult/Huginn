@@ -7,13 +7,13 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use huginn_daemon::index::Backoff;
-use huginn_daemon::index::ollama::OllamaEmbedder;
+use huginn_daemon::index::ollama::pool;
 use huginn_daemon::index::qdrant::QdrantIndex;
 use huginn_daemon::serve::{ServeOptions, parse_options, run, startup};
 
 fn main() -> Result<()> {
     let options = parse_options(std::env::args().skip(1))?;
-    let embedder = OllamaEmbedder::new(&options.ollama_url, &options.embedding_model);
+    let embedder = pool(&options.ollama_urls, &options.reserve_ollama_urls, &options.embedding_model);
     let index = QdrantIndex::new(&options.qdrant_url);
     let (mut daemon, mut hub, registry) = match startup(&options, embedder, index, Backoff::default()) {
         Ok(started) => started,

@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use huginn_mind::{IndexStatus, PersonaStatus, PipelineDocumentSummary, PipelineDocumentView, PipelineStatus, PipelineStatusSummary};
+use huginn_mind::{SourceHits, IndexStatus, PersonaStatus, PipelineDocumentSummary, PipelineDocumentView, PipelineStatus, PipelineStatusSummary};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -96,6 +96,32 @@ pub fn header(item: &PipelineDocumentSummary) -> String {
     line.chars().take(HEADER_MAX_CHARS).collect()
 }
 
+/// Source hits as the CLI prints them: per hit a citation line,
+/// `repo:path:start-end @commit7 score`, then the chunk's text, and a blank line
+/// between hits. Nothing for no hits.
+pub fn source_hits(found: &SourceHits) -> String {
+    found
+        .hits
+        .iter()
+        .map(|hit| {
+            format!(
+                "{}:{}:{}-{} @{} {:.3}
+{}
+",
+                hit.repo,
+                hit.path,
+                hit.line_start,
+                hit.line_end,
+                &hit.commit[..hit.commit.len().min(7)],
+                hit.score,
+                hit.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("
+")
+}
+
 /// A fact as one token: a string, a number, a flag, a reference's id, or a
 /// list of those joined by commas. Anything deeper is not a header fact.
 fn scalar(value: &Value) -> Option<String> {
@@ -120,6 +146,35 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The citation line is what an agent copies: repo, path, the inclusive
+    /// line range and the first seven of the commit.
+    #[test]
+    fn a_source_hit_prints_as_a_citation_then_its_text() {
+        let hit = |path: &str, text: &str| huginn_mind::SourceHit {
+            repo: "Huginn".into(),
+            path: path.into(),
+            commit: "0123456789abcdef".into(),
+            line_start: 3,
+            line_end: 9,
+            score: 0.87654,
+            text: text.into(),
+        };
+        let found = SourceHits {
+            indexed_under: huginn_mind::SourceModel { name: "m".into(), digest: "d".into() },
+            hits: vec![hit("a.rs", "one"), hit("b/c.rs", "two")],
+        };
+        assert_eq!(source_hits(&found), "Huginn:a.rs:3-9 @0123456 0.877
+one
+
+Huginn:b/c.rs:3-9 @0123456 0.877
+two
+");
+        let empty = SourceHits { indexed_under: found.indexed_under.clone(), hits: vec![] };
+        assert_eq!(source_hits(&empty), "");
+        let json = serde_json::to_string(&found).unwrap();
+        assert_eq!(serde_json::from_str::<SourceHits>(&json).unwrap(), found, "--json round-trips");
+    }
 
     #[test]
     fn a_fact_is_one_token_or_nothing() {

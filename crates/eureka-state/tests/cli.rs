@@ -19,7 +19,10 @@ use huginn_mind::{
     AdmissionFacts, HuginnMindRequest, HuginnMindResponse, IndexStatus, MindRefusal, MindStatus, PersonaStatus, PipelineAdmissionOutcome, PipelineDocumentView,
     PipelinePageItems, PipelineProvenance, PipelineSelectionPage, PipelineStatus,
 };
+use huginn_daemon::{Daemon, Hits, IndexSink, SearchTicket};
+use huginn_mind::MindStore;
 use serde_json::{Value, json};
+use std::time::Duration;
 use tempfile::TempDir;
 
 mod common;
@@ -1046,4 +1049,161 @@ fn a_conflicting_batch_is_the_minds_no() {
     let ran = at(conflict.addr, &admit_args(&file), None);
     assert_eq!(ran.code, 1);
     assert_eq!(ran.out, format!("Conflict\nconflicts {CAMPAIGN}:campaign:self\n"));
+}
+
+/// The chunks a source index holds, served from memory: each text embeds to one
+/// vector and each held chunk scores the same, so the search is the daemon's own
+/// path (`sources::search`, its identity check and its citation fields) with
+/// nothing about ranking in it.
+struct Desk {
+    built_under: &'static str,
+    embeds_under: &'static str,
+    held: Vec<huginn_daemon::sources::SourcePayload>,
+    tickets: u64,
+    done: Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)>,
+}
+
+/// An embedder that sends every text to one vector, under a digest.
+struct Flat(&'static str);
+
+impl huginn_daemon::index::Embedder for Flat {
+    fn model_identity(&mut self, _within: Duration) -> anyhow::Result<huginn_daemon::index::ModelIdentity> {
+        Ok(huginn_daemon::index::ModelIdentity { name: "flat".into(), digest: self.0.into(), dimensions: 2 })
+    }
+
+    fn embed(&mut self, texts: &[String], _within: Duration) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+    }
+}
+
+impl huginn_daemon::sources::SourceIndex for Desk {
+    fn describe_sources(&mut self, _within: Duration) -> anyhow::Result<huginn_daemon::sources::DescribedSources> {
+        Ok(huginn_daemon::sources::DescribedSources::Labelled {
+            meta: huginn_daemon::sources::SourcesMeta {
+                managed_by: "huginn".into(),
+                corpus: huginn_daemon::sources::CORPUS.into(),
+                model: "flat".into(),
+                model_digest: self.built_under.into(),
+                dimensions: 2,
+                chunker_version: huginn_daemon::sources::chunk::CHUNKER_VERSION,
+            },
+            cursors: Default::default(),
+        })
+    }
+
+    fn recreate_sources(&mut self, _meta: &huginn_daemon::sources::SourcesMeta) -> anyhow::Result<()> {
+        anyhow::bail!("a daemon never writes the source index")
+    }
+
+    fn set_cursors(&mut self, _cursors: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        anyhow::bail!("a daemon never writes the source index")
+    }
+
+    fn delete_by(&mut self, _repo: &str, _paths: Option<&[String]>) -> anyhow::Result<()> {
+        anyhow::bail!("a daemon never writes the source index")
+    }
+
+    fn upsert_sources(&mut self, _points: &[huginn_daemon::sources::SourcePoint]) -> anyhow::Result<()> {
+        anyhow::bail!("a daemon never writes the source index")
+    }
+
+    fn search_sources(
+        &mut self,
+        _vector: &[f32],
+        repo: Option<&str>,
+        limit: u32,
+        _within: Duration,
+    ) -> anyhow::Result<Vec<huginn_daemon::sources::SourceRow>> {
+        Ok(self
+            .held
+            .iter()
+            .filter(|payload| repo.is_none_or(|repo| payload.repo == repo))
+            .take(limit as usize)
+            .map(|payload| huginn_daemon::sources::SourceRow { score: 0.9, payload: payload.clone() })
+            .collect())
+    }
+}
+
+impl<S: MindStore> IndexSink<S> for Desk {
+    fn committed(&mut self, _mind: &huginn_mind::Mind<S>, _writes: &[PipelineRef]) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn status(&self) -> IndexStatus {
+        IndexStatus::Current
+    }
+    fn search(&mut self, _text: &str, _top_k: u32, _among: Vec<String>) -> Result<SearchTicket, String> {
+        Err("this index holds sources only".into())
+    }
+    fn search_sources(&mut self, query: &huginn_mind::SourceQuery) -> Result<SearchTicket, String> {
+        self.tickets += 1;
+        let ticket = SearchTicket(self.tickets);
+        let mut embedder = Flat(self.embeds_under);
+        let found = huginn_daemon::sources::search(&mut embedder, self, query, Duration::from_secs(5)).map_err(|error| format!("{error:#}"));
+        self.done.push((ticket, found));
+        Ok(ticket)
+    }
+    fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)> {
+        std::mem::take(&mut self.done)
+    }
+    fn search_deadline(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+    fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
+        Vec::new()
+    }
+    fn abandon(&mut self, _ticket: SearchTicket) {}
+}
+
+/// A daemon over a temporary mind whose source index was built under
+/// `built_under` and whose embedder reports `embeds_under`.
+fn source_daemon(built_under: &'static str, embeds_under: &'static str) -> Server {
+    let chunk = |repo: &str, path: &str, line_start: u32, line_end: u32, text: &str| huginn_daemon::sources::SourcePayload {
+        repo: repo.into(),
+        path: path.into(),
+        commit: "abcdef1234567890".into(),
+        blob: "b".into(),
+        line_start,
+        line_end,
+        chunk_index: 0,
+        ext: "rs".into(),
+        text: text.into(),
+    };
+    let desk = Desk {
+        built_under,
+        embeds_under,
+        held: vec![
+            chunk("Demo", "src/lib.rs", 3, 9, "fn cursor() {}"),
+            chunk("Demo", "README.md", 1, 2, "# Demo"),
+            chunk("Other", "x.rs", 1, 1, "fn other() {}"),
+        ],
+        tickets: 0,
+        done: Vec::new(),
+    };
+    let root = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(huginn_mind::Mind::open(root.path(), &slug(INSTANCE)).unwrap(), desk);
+    let admitted = answered(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)])), chrono::Utc::now()));
+    assert!(matches!(admitted, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })), "{admitted:?}");
+    serve(root, daemon)
+}
+
+/// `huginn sources` end to end: the binary asks a daemon over CultNet, the
+/// daemon answers from its source index through the worker path, and the
+/// citation is printed for the chunk the filter and limit chose.
+#[test]
+fn sources_prints_a_citation_for_a_search_answered_by_a_daemon() {
+    let server = source_daemon("d1", "d1");
+    let found = at(server.addr, &["sources", "where is the cursor kept", "--repo", "Demo", "--top-k", "1"], None);
+    assert_eq!(found.code, 0, "{}", found.err);
+    assert!(found.out.starts_with("Demo:src/lib.rs:3-9 @abcdef1 0.900\nfn cursor() {}"), "{}", found.out);
+    assert!(!found.out.contains("README") && !found.out.contains("Other"), "{}", found.out);
+}
+
+/// A daemon whose embedder is not the model the index was built under refuses
+/// the search naming both, and the CLI exits 1 with that word.
+#[test]
+fn sources_refuses_naming_both_models_when_the_daemon_embeds_under_another() {
+    let server = source_daemon("d1", "d2");
+    let refused = at(server.addr, &["sources", "anything"], None);
+    assert_eq!(refused.code, 1, "{}", refused.err);
+    assert!(refused.out.contains("d1") && refused.out.contains("d2"), "{}", refused.out);
 }

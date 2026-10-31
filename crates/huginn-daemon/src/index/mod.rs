@@ -89,6 +89,7 @@
 //!   model, the collection's label) forgets it.
 
 pub mod ollama;
+pub mod pool;
 pub mod qdrant;
 
 #[cfg(test)]
@@ -105,6 +106,8 @@ use huginn_mind::{INDEX_TEXT_VERSION, IndexEntry, Mind, MindStore};
 use sha2::{Digest, Sha256};
 
 use crate::daemon::{Hits, IndexSink, SearchTicket};
+use crate::sources::{self, SourceIndex};
+use huginn_mind::{SourceHits, SourceQuery};
 use ollama::QUERY_INSTRUCTION;
 
 /// The `managed_by` a collection carries when this organ made it.
@@ -152,6 +155,13 @@ pub struct CollectionMeta {
     pub index_text_version: u32,
 }
 
+impl CollectionMeta {
+    /// The model the collection was built with.
+    pub fn model_identity(&self) -> ModelIdentity {
+        ModelIdentity { name: self.model.clone(), digest: self.model_digest.clone(), dimensions: self.dimensions }
+    }
+}
+
 /// What the vector store holds under a collection's name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Described {
@@ -189,6 +199,10 @@ pub struct Hit {
 }
 
 pub trait Embedder {
+    /// The model the collection about to be served was built with, or `None`
+    /// when there is no collection yet. Called before `model_identity`. One
+    /// endpoint has nothing to do with it; a pool holds its endpoints to it.
+    fn built_under(&mut self, _built: Option<&ModelIdentity>) {}
     /// The model's identity, or an error once `within` has passed.
     fn model_identity(&mut self, within: Duration) -> Result<ModelIdentity>;
     /// One vector per text, in order, or an error once `within` has passed.
@@ -262,17 +276,17 @@ pub enum Advance {
 
 /// The time one operation has left. Every call the operation makes is bounded
 /// by what remains, not by a bound of its own, so their sum cannot outlast it.
-struct Budget {
+pub(crate) struct Budget {
     end: Instant,
     total: Duration,
 }
 
 impl Budget {
-    fn new(total: Duration) -> Self {
+    pub(crate) fn new(total: Duration) -> Self {
         Self { end: Instant::now() + total, total }
     }
 
-    fn left(&self) -> Result<Duration> {
+    pub(crate) fn left(&self) -> Result<Duration> {
         let left = self.end.saturating_duration_since(Instant::now());
         ensure!(!left.is_zero(), "the time allowed ({:?}) has run out", self.total);
         Ok(left)
@@ -414,10 +428,12 @@ impl<E: Embedder, V: VectorIndex> Projector<E, V> {
         let Some(mind) = self.mind.clone() else {
             return Err(StepError::Unavailable(anyhow::anyhow!("the mind has no identity yet")));
         };
+        let described = self.index.describe(&self.collection, INDEX_CALL_TIMEOUT).context("describing the collection")?;
+        self.embedder.built_under(if let Described::Labelled(found) = &described { Some(found.model_identity()) } else { None }.as_ref());
         let identity =
             self.embedder.model_identity(BULK_EMBED_TIMEOUT).context("reading the embedding model's identity")?;
         let wanted = self.collection_meta(&mind, &identity);
-        match self.index.describe(&self.collection, INDEX_CALL_TIMEOUT).context("describing the collection")? {
+        match described {
             Described::Absent => {
                 // A collection lost while the worker ran was an index; one that
                 // was never made is a first build.
@@ -669,6 +685,14 @@ struct Queued {
     due: Instant,
 }
 
+/// A source search waiting for the worker. It is not the mind's: nothing about
+/// the mind's reconciliation gates it.
+struct QueuedSource {
+    ticket: SearchTicket,
+    query: SourceQuery,
+    due: Instant,
+}
+
 struct Shared {
     inbox: Vec<IndexEntry>,
     /// The mind's identity, once a commit has revealed it to a mind that had none.
@@ -681,6 +705,8 @@ struct Shared {
     searches: VecDeque<Queued>,
     /// Searches the worker finished and the serve loop has not collected.
     found: Vec<(SearchTicket, Result<Hits, String>)>,
+    source_searches: VecDeque<QueuedSource>,
+    sources_found: Vec<(SearchTicket, Result<SourceHits, String>)>,
     next_ticket: u64,
 }
 
@@ -711,7 +737,7 @@ fn wait_for_work(shared: &Lock, wait: Wait) {
         if guard.closed {
             return;
         }
-        if wakes_on_work && (!guard.inbox.is_empty() || guard.mind.is_some() || !guard.searches.is_empty()) {
+        if !guard.source_searches.is_empty() || (wakes_on_work && (!guard.inbox.is_empty() || guard.mind.is_some() || !guard.searches.is_empty())) {
             return;
         }
         let left = deadline.saturating_duration_since(Instant::now());
@@ -787,6 +813,21 @@ fn serve_search<E: Embedder, V: VectorIndex>(projector: &mut Projector<E, V>, sh
     lock(shared).found.push((ticket, found));
 }
 
+/// Answers the oldest queued source search, whatever state the mind's
+/// projection is in: it asks the embedder and the source collection and nothing
+/// of the projector's reconciliation.
+fn serve_source_search<E: Embedder, V: VectorIndex + SourceIndex>(projector: &mut Projector<E, V>, shared: &Lock) {
+    let mut guard = lock(shared);
+    if guard.closed {
+        return;
+    }
+    let Some(QueuedSource { ticket, query, due }) = guard.source_searches.pop_front() else { return };
+    drop(guard);
+    let found = sources::search(&mut projector.embedder, &mut projector.index, &query, due.saturating_duration_since(Instant::now()))
+        .map_err(|error| format!("{error:#}"));
+    lock(shared).sources_found.push((ticket, found));
+}
+
 /// The search at the front of the queue, if it may be served now. Never while
 /// a document sits in the inbox, and never while anything ahead of it is
 /// owed (documents to write, a reconciliation to make) unless the index
@@ -852,7 +893,7 @@ fn absorb_into<E: Embedder, V: VectorIndex>(
     true
 }
 
-fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Lock, backoff: Backoff) {
+fn work<E: Embedder, V: VectorIndex + SourceIndex>(mut projector: Projector<E, V>, shared: Lock, backoff: Backoff) {
     let mut failing: Option<(StepError, u32)> = None;
     let mut delay = backoff.initial;
     // When the worker next verifies the model and the collection whether or
@@ -878,6 +919,7 @@ fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Loc
                 }
                 publish(&shared, projector.progress_status());
                 serve_search(&mut projector, &shared);
+                serve_source_search(&mut projector, &shared);
                 // A model or collection the search found changed has left the
                 // reconciliation to redo: do it now, not at the next wake.
                 if advance == Advance::Idle && !projector.stale() {
@@ -894,7 +936,17 @@ fn work<E: Embedder, V: VectorIndex>(mut projector: Projector<E, V>, shared: Loc
                 publish(&shared, projector.failure_status(&error, attempts));
                 refuse_searches(&shared, &unsearchable(&projector.failure_status(&error, attempts)).unwrap_or_default());
                 failing = Some((error, attempts));
-                wait_for_work(&shared, Wait::Backoff(delay));
+                // The mind's index is down; a source search does not depend on
+                // it, so it is answered while the backoff runs out.
+                let until = Instant::now() + delay;
+                loop {
+                    serve_source_search(&mut projector, &shared);
+                    let left = until.saturating_duration_since(Instant::now());
+                    if left.is_zero() || lock(&shared).closed {
+                        break;
+                    }
+                    wait_for_work(&shared, Wait::Backoff(left));
+                }
                 delay = backoff.after(delay);
             }
         }
@@ -928,7 +980,7 @@ impl WorkerSink {
     ) -> Self
     where
         E: Embedder + Send + 'static,
-        V: VectorIndex + Send + 'static,
+        V: VectorIndex + SourceIndex + Send + 'static,
     {
         let identified = mind.is_some();
         let mut projector = Projector::new(embedder, index, instance, mind);
@@ -941,6 +993,8 @@ impl WorkerSink {
                 closed: false,
                 searches: VecDeque::new(),
                 found: Vec::new(),
+                source_searches: VecDeque::new(),
+                sources_found: Vec::new(),
                 next_ticket: 0,
             }),
             Condvar::new(),
@@ -1017,10 +1071,10 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
         if let Some(why) = unsearchable(&status) {
             return Err(why);
         }
-        if guard.searches.len() >= SEARCHES_QUEUED_MAX {
+        if guard.searches.len() + guard.source_searches.len() >= SEARCHES_QUEUED_MAX {
             return Err(format!(
                 "the semantic index has {} searches waiting and takes no more until it has answered some",
-                guard.searches.len()
+                guard.searches.len() + guard.source_searches.len()
             ));
         }
         let ticket = SearchTicket(guard.next_ticket);
@@ -1029,6 +1083,26 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
         drop(guard);
         self.shared.1.notify_all();
         Ok(ticket)
+    }
+
+    fn search_sources(&mut self, query: &SourceQuery) -> Result<SearchTicket, String> {
+        let mut guard = lock(&self.shared);
+        if guard.searches.len() + guard.source_searches.len() >= SEARCHES_QUEUED_MAX {
+            return Err(format!(
+                "the index has {} searches waiting and takes no more until it has answered some",
+                guard.searches.len() + guard.source_searches.len()
+            ));
+        }
+        let ticket = SearchTicket(guard.next_ticket);
+        guard.next_ticket += 1;
+        guard.source_searches.push_back(QueuedSource { ticket, query: query.clone(), due: Instant::now() + self.deadline });
+        drop(guard);
+        self.shared.1.notify_all();
+        Ok(ticket)
+    }
+
+    fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+        std::mem::take(&mut lock(&self.shared).sources_found)
     }
 
     fn search_deadline(&self) -> Duration {
@@ -1043,7 +1117,9 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
     /// the worker already holds cannot be recalled; its answer is collected
     /// and dropped by the loop, which no longer waits for it.
     fn abandon(&mut self, ticket: SearchTicket) {
-        lock(&self.shared).searches.retain(|queued| queued.ticket != ticket);
+        let mut guard = lock(&self.shared);
+        guard.searches.retain(|queued| queued.ticket != ticket);
+        guard.source_searches.retain(|queued| queued.ticket != ticket);
     }
 }
 
@@ -1061,12 +1137,23 @@ pub(crate) enum Method {
     Put,
     Post,
     Delete,
+    Patch,
 }
 
 impl Http {
     pub(crate) fn new(base_url: &str, timeout: Duration) -> Self {
-        let agent: ureq::Agent =
-            ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into();
+        Self::connecting_within(base_url, timeout, None)
+    }
+
+    /// As `new`, with a bound on the connect alone, so a host that never
+    /// answers the connection is not waited on for the whole `timeout`.
+    pub(crate) fn connecting_within(base_url: &str, timeout: Duration, connect: Option<Duration>) -> Self {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .timeout_connect(connect)
+            .http_status_as_error(false)
+            .build()
+            .into();
         Self { agent, base: base_url.trim_end_matches('/').to_owned() }
     }
 
@@ -1084,6 +1171,7 @@ impl Http {
             Method::Delete => self.agent.delete(&url).call(),
             Method::Post => self.agent.post(&url).header("content-type", json).send(body.unwrap_or_default()),
             Method::Put => self.agent.put(&url).header("content-type", json).send(body.unwrap_or_default()),
+            Method::Patch => self.agent.patch(&url).header("content-type", json).send(body.unwrap_or_default()),
         };
         let mut response = sent.with_context(|| format!("no answer from {url}"))?;
         let status = response.status().as_u16();

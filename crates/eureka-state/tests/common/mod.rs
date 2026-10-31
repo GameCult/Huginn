@@ -92,6 +92,12 @@ impl<S: MindStore> IndexSink<S> for Inert {
     fn search(&mut self, _text: &str, _top_k: u32, _among: Vec<String>) -> Result<SearchTicket, String> {
         Err("this index cannot search".into())
     }
+    fn search_sources(&mut self, _query: &huginn_mind::SourceQuery) -> Result<SearchTicket, String> {
+        Err("this index cannot search".into())
+    }
+    fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)> {
+        Vec::new()
+    }
     fn search_deadline(&self) -> Duration {
         Duration::ZERO
     }
@@ -142,7 +148,10 @@ impl Drop for Server {
     }
 }
 
-pub fn serve(root: TempDir, mut daemon: TestDaemon) -> Server {
+pub fn serve<I: IndexSink<OwnedRedbMessagePackBackingStore> + Send + 'static>(
+    root: TempDir,
+    mut daemon: Daemon<OwnedRedbMessagePackBackingStore, I>,
+) -> Server {
     let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
     let addr = hub.local_addr().unwrap();
     let stopping = Arc::new(AtomicBool::new(false));

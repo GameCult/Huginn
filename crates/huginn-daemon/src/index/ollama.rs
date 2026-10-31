@@ -14,15 +14,43 @@ use super::{Embedder, Http, Method, ModelIdentity};
 pub const QUERY_INSTRUCTION: &str =
     "Given a question about a project's pipeline state, retrieve the documents that answer it";
 
+/// What an embed call may take, sized to the batch and never beyond the
+/// caller's budget: a host that froze after accepting the batch is given up on
+/// after `floor + per_text * texts`, not after the caller's whole `within`.
+#[derive(Clone, Copy)]
+pub struct EmbedBounds {
+    /// The bound on connecting alone.
+    pub connect: Duration,
+    /// What any batch is allowed, a model load included.
+    pub floor: Duration,
+    /// What each text adds.
+    pub per_text: Duration,
+}
+
+impl EmbedBounds {
+    pub const DEFAULT: Self =
+        Self { connect: Duration::from_secs(3), floor: Duration::from_secs(20), per_text: Duration::from_millis(500) };
+
+    fn for_batch(&self, texts: usize, within: Duration) -> Duration {
+        (self.floor + self.per_text.saturating_mul(u32::try_from(texts).unwrap_or(u32::MAX))).min(within)
+    }
+}
+
 /// One model on one Ollama. Every call carries its own bound.
 pub struct OllamaEmbedder {
     base_url: String,
     model: String,
+    bounds: EmbedBounds,
 }
 
 impl OllamaEmbedder {
     pub fn new(base_url: &str, model: &str) -> Self {
-        Self { base_url: base_url.to_owned(), model: model.to_owned() }
+        Self { base_url: base_url.to_owned(), model: model.to_owned(), bounds: EmbedBounds::DEFAULT }
+    }
+
+    pub fn bounded_by(mut self, bounds: EmbedBounds) -> Self {
+        self.bounds = bounds;
+        self
     }
 
     fn ask(&self, http: &Http, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
@@ -57,7 +85,8 @@ impl Embedder for OllamaEmbedder {
     }
 
     fn embed(&mut self, texts: &[String], within: Duration) -> Result<Vec<Vec<f32>>> {
-        let bounded = Http::new(&self.base_url, within);
+        let allowed = self.bounds.for_batch(texts.len(), within);
+        let bounded = Http::connecting_within(&self.base_url, allowed, Some(self.bounds.connect.min(allowed)));
         let answer = self.ask(&bounded, Method::Post, "/api/embed", Some(&json!({ "model": self.model, "input": texts })))?;
         let embeddings = answer["embeddings"].as_array().context("Ollama's answer has no embeddings")?;
         embeddings
@@ -71,5 +100,25 @@ impl Embedder for OllamaEmbedder {
                     .collect()
             })
             .collect()
+    }
+}
+
+/// One pool over Ollama endpoints serving `model`: the `primaries` (GPU hosts)
+/// share the work and the `reserve` (CPU hosts) serve only when none of them
+/// can. The one embedder client of every Huginn process that embeds.
+pub fn pool(primaries: &[String], reserve: &[String], model: &str) -> super::pool::EmbedderPool<OllamaEmbedder> {
+    let endpoint = |url: &String| (url.clone(), OllamaEmbedder::new(url, model));
+    super::pool::EmbedderPool::new(primaries.iter().map(endpoint).collect(), reserve.iter().map(endpoint).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_batch_is_given_its_floor_and_what_each_text_adds_but_never_more_than_the_budget() {
+        let bounds = EmbedBounds { connect: Duration::from_secs(1), floor: Duration::from_secs(10), per_text: Duration::from_secs(2) };
+        assert_eq!(bounds.for_batch(3, Duration::from_secs(100)), Duration::from_secs(16));
+        assert_eq!(bounds.for_batch(3, Duration::from_secs(12)), Duration::from_secs(12));
     }
 }
