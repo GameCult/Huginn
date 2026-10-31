@@ -436,7 +436,7 @@ mod tests {
             (K::HandOff, &["repo"]),
             (K::Run, &["turn", "operated_by", "ran"]),
             (K::Pulse, &["voted", "urged"]),
-            (K::Memory, &["sort", "about", "direct"]),
+            (K::Memory, &["sort", "about", "memory_origin"]),
         ];
         for (kind, extra) in table {
             let want = [&["root", "in_force", "faculty"][..], extra].concat();

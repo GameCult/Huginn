@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{
-    CommitRange, CutVerification, Date, DocRef, MemorySort, PipelineCampaign, PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
+    CommitRange, CutVerification, Date, DocRef, MemoryOrigin, MemorySort, PipelineCampaign, PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
     PipelineInstance, PipelineKind, PipelineMemory, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, PipelineStewardship,
     PipelineTarget, QuestionOption, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Slug, StructuralDelta, TargetInvariant,
 };
@@ -221,18 +221,22 @@ impl MindPort for Answering<'_> {
     }
 }
 
-/// One of her memories: `sort` and `text`, about `about`, learned in #swarm, not direct.
+/// One of her memories: `sort` and `text`, about `about`, learned in #swarm, salience 500.
 pub(crate) fn memory(label: &str, sort: MemorySort, text: &str, about: &[&str]) -> PipelineDocument {
+    memory_from(label, sort, text, about, MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec![] }, 500)
+}
+
+/// One of her memories with the origin and salience the ranking tests need.
+pub(crate) fn memory_from(label: &str, sort: MemorySort, text: &str, about: &[&str], origin: MemoryOrigin, salience_permille: u16) -> PipelineDocument {
     PipelineDocument::Memory(PipelineMemory {
         instance: Slug(INSTANCE.into()),
         label: eureka_pipeline::Label(label.into()),
         sort,
         text: text.into(),
         about: about.iter().map(|who| (*who).into()).collect(),
-        learned_in: "swarm".into(),
-        direct: false,
+        origin,
         sources: vec![],
-        salience_permille: 500,
+        salience_permille,
         consolidates: vec![],
     })
 }
