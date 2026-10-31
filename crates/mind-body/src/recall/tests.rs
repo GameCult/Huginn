@@ -256,12 +256,12 @@ fn each_lane_is_limited_and_the_merge_stops_at_twenty_items_from_disjoint_lanes(
         mind.committed(vec![memory(&format!("b{index:02}"), MemorySort::Learned, &format!("about {index}"), &[LIBBY])]);
     }
     for index in 0..8 {
-        mind.committed(vec![memory(&format!("z{index:02}"), MemorySort::Learned, "zebra zebra", &[])]);
+        mind.committed(vec![memory(&format!("z{index:02}"), MemorySort::Learned, "zebra stripe", &[])]);
     }
     for index in 0..4 {
         mind.committed(vec![memory(&format!("n{index:02}"), MemorySort::Did, &format!("newest {index}"), &[])]);
     }
-    let recalled = select(&Recording::over(&mind), &cue(&[LIBBY], &["zebra"], &[])).unwrap();
+    let recalled = select(&Recording::over(&mind), &cue(&[LIBBY], &["zebra stripe"], &[])).unwrap();
     assert_eq!(recalled.asks.len(), 8, "the asks lane is limited to eight");
     let lane = |lane: Lane| recalled.others.iter().filter(|entry| entry.lane == lane).count();
     assert_eq!(lane(Lane::About), 6, "the about lane is limited to six");
@@ -282,9 +282,9 @@ fn the_byte_cap_stops_the_merge_before_it_is_crossed() {
         mind.committed(vec![memory(&format!("b{index:02}"), MemorySort::Learned, &"b".repeat(1000), &[LIBBY])]);
     }
     for index in 0..8 {
-        mind.committed(vec![memory(&format!("z{index:02}"), MemorySort::Learned, &format!("{} zebra", "z".repeat(1000)), &[])]);
+        mind.committed(vec![memory(&format!("z{index:02}"), MemorySort::Learned, &format!("{} zebra stripe", "z".repeat(980)), &[])]);
     }
-    let recalled = select(&Recording::over(&mind), &cue(&[LIBBY], &["zebra"], &[])).unwrap();
+    let recalled = select(&Recording::over(&mind), &cue(&[LIBBY], &["zebra stripe"], &[])).unwrap();
     let bytes: usize = recalled.asks.iter().chain(&recalled.others).map(|entry| entry.line.len()).sum();
     assert!(bytes <= MAX_BYTES, "{bytes}");
     assert!(bytes > MAX_BYTES - 1300, "the cap is reached, not undershot: {bytes}");
