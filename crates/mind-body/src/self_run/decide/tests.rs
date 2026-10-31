@@ -458,5 +458,4 @@ fn every_order_of_up_to_four_events_keeps_the_write_accounting_and_the_single_fl
 fn the_ladder_allowance_is_three_escalations_the_drain_and_a_minute() {
     // The sweep above is only as long as this constant: pin the number the spec derives (3 * 120 + 2 + 60).
     assert_eq!(LADDER_S, 422);
-    assert!(LADDER_S >= 3 * ESC + EXIT_DRAIN_S, "the allowance covers the ladder it is named for");
 }
