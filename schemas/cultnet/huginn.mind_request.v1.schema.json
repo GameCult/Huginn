@@ -1305,7 +1305,7 @@
       ]
     },
     "PipelinePulse": {
-      "description": "One Mind's heartbeat vote, in her own mind: the beat she wants (the swarm's\ntempo is the lower median of every Mind's newest vote) and the urgency she\ndeclares for herself until her next Persona turn. Either may be absent, not\nboth. Instance-rooted: the key is `<instance>:pulse:<label>`, the label\ntime-ordered like a run's.",
+      "description": "One Mind's heartbeat vote, in her own mind: the beat she wants (the swarm's\ntempo is the lower median of every Mind's newest vote), the withdrawal of\nher standing vote (`tempo_vote_withdrawn`, an explicit null: she counts as\nsilent again), and the urgency she declares for herself until her next\nPersona turn. A pulse says at least one of the three; a withdrawal and a\nbeat are never both. Instance-rooted: the key is `<instance>:pulse:<label>`, the label\ntime-ordered like a run's.",
       "type": "object",
       "properties": {
         "instance": {
@@ -1324,6 +1324,9 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "tempo_vote_withdrawn": {
+          "type": "boolean"
         },
         "urgency_permille": {
           "type": [
