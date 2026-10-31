@@ -8,8 +8,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, ensure};
 use huginn_daemon::index::ollama::OllamaEmbedder;
+use huginn_daemon::index::pool::EmbedderPool;
 use huginn_daemon::index::qdrant::QdrantIndex;
-use huginn_daemon::sources::failover::FailoverEmbedder;
 use huginn_daemon::sources::forge::HttpForge;
 use huginn_daemon::sources::refresh;
 
@@ -20,8 +20,10 @@ const DEFAULT_FORGE_URL: &str = "http://127.0.0.1:3310";
 struct Options {
     state_root: PathBuf,
     qdrant_url: String,
-    /// In order of preference; the first that serves the run's model embeds.
+    /// The GPU hosts: all take batches at once.
     ollama_urls: Vec<String>,
+    /// The CPU host: takes batches only while no GPU host can.
+    reserve_urls: Vec<String>,
     embedding_model: String,
     forge_url: String,
 }
@@ -30,16 +32,17 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Options> {
     let mut args = args;
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     let mut ollama_urls = Vec::new();
+    let mut reserve_urls = Vec::new();
     while let Some(name) = args.next() {
         let name = name.strip_prefix("--").with_context(|| format!("expected --option, got {name:?}"))?;
         ensure!(
-            matches!(name, "state-root" | "qdrant-url" | "ollama-url" | "embedding-model" | "forge-url"),
+            matches!(name, "state-root" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model" | "forge-url"),
             "unsupported huginn-sources option --{name}"
         );
         let value = args.next().with_context(|| format!("missing value for --{name}"))?;
-        if name == "ollama-url" {
-            ensure!(value.starts_with("http://"), "--ollama-url must be a plain http:// address, got {value:?}");
-            ollama_urls.push(value);
+        if name == "ollama-url" || name == "reserve-ollama-url" {
+            ensure!(value.starts_with("http://"), "--{name} must be a plain http:// address, got {value:?}");
+            if name == "ollama-url" { ollama_urls.push(value) } else { reserve_urls.push(value) }
         } else {
             ensure!(values.insert(name.to_owned(), value).is_none(), "duplicate option --{name}");
         }
@@ -57,9 +60,10 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Options> {
         state_root,
         qdrant_url: url("qdrant-url", take("qdrant-url")?)?,
         ollama_urls: {
-            ensure!(!ollama_urls.is_empty(), "at least one --ollama-url is required; repeat it in order of preference");
+            ensure!(!ollama_urls.is_empty(), "at least one --ollama-url is required; repeat it for each GPU host");
             ollama_urls
         },
+        reserve_urls,
         embedding_model,
         forge_url: url("forge-url", values.get("forge-url").cloned().unwrap_or_else(|| DEFAULT_FORGE_URL.to_owned()))?,
     })
@@ -73,9 +77,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut embedder = FailoverEmbedder::new(
-        options.ollama_urls.iter().map(|url| (url.clone(), OllamaEmbedder::new(url, &options.embedding_model))).collect(),
-    );
+    let endpoint = |url: &String| (url.clone(), OllamaEmbedder::new(url, &options.embedding_model));
+    let mut embedder = EmbedderPool::new(options.ollama_urls.iter().map(endpoint).collect(), options.reserve_urls.iter().map(endpoint).collect());
     let mut index = QdrantIndex::new(&options.qdrant_url);
     let mut forge = HttpForge::new(&options.forge_url);
     let mut journal = |report: &huginn_daemon::sources::Report| println!("{report}");

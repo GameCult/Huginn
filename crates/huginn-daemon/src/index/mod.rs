@@ -89,6 +89,7 @@
 //!   model, the collection's label) forgets it.
 
 pub mod ollama;
+pub mod pool;
 pub mod qdrant;
 
 #[cfg(test)]

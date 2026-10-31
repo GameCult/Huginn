@@ -16,7 +16,6 @@
 //! The cursors object is written whole by this job alone, once per repo.
 
 pub mod chunk;
-pub mod failover;
 pub mod forge;
 pub mod git;
 
