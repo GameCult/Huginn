@@ -35,7 +35,8 @@
         "Instance",
         "Stewardship",
         "HandOff",
-        "Run"
+        "Run",
+        "Pulse"
       ],
       "type": "string"
     },

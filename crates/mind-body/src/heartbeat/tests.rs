@@ -288,10 +288,17 @@ fn the_beat_is_the_lower_median_of_the_minds_newest_votes() {
     rig.pulse(BOB, 100, Some(86_400), None);
     rig.poll();
     assert_eq!(rig.store.traces.borrow().last().unwrap().tempo_s, 60, "the lower median of two votes is the lower");
-    // Ann's newest vote replaces her old one; a pulse with no vote keeps it.
+}
+
+#[test]
+fn a_minds_newest_vote_replaces_her_old_one_and_a_pulse_with_no_vote_keeps_it() {
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.pulse(ANN, 100, Some(60), None);
     rig.pulse(ANN, 50, Some(7200), None);
     rig.pulse(ANN, 40, None, Some(10));
-    rig.advance(1);
+    rig.pulse(BOB, 100, Some(86_400), None);
     rig.poll();
     let trace = rig.store.traces.borrow().last().cloned().unwrap();
     assert_eq!(trace.tempo_s, 7200);

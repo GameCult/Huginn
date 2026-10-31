@@ -403,7 +403,7 @@ fn a_reply_is_decoded_as_the_one_type_and_nothing_else_is_scanned() {
     assert!(decode_reply(&says(&[("swarm", "x")]), &c.rooms).is_ok());
     for bad in [
         "I will start_self_run now",
-        r#"{"say":[],"start_self_run":null} and more"#,
+        r#"{"say":[],"start_self_run":null,"tempo_vote_beat_s":null,"urgency_permille":null} and more"#,
         r#"{"say":[],"start_self_run":null,"extra":1}"#,
         "",
     ] {
@@ -477,7 +477,7 @@ fn a_start_outside_the_reply_bounds_fails_the_turn_without_an_admission_or_an_ac
 fn a_reply_without_start_self_run_is_not_a_reply_though_null_is() {
     let c = config();
     assert_eq!(decode_reply(r#"{"say":[]}"#, &c.rooms), Err(Failure::Undecodable), "the schema requires the field, so does the decoder");
-    assert!(decode_reply(r#"{"say":[],"start_self_run":null}"#, &c.rooms).is_ok());
+    assert!(decode_reply(r#"{"say":[],"start_self_run":null,"tempo_vote_beat_s":null,"urgency_permille":null}"#, &c.rooms).is_ok());
     let rig = Rig::new(vec![operator_says(1, "go")], &[r#"{"say":[{"room":"operator","text":"hi"}]}"#.into()]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));

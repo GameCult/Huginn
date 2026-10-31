@@ -391,7 +391,8 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawne
 
 #[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
 fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, run: &PipelineRef, heard: &mut Heard) -> Result<SelfRunOutcome> {
-    let request = LeaseRequest { expires_at_unix_ms: unix_ms(clock.now()).saturating_add(run_cap_s.saturating_mul(1000)) };
+    let started_ms = unix_ms(clock.now());
+    let request = LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
         Lent::Granted(lease) => lease,
         Lent::Refused(refused) if refused.kind == LeaseRefusalKind::Expired => {
@@ -401,7 +402,6 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
     let child = spawner.spawn(&claude_args(session_id(run)), lease.token())?;
-    let started_ms = unix_ms(clock.now());
     drive(mind, clock, child, run, (lease.plan_quota(), started_ms), heard, out)
 }
 

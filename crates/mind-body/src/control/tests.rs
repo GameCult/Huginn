@@ -230,6 +230,7 @@ fn an_old_swarm_store_holding_a_dial_or_a_share_reads_as_held_undecodable_and_is
         let dir = tempfile::tempdir().unwrap();
         let path = released_store(dir.path());
         let mut cache = CultCache::new();
+        cache.register_entry_type::<Brake>().unwrap();
         cache.register_entry_type::<OldDial>().unwrap();
         cache.register_entry_type::<OldShare>().unwrap();
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(swarm_path(dir.path()))).unwrap();
