@@ -285,7 +285,7 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String]) -> String {
                 }
             },
             "start_self_run": start,
-            "tempo_vote_beat_s": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": TEMPO_VOTE_MIN_S, "maximum": TEMPO_VOTE_MAX_S }] },
+            "tempo_vote_beat_s": { "description": "Omit this key to leave your standing vote unchanged. A number votes that many seconds per beat. null only withdraws your vote, so you count as silent again.", "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": TEMPO_VOTE_MIN_S, "maximum": TEMPO_VOTE_MAX_S }] },
             "urgency_permille": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0, "maximum": URGENCY_MAX_PERMILLE }] }
         }
     })

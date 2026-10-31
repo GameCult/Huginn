@@ -925,6 +925,11 @@ fn the_reply_schema_bounds_the_vote_and_the_urgency_to_the_pulse_kind() {
     let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[])).unwrap();
     assert_eq!(schema["required"], json!(["say", "start_self_run", "urgency_permille"]));
     assert_eq!(schema["properties"]["tempo_vote_beat_s"]["anyOf"][1], json!({ "type": "integer", "minimum": 60, "maximum": 86_400 }));
+    let described = schema["properties"]["tempo_vote_beat_s"]["description"].as_str().expect("the vote key is described to the model");
+    assert!(
+        described.contains("Omit") && described.contains("unchanged") && described.contains("null only withdraws"),
+        "omit leaves the vote, a number votes, null only withdraws: {described}"
+    );
     assert_eq!(schema["properties"]["urgency_permille"]["anyOf"][1], json!({ "type": "integer", "minimum": 0, "maximum": 1000 }));
 }
 
