@@ -110,3 +110,15 @@ pub fn pool(primaries: &[String], reserve: &[String], model: &str) -> super::poo
     let endpoint = |url: &String| (url.clone(), OllamaEmbedder::new(url, model));
     super::pool::EmbedderPool::new(primaries.iter().map(endpoint).collect(), reserve.iter().map(endpoint).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_batch_is_given_its_floor_and_what_each_text_adds_but_never_more_than_the_budget() {
+        let bounds = EmbedBounds { connect: Duration::from_secs(1), floor: Duration::from_secs(10), per_text: Duration::from_secs(2) };
+        assert_eq!(bounds.for_batch(3, Duration::from_secs(100)), Duration::from_secs(16));
+        assert_eq!(bounds.for_batch(3, Duration::from_secs(12)), Duration::from_secs(12));
+    }
+}
