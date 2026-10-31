@@ -868,6 +868,7 @@ fn a_turn_shows_her_stewardships_follow_ups_and_the_rulings_they_cite() {
     rig.mind.committed(vec![open_follow_up("newer", &ruling_ref, "Ship the other thing.\nSecond line.")]);
     let input = first_input(&rig);
     assert!(input.contains("What you are responsible for"), "{input}");
+    assert!(input.contains("Open follow-ups, newest first:"), "{input}");
     assert!(input.contains("- steward of GameCult/cinny: the chat client; design law in eureka-body:ruling:client-first."), "{input}");
     let (newer, older) = (input.find("eureka-body/newer").unwrap(), input.find("eureka-body/older").unwrap());
     assert!(newer < older, "{input}");
@@ -880,7 +881,7 @@ fn a_turn_shows_her_stewardships_follow_ups_and_the_rulings_they_cite() {
 fn a_mind_with_nothing_to_answer_for_says_so() {
     let text = render_responsibilities(&TestMind::bare(), &Slug(INSTANCE.into())).unwrap();
     assert!(text.contains("no stewardship is in force") && text.contains("no follow-up is open"), "{text}");
-    assert!(!text.contains("Rulings these cite"), "{text}");
+    assert!(!text.contains("Rulings these cite") && !text.contains("Open follow-ups, newest first:"), "{text}");
 }
 
 fn titled(label: &str, title: &str) -> PipelineDocument {
