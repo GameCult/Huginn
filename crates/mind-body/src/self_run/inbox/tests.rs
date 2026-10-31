@@ -1,7 +1,7 @@
 //! The inbox over a mind in memory: what is a brief, what is told and what the
 //! backlog lists.
 
-use eureka_pipeline::{PipelineDocument, PipelineKind as K, RunOperator, RunTurn};
+use eureka_pipeline::{PipelineDocument, PipelineKind as K, PipelineRef, RunOperator, RunTurn};
 
 use super::*;
 use crate::persona::AGENT as PERSONA;

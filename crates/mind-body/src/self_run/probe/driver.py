@@ -1,11 +1,16 @@
 """Drives the real claude CLI (stream-json, --replay-user-messages) against fake.py
 through one scenario and records its stdout and what was written to its stdin.
 
-  PROBE_SCENARIO  folded | queued | ceiling-flush-folded | ceiling-flush-queued |
-                  api-error-first | blocking-limit | compaction-off-360k
+  PROBE_SCENARIO  folded | queued | three-queued | serialized | ceiling-flush-folded |
+                  ceiling-flush-queued | api-error-first | blocking-limit | compaction-off-360k
+                  (three-queued writes a second and a third line while the first request is in
+                  flight: the CLI joins them into one echo. serialized is the actuator's policy
+                  with the same lines: `want` holds a line until every line sent was echoed, and
+                  coalesces what waits into one line)
   PROBE_BASE      a scratch directory (config and work dirs are made in it)
   PROBE_OUT       where stream.jsonl is written: one JSON object per line,
-                  {"t": seconds, "line": <claude stdout line>} or {"t": seconds, "sent": <our stdin text>}
+                  {"t": seconds, "line": <claude stdout line>}, {"t": seconds, "sent": <our stdin text>} or
+                  (serialized) {"t": seconds, "want": <a line the policy was asked to send>}
   SCRUB           1 (default) sets CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 as the actuator does; 0 turns it off
   CLAUDE          the claude binary (default /opt/claude-code/2.1.312/claude)
   PROBE_PORT      the fake port (default 18611)
@@ -54,6 +59,31 @@ def record(entry):
         out.flush()
 
 
+sent = 0
+pending = []
+plock = threading.Lock()
+serial = False
+
+
+def echoes():
+    return sum(1 for e in events if e.get("type") == "user" and e.get("isReplay") is True and isinstance(e.get("message", {}).get("content"), str))
+
+
+def pump():
+    """The one-outstanding policy: send what waits, as one line, only when every line sent was echoed."""
+    with plock:
+        if serial and pending and echoes() >= sent:
+            text = "\n\n".join(pending)
+            pending.clear()
+            send(text)
+
+
+def want(text):
+    record({"want": text})
+    pending.append(text)
+    pump()
+
+
 def reader():
     for line in p.stdout:
         record({"line": line.rstrip("\n")})
@@ -61,12 +91,15 @@ def reader():
             events.append(json.loads(line))
         except Exception:
             pass
+        pump()
 
 
 threading.Thread(target=reader, daemon=True).start()
 
 
 def send(text):
+    global sent
+    sent += 1
     p.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
     p.stdin.flush()
     record({"sent": text})
@@ -98,6 +131,32 @@ elif SCENARIO == "queued":
     time.sleep(4)
     send("QUEUED line B.")
     wait(lambda: results() >= 2)
+elif SCENARIO == "three-queued":
+    send("SLOWEND turn A.")
+    time.sleep(3)
+    send("QUEUED line B.")
+    time.sleep(2)
+    send("QUEUED line C.")
+    wait(lambda: results() >= 3, 45)
+    time.sleep(3)
+elif SCENARIO == "serialized":
+    serial = True
+    send("SLOWEND turn A.")
+    time.sleep(3)
+    want("QUEUED line B.")
+    time.sleep(2)
+    want("CEIL300 QUEUED line C.")
+
+    def ceiling_request():
+        def usage(e):
+            return (e.get("message") or {}).get("usage") or {}
+
+        return any(e.get("type") == "assistant" and sum(usage(e).get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")) >= 300000 for e in events)
+
+    wait(ceiling_request, 60)
+    want(FLUSH)
+    wait(lambda: echoes() >= sent and results() >= 3, 60)
+    time.sleep(3)
 elif SCENARIO == "ceiling-flush-folded":
     send("SLEEPCMD CEIL300 turn.")
     wait(lambda: assistants() >= 1)

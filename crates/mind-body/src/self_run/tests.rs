@@ -1735,13 +1735,25 @@ mod live_session {
 
     /// One recorded line as the loop would hear it: a label for the stream, the decision's action.
     fn replay(jsonl: &str) -> Vec<(String, Do)> {
+        replay_state(jsonl).0
+    }
+
+    /// The same, with the state the decision ended in. A `want` entry (the probe asked its writer to send a line that waits) is a brief waiting; the flush is the decision's own.
+    fn replay_state(jsonl: &str) -> (Vec<(String, Do)>, State) {
         let mut state = State::started(crate::testkit::at(0), 100_000);
         let mut ttl_1h = false;
         let mut trace = Vec::new();
         for entry in jsonl.lines() {
             let entry: Value = serde_json::from_str(entry).unwrap();
-            let Some(line) = entry.get("line").and_then(Value::as_str) else { continue };
             let at = crate::testkit::at((entry["t"].as_f64().unwrap() * 1000.0) as i64);
+            if let Some(text) = entry.get("want").and_then(Value::as_str) {
+                let (label, fact) = if text.starts_with(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true }) };
+                let (next, action) = decide(state, fact, at);
+                state = next;
+                trace.push((label.to_string(), action));
+                continue;
+            }
+            let Some(line) = entry.get("line").and_then(Value::as_str) else { continue };
             if let Some(hour) = writes_hour_cache(line) {
                 ttl_1h = hour;
             }
@@ -1755,7 +1767,7 @@ mod live_session {
             state = next;
             trace.push((label, action));
         }
-        trace
+        (trace, state)
     }
 
     fn kinds(trace: &[(String, Do)]) -> Vec<&str> {
@@ -1769,6 +1781,8 @@ mod live_session {
 
     const FOLDED: &str = include_str!("claude-2.1.312-live-session-folded.jsonl");
     const QUEUED: [&str; 2] = [include_str!("claude-2.1.312-live-session-queued.jsonl"), include_str!("claude-2.1.312-live-session-queued-scrub.jsonl")];
+    const THREE_QUEUED: [&str; 2] = [include_str!("claude-2.1.312-live-session-three-queued.jsonl"), include_str!("claude-2.1.312-live-session-three-queued-scrub.jsonl")];
+    const SERIALIZED: [&str; 2] = [include_str!("claude-2.1.312-live-session-serialized.jsonl"), include_str!("claude-2.1.312-live-session-serialized-scrub.jsonl")];
     const CEILING_FOLDED: &str = include_str!("claude-2.1.312-live-session-ceiling-flush-folded.jsonl");
     const CEILING_QUEUED: [&str; 2] = [include_str!("claude-2.1.312-live-session-ceiling-flush-queued.jsonl"), include_str!("claude-2.1.312-live-session-ceiling-flush-queued-scrub.jsonl")];
     const API_ERROR: [&str; 2] = [include_str!("claude-2.1.312-live-session-api-error-first.jsonl"), include_str!("claude-2.1.312-live-session-api-error-first-scrub.jsonl")];
@@ -1789,6 +1803,33 @@ mod live_session {
             let trace = replay(stream);
             assert_eq!(kinds(&trace), ["other", "echo", "request:10", "result:ok", "other", "echo", "request:10", "result:ok"]);
             assert!(acted(&trace).is_empty(), "{:?}", acted(&trace));
+        }
+    }
+
+    fn sent(jsonl: &str) -> usize {
+        jsonl.lines().filter(|entry| serde_json::from_str::<Value>(entry).unwrap().get("sent").is_some()).count()
+    }
+
+    #[test]
+    fn lines_written_behind_an_in_flight_request_come_back_as_one_echo_which_is_why_one_write_is_outstanding() {
+        for stream in THREE_QUEUED {
+            let trace = replay(stream);
+            let echoes = kinds(&trace).iter().filter(|kind| **kind == "echo").count();
+            assert_eq!((sent(stream), echoes), (3, 2), "three lines written, two echoes: counting echoes against lines written drifts for good");
+        }
+    }
+
+    #[test]
+    fn with_one_write_outstanding_every_write_is_echoed_once_and_the_flush_is_reached_and_answered() {
+        for stream in SERIALIZED {
+            let (trace, state) = replay_state(stream);
+            assert_eq!(
+                kinds(&trace),
+                ["other", "want", "want", "echo", "request:10", "result:ok", "other", "echo", "request:300000", "result:ok", "flush-asked", "other", "echo", "request:10", "result:ok"]
+            );
+            // Both briefs wait for the start message's echo and go as one line; the flush is written at the ceiling request; the result after its echo closes stdin.
+            assert_eq!(acted(&trace), vec![(3, Do::Write { tells: true, flush: None }), (8, flush(Why::Ceiling)), (14, Do::CloseStdin)]);
+            assert_eq!((sent(stream), state.written, state.consumed), (3, 3, 3), "every line written has its own echo");
         }
     }
 

@@ -444,11 +444,6 @@ impl Heard {
     }
 }
 
-/// The label of a run: the name its closure and its briefs' closures are admitted under.
-fn session_label(run: &PipelineRef) -> &str {
-    run.id.0.rsplit(':').next().unwrap_or(&run.id.0)
-}
-
 fn unix_ms(at: DateTime<Utc>) -> u64 {
     u64::try_from(at.timestamp_millis()).unwrap_or(0)
 }
