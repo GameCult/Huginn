@@ -612,6 +612,8 @@ fn drive(
         }
         while let Some(heard_event) = events.pop_front() {
             let counted = state.requests;
+            // The decision's inputs, as they stood when the event came.
+            let (ttl_s, inbox, idle_s) = (state.ttl_s, state.inbox, state.idle_s(now));
             let (next, action) = decide(state, heard_event, now);
             state = next;
             if state.requests != counted {
@@ -639,8 +641,8 @@ fn drive(
                 Action::Finish(_) => {}
             }
             if !matches!(action, Action::None | Action::Finish(_)) {
-                let idle = state.idle_s(now).map_or_else(|| "working".to_string(), |seconds| seconds.to_string());
-                writeln!(out, "decision {action:?} prefix {} ttl_s {} idle_s {idle} inbox {}", state.prefix, state.ttl_s, state.inbox)?;
+                let idle = idle_s.map_or_else(|| "working".to_string(), |seconds| seconds.to_string());
+                writeln!(out, "decision {action:?} prefix {} ttl_s {ttl_s} idle_s {idle} inbox {inbox}", state.prefix)?;
             }
             if let Action::Finish(outcome) = action {
                 return Ok(outcome);
