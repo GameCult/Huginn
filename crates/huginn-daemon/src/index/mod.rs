@@ -1142,8 +1142,18 @@ pub(crate) enum Method {
 
 impl Http {
     pub(crate) fn new(base_url: &str, timeout: Duration) -> Self {
-        let agent: ureq::Agent =
-            ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into();
+        Self::connecting_within(base_url, timeout, None)
+    }
+
+    /// As `new`, with a bound on the connect alone, so a host that never
+    /// answers the connection is not waited on for the whole `timeout`.
+    pub(crate) fn connecting_within(base_url: &str, timeout: Duration, connect: Option<Duration>) -> Self {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .timeout_connect(connect)
+            .http_status_as_error(false)
+            .build()
+            .into();
         Self { agent, base: base_url.trim_end_matches('/').to_owned() }
     }
 

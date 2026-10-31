@@ -241,6 +241,9 @@ impl<E: Embedder + Send + 'static> Embedder for EmbedderPool<E> {
     }
 
     fn embed(&mut self, texts: &[String], within: Duration) -> Result<Vec<Vec<f32>>> {
+        // One budget for the batch: a piece moved off a failed endpoint is
+        // embedded under what is left of it, not under a fresh `within`.
+        let deadline = Instant::now() + within;
         self.admit(within);
         let mut vectors: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
         // Pieces still owed, as (first index, length) over `texts`.
@@ -250,11 +253,15 @@ impl<E: Embedder + Send + 'static> Embedder for EmbedderPool<E> {
             if active.is_empty() {
                 // Every member that took the last round failed; the reserve may
                 // still be on its first read.
-                self.admit(within);
+                self.admit(deadline.saturating_duration_since(Instant::now()));
                 active = self.active();
             }
             if active.is_empty() {
                 bail!("{}", locked(&self.shared.roster).unavailable());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                bail!("the batch's budget of {within:?} is spent; {}", locked(&self.shared.roster).unavailable());
             }
             // Each owed piece is cut evenly over the active members.
             let mut jobs: Vec<(usize, usize, usize)> = Vec::new(); // (member, first, length)
@@ -274,7 +281,7 @@ impl<E: Embedder + Send + 'static> Embedder for EmbedderPool<E> {
                         owed.push((first, length));
                     } else {
                         let (piece, embedder) = (&texts[first..first + length], &self.embedders[member]);
-                        running.push((member, first, length, scope.spawn(move || locked(embedder).embed(piece, within))));
+                        running.push((member, first, length, scope.spawn(move || locked(embedder).embed(piece, left))));
                     }
                 }
                 for (member, first, length, handle) in running {
@@ -559,5 +566,149 @@ mod tests {
         pool.built_under(Some(&identity("d1")));
         pool.embed(&texts(3), WITHIN).unwrap();
         assert_eq!((used(&fakes[0]), used(&fakes[1])), (3, 0));
+    }
+
+    // Real Ollama clients against sockets that go wrong after the pool has
+    // admitted them.
+
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::index::ollama::{EmbedBounds, OllamaEmbedder};
+
+    const TAGS: &str = r#"{"models":[{"name":"m:1","model":"m:1","digest":"d1"}]}"#;
+    const SHOW: &str = r#"{"model_info":{"qwen3.embedding_length":1}}"#;
+    const QUICK: EmbedBounds =
+        EmbedBounds { connect: Duration::from_millis(200), floor: Duration::from_millis(300), per_text: Duration::ZERO };
+
+    /// An Ollama on a local port. `stalls` makes it take an embed request and
+    /// never answer; `gone` closes the listener, so the next connect is refused.
+    /// An embedding is `[text length]`, so order is checkable.
+    struct Endpoint {
+        url: String,
+        stalls: Arc<AtomicBool>,
+        gone: Arc<AtomicBool>,
+        listening: std::thread::JoinHandle<()>,
+    }
+
+    fn endpoint() -> Endpoint {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (stalls, gone) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (stalling, leaving) = (Arc::clone(&stalls), Arc::clone(&gone));
+        let listening = std::thread::spawn(move || {
+            while !leaving.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let stalling = Arc::clone(&stalling);
+                        std::thread::spawn(move || answer(stream, &stalling));
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        Endpoint { url, stalls, gone, listening }
+    }
+
+    fn answer(mut stream: TcpStream, stalls: &AtomicBool) {
+        stream.set_nonblocking(false).unwrap();
+        let mut buffer = Vec::new();
+        let (head, length) = loop {
+            let mut chunk = [0_u8; 4096];
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            }
+            let text = String::from_utf8_lossy(&buffer).into_owned();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let length = text.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
+                break (end + 4, length);
+            }
+        };
+        while buffer.len() < head + length {
+            let mut chunk = [0_u8; 4096];
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            }
+        }
+        let request = String::from_utf8_lossy(&buffer[..head]).into_owned();
+        let body = if request.starts_with("GET /api/tags") {
+            TAGS.to_owned()
+        } else if request.starts_with("POST /api/show") {
+            SHOW.to_owned()
+        } else {
+            if stalls.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_secs(30));
+                return;
+            }
+            let asked: serde_json::Value = serde_json::from_slice(&buffer[head..head + length]).unwrap();
+            let vectors: Vec<Vec<usize>> = asked["input"].as_array().unwrap().iter().map(|text| vec![text.as_str().unwrap().len()]).collect();
+            serde_json::json!({ "embeddings": vectors }).to_string()
+        };
+        let _ = write!(stream, "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+    }
+
+    fn real_pool(endpoints: &[&Endpoint], bounds: EmbedBounds) -> EmbedderPool<OllamaEmbedder> {
+        let members = endpoints.iter().map(|at| (at.url.clone(), OllamaEmbedder::new(&at.url, "m:1").bounded_by(bounds))).collect();
+        let pool = EmbedderPool::new(members, Vec::new()).retrying_after(Duration::from_secs(3600));
+        warm_real(&pool);
+        pool
+    }
+
+    fn warm_real(pool: &EmbedderPool<OllamaEmbedder>) {
+        pool.admit(Duration::from_secs(5));
+        pool.settle();
+    }
+
+    fn lengths(vectors: &[Vec<f32>]) -> Vec<f32> {
+        vectors.iter().map(|vector| vector[0]).collect()
+    }
+
+    /// An endpoint that takes the connection and then says nothing costs the
+    /// batch its own bound, not the caller's budget; its share goes to the
+    /// healthy endpoint, in order, and it stays out until its retry time.
+    #[test]
+    fn an_endpoint_that_stalls_mid_batch_costs_the_batch_its_bound_not_the_budget() {
+        let (healthy, stalling) = (endpoint(), endpoint());
+        let mut pool = real_pool(&[&healthy, &stalling], QUICK);
+        stalling.stalls.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        let vectors = pool.embed(&texts(8), Duration::from_secs(20)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        assert_eq!(lengths(&vectors), (1..=8).map(|n| n as f32).collect::<Vec<_>>());
+        assert!(locked(&pool.shared.roster).members[1].out.is_some());
+        let again = Instant::now();
+        pool.embed(&texts(4), Duration::from_secs(20)).unwrap();
+        assert!(again.elapsed() < Duration::from_millis(250), "the dropped endpoint was tried again: {:?}", again.elapsed());
+    }
+
+    /// An endpoint that stops listening after it was admitted: the same.
+    #[test]
+    fn an_endpoint_that_refuses_mid_batch_costs_the_batch_nothing_the_healthy_one_could_not_do() {
+        let (healthy, leaving) = (endpoint(), endpoint());
+        let mut pool = real_pool(&[&healthy, &leaving], QUICK);
+        leaving.gone.store(true, Ordering::SeqCst);
+        leaving.listening.join().unwrap();
+        let started = Instant::now();
+        let vectors = pool.embed(&texts(6), Duration::from_secs(20)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        assert_eq!(lengths(&vectors), (1..=6).map(|n| n as f32).collect::<Vec<_>>());
+        assert!(locked(&pool.shared.roster).members[1].out.is_some());
+    }
+
+    /// The bound never exceeds what the caller gave: with one endpoint, stalled
+    /// and a floor far above the budget, the batch fails at the budget.
+    #[test]
+    fn a_stall_is_never_waited_on_beyond_the_callers_budget() {
+        let only = endpoint();
+        let generous = EmbedBounds { floor: Duration::from_secs(60), ..QUICK };
+        let mut pool = real_pool(&[&only], generous);
+        only.stalls.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(pool.embed(&texts(2), Duration::from_millis(400)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
     }
 }
