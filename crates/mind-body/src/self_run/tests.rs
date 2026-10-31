@@ -197,11 +197,13 @@ impl Fake {
     }
 }
 
-/// A spool of its own under the system temporary directory, so that tests running side by side share nothing.
+/// A spool of its own, so that tests running side by side share nothing. Its directory outlives
+/// the test: a run's spool is read back after `carry` returns.
 fn test_hooks() -> Hooks {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Hooks { spool: std::env::temp_dir().join(format!("mind-self-run-spool-{}-{n}", std::process::id())), injector: PathBuf::from("/opt/mind-self-run") }
+    let dir = tempfile::tempdir().unwrap();
+    let spool = dir.path().join("inbox");
+    std::mem::forget(dir);
+    Hooks { spool, injector: PathBuf::from("/opt/mind-self-run") }
 }
 
 impl Spawner for Fake {
