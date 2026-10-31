@@ -1,9 +1,9 @@
-//! The operator's brake and the swarm's dial, and the one reader of them.
+//! The operator's brakes, and the one reader of them.
 //!
-//! `Released` carries a `Grant`, the only value that hands a run cap to the
-//! launch: it cannot be built outside this module, so a cap exists only as the
-//! reading of a released instance brake and a released swarm envelope. The Grant names the
-//! instance whose store was read. The store is at a fixed place, `CONTROL_ROOT`,
+//! `Released` carries a `Grant`, the only value that opens a launch: it cannot
+//! be built outside this module, so a launch exists only as the reading of a
+//! released instance brake and a released swarm brake. The Grant names the
+//! instance whose store was read and carries nothing else: no money, no cap. The store is at a fixed place, `CONTROL_ROOT`,
 //! and the one reader takes the instance only: no function, argument, variable
 //! or flag lets a caller choose a root, a path or a source, so a Grant is the
 //! proof that this instance's own root-owned store released. Only a
@@ -12,14 +12,13 @@
 //! State is a CultCache single-file store at
 //! `/etc/gamecult/minds/<instance>/control.cc`, root-owned and world-readable.
 //! The operator's CLI replaces a document whole; every organ that acts calls
-//! `read_effective` before the consequence and takes its answer as given. The
-//! run cap is derived here and nowhere else; who wakes and when is the
+//! `read_effective` before the consequence and takes its answer as given. Who wakes and when is the
 //! heartbeat's.
 //!
 //! Fail closed: the reader's only route to `Released` is a decodable instance
 //! store holding a released brake and a released swarm envelope. Anything else
-//! (no file, no brake, a held brake, a held, absent or out-of-bounds swarm dial,
-//! bytes that do not decode, a file that cannot be read) is `Held`, with the reason.
+//! (no file, no brake, a held brake, bytes that do not decode, a store
+//! holding any document but a brake, a file that cannot be read) is `Held`, with the reason.
 //!
 //! The reader opens the file read-only through CultCache's read-only snapshot
 //! door: it takes no lock and creates no sibling file, so the units she runs as
@@ -30,10 +29,10 @@
 //!
 //! The swarm has one more store of the same kind, `CONTROL_ROOT/swarm.cc`: a
 //! file beside the instance directories, so no instance name reaches it. It
-//! holds the swarm's brake, the swarm dial (heat, the spend rate, the per-run
-//! cap and the concurrency) and each instance's share. `read_envelope` is its
-//! one reader, fail closed like `read_effective`; `Envelope::grant_for` is the
-//! only way to narrow the envelope into a `Grant`, and it never widens one.
+//! holds the swarm's brake and nothing else: a store still holding a swarm dial
+//! or a share from the dollar-metering days reads `Held(Undecodable)` and is
+//! never migrated. `read_envelope` is its one reader, fail closed like
+//! `read_effective`.
 
 use std::path::{Path, PathBuf};
 
@@ -41,7 +40,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore};
 use eureka_pipeline::Slug;
-use rust_decimal::Decimal;
 
 /// Where every instance's control directory lives. The reader reads only here;
 /// the operator's CLI takes its own `--root` for writing and display.
@@ -49,7 +47,6 @@ pub const CONTROL_ROOT: &str = "/etc/gamecult/minds";
 
 /// The one key each control document has in the store.
 pub const BRAKE_KEY: &str = "brake";
-pub const DIAL_KEY: &str = "dial";
 
 /// The swarm's store, a file directly under `CONTROL_ROOT`.
 pub const SWARM_FILE: &str = "swarm.cc";
@@ -78,33 +75,11 @@ pub struct Brake {
     pub set_by: String,
 }
 
-/// Heat's inclusive upper bound.
-pub fn heat_max() -> Decimal {
-    Decimal::new(20, 1)
-}
-
-/// Calibration ceilings on the swarm dial's base values, so a typo (a
-/// `--base-run 10000`) is refused where it is written and held where it is read.
-/// They are guards, not policy: the operator raises them here.
-pub fn base_rate_max() -> Decimal {
-    Decimal::new(100, 0)
-}
-pub fn base_run_max() -> Decimal {
-    Decimal::new(50, 0)
-}
-pub const K_MAX: u32 = 16;
-
 /// Why the reader said held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeldReason {
     BrakeAbsent,
     BrakeHeld,
-    DialAbsent,
-    DialOutOfBounds,
-    /// The swarm dial's heat is 0: the operator stopped everything.
-    HeatZero,
-    /// A share in the swarm store is out of bounds or not keyed by its instance.
-    ShareOutOfBounds,
     Undecodable,
 }
 
@@ -115,7 +90,7 @@ pub enum Effective {
     Released(Grant),
 }
 
-/// The proof that the instance brake and the swarm envelope were released when
+/// The proof that the instance brake and the swarm brake were released when
 /// read, in the root-owned stores of `instance`. Its fields are private and only
 /// `read_effective` makes one; `open_and_launch` takes it by value and refuses
 /// one read for another instance, so one reading opens at most one run, of the
@@ -129,7 +104,7 @@ pub enum Effective {
 /// ```compile_fail,E0451
 /// use mind_body::control::Grant;
 /// // a struct literal
-/// let _ = Grant { instance: eureka_pipeline::Slug("eureka".into()), run_cap_usd: rust_decimal::Decimal::ONE };
+/// let _ = Grant { instance: eureka_pipeline::Slug("eureka".into()) };
 /// ```
 ///
 /// ```compile_fail,E0277
@@ -153,12 +128,11 @@ pub enum Effective {
 /// ```compile_fail,E0277
 /// // not From its parts
 /// use mind_body::control::Grant;
-/// let _ = Grant::from((eureka_pipeline::Slug("eureka".into()), rust_decimal::Decimal::ONE));
+/// let _ = Grant::from(eureka_pipeline::Slug("eureka".into()));
 /// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct Grant {
     instance: Slug,
-    run_cap_usd: Decimal,
 }
 
 impl Grant {
@@ -167,16 +141,11 @@ impl Grant {
         &self.instance
     }
 
-    /// The most one run may spend.
-    pub fn run_cap_usd(&self) -> Decimal {
-        self.run_cap_usd
-    }
-
     /// A Grant for a launch test that has no store. It names its instance like
     /// any other, so the launch's instance check judges it.
     #[cfg(test)]
-    pub(crate) fn for_test(instance: Slug, run_cap_usd: Decimal) -> Self {
-        Self { instance, run_cap_usd }
+    pub(crate) fn for_test(instance: Slug) -> Self {
+        Self { instance }
     }
 }
 
@@ -187,9 +156,8 @@ pub struct ControlState {
 }
 
 impl ControlState {
-    /// The one derivation. Order: the instance brake, then the swarm envelope
-    /// (its own order is `SwarmState::effective`'s); each failing rung is its
-    /// own reason. The Grant's cap is the envelope's run cap.
+    /// The one derivation. Order: the instance brake, then the swarm brake;
+    /// each failing rung is its own reason.
     pub(crate) fn effective(&self, instance: &Slug, swarm: SwarmEffective) -> Effective {
         let held = |reason| Effective::Held { reason };
         let Some(brake) = &self.brake else {
@@ -200,7 +168,7 @@ impl ControlState {
         }
         match swarm {
             SwarmEffective::Held(reason) => held(reason),
-            SwarmEffective::Released(envelope) => Effective::Released(Grant { instance: instance.clone(), run_cap_usd: envelope.run_cap_usd }),
+            SwarmEffective::Released => Effective::Released(Grant { instance: instance.clone() }),
         }
     }
 }
@@ -237,8 +205,6 @@ fn registered_cache() -> Result<CultCache> {
 fn swarm_cache() -> Result<CultCache> {
     let mut cache = CultCache::new();
     cache.register_entry_type::<Brake>()?;
-    cache.register_entry_type::<SwarmDial>()?;
-    cache.register_entry_type::<Share>()?;
     Ok(cache)
 }
 
@@ -345,6 +311,11 @@ const DIR_MODE: u32 = 0o755;
 const FILE_MODE: u32 = 0o644;
 
 #[cfg(unix)]
+pub(crate) fn set_mode_world_readable(path: &Path) -> Result<()> {
+    set_mode(path, FILE_MODE)
+}
+
+#[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).with_context(|| format!("failed to set the mode of {}", path.display()))
@@ -391,6 +362,11 @@ fn require_root_only_writable(_path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn set_mode_world_readable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -464,175 +440,43 @@ impl ControlWriter {
 // The swarm store: `CONTROL_ROOT/swarm.cc`.
 // ---------------------------------------------------------------------------
 
-/// The swarm dial: `heat` scales the whole swarm's activity, 0 stops it. The
-/// base values say what heat 1.0 means: the total spend rate, the most one run
-/// may spend, and `k`, how many turns may run at once. The envelope derives
-/// rate and run cap from it, never stored.
-#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "eureka.control.swarm_dial.v1", schema = "ControlSwarmDial")]
-pub struct SwarmDial {
-    #[cultcache(key = 0)]
-    pub heat: Decimal,
-    #[cultcache(key = 1)]
-    pub base_rate_usd_per_h: Decimal,
-    #[cultcache(key = 2)]
-    pub base_run_usd: Decimal,
-    #[cultcache(key = 3)]
-    pub k: u32,
-    #[cultcache(key = 4)]
-    pub set_at: DateTime<Utc>,
-    #[cultcache(key = 5)]
-    pub set_by: String,
-}
-
-impl SwarmDial {
-    /// The one bounds rule for the swarm dial: the reader holds on it and the
-    /// CLI refuses on it. Heat 0 is in bounds (it is the stop); the reader
-    /// answers it as held.
-    pub fn in_bounds(&self) -> bool {
-        self.heat >= Decimal::ZERO && self.heat <= heat_max() && self.base_rate_usd_per_h > Decimal::ZERO
-            && self.base_rate_usd_per_h <= base_rate_max()
-            && self.base_run_usd > Decimal::ZERO
-            && self.base_run_usd <= base_run_max()
-            && self.k >= 1
-            && self.k <= K_MAX
-    }
-}
-
-/// One instance's share of the swarm, keyed in the store by the instance name.
-/// An instance with no share has weight 1.
-#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
-#[cultcache(type = "eureka.control.share.v1", schema = "ControlShare")]
-pub struct Share {
-    #[cultcache(key = 0)]
-    pub instance: String,
-    #[cultcache(key = 1)]
-    pub weight: Decimal,
-}
-
-impl Share {
-    /// A share is a slug-named instance with a positive weight.
-    pub fn in_bounds(&self) -> bool {
-        Slug(self.instance.clone()).validate_slug().is_ok() && self.weight > Decimal::ZERO
-    }
-}
-
 /// The swarm store's contents, decoded and not yet judged.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct SwarmState {
     pub brake: Option<Brake>,
-    pub dial: Option<SwarmDial>,
-    pub shares: Vec<Share>,
 }
 
 /// What the swarm store allows right now.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SwarmEffective {
     Held(HeldReason),
-    Released(Envelope),
-}
-
-/// The swarm's budget while the brake is released and heat is above 0. Its
-/// fields are private and only `read_envelope` makes one, so a run cap derived
-/// from it exists only as the reading of the root-owned swarm store.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Envelope {
-    rate_usd_per_h: Decimal,
-    run_cap_usd: Decimal,
-    k: u32,
-    shares: std::collections::BTreeMap<String, Decimal>,
-}
-
-impl Envelope {
-    /// The swarm's total spend rate: `base_rate_usd_per_h x heat`.
-    pub fn rate_usd_per_h(&self) -> Decimal {
-        self.rate_usd_per_h
-    }
-
-    /// The most any one run may spend: `base_run_usd x heat`.
-    pub fn run_cap_usd(&self) -> Decimal {
-        self.run_cap_usd
-    }
-
-    /// How many turns may run at once.
-    pub fn k(&self) -> u32 {
-        self.k
-    }
-
-    /// The instance's weight; 1 when the store holds no share for it.
-    pub fn share(&self, instance: &Slug) -> Decimal {
-        self.shares.get(&instance.0).copied().unwrap_or(Decimal::ONE)
-    }
-
-    /// Narrows this envelope and the instance's own reading into the Grant for
-    /// one run of `budget_usd`. It is the only new way to build a Grant and it
-    /// never widens: `None` unless the instance's own reading is released for
-    /// this instance and `0 < budget_usd` is within the swarm's run cap. The
-    /// Grant's cap is the budget.
-    pub fn grant_for(&self, instance: &Slug, instance_effective: &Effective, budget_usd: Decimal) -> Option<Grant> {
-        let Effective::Released(own) = instance_effective else {
-            return None;
-        };
-        if own.instance != *instance || budget_usd <= Decimal::ZERO || budget_usd > self.run_cap_usd {
-            return None;
-        }
-        Some(Grant { instance: instance.clone(), run_cap_usd: budget_usd })
-    }
+    Released,
 }
 
 impl SwarmState {
-    /// The one derivation. Order: brake, dial bounds, heat, shares.
+    /// The one derivation: the swarm brake, released.
     pub(crate) fn effective(&self) -> SwarmEffective {
-        let held = SwarmEffective::Held;
-        let Some(brake) = &self.brake else {
-            return held(HeldReason::BrakeAbsent);
-        };
-        if !brake.released {
-            return held(HeldReason::BrakeHeld);
-        }
-        let Some(dial) = &self.dial else {
-            return held(HeldReason::DialAbsent);
-        };
-        if !dial.in_bounds() {
-            return held(HeldReason::DialOutOfBounds);
-        }
-        if dial.heat.is_zero() {
-            return held(HeldReason::HeatZero);
-        }
-        if !self.shares.iter().all(Share::in_bounds) {
-            return held(HeldReason::ShareOutOfBounds);
-        }
-        match (dial.base_rate_usd_per_h.checked_mul(dial.heat), dial.base_run_usd.checked_mul(dial.heat)) {
-            (Some(rate_usd_per_h), Some(run_cap_usd)) => SwarmEffective::Released(Envelope {
-                rate_usd_per_h,
-                run_cap_usd,
-                k: dial.k,
-                shares: self.shares.iter().map(|share| (share.instance.clone(), share.weight)).collect(),
-            }),
-            _ => held(HeldReason::DialOutOfBounds),
+        match &self.brake {
+            None => SwarmEffective::Held(HeldReason::BrakeAbsent),
+            Some(brake) if !brake.released => SwarmEffective::Held(HeldReason::BrakeHeld),
+            Some(_) => SwarmEffective::Released,
         }
     }
 }
 
-/// Decodes the swarm store. An envelope the cache does not know, a payload that
-/// does not decode or a share not keyed by its own instance is an error.
+/// Decodes the swarm store. An envelope the cache does not know, or a payload
+/// that does not decode, is an error.
 pub fn load_swarm_state(source: &impl ControlSource) -> Result<SwarmState> {
     let mut cache = swarm_cache()?;
     for envelope in source.snapshot().context("swarm store cannot be read")? {
         cache.put_raw_envelope(envelope)?;
     }
-    let mut shares = Vec::new();
-    for (key, share) in cache.get_all_with_keys::<Share>()? {
-        anyhow::ensure!(key == share.instance, "a share is not keyed by its instance");
-        shares.push(share);
-    }
-    Ok(SwarmState { brake: cache.get::<Brake>(BRAKE_KEY)?, dial: cache.get::<SwarmDial>(DIAL_KEY)?, shares })
+    Ok(SwarmState { brake: cache.get::<Brake>(BRAKE_KEY)? })
 }
 
 /// The one reader of the swarm store, at `CONTROL_ROOT/swarm.cc`; the caller
 /// supplies neither a root, a path nor a source. Anything but a decodable store
-/// holding a released brake, an in-bounds dial with heat above 0 and in-bounds
-/// shares is `Held`, with the reason.
+/// holding a released brake is `Held`, with the reason.
 pub fn read_envelope() -> SwarmEffective {
     derive_swarm(&FileSource::new(swarm_path(&control_root())))
 }
@@ -646,7 +490,7 @@ pub(crate) fn derive_swarm(source: &impl ControlSource) -> SwarmEffective {
 }
 
 /// The operator's writer over the swarm file, with the same root-only refusals
-/// as `ControlWriter`. Each setter replaces its document whole.
+/// as `ControlWriter`.
 pub struct SwarmWriter {
     cache: CultCache,
     path: PathBuf,
@@ -669,32 +513,6 @@ impl SwarmWriter {
         let brake = Brake { released, set_at, set_by: set_by.to_string() };
         prepare_store(&self.path)?;
         self.cache.put(BRAKE_KEY, &brake)?;
-        self.settle()
-    }
-
-    /// Refuses an out-of-bounds dial before anything is written.
-    pub fn set_dial(&mut self, dial: SwarmDial) -> Result<()> {
-        if !dial.in_bounds() {
-            anyhow::bail!(
-                "swarm dial refused: heat must be within 0..={}, base_rate_usd_per_h in (0, {}], base_run_usd in (0, {}], k in 1..={}",
-                heat_max(),
-                base_rate_max(),
-                base_run_max(),
-                K_MAX
-            );
-        }
-        prepare_store(&self.path)?;
-        self.cache.put(DIAL_KEY, &dial)?;
-        self.settle()
-    }
-
-    /// Refuses a share for a non-slug instance or a weight at or below 0.
-    pub fn set_share(&mut self, share: Share) -> Result<()> {
-        if !share.in_bounds() {
-            anyhow::bail!("share refused: the instance must be a slug and the weight above 0");
-        }
-        prepare_store(&self.path)?;
-        self.cache.put(share.instance.clone(), &share)?;
         self.settle()
     }
 }

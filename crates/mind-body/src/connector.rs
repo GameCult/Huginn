@@ -1,14 +1,14 @@
 //! The Persona organ's model transport: ModelConnector's kit client.
 //!
 //! `KitConnector` is the `Connector` port over `model_connector::ConnectorClient`,
-//! the contract-v3 client of the connector daemon (CultNet operation frames,
+//! the wire-v4 client of the connector daemon (CultNet operation frames,
 //! AES-GCM sealed, one request per connection). A turn is one tool-less
 //! `ProviderRequest` for the instance as caller, its output constrained to the
 //! turn's schema, and its answer the assistant text of a `Completed` result; a
 //! refusal, a failure or a stop other than the end of the turn is an error. The
-//! readout is the kit's spend readout asked as this client's own caller: the
-//! service answers every caller's row to any admitted asker, and the asker is
-//! decrypted with its own key, so nobody asks as another caller.
+//! readout is the kit's usage readout (`gamecult.model.usage_readout.v1`): the
+//! subscription plan's own windows as the connector last saw them, asked as this
+//! client's own caller. The connector meters nothing in dollars.
 //!
 //! The connector reads its connection key as the file's text without the
 //! trailing line break; the same rule applies here (`key`). The endpoint is the
@@ -19,11 +19,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
 use model_connector::{
-    ConnectorClient, InputItem, ProviderRequest, StopReason, TransportDisposition, TransportEventPayload, TransportInvocation, TransportOutcome,
+    ConnectorClient, InputItem, PlanQuota, ProviderRequest, StopReason, TransportDisposition, TransportEventPayload, TransportInvocation, TransportOutcome,
     provider_request_sha256,
 };
 
-use crate::persona::{Connector, SpendReadout, TurnRequest};
+use crate::persona::{Connector, TurnRequest, UsageReadout};
 
 /// The largest frame either side of a connection may carry.
 const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -74,7 +74,7 @@ impl Connector for KitConnector {
         provider.output_schema_json = Some(request.output_schema_json.clone());
         // The caller has no provider-native form of its request: the native digest is the request's own.
         let digest = provider_request_sha256(&provider).map_err(|_| anyhow!("the connector request does not digest"))?;
-        let invocation = TransportInvocation::new(request.caller.as_str(), now_ms() + EXPIRES_IN_MS, digest, request.max_cost_micro_usd, provider)
+        let invocation = TransportInvocation::new(request.caller.as_str(), now_ms() + EXPIRES_IN_MS, digest, provider)
             .map_err(|_| anyhow!("the connector invocation is not valid"))?;
         let result = self.client.execute(&invocation).map_err(|error| anyhow!("the connector call failed: {error}"))?;
         match result.disposition {
@@ -96,7 +96,34 @@ impl Connector for KitConnector {
         }
     }
 
-    fn spend_readout(&self) -> Result<SpendReadout> {
-        self.client.spend_readout(&self.caller).map_err(|error| anyhow!("the spend readout failed: {error}"))
+    fn usage_readout(&self) -> Result<UsageReadout> {
+        self.client.usage_readout(&self.caller).map_err(|error| anyhow!("the usage readout failed: {error}"))
     }
+}
+
+/// The plan windows as one line for a Mind: each window's percent used, its
+/// status, when it resets and how old the reading is. Rendered from the readout
+/// and nothing else, so no number in it is ever a paraphrase; the guidance that
+/// follows it states the swarm's aim and that nothing enforces it.
+pub fn render_plan(windows: &[PlanQuota], now_ms: u64) -> String {
+    let guidance = "The swarm aims to have used about 90% of the weekly allowance at reset; nothing enforces it; you and the other Minds set the tempo.";
+    if windows.is_empty() {
+        return format!("Plan usage: unobserved. {guidance}");
+    }
+    let rendered: Vec<String> = windows
+        .iter()
+        .map(|plan| match plan.utilization_permille {
+            Some(permille) => format!(
+                "{} {}.{}% {}, resets at unix ms {}, read {}s ago",
+                plan.window,
+                permille / 10,
+                permille % 10,
+                plan.status,
+                plan.resets_at_unix_ms,
+                now_ms.saturating_sub(plan.observed_at_unix_ms) / 1000
+            ),
+            None => format!("{} expired, resets at unix ms {}", plan.window, plan.resets_at_unix_ms),
+        })
+        .collect();
+    format!("Plan usage: {}. {guidance}", rendered.join("; "))
 }

@@ -217,8 +217,8 @@ pub struct LaunchRequest {
     pub claims: Vec<PipelineRef>,
     /// The admitting agent's name on the receipt.
     pub agent: String,
-    /// The reading of a released brake and an in-bounds dial; its cap is the
-    /// run's budget. Taken by value, so one reading opens at most one run.
+    /// The reading of a released instance brake and a released swarm brake.
+    /// Taken by value, so one reading opens at most one run.
     pub grant: Grant,
 }
 
@@ -374,7 +374,8 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
         turn,
         host: ports.host.into(),
         started_on: date(now),
-        budget_usd: grant.run_cap_usd().normalize().to_string().as_str().into(),
+        // The field is dead record: nothing reads it, and the schema revision that drops it is a follow-up.
+        budget_usd: "0".into(),
         claims,
         campaigns,
     });
@@ -454,7 +455,6 @@ mod tests {
 
     use eureka_pipeline::PipelineKind as K;
     use huginn_mind::{PipelineAdmissionOutcome as Outcome, PipelineSelectionPage, PipelineStatus};
-    use rust_decimal::Decimal;
 
     use super::*;
     use crate::testkit::*;
@@ -470,17 +470,17 @@ mod tests {
             Self { mind: TestMind::seeded(), launcher: Recording::default(), clock: Fixed(Cell::new(at(0))) }
         }
 
-        fn launch(&self, turn: RunTurn, claims: &[PipelineRef], cap: Decimal) -> LaunchOutcome {
-            self.launch_through(&self.mind, turn, claims, cap)
+        fn launch(&self, turn: RunTurn, claims: &[PipelineRef]) -> LaunchOutcome {
+            self.launch_through(&self.mind, turn, claims)
         }
 
-        fn launch_through(&self, mind: &dyn MindPort, turn: RunTurn, claims: &[PipelineRef], cap: Decimal) -> LaunchOutcome {
-            self.try_launch_through(mind, turn, claims, cap).unwrap()
+        fn launch_through(&self, mind: &dyn MindPort, turn: RunTurn, claims: &[PipelineRef]) -> LaunchOutcome {
+            self.try_launch_through(mind, turn, claims).unwrap()
         }
 
-        fn try_launch_through(&self, mind: &dyn MindPort, turn: RunTurn, claims: &[PipelineRef], cap: Decimal) -> Result<LaunchOutcome> {
+        fn try_launch_through(&self, mind: &dyn MindPort, turn: RunTurn, claims: &[PipelineRef]) -> Result<LaunchOutcome> {
             let ports = Ports { mind, launcher: &self.launcher, clock: &self.clock, host: "yggdrasil-host" };
-            let grant = Grant::for_test(Slug(INSTANCE.into()), cap);
+            let grant = Grant::for_test(Slug(INSTANCE.into()));
             open_and_launch(&ports, LaunchRequest { turn, claims: claims.to_vec(), agent: "agent-x".into(), grant })
         }
 
@@ -514,10 +514,6 @@ mod tests {
         }
     }
 
-    fn five() -> Decimal {
-        Decimal::new(5, 0)
-    }
-
     fn the_run(view: &huginn_mind::PipelineDocumentView) -> &PipelineRun {
         let PipelineDocument::Run(run) = &view.document else { panic!("not a run") };
         run
@@ -533,12 +529,12 @@ mod tests {
     fn a_queued_spec_opens_a_run_that_records_its_launch_and_then_its_unit_starts() {
         let rig = Rig::new();
         rig.mind.committed(vec![spec("x")]);
-        let LaunchOutcome::Launched { run } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()) else { panic!("not launched") };
+        let LaunchOutcome::Launched { run } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]) else { panic!("not launched") };
         assert_eq!(run.id.0, "yggdrasil:run:mind-20261009T131500000Z");
         let view = rig.mind.view(K::Run, &run.id.0).unwrap();
         let held = the_run(&view);
         assert_eq!((held.operated_by, held.turn), (RunOperator::Mind, RunTurn::SelfRun));
-        assert_eq!((held.host.0.as_str(), held.started_on.0.as_str(), held.budget_usd.0.as_str()), ("yggdrasil-host", "2026-10-09", "5"));
+        assert_eq!((held.host.0.as_str(), held.started_on.0.as_str(), held.budget_usd.0.as_str()), ("yggdrasil-host", "2026-10-09", "0"));
         assert_eq!(held.claims, vec![spec_ref("x")]);
         assert_eq!(held.campaigns, vec![Slug(CAMPAIGN.into())]);
         assert_eq!(view.admission.provenance.agent.0, "agent-x");
@@ -549,19 +545,19 @@ mod tests {
     #[test]
     fn the_unit_started_names_the_minds_instance() {
         let rig = Rig::new();
-        rig.launch(RunTurn::PersonaTurn, &[], five());
+        rig.launch(RunTurn::PersonaTurn, &[]);
         let started = rig.launcher.started.borrow();
         assert_eq!(started[0].0, *rig.mind.instance());
     }
 
     #[test]
-    fn the_runs_budget_is_the_grants_cap_at_two_caps() {
+    fn a_run_carries_no_budget_and_each_persona_turn_opens_after_the_last_ended() {
         let rig = Rig::new();
-        for (n, (cap, want)) in [(Decimal::new(5, 0), "5"), (Decimal::new(750, 2), "7.5"), (Decimal::new(125, 1), "12.5")].into_iter().enumerate() {
-            rig.at(n as i64);
-            let LaunchOutcome::Launched { run } = rig.launch(RunTurn::PersonaTurn, &[], cap) else { panic!("not launched") };
+        for n in 0..3 {
+            rig.at(n);
+            let LaunchOutcome::Launched { run } = rig.launch(RunTurn::PersonaTurn, &[]) else { panic!("not launched") };
             let view = rig.mind.view(K::Run, &run.id.0).unwrap();
-            assert_eq!(the_run(&view).budget_usd.0, want);
+            assert_eq!(the_run(&view).budget_usd.0, "0", "the dead record field is written zero");
             assert_eq!(the_run(&view).turn, RunTurn::PersonaTurn);
             assert!(the_run(&view).claims.is_empty() && the_run(&view).campaigns.is_empty());
             // One live Persona turn of hers at a time: end this one.
@@ -573,11 +569,11 @@ mod tests {
     #[test]
     fn a_live_persona_turn_is_busy_to_a_persona_launch_and_does_not_block_a_self_run() {
         let rig = Rig::new();
-        let LaunchOutcome::Launched { run } = rig.launch(RunTurn::PersonaTurn, &[], five()) else { panic!("not launched") };
+        let LaunchOutcome::Launched { run } = rig.launch(RunTurn::PersonaTurn, &[]) else { panic!("not launched") };
         rig.at(1);
-        assert_eq!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Busy { run });
+        assert_eq!(rig.launch(RunTurn::PersonaTurn, &[]), LaunchOutcome::Busy { run });
         assert_eq!((rig.runs(), rig.started()), (1, 1), "Busy admits and starts nothing");
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[]), LaunchOutcome::Launched { .. }));
     }
 
     #[test]
@@ -589,9 +585,9 @@ mod tests {
     #[test]
     fn two_launches_in_one_millisecond_open_one_run() {
         let rig = Rig::new();
-        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[]), LaunchOutcome::Launched { .. }));
         // A Self run holds another slot, so only the key (instance and label) collides.
-        let second = rig.launch(RunTurn::SelfRun, &[], Decimal::new(6, 0));
+        let second = rig.launch(RunTurn::SelfRun, &[]);
         assert!(matches!(second, LaunchOutcome::Refused(_)), "{second:?}");
         assert_eq!((rig.runs(), rig.started()), (1, 1));
     }
@@ -602,14 +598,14 @@ mod tests {
         rig.mind.committed(vec![spec("x"), follow_up("later", &spec_ref("x"))]);
         let later = reference(K::FollowUp, &id("follow_up", "later"));
         rig.mind.committed(vec![run("op", RunTurn::SelfRun, RunOperator::Operator, std::slice::from_ref(&later))]);
-        let outcome = rig.launch(RunTurn::SelfRun, std::slice::from_ref(&later), five());
+        let outcome = rig.launch(RunTurn::SelfRun, std::slice::from_ref(&later));
         assert!(matches!(outcome, LaunchOutcome::Refused(Declined::Admission(MindRefusal::AlreadyClaimed { .. }))), "{outcome:?}");
         for (answer, declined) in [
             (Outcome::Conflict { identities: vec![] }, Declined::Conflict),
             (Outcome::AlreadyAdmitted { receipt_id: "r".into() }, Declined::AlreadyAdmitted),
         ] {
             let mind = Answering { inner: &rig.mind, outcome: answer };
-            assert_eq!(rig.launch_through(&mind, RunTurn::SelfRun, &[spec_ref("x")], five()), LaunchOutcome::Refused(declined));
+            assert_eq!(rig.launch_through(&mind, RunTurn::SelfRun, &[spec_ref("x")]), LaunchOutcome::Refused(declined));
         }
         assert_eq!((rig.runs(), rig.started()), (1, 0));
     }
@@ -620,7 +616,7 @@ mod tests {
         rig.mind.committed(vec![spec("x"), spec("y")]);
         rig.mind.committed(vec![run("other", RunTurn::SelfRun, RunOperator::Operator, &[spec_ref("y")])]);
         rig.launcher.fail.set(true);
-        let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five());
+        let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]);
         assert_eq!(outcome, LaunchOutcome::Refused(Declined::StartFailed));
         let opened = format!("{INSTANCE}:run:mind-20261009T131500000Z");
         let status = |id: &str| rig.mind.view(K::Run, id).unwrap().status;
@@ -629,7 +625,7 @@ mod tests {
         // The spec is free again.
         rig.launcher.fail.set(false);
         rig.at(1);
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")]), LaunchOutcome::Launched { .. }));
     }
 
     #[test]
@@ -640,10 +636,10 @@ mod tests {
         rig.mind.committed(vec![question_in("fork", &spec_ref("blocked"))]);
         rig.mind.committed(vec![run("op", RunTurn::SelfRun, RunOperator::Operator, &[spec_ref("held")])]);
         for item in ["done", "blocked", "held"] {
-            let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref(item)], five());
+            let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref(item)]);
             assert_eq!(outcome, LaunchOutcome::NotQueued { item: spec_ref(item) });
         }
-        let mixed = rig.launch(RunTurn::SelfRun, &[spec_ref("free"), spec_ref("done")], five());
+        let mixed = rig.launch(RunTurn::SelfRun, &[spec_ref("free"), spec_ref("done")]);
         assert_eq!(mixed, LaunchOutcome::NotQueued { item: spec_ref("done") }, "one unqueued claim refuses the whole request");
         assert_eq!((rig.runs(), rig.started()), (1, 0));
     }
@@ -658,17 +654,17 @@ mod tests {
         rig.mind.committed(vec![close(run_ref("gone"), withdrawn())]);
         rig.seed("persona", RunTurn::PersonaTurn, &[]);
         rig.at(1);
-        let LaunchOutcome::Launched { run: first } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()) else {
+        let LaunchOutcome::Launched { run: first } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]) else {
             panic!("blocked by a run that is not hers")
         };
         let (runs, started) = (rig.runs(), rig.started());
         rig.at(2);
-        assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("y")], five()), LaunchOutcome::Busy { run: first.clone() });
+        assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("y")]), LaunchOutcome::Busy { run: first.clone() });
         assert_eq!((rig.runs(), rig.started()), (runs, started), "Busy admits and starts nothing");
         // Ending her run frees the slot.
         rig.mind.committed(vec![close(first, recorded())]);
         rig.at(3);
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("y")], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("y")]), LaunchOutcome::Launched { .. }));
     }
 
     #[test]
@@ -677,7 +673,7 @@ mod tests {
         rig.mind.committed(vec![spec("x")]);
         rig.seed("old", RunTurn::SelfRun, &[spec_ref("x")]);
         rig.age(&run_ref("old").id.0, 24 * 3600);
-        assert_eq!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Busy { run: run_ref("old") });
+        assert_eq!(rig.launch(RunTurn::SelfRun, &[]), LaunchOutcome::Busy { run: run_ref("old") });
         assert!(rig.in_force("old"));
         assert_eq!((rig.runs(), rig.started()), (1, 0));
     }
@@ -688,7 +684,7 @@ mod tests {
         rig.mind.committed(vec![spec("x")]);
         rig.seed("bare", RunTurn::SelfRun, &[]);
         rig.age(&run_ref("bare").id.0, 3600);
-        assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()), LaunchOutcome::Busy { run: run_ref("bare") });
+        assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")]), LaunchOutcome::Busy { run: run_ref("bare") });
         assert!(rig.in_force("bare"));
     }
 
@@ -701,7 +697,7 @@ mod tests {
         let dead = run_ref("dead").id.0;
         rig.age(&dead, START_GRACE_S - 1);
         assert_eq!(
-            rig.launch(RunTurn::SelfRun, &[], five()),
+            rig.launch(RunTurn::SelfRun, &[]),
             LaunchOutcome::Busy { run: run_ref("dead") },
             "inside the grace the unit may still be starting"
         );
@@ -709,7 +705,7 @@ mod tests {
         assert_eq!((rig.runs(), rig.started()), (1, 0));
 
         rig.age(&dead, START_GRACE_S);
-        let LaunchOutcome::Launched { run: next } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()) else {
+        let LaunchOutcome::Launched { run: next } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]) else {
             panic!("the dead run's claim stayed held")
         };
         assert!(!rig.in_force("dead"));
@@ -734,7 +730,7 @@ mod tests {
         rig.mind.committed(vec![close(first, withdrawn())]);
         assert!(rig.in_force("dead"));
         rig.age(&run_ref("dead").id.0, 600);
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[]), LaunchOutcome::Launched { .. }));
         assert!(!rig.in_force("dead"));
         assert_eq!(the_closure(&rig, "dead", 2).0.sequence, 2);
     }
@@ -746,7 +742,7 @@ mod tests {
         rig.mind.committed(vec![run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
         rig.mind.committed(vec![run("dead", RunTurn::SelfRun, RunOperator::Mind, &[])]);
         rig.age(&run_ref("dead").id.0, 3600);
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[]), LaunchOutcome::Launched { .. }));
         assert!(!rig.in_force("dead"));
         assert!(rig.in_force("op") && rig.in_force("persona"), "an Operator run and a run of the other turn are never closed by this launch");
     }
@@ -769,11 +765,11 @@ mod tests {
             }
         }
         let rig = Rig::new();
-        assert!(rig.try_launch_through(&LosesAnswer(&rig.mind), RunTurn::SelfRun, &[], five()).is_err());
+        assert!(rig.try_launch_through(&LosesAnswer(&rig.mind), RunTurn::SelfRun, &[]).is_err());
         assert_eq!((rig.runs(), rig.started()), (1, 0), "committed, and no unit was started");
         let lost = rig.mind.ids(K::Run).remove(0);
         rig.age(&lost, START_GRACE_S);
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[]), LaunchOutcome::Launched { .. }));
         assert_eq!((rig.runs(), rig.started()), (2, 1));
         let lost_label = lost.rsplit(':').next().unwrap().to_string();
         assert!(!rig.in_force(&lost_label));
@@ -803,7 +799,7 @@ mod tests {
         }
         let rig = Rig::new();
         let racing = Racing { inner: &rig.mind, raced: Cell::new(false) };
-        assert_eq!(rig.launch_through(&racing, RunTurn::SelfRun, &[], five()), LaunchOutcome::Busy { run: run_ref("rival") });
+        assert_eq!(rig.launch_through(&racing, RunTurn::SelfRun, &[]), LaunchOutcome::Busy { run: run_ref("rival") });
         assert_eq!((rig.runs(), rig.started()), (1, 0));
     }
 
@@ -830,7 +826,7 @@ mod tests {
         for foreign in
             ["other:run:mind-20261010T010203004Z", "eureka-body:run:mind-20261010T010203004Z", "yggdrasil:run:nobody", "yggdrasil:run:persona"]
         {
-            let outcome = rig.launch_through(&Forged(&rig.mind, foreign), RunTurn::SelfRun, &[], five());
+            let outcome = rig.launch_through(&Forged(&rig.mind, foreign), RunTurn::SelfRun, &[]);
             assert!(matches!(outcome, LaunchOutcome::Refused(Declined::Admission(MindRefusal::AlreadyLive { .. }))), "{foreign}: {outcome:?}");
         }
         assert_eq!(rig.started(), 0);
@@ -839,12 +835,12 @@ mod tests {
     #[test]
     fn a_run_whose_unit_died_is_closed_by_the_next_launch_of_its_turn() {
         let rig = Rig::new();
-        let LaunchOutcome::Launched { run: first } = rig.launch(RunTurn::SelfRun, &[], five()) else { panic!("not launched") };
+        let LaunchOutcome::Launched { run: first } = rig.launch(RunTurn::SelfRun, &[]) else { panic!("not launched") };
         let first_label = first.id.0.rsplit(':').next().unwrap().to_string();
         rig.age(&first.id.0, 3600);
-        assert_eq!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Busy { run: first.clone() }, "its unit is still running");
+        assert_eq!(rig.launch(RunTurn::SelfRun, &[]), LaunchOutcome::Busy { run: first.clone() }, "its unit is still running");
         rig.launcher.kill(RunTurn::SelfRun);
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[]), LaunchOutcome::Launched { .. }));
         assert!(!rig.in_force(&first_label));
         assert_eq!(rig.started(), 2);
     }
@@ -855,7 +851,7 @@ mod tests {
         rig.mind.committed(vec![spec("x")]);
         history(&rig.mind, &spec_ref("x"), &[false, false, false]);
         let before = rig.runs();
-        let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five());
+        let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]);
         let question = id("question", "breaker-mind-20261009T131500000Z");
         assert_eq!(outcome, LaunchOutcome::Tripped { item: spec_ref("x"), question: reference(K::Question, &question) });
         assert_eq!((rig.runs(), rig.started()), (before, 0));
@@ -865,11 +861,11 @@ mod tests {
         assert_eq!((asked.raised_in.clone(), asked.campaign.0.as_str()), (Some(spec_ref("x")), CAMPAIGN));
         assert_eq!(view.admission.provenance.session.0, "mind-20261009T131500000Z");
         // Open, the question blocks the item.
-        assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()), LaunchOutcome::NotQueued { item: spec_ref("x") });
+        assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")]), LaunchOutcome::NotQueued { item: spec_ref("x") });
         // The ruling that answers it opens the item, and the count starts afresh.
         rig.mind.committed(vec![ruling("reopen-x", Some((&question, "reopen")))]);
         rig.at(1);
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")]), LaunchOutcome::Launched { .. }));
     }
 
     #[test]
@@ -877,10 +873,10 @@ mod tests {
         let rig = Rig::new();
         rig.mind.committed(vec![spec("x"), spec("y")]);
         history_as(&rig.mind, &spec_ref("x"), "x", &[false, false, false]);
-        let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five());
+        let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]);
         assert!(matches!(outcome, LaunchOutcome::Tripped { .. }), "{outcome:?}");
         assert_eq!(rig.started(), 0);
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("y")], five()), LaunchOutcome::Launched { .. }), "the other item still launches");
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[spec_ref("y")]), LaunchOutcome::Launched { .. }), "the other item still launches");
     }
 
     #[test]
@@ -888,11 +884,11 @@ mod tests {
         let rig = Rig::new();
         rig.mind.committed(vec![spec("x")]);
         history(&rig.mind, &spec_ref("x"), &[false, false, false]);
-        let LaunchOutcome::Tripped { question: first, .. } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()) else { panic!("no first trip") };
+        let LaunchOutcome::Tripped { question: first, .. } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]) else { panic!("no first trip") };
         rig.mind.committed(vec![ruling("reopen", Some((&first.id.0, "reopen")))]);
         history_as(&rig.mind, &spec_ref("x"), "g", &[false, false, false]);
         rig.at(1);
-        let LaunchOutcome::Tripped { question: second, .. } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five()) else {
+        let LaunchOutcome::Tripped { question: second, .. } = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]) else {
             panic!("no second trip")
         };
         assert_ne!(first, second);
@@ -909,7 +905,7 @@ mod tests {
         rig.mind.committed(vec![question_in("fork", &item)]);
         rig.mind.committed(vec![ruling("answer", Some((&id("question", "fork"), "A")))]);
         history_as(&rig.mind, &item, "g", &[false]);
-        assert!(matches!(rig.launch(RunTurn::SelfRun, &[item], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[item]), LaunchOutcome::Launched { .. }));
     }
 
     #[test]
@@ -919,7 +915,7 @@ mod tests {
         history(&rig.mind, &spec_ref("x"), &[false, false]);
         rig.mind.committed(vec![run("dead", RunTurn::SelfRun, RunOperator::Mind, &[spec_ref("x")])]);
         rig.age(&run_ref("dead").id.0, 600);
-        let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")], five());
+        let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]);
         assert!(matches!(outcome, LaunchOutcome::Tripped { .. }), "{outcome:?}");
         assert!(!rig.in_force("dead"), "the trip's batch closes the dead run too");
         assert_eq!((rig.runs(), rig.started()), (3, 0));
@@ -1048,7 +1044,7 @@ mod tests {
     fn gated(mind: &Named, grant: &str, turn: RunTurn, claims: Vec<PipelineRef>) -> Result<LaunchOutcome> {
         let (launcher, clock) = (Recording::default(), Fixed(Cell::new(at(0))));
         let ports = Ports { mind, launcher: &launcher, clock: &clock, host: "yggdrasil-host" };
-        let grant = Grant::for_test(Slug(grant.into()), five());
+        let grant = Grant::for_test(Slug(grant.into()));
         let outcome = open_and_launch(&ports, LaunchRequest { turn, claims, agent: "agent-x".into(), grant });
         assert!(launcher.started.borrow().is_empty());
         outcome
@@ -1143,9 +1139,9 @@ mod tests {
         let rig = Rig::new();
         rig.mind.committed(vec![run("pdead", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
         rig.age(&run_ref("pdead").id.0, START_GRACE_S - 1);
-        assert_eq!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Busy { run: run_ref("pdead") }, "inside the grace");
+        assert_eq!(rig.launch(RunTurn::PersonaTurn, &[]), LaunchOutcome::Busy { run: run_ref("pdead") }, "inside the grace");
         rig.age(&run_ref("pdead").id.0, START_GRACE_S);
-        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[]), LaunchOutcome::Launched { .. }));
         assert!(!rig.in_force("pdead"));
         assert_eq!(the_closure(&rig, "pdead", 1).0.outcome, ResolutionOutcome::Recorded { reason: "unit not active".into() });
         assert_eq!((rig.runs(), rig.started()), (2, 1));
@@ -1155,7 +1151,7 @@ mod tests {
     fn a_live_self_run_does_not_make_a_persona_launch_busy() {
         let rig = Rig::new();
         rig.seed("alive-self", RunTurn::SelfRun, &[]);
-        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[]), LaunchOutcome::Launched { .. }));
         assert!(rig.in_force("alive-self"));
     }
 
@@ -1164,7 +1160,7 @@ mod tests {
         let rig = Rig::new();
         rig.mind.committed(vec![run("dead-self", RunTurn::SelfRun, RunOperator::Mind, &[])]);
         rig.age(&run_ref("dead-self").id.0, 3600);
-        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[], five()), LaunchOutcome::Launched { .. }));
+        assert!(matches!(rig.launch(RunTurn::PersonaTurn, &[]), LaunchOutcome::Launched { .. }));
         assert!(rig.in_force("dead-self"), "a Persona launch closes only Persona holders");
     }
 

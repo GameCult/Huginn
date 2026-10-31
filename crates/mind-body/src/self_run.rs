@@ -20,13 +20,14 @@
 //! The child's credential is a lease, not a variable (rulings
 //! `eureka-body:ruling:self-runs-through-connector` and
 //! `eureka-body:ruling:self-run-credential-lease`): before it starts `claude`,
-//! `carry` asks the connector for a lease (`lease_client`) until the unit's
-//! runtime cap, given to it in seconds (the connector sets the reservation and binds the lease to this
-//! unit's invocation), and the granted descriptor is the only place the
-//! token reaches the child. A refusal closes the run Recorded and starts nothing.
-//! When the child has ended `carry` settles with the usage, per model, the
-//! stream reported; a run that ends without settling (killed by the brake, a
-//! crash) is billed its reservation by the connector.
+//! `carry` asks the connector for a lease (`lease_client`) until the unit runtime
+//! cap, given to it in seconds (the connector binds the lease to this unit
+//! invocation), and the granted descriptor is the only place the token reaches
+//! the child. A refusal closes the run Recorded and starts nothing. Nothing is
+//! reserved, billed or settled: the lease ends when `carry` drops it, and nothing
+//! bounds a run in dollars or in usage; the bounds are `--max-turns`, the unit
+//! `RuntimeMaxSec` and the context-ceiling flush. The grant carries the plan usage
+//! windows, which go to the child in its start message.
 //!
 //! The actuator admits only closures of Self runs, nothing else. Every exit of
 //! `carry` that leaves her run open resolves it Recorded exactly once (the
@@ -37,7 +38,6 @@
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
 //! parsed is stored.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
@@ -48,14 +48,15 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use cultnet_rs::Selection;
-use eureka_pipeline::{PipelineDocument, PipelineRef, ResolutionOutcome, RunTurn, Slug};
-use huginn_mind::{PipelineAdmissionOutcome, PipelinePageItems};
+use eureka_pipeline::{PipelineRef, ResolutionOutcome, RunTurn, Slug};
+use huginn_mind::PipelineAdmissionOutcome;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::launch::{Clock, closure, holders};
-use crate::lease_client::{Lender, LeaseRefusalKind, LeaseRequest, Lent, ModelUsage, Settlement, TokenFd, TokenUsage};
+use crate::connector::render_plan;
+use crate::lease_client::{LeaseRefusalKind, LeaseRequest, Lender, Lent, TokenFd};
+use model_connector::PlanQuota;
 use crate::queue::MindPort;
 
 use decide::{Action, Event, State, decide, next_deadline};
@@ -100,10 +101,12 @@ const POLL: StdDuration = StdDuration::from_secs(60);
 
 /// What the child is told at the start. The contract with the `eureka`
 /// skill: it names the skill, the instance and the run id.
-pub fn start_message(instance: &Slug, run: &PipelineRef) -> String {
+pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
     format!(
-        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.",
-        instance.0, run.id.0
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\n{}",
+        instance.0,
+        run.id.0,
+        render_plan(plan_quota, now_ms)
     )
 }
 
@@ -124,8 +127,7 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
 /// user's settings load (the fresh configuration directory
 /// the seed fills); the working directory's project and local settings, which a
 /// run could have written, do not.
-/// `budget_usd` is the run's, as stored.
-pub fn claude_args(session: Uuid, budget_usd: &str) -> Vec<String> {
+pub fn claude_args(session: Uuid) -> Vec<String> {
     [
         "-p",
         "--input-format",
@@ -135,8 +137,6 @@ pub fn claude_args(session: Uuid, budget_usd: &str) -> Vec<String> {
         "--verbose",
         "--session-id",
         &session.to_string(),
-        "--max-budget-usd",
-        budget_usd,
         "--max-turns",
         &MAX_TURNS.to_string(),
         "--permission-mode",
@@ -286,103 +286,28 @@ impl fmt::Display for SelfRunOutcome {
     }
 }
 
-/// Her one open Self run and its budget, read through the launch primitive's
-/// holder reader. Anything but exactly one run is none: the mind admits at most
-/// one Self run of hers in force, and the launch that opens the next closes a
-/// dead one.
-fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, String)>> {
+/// Her one open Self run, read through the launch primitive holder reader.
+/// Anything but exactly one run is none: the mind admits at most one Self run of
+/// hers in force, and the launch that opens the next closes a dead one.
+fn her_run(mind: &dyn MindPort) -> Result<Option<PipelineRef>> {
     let mut held = holders(mind, mind.instance(), RunTurn::SelfRun)?;
     let (Some(run), None) = (held.pop(), held.pop()) else { return Ok(None) };
-    let one = Selection { keys: Some(vec![run.id.id.0.clone()]), projection: "document".into(), ..Selection::default() };
-    let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
-    match views.into_iter().next().map(|view| view.document) {
-        Some(PipelineDocument::Run(document)) => Ok(Some((run.id, document.budget_usd.0))),
-        _ => Err(anyhow!("the run's document could not be read")),
-    }
+    Ok(Some(run.id))
 }
 
-/// What a run used, from its stream. `claude`'s own account comes first: a
-/// result record's `modelUsage` is its cumulative per-model total as of that
-/// result, so the last result that has one is the run's usage up to then, plus
-/// the tokens of every assistant message after it (the flush turn, or a turn the
-/// child was cut off in: those requests are billed too). A stream with no such
-/// result falls back to the tokens of every assistant message (once per message
-/// id, subagents included), by model.
+/// What the stream said at the end of the run, as the reason of its closure.
 #[derive(Default)]
-struct Spent {
-    requests: BTreeMap<String, (String, TokenUsage)>,
-    reported: Option<BTreeMap<String, TokenUsage>>,
-    /// The message ids heard when `reported` was stated: its total already holds them.
-    counted: BTreeSet<String>,
-    /// The last result heard, as the reason of the run's closure: bounded.
+struct Heard {
+    /// The last result heard: bounded.
     concluded: Option<String>,
 }
 
-/// The model of a message that names none; the connector prices it as it sees fit.
-const UNNAMED_MODEL: &str = "unknown";
-
-impl Spent {
+impl Heard {
     fn hear(&mut self, line: &str) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
-        match event.get("type").and_then(Value::as_str) {
-            Some("assistant") => {}
-            Some("result") => {
-                self.concluded = Some(describe_result(&event, REASON_EXCERPT_LIMIT));
-                return self.hear_result(&event);
-            }
-            _ => return,
+        if event.get("type").and_then(Value::as_str) == Some("result") {
+            self.concluded = Some(describe_result(&event, REASON_EXCERPT_LIMIT));
         }
-        let message = event.get("message");
-        let Some(id) = message.and_then(|message| message.get("id")).and_then(Value::as_str) else { return };
-        let model = message.and_then(|message| message.get("model")).and_then(Value::as_str).unwrap_or(UNNAMED_MODEL);
-        let usage = message.and_then(|message| message.get("usage"));
-        let field = |name: &str| usage.and_then(|usage| usage.get(name)).and_then(Value::as_u64).unwrap_or(0);
-        let (named, seen) = self.requests.entry(id.to_string()).or_insert_with(|| (model.to_string(), TokenUsage::default()));
-        *named = model.to_string();
-        // Records that share an id are one request, each with the usage so far.
-        seen.input_tokens = seen.input_tokens.max(field("input_tokens"));
-        seen.cache_read_tokens = seen.cache_read_tokens.max(field("cache_read_input_tokens"));
-        seen.cache_write_tokens = seen.cache_write_tokens.max(field("cache_creation_input_tokens"));
-        seen.output_tokens = seen.output_tokens.max(field("output_tokens"));
-    }
-
-    /// A result's own per-model total, when it states one.
-    fn hear_result(&mut self, result: &serde_json::Map<String, Value>) {
-        let Some(Value::Object(models)) = result.get("modelUsage") else { return };
-        let counted = |used: &Value, name: &str| used.get(name).and_then(Value::as_u64).unwrap_or(0);
-        let stated: BTreeMap<String, TokenUsage> = models
-            .iter()
-            .map(|(model, used)| {
-                let usage = TokenUsage {
-                    input_tokens: counted(used, "inputTokens"),
-                    cache_read_tokens: counted(used, "cacheReadInputTokens"),
-                    cache_write_tokens: counted(used, "cacheCreationInputTokens"),
-                    output_tokens: counted(used, "outputTokens"),
-                    reasoning_tokens: None,
-                };
-                (model.clone(), usage)
-            })
-            .collect();
-        if !stated.is_empty() {
-            self.reported = Some(stated);
-            self.counted = self.requests.keys().cloned().collect();
-        }
-    }
-
-    /// The settle: the usage per model, models in name order.
-    fn settlement(&self) -> Settlement {
-        let mut by_model: BTreeMap<String, TokenUsage> = self.reported.clone().unwrap_or_default();
-        for (id, (model, request)) in &self.requests {
-            if self.reported.is_some() && self.counted.contains(id) {
-                continue;
-            }
-            let total = by_model.entry(model.clone()).or_default();
-            total.input_tokens = total.input_tokens.saturating_add(request.input_tokens);
-            total.cache_read_tokens = total.cache_read_tokens.saturating_add(request.cache_read_tokens);
-            total.cache_write_tokens = total.cache_write_tokens.saturating_add(request.cache_write_tokens);
-            total.output_tokens = total.output_tokens.saturating_add(request.output_tokens);
-        }
-        Settlement { usage: by_model.into_iter().map(|(model, usage)| ModelUsage { model, usage }).collect() }
     }
 }
 
@@ -411,7 +336,7 @@ fn admit_closure(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, outc
 /// Resolves `run` Recorded if it is still in force: the child may have closed it
 /// itself in its flush, and a refused lease was closed already. One try; a mind
 /// that cannot be reached leaves it open: the launch that opens the next run closes it.
-fn close_if_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, ran: &Result<SelfRunOutcome>, spent: &Spent) -> Result<()> {
+fn close_if_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, ran: &Result<SelfRunOutcome>, heard: &Heard) -> Result<()> {
     if !holders(mind, mind.instance(), RunTurn::SelfRun)?.iter().any(|held| held.id == *run) {
         return Ok(());
     }
@@ -419,7 +344,7 @@ fn close_if_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, ran:
         Ok(outcome) => outcome.to_string(),
         Err(_) => "the actuator failed after the run opened".to_string(),
     };
-    let reason = match &spent.concluded {
+    let reason = match &heard.concluded {
         Some(concluded) => format!("{how}; {concluded}"),
         None => format!("{how}; claude gave no result"),
     };
@@ -435,11 +360,11 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 }
 
 /// Carries her one open Self run: one `claude` child from the lease to its
-/// settle. The request lines go to `out`. A mind that cannot be reached, a
+/// end. The request lines go to `out`. A mind that cannot be reached, a
 /// connector that cannot be reached or a child that cannot be started is an
 /// error; every other end is an outcome. The lease comes first: with none
-/// granted no child exists. It is settled once, after the child is known to
-/// have ended; a lease dropped any other way is billed in full by the connector.
+/// granted no child exists. The lease is dropped when the child is known to
+/// have ended, which ends it.
 /// `run_cap_s` is the unit's `RuntimeMaxSec`: a connector that finds the lease
 /// too long is misconfigured, which is an error naming the mismatch and not a
 /// refusal of the run: the run is withdrawn, so the breaker counts nothing.
@@ -450,10 +375,10 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 /// original error) stands, a failed close of a run that ended normally is an
 /// error, and the launch that opens the next run closes the run left open.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
-    let Some((run, budget)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
-    let mut spent = Spent::default();
-    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &budget), &mut spent);
-    let closed = close_if_open(mind, clock, &run, &ran, &spent);
+    let Some(run) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
+    let mut heard = Heard::default();
+    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, &run, &mut heard);
+    let closed = close_if_open(mind, clock, &run, &ran, &heard);
     if closed.is_err() {
         let _ = writeln!(out, "the run could not be closed: the next launch closes it");
     }
@@ -465,7 +390,7 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawne
 }
 
 #[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
-fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, budget): (&PipelineRef, &str), spent: &mut Spent) -> Result<SelfRunOutcome> {
+fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, run: &PipelineRef, heard: &mut Heard) -> Result<SelfRunOutcome> {
     let request = LeaseRequest { expires_at_unix_ms: unix_ms(clock.now()).saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
         Lent::Granted(lease) => lease,
@@ -475,27 +400,9 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         }
         Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
-    let child = match spawner.spawn(&claude_args(session_id(run), budget), lease.token()) {
-        Ok(child) => child,
-        Err(error) => {
-            // No child ever held the token; the empty report is the connector's cue to bill the reservation.
-            let _ = lease.settle(Settlement::default());
-            return Err(error);
-        }
-    };
-    let outcome = drive(mind, clock, child, run, spent, out)?;
-    // A child that could not even be killed may still be spending: that lease is
-    // dropped, and the connector bills the reservation.
-    if !matches!(outcome, SelfRunOutcome::Ended { cause: Cause::Unstoppable, .. }) {
-        // A settle that fails leaves the connector to bill the reservation; the run's outcome stands.
-        // Either way the journal says what the connector billed, or that it will bill the reservation.
-        let report = match lease.settle(spent.settlement()) {
-            Ok(billed) => format!("settled: billed {billed} micro-USD"),
-            Err(_) => "settle failed: the connector bills the reservation".to_string(),
-        };
-        let _ = writeln!(out, "{report}");
-    }
-    Ok(outcome)
+    let child = spawner.spawn(&claude_args(session_id(run)), lease.token())?;
+    let started_ms = unix_ms(clock.now());
+    drive(mind, clock, child, run, (lease.plan_quota(), started_ms), heard, out)
 }
 
 /// The most of a result's text that reaches the journal.
@@ -533,9 +440,9 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
 }
 
 /// The loop: facts in, one clock read per fact, actions out.
-fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run: &PipelineRef, spent: &mut Spent, out: &mut dyn Write) -> Result<SelfRunOutcome> {
+fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run: &PipelineRef, (plan_quota, now_ms): (&[PlanQuota], u64), heard: &mut Heard, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
-    child.write_line(&user_line(&start_message(mind.instance(), run)));
+    child.write_line(&user_line(&start_message(mind.instance(), run, plan_quota, now_ms)));
 
     let mut state = State::default();
     let mut now = clock.now();
@@ -543,7 +450,7 @@ fn drive(mind: &dyn MindPort, clock: &dyn Clock, mut child: Box<dyn Child>, run:
         let wait = next_deadline(&state).map_or(POLL, |at| (at - now).to_std().unwrap_or_default().min(POLL));
         let fact = match child.next(wait) {
             Read::Line(line) => {
-                spent.hear(&line);
+                heard.hear(&line);
                 write_result(&line, out)?;
                 match read_usage(&line) {
                     Usage::Request { id, prefix } => Event::Request { id, prefix },

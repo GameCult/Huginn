@@ -1,13 +1,7 @@
-//! The wire against the connector's golden frames, and the client against a
-//! fake connector that speaks them over a real unix socket with real SCM_RIGHTS.
+//! The lease wire (v2: no reservation, no settle) and the client against a fake
+//! connector that speaks it over a real unix socket with real SCM_RIGHTS.
 
 use super::*;
-
-const REQUEST: &[u8] = include_bytes!("lease_v1/request.bin");
-const GRANT: &[u8] = include_bytes!("lease_v1/grant.bin");
-const REFUSAL: &[u8] = include_bytes!("lease_v1/refusal.bin");
-const SETTLE: &[u8] = include_bytes!("lease_v1/settle.bin");
-const SETTLED: &[u8] = include_bytes!("lease_v1/settled.bin");
 
 const RESET: u64 = 1_793_307_000_000;
 
@@ -17,41 +11,62 @@ fn request() -> LeaseRequest {
 
 const LEASE_ID: &str = "lease:0123456789abcdef0123456789abcdef";
 
-fn settlement() -> Settlement {
-    Settlement {
-        usage: vec![
-            ModelUsage { model: "claude-opus-5-1".into(), usage: TokenUsage { input_tokens: 1200, cache_read_tokens: 30_000, cache_write_tokens: 500, output_tokens: 800, reasoning_tokens: Some(100) } },
-            ModelUsage { model: "claude-haiku-5-1".into(), usage: TokenUsage { input_tokens: 400, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 60, reasoning_tokens: None } },
-        ],
+fn window() -> PlanQuota {
+    PlanQuota { window: "five_hour".into(), utilization_permille: Some(80), resets_at_unix_ms: RESET, status: "allowed".into(), observed_at_unix_ms: RESET - 1000 }
+}
+
+fn refusal_message() -> LeaseMessage {
+    LeaseMessage::Refusal(LeaseRefused { kind: LeaseRefusalKind::ProviderRejected, detail: "the provider refuses until its reset".into() })
+}
+
+fn request_frame() -> Vec<u8> {
+    encode_frame(&LeaseMessage::Request(request())).unwrap()
+}
+
+fn grant_frame() -> Vec<u8> {
+    encode_frame(&LeaseMessage::Grant(LeaseGranted { lease_id: LEASE_ID.into(), plan_quota: vec![window()] })).unwrap()
+}
+
+fn refusal_frame() -> Vec<u8> {
+    encode_frame(&refusal_message()).unwrap()
+}
+
+/// The connector names on the wire, spelled out: a renamed field or kind is a
+/// different protocol, so the frames are read back as plain JSON values.
+#[test]
+fn the_wire_names_are_the_connector_lease_v2_names() {
+    let body = |frame: &[u8]| -> serde_json::Value { rmp_serde::from_slice(&frame[4..]).unwrap() };
+    assert_eq!(body(&request_frame()), serde_json::json!({"kind": "claude_lease_request", "value": {"expires_at_unix_ms": RESET}}));
+    assert_eq!(
+        body(&grant_frame()),
+        serde_json::json!({"kind": "claude_lease_grant", "value": {"lease_id": LEASE_ID, "plan_quota": [{
+            "window": "five_hour", "utilization_permille": 80, "resets_at_unix_ms": RESET, "status": "allowed", "observed_at_unix_ms": RESET - 1000
+        }]}})
+    );
+    assert_eq!(body(&refusal_frame())["kind"], "claude_lease_refusal");
+    assert_eq!(body(&refusal_frame())["value"]["kind"], "ProviderRejected");
+    for (name, kind) in [("UnknownCaller", LeaseRefusalKind::UnknownCaller), ("Expired", LeaseRefusalKind::Expired), ("Busy", LeaseRefusalKind::Busy)] {
+        let frame = encode_frame(&LeaseMessage::Refusal(LeaseRefused { kind, detail: String::new() })).unwrap();
+        assert_eq!(body(&frame)["value"]["kind"], name);
     }
 }
 
-fn settle_message() -> LeaseMessage {
-    LeaseMessage::Settle(LeaseSettle { lease_id: LEASE_ID.into(), usage: settlement().usage })
-}
-
 #[test]
-fn lease_fixtures_decode() {
-    let refusal = LeaseRefused { kind: LeaseRefusalKind::SpendCeiling, detail: "the window cannot hold this reservation".into() };
-    let cases: Vec<(&str, &[u8], LeaseMessage)> = vec![
-        ("request", REQUEST, LeaseMessage::Request(request())),
-        ("grant", GRANT, LeaseMessage::Grant(LeaseGranted { lease_id: LEASE_ID.into(), reserved_micro_usd: 600_000 })),
-        ("refusal", REFUSAL, LeaseMessage::Refusal(refusal)),
-        ("settle", SETTLE, settle_message()),
-        ("settled", SETTLED, LeaseMessage::Settled(LeaseSettled { billed_micro_usd: 123_456, overrun_micro_usd: 23_456 })),
-    ];
-    for (name, bytes, message) in cases {
-        assert_eq!(decode_frame(bytes).as_ref(), Some(&message), "{name} decodes");
-        assert_eq!(encode_frame(&message).unwrap(), bytes, "{name} re-encodes to the connector's bytes");
+fn a_v1_settle_or_settled_frame_is_not_a_message() {
+    for kind in ["claude_lease_settle", "claude_lease_settled"] {
+        let body = rmp_serde::to_vec_named(&serde_json::json!({"kind": kind, "value": {}})).unwrap();
+        assert!(decode_frame_body(&body).is_err(), "{kind}");
     }
 }
 
 #[test]
 fn a_frame_is_one_whole_message_within_the_bound() {
-    let mut trailing = GRANT.to_vec();
+    let grant = grant_frame();
+    let mut trailing = grant.clone();
     trailing.push(0);
     assert!(decode_frame(&trailing).is_none());
-    assert!(decode_frame(&GRANT[..GRANT.len() - 1]).is_none());
+    assert!(decode_frame(&grant[..grant.len() - 1]).is_none());
+    assert!(decode_frame(&grant).is_some());
     assert!(decode_frame(&[0, 0, 0, 0]).is_none());
     assert!(decode_frame(&[0, 0]).is_none());
     let mut oversize = vec![0_u8; 4 + MAX_LEASE_FRAME_BYTES + 1];
@@ -62,7 +77,7 @@ fn a_frame_is_one_whole_message_within_the_bound() {
 }
 
 #[test]
-fn the_frame_bound_is_the_connectors_65536_bytes() {
+fn the_frame_bound_is_the_connector_65536_bytes() {
     assert_eq!(MAX_LEASE_FRAME_BYTES, 65_536);
 }
 
@@ -132,15 +147,18 @@ mod socket_wire {
     }
 
     #[test]
-    fn a_lease_round_trips_with_the_token_on_a_close_on_exec_descriptor_and_the_settle_in_the_connectors_bytes() {
+    fn a_lease_round_trips_with_the_token_on_a_close_on_exec_descriptor_and_the_plan_windows() {
         let (_dir, lender, served) = connector(|mut stream| {
-            assert_eq!(read_frame(&mut stream), REQUEST, "the request is the connector's golden bytes");
-            send_with(&stream, GRANT, &[pipe_holding("tok-canary-1").as_fd()]);
-            assert_eq!(read_frame(&mut stream), SETTLE, "the settle is the connector's golden bytes");
-            stream.write_all(SETTLED).unwrap();
+            assert_eq!(read_frame(&mut stream), request_frame(), "the request is the connector bytes");
+            send_with(&stream, &grant_frame(), &[pipe_holding("tok-canary-1").as_fd()]);
+            // The lease lasts while the connection is open: it ends when the holder drops it.
+            let mut rest = Vec::new();
+            stream.read_to_end(&mut rest).unwrap();
+            rest
         });
         let Lent::Granted(lease) = lender.lend(&request()).unwrap() else { panic!("refused") };
-        // Close-on-exec: nothing the actuator starts inherits the lease's own descriptor.
+        assert_eq!(lease.plan_quota(), [window()]);
+        // Close-on-exec: nothing the actuator starts inherits the lease own descriptor.
         assert!(fcntl_getfd(&lease.token().0).unwrap().contains(FdFlags::CLOEXEC));
         // The duplicate for the child survives exec, sits above stdio and holds the token once.
         let inheritable = lease.token().inheritable().unwrap();
@@ -148,18 +166,18 @@ mod socket_wire {
         let mut text = String::new();
         std::fs::File::from(rustix::io::dup(&inheritable.0).unwrap()).read_to_string(&mut text).unwrap();
         assert_eq!(text, "tok-canary-1");
-        assert_eq!(lease.settle(settlement()).unwrap(), 123_456);
-        served.join().unwrap();
+        drop(lease);
+        assert!(served.join().unwrap().is_empty(), "a lease sends nothing after the request: no settle exists");
     }
 
     #[test]
     fn a_refusal_is_an_answer_with_its_kind_and_no_descriptor() {
         let (_dir, lender, served) = connector(|mut stream| {
             read_frame(&mut stream);
-            stream.write_all(REFUSAL).unwrap();
+            stream.write_all(&refusal_frame()).unwrap();
         });
         let Lent::Refused(refused) = lender.lend(&request()).unwrap() else { panic!("granted") };
-        assert_eq!(refused.kind, LeaseRefusalKind::SpendCeiling);
+        assert_eq!(refused.kind, LeaseRefusalKind::ProviderRejected);
         served.join().unwrap();
     }
 
@@ -204,27 +222,11 @@ mod socket_wire {
                 read_frame(&mut stream);
                 let held: Vec<_> = (0..fds).map(|_| pipe_holding("tok")).collect();
                 let borrowed: Vec<_> = held.iter().map(AsFd::as_fd).collect();
-                send_with(&stream, GRANT, &borrowed);
+                send_with(&stream, &grant_frame(), &borrowed);
             });
             assert!(lender.lend(&request()).is_err(), "{fds} descriptors");
             served.join().unwrap();
         }
-    }
-
-    #[test]
-    fn a_lease_dropped_without_settling_sends_no_settle_and_closes_the_connection() {
-        // A run killed by the brake never settles: the connector sees the connection end with no settle,
-        // which it bills as the whole reservation.
-        let (_dir, lender, served) = connector(|mut stream| {
-            read_frame(&mut stream);
-            send_with(&stream, GRANT, &[pipe_holding("tok-canary-2").as_fd()]);
-            let mut rest = Vec::new();
-            stream.read_to_end(&mut rest).unwrap();
-            rest
-        });
-        let Lent::Granted(lease) = lender.lend(&request()).unwrap() else { panic!("refused") };
-        drop(lease);
-        assert!(served.join().unwrap().is_empty(), "nothing was sent after the request");
     }
 
     #[test]
@@ -233,7 +235,7 @@ mod socket_wire {
         assert!(SocketLender::new(dir.path().join("none.sock")).lend(&request()).is_err());
         let (_dir, lender, served) = connector(|mut stream| {
             read_frame(&mut stream);
-            stream.write_all(SETTLED).unwrap();
+            stream.write_all(&request_frame()).unwrap();
         });
         assert!(lender.lend(&request()).is_err());
         served.join().unwrap();
@@ -247,23 +249,13 @@ mod socket_wire {
     }
 
     #[test]
-    fn a_refusal_or_settled_answer_that_carries_a_descriptor_is_an_error() {
+    fn a_refusal_that_carries_a_descriptor_is_an_error() {
         // A refusal lends nothing: a descriptor with one is a connector fault, and is closed, not used.
         let (_dir, lender, served) = connector(|mut stream| {
             read_frame(&mut stream);
-            send_with(&stream, REFUSAL, &[pipe_holding("tok-canary-3").as_fd()]);
+            send_with(&stream, &refusal_frame(), &[pipe_holding("tok-canary-3").as_fd()]);
         });
         assert!(lender.lend(&request()).is_err());
-        served.join().unwrap();
-
-        let (_dir, lender, served) = connector(|mut stream| {
-            read_frame(&mut stream);
-            send_with(&stream, GRANT, &[pipe_holding("tok-canary-4").as_fd()]);
-            read_frame(&mut stream);
-            send_with(&stream, SETTLED, &[pipe_holding("tok-canary-5").as_fd()]);
-        });
-        let Lent::Granted(lease) = lender.lend(&request()).unwrap() else { panic!("refused") };
-        assert!(lease.settle(settlement()).is_err());
         served.join().unwrap();
     }
 }

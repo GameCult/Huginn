@@ -3,14 +3,13 @@
 //! `eureka-body:ruling:self-run-credential-lease`).
 //!
 //! The Claude connector is the only holder of the subscription token and the
-//! one owner of Self-run admission, reservation and the spend ledger. A Self run
-//! asks it over a unix socket for a lease. The connector reserves the run's
-//! maximum cost, then answers with one frame and, with it, one descriptor: the
-//! read end of a pipe that holds the token, its write end already closed. The
-//! run settles with what it used, per model. A run that never
-//! settles (killed by the brake, a crash, a dropped connection) is billed the
-//! whole reservation by the connector, which is why [`Lease`] settles only by
-//! being told to, and a dropped one just closes the connection.
+//! one owner of Self-run admission. A Self run asks it over a unix socket for a
+//! lease. The connector answers with one frame and, with it, one descriptor: the
+//! read end of a pipe that holds the token, its write end already closed, and
+//! the plan's usage windows as it last saw them. Nothing is reserved, billed or
+//! settled: the lease lasts while the holder keeps the socket open, so [`Lease`]
+//! ends by being dropped, and the connector's only usage-derived refusal is the
+//! provider's own.
 //!
 //! The token is never read here. It travels as a descriptor from the socket to
 //! the child's descriptor table and is not in an environment, an argument, a
@@ -18,11 +17,13 @@
 //!
 //! Wire: a `u32` big-endian length, then a MessagePack named map `{kind, value}`
 //! of at most [`MAX_LEASE_FRAME_BYTES`]. The connector owns the format; the
-//! golden frames under `lease_client/lease_v1` are copies of its fixtures.
+//! names in `LeaseMessage` and the structs below are pinned by `lease_client/tests.rs`
+//! against the connector's `claude_lease_*` message kinds (lease v2).
 
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
+use model_connector::PlanQuota;
 use serde::{Deserialize, Serialize};
 
 /// The variable the Self unit's environment names the connector's lease socket
@@ -33,9 +34,8 @@ pub const LEASE_SOCKET_VARIABLE: &str = "CLAUDE_LEASE_SOCKET";
 /// The largest frame either side sends or accepts, in bytes.
 pub const MAX_LEASE_FRAME_BYTES: usize = 64 * 1024;
 
-/// What a run asks for: a lease until `expires_at_unix_ms` (the connector bills a
-/// lease that outlives it). The connector, not the caller, sets the reservation
-/// and binds the lease to the requesting unit's invocation.
+/// What a run asks for: a lease until `expires_at_unix_ms`. The connector, not
+/// the caller, binds the lease to the requesting unit's invocation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseRequest {
     pub expires_at_unix_ms: u64,
@@ -44,11 +44,11 @@ pub struct LeaseRequest {
 /// Why the connector would not lend, as it names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeaseRefusalKind {
-    SpendCeiling,
-    CostBound,
     UnknownCaller,
     Expired,
     Busy,
+    /// The provider is refusing right now and has said until when.
+    ProviderRejected,
 }
 
 /// A refusal: the kind is the typed answer, the detail the connector's words
@@ -57,31 +57,6 @@ pub enum LeaseRefusalKind {
 pub struct LeaseRefused {
     pub kind: LeaseRefusalKind,
     pub detail: String,
-}
-
-/// Tokens a run used, as the connector prices them. Cache reads and writes are
-/// counted apart from plain input; `output_tokens` already includes reasoning.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub input_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
-    pub output_tokens: u64,
-    pub reasoning_tokens: Option<u64>,
-}
-
-/// The tokens one model used in a run.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelUsage {
-    pub model: String,
-    pub usage: TokenUsage,
-}
-
-/// What a run tells the connector when it ends: its usage, per model. The
-/// connector trusts only its own observed plan quota.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Settlement {
-    pub usage: Vec<ModelUsage>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,28 +69,13 @@ pub(crate) enum LeaseMessage {
     Grant(LeaseGranted),
     #[serde(rename = "claude_lease_refusal")]
     Refusal(LeaseRefused),
-    #[serde(rename = "claude_lease_settle")]
-    Settle(LeaseSettle),
-    #[serde(rename = "claude_lease_settled")]
-    Settled(LeaseSettled),
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LeaseGranted {
     pub(crate) lease_id: String,
-    pub(crate) reserved_micro_usd: u64,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LeaseSettle {
-    pub(crate) lease_id: String,
-    pub(crate) usage: Vec<ModelUsage>,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LeaseSettled {
-    pub(crate) billed_micro_usd: u64,
-    pub(crate) overrun_micro_usd: u64,
+    /// The plan's usage windows as the connector last saw them.
+    pub(crate) plan_quota: Vec<PlanQuota>,
 }
 
 /// A frame: the length, then the named-map MessagePack of `message`.
@@ -202,12 +162,11 @@ impl Inheritable {
     }
 }
 
-/// A held lease: the token, and the means to settle it exactly once.
+/// A held lease: the token and the plan's usage windows at the grant. Dropping
+/// it closes the connection, which ends the lease.
 pub trait Lease {
     fn token(&self) -> &TokenFd;
-    /// Tells the connector what the run used, and answers what it billed in
-    /// micro-USD. A lease dropped without this is billed its whole reservation.
-    fn settle(self: Box<Self>, settlement: Settlement) -> Result<u64>;
+    fn plan_quota(&self) -> &[PlanQuota];
 }
 
 /// The connector's answer to a request.
@@ -260,8 +219,7 @@ mod socket {
     use rustix::io::Errno;
     use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, recvmsg};
 
-    use super::{LeaseMessage, LeaseRequest, Lease, Lent, Settlement, TokenFd, decode_frame_body, encode_frame};
-    use super::{LeaseSettle, MAX_LEASE_FRAME_BYTES};
+    use super::{Lease, LeaseMessage, LeaseRequest, Lent, MAX_LEASE_FRAME_BYTES, PlanQuota, TokenFd, decode_frame_body, encode_frame};
 
     /// How long the connector may take over any one frame.
     const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -278,7 +236,7 @@ mod socket {
                 if grant.lease_id.is_empty() {
                     bail!("a lease grant names no lease");
                 }
-                Ok(Lent::Granted(Box::new(Granted { token: TokenFd::from_owned(fd), lease_id: grant.lease_id, stream })))
+                Ok(Lent::Granted(Box::new(Granted { token: TokenFd::from_owned(fd), plan_quota: grant.plan_quota, _connection: stream })))
             }
             LeaseMessage::Refusal(refused) if fds.is_empty() => Ok(Lent::Refused(refused)),
             _ => Err(anyhow!("the connector answered a lease request with something else")),
@@ -324,12 +282,12 @@ mod socket {
         Ok((decode_frame_body(&body)?, fds))
     }
 
-    /// The lease on the wire: its token, and the connection a settle goes down.
-    /// Dropping it closes the connection, which the connector bills in full.
+    /// The lease on the wire: its token and the plan windows it came with. The
+    /// connection is held for the lease's life and closed by dropping it.
     struct Granted {
         token: TokenFd,
-        lease_id: String,
-        stream: UnixStream,
+        plan_quota: Vec<PlanQuota>,
+        _connection: UnixStream,
     }
 
     impl Lease for Granted {
@@ -337,18 +295,8 @@ mod socket {
             &self.token
         }
 
-        fn settle(self: Box<Self>, settlement: Settlement) -> Result<u64> {
-            let mut stream = self.stream;
-            let frame = encode_frame(&LeaseMessage::Settle(LeaseSettle {
-                lease_id: self.lease_id,
-                usage: settlement.usage,
-            }))?;
-            stream.write_all(&frame)?;
-            let (message, fds) = receive(&stream)?;
-            match message {
-                LeaseMessage::Settled(settled) if fds.is_empty() => Ok(settled.billed_micro_usd),
-                _ => Err(anyhow!("the connector answered a settle with something else")),
-            }
+        fn plan_quota(&self) -> &[PlanQuota] {
+            &self.plan_quota
         }
     }
 }

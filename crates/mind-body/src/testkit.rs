@@ -360,7 +360,7 @@ pub(crate) fn run_in(instance: &str, label: &str, turn: RunTurn, operated_by: Ru
         turn,
         host: "test".into(),
         started_on: Date("2026-10-09".into()),
-        budget_usd: "5".into(),
+        budget_usd: "0".into(),
         claims: claims.to_vec(),
         campaigns: vec![Slug(CAMPAIGN.into())],
     })
