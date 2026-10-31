@@ -1593,7 +1593,7 @@ fn a_brief_told_mid_turn_by_the_hook_is_closed_by_that_turns_result_and_never_to
         .iter()
         .filter_map(|resolution| mind.view(K::Resolution, resolution))
         .filter(|view| matches!(&view.document, PipelineDocument::Resolution(document) if document.subject == brief_ref("b2")))
-        .map(|view| view.admission.provenance.session)
+        .map(|view| view.admission.provenance.session.0)
         .collect();
     assert_eq!(sessions, vec!["selfrun-a".to_string()]);
 }
