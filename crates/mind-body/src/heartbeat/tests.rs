@@ -208,9 +208,14 @@ impl Rig {
 
     /// `who` admits a pulse, `ago` seconds before now.
     fn pulse(&self, who: usize, ago: i64, beat: Option<u32>, urgency: Option<u16>) {
-        self.minds[who].admit_at(self.now() - Duration::seconds(ago));
         let label = format!("p{}", self.labels.get());
         self.labels.set(self.labels.get() + 1);
+        self.pulse_labelled(who, ago, &label, beat, urgency);
+    }
+
+    fn pulse_labelled(&self, who: usize, ago: i64, label: &str, beat: Option<u32>, urgency: Option<u16>) {
+        self.minds[who].admit_at(self.now() - Duration::seconds(ago));
+        let label = label.to_string();
         self.minds[who].committed(vec![eureka_pipeline::PipelineDocument::Pulse(eureka_pipeline::PipelinePulse {
             instance: Slug(NAMES[who].into()),
             label: eureka_pipeline::Label(label),
@@ -307,6 +312,53 @@ fn a_minds_newest_vote_replaces_her_old_one_and_a_pulse_with_no_vote_keeps_it() 
     let trace = rig.store.traces.borrow().last().cloned().unwrap();
     assert_eq!(trace.tempo_s, 7200);
     assert_eq!(trace.instances[ANN].vote_beat_s, Some(7200));
+}
+
+#[test]
+fn a_standing_vote_stands_until_she_replaces_it_whatever_else_she_writes() {
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.pulse(ANN, 2000, Some(3600), None);
+    for n in 1..=20 {
+        rig.pulse(ANN, 2000 - n * 10, None, Some(1));
+    }
+    rig.pulse(BOB, 100, Some(86_400), None);
+    rig.poll();
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.instances[ANN].vote_beat_s, Some(3600));
+    assert_eq!(trace.instances[ANN].urgency_permille, 1, "the newest declared urgency is read too");
+    assert_eq!(trace.tempo_s, 3600);
+}
+
+#[test]
+fn her_newest_vote_is_the_latest_admitted_not_the_highest_label() {
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.pulse_labelled(ANN, 300, "2026-10-31-t9", Some(600), None);
+    rig.pulse_labelled(ANN, 200, "2026-10-31-t10", Some(7200), None);
+    rig.pulse_labelled(ANN, 100, "2026-10-31-t11", None, Some(5));
+    rig.poll();
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.instances[ANN].vote_beat_s, Some(7200));
+}
+
+#[test]
+fn a_mind_whose_launch_keeps_failing_neither_starves_the_beat_nor_reads_as_never_acted() {
+    let rig = Rig::new();
+    rig.turn(ANN, 5000);
+    rig.turn(BOB, 1000);
+    *rig.launcher.fail_for.borrow_mut() = Some(Slug("ann".into()));
+    for beat in 1..=12 {
+        rig.advance(1000);
+        assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] }, "beat {beat}");
+        rig.end_run(BOB);
+        let trace = rig.store.traces.borrow().last().cloned().unwrap();
+        assert!(trace.instances[ANN].note.contains("launch"), "beat {beat}: {:?}", trace.instances[ANN]);
+        assert!(trace.instances[ANN].idle_s >= 5000, "beat {beat}: she acted before; withdrawn launches do not erase that: {:?}", trace.instances[ANN]);
+    }
+    assert_eq!(rig.launched().iter().filter(|slug| slug.0 == "bob").count(), 12);
 }
 
 #[test]

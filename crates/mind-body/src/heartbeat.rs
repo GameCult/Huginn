@@ -334,10 +334,6 @@ impl fmt::Display for Outcome {
     }
 }
 
-struct Turn {
-    admitted: DateTime<Utc>,
-}
-
 fn parse_time(text: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(text)
         .map(|at| at.with_timezone(&Utc))
@@ -372,8 +368,10 @@ fn latest_resolution(
     Ok(ending.map(|(_, at, outcome)| (at, outcome)))
 }
 
-/// The instance's latest Persona runs, newest first, with how each ended.
-fn recent_turns(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<Turn>> {
+/// When her newest Persona turn that actually ran was admitted. A turn withdrawn
+/// unrun never happened: it neither resets her wait nor counts as her last turn,
+/// so the walk goes back past any number of them.
+fn last_turn(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime<Utc>>> {
     let turn = format!("{:?}", RunTurn::PersonaTurn);
     let operator = format!("{:?}", RunOperator::Mind);
     let runs = any_of(
@@ -385,26 +383,30 @@ fn recent_turns(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<Turn>> {
         "operated_by",
         &[&operator],
     );
-    let selection = Selection {
+    let mut asking = Selection {
         descending: true,
         limit: Some(RECENT),
         ..runs
     };
-    let PipelinePageItems::Headers(runs) = mind.query(&selection)?.items else {
-        bail!("the mind answered documents to a header selection")
-    };
-    let mut turns = Vec::new();
-    for run in runs {
-        if !matches!(run.facts, PipelineFacts::Run { .. }) {
-            continue;
+    loop {
+        let page = mind.query(&asking)?;
+        let PipelinePageItems::Headers(runs) = page.items else {
+            bail!("the mind answered documents to a header selection")
+        };
+        for run in runs {
+            if !matches!(run.facts, PipelineFacts::Run { .. }) {
+                continue;
+            }
+            if let Some((_, ResolutionOutcome::Withdrawn { .. })) = latest_resolution(mind, &run.id)? {
+                continue;
+            }
+            return Ok(Some(parse_time(&run.admission.admitted_at)?));
         }
-        // A turn withdrawn unrun never happened: it neither resets her wait nor counts as her last turn.
-        if let Some((_, ResolutionOutcome::Withdrawn { .. })) = latest_resolution(mind, &run.id)? {
-            continue;
+        match page.next {
+            Some(cursor) => asking.cursor = Some(cursor),
+            None => return Ok(None),
         }
-        turns.push(Turn { admitted: parse_time(&run.admission.admitted_at)? });
     }
-    Ok(turns)
 }
 
 /// Whether `text` holds `name` as a whole word, ignoring case: the characters on
@@ -466,14 +468,24 @@ struct Pulse {
     urgency_permille: Option<u16>,
 }
 
-/// Her latest pulses, newest first by the time the mind admitted them.
+/// Her pulses, newest first by the time the mind admitted them, read back only as
+/// far as her standing vote and her newest declared urgency: a vote stands until
+/// she replaces it, however many pulses of other kinds follow.
 fn recent_pulses(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<Pulse>> {
-    let selection = Selection { descending: true, limit: Some(RECENT), ..any_of(of_kind(PipelineKind::Pulse), "root", &[&instance.0]) };
-    let PipelinePageItems::Headers(found) = mind.query(&selection)?.items else { bail!("the mind answered documents to a header selection") };
+    let mut asking = Selection { descending: true, limit: Some(RECENT), ..any_of(of_kind(PipelineKind::Pulse), "root", &[&instance.0]) };
     let mut pulses = Vec::new();
-    for header in found {
-        if let PipelineFacts::Pulse { tempo_vote_beat_s, urgency_permille, .. } = header.facts {
-            pulses.push(Pulse { admitted: parse_time(&header.admission.admitted_at)?, beat_s: tempo_vote_beat_s, urgency_permille });
+    loop {
+        let page = mind.query(&asking)?;
+        let PipelinePageItems::Headers(found) = page.items else { bail!("the mind answered documents to a header selection") };
+        for header in found {
+            if let PipelineFacts::Pulse { tempo_vote_beat_s, urgency_permille, .. } = header.facts {
+                pulses.push(Pulse { admitted: parse_time(&header.admission.admitted_at)?, beat_s: tempo_vote_beat_s, urgency_permille });
+            }
+        }
+        let read_enough = pulses.iter().any(|pulse| pulse.beat_s.is_some()) && pulses.iter().any(|pulse| pulse.urgency_permille.is_some());
+        match page.next {
+            Some(cursor) if !read_enough => asking.cursor = Some(cursor),
+            _ => break,
         }
     }
     pulses.sort_by(|a, b| b.admitted.cmp(&a.admitted));
@@ -508,7 +520,7 @@ struct MindRead {
 fn read_mind(mind: &dyn MindPort, slug: &Slug) -> Result<MindRead> {
     Ok(MindRead {
         busy: !holders(mind, slug, RunTurn::PersonaTurn)?.is_empty(),
-        last_turn: recent_turns(mind, slug)?.first().map(|turn| turn.admitted),
+        last_turn: last_turn(mind, slug)?,
         pulses: recent_pulses(mind, slug)?,
         self_end: last_self_end(mind, slug)?,
     })
@@ -674,17 +686,22 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
             }
         })
         .collect();
-    if due && let Some(winner) = tempo::pick(&standings, beat_s) {
+    // A winner whose unit cannot start loses the beat to the next of the pick, so
+    // one failing Mind never starves the others; a launch ends the beat.
+    let mut passed: Vec<Standing> = standings.clone();
+    while due && let Some(winner) = tempo::pick(&passed, beat_s) {
         match launch(organs, &rows[winner])? {
             Launched::Run(label) => {
                 state.last_beat_at = now;
                 rows[winner].busy = true;
                 launches.push(label);
                 launched.push(rows[winner].slug().clone());
+                break;
             }
             Launched::Busy => rows[winner].busy = true,
             Launched::Refused(why) => rows[winner].note = why,
         }
+        passed[winner].eligible = false;
     }
 
     if stored.as_ref() != Some(&state) {

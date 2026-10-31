@@ -45,6 +45,8 @@ impl Clock for Fixed {
 pub(crate) struct Recording {
     pub(crate) started: RefCell<Vec<(Slug, RunTurn)>>,
     pub(crate) fail: Cell<bool>,
+    /// One named instance whose unit never starts.
+    pub(crate) fail_for: RefCell<Option<Slug>>,
     running: RefCell<Vec<(Slug, RunTurn)>>,
 }
 
@@ -65,7 +67,7 @@ impl Recording {
 
 impl Launcher for Recording {
     fn start(&self, instance: &Slug, turn: RunTurn) -> Result<()> {
-        if self.fail.get() {
+        if self.fail.get() || self.fail_for.borrow().as_ref() == Some(instance) {
             return Err(anyhow!("refused"));
         }
         self.started.borrow_mut().push((instance.clone(), turn));
