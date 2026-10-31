@@ -487,7 +487,7 @@ fn a_reply_without_start_self_run_is_not_a_reply_though_null_is() {
 #[test]
 fn the_decoder_holds_the_bounds_the_schema_states() {
     let c = config();
-    let start = |brief: &str, repo: &str, campaign: &str| json!({ "say": [], "start_self_run": { "brief": brief, "repo": repo, "campaign": campaign } }).to_string();
+    let start = |brief: &str, repo: &str, campaign: &str| json!({ "say": [], "start_self_run": { "brief": brief, "repo": repo, "campaign": campaign }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
     let ok = |brief: &str, repo: &str, campaign: &str| decode_reply(&start(brief, repo, campaign), &c.rooms).is_ok();
     assert!(ok("b", "GameCult/Huginn", "eureka-body"));
     assert!(ok(&"b".repeat(1000), "a-b/c.d_e-f", &"c".repeat(64)));
@@ -676,7 +676,7 @@ fn no_member_text_name_or_context_can_read_as_an_operator_line() {
 
 #[test]
 fn a_self_run_in_a_campaign_the_mind_does_not_hold_is_refused_before_anything_is_admitted() {
-    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": "no-such-campaign" } }).to_string();
+    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": "no-such-campaign" }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
     let Outcome::Served { failure, self_run, .. } = rig.go() else { panic!("served") };
     assert_eq!((failure, self_run), (Some(Failure::SelfRun), None));
@@ -684,7 +684,7 @@ fn a_self_run_in_a_campaign_the_mind_does_not_hold_is_refused_before_anything_is
     assert!(rig.launcher.started.borrow().is_empty());
     assert!(rig.chat.acked.borrow().is_empty());
     // A prefix of a real campaign's name is not that campaign.
-    let prefix = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": &CAMPAIGN[..CAMPAIGN.len() - 1] } }).to_string();
+    let prefix = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": &CAMPAIGN[..CAMPAIGN.len() - 1] }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[prefix]);
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::SelfRun));
@@ -810,7 +810,7 @@ fn the_campaigns_in_force_are_listed_and_are_the_schemas_campaign_enum() {
 
 #[test]
 fn a_self_run_naming_a_listed_campaign_passes_the_campaign_check() {
-    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": CAMPAIGN } }).to_string();
+    let reply = json!({ "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": CAMPAIGN }, "tempo_vote_beat_s": null, "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
     let Outcome::Served { failure, self_run, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, None);

@@ -421,7 +421,7 @@ mod tests {
         }
         assert_eq!(Vocabulary.target_leaves("answers"), vec![K::Question.type_id().to_string()]);
         assert_eq!(Vocabulary.target_leaves("rulings"), vec![K::Ruling.type_id().to_string()]);
-        assert_eq!(Vocabulary.target_leaves("subject").len(), 14);
+        assert_eq!(Vocabulary.target_leaves("subject").len(), 15);
         assert_eq!(
             sorted(Vocabulary.target_leaves("claims")),
             sorted([K::CutSpec, K::Finding, K::FollowUp].iter().map(|kind| kind.type_id().to_string()).collect())

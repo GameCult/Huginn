@@ -176,6 +176,10 @@ impl Rig {
     }
 
     fn poll(&self) -> Outcome {
+        // Launches are admitted by the mind own clock; keep it on the rig clock so a launched turn is dated now.
+        for mind in &self.minds {
+            mind.admit_at(self.now());
+        }
         let ports: Vec<Counting> = self.minds.iter().zip(self.calls.iter().zip(&self.down)).map(|(inner, (calls, down))| Counting { inner, calls, down }).collect();
         let seats: Vec<Seat> = self.config.personas.iter().enumerate().map(|(index, who)| Seat { who: who.clone(), mind: &ports[index], chat: &self.chats[index] }).collect();
         let organs = Organs { seats: &seats, control: &self.control, launcher: &self.launcher, clock: &self.clock, host: "test-host", store: &self.store };
