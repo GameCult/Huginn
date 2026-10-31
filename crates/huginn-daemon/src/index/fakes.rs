@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Result, bail, ensure};
 
+use crate::sources::{DescribedSources, SourceIndex, SourcePoint, SourceRow, SourcesMeta};
+
 use super::{CollectionMeta, Described, Embedder, Hit, ModelIdentity, Point, VectorIndex, point_id};
 
 pub(crate) fn identity(digest: &str) -> ModelIdentity {
@@ -162,6 +164,9 @@ pub(crate) struct IndexState {
 #[derive(Clone, Default)]
 pub(crate) struct FakeIndex {
     pub(crate) state: Arc<Mutex<IndexState>>,
+    /// The source collection, held beside the mind's so one fake serves a
+    /// worker that owns both.
+    pub(crate) sources: FakeSources,
 }
 
 impl FakeIndex {
@@ -240,4 +245,139 @@ impl VectorIndex for FakeIndex {
 /// A working embedder and vector store, for tests whose subject is elsewhere.
 pub(crate) fn pair() -> (FakeEmbedder, FakeIndex) {
     (FakeEmbedder::new("d1"), FakeIndex::default())
+}
+
+#[derive(Default)]
+pub(crate) struct SourcesState {
+    pub(crate) described: Option<DescribedSources>,
+    pub(crate) points: BTreeMap<String, SourcePoint>,
+    /// How many times the collection was recreated.
+    pub(crate) recreated: u32,
+    pub(crate) upsert_calls: u32,
+    /// Every upsert call refuses once this many have succeeded.
+    pub(crate) fail_upserts_after: Option<u32>,
+    pub(crate) cursor_writes: Vec<std::collections::BTreeMap<String, String>>,
+    pub(crate) deletes: Vec<(String, Option<Vec<String>>)>,
+    /// The repo filter and limit of every search, in order.
+    pub(crate) searches: Vec<(Option<String>, u32)>,
+}
+
+/// An in-memory source collection: a brute-force cosine search over what it
+/// holds, so a test sees what a filter and a limit do.
+#[derive(Clone, Default)]
+pub(crate) struct FakeSources {
+    pub(crate) state: Arc<Mutex<SourcesState>>,
+}
+
+impl FakeSources {
+    pub(crate) fn plant(&self, described: DescribedSources) {
+        self.state.lock().unwrap().described = Some(described);
+    }
+
+    pub(crate) fn cursors(&self) -> BTreeMap<String, String> {
+        match &self.state.lock().unwrap().described {
+            Some(DescribedSources::Labelled { cursors, .. }) => cursors.clone(),
+            _ => BTreeMap::new(),
+        }
+    }
+
+    /// (repo, path, chunk_index, commit) of every point held, sorted.
+    pub(crate) fn held(&self) -> Vec<(String, String, u32, String)> {
+        let state = self.state.lock().unwrap();
+        let mut held: Vec<_> = state
+            .points
+            .values()
+            .map(|point| (point.payload.repo.clone(), point.payload.path.clone(), point.payload.chunk_index, point.payload.commit.clone()))
+            .collect();
+        held.sort();
+        held
+    }
+
+    pub(crate) fn ids(&self) -> BTreeSet<String> {
+        self.state.lock().unwrap().points.keys().cloned().collect()
+    }
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    dot / (norm(a) * norm(b)).max(f32::MIN_POSITIVE)
+}
+
+impl SourceIndex for FakeSources {
+    fn describe_sources(&mut self, _within: Duration) -> Result<DescribedSources> {
+        Ok(self.state.lock().unwrap().described.clone().unwrap_or(DescribedSources::Absent))
+    }
+
+    fn recreate_sources(&mut self, meta: &SourcesMeta) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        state.recreated += 1;
+        state.points.clear();
+        state.described = Some(DescribedSources::Labelled { meta: meta.clone(), cursors: BTreeMap::new() });
+        Ok(())
+    }
+
+    fn set_cursors(&mut self, cursors: &BTreeMap<String, String>) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        state.cursor_writes.push(cursors.clone());
+        let Some(DescribedSources::Labelled { cursors: held, .. }) = &mut state.described else { bail!("no source collection") };
+        *held = cursors.clone();
+        Ok(())
+    }
+
+    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        state.deletes.push((repo.to_owned(), paths.map(<[String]>::to_vec)));
+        state.points.retain(|_, point| {
+            !(point.payload.repo == repo && paths.is_none_or(|paths| paths.contains(&point.payload.path)))
+        });
+        Ok(())
+    }
+
+    fn upsert_sources(&mut self, points: &[SourcePoint]) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.fail_upserts_after.is_some_and(|after| state.upsert_calls >= after) {
+            bail!("the vector store refused the upsert");
+        }
+        state.upsert_calls += 1;
+        for point in points {
+            state.points.insert(point.id.clone(), point.clone());
+        }
+        Ok(())
+    }
+
+    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, limit: u32, _within: Duration) -> Result<Vec<SourceRow>> {
+        let mut state = self.state.lock().unwrap();
+        state.searches.push((repo.map(str::to_owned), limit));
+        let mut rows: Vec<SourceRow> = state
+            .points
+            .values()
+            .filter(|point| repo.is_none_or(|repo| point.payload.repo == repo))
+            .map(|point| SourceRow { score: cosine(vector, &point.vector), payload: point.payload.clone() })
+            .collect();
+        rows.sort_by(|a, b| b.score.total_cmp(&a.score));
+        rows.truncate(limit as usize);
+        Ok(rows)
+    }
+}
+
+impl SourceIndex for FakeIndex {
+    fn describe_sources(&mut self, within: Duration) -> Result<DescribedSources> {
+        self.sources.describe_sources(within)
+    }
+    fn recreate_sources(&mut self, meta: &SourcesMeta) -> Result<()> {
+        self.sources.recreate_sources(meta)
+    }
+    fn set_cursors(&mut self, cursors: &BTreeMap<String, String>) -> Result<()> {
+        self.sources.set_cursors(cursors)
+    }
+    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>) -> Result<()> {
+        self.sources.delete_by(repo, paths)
+    }
+    fn upsert_sources(&mut self, points: &[SourcePoint]) -> Result<()> {
+        self.sources.upsert_sources(points)
+    }
+    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, limit: u32, within: Duration) -> Result<Vec<SourceRow>> {
+        self.sources.search_sources(vector, repo, limit, within)
+    }
 }

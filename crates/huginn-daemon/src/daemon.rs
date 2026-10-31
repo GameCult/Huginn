@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
 use huginn_mind::eureka_pipeline::{PipelineRef, Slug};
 use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, IndexStatus};
-use huginn_mind::{Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery};
+use huginn_mind::{Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery, SourceHits, SourceQuery};
 
 /// Where the index attaches. Called after a batch commits, with the refs the
 /// batch landed, derived writes included; the sink may read each through
@@ -29,6 +29,11 @@ pub trait IndexSink<S: MindStore> {
     fn search(&mut self, text: &str, top_k: u32, among: Vec<String>) -> Result<SearchTicket, String>;
     /// How long after it was asked a search is worth answering: the index's
     /// own bound on it, which the loop waiting for the answer must share.
+    /// Starts a source search. The source index is not the mind's: it needs no
+    /// member ids, and nothing about the mind's own index state refuses it.
+    fn search_sources(&mut self, query: &SourceQuery) -> Result<SearchTicket, String>;
+    /// Every source search that finished since the last call, by ticket.
+    fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)>;
     fn search_deadline(&self) -> std::time::Duration;
     /// Every search that finished since the last call, by ticket: its
     /// candidates and scores, or why it failed.
@@ -53,9 +58,22 @@ pub type Hits = Vec<(PipelineRef, f32)>;
 /// `Daemon::finish` with the index's answer.
 pub struct Search {
     pub ticket: SearchTicket,
-    selection: Selection,
-    semantic: SemanticQuery,
-    members: Members,
+    pending: Pending,
+}
+
+/// What the asker is owed: a ranked page of the mind's documents, or the
+/// source index's chunks as the index holds them.
+enum Pending {
+    Mind { selection: Selection, semantic: SemanticQuery, members: Members },
+    Sources,
+}
+
+/// What a finished search came to: the mind's candidates, the source index's
+/// hits, or why it failed.
+pub enum Found {
+    Mind(Hits),
+    Sources(SourceHits),
+    Failed(String),
 }
 
 /// What a request came to: an answer, or a search the index has yet to
@@ -170,6 +188,15 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
             HuginnMindRequest::Query { selection, semantic: Some(semantic), .. } => {
                 return self.begin_search(selection, semantic);
             }
+            HuginnMindRequest::SearchSources { query, .. } => {
+                if let Err(refusal) = query.check() {
+                    return Handled::Answered(HuginnMindResponse::Refused(refusal));
+                }
+                return match self.index.search_sources(&query) {
+                    Ok(ticket) => Handled::Searching(Search { ticket, pending: Pending::Sources }),
+                    Err(detail) => Handled::Answered(HuginnMindResponse::Refused(MindRefusal::Unavailable { detail })),
+                };
+            }
         };
         Handled::Answered(answer)
     }
@@ -193,7 +220,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         }
         let among = members.ids.iter().map(|id| id.id.0.clone()).collect();
         match self.index.search(&semantic.text.0, semantic.top_k, among) {
-            Ok(ticket) => Handled::Searching(Search { ticket, selection, semantic, members }),
+            Ok(ticket) => Handled::Searching(Search { ticket, pending: Pending::Mind { selection, semantic, members } }),
             Err(detail) => refused(MindRefusal::Unavailable { detail }),
         }
     }
@@ -204,8 +231,10 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
     }
 
     /// Searches the index has finished since this was last called.
-    pub fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
-        self.index.searched()
+    pub fn searched(&mut self) -> Vec<(SearchTicket, Found)> {
+        let mind = self.index.searched().into_iter().map(|(ticket, found)| (ticket, found.map_or_else(Found::Failed, Found::Mind)));
+        let sources = self.index.sources_searched().into_iter().map(|(ticket, found)| (ticket, found.map_or_else(Found::Failed, Found::Sources)));
+        mind.chain(sources).collect()
     }
 
     /// The client has stopped waiting for `ticket`.
@@ -217,12 +246,15 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
     /// through the mind (`Mind::rank` answers as of the snapshot the members
     /// were taken at and drops what is not a member), or, when the index could not answer, a typed
     /// `Unavailable`. Never an empty page in place of a failure.
-    pub fn finish(&mut self, search: Search, found: Result<Hits, String>) -> HuginnMindResponse {
-        let hits = match found {
-            Ok(hits) => hits,
-            Err(detail) => return HuginnMindResponse::Refused(MindRefusal::Unavailable { detail }),
+    pub fn finish(&mut self, search: Search, found: Found) -> HuginnMindResponse {
+        let unavailable = |detail: String| HuginnMindResponse::Refused(MindRefusal::Unavailable { detail });
+        let (selection, semantic, members, hits) = match (search.pending, found) {
+            (_, Found::Failed(detail)) => return unavailable(detail),
+            (Pending::Sources, Found::Sources(hits)) => return HuginnMindResponse::Sources(hits),
+            (Pending::Mind { selection, semantic, members }, Found::Mind(hits)) => (selection, semantic, members, hits),
+            _ => return unavailable("the index answered another kind of search than the one asked".into()),
         };
-        match self.mind.rank(&search.selection, &search.semantic, &search.members, &hits) {
+        match self.mind.rank(&selection, &semantic, &members, &hits) {
             Ok(ranked) => {
                 if let Some(note) = dropped_note(&ranked.dropped) {
                     eprintln!("{note}");
@@ -497,6 +529,14 @@ pub(crate) mod tests {
             Err("this index cannot search".into())
         }
 
+        fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
+        fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+            Vec::new()
+        }
+
         fn search_deadline(&self) -> std::time::Duration {
             std::time::Duration::ZERO
         }
@@ -539,6 +579,14 @@ pub(crate) mod tests {
             Err("this index cannot search".into())
         }
 
+        fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
+        fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+            Vec::new()
+        }
+
         fn search_deadline(&self) -> std::time::Duration {
             std::time::Duration::ZERO
         }
@@ -563,6 +611,14 @@ pub(crate) mod tests {
 
         fn search(&mut self, _text: &str, _top_k: u32, _among: Vec<String>) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
+        }
+
+        fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
+        fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+            Vec::new()
         }
 
         fn search_deadline(&self) -> std::time::Duration {

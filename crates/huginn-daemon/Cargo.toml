@@ -17,6 +17,12 @@ path = "src/lib.rs"
 name = "huginn-daemon"
 path = "src/main.rs"
 
+# The source index's one writer: a oneshot job that brings `huginn_sources` to
+# the forge's current state and exits. No daemon calls any of its writes.
+[[bin]]
+name = "huginn-sources"
+path = "src/bin/huginn-sources.rs"
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"

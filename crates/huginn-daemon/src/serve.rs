@@ -522,14 +522,14 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
 fn collect_searches<S: MindStore, I: IndexSink<S>>(
     daemon: &mut Daemon<S, I>,
     waiting: &BTreeMap<SearchTicket, Waiting>,
-) -> Vec<(SearchTicket, Result<crate::daemon::Hits, String>)> {
+) -> Vec<(SearchTicket, crate::daemon::Found)> {
     let deadline = daemon.search_deadline();
     let mut collected = daemon.searched();
     let now = Instant::now();
     for (ticket, asked) in waiting {
         if asked.until <= now {
             daemon.abandon(*ticket);
-            collected.push((*ticket, Err(format!("the semantic search did not finish within {deadline:?}"))));
+            collected.push((*ticket, crate::daemon::Found::Failed(format!("the search did not finish within {deadline:?}"))));
         }
     }
     collected

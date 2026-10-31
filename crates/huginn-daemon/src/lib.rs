@@ -17,9 +17,10 @@ pub mod bodies;
 pub mod daemon;
 pub mod index;
 pub mod serve;
+pub mod sources;
 
 #[cfg(test)]
 mod semantic_tests;
 
-pub use daemon::{Daemon, Handled, Hits, IndexSink, Search, SearchTicket, runtime_id};
+pub use daemon::{Daemon, Found, Handled, Hits, IndexSink, Search, SearchTicket, runtime_id};
 pub use serve::{Options, ServeOptions, parse_options, run, startup};
