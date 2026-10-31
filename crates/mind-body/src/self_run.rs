@@ -293,6 +293,7 @@ impl fmt::Display for SelfRunOutcome {
 fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, String)>> {
     let mut held = holders(mind, mind.instance(), RunTurn::SelfRun)?;
     let (Some(run), None) = (held.pop(), held.pop()) else { return Ok(None) };
+    let one = Selection { keys: Some(vec![run.id.id.0.clone()]), projection: "document".into(), ..Selection::default() };
     let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
     match views.into_iter().next().map(|view| view.document) {
         Some(PipelineDocument::Run(document)) => Ok(Some((run.id, document.budget_usd.0))),
