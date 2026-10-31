@@ -108,7 +108,6 @@ mod lane {
     use std::mem::MaybeUninit;
     use std::net::UdpSocket;
     use std::os::unix::net::UnixListener;
-    use std::sync::{Arc, Mutex};
     use std::path::Path;
     use std::process::{Child, Command, Output, Stdio};
     use std::time::Duration;
@@ -268,7 +267,6 @@ mod lane {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
-                let kept = kept.clone();
                 std::thread::spawn(move || {
                     if read_frame(&mut stream).is_err() {
                         return;
