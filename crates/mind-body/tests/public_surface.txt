@@ -271,6 +271,8 @@ mind_body::self_run: impl SelfRunOutcome: fn exit_status (& self) -> i32
 mind_body::self_run: impl Spawner for ClaudeSpawner
 mind_body::self_run: impl Spent
 mind_body::self_run: impl Stop
+mind_body::self_run: impl fmt :: Display for SeedLinkRefused
+mind_body::self_run: impl std :: error :: Error for SeedLinkRefused
 mind_body::self_run: impl fmt :: Display for SelfRunOutcome
 mind_body::self_run: pub trait Child { fn write_line (& mut self , line : & str) ; fn close_input (& mut self) ; fn next (& mut self , timeout : StdDuration) -> Read ; fn stop (& mut self , how : Stop) -> bool ; }
 mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String] , token : & TokenFd) -> Result < Box < dyn Child > > ; }

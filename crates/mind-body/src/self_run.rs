@@ -96,11 +96,11 @@ pub const SESSION_NAMESPACE: Uuid = Uuid::NAMESPACE_OID;
 /// The longest the loop waits on the child when no deadline is nearer.
 const POLL: StdDuration = StdDuration::from_secs(60);
 
-/// What the child is told at the start. The contract with the `mind-self`
+/// What the child is told at the start. The contract with the `eureka`
 /// skill: it names the skill, the instance and the run id.
 pub fn start_message(instance: &Slug, run: &PipelineRef) -> String {
     format!(
-        "Use the mind-self skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.",
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.",
         instance.0, run.id.0
     )
 }
@@ -551,17 +551,49 @@ impl Drop for FreshConfig {
     }
 }
 
-/// Copies directories and regular files; a link is skipped, never followed.
+/// A seed link the copy refuses: it would reach outside the seed.
+#[derive(Debug)]
+struct SeedLinkRefused {
+    link: PathBuf,
+    target: PathBuf,
+}
+
+impl fmt::Display for SeedLinkRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the seed link {} -> {} is absolute or leaves the seed", self.link.display(), self.target.display())
+    }
+}
+
+impl std::error::Error for SeedLinkRefused {}
+
+/// Copies directories and regular files; a link is reproduced as a link with
+/// the same target, never followed into the copy. A link is refused with
+/// [`SeedLinkRefused`] unless its target is relative and, resolved through
+/// every link on its way in the source, lands under the canonical seed root.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    copy_level(&from.canonicalize()?, from, to)
+}
+
+fn copy_level(root: &Path, from: &Path, to: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let kind = entry.file_type()?;
         let target = to.join(entry.file_name());
         if kind.is_dir() {
             std::fs::create_dir(&target)?;
-            copy_tree(&entry.path(), &target)?;
+            copy_level(root, &entry.path(), &target)?;
         } else if kind.is_file() {
             std::fs::copy(entry.path(), &target)?;
+        } else if kind.is_symlink() {
+            let points_at = std::fs::read_link(entry.path())?;
+            let stays = !points_at.is_absolute() && entry.path().canonicalize().is_ok_and(|resolved| resolved.starts_with(root));
+            if !stays {
+                return Err(std::io::Error::other(SeedLinkRefused { link: entry.path(), target: points_at }));
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&points_at, &target)?;
+            #[cfg(not(unix))]
+            return Err(std::io::Error::other("a seed link cannot be reproduced on this platform"));
         }
     }
     Ok(())

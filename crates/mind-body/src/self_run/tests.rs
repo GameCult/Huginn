@@ -526,10 +526,65 @@ fn the_start_message_is_the_first_thing_written_and_names_the_skill_the_instance
     assert!(matches!(&ran.events[0], Event::Wrote(_)), "the start precedes the first read: {:?}", ran.events[0]);
     let written = ran.written();
     assert_eq!(written[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a")));
-    for needle in ["mind-self", "yggdrasil", "yggdrasil:run:selfrun-a", AGENT] {
+    for needle in ["Use the eureka skill.", "yggdrasil", "yggdrasil:run:selfrun-a", AGENT] {
         assert!(written[0].contains(needle), "{needle}: {}", written[0]);
     }
     assert_eq!(written.len(), 1, "no flush without the ceiling");
+}
+
+#[test]
+fn the_start_message_opens_with_the_skill_the_seed_ships() {
+    let message = start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"));
+    assert!(message.starts_with("Use the eureka skill. You are Self for the instance `yggdrasil`;"), "{message}");
+    assert!(!message.contains("mind-self skill"), "{message}");
+}
+
+#[cfg(unix)]
+mod seed_links {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn a_relative_in_tree_link_is_copied_as_a_link_that_resolves() {
+        let seed = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(seed.path().join("skills/eureka/agents")).unwrap();
+        std::fs::write(seed.path().join("skills/eureka/agents/hands.md"), "hands").unwrap();
+        symlink("skills/eureka/agents", seed.path().join("agents")).unwrap();
+        std::fs::create_dir(seed.path().join("sub")).unwrap();
+        symlink("../skills/eureka", seed.path().join("sub/eureka")).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        copy_tree(seed.path(), out.path()).unwrap();
+        assert!(out.path().join("agents").symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(out.path().join("agents")).unwrap(), Path::new("skills/eureka/agents"));
+        assert_eq!(std::fs::read_to_string(out.path().join("agents/hands.md")).unwrap(), "hands");
+        assert_eq!(std::fs::read_to_string(out.path().join("sub/eureka/agents/hands.md")).unwrap(), "hands");
+    }
+
+    #[test]
+    fn an_absolute_or_escaping_link_is_refused_with_the_typed_error() {
+        for target in ["/etc/passwd", "../outside", "a/../../outside", "missing"] {
+            let seed = tempfile::tempdir().unwrap();
+            symlink(target, seed.path().join("bad")).unwrap();
+            let out = tempfile::tempdir().unwrap();
+            let error = copy_tree(seed.path(), out.path()).unwrap_err();
+            let refused = error.get_ref().and_then(|inner| inner.downcast_ref::<SeedLinkRefused>());
+            assert_eq!(refused.map(|r| r.target.as_path()), Some(Path::new(target)), "{target}: {error}");
+            assert!(out.path().join("bad").symlink_metadata().is_err(), "{target} was copied");
+        }
+    }
+
+    #[test]
+    fn a_link_through_another_in_tree_link_cannot_escape() {
+        let parent = tempfile::tempdir().unwrap();
+        let seed = parent.path().join("seed");
+        std::fs::create_dir(&seed).unwrap();
+        symlink(".", seed.join("c")).unwrap();
+        symlink("c/..", seed.join("a")).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let error = copy_tree(&seed, out.path()).unwrap_err();
+        let refused = error.get_ref().and_then(|inner| inner.downcast_ref::<SeedLinkRefused>());
+        assert_eq!(refused.map(|r| r.target.as_path()), Some(Path::new("c/..")), "{error}");
+    }
 }
 
 // ---- what is read -----------------------------------------------------------

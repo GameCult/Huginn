@@ -103,15 +103,20 @@ fn each_run_gets_a_fresh_owner_only_configuration_that_what_it_writes_does_not_o
     let seed = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(seed.path().join("skills/mind-self")).unwrap();
     std::fs::write(seed.path().join("skills/mind-self/SKILL.md"), "the brief").unwrap();
-    std::os::unix::fs::symlink("/etc/passwd", seed.path().join("link")).unwrap();
+    std::os::unix::fs::symlink("skills/mind-self", seed.path().join("agents")).unwrap();
 
     let first = run_once(&program, dir.path(), Some(seed.path()));
     assert_eq!(field(&first, "dir"), field(&first, "home"));
     assert_eq!(field(&first, "dir"), dir.path().join("claude-config").to_string_lossy());
     assert_eq!(field(&first, "mode"), "700");
     assert_eq!(field(&first, "skill"), "the brief", "the seed is copied in");
-    assert_eq!(field(&first, "listing").trim(), "skills", "a link in the seed is not followed or copied");
+    assert_eq!(field(&first, "listing").trim(), "agents skills", "an in-tree seed link is copied as a link");
     assert!(!dir.path().join("claude-config").exists(), "removed when the child's handle went");
+
+    std::os::unix::fs::symlink("/etc/passwd", seed.path().join("link")).unwrap();
+    let refused = FreshConfig::create(dir.path(), Some(seed.path())).err().expect("an absolute seed link is refused");
+    assert!(format!("{refused:#}").contains("leaves the seed"), "{refused:#}");
+    assert!(!dir.path().join("claude-config").exists(), "a refused copy leaves no configuration behind");
 
     // A stale directory (a unit whose runtime directory was preserved) is wiped, not reused.
     std::fs::create_dir_all(dir.path().join("claude-config")).unwrap();
