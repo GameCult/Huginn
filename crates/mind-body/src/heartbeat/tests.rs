@@ -386,7 +386,7 @@ fn a_mind_whose_launch_keeps_failing_neither_starves_the_beat_nor_reads_as_never
 }
 
 #[test]
-fn a_mind_that_cannot_be_read_votes_the_default_beat() {
+fn a_mind_that_cannot_be_read_is_not_counted() {
     let rig = Rig::new();
     rig.turn(ANN, 3000);
     rig.turn(BOB, 3000);
@@ -395,7 +395,7 @@ fn a_mind_that_cannot_be_read_votes_the_default_beat() {
     rig.poll();
     let trace = rig.store.traces.borrow().last().cloned().unwrap();
     assert_eq!(trace.instances[ANN].vote_beat_s, Some(7200));
-    assert_eq!(trace.tempo_s, 900, "her 7200 and the unreadable Mind's default: the lower median is the default");
+    assert_eq!(trace.tempo_s, 7200, "the unreadable Mind abstains: her 7200 is the only vote cast");
 }
 
 #[test]
