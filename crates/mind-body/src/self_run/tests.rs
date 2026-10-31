@@ -95,6 +95,8 @@ enum Step {
     Exit(Option<i32>),
     /// Its stdout ends; the child is not reaped yet.
     Eof,
+    /// The clock moves, this runs (the mind changes, a tool call's hook fires), and the read times out.
+    Do(i64, Rc<dyn Fn()>),
 }
 
 use Step::{Eof, Exit, Idle, Line as Out};
@@ -142,6 +144,11 @@ impl Child for Scripted {
             Some(Step::Exit(code)) => {
                 self.exited = true;
                 Read::Exited(code)
+            }
+            Some(Step::Do(seconds, act)) => {
+                self.clock.0.set(self.clock.0.get() + ChronoDuration::seconds(seconds));
+                act();
+                Read::Timeout
             }
             Some(Step::Eof) => {
                 self.eof = true;
@@ -387,9 +394,15 @@ fn carry_signalled(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Op
 }
 
 fn carry_scripted(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Option<Stop>, refuses: &[Stop], hangs: bool) -> Ran {
+    carry_hooked(seen, steps, (code, dies_on, refuses, hangs), test_hooks())
+}
+
+/// The same with the spool the child's hooks drain named by the test, so that a step can fire the hook.
+fn carry_hooked(seen: &Seen, steps: Vec<Step>, (code, dies_on, refuses, hangs): (Option<i32>, Option<Stop>, &[Stop], bool), hooks: Hooks) -> Ran {
     let log = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(Fixed(Cell::new(at_start())));
-    let fake = Fake::with(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false, asked: 0 }), false);
+    let mut fake = Fake::with(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false, asked: 0 }), false);
+    fake.hooks = hooks;
     let lender = FakeLender::logging(log.clone(), Answer::Grant);
     let mut out = Vec::new();
     let outcome = carry(seen, &*clock, &lender, &fake, TEST_CAP_S, &mut out);
@@ -464,7 +477,7 @@ fn without_exactly_one_open_self_run_of_hers_it_is_no_run_and_no_child_is_spawne
 fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_outcome() {
     let mind = with_run();
     let clock = Rc::new(Fixed(Cell::new(at_start())));
-    let refusing = Fake::with(RefCell::new(None), true);
+    let refusing = Fake::with(None, true);
     assert!(carry(&Seen::of(&mind), &*clock, &FakeLender::new(Answer::Grant), &refusing, TEST_CAP_S, &mut Vec::new()).is_err());
     assert_eq!(refusing.spawns.borrow().len(), 1, "it tried exactly once");
 
@@ -481,7 +494,7 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
             unreachable!()
         }
     }
-    let never = Fake::with(RefCell::new(None), false);
+    let never = Fake::with(None, false);
     assert!(carry(&Down, &*clock, &FakeLender::new(Answer::Grant), &never, TEST_CAP_S, &mut Vec::new()).is_err());
     assert!(never.spawns.borrow().is_empty());
 }
@@ -998,7 +1011,7 @@ fn the_clock_is_read_once_per_event_so_a_step_of_the_wall_clock_cannot_split_a_p
     }
     let steps: VecDeque<Step> = vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", CEILING_TOKENS + 1)), Idle(0)].into();
     let child = Scripted { steps, log: log.clone(), clock: Rc::new(Fixed(Cell::new(at_start()))), code: Some(0), dies_on: None, refuses: vec![], hangs: false, exited: false, eof: false, asked: 0 };
-    let fake = Fake::with(RefCell::new(Some(child)), false);
+    let fake = Fake::with(Some(child), false);
     let outcome = carry(&Seen::of(&mind), &Stepped(clock.clone()), &FakeLender::new(Answer::Grant), &fake, TEST_CAP_S, &mut Vec::new()).unwrap();
     let events = log.borrow().clone();
     let reads = events.iter().filter(|event| matches!(event, Event::Asked(_))).count() as u32;
@@ -1457,4 +1470,202 @@ fn a_mind_query_failure_on_a_claim_fails_the_run_with_the_cause_and_starts_no_ch
 fn a_run_without_claims_gets_the_identity_lines_alone() {
     let ran = go(vec![Out(result_line())]);
     assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_000_000));
+}
+
+// ---- the live session -----------------------------------------------------
+
+use eureka_pipeline::PipelineResolution;
+
+const NO_SIGNALS: &[Stop] = &[];
+
+fn live_mind() -> Rc<TestMind> {
+    let mind = Rc::new(with_run());
+    mind.committed(vec![spec("x")]);
+    mind
+}
+
+/// A brief from her Persona: a follow-up with owner `self-run`.
+fn brief(label: &str, item: &str) -> PipelineDocument {
+    let PipelineDocument::FollowUp(mut document) = follow_up(label, &spec_ref("x")) else { unreachable!() };
+    document.item = item.into();
+    document.owner = inbox::OWNER.into();
+    PipelineDocument::FollowUp(document)
+}
+
+fn brief_ref(label: &str) -> PipelineRef {
+    reference(K::FollowUp, &id("follow_up", label))
+}
+
+/// The mind gains these documents, `seconds` into the run.
+fn admits(mind: &Rc<TestMind>, seconds: i64, documents: Vec<PipelineDocument>) -> Step {
+    let mind = mind.clone();
+    Step::Do(seconds, Rc::new(move || mind.committed(documents.clone())))
+}
+
+fn resolutions_of(mind: &TestMind, subject: &PipelineRef) -> Vec<PipelineResolution> {
+    mind.ids(K::Resolution)
+        .iter()
+        .filter_map(|resolution| match mind.view(K::Resolution, resolution)?.document {
+            PipelineDocument::Resolution(document) if document.subject == *subject => Some(document),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The text of the probe's result line: what a brief's closure carries.
+fn answer_text() -> String {
+    serde_json::from_str::<Value>(&result_line()).unwrap()["result"].as_str().unwrap().to_string()
+}
+
+fn five_minute_request(id: &str, prefix: u64) -> String {
+    let mut event: Value = serde_json::from_str(&at(id, prefix)).unwrap();
+    event["message"]["usage"]["cache_creation"] = json!({"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 100});
+    event.to_string()
+}
+
+fn tells(ran: &Ran) -> Vec<String> {
+    ran.written().into_iter().filter(|text| text.contains("A brief from your Persona")).collect()
+}
+
+#[test]
+fn a_result_never_ends_the_session_the_child_ends_it_or_the_cache_does() {
+    let ran = go(vec![Out(at("m1", 10)), Out(result_line())]);
+    assert_eq!(ran.count(&Event::InputClosed), 0, "a result is the end of a turn: {:?}", ran.events);
+    assert_eq!(ran.ended().0, Cause::Own);
+}
+
+#[test]
+fn a_brief_to_a_working_self_is_told_once_between_turns_and_closed_by_the_result_that_answers_it() {
+    let mind = live_mind();
+    let steps = vec![
+        Out(at("m1", 10)),
+        admits(&mind, 31, vec![brief("b1", "Survey the noise functions.")]),
+        // The first turn ends: the brief was spooled while it ran, so it is told now, as the next turn.
+        Out(result_line()),
+        Idle(1),
+        // A later poll does not spool it again.
+        Idle(31),
+        Out(result_line()),
+        Idle(1),
+    ];
+    let ran = carry_with(&Seen::of(&mind), steps, Some(0), false);
+    let told = tells(&ran);
+    assert_eq!(told.len(), 1, "{:?}", ran.written());
+    assert!(told[0].contains(&brief_ref("b1").id.0) && told[0].contains("Survey the noise functions."), "{}", told[0]);
+    assert!(told[0].contains("Your answer closes it"), "{}", told[0]);
+    assert_eq!(ran.count(&Event::InputClosed), 0);
+    let closures = resolutions_of(&mind, &brief_ref("b1"));
+    assert_eq!(closures.len(), 1, "closed once");
+    assert!(matches!(closures[0].outcome, ResolutionOutcome::Recorded { .. }));
+    assert_eq!(closures[0].rationale.0, answer_text());
+    assert!(!inbox::pending(&ran.hooks.spool).unwrap(), "nothing left to tell");
+}
+
+#[test]
+fn a_brief_told_mid_turn_by_the_hook_is_closed_by_that_turns_result_and_never_told_twice() {
+    let mind = live_mind();
+    let hooks = test_hooks();
+    let printed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let fire = {
+        let (spool, printed) = (hooks.spool.clone(), printed.clone());
+        Step::Do(0, Rc::new(move || printed.borrow_mut().push(inbox::inject(&spool, "{\"hook_event_name\":\"PostToolBatch\"}", false).unwrap().stdout)))
+    };
+    let steps = vec![Out(at("m1", 10)), admits(&mind, 31, vec![brief("b2", "Wire the shader uniforms.")]), fire.clone(), fire, Out(result_line()), Idle(1)];
+    let ran = carry_hooked(&Seen::of(&mind), steps, (Some(0), None, NO_SIGNALS, false), hooks);
+    let printed = printed.borrow();
+    assert!(printed[0].contains(&brief_ref("b2").id.0) && printed[0].contains("Wire the shader uniforms."), "{printed:?}");
+    assert_eq!(printed[1], "", "the second call finds nothing: each brief enters once");
+    assert!(tells(&ran).is_empty(), "the hook told it; the actuator did not: {:?}", ran.written());
+    let closures = resolutions_of(&mind, &brief_ref("b2"));
+    assert_eq!((closures.len(), closures[0].rationale.0.as_str()), (1, answer_text().as_str()));
+}
+
+#[test]
+fn a_brief_her_self_resolved_is_not_resolved_again_and_one_not_yet_told_stays_open_past_the_result() {
+    let mind = live_mind();
+    let hooks = test_hooks();
+    let claim_and_resolve = {
+        let (spool, mind) = (hooks.spool.clone(), mind.clone());
+        Step::Do(
+            0,
+            Rc::new(move || {
+                inbox::inject(&spool, "{}", false).unwrap();
+                mind.committed(vec![close(brief_ref("b3"), recorded())]);
+            }),
+        )
+    };
+    let steps = vec![Out(at("m1", 10)), admits(&mind, 31, vec![brief("b3", "Mine.")]), claim_and_resolve, admits(&mind, 31, vec![brief("b4", "Later.")]), Out(result_line())];
+    let ran = carry_hooked(&Seen::of(&mind), steps, (Some(0), None, NO_SIGNALS, false), hooks);
+    assert_eq!(resolutions_of(&mind, &brief_ref("b3")).len(), 1, "her own resolution stands alone");
+    assert!(resolutions_of(&mind, &brief_ref("b4")).is_empty(), "spooled, never told: this result did not answer it");
+    assert!(tells(&ran).is_empty());
+}
+
+#[test]
+fn the_past_is_closed_at_session_start_and_only_what_no_closed_run_claimed_is_told() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x")]);
+    mind.committed(vec![brief("p1", "Stale."), brief("p2", "Still open.")]);
+    mind.committed(vec![run("old", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("p1")])]);
+    mind.committed(vec![close(run_ref("old"), recorded())]);
+    mind.committed(vec![self_run("selfrun-a", "5")]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
+    let closures = resolutions_of(&mind, &brief_ref("p1"));
+    assert_eq!(closures.len(), 1);
+    assert!(matches!(closures[0].outcome, ResolutionOutcome::Recorded { .. }));
+    assert!(closures[0].rationale.0.contains(&run_ref("old").id.0), "names the run that answered it: {}", closures[0].rationale.0);
+    let start = &ran.written()[0];
+    assert!(start.contains("Also open for you") && start.contains(&brief_ref("p2").id.0) && start.contains("Still open."), "{start}");
+    assert!(!start.contains(&brief_ref("p1").id.0), "never told: {start}");
+    // The unclaimed one was told in the start message, so the first result answers it.
+    assert_eq!(resolutions_of(&mind, &brief_ref("p2")).len(), 1);
+}
+
+#[test]
+fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_brief_keeps_it_open() {
+    // An hour's cache: warm at 3539 s, the flush at 3540, the input closed after the flush's own result.
+    let hour = go(vec![Out(at("m1", 10)), Out(result_line()), Idle(3539), Idle(1), Out(result_line()), Idle(1)]);
+    assert_eq!(hour.written().iter().filter(|text| text.as_str() == FLUSH_MESSAGE).count(), 1);
+    let flush_at = hour.events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains(FLUSH_MESSAGE))).unwrap();
+    let closed_at = hour.events.iter().position(|event| *event == Event::InputClosed).unwrap();
+    assert!(flush_at < closed_at && hour.count(&Event::InputClosed) == 1, "{:?}", hour.events);
+    // Five minutes' cache: the flush at 240 s.
+    let short = go(vec![Out(five_minute_request("m1", 10)), Out(result_line()), Idle(239), Idle(1), Out(result_line()), Idle(1)]);
+    assert_eq!(flushes(&short), 1);
+    // Not a second early.
+    let early = go(vec![Out(at("m1", 10)), Out(result_line()), Idle(3539)]);
+    assert_eq!(flushes(&early), 0);
+    // A brief waiting at the cache's end is told, not flushed: the session stays open.
+    let mind = live_mind();
+    let steps = vec![Out(at("m1", 10)), Out(result_line()), admits(&mind, 3539, vec![brief("b5", "One more.")]), Idle(1), Idle(1), Out(result_line()), Idle(1)];
+    let ran = carry_with(&Seen::of(&mind), steps, Some(0), false);
+    assert_eq!((flushes(&ran), tells(&ran).len(), ran.count(&Event::InputClosed)), (0, 1, 0), "{:?}", ran.written());
+}
+
+#[test]
+fn near_the_cap_an_idle_session_closes_for_rotation_and_a_working_one_is_asked_for_its_flush() {
+    let cap = i64::try_from(TEST_CAP_S).unwrap();
+    // Idle at cap - 1200 s: closed, with no flush asked.
+    let idle = go(vec![After(cap - 1400, at("m1", 10)), Out(result_line()), Idle(199), Idle(1)]);
+    assert_eq!((idle.count(&Event::InputClosed), flushes(&idle)), (1, 0), "{:?}", idle.events);
+    let early = go(vec![After(cap - 1400, at("m1", 10)), Out(result_line()), Idle(199)]);
+    assert_eq!(early.count(&Event::InputClosed), 0);
+    // Mid-turn at cap - 600 s: the flush, once.
+    let working = go(vec![After(cap - 600, at("m1", 10))]);
+    assert_eq!(flushes(&working), 1);
+    let before = go(vec![After(cap - 601, at("m1", 10))]);
+    assert_eq!(flushes(&before), 0);
+}
+
+#[test]
+fn a_pre_compact_block_leaves_a_marker_and_the_session_asks_for_the_flush_once() {
+    let hooks = test_hooks();
+    let fire = {
+        let spool = hooks.spool.clone();
+        Step::Do(1, Rc::new(move || assert_eq!(inbox::inject(&spool, "{}", true).unwrap().exit, 2)))
+    };
+    let mind = with_run();
+    let ran = carry_hooked(&Seen::of(&mind), vec![Out(at("m1", 10)), fire.clone(), fire, Out(result_line())], (Some(0), None, NO_SIGNALS, false), hooks);
+    assert_eq!(flushes(&ran), 1, "{:?}", ran.written());
+    assert!(!inbox::take_pre_compact(&ran.hooks.spool), "the marker was taken");
 }

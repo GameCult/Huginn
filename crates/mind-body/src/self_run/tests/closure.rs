@@ -84,7 +84,7 @@ fn a_child_stopped_by_the_actuator_resolves_the_run_with_how_it_ended() {
 fn a_child_that_cannot_start_resolves_the_run_and_the_error_stands() {
     let mind = with_run();
     let clock = Rc::new(Fixed(Cell::new(at_start())));
-    let refusing = Fake::with(RefCell::new(None), true);
+    let refusing = Fake::with(None, true);
     let error = carry(&Seen::of(&mind), &*clock, &FakeLender::new(Answer::Grant), &refusing, TEST_CAP_S, &mut Vec::new()).unwrap_err();
     assert_eq!(error.to_string(), "refused");
     assert!(reason_of(&mind, "selfrun-a").contains("the actuator failed"));
@@ -105,7 +105,7 @@ fn an_error_after_the_run_opened_resolves_it() {
     let log = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(Fixed(Cell::new(at_start())));
     let child = Scripted { steps: vec![Out(at("m1", 10))].into(), log: log.clone(), clock: clock.clone(), code: Some(0), dies_on: None, refuses: vec![], hangs: true, exited: false, eof: false, asked: 0 };
-    let fake = Fake::with(RefCell::new(Some(child)), false);
+    let fake = Fake::with(Some(child), false);
     assert!(carry(&Seen::of(&mind), &*clock, &FakeLender::logging(log, Answer::Grant), &fake, TEST_CAP_S, &mut Broken).is_err());
     assert!(reason_of(&mind, "selfrun-a").contains("the actuator failed"));
 }
@@ -133,7 +133,7 @@ fn a_resolve_that_fails_is_logged_and_tried_once() {
 
     // The same when the run's own error is what is being reported: that error stands.
     let clock = Rc::new(Fixed(Cell::new(at_start())));
-    let refusing = Fake::with(RefCell::new(None), true);
+    let refusing = Fake::with(None, true);
     let again = Seen { admit_fails: true, ..Seen::of(&mind) };
     let error = carry(&again, &*clock, &FakeLender::new(Answer::Grant), &refusing, TEST_CAP_S, &mut Vec::new()).unwrap_err();
     assert_eq!(error.to_string(), "refused");
