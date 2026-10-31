@@ -6,7 +6,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use cultcache_rs::CultCacheEnvelope;
 use eureka_pipeline::{
     AuthorityMap, ClaimOutcome, CodeLocation, CommitRange, CutVerification, Date, DocRef, Evidence, EvidenceKind,
-    FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MemorySort, MutationRecord, OrgRepo, PipelineCampaign,
+    FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MemoryOrigin, MemorySort, MutationRecord, OrgRepo, PipelineCampaign,
     PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFinding, PipelineFollowUp, PipelineHandOff,
     PipelineInstance, PipelineKind, PipelineMemory, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling,
     PipelineRun, PipelineStewardship, PipelineTarget, PipelineVerdict, Promise, QuestionOption, ReportCommit,
@@ -362,8 +362,7 @@ pub(crate) fn memory(label: &str, sort: MemorySort, text: &str, about: &[&str]) 
         sort,
         text: text.into(),
         about: about.iter().map(|who| s(who)).collect(),
-        learned_in: s("swarm"),
-        direct: false,
+        origin: MemoryOrigin::Room { rooms: s("swarm"), heard_from: vec![] },
         sources: vec![],
         salience_permille: 500,
         consolidates: vec![],

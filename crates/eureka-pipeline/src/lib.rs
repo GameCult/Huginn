@@ -615,6 +615,11 @@ fn memory_is_well_formed(memory: &PipelineMemory, at: &str) -> Result<(), Pipeli
     if memory.text.0.trim().is_empty() {
         return Err(format_error(&format!("{at}.text"), "an empty memory"));
     }
+    if let MemoryOrigin::Direct { with, .. } = &memory.origin {
+        if with.is_empty() {
+            return Err(format_error(&format!("{at}.origin.with"), "a direct memory that names no one she heard it from"));
+        }
+    }
     if memory.salience_permille > SALIENCE_MAX_PERMILLE {
         return Err(format_error(&format!("{at}.salience_permille"), &memory.salience_permille.to_string()));
     }
@@ -778,15 +783,14 @@ value_types! {
     /// One thing a Mind keeps for herself, in her own mind: what she was asked,
     /// decided, committed to, learned or did, an idea, or the rapport between
     /// her and another Mind or person. `text` is her own words. `about` names
-    /// the Matrix users it concerns (Minds included), `learned_in` where she
-    /// learned it (a room alias, a DM's room id, or `self run <label>`),
-    /// `direct` whether it came in a direct message, and `sources` the event
-    /// ids, commits or documents it rests on; the organ fills the last three,
+    /// the Matrix users it concerns (Minds included) and nothing about where it
+    /// came from; `origin` is where and from whom she learned it, and `sources`
+    /// the event ids, commits or documents it rests on; the organ fills both,
     /// not the model. `salience_permille` ranks it and decides nothing.
     /// `consolidates` names the memories a consolidating memory replaces.
     /// Instance-rooted: the key is `<instance>:memory:<label>`.
     pub struct PipelineMemory {
-        instance: Slug, label: Label, sort: MemorySort, text: Line, about: Vec<Short>[8], learned_in: Short, direct: bool,
+        instance: Slug, label: Label, sort: MemorySort, text: Line, about: Vec<Short>[8], origin: MemoryOrigin,
         sources: Vec<Short>[8], salience_permille: u16, consolidates: Vec<PipelineRef>[16],
     } => memory_is_well_formed
 }
@@ -824,6 +828,47 @@ impl PipelineRef {
     /// every in-crate caller holding a `PipelineRef`.
     pub fn validate_ref(&self) -> Result<(), PipelineRefusal> {
         self.validate("ref")
+    }
+}
+
+/// Where a memory came from and whom she heard it from. The organ derives it
+/// from the batch of the turn that wrote the memory; the model never writes it.
+/// `about` names whom a memory concerns, this names the room and the voices.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum MemoryOrigin {
+    /// A turn in rooms: their aliases comma-joined, and the batch's other senders.
+    Room {
+        rooms: Short,
+        #[schemars(extend("maxItems" = 8))]
+        heard_from: Vec<Short>,
+    },
+    /// A direct message: the DM's room id, and the others who spoke in it (whom
+    /// she heard it from in confidence).
+    Direct {
+        room: Short,
+        #[schemars(extend("maxItems" = 8))]
+        with: Vec<Short>,
+    },
+    /// A wake: no one spoke.
+    Wake,
+    /// A Self run of hers, by its label.
+    SelfRun { run: Short },
+}
+
+impl Bounded for MemoryOrigin {
+    fn validate(&self, field: &str) -> Result<(), PipelineRefusal> {
+        match self {
+            Self::Room { rooms, heard_from } => {
+                rooms.validate(&format!("{field}.rooms"))?;
+                list(&format!("{field}.heard_from"), heard_from, 8)
+            }
+            Self::Direct { room, with } => {
+                room.validate(&format!("{field}.room"))?;
+                list(&format!("{field}.with"), with, 8)
+            }
+            Self::Wake => Ok(()),
+            Self::SelfRun { run } => run.validate(&format!("{field}.run")),
+        }
     }
 }
 
@@ -1462,7 +1507,7 @@ mod tests {
             (D::Memory(PipelineMemory {
                 instance: slug(INSTANCE), label: l("2026-10-31t041200-t0-m0"), sort: MemorySort::Committed,
                 text: "I take the background shaders; Libby holds the sounds.".into(), about: vec![s("@libby:chat")],
-                learned_in: s("swarm"), direct: false, sources: vec![s("$e1")], salience_permille: 700, consolidates: vec![],
+                origin: MemoryOrigin::Room { rooms: s("swarm"), heard_from: vec![s("@libby:chat")] }, sources: vec![s("$e1")], salience_permille: 700, consolidates: vec![],
             }), format!("{INSTANCE}:memory:2026-10-31t041200-t0-m0")),
         ]
     }

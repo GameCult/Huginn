@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use cultnet_rs::{Row, RowSet, Selection};
 use eureka_pipeline::{
-    FindingConfidence, FindingOrigin, FindingSeverity, Label, MemorySort, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome,
+    FindingConfidence, FindingOrigin, FindingSeverity, Label, MemoryOrigin, MemorySort, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome,
     RulingAuthority, RunOperator, RunTurn, Slug,
 };
 
@@ -56,13 +56,15 @@ pub(crate) enum Alias {
     Sort,
     /// The Matrix users a memory is about, one value each.
     About,
-    /// `true` or `false` on a memory: whether it was learned in a direct message.
-    Direct,
+    /// A memory's origin kind: `Room`, `Direct`, `Wake` or `SelfRun`. Named `memory_origin` because
+    /// `origin` already selects a finding's origin.
+    MemoryOrigin,
 }
 
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
 const OUTCOMES: [&str; 6] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn"];
 const BOOLEANS: [&str; 2] = ["true", "false"];
+const MEMORY_ORIGINS: [&str; 4] = ["Room", "Direct", "Wake", "SelfRun"];
 /// The one value a presence alias answers with; a row without it answers nothing.
 const PRESENT: [&str; 1] = ["true"];
 
@@ -86,7 +88,7 @@ impl Alias {
         Self::Urged,
         Self::Sort,
         Self::About,
-        Self::Direct,
+        Self::MemoryOrigin,
     ];
 
     fn name(self) -> &'static str {
@@ -109,7 +111,7 @@ impl Alias {
             Self::Urged => "urged",
             Self::Sort => "sort",
             Self::About => "about",
-            Self::Direct => "direct",
+            Self::MemoryOrigin => "memory_origin",
         }
     }
 
@@ -131,7 +133,7 @@ impl Alias {
             Self::Outcome => kind == K::Resolution,
             Self::Turn | Self::OperatedBy | Self::Ran => kind == K::Run,
             Self::Voted | Self::Urged => kind == K::Pulse,
-            Self::Sort | Self::About | Self::Direct => kind == K::Memory,
+            Self::Sort | Self::About | Self::MemoryOrigin => kind == K::Memory,
         }
     }
 
@@ -150,7 +152,7 @@ impl Alias {
             Self::OperatedBy => Some(RunOperator::NAMES),
             Self::Ran | Self::Voted | Self::Urged => Some(&PRESENT),
             Self::Sort => Some(MemorySort::NAMES),
-            Self::Direct => Some(&BOOLEANS),
+            Self::MemoryOrigin => Some(&MEMORY_ORIGINS),
             Self::Root | Self::Repo | Self::Cut | Self::About => None,
         }
     }
@@ -266,7 +268,12 @@ impl SelectionRow {
             D::Memory(memory) => {
                 put(Alias::Sort, vec![format!("{:?}", memory.sort)]);
                 put(Alias::About, memory.about.iter().map(|who| who.0.clone()).collect());
-                put(Alias::Direct, vec![memory.direct.to_string()]);
+                put(Alias::MemoryOrigin, vec![match memory.origin {
+                    MemoryOrigin::Room { .. } => "Room",
+                    MemoryOrigin::Direct { .. } => "Direct",
+                    MemoryOrigin::Wake => "Wake",
+                    MemoryOrigin::SelfRun { .. } => "SelfRun",
+                }.to_string()]);
             }
             _ => {}
         }
