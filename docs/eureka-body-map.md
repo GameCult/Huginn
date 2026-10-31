@@ -799,17 +799,23 @@ in-force `operated_by Mind` Self run of its instance, which admission keeps uniq
 - Owner: `mind_body::self_run::carry`, inside `mind-self@<i>`, decides the argv, the session
   id, when to ask for the flush and when to interrupt.
 - Inputs: its run (budget, claims, id) from the mind; the child's stdout stream; the clock.
-- Outputs: one `claude` child; the start message; at most one flush message; stdin closed at
-  the first `result`; at most one interrupt; an outcome line and an exit status.
+- Outputs: one `claude` child; stdin lines written by `drive` alone (the start message, tells of
+  briefs, one flush); stdin closed at the result after the flush's replay echo, or at a blocked
+  result or an error before any answer; at most one interrupt; an outcome line and an exit status.
 - Derived: the request's prefix (F24, keyed on `message.id`, main thread only); the session id
   (UUIDv5 of the run id, so the measure cut can find the transcript and resume it).
 - Not its decision: continuation (fresh only until `self-run-measure`), the brake (the unit's
   gate), the stop (the hold), the budget (the run's `budget_usd`, from the dial at launch),
   the environment, token and permissions (the unit and managed settings, gamecult-ops).
-- Robust to F25's open point: the flush is written only before the first `result`, stdin closes
-  at that `result`, and if the child has not exited `FLUSH_GRACE` after the flush, or the
-  prefix passes `CEILING_TOKENS + FLUSH_ALLOWANCE_TOKENS`, it is interrupted once. A queued
-  message that is never delivered costs the flush, never the stop.
+- Delivery is counted: `--replay-user-messages` makes the CLI echo each stdin line right before
+  the request that carries it, folded into the running turn or queued as the next, so the echo is
+  the consumption point and idle is `lines written == lines echoed` with no turn open. The flush
+  is answered at the first result after its echo, folded or queued alike; the grace interrupt
+  (earlier of 15 min after the write and the cap less the ladder) is the backstop. Compaction is
+  off in the CLI (`DISABLE_COMPACT=1` in the child environment).
+- With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` set the CLI forces the permission mode to default:
+  `--permission-mode bypassPermissions` has no effect there and only the seed's allow list decides
+  tools (probe, claude 2.1.312, 2026-10-31).
 
 ### Swarm by 2026-10-30 (Imagination `imagination-swarm-tonight`, 2026-10-29)
 
