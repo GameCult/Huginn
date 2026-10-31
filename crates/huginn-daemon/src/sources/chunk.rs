@@ -131,4 +131,23 @@ mod tests {
         let held = Chunk { line_start: 3, line_end: 4, text: "fn a() {}".into() };
         assert_eq!(embedded_text("Huginn", "src/a.rs", &held), "Huginn/src/a.rs\nfn a() {}");
     }
+
+    /// The character bound is inclusive: a line of exactly the bound is kept
+    /// whole, one more character is cut; and the running count of a window
+    /// includes each joining newline.
+    #[test]
+    fn the_character_bound_is_inclusive_and_counts_the_joining_newlines() {
+        let exact = "z".repeat(CHUNK_CHARS_MAX);
+        let kept = chunk(&format!("{exact}\n"));
+        assert_eq!((kept.len(), kept[0].text.chars().count()), (1, CHUNK_CHARS_MAX));
+        let over = chunk(&format!("{exact}z\nnext\n"));
+        let shown: Vec<(u32, u32, usize)> = over.iter().map(|held| (held.line_start, held.line_end, held.text.chars().count())).collect();
+        assert_eq!(shown, [(1, 1, CHUNK_CHARS_MAX), (2, 2, 4)]);
+
+        // 13 lines of 100 characters are 1,312 with their newlines; the 14th would make 1,413.
+        let hundred = "h".repeat(100);
+        let text: String = (0..20).map(|_| format!("{hundred}\n")).collect();
+        let ranges: Vec<(u32, u32)> = chunk(&text).iter().map(|held| (held.line_start, held.line_end)).collect();
+        assert_eq!(ranges, [(1, 13), (14, 20)]);
+    }
 }

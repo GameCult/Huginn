@@ -2057,3 +2057,30 @@ fn a_worker_stuck_on_the_minds_collection_still_answers_a_source_search() {
     assert_eq!((answered.hits[0].repo.as_str(), answered.hits[0].path.as_str()), ("Huginn", "a.rs"));
     assert_eq!(answered.indexed_under.digest, "d1");
 }
+
+/// Source searches take their own tickets, share the queue's bound with the
+/// mind's searches, and an abandon removes the one ticket named from either.
+#[test]
+fn source_searches_have_distinct_tickets_share_the_queue_bound_and_abandon_by_ticket() {
+    let shared = shared_with(Vec::new(), None, Vec::new(), false);
+    let mut sink = WorkerSink { shared, identified: true, deadline: SEARCH_DEADLINE };
+    let first = ask_sources(&mut sink, "a").unwrap();
+    let second = ask_sources(&mut sink, "b").unwrap();
+    let mind = ask_sink(&mut sink, "m", 3).unwrap();
+    assert!(first != second && second != mind && first != mind, "{first:?} {second:?} {mind:?}");
+
+    abandon(&mut sink, first);
+    {
+        let guard = lock(&sink.shared);
+        let left: Vec<SearchTicket> = guard.source_searches.iter().map(|queued| queued.ticket).collect();
+        assert_eq!((left, guard.searches.len()), (vec![second], 1), "only the named ticket went");
+    }
+
+    for _ in 0..SEARCHES_QUEUED_MAX - 2 {
+        ask_sources(&mut sink, "fill").unwrap();
+    }
+    assert!(ask_sources(&mut sink, "over").is_err(), "the bound counts both kinds");
+    assert!(ask_sink(&mut sink, "over", 3).is_err(), "and refuses both kinds");
+    abandon(&mut sink, second);
+    assert!(ask_sink(&mut sink, "now", 3).is_ok(), "a freed slot is a slot");
+}

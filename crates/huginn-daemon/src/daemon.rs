@@ -551,6 +551,83 @@ pub(crate) mod tests {
         fn abandon(&mut self, _ticket: SearchTicket) {}
     }
 
+    /// An index that answers source searches from a script and counts how often
+    /// it was asked.
+    struct SourcesIndex {
+        asked: Arc<Mutex<u32>>,
+        hits: SourceHits,
+    }
+
+    impl<S: MindStore> IndexSink<S> for SourcesIndex {
+        fn committed(&mut self, _mind: &Mind<S>, _writes: &[PipelineRef]) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn status(&self) -> IndexStatus {
+            IndexStatus::Current
+        }
+
+        fn search(&mut self, _text: &str, _top_k: u32, _among: Vec<String>) -> Result<SearchTicket, String> {
+            Err("this index cannot search the mind".into())
+        }
+
+        fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
+            *self.asked.lock().unwrap() += 1;
+            Ok(SearchTicket(7))
+        }
+
+        fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+            vec![(SearchTicket(7), Ok(self.hits.clone()))]
+        }
+
+        fn search_deadline(&self) -> std::time::Duration {
+            std::time::Duration::ZERO
+        }
+
+        fn searched(&mut self) -> Vec<(SearchTicket, Result<Hits, String>)> {
+            Vec::new()
+        }
+
+        fn abandon(&mut self, _ticket: SearchTicket) {}
+    }
+
+    /// A source search is checked at the door before the index is asked, is
+    /// answered with the hits the index found and nothing joined from the mind,
+    /// turns a failure into `Unavailable`, and is refused for another mind.
+    #[test]
+    fn a_source_search_reaches_the_index_only_when_well_formed_and_answers_its_hits() {
+        use huginn_mind::{SourceHit, SourceModel};
+        let hits = SourceHits {
+            indexed_under: SourceModel { name: "m".into(), digest: "d".into() },
+            hits: vec![SourceHit { repo: "R".into(), path: "p.rs".into(), commit: "c".into(), line_start: 1, line_end: 2, score: 0.5, text: "t".into() }],
+        };
+        let asked = Arc::new(Mutex::new(0));
+        let root = tempfile::tempdir().unwrap();
+        let mind = Mind::open(root.path(), &slug(INSTANCE)).unwrap();
+        let mut daemon = Daemon::new(mind, SourcesIndex { asked: Arc::clone(&asked), hits: hits.clone() });
+        let request = |instance: &str, top_k: u32| HuginnMindRequest::SearchSources {
+            instance: slug(instance),
+            query: SourceQuery { text: huginn_mind::eureka_pipeline::Line("find".into()), top_k, repo: None },
+        };
+
+        let Handled::Searching(search) = daemon.handle(request(INSTANCE, 5), now()) else { panic!("a well-formed source search is a search") };
+        assert_eq!((search.ticket, *asked.lock().unwrap()), (SearchTicket(7), 1));
+        let mut finished = daemon.searched();
+        let (ticket, found) = finished.remove(0);
+        assert_eq!(ticket, SearchTicket(7));
+        assert_eq!(daemon.finish(search, found), HuginnMindResponse::Sources(hits));
+
+        let Handled::Searching(search) = daemon.handle(request(INSTANCE, 5), now()) else { panic!() };
+        let failed = daemon.finish(search, Found::Failed("the index fell over".into()));
+        assert!(matches!(failed, HuginnMindResponse::Refused(MindRefusal::Unavailable { ref detail }) if detail.contains("fell over")), "{failed:?}");
+
+        for refused in [request(INSTANCE, 0), request(INSTANCE, 51), request(OTHER, 5)] {
+            let answer = daemon.handle(refused, now()).answered();
+            assert!(matches!(answer, HuginnMindResponse::Refused(_)), "{answer:?}");
+        }
+        assert_eq!(*asked.lock().unwrap(), 2, "a refused query never reached the index");
+    }
+
     /// A daemon over the instance's mind under `state_root`, with no index.
     pub(crate) fn open_unindexed(
         state_root: &Path,

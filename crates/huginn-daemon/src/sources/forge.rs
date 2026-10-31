@@ -90,4 +90,38 @@ mod tests {
         let names: Vec<String> = indexable(&page).unwrap().into_iter().map(|repo| repo.name).collect();
         assert_eq!(names, ["Open"]);
     }
+
+    /// Serves each page in `pages` once, to the request that names it.
+    fn serve(pages: Vec<String>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..pages.len() {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0_u8; 2048];
+                let read = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                let body = if request.contains("page=1&") { &pages[0] } else { &pages[1] };
+                write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
+
+    /// The catalog reads every page until one is short: a full first page
+    /// does not end it, and a short second page does; clone URLs name the org.
+    #[test]
+    fn the_catalog_reads_pages_until_a_short_one_and_clones_from_the_org() {
+        let page = |range: std::ops::Range<usize>| {
+            let repos: Vec<Value> = range.map(|n| json!({ "name": format!("r{n}"), "default_branch": "main", "private": false, "archived": false, "mirror": false, "empty": false })).collect();
+            Value::Array(repos).to_string()
+        };
+        let base = serve(vec![page(0..PAGE), page(PAGE..PAGE + 3)]);
+        let mut forge = HttpForge::new(&format!("{base}/"));
+        let names: Vec<String> = forge.catalog().unwrap().into_iter().map(|repo| repo.name).collect();
+        assert_eq!(names.len(), PAGE + 3);
+        assert_eq!((names[0].as_str(), names[PAGE + 2].as_str()), ("r0", "r52"));
+        assert_eq!(forge.clone_url("Demo"), format!("{base}/GameCult/Demo.git"));
+    }
 }
