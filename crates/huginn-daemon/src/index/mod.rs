@@ -813,11 +813,6 @@ fn serve_search<E: Embedder, V: VectorIndex>(projector: &mut Projector<E, V>, sh
     lock(shared).found.push((ticket, found));
 }
 
-/// The search at the front of the queue, if it may be served now. Never while
-/// a document sits in the inbox, and never while anything ahead of it is
-/// owed (documents to write, a reconciliation to make) unless the index
-/// cannot be asked at all, in which case the search is taken to be refused:
-/// waiting would not change the answer.
 /// Answers the oldest queued source search, whatever state the mind's
 /// projection is in: it asks the embedder and the source collection and nothing
 /// of the projector's reconciliation.
@@ -833,6 +828,11 @@ fn serve_source_search<E: Embedder, V: VectorIndex + SourceIndex>(projector: &mu
     lock(shared).sources_found.push((ticket, found));
 }
 
+/// The search at the front of the queue, if it may be served now. Never while
+/// a document sits in the inbox, and never while anything ahead of it is
+/// owed (documents to write, a reconciliation to make) unless the index
+/// cannot be asked at all, in which case the search is taken to be refused:
+/// waiting would not change the answer.
 fn take_search<E: Embedder, V: VectorIndex>(projector: &Projector<E, V>, guard: &mut Shared) -> Option<Queued> {
     if !guard.inbox.is_empty() {
         return None;
