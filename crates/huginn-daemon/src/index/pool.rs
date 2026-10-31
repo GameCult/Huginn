@@ -64,7 +64,7 @@ impl<E: Embedder + Send> EmbedderPool<E> {
     fn admit(&mut self, within: Duration) {
         let now = Instant::now();
         for at in 0..self.members.len() {
-            if !self.members[at].out.as_ref().is_some_and(|(due, _)| *due <= now) {
+            if self.members[at].out.as_ref().is_none_or(|(due, _)| *due > now) {
                 continue;
             }
             let name = self.members[at].name.clone();
