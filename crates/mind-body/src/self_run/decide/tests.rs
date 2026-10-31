@@ -260,8 +260,6 @@ fn the_ladder_ends_before_the_cap_whenever_the_flush_was_written() {
             assert!(finished.is_some_and(|end| end < cap as i64), "flush at {second}: ended at {finished:?}, cap {cap}");
         }
     }
-    // The rotation margin leaves room: this is the arithmetic the const assertion pins.
-    assert!(GRACE + LADDER_S < ROTATE_MARGIN_S);
 }
 
 #[test]
