@@ -252,7 +252,10 @@ mind_body::self_run: struct ClaudeSpawner  pub-fields[]
 mind_body::self_run::decide: impl State
 mind_body::self_run::inbox: const OWNER : & str
 mind_body::self_run::inbox: fn claim (spool : & Path) -> Result < Vec < Brief > >
+mind_body::self_run::inbox: fn close (mind : & dyn MindPort , now : DateTime < Utc > , session : & str , briefs : & [(Brief , String)] , reason : & str) -> Result < usize >
+mind_body::self_run::inbox: fn close_past (mind : & dyn MindPort , now : DateTime < Utc > , session : & str) -> Result < usize >
 mind_body::self_run::inbox: fn derive (mind : & dyn MindPort , spool : & Path) -> Result < Vec < Brief > >
+mind_body::self_run::inbox: fn forget (spool : & Path , briefs : & [Brief])
 mind_body::self_run::inbox: fn inject (spool : & Path , input : & str , pre_compact : bool) -> Result < Injection >
 mind_body::self_run::inbox: fn mark_told (spool : & Path , briefs : & [Brief]) -> Result < () >
 mind_body::self_run::inbox: fn pending (spool : & Path) -> Result < bool >
@@ -260,6 +263,7 @@ mind_body::self_run::inbox: fn render (briefs : & [Brief] , plan : & str) -> Str
 mind_body::self_run::inbox: fn reset (spool : & Path) -> Result < () >
 mind_body::self_run::inbox: fn spool (spool : & Path , briefs : & [Brief]) -> Result < () >
 mind_body::self_run::inbox: fn take_pre_compact (spool : & Path) -> bool
+mind_body::self_run::inbox: fn told (spool : & Path) -> Result < Vec < Brief > >
 mind_body::self_run::inbox: fn write_plan (spool : & Path , line : & str) -> Result < () >
 mind_body::self_run::inbox: impl Brief
 mind_body::self_run::inbox: impl Hooks
