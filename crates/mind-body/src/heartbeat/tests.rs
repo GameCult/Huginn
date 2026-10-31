@@ -677,8 +677,20 @@ fn a_null_vote_withdraws_the_standing_one_and_an_urgency_only_pulse_leaves_it() 
         urgency_permille: None,
         note: "test".into(),
     })]);
+    rig.advance(5000);
     rig.poll();
     let withdrawn = rig.store.traces.borrow().last().cloned().unwrap();
     assert_eq!(withdrawn.instances[ANN].vote_beat_s, None, "an explicit null withdraws it");
     assert_eq!(withdrawn.tempo_s, 900, "she counts as silent again");
+}
+
+#[test]
+fn an_urgency_declared_in_the_second_of_her_turn_is_already_consumed() {
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.pulse(ANN, 3000, None, Some(900));
+    rig.poll();
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.instances[ANN].urgency_permille, 0, "a declaration is pending only when admitted after her turn");
 }
