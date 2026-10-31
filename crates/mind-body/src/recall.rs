@@ -4,7 +4,7 @@
 //! must still know when the conversation is gone is written into her mind as
 //! typed memory, and a later turn reads it back from there. This module owns
 //! the reading and nothing else. It reads only her own mind through `MindPort`;
-//! it reads no chat (a room's context lines are conversation, never memory),
+//! it reads no chat (the lines shown beside a message are conversation, never memory),
 //! keeps no cache between turns, and holds no index: the daemon's index answers
 //! `MindPort::query_near`, and a rank only orders.
 //!
