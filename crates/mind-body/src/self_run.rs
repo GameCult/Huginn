@@ -665,7 +665,11 @@ fn drive(
                         events.push_front(Event::Inbox { pending: false });
                     }
                 },
-                Action::CloseBriefs => briefs_closed = close_told(mind, clock, hooks, session, heard, out)?,
+                Action::CloseBriefs => {
+                    briefs_closed = close_told(mind, clock, hooks, session, heard, out)?;
+                    // The result's own pass goes on to the lifecycle: a waiting brief is told, a finished flush closes the input.
+                    events.push_front(Event::Tick);
+                }
                 Action::CloseStdin => {
                     child.close_input();
                     closed = true;
