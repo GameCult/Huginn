@@ -271,12 +271,14 @@ struct Seen<'a> {
     instance: Slug,
     doubled: bool,
     admit_fails: bool,
+    /// A query for this key fails.
+    query_fails_on: Option<String>,
     admits: Cell<usize>,
 }
 
 impl<'a> Seen<'a> {
     fn of(inner: &'a TestMind) -> Self {
-        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, admits: Cell::new(0) }
+        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, query_fails_on: None, admits: Cell::new(0) }
     }
 }
 
@@ -286,6 +288,11 @@ impl MindPort for Seen<'_> {
     }
 
     fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage> {
+        if let (Some(key), Some(keys)) = (&self.query_fails_on, &selection.keys)
+            && keys.contains(key)
+        {
+            return Err(anyhow!("mind-down-canary"));
+        }
         let mut page = self.inner.query(selection)?;
         if self.doubled
             && let PipelinePageItems::Headers(items) = &mut page.items
@@ -1315,3 +1322,94 @@ mod process {
 
 mod lease;
 mod closure;
+
+// ---- the task in the start message ---------------------------------------
+
+fn follow_up_saying(label: &str, item: &str) -> (PipelineDocument, PipelineRef) {
+    let PipelineDocument::FollowUp(mut document) = follow_up(label, &spec_ref("x")) else { unreachable!() };
+    document.item = item.into();
+    (PipelineDocument::FollowUp(document), reference(K::FollowUp, &id("follow_up", label)))
+}
+
+fn claiming(claims: &[PipelineRef], documents: Vec<PipelineDocument>) -> TestMind {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x")]);
+    if !documents.is_empty() {
+        mind.committed(documents);
+    }
+    let PipelineDocument::Run(mut document) = self_run("selfrun-a", "5") else { unreachable!() };
+    document.claims = claims.to_vec();
+    mind.committed(vec![PipelineDocument::Run(document)]);
+    mind
+}
+
+#[test]
+fn the_start_message_carries_the_claimed_follow_ups_item_and_id_verbatim() {
+    let (brief, claim) = follow_up_saying("brief-a", "Fix the thing.\nThen report \u{e9}.");
+    let mind = claiming(std::slice::from_ref(&claim), vec![brief]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
+    let first = &ran.written()[0];
+    assert!(first.starts_with(&start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"))), "{first}");
+    for needle in ["Fix the thing.\nThen report \u{e9}.", claim.id.0.as_str(), "Use the eureka skill."] {
+        assert!(first.contains(needle), "{needle}: {first}");
+    }
+    assert!(first.contains(&format!("(campaign `{}`)", follow_up_campaign())), "{first}");
+}
+
+fn follow_up_campaign() -> String {
+    let PipelineDocument::FollowUp(document) = follow_up("c", &spec_ref("x")) else { unreachable!() };
+    document.campaign.0
+}
+
+#[test]
+fn a_claim_that_is_no_brief_is_named_not_dropped() {
+    // A claimed cut spec is the task: named with its id, to be read with huginn view.
+    let mind = claiming(&[spec_ref("x")], vec![]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
+    let first = &ran.written()[0];
+    assert!(first.contains(&format!("claimed cut spec `{}`", spec_ref("x").id.0)) && first.contains("huginn view"), "{first}");
+    assert!(!first.contains("unknown"), "{first}");
+    // A claim the mind does not hold at all.
+    let absent = reference(K::FollowUp, &id("follow_up", "absent"));
+    let task = task_section(&mind, std::slice::from_ref(&absent)).unwrap();
+    assert!(task.contains(&absent.id.0) && task.contains("does not hold"), "{task}");
+    // A document of another kind is named by id and kind.
+    let other = run_ref("selfrun-a");
+    let task = task_section(&mind, std::slice::from_ref(&other)).unwrap();
+    assert!(task.contains(&other.id.0) && task.contains("no brief"), "{task}");
+}
+
+#[test]
+fn every_claim_of_sixty_four_full_items_is_named_by_id() {
+    let big = "\u{e9}".repeat(500);
+    let docs: Vec<_> = (0..64).map(|n| follow_up_saying(&format!("big-{n}"), &big)).collect();
+    let claims: Vec<_> = docs.iter().map(|(_, claim)| claim.clone()).collect();
+    let mind = claiming(&claims, docs.into_iter().map(|(document, _)| document).collect());
+    let task = task_section(&mind, &claims).unwrap();
+    for claim in &claims {
+        assert!(task.contains(&claim.id.0), "{}", claim.id.0);
+    }
+    assert_eq!(task.matches(&big).count(), 64, "every item verbatim");
+    assert!(!task.contains("truncated"));
+    // Claim order is kept.
+    assert!(task.find(&claims[0].id.0) < task.find(&claims[63].id.0));
+}
+
+#[test]
+fn a_mind_query_failure_on_a_claim_fails_the_run_with_the_cause_and_starts_no_child() {
+    let (brief, claim) = follow_up_saying("brief-a", "Fix the thing.");
+    let mind = claiming(std::slice::from_ref(&claim), vec![brief]);
+    let mut seen = Seen::of(&mind);
+    seen.query_fails_on = Some(claim.id.0.clone());
+    let ran = carry_with(&seen, vec![Out(result_line())], Some(0), false);
+    let error = format!("{:#}", ran.outcome.as_ref().unwrap_err());
+    assert!(error.contains("mind-down-canary") && error.contains(&claim.id.0), "{error}");
+    assert!(ran.spawns.is_empty() && ran.events.is_empty() && !ran.all.iter().any(|event| matches!(event, Event::Lent)), "no lease, no child");
+    assert!(!ran.out.contains("unknown"));
+}
+
+#[test]
+fn a_run_without_claims_gets_the_identity_lines_alone() {
+    let ran = go(vec![Out(result_line())]);
+    assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a")));
+}
