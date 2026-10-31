@@ -164,7 +164,7 @@ mod lane {
                 turn: RunTurn::SelfRun,
                 host: "test".into(),
                 started_on: date(),
-                budget_usd: "7.25".into(),
+                budget_usd: "0".into(),
                 claims: vec![],
                 campaigns: vec![Slug(CAMPAIGN.into())],
             }),
@@ -234,17 +234,22 @@ mod lane {
         panic!("the daemon never answered");
     }
 
-    const GRANT: &[u8] = include_bytes!("../src/lease_client/lease_v1/grant.bin");
-    const SETTLED: &[u8] = include_bytes!("../src/lease_client/lease_v1/settled.bin");
+    /// The connector grant frame (lease v2): a length, then the named-map MessagePack of the grant with one plan window.
+    fn grant_frame() -> Vec<u8> {
+        let body = rmp_serde::to_vec_named(&serde_json::json!({"kind": "claude_lease_grant", "value": {"lease_id": "lease:0123456789abcdef0123456789abcdef", "plan_quota": [{
+            "window": "five_hour", "utilization_permille": 80, "resets_at_unix_ms": 1_793_307_000_000_u64, "status": "allowed", "observed_at_unix_ms": 1_793_306_000_000_u64
+        }]}})).unwrap();
+        let mut frame = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        frame
+    }
     const LANE_TOKEN: &str = "tok-lane-canary-51c7";
 
-    /// The connector's lease socket: every connection gets the golden grant with a pipe holding
-    /// `LANE_TOKEN` attached as SCM_RIGHTS, then the golden settled answer to the settle it reads.
-    /// The settle frames it received are kept.
+    /// The connector's lease socket: every connection gets the grant with a pipe holding
+    /// `LANE_TOKEN` attached as SCM_RIGHTS, and is then held open until the run lets go.
     struct FakeConnector {
         _dir: TempDir,
         path: std::path::PathBuf,
-        settles: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<Vec<u8>> {
@@ -278,15 +283,13 @@ mod lane {
                     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
                     let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);
                     assert!(control.push(rustix::net::SendAncillaryMessage::ScmRights(&fds)));
-                    rustix::net::sendmsg(&stream, &[IoSlice::new(GRANT)], &mut control, rustix::net::SendFlags::empty()).unwrap();
-                    if let Ok(settle) = read_frame(&mut stream) {
-                        kept.lock().unwrap().push(settle);
-                        let _ = stream.write_all(SETTLED);
-                    }
+                    rustix::net::sendmsg(&stream, &[IoSlice::new(&grant_frame())], &mut control, rustix::net::SendFlags::empty()).unwrap();
+                    // The lease lasts while this connection is open: the run drops it to end it.
+                    let _ = read_frame(&mut stream);
                 });
             }
         });
-        FakeConnector { _dir: dir, path, settles }
+        FakeConnector { _dir: dir, path }
     }
 
     const ENV_CANARY: &str = "canary-unit-environment-b94e";
@@ -334,14 +337,14 @@ echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         assert_eq!(output.status.code(), Some(0), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 300000\nsettled: billed 123456 micro-USD\nended: flush-requested code 0 requests 2 prefix 300000\n");
+        assert_eq!(stdout, "request 1 prefix 101\nrequest 2 prefix 300000\nended: flush-requested code 0 requests 2 prefix 300000\n");
         assert!(!all_output(&output).contains(ENV_CANARY), "the unit environment is not echoed");
         assert!(String::from_utf8_lossy(&output.stderr).contains("journal-line"), "the child's stderr is the unit's journal");
 
         let recorded = std::fs::read_to_string(&record).unwrap();
         let mut lines = recorded.lines();
         let argv = lines.next().unwrap();
-        assert!(argv.contains(&format!("--session-id {LANE_SESSION}")) && argv.contains("--max-budget-usd 7.25"), "{argv}");
+        assert!(argv.contains(&format!("--session-id {LANE_SESSION}")) && !argv.contains("--max-budget-usd"), "{argv}");
         assert!(argv.starts_with("-p --input-format stream-json"), "{argv}");
         assert!(lines.next().unwrap().contains("yggdrasil:run:selfrun-lane"), "the start message names her run");
         let flush = lines.next().unwrap();
@@ -349,9 +352,6 @@ echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start
         assert_eq!(lines.next().unwrap(), "", "the child gets the allow-listed variables only, not the rest of the unit environment");
         assert_eq!(lines.next().unwrap(), LANE_TOKEN, "the child read its credential from the lease's descriptor");
         assert!(!all_output(&output).contains(LANE_TOKEN), "the token is never in the bin's output");
-        let settles = connector.settles.lock().unwrap();
-        assert_eq!(settles.len(), 1, "the run settled once");
-        assert!(String::from_utf8_lossy(&settles[0]).contains("claude_lease_settle"));
     }
 
     /// With no Self run of hers in the mind the bin starts no child and exits 3.

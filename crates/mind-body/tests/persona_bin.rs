@@ -14,8 +14,7 @@ fn run(dir: &Path, drop: &[&str], extra: &[(&str, &str)], args: &[&str]) -> Outp
     let mut env = vec![
         ("HUGINN_ENDPOINT", "rudp://127.0.0.1:9".to_string()),
         ("STATE_DIRECTORY", dir.to_string_lossy().into_owned()),
-        ("MIND_PERSONA_ROOMS", "#swarm:chat,#burn:chat".to_string()),
-        ("MIND_PERSONA_BURN_ROOM", "#burn:chat".to_string()),
+        ("MIND_PERSONA_ROOMS", "#swarm:chat,#ops:chat".to_string()),
         ("MIND_PERSONA_OPERATOR", "@op:chat".to_string()),
         ("MIND_PERSONA_SELF_SENDER", "@eureka:chat".to_string()),
         ("MIND_CONNECTOR_ENDPOINT", "127.0.0.1:4110".to_string()),
@@ -47,10 +46,8 @@ fn a_unit_configured_from_its_environment_alone_reaches_the_gate_and_ends_dead()
 #[test]
 fn a_flag_overrides_the_environment() {
     let dir = tempfile::tempdir().unwrap();
-    // The burn room from the environment is not among the rooms the flag names.
-    let output = run(dir.path(), &[], &[], &["--instance", "eureka", "--rooms", "#swarm:chat"]);
-    assert_eq!(output.status.code(), Some(2));
-    let flagged = run(dir.path(), &[], &[], &["--instance", "eureka", "--rooms", "#swarm:chat,#burn:chat"]);
+    // The rooms flag replaces the rooms the environment names.
+    let flagged = run(dir.path(), &[], &[], &["--instance", "eureka", "--rooms", "#swarm:chat"]);
     assert_eq!(flagged.status.code(), Some(0), "{}", text(&flagged.stderr));
 }
 

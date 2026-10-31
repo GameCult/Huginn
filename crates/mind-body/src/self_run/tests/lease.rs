@@ -74,6 +74,44 @@ fn stated(input: u64, read: u64, write: u64, output: u64) -> Value {
     json!({"inputTokens": input, "cacheReadInputTokens": read, "cacheCreationInputTokens": write, "outputTokens": output, "costUSD": 0.5, "contextWindow": 200000})
 }
 
-fn read_total(settlement: &Settlement) -> u64 {
-    settlement.usage.iter().map(|used| used.usage.cache_read_tokens).sum()
+#[test]
+fn a_lease_is_asked_for_before_claude_starts_for_the_units_runtime_cap() {
+    let ran = go(vec![Out(result_line())]);
+    assert_eq!(ran.asked, vec![LeaseRequest { expires_at_unix_ms: u64::try_from(at_start().timestamp_millis()).unwrap() + TEST_CAP_S * 1000 }], "the request is only the expiry, the cap the unit gave");
+    assert_eq!(ran.all.first(), Some(&Event::Lent), "nothing happens before the lease");
+    assert_eq!(ran.all.get(1), Some(&Event::Spawned), "the child is the next thing");
+}
+
+#[test]
+fn refused_lease_spawns_nothing() {
+    for kind in [LeaseRefusalKind::UnknownCaller, LeaseRefusalKind::Busy, LeaseRefusalKind::ProviderRejected] {
+        let mind = with_run();
+        let lender = FakeLender::new(Answer::Refuse(kind));
+        let never = never_spawns();
+        let clock = Rc::new(Fixed(Cell::new(at_start())));
+        let mut out = Vec::new();
+        let outcome = carry(&mind, &*clock, &lender, &never, TEST_CAP_S, &mut out).unwrap();
+        assert_eq!(outcome, SelfRunOutcome::LeaseRefused { kind });
+        assert_eq!(outcome.exit_status(), 4);
+        assert!(never.spawns.borrow().is_empty(), "{kind:?}: the spawner is never called");
+        assert!(!format!("{outcome} {}", String::from_utf8_lossy(&out)).contains("detail-canary"), "the connector's words are not echoed");
+
+        // The run is closed Recorded, with the kind, so a run that cannot be paid for counts as an empty one.
+        let closure = mind.view(K::Resolution, &format!("{INSTANCE}:resolution:run.selfrun-a.n1")).expect("the run is closed");
+        let PipelineDocument::Resolution(closure) = closure.document else { panic!("not a resolution") };
+        assert_eq!(closure.subject, run_ref("selfrun-a"));
+        assert!(matches!(&closure.outcome, ResolutionOutcome::Recorded { reason } if reason.0.contains(&format!("{kind:?}"))), "{:?}", closure.outcome);
+
+        // Closed, so it is no longer her open run: nothing is carried or leased for it again.
+        let again = FakeLender::new(Answer::Grant);
+        assert_eq!(carry(&mind, &*clock, &again, &never, TEST_CAP_S, &mut Vec::new()).unwrap(), SelfRunOutcome::NoRun);
+        assert!(again.asked.borrow().is_empty());
+    }
+}
+
+#[test]
+fn the_lease_is_held_until_the_child_ends_and_then_dropped_with_nothing_settled() {
+    let ran = go(vec![Out(result_line())]);
+    assert_eq!(ran.all.last(), Some(&Event::Abandoned), "the lease ends by being dropped");
+    assert!(!ran.out.contains("settle"), "no settle report exists");
 }

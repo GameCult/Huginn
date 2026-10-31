@@ -14,6 +14,7 @@ use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
 
 use super::*;
 use cultnet_rs::Selection;
+use huginn_mind::PipelinePageItems;
 use crate::lease_client::{Lease, LeaseRefused, token_holding};
 use model_connector::PlanQuota;
 use crate::testkit::*;
