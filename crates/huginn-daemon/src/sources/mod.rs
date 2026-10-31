@@ -13,6 +13,8 @@
 //! lives in the collection's own metadata, so it is lost with the collection
 //! and the two cannot disagree about what is held. It is advanced only after
 //! the repo's deletes and upserts are acknowledged: it may lag and never leads.
+//! It is dropped before the repo's first delete, so a run that fails between
+//! the delete and the upserts leaves no cursor, and the repo is ingested whole.
 //! The cursors object is written whole by this job alone, once per repo.
 
 pub mod chunk;
@@ -129,9 +131,19 @@ pub struct SourceRepo {
     pub default_branch: String,
 }
 
+/// The repos the forge listed as indexable, and whether the list is the whole
+/// of what the forge holds. A list that is not whole cannot say which repos
+/// are gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Catalog {
+    pub repos: Vec<SourceRepo>,
+    /// Why the list may be missing repos; `None` when it is the forge's count.
+    pub shortfall: Option<String>,
+}
+
 /// The forge: which repos exist, and where to fetch them from.
 pub trait Forge {
-    fn catalog(&mut self) -> Result<Vec<SourceRepo>>;
+    fn catalog(&mut self) -> Result<Catalog>;
     fn clone_url(&self, name: &str) -> String;
 }
 
@@ -178,10 +190,20 @@ fn extension(path: &str) -> String {
     name.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase()).unwrap_or_default()
 }
 
-/// The names the refresh reports as failed; empty when every repo converged.
+/// What a refresh reports: the names that failed, and why nothing was retired
+/// if the catalog could not be trusted to say which repos are gone.
 #[derive(Debug, Default)]
 pub struct Refreshed {
     pub failed: Vec<String>,
+    /// Set when retirement was skipped because the catalog was empty or short.
+    pub retirement_withheld: Option<String>,
+}
+
+impl Refreshed {
+    /// Every repo converged and the catalog could be trusted to retire from.
+    pub fn is_clean(&self) -> bool {
+        self.failed.is_empty() && self.retirement_withheld.is_none()
+    }
 }
 
 /// Brings the collection to the forge's current state. A collection that
@@ -222,10 +244,24 @@ pub fn refresh<E: Embedder, S: SourceIndex, F: Forge>(
 
     let catalog = forge.catalog().context("listing the forge's repos")?;
     let mirrors = mirrors_dir(state_root);
-    retire(index, &catalog, &mirrors, &mut cursors)?;
-
     let mut refreshed = Refreshed::default();
-    for repo in &catalog {
+    // Retirement reads the catalog as the complete list of what exists. An
+    // empty or short list would retire everything it fails to name, so then
+    // nothing is retired and the run says so.
+    let withheld = match (&catalog.shortfall, catalog.repos.is_empty()) {
+        (Some(why), _) => Some(format!("the forge's catalog is incomplete ({why})")),
+        (None, true) => Some("the forge's catalog lists no indexable repos".to_owned()),
+        (None, false) => None,
+    };
+    match withheld {
+        Some(why) => {
+            eprintln!("huginn-sources: retiring nothing: {why}");
+            refreshed.retirement_withheld = Some(why);
+        }
+        None => retire(index, &catalog.repos, &mirrors, &mut cursors, &mut refreshed.failed),
+    }
+
+    for repo in &catalog.repos {
         let started = Instant::now();
         match refresh_repo(embedder, index, forge, &mirrors, repo, &identity.dimensions, &mut cursors) {
             Ok(mut report) => {
@@ -243,13 +279,17 @@ pub fn refresh<E: Embedder, S: SourceIndex, F: Forge>(
 
 /// Drops every repo the catalog no longer lists: its chunks, its cursor and
 /// its mirror, in that order, so a failure leaves the cursor to find it again.
+/// One repo's failure is logged and named in `failed`; the others go on. Names
+/// are compared as written: a repo renamed only by case is a new repo to the
+/// index (its points carry the old spelling), so the old one is retired.
 fn retire<S: SourceIndex>(
     index: &mut S,
     catalog: &[SourceRepo],
     mirrors: &Path,
     cursors: &mut BTreeMap<String, String>,
-) -> Result<()> {
-    let listed = |name: &str| catalog.iter().any(|repo| repo.name.eq_ignore_ascii_case(name));
+    failed: &mut Vec<String>,
+) {
+    let listed = |name: &str| catalog.iter().any(|repo| repo.name == name);
     let mut gone: BTreeSet<String> = cursors.keys().filter(|name| !listed(name)).cloned().collect();
     if let Ok(entries) = std::fs::read_dir(mirrors) {
         for entry in entries.flatten() {
@@ -261,14 +301,21 @@ fn retire<S: SourceIndex>(
         }
     }
     for name in gone {
-        index.delete_by(&name, None).with_context(|| format!("deleting the chunks of retired {name}"))?;
-        if cursors.remove(&name).is_some() {
-            index.set_cursors(cursors).context("dropping a retired repo's cursor")?;
+        if let Err(error) = retire_one(index, &name, mirrors, cursors) {
+            eprintln!("huginn-sources: retiring {name} failed, the others go on: {error:#}");
+            failed.push(name);
         }
-        let mirror = Mirror::path_for(mirrors, &name);
-        if mirror.exists() {
-            std::fs::remove_dir_all(&mirror).with_context(|| format!("removing {}", mirror.display()))?;
-        }
+    }
+}
+
+fn retire_one<S: SourceIndex>(index: &mut S, name: &str, mirrors: &Path, cursors: &mut BTreeMap<String, String>) -> Result<()> {
+    index.delete_by(name, None).with_context(|| format!("deleting the chunks of retired {name}"))?;
+    if cursors.remove(name).is_some() {
+        index.set_cursors(cursors).context("dropping a retired repo's cursor")?;
+    }
+    let mirror = Mirror::path_for(mirrors, name);
+    if mirror.exists() {
+        std::fs::remove_dir_all(&mirror).with_context(|| format!("removing {}", mirror.display()))?;
     }
     Ok(())
 }
@@ -295,6 +342,14 @@ fn refresh_repo<E: Embedder, S: SourceIndex, F: Forge>(
         Some(old) if mirror.is_ancestor(old, &head) => Some(mirror.changed_paths(old, &head)?.into_iter().collect()),
         _ => None,
     };
+    // From the first delete on, the collection holds no single commit's chunks
+    // for this repo until the run finishes. Say so before changing anything:
+    // the cursor is dropped, so a run that dies half way leaves a repo the next
+    // run re-ingests whole, whatever head it finds then. A cursor left at the
+    // old commit would let a later head that reverts the files hide the hole.
+    if cursors.remove(&repo.name).is_some() {
+        index.set_cursors(cursors).context("dropping the cursor before the repo's chunks change")?;
+    }
     match &changed {
         Some(paths) => {
             let paths: Vec<String> = paths.iter().cloned().collect();

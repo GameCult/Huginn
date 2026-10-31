@@ -148,7 +148,10 @@ impl Drop for Server {
     }
 }
 
-pub fn serve(root: TempDir, mut daemon: TestDaemon) -> Server {
+pub fn serve<I: IndexSink<OwnedRedbMessagePackBackingStore> + Send + 'static>(
+    root: TempDir,
+    mut daemon: Daemon<OwnedRedbMessagePackBackingStore, I>,
+) -> Server {
     let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
     let addr = hub.local_addr().unwrap();
     let stopping = Arc::new(AtomicBool::new(false));

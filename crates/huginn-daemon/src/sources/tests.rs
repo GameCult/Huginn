@@ -58,6 +58,7 @@ impl Remote {
 
 struct FakeForge {
     repos: Vec<(SourceRepo, PathBuf)>,
+    shortfall: Option<String>,
 }
 
 impl FakeForge {
@@ -67,13 +68,14 @@ impl FakeForge {
                 .iter()
                 .map(|(name, remote)| (SourceRepo { name: (*name).into(), default_branch: "main".into() }, remote.path()))
                 .collect(),
+            shortfall: None,
         }
     }
 }
 
 impl Forge for FakeForge {
-    fn catalog(&mut self) -> Result<Vec<SourceRepo>> {
-        Ok(self.repos.iter().map(|(repo, _)| repo.clone()).collect())
+    fn catalog(&mut self) -> Result<Catalog> {
+        Ok(Catalog { repos: self.repos.iter().map(|(repo, _)| repo.clone()).collect(), shortfall: self.shortfall.clone() })
     }
 
     fn clone_url(&self, name: &str) -> String {
@@ -182,7 +184,7 @@ fn unchanged_repo_makes_no_embed_call() {
     assert_eq!((reports[0].files, reports[0].chunks), (0, 0));
 }
 
-/// An upsert that fails mid-repo leaves the cursor on the old commit, and the
+/// An upsert that fails mid-repo leaves no cursor (no commit is held whole), and the
 /// next run converges to the points a clean run of the same history makes.
 #[test]
 fn cursor_never_leads() {
@@ -203,13 +205,52 @@ fn cursor_never_leads() {
     }
     let (refreshed, _) = rig.run(&mut forge);
     assert_eq!(refreshed.unwrap().failed, ["Demo"], "one repo failed, the run finished");
-    assert_eq!(rig.index.cursors().get("Demo"), Some(&a), "the cursor never leads the points");
+    assert_eq!(rig.index.cursors().get("Demo"), None, "no commit's chunks are held whole, so no cursor says one is");
+    assert_ne!(a, b);
 
     rig.index.state.lock().unwrap().fail_upserts_after = None;
     rig.converged(&mut forge);
     assert_eq!(rig.index.cursors().get("Demo"), Some(&b));
     let mut clean = Rig::new();
     clean.converged(&mut forge);
+    assert_eq!(rig.index.held(), clean.index.held());
+    assert_eq!(rig.index.ids(), clean.index.ids());
+}
+
+/// A run that fails between a repo's deletes and its upserts leaves chunks of
+/// no single commit. A head that then reverts the files to the old content
+/// makes an empty diff from the old commit, which would keep the deleted
+/// chunks deleted; the repo is ingested whole instead.
+#[test]
+fn a_failed_run_then_a_revert_converges() {
+    let remote = Remote::new();
+    let at_a: Vec<(String, Vec<u8>)> = (0..40).map(|n| (format!("f{n}.rs"), format!("file {n}
+").into_bytes())).collect();
+    let original: Vec<(&str, &[u8])> = at_a.iter().map(|(path, bytes)| (path.as_str(), bytes.as_slice())).collect();
+    remote.commit(&original, &[]);
+    let mut rig = Rig::new();
+    let mut forge = FakeForge::of(&[("Demo", &remote)]);
+    rig.converged(&mut forge);
+
+    let at_b: Vec<(String, Vec<u8>)> = (0..40).map(|n| (format!("f{n}.rs"), format!("file {n} edited
+").into_bytes())).collect();
+    let edited: Vec<(&str, &[u8])> = at_b.iter().map(|(path, bytes)| (path.as_str(), bytes.as_slice())).collect();
+    remote.commit(&edited, &[]);
+    {
+        let mut state = rig.index.state.lock().unwrap();
+        state.fail_upserts_after = Some(state.upsert_calls + 1);
+    }
+    let (refreshed, _) = rig.run(&mut forge);
+    assert_eq!(refreshed.unwrap().failed, ["Demo"]);
+    assert!(rig.index.held().len() < 40, "the failed run left a partial repo");
+
+    rig.index.state.lock().unwrap().fail_upserts_after = None;
+    let c = remote.commit(&original, &[]);
+    rig.converged(&mut forge);
+    assert_eq!(rig.index.cursors().get("Demo"), Some(&c));
+    let mut clean = Rig::new();
+    clean.converged(&mut forge);
+    assert_eq!(rig.index.held().len(), 40, "every file of the reverted head is held");
     assert_eq!(rig.index.held(), clean.index.held());
     assert_eq!(rig.index.ids(), clean.index.ids());
 }
@@ -263,6 +304,88 @@ fn retired_repo_leaves_nothing() {
     assert_eq!(rig.index.held(), [held("Keep", "a.rs", 0, &k)]);
     assert_eq!(rig.index.cursors().keys().collect::<Vec<_>>(), ["Keep"]);
     assert!(!rig.mirror("Gone").exists() && rig.mirror("Keep").exists());
+}
+
+/// An empty catalog, and a catalog the forge says is short, retire nothing and
+/// the run says why; the same forge answering whole retires what it dropped.
+#[test]
+fn an_empty_or_short_catalog_retires_nothing() {
+    let (keep, gone) = (Remote::new(), Remote::new());
+    let k = keep.commit(&[("a.rs", b"a\n")], &[]);
+    gone.commit(&[("b.rs", b"b\n")], &[]);
+    let mut rig = Rig::new();
+    rig.converged(&mut FakeForge::of(&[("Keep", &keep), ("Gone", &gone)]));
+    let both = rig.index.held();
+
+    let mut empty = FakeForge::of(&[]);
+    let (refreshed, reports) = rig.run(&mut empty);
+    let refreshed = refreshed.unwrap();
+    assert!(reports.is_empty() && refreshed.retirement_withheld.as_deref().unwrap().contains("no indexable repos"));
+    assert_eq!(rig.index.held(), both, "an empty answer deleted nothing");
+    assert!(rig.mirror("Gone").exists() && rig.mirror("Keep").exists());
+    assert_eq!(rig.index.cursors().len(), 2);
+
+    let mut short = FakeForge::of(&[("Keep", &keep)]);
+    short.shortfall = Some("the forge counts 2 repos and 1 were listed".into());
+    let (refreshed, _) = rig.run(&mut short);
+    assert!(refreshed.unwrap().retirement_withheld.unwrap().contains("incomplete"));
+    assert_eq!(rig.index.held(), both, "a short answer deleted nothing");
+    assert!(rig.mirror("Gone").exists());
+
+    let (refreshed, _) = rig.run(&mut FakeForge::of(&[("Keep", &keep)]));
+    assert_eq!(refreshed.unwrap().retirement_withheld, None);
+    assert_eq!(rig.index.held(), [held("Keep", "a.rs", 0, &k)], "a whole answer retires what the forge dropped");
+}
+
+/// A retirement that fails is that repo's failure alone: it is named, the
+/// other retirements and the live repos go on, and the failed one keeps its
+/// cursor and mirror so the next run finds it again.
+#[test]
+fn a_retire_error_skips_that_repo_and_the_run_goes_on() {
+    let (keep, first, second) = (Remote::new(), Remote::new(), Remote::new());
+    let k = keep.commit(&[("a.rs", b"a\n")], &[]);
+    first.commit(&[("b.rs", b"b\n")], &[]);
+    second.commit(&[("c.rs", b"c\n")], &[]);
+    let mut rig = Rig::new();
+    rig.converged(&mut FakeForge::of(&[("Keep", &keep), ("First", &first), ("Second", &second)]));
+    let edited = keep.commit(&[("a.rs", b"a edited\n")], &[]);
+    rig.index.state.lock().unwrap().fail_deletes_of = Some("First".into());
+
+    let (refreshed, reports) = rig.run(&mut FakeForge::of(&[("Keep", &keep)]));
+    assert_eq!(refreshed.unwrap().failed, ["First"]);
+    assert!(!rig.mirror("Second").exists() && rig.mirror("First").exists());
+    assert_eq!(rig.index.cursors().into_keys().collect::<Vec<_>>(), ["First", "Keep"]);
+    assert_eq!(reports.len(), 1, "the live repo was refreshed after the failed retirement");
+    assert_ne!(k, edited);
+
+    rig.index.state.lock().unwrap().fail_deletes_of = None;
+    rig.converged(&mut FakeForge::of(&[("Keep", &keep)]));
+    assert!(!rig.mirror("First").exists());
+    assert_eq!(rig.index.cursors().into_keys().collect::<Vec<_>>(), ["Keep"]);
+    assert_eq!(rig.index.held(), [held("Keep", "a.rs", 0, &edited)]);
+}
+
+/// A repo the forge now spells with another case is another repo to the
+/// index: the points under the old spelling do not stay behind.
+#[test]
+fn a_repo_renamed_only_by_case_keeps_no_stale_points() {
+    let remote = Remote::new();
+    remote.commit(&[("a.rs", b"a\n")], &[]);
+    let mut rig = Rig::new();
+    rig.converged(&mut FakeForge::of(&[("Demo", &remote)]));
+    let head = remote.commit(&[("b.rs", b"b\n")], &[]);
+    rig.converged(&mut FakeForge::of(&[("demo", &remote)]));
+    let repos: BTreeSet<String> = rig.index.held().into_iter().map(|(repo, _, _, _)| repo).collect();
+    assert_eq!(repos, BTreeSet::from(["demo".to_owned()]));
+    assert_eq!(rig.index.cursors().into_iter().collect::<Vec<_>>(), [("demo".to_owned(), head)]);
+}
+
+/// A run is clean only when no repo failed and retirement was not withheld.
+#[test]
+fn a_run_is_clean_only_when_nothing_failed_and_retirement_was_not_withheld() {
+    assert!(Refreshed::default().is_clean());
+    assert!(!Refreshed { failed: vec!["Demo".into()], retirement_withheld: None }.is_clean());
+    assert!(!Refreshed { failed: Vec::new(), retirement_withheld: Some("short".into()) }.is_clean());
 }
 
 /// A mirror no cursor knows (a first ingest that never finished) is retired
