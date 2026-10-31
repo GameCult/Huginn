@@ -1374,7 +1374,7 @@ fn the_start_message_carries_the_claimed_follow_ups_item_and_id_verbatim() {
     let mind = claiming(std::slice::from_ref(&claim), vec![brief]);
     let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
     let first = &ran.written()[0];
-    assert!(first.starts_with(&start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_100_000)), "{first}");
+    assert!(first.starts_with(&start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_000_000)), "{first}");
     for needle in ["Fix the thing.\nThen report \u{e9}.", claim.id.0.as_str(), "Use the eureka skill."] {
         assert!(first.contains(needle), "{needle}: {first}");
     }
@@ -1436,5 +1436,5 @@ fn a_mind_query_failure_on_a_claim_fails_the_run_with_the_cause_and_starts_no_ch
 #[test]
 fn a_run_without_claims_gets_the_identity_lines_alone() {
     let ran = go(vec![Out(result_line())]);
-    assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_100_000));
+    assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_000_000));
 }
