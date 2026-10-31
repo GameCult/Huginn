@@ -269,13 +269,14 @@ impl Drop for FakeLease {
 struct Seen<'a> {
     inner: &'a TestMind,
     instance: Slug,
+    doubled: bool,
     admit_fails: bool,
     admits: Cell<usize>,
 }
 
 impl<'a> Seen<'a> {
     fn of(inner: &'a TestMind) -> Self {
-        Self { inner, instance: inner.instance().clone(), admit_fails: false, admits: Cell::new(0) }
+        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, admits: Cell::new(0) }
     }
 }
 
@@ -285,7 +286,14 @@ impl MindPort for Seen<'_> {
     }
 
     fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage> {
-        self.inner.query(selection)
+        let mut page = self.inner.query(selection)?;
+        if self.doubled
+            && let PipelinePageItems::Headers(items) = &mut page.items
+        {
+            let again = items.clone();
+            items.extend(again);
+        }
+        Ok(page)
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
@@ -402,7 +410,7 @@ fn flushes(ran: &Ran) -> usize {
 // ---- who is carried -----------------------------------------------------
 
 #[test]
-fn without_an_open_self_run_of_hers_it_is_no_run_and_no_child_is_spawned() {
+fn without_exactly_one_open_self_run_of_hers_it_is_no_run_and_no_child_is_spawned() {
     let cases: Vec<(&str, Seed)> = vec![
         ("no run at all", Box::new(|_| {})),
         ("a Self run the operator operates", Box::new(|mind| mind.committed(vec![run("op", RunTurn::SelfRun, RunOperator::Operator, &[])]))),
@@ -428,6 +436,13 @@ fn without_an_open_self_run_of_hers_it_is_no_run_and_no_child_is_spawned() {
     let mut other = Seen::of(&mind);
     other.instance = Slug("another".into());
     assert_eq!(carry_with(&other, vec![], Some(0), false).outcome.unwrap(), SelfRunOutcome::NoRun);
+
+    // Two open runs are not one: nothing is spawned for either.
+    let mut two = Seen::of(&mind);
+    two.doubled = true;
+    let ran = carry_with(&two, vec![], Some(0), false);
+    assert_eq!(ran.outcome.unwrap(), SelfRunOutcome::NoRun);
+    assert!(ran.spawns.is_empty());
 }
 
 #[test]
@@ -956,9 +971,9 @@ fn the_clock_is_read_once_per_event_so_a_step_of_the_wall_clock_cannot_split_a_p
     let outcome = carry(&Seen::of(&mind), &Stepped(clock.clone()), &FakeLender::new(Answer::Grant), &fake, TEST_CAP_S, &mut Vec::new()).unwrap();
     let events = log.borrow().clone();
     let reads = events.iter().filter(|event| matches!(event, Event::Asked(_))).count() as u32;
-    // One read for the lease's expiry, one before the first wait, then one per fact heard:
+    // One read for the lease's expiry, one before the first wait, then one per fact heard, and one for the closure:
     // never a second read inside a pass.
-    assert_eq!(clock.1.get(), 2 + reads, "{events:?}");
+    assert_eq!(clock.1.get(), 3 + reads, "{events:?}");
     // The flush was written on the first request at time 0; the very next pass sees the stepped clock.
     // The flush pass itself has no interrupt, whatever the step: the interrupt is on a later event.
     let flush_at = events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains("context ceiling"))).unwrap();

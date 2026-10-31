@@ -1,5 +1,4 @@
-//! Every exit of `carry` resolves her run Recorded exactly once, and a run left
-//! open by a process that died is closed at the next start.
+//! Every exit of `carry` resolves her run Recorded exactly once.
 
 use eureka_pipeline::ResolutionOutcome;
 
@@ -99,20 +98,6 @@ fn a_run_the_child_closed_itself_is_not_closed_again() {
     let seen = Seen::of(&mind);
     assert_eq!(carry_with(&seen, vec![Out(result_line())], Some(0), false).outcome.unwrap(), SelfRunOutcome::NoRun);
     assert_eq!(seen.admits.get(), 0);
-}
-
-#[test]
-fn a_run_still_open_at_the_next_start_is_an_orphan_and_is_closed_before_the_newer_one_is_carried() {
-    let mind = TestMind::seeded();
-    mind.committed(vec![self_run("selfrun-old", "5")]);
-    mind.committed(vec![self_run("selfrun-a", "5")]);
-    let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
-    assert!(ran.outcome.is_ok());
-    assert_eq!(ran.spawns.len(), 1);
-    assert!(ran.spawns[0].contains(&SESSION_OF_RUN_A.to_string()), "the newer run is the one carried");
-    assert_eq!(reason_of(&mind, "selfrun-old"), "orphaned: the run's process ended without closing it");
-    assert!(reason_of(&mind, "selfrun-a").contains("subtype=success"));
-    assert_eq!(mind.ids(K::Resolution).len(), 2);
 }
 
 #[test]

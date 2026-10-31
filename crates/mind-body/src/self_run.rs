@@ -30,11 +30,9 @@
 //!
 //! The actuator admits only closures of Self runs, nothing else. Every exit of
 //! `carry` that leaves her run open resolves it Recorded exactly once (the
-//! child's result, or that it gave none, in the reason), and a run found open at
-//! the start besides the one carried is an orphan of a process that ended
-//! without closing it: one Self unit per Mind runs at a time (the systemd
-//! template instance), so the older runs are closed first. It reads neither the
-//! brake nor the environment and stops no unit: the gate and the brake hold own those. It never echoes an argument, an endpoint, a
+//! child's result, or that it gave none, in the reason). It reads neither the
+//! brake nor the environment and stops no unit: the gate and the brake hold own those.
+//! It never echoes an argument, an endpoint, a
 //! connector's refusal text or a stream line. Stream-json is Claude Code's wire, a
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
 //! parsed is stored.
@@ -288,23 +286,13 @@ impl fmt::Display for SelfRunOutcome {
     }
 }
 
-/// Why a run found open beside the carried one was closed.
-const ORPHANED: &str = "orphaned: the run's process ended without closing it";
-
-/// Her open Self run and its budget, read through the launch primitive's holder
-/// reader. The newest in force is the one this unit carries; any older one is an
-/// orphan (its process ended without closing it, and one Self unit per Mind runs
-/// at a time), closed here before anything is claimed. None when she has none.
-fn her_run(mind: &dyn MindPort, clock: &dyn Clock, out: &mut dyn Write) -> Result<Option<(PipelineRef, String)>> {
+/// Her one open Self run and its budget, read through the launch primitive's
+/// holder reader. Anything but exactly one run is none: the mind admits at most
+/// one Self run of hers in force, and the launch that opens the next closes a
+/// dead one.
+fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, String)>> {
     let mut held = holders(mind, mind.instance(), RunTurn::SelfRun)?;
-    held.sort_by(|a, b| (&a.admission.admitted_at, &a.id.id.0).cmp(&(&b.admission.admitted_at, &b.id.id.0)));
-    held.dedup_by(|a, b| a.id == b.id);
-    let Some(run) = held.pop() else { return Ok(None) };
-    for orphan in held {
-        admit_closure(mind, clock, &orphan.id, ResolutionOutcome::Recorded { reason: ORPHANED.into() }, "An earlier Self run's process ended without closing it; the next start closed it.")?;
-        let _ = writeln!(out, "closed an orphaned run");
-    }
-    let one = Selection { keys: Some(vec![run.id.id.0.clone()]), projection: "document".into(), ..Selection::default() };
+    let (Some(run), None) = (held.pop(), held.pop()) else { return Ok(None) };
     let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
     match views.into_iter().next().map(|view| view.document) {
         Some(PipelineDocument::Run(document)) => Ok(Some((run.id, document.budget_usd.0))),
@@ -421,7 +409,7 @@ fn admit_closure(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, outc
 
 /// Resolves `run` Recorded if it is still in force: the child may have closed it
 /// itself in its flush, and a refused lease was closed already. One try; a mind
-/// that cannot be reached leaves it to the next start's orphan sweep.
+/// that cannot be reached leaves it open: the launch that opens the next run closes it.
 fn close_if_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, ran: &Result<SelfRunOutcome>, spent: &Spent) -> Result<()> {
     if !holders(mind, mind.instance(), RunTurn::SelfRun)?.iter().any(|held| held.id == *run) {
         return Ok(());
@@ -459,14 +447,14 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 /// before `carry` returns: the child's result (or that it gave none) in the
 /// reason. A resolve that fails is logged and tried no more: the outcome (or the
 /// original error) stands, a failed close of a run that ended normally is an
-/// error, and the next start closes the run as an orphan.
+/// error, and the launch that opens the next run closes the run left open.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
-    let Some((run, budget)) = her_run(mind, clock, out)? else { return Ok(SelfRunOutcome::NoRun) };
+    let Some((run, budget)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
     let mut spent = Spent::default();
     let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &budget), &mut spent);
     let closed = close_if_open(mind, clock, &run, &ran, &spent);
     if closed.is_err() {
-        let _ = writeln!(out, "the run could not be closed: the next start closes it as an orphan");
+        let _ = writeln!(out, "the run could not be closed: the next launch closes it");
     }
     match (ran, closed) {
         (Err(error), _) => Err(error),
@@ -541,7 +529,6 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
         return Ok(());
     }
     writeln!(out, "{}", describe_result(&event, RESULT_TEXT_LIMIT))
-}
 }
 
 /// The loop: facts in, one clock read per fact, actions out.
