@@ -380,6 +380,14 @@ fn a_repo_renamed_only_by_case_keeps_no_stale_points() {
     assert_eq!(rig.index.cursors().into_iter().collect::<Vec<_>>(), [("demo".to_owned(), head)]);
 }
 
+/// A run is clean only when no repo failed and retirement was not withheld.
+#[test]
+fn a_run_is_clean_only_when_nothing_failed_and_retirement_was_not_withheld() {
+    assert!(Refreshed::default().is_clean());
+    assert!(!Refreshed { failed: vec!["Demo".into()], retirement_withheld: None }.is_clean());
+    assert!(!Refreshed { failed: Vec::new(), retirement_withheld: Some("short".into()) }.is_clean());
+}
+
 /// A mirror no cursor knows (a first ingest that never finished) is retired
 /// with its points too.
 #[test]

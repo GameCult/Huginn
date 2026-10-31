@@ -199,6 +199,13 @@ pub struct Refreshed {
     pub retirement_withheld: Option<String>,
 }
 
+impl Refreshed {
+    /// Every repo converged and the catalog could be trusted to retire from.
+    pub fn is_clean(&self) -> bool {
+        self.failed.is_empty() && self.retirement_withheld.is_none()
+    }
+}
+
 /// Brings the collection to the forge's current state. A collection that
 /// exists without Huginn's label is refused untouched. One repo's failure is
 /// logged and the others go on; the caller exits nonzero if any failed.

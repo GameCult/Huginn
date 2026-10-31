@@ -81,7 +81,7 @@ fn main() -> ExitCode {
     let mut forge = HttpForge::new(&options.forge_url);
     let mut journal = |report: &huginn_daemon::sources::Report| println!("{report}");
     match refresh(&mut embedder, &mut index, &mut forge, &options.state_root, &mut journal) {
-        Ok(refreshed) if refreshed.failed.is_empty() && refreshed.retirement_withheld.is_none() => ExitCode::SUCCESS,
+        Ok(refreshed) if refreshed.is_clean() => ExitCode::SUCCESS,
         Ok(refreshed) => {
             if !refreshed.failed.is_empty() {
                 eprintln!("huginn-sources: {} repos failed: {}", refreshed.failed.len(), refreshed.failed.join(", "));
