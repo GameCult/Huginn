@@ -98,6 +98,15 @@ impl TestMind {
         this
     }
 
+    /// A mind holding only its identity: no stewardship, no campaign.
+    pub(crate) fn bare() -> Self {
+        let dir = TempDir::new().unwrap();
+        let mind = Mind::open(dir.path(), &Slug(INSTANCE.into())).unwrap();
+        let this = Self { _dir: dir, instance: Slug(INSTANCE.into()), mind: RefCell::new(mind), now: Cell::new(at(0)) };
+        this.put(vec![instance(INSTANCE)]);
+        this
+    }
+
     /// The same, for another instance name.
     pub(crate) fn seeded_as(name: &str) -> Self {
         let dir = TempDir::new().unwrap();
