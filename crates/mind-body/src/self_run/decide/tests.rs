@@ -49,6 +49,15 @@ fn last(events: Vec<(Event, i64)>) -> Action {
     run(events).1.pop().unwrap()
 }
 
+/// The one write with only the waiting briefs, and with only the flush.
+fn tells() -> Action {
+    Action::Write { tells: true, flush: None }
+}
+
+fn flush(why: Why) -> Action {
+    Action::Write { tells: false, flush: Some(why) }
+}
+
 fn delivered(how: Stop) -> Event {
     Event::Signalled { how, delivered: true }
 }
@@ -68,11 +77,31 @@ fn idle_at(at: i64) -> (State, Vec<Action>) {
 
 #[test]
 fn the_flush_is_asked_once_at_the_ceiling_and_never_after_a_result_or_an_exit_or_for_a_repeated_request() {
-    assert_eq!(last(vec![(req("a", CEILING_TOKENS - 1), 0)]), Action::None);
-    let (state, actions) = run(vec![(req("a", CEILING_TOKENS), 0), (req("a", CEILING_TOKENS), 1), (req("b", CEILING_TOKENS + 1), 2)]);
-    assert_eq!(actions, vec![Action::WriteFlush(Why::Ceiling), Action::None, Action::None]);
+    assert_eq!(last(vec![(Event::Echo, 0), (req("a", CEILING_TOKENS - 1), 0)]), Action::None);
+    let (state, actions) = run(vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), 0), (req("a", CEILING_TOKENS), 1), (req("b", CEILING_TOKENS + 1), 2)]);
+    assert_eq!(actions, vec![Action::None, flush(Why::Ceiling), Action::None, Action::None]);
     assert_eq!((state.written, state.requests), (2, 2));
     assert_eq!(last(vec![(Event::ChildExited(Some(0)), 0), (req("a", CEILING_TOKENS), 1)]), Action::None);
+}
+
+#[test]
+fn what_waits_is_one_write_sent_only_after_the_outstanding_writes_echo_the_briefs_and_the_flush_ask_together() {
+    // The start message is not echoed: the ceiling asks the flush and a brief waits, and nothing is written.
+    let (state, actions) = run(vec![(req("a", CEILING_TOKENS), 1), (Event::Inbox { pending: true }, 2), (Event::Tick, 3)]);
+    assert_eq!(actions, vec![Action::None, Action::None, Action::None]);
+    assert_eq!(state.written, 1);
+    // The echo frees the writer: one write carries both, and the flush is asked only once.
+    let (state, action) = feed(state, Event::Echo, 4);
+    assert_eq!(action, Action::Write { tells: true, flush: Some(Why::Ceiling) });
+    assert_eq!((state.written, state.consumed), (2, 1));
+    assert_eq!(next_deadline(&state), Some(t(1 + GRACE)), "the grace runs from the ask");
+    // Briefs alone: the first poll writes, the second finds that write outstanding and waits for its echo.
+    let (state, actions) = run(vec![(Event::Echo, 0), (Event::Inbox { pending: true }, 1), (Event::Inbox { pending: true }, 2)]);
+    assert_eq!(actions, vec![Action::None, tells(), Action::None]);
+    assert_eq!(state.written, 2);
+    let (state, action) = feed(state, Event::Echo, 3);
+    assert_eq!(action, tells(), "the second poll's brief is written at the echo");
+    assert_eq!(state.written, 3);
 }
 
 #[test]
@@ -86,7 +115,7 @@ fn the_start_message_is_one_line_written_and_the_session_is_idle_only_when_every
     assert_eq!(state.idle_s(t(10)), Some(3));
     // A tell written after the result is outstanding until its echo: not idle.
     let (state, actions) = run(vec![(Event::Echo, 0), (OK, 7), (Event::Inbox { pending: true }, 8)]);
-    assert_eq!(actions[2], Action::WriteTells);
+    assert_eq!(actions[2], tells());
     assert_eq!(state.idle_s(t(9)), None);
     // The result of a turn with a queued line outstanding is not idleness.
     let (state, _) = run(vec![(Event::Echo, 0), (Event::Inbox { pending: true }, 1), (OK, 2)]);
@@ -96,7 +125,7 @@ fn the_start_message_is_one_line_written_and_the_session_is_idle_only_when_every
 #[test]
 fn a_flush_folded_into_the_running_turn_is_answered_by_the_result_after_its_echo() {
     let (state, actions) = run(vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), 1), (Event::Echo, 2), (OK, 3)]);
-    assert_eq!(actions, vec![Action::None, Action::WriteFlush(Why::Ceiling), Action::None, Action::CloseStdin]);
+    assert_eq!(actions, vec![Action::None, flush(Why::Ceiling), Action::None, Action::CloseStdin]);
     assert_eq!(next_deadline(&state), Some(t(1 + GRACE)), "closed: only the flush's grace backstop remains, no lifecycle deadline");
 }
 
@@ -135,7 +164,7 @@ fn an_error_after_an_ok_answer_ends_the_turn_and_not_the_session() {
 fn a_brief_waiting_is_told_mid_turn_or_idle_once_and_never_after_the_flush() {
     // Mid-turn: written at once.
     let (state, actions) = run(vec![(Event::Echo, 0), (Event::Inbox { pending: true }, 1)]);
-    assert_eq!(actions[1], Action::WriteTells);
+    assert_eq!(actions[1], tells());
     assert_eq!(state.written, 2);
     // The same poll answered again with nothing new is no second tell.
     assert_eq!(feed(state.clone(), Event::Inbox { pending: false }, 2).1, Action::None);
@@ -143,9 +172,9 @@ fn a_brief_waiting_is_told_mid_turn_or_idle_once_and_never_after_the_flush() {
     // Idle: the same.
     let (_, actions) = idle_at(5);
     assert!(actions.iter().all(|action| *action == Action::None));
-    assert_eq!(feed(idle_at(5).0, Event::Inbox { pending: true }, 6).1, Action::WriteTells);
+    assert_eq!(feed(idle_at(5).0, Event::Inbox { pending: true }, 6).1, tells());
     // After the flush no line is written, a brief waiting or not.
-    let (state, _) = run(vec![(req("a", CEILING_TOKENS), 0)]);
+    let (state, _) = run(vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), 0)]);
     assert_eq!(feed(state.clone(), Event::Inbox { pending: true }, 1).1, Action::None);
     assert_eq!(feed(state, Event::Tick, 2).1, Action::None);
 }
@@ -156,7 +185,7 @@ fn an_idle_session_asks_the_flush_where_the_cache_would_lapse_and_a_waiting_brie
     let lapse = 10 + TTL_1H_S - TTL_MARGIN_S;
     assert_eq!(next_deadline(&idle), Some(t(lapse)));
     assert_eq!(feed(idle.clone(), Event::Tick, lapse - 1).1, Action::None);
-    assert_eq!(feed(idle, Event::Tick, lapse).1, Action::WriteFlush(Why::Idle));
+    assert_eq!(feed(idle, Event::Tick, lapse).1, flush(Why::Idle));
     // A five-minute cache lapses sooner.
     let (short, _) = run(vec![(Event::Echo, 0), (req("a", 10), 1), (OK_SHORT, 10)]);
     assert_eq!(next_deadline(&short), Some(t(10 + TTL_5M_S - TTL_MARGIN_S)));
@@ -164,20 +193,8 @@ fn an_idle_session_asks_the_flush_where_the_cache_would_lapse_and_a_waiting_brie
     let (waiting, _) = run_from(idle_at(10).0, vec![(Event::Inbox { pending: true }, 11)]);
     assert_eq!(feed(waiting, Event::Tick, lapse + 100).1, Action::None);
     // The idle flush closes after its own answer.
-    let (state, actions) = run_from(idle_at(10).0, vec![(Event::Tick, lapse), (Event::Echo, lapse + 1), (req("b", 11), lapse + 1), (OK, lapse + 2)]);
-    assert_eq!(actions, vec![Action::WriteFlush(Why::Idle), Action::None, Action::None, Action::CloseStdin]);
-    assert!(state.idle_end_answered());
-}
-
-#[test]
-fn an_idle_end_answered_by_an_error_is_not_an_answered_idle_end() {
-    let lapse = 10 + TTL_1H_S - TTL_MARGIN_S;
-    let (state, actions) = run_from(idle_at(10).0, vec![(Event::Tick, lapse), (Event::Echo, lapse + 1), (FAILED, lapse + 2)]);
-    assert_eq!(actions[2], Action::CloseStdin);
-    assert!(!state.idle_end_answered());
-    // A rotation or ceiling flush is never an idle end.
-    let (state, _) = run(vec![(req("a", CEILING_TOKENS), 0), (Event::Echo, 1), (Event::Echo, 2), (OK, 3)]);
-    assert!(!state.idle_end_answered());
+    let (_, actions) = run_from(idle_at(10).0, vec![(Event::Tick, lapse), (Event::Echo, lapse + 1), (req("b", 11), lapse + 1), (OK, lapse + 2)]);
+    assert_eq!(actions, vec![flush(Why::Idle), Action::None, Action::None, Action::CloseStdin]);
 }
 
 #[test]
@@ -189,13 +206,13 @@ fn near_the_cap_the_session_is_asked_for_its_flush_idle_or_working_and_closes_af
     let (state, _) = run_from(started(), vec![(Event::Echo, 0)]);
     assert_eq!(next_deadline(&state), Some(t(rotate)));
     assert_eq!(feed(state.clone(), Event::Tick, rotate - 1).1, Action::None);
-    assert_eq!(feed(state, Event::Tick, rotate).1, Action::WriteFlush(Why::Rotation));
+    assert_eq!(feed(state, Event::Tick, rotate).1, flush(Why::Rotation));
     // Idle, its cache still warm.
     let (idle, _) = run_from(started(), vec![(Event::Echo, 0), (OK, rotate - 100)]);
-    assert_eq!(feed(idle.clone(), Event::Tick, rotate).1, Action::WriteFlush(Why::Rotation));
+    assert_eq!(feed(idle.clone(), Event::Tick, rotate).1, flush(Why::Rotation));
     // And the close follows the answer, never a bare close.
     let (_, actions) = run_from(idle, vec![(Event::Tick, rotate), (Event::Echo, rotate + 1), (OK, rotate + 2)]);
-    assert_eq!(actions, vec![Action::WriteFlush(Why::Rotation), Action::None, Action::CloseStdin]);
+    assert_eq!(actions, vec![flush(Why::Rotation), Action::None, Action::CloseStdin]);
 }
 
 #[test]
@@ -212,8 +229,8 @@ fn a_flush_is_never_asked_of_a_session_whose_input_is_closed() {
 }
 
 #[test]
-fn the_grace_runs_from_the_flush_write_to_the_second_and_no_later_request_moves_it() {
-    let (state, _) = run(vec![(req("a", CEILING_TOKENS), 100), (req("b", CEILING_TOKENS + 1), 500)]);
+fn the_grace_runs_from_the_flush_ask_to_the_second_and_no_later_request_moves_it() {
+    let (state, _) = run(vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), 100), (req("b", CEILING_TOKENS + 1), 500)]);
     assert_eq!(next_deadline(&state), Some(t(100 + GRACE)));
     assert_eq!(feed(state.clone(), Event::Tick, 100 + GRACE - 1).1, Action::None);
     assert_eq!(feed(state, Event::Tick, 100 + GRACE).1, Action::Signal(Stop::Interrupt));
@@ -236,12 +253,12 @@ fn the_headroom_counts_the_requests_after_the_flushs_echo_from_the_prefix_of_the
 #[test]
 fn the_ladder_ends_before_the_cap_whenever_the_flush_was_written() {
     let cap = 5_400_u64;
-    let ceiling = |second: i64| run_from(State::started(t(0), cap), vec![(req("a", CEILING_TOKENS), second)]);
-    let rotation = |second: i64| run_from(State::started(t(0), cap), vec![(Event::Tick, second)]);
+    let ceiling = |second: i64| run_from(State::started(t(0), cap), vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), second)]);
+    let rotation = |second: i64| run_from(State::started(t(0), cap), vec![(Event::Echo, 0), (Event::Tick, second)]);
     // A flush written inside the last LADDER_S cannot finish its ladder: the unit's own cap is the backstop there.
     for second in (0..cap as i64 - LADDER_S).step_by(7) {
         for (state, actions) in [ceiling(second), rotation(second)] {
-            if !matches!(actions.last(), Some(Action::WriteFlush(_))) {
+            if !matches!(actions.last(), Some(Action::Write { flush: Some(_), .. })) {
                 continue;
             }
             let mut state = state;
@@ -266,18 +283,19 @@ fn the_ladder_ends_before_the_cap_whenever_the_flush_was_written() {
 fn a_flush_written_late_has_its_grace_clamped_so_the_ladder_still_ends_under_the_cap() {
     let cap = 5_400_i64;
     let late = cap - 100;
-    let (state, _) = run_from(State::started(t(0), cap as u64), vec![(req("a", CEILING_TOKENS), late)]);
+    let (state, _) = run_from(State::started(t(0), cap as u64), vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), late)]);
     assert_eq!(next_deadline(&state), Some(t(cap - LADDER_S)), "the interrupt is not the full grace after the write");
 }
 
 #[test]
 fn the_flush_pass_never_signals_whatever_the_clock_does() {
     // Two events apart by more than the grace: the write is its own pass, the signal comes in the next.
-    let (state, action) = feed(working(), req("a", CEILING_TOKENS), 0);
-    assert_eq!(action, Action::WriteFlush(Why::Ceiling));
+    let (state, _) = feed(working(), Event::Echo, 0);
+    let (state, action) = feed(state, req("a", CEILING_TOKENS), 0);
+    assert_eq!(action, flush(Why::Ceiling));
     assert_eq!(feed(state, Event::Tick, 10 * GRACE).1, Action::Signal(Stop::Interrupt));
     // A request that both crosses the ceiling and is far past the headroom writes the flush and nothing else.
-    assert_eq!(last(vec![(req("a", u64::MAX), 0)]), Action::WriteFlush(Why::Ceiling));
+    assert_eq!(last(vec![(Event::Echo, 0), (req("a", u64::MAX), 0)]), flush(Why::Ceiling));
 }
 
 #[test]
@@ -388,7 +406,7 @@ const SYMBOLS: [Sym; 8] = [Sym::Request, Sym::Ceiling, Sym::Echo, Sym::Ok, Sym::
 /// and the single-writer invariants.
 fn play(symbols: &[Sym]) {
     let mut state = working();
-    let (mut tells, mut flushes, mut closes, mut echoes) = (0_u32, 0_u32, 0_u32, 0_u32);
+    let (mut writes, mut tells, mut flushes, mut closes, mut echoes) = (0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
     let (mut now, mut unique) = (0_i64, 0_u32);
     let mut flushed = false;
     let mut closed = false;
@@ -414,14 +432,14 @@ fn play(symbols: &[Sym]) {
         let (next, action) = feed(state, event, now);
         state = next;
         match action {
-            Action::WriteTells => {
-                assert!(!flushed && !closed, "a tell after the flush or the close: {symbols:?}");
-                tells += 1;
-            }
-            Action::WriteFlush(_) => {
-                assert!(!flushed && !closed, "a second flush, or one after the close: {symbols:?}");
-                flushed = true;
-                flushes += 1;
+            Action::Write { tells: told, flush } => {
+                assert!(!flushed && !closed, "a write after the flush or the close: {symbols:?}");
+                writes += 1;
+                tells += u32::from(told);
+                if flush.is_some() {
+                    flushed = true;
+                    flushes += 1;
+                }
             }
             Action::CloseStdin => {
                 assert!(!closed, "stdin closed twice: {symbols:?}");
@@ -431,7 +449,9 @@ fn play(symbols: &[Sym]) {
             Action::Signal(_) => assert!(flushed, "a signal with no flush: {symbols:?}"),
             Action::None | Action::Finish(_) => {}
         }
-        assert_eq!(state.written, 1 + tells + flushes, "every write is counted once: {symbols:?}");
+        assert_eq!(state.written, 1 + writes, "every write is counted once: {symbols:?}");
+        assert!(state.written <= state.consumed + 1, "two writes outstanding: {symbols:?}");
+        assert!(tells <= writes && flushes <= writes);
         assert_eq!(state.consumed, echoes, "every echo is counted once: {symbols:?}");
         assert!(closes <= 1 && flushes <= 1);
     }

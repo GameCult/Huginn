@@ -14,14 +14,17 @@
 //!
 //! One run is one live session (ruling `eureka-body:ruling:live-mind-sessions`).
 //! A result ends a turn, not the session. What her Self is asked is derived from
-//! her mind (the `inbox` module): an open follow-up with owner `self-run` sourced
-//! from a Persona turn is a brief. `drive` is the one writer into her session: the
-//! start message, every tell and the flush are stdin lines, a tell written whenever
-//! a brief waits and the flush has not been written, mid-turn or idle. The CLI
-//! echoes each line it takes into a request (`--replay-user-messages`); the echo is
-//! the consumption point, folded or queued, and idle is derived from the lines
-//! written and the lines echoed. Her Self resolves each brief she answers; the
-//! actuator closes only what she left open at an idle end. Compaction is off in
+//! her mind (the `inbox` module): an open follow-up with owner `self-run` admitted
+//! by her Persona turn is a brief. `drive` is the one writer into her
+//! session, and keeps one write outstanding (ruling
+//! `eureka-body:ruling:self-session-one-outstanding-write`): the start message,
+//! then one line at a time holding the briefs that wait and the flush ask, each
+//! sent only after the previous line's echo, mid-turn or idle. The CLI echoes each
+//! line it takes into a request (`--replay-user-messages`) and joins lines queued
+//! behind one request into a single echo, so the echo is the consumption point
+//! only while no second line is in flight. Her Self resolves each brief she
+//! answers; the actuator closes none, and a brief she left open is told to her
+//! next session. Compaction is off in
 //! the CLI (`DISABLE_COMPACT=1`): the organ's own ceiling, flush, end and rehydrate
 //! is the only path. The session ends where its cache would be evicted, near the
 //! unit's cap, at the context ceiling, or after the flush each of those asks.
@@ -79,6 +82,12 @@ use inbox::Brief;
 
 /// The measured Self ceiling: at this prefix the flush is asked for.
 pub const CEILING_TOKENS: u64 = 300_000;
+/// The context window the CLI reports for the model a Self runs (`modelUsage.contextWindow` in every result of the
+/// `claude-2.1.312-live-session-*` fixtures: the default model, `claude-opus-5-5`, 1M). The seed sets no model, so the CLI's default is the model.
+/// The window under the real subscription is read from a result's `contextWindow` and not otherwise observed here.
+pub const SELF_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
+/// What the CLI keeps free below its window before it refuses a prompt (`blocking_limit`): the blocking-limit fixture sends a 990k request and refuses the next.
+pub const CLI_BLOCKING_BUFFER_TOKENS: u64 = 10_000;
 /// What the prefix may grow by beyond the prefix the flush was asked at before
 /// the actuator interrupts. Relative to the flush, never an absolute limit.
 pub const FLUSH_HEADROOM_TOKENS: u64 = 60_000;
@@ -94,6 +103,9 @@ pub const ROTATE_MARGIN_S: i64 = 25 * 60;
 /// The signal ladder's length: three escalations, the stream drain and a minute of slack. The grace interrupt is never later than the cap less this.
 pub const LADDER_S: i64 = 3 * ESCALATE_AFTER_S + EXIT_DRAIN_S + 60;
 const _: () = assert!(FLUSH_GRACE_S + LADDER_S < ROTATE_MARGIN_S, "the flush and the whole ladder must finish before the unit's cap");
+/// The ceiling, and the headroom its flush's own turn may grow by, sit below the CLI's blocking limit with 600k to spare at a 1M window; a window under
+/// 400k has no room for the flush's turn, and the assertion refuses to compile until the ceiling is cut to fit the window.
+const _: () = assert!(CEILING_TOKENS + FLUSH_HEADROOM_TOKENS + 40_000 < SELF_CONTEXT_WINDOW_TOKENS - CLI_BLOCKING_BUFFER_TOKENS, "the ceiling and its flush headroom must fit under the CLI's blocking limit");
 /// How often the mind is asked for new briefs.
 pub const INBOX_POLL_S: i64 = 30;
 /// The prompt cache's lifetimes, and how long before one runs out the session ends.
@@ -234,6 +246,9 @@ pub fn claude_args(session: Uuid) -> Vec<String> {
     .to_vec()
 }
 
+/// The model name on the CLI's own assistant lines, which no request produced.
+const SYNTHETIC_MODEL: &str = "<synthetic>";
+
 /// One line of the child's stream, as far as the actuator reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Usage {
@@ -279,6 +294,10 @@ pub fn read_usage(line: &str) -> Usage {
         }
         Some("assistant") if event.get("parent_tool_use_id").is_none_or(Value::is_null) => {
             let message = event.get("message");
+            // The CLI's own lines after an API error or a refused slash command carry a uuid id and no usage: no request was made.
+            if message.and_then(|message| message.get("model")).and_then(Value::as_str) == Some(SYNTHETIC_MODEL) {
+                return Usage::Other;
+            }
             let Some(id) = message.and_then(|message| message.get("id")).and_then(Value::as_str) else { return Usage::Other };
             let usage = message.and_then(|message| message.get("usage"));
             let field = |name: &str| usage.and_then(|usage| usage.get(name)).and_then(Value::as_u64).unwrap_or(0);
@@ -414,21 +433,13 @@ fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, Vec<PipelineRef>)
 struct Heard {
     /// The last result heard, ok or not: its head line and its text cut to `RATIONALE_RESULT_LIMIT`.
     concluded: Option<(String, String)>,
-    /// The text of the last ok result: what an idle end records as her answer.
-    answer: Option<String>,
-    /// The idle flush was answered by an ok result.
-    idle_end: bool,
 }
 
 impl Heard {
     fn hear(&mut self, line: &str) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         if event.get("type").and_then(Value::as_str) == Some("result") {
-            let text = cut_text(result_text(&event), RATIONALE_RESULT_LIMIT);
-            if !event.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
-                self.answer = Some(text.clone());
-            }
-            self.concluded = Some((result_head(&event), text));
+            self.concluded = Some((result_head(&event), cut_text(result_text(&event), RATIONALE_RESULT_LIMIT)));
         }
     }
 }
@@ -521,10 +532,6 @@ Also open for you:");
     }
     let mut heard = Heard::default();
     let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &task), &mut told, &mut heard);
-    // An idle end answered by an ok result: what she left open is closed, saying so. After a rotation, a ceiling, an error or a crash the told briefs stay open for the successor.
-    if heard.idle_end && ran.is_ok() {
-        close_left_open(mind, clock, &run, &told, &heard, out);
-    }
     let closed = close_if_open(mind, clock, &run, &ran, &heard);
     if closed.is_err() {
         let _ = writeln!(out, "the run could not be closed: the next launch closes it");
@@ -599,20 +606,6 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
     writeln!(out, "{}", describe_result(&event, RESULT_TEXT_LIMIT))
 }
 
-/// What a brief's closing resolution says when her last answer had no text.
-const NO_ANSWER_TEXT: &str = "The turn ended with no answer text.";
-
-/// At an idle end: resolves Recorded the told briefs she left in force, the last ok result's text as the rationale. One try; a failure is logged and the briefs stay open for the successor.
-fn close_left_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, told: &[Brief], heard: &Heard, out: &mut dyn Write) {
-    let rationale = heard.answer.as_deref().filter(|text| !text.is_empty()).unwrap_or(NO_ANSWER_TEXT);
-    let label = session_label(run);
-    let reason = format!("told to Self run {label}; the session went idle and ended without her resolving it");
-    let answered: Vec<(Brief, String)> = told.iter().map(|brief| (brief.clone(), rationale.to_string())).collect();
-    if inbox::close(mind, clock.now(), label, &answered, &reason).is_err() {
-        let _ = writeln!(out, "briefs could not be closed: they stay open for the next session");
-    }
-}
-
 /// The loop: facts in, one clock read per fact, actions out. The one writer into her session.
 #[allow(clippy::too_many_arguments, reason = "the loop's ports and the run's facts, passed on whole")]
 fn drive(
@@ -677,16 +670,21 @@ fn drive(
             let (ttl_s, inbox, idle_s) = (state.ttl_s, state.inbox || matches!(&heard_event, Event::Inbox { pending: true }), state.idle_s(now));
             let (next, action) = decide(state, heard_event, now);
             state = next;
-            heard.idle_end = state.idle_end_answered();
             if state.requests != counted {
                 writeln!(out, "request {} prefix {}", state.requests, state.prefix)?;
             }
             match &action {
                 Action::None => {}
-                Action::WriteFlush(why) => child.write_line(&user_line(&flush_text(*why))),
-                Action::WriteTells => {
-                    child.write_line(&user_line(&inbox::render(&waiting, &plan)));
-                    told.append(&mut waiting);
+                Action::Write { tells, flush } => {
+                    let mut parts = Vec::new();
+                    if *tells {
+                        parts.push(inbox::render(&waiting, &plan));
+                        told.append(&mut waiting);
+                    }
+                    parts.extend(flush.map(flush_text));
+                    child.write_line(&user_line(&parts.join("
+
+")));
                 }
                 Action::CloseStdin => {
                     child.close_input();

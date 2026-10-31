@@ -2,23 +2,22 @@
 //! mind and told to the live session by the actuator's one stdin writer.
 //!
 //! The mind owns what her Self is asked: an in-force follow-up with owner
-//! `self-run` whose source is a Persona turn's run is a brief. A follow-up her
-//! Self files for herself, or one whose source the mind does not hold, is not.
-//! `derive` lists the briefs the session has not been told (the told set is the
-//! actuator's process memory, a cache; the mind is the truth). Her Self resolves
-//! each brief she answers; `close` resolves the ones she left open at an idle
-//! end. `backlog` lists, and never closes, the in-force briefs a closed run
-//! claimed: the one-time sweep at deploy.
+//! `self-run` that her Persona turn admitted is a brief. Who admitted it is the
+//! receipt's provenance, which the mind records and a writer cannot choose; the
+//! follow-up's `source` is the writer's word and decides nothing. A follow-up her
+//! Self files for herself is not a brief, whatever it cites. `derive` lists the
+//! briefs the session has not been told (the told set is the actuator's process
+//! memory, a cache; the mind is the truth). Her Self resolves each brief she
+//! answers and the actuator closes none. `backlog` lists, and never closes, the
+//! in-force briefs a closed run claimed: the one-time sweep at deploy.
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc};
-use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunTurn};
-use huginn_mind::{PipelineAdmissionOutcome, PipelineFacts, PipelineStatusSummary};
+use anyhow::Result;
+use eureka_pipeline::PipelineKind;
+use huginn_mind::{PipelineFacts, PipelineStatusSummary};
 
-use super::AGENT;
-use crate::launch::closure;
+use crate::persona;
 use crate::queue::{MindPort, any_of, headers, in_force, of_kind};
 
 /// The owner a follow-up names when it is a brief for her Self.
@@ -36,12 +35,6 @@ pub struct Brief {
     pub ordinal: u64,
 }
 
-impl Brief {
-    fn follow_up(&self) -> PipelineRef {
-        PipelineRef { kind: PipelineKind::FollowUp, id: self.id.as_str().into() }
-    }
-}
-
 /// The ids of the follow-ups a closed run claims, with the run each was claimed by.
 fn claimed_by_closed(mind: &dyn MindPort) -> Result<HashMap<String, String>> {
     let runs = headers(mind, &any_of(of_kind(PipelineKind::Run), "root", &[&mind.instance().0]))?;
@@ -55,29 +48,19 @@ fn claimed_by_closed(mind: &dyn MindPort) -> Result<HashMap<String, String>> {
     Ok(claimed)
 }
 
-/// Every in-force brief, oldest first: owner `self-run`, sourced from a run of
-/// the mind whose turn is a Persona turn.
+/// Every in-force brief, oldest first: owner `self-run`, admitted by her Persona
+/// turn (the receipt's agent), whatever source the writer named.
 fn open_briefs(mind: &dyn MindPort) -> Result<Vec<Brief>> {
-    let mut candidates: Vec<(Brief, String)> = headers(mind, &in_force(of_kind(PipelineKind::FollowUp)))?
+    let mut briefs: Vec<Brief> = headers(mind, &in_force(of_kind(PipelineKind::FollowUp)))?
         .into_iter()
         .filter_map(|summary| match summary.facts {
-            PipelineFacts::FollowUp { repo, owner, item, source, .. } if owner.0 == OWNER => {
+            PipelineFacts::FollowUp { repo, owner, item, .. } if owner.0 == OWNER && summary.admission.provenance.agent.0 == persona::AGENT => {
                 let campaign = summary.id.id.0.split(':').next().unwrap_or("").to_string();
-                Some((Brief { id: summary.id.id.0, campaign, repo: repo.0, item: item.0, ordinal: summary.admission.ordinal }, source.id.0))
+                Some(Brief { id: summary.id.id.0, campaign, repo: repo.0, item: item.0, ordinal: summary.admission.ordinal })
             }
             _ => None,
         })
         .collect();
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-    let persona: HashSet<String> = headers(mind, &any_of(of_kind(PipelineKind::Run), "root", &[&mind.instance().0]))?
-        .into_iter()
-        .filter(|run| matches!(run.facts, PipelineFacts::Run { turn: RunTurn::PersonaTurn, .. }))
-        .map(|run| run.id.id.0)
-        .collect();
-    candidates.retain(|(_, source)| persona.contains(source));
-    let mut briefs: Vec<Brief> = candidates.into_iter().map(|(brief, _)| brief).collect();
     briefs.sort_by_key(|brief| brief.ordinal);
     Ok(briefs)
 }
@@ -118,24 +101,6 @@ pub fn render(briefs: &[Brief], plan: &str) -> String {
 /// What her Self does when she answers or declines a brief.
 pub fn resolving_sentence(id: &str) -> String {
     format!("When you answer this brief, resolve follow-up {id} Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why.")
-}
-
-/// Resolves Recorded each of `briefs` that is still in force, in one admission:
-/// a brief her Self resolved herself is left as it is. Returns how many.
-pub fn close(mind: &dyn MindPort, now: DateTime<Utc>, session: &str, briefs: &[(Brief, String)], reason: &str) -> Result<usize> {
-    let standing: HashSet<String> = headers(mind, &in_force(of_kind(PipelineKind::FollowUp)))?.into_iter().map(|summary| summary.id.id.0).collect();
-    let mut documents: Vec<PipelineDocument> = Vec::new();
-    for (brief, rationale) in briefs.iter().filter(|(brief, _)| standing.contains(&brief.id)) {
-        documents.push(closure(mind, &brief.follow_up(), now, ResolutionOutcome::Recorded { reason: reason.into() }, rationale)?);
-    }
-    let count = documents.len();
-    if count == 0 {
-        return Ok(0);
-    }
-    match mind.admit(AGENT, session, documents)? {
-        PipelineAdmissionOutcome::Committed { .. } => Ok(count),
-        _ => Err(anyhow!("the briefs could not be closed")),
-    }
 }
 
 #[cfg(test)]

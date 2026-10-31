@@ -1495,6 +1495,18 @@ fn live_mind() -> Rc<TestMind> {
     mind
 }
 
+/// The mind gains these documents as her Persona turn's admission: the provenance that makes a self-run follow-up a brief.
+fn persona_commit(mind: &TestMind, documents: Vec<PipelineDocument>) {
+    let outcome = mind.admit(crate::persona::AGENT, "persona-a", documents).unwrap();
+    assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+}
+
+/// Her Persona admits these briefs, `seconds` into the run.
+fn briefed(mind: &Rc<TestMind>, seconds: i64, documents: Vec<PipelineDocument>) -> Step {
+    let mind = mind.clone();
+    Step::Do(seconds, Rc::new(move || persona_commit(&mind, documents.clone())))
+}
+
 /// A brief from her Persona: a follow-up with owner `self-run`, sourced from the Persona turn's run.
 fn brief(label: &str, item: &str) -> PipelineDocument {
     let PipelineDocument::FollowUp(mut document) = follow_up(label, &run_ref("persona")) else { unreachable!() };
@@ -1556,7 +1568,7 @@ fn a_brief_derived_while_a_turn_runs_is_written_at_once_counted_at_its_echo_and_
         Out(echo()),
         Out(at("m1", 10)),
         // The brief arrives while the first turn runs: the next poll writes it at once, mid-turn.
-        admits(&mind, 31, vec![brief("b1", "Survey the noise functions.")]),
+        briefed(&mind, 31, vec![brief("b1", "Survey the noise functions.")]),
         Out(echo()),
         // Later polls do not tell it again.
         Idle(31),
@@ -1569,7 +1581,7 @@ fn a_brief_derived_while_a_turn_runs_is_written_at_once_counted_at_its_echo_and_
     assert!(told[0].contains(&brief_ref("b1").id.0) && told[0].contains("Survey the noise functions."), "{}", told[0]);
     assert!(told[0].contains("resolve follow-up") && told[0].contains("Recorded"), "she is told how to close it: {}", told[0]);
     assert_eq!(ran.written().len(), 2, "the start message and one tell: {:?}", ran.written());
-    assert!(ran.out.contains("decision WriteTells prefix 10 ttl_s 0 idle_s working inbox true written 2 consumed 1\n"), "{}", ran.out);
+    assert!(ran.out.contains("decision Write { tells: true, flush: None } prefix 10 ttl_s 0 idle_s working inbox true written 2 consumed 1\n"), "{}", ran.out);
     assert_eq!(ran.count(&Event::InputClosed), 0);
     // A result is not an answer: nothing closes the brief by its timing.
     assert!(resolutions_of(&mind, &brief_ref("b1")).is_empty());
@@ -1578,7 +1590,7 @@ fn a_brief_derived_while_a_turn_runs_is_written_at_once_counted_at_its_echo_and_
 #[test]
 fn a_brief_derived_while_the_session_is_idle_is_written_and_the_session_is_busy_until_its_echo() {
     let mind = live_mind();
-    let steps = vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), admits(&mind, 31, vec![brief("b2", "Wire the shader uniforms.")]), Out(echo()), Out(ok_result())];
+    let steps = vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), briefed(&mind, 31, vec![brief("b2", "Wire the shader uniforms.")]), Out(echo()), Out(ok_result())];
     let ran = mind_run(&mind, steps);
     assert_eq!(tells(&ran).len(), 1, "{:?}", ran.written());
     assert!(ran.out.contains("idle_s 31 inbox true written 2 consumed 1\n"), "idle when it was written: {}", ran.out);
@@ -1589,7 +1601,7 @@ fn a_brief_derived_while_the_session_is_idle_is_written_and_the_session_is_busy_
 #[test]
 fn a_brief_open_at_start_is_in_the_start_message_with_how_to_resolve_it_and_is_not_told_again() {
     let mind = live_mind();
-    mind.committed(vec![brief("p1", "Still open.")]);
+    persona_commit(&mind, vec![brief("p1", "Still open.")]);
     let ran = mind_run(&mind, vec![Out(echo()), Idle(31), Idle(31)]);
     let start = &ran.written()[0];
     assert!(start.contains("Also open for you") && start.contains(&brief_ref("p1").id.0) && start.contains("Still open."), "{start}");
@@ -1602,24 +1614,23 @@ fn a_follow_up_her_self_filed_for_herself_is_never_told() {
     let mind = live_mind();
     let PipelineDocument::FollowUp(mut hers) = follow_up("hers", &run_ref("selfrun-a")) else { unreachable!() };
     hers.owner = inbox::OWNER.into();
-    mind.committed(vec![PipelineDocument::FollowUp(hers)]);
+    // Naming the Persona turn's run as the source does not make it hers to be told: the receipt records who admitted it.
+    let PipelineDocument::FollowUp(mut citing) = follow_up("citing", &run_ref("persona")) else { unreachable!() };
+    citing.owner = inbox::OWNER.into();
+    mind.committed(vec![PipelineDocument::FollowUp(hers), PipelineDocument::FollowUp(citing)]);
     let ran = mind_run(&mind, vec![Out(echo()), Idle(31)]);
     assert_eq!(ran.written().len(), 1, "{:?}", ran.written());
     assert!(!ran.written()[0].contains("Also open"), "{}", ran.written()[0]);
 }
 
 #[test]
-fn an_idle_end_closes_the_briefs_she_left_open_saying_so_and_leaves_the_ones_she_resolved() {
+fn an_idle_end_closes_no_brief_the_ones_she_left_open_stay_open_and_her_resolutions_stand() {
     let mind = live_mind();
-    mind.committed(vec![brief("p1", "Left open."), brief("p2", "Answered by her.")]);
+    persona_commit(&mind, vec![brief("p1", "Left open."), brief("p2", "Answered by her.")]);
     let steps = vec![Out(echo()), Out(at("m1", 10)), resolves(&mind, "p2"), Out(ok_result()), Idle(3539), Idle(1), Out(echo()), Out(ok_result())];
     let ran = mind_run(&mind, steps);
     assert_eq!(ran.count(&Event::InputClosed), 1, "{:?}", ran.events);
-    let left = resolutions_of(&mind, &brief_ref("p1"));
-    assert_eq!(left.len(), 1);
-    let ResolutionOutcome::Recorded { reason } = &left[0].outcome else { panic!("{:?}", left[0].outcome) };
-    assert!(reason.0.contains("selfrun-a") && reason.0.contains("went idle") && reason.0.contains("without her resolving it"), "{}", reason.0);
-    assert_eq!(left[0].rationale.0, "The answer.", "the last ok result's text");
+    assert!(resolutions_of(&mind, &brief_ref("p1")).is_empty(), "the actuator resolved nothing she left open");
     assert_eq!(resolutions_of(&mind, &brief_ref("p2")).len(), 1, "her own resolution stands alone");
 }
 
@@ -1635,7 +1646,7 @@ fn a_rotation_a_ceiling_an_error_or_a_crash_leaves_the_told_briefs_open_for_the_
     ];
     for (name, steps) in ends {
         let mind = live_mind();
-        mind.committed(vec![brief("p1", "Left open.")]);
+        persona_commit(&mind, vec![brief("p1", "Left open.")]);
         let ran = mind_run(&mind, steps);
         assert!(ran.outcome.is_ok(), "{name}");
         assert!(resolutions_of(&mind, &brief_ref("p1")).is_empty(), "{name}: the brief stays open");
@@ -1645,7 +1656,7 @@ fn a_rotation_a_ceiling_an_error_or_a_crash_leaves_the_told_briefs_open_for_the_
 #[test]
 fn a_brief_admitted_after_the_flush_is_written_stays_in_force_and_untold() {
     let mind = live_mind();
-    let steps = vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), admits(&mind, 31, vec![brief("late", "Too late.")]), Idle(31), Out(echo()), Out(ok_result())];
+    let steps = vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), briefed(&mind, 31, vec![brief("late", "Too late.")]), Idle(31), Out(echo()), Out(ok_result())];
     let ran = mind_run(&mind, steps);
     assert!(tells(&ran).is_empty(), "{:?}", ran.written());
     assert_eq!(ran.written().len(), 2, "the start and the flush; no line after the flush");
@@ -1660,7 +1671,7 @@ fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_
     let flush_at = hour.events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains(FLUSH_MESSAGE))).unwrap();
     let closed_at = hour.events.iter().position(|event| *event == Event::InputClosed).unwrap();
     assert!(flush_at < closed_at && hour.count(&Event::InputClosed) == 1, "{:?}", hour.events);
-    assert!(hour.out.contains("decision WriteFlush(Idle) prefix 10 ttl_s 3600 idle_s 3540 inbox false written 2 consumed 1\n"), "{}", hour.out);
+    assert!(hour.out.contains("decision Write { tells: false, flush: Some(Idle) } prefix 10 ttl_s 3600 idle_s 3540 inbox false written 2 consumed 1\n"), "{}", hour.out);
     assert!(hour.written().iter().any(|text| text.contains("nothing is waiting and its cache would lapse") && text.contains("Resolve each brief you answered")), "{:?}", hour.written());
     // Five minutes' cache: the flush at 240 s.
     let short = go(vec![Out(echo()), Out(five_minute_request("m1", 10)), Out(ok_result()), Idle(239), Idle(1), Out(echo()), Out(ok_result()), Idle(1)]);
@@ -1670,7 +1681,7 @@ fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_
     assert_eq!(flushes(&early), 0);
     // A brief waiting at the cache's end is told, not flushed: the session stays open.
     let mind = live_mind();
-    let steps = vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), admits(&mind, 3539, vec![brief("b5", "One more.")]), Idle(1), Out(echo()), Out(ok_result()), Idle(1)];
+    let steps = vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), briefed(&mind, 3539, vec![brief("b5", "One more.")]), Idle(1), Out(echo()), Out(ok_result()), Idle(1)];
     let ran = mind_run(&mind, steps);
     assert_eq!((flushes(&ran), tells(&ran).len(), ran.count(&Event::InputClosed)), (0, 1, 0), "{:?}
 {}", ran.written(), ran.out);
@@ -1679,7 +1690,7 @@ fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_
 #[test]
 fn a_tell_that_is_not_yet_echoed_keeps_the_session_busy_so_the_cache_end_does_not_flush_over_it() {
     let mind = live_mind();
-    let steps = vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), admits(&mind, 31, vec![brief("b6", "Pending.")]), Idle(3600)];
+    let steps = vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), briefed(&mind, 31, vec![brief("b6", "Pending.")]), Idle(3600)];
     let ran = mind_run(&mind, steps);
     assert_eq!((tells(&ran).len(), flushes(&ran)), (1, 0), "{:?}", ran.written());
 }
@@ -1703,8 +1714,8 @@ fn near_the_cap_the_session_is_asked_for_its_flush_idle_or_working_and_closes_at
 #[test]
 fn no_stdin_line_is_written_after_the_flush_and_nothing_but_the_writer_writes() {
     let mind = live_mind();
-    mind.committed(vec![brief("b7", "Early.")]);
-    let steps = vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), admits(&mind, 31, vec![brief("b8", "After the flush.")]), Idle(31), Idle(31), Out(echo()), Out(at("m2", 11)), Out(ok_result())];
+    persona_commit(&mind, vec![brief("b7", "Early.")]);
+    let steps = vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), briefed(&mind, 31, vec![brief("b8", "After the flush.")]), Idle(31), Idle(31), Out(echo()), Out(at("m2", 11)), Out(ok_result())];
     let ran = mind_run(&mind, steps);
     let written = ran.written();
     assert_eq!(written.len(), 2, "{written:?}");
@@ -1717,6 +1728,10 @@ fn no_stdin_line_is_written_after_the_flush_and_nothing_but_the_writer_writes() 
 mod live_session {
     use crate::self_run::decide::{Action as Do, Event as Fact, Why};
     use super::*;
+
+    fn flush(why: Why) -> Do {
+        Do::Write { tells: false, flush: Some(why) }
+    }
 
     /// One recorded line as the loop would hear it: a label for the stream, the decision's action.
     fn replay(jsonl: &str) -> Vec<(String, Do)> {
@@ -1781,7 +1796,7 @@ mod live_session {
     fn the_flush_folded_into_a_running_turn_is_answered_at_its_one_result() {
         let trace = replay(CEILING_FOLDED);
         assert_eq!(kinds(&trace), ["other", "echo", "request:300000", "other", "other", "other", "echo", "request:10", "result:ok"]);
-        assert_eq!(acted(&trace), vec![(2, Do::WriteFlush(Why::Ceiling)), (8, Do::CloseStdin)], "never a grace interrupt");
+        assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (8, Do::CloseStdin)], "never a grace interrupt");
     }
 
     #[test]
@@ -1790,7 +1805,7 @@ mod live_session {
             let trace = replay(stream);
             assert_eq!(kinds(&trace), ["other", "echo", "request:300000", "result:ok", "other", "echo", "request:10", "result:ok"]);
             // The first result ends the turn the flush was queued behind: it closes nothing.
-            assert_eq!(acted(&trace), vec![(2, Do::WriteFlush(Why::Ceiling)), (7, Do::CloseStdin)], "never a grace interrupt");
+            assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (7, Do::CloseStdin)], "never a grace interrupt");
         }
     }
 
@@ -1798,7 +1813,7 @@ mod live_session {
     fn an_api_error_before_any_answer_closes_the_session_at_once_with_no_flush() {
         for stream in API_ERROR {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:0", "result:error"]);
+            assert_eq!(kinds(&trace), ["other", "echo", "other", "result:error"]);
             assert_eq!(acted(&trace), vec![(3, Do::CloseStdin)]);
         }
     }
@@ -1807,8 +1822,8 @@ mod live_session {
     fn a_context_over_the_blocking_limit_is_a_blocked_result_that_closes_the_session() {
         for stream in BLOCKING {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:990000", "result:ok", "other", "echo", "request:0", "result:blocked"]);
-            assert_eq!(acted(&trace), vec![(2, Do::WriteFlush(Why::Ceiling)), (7, Do::CloseStdin)]);
+            assert_eq!(kinds(&trace), ["other", "echo", "request:990000", "result:ok", "other", "echo", "other", "result:blocked"]);
+            assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (7, Do::CloseStdin)]);
         }
     }
 
@@ -1817,7 +1832,7 @@ mod live_session {
         for stream in COMPACTION_OFF {
             let trace = replay(stream);
             assert_eq!(kinds(&trace), ["other", "echo", "request:360000", "result:ok", "other", "echo", "request:10", "result:ok"]);
-            assert_eq!(acted(&trace), vec![(2, Do::WriteFlush(Why::Ceiling)), (7, Do::CloseStdin)]);
+            assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (7, Do::CloseStdin)]);
         }
     }
 }
@@ -1826,7 +1841,7 @@ mod live_session {
 fn a_brief_the_run_claims_is_in_the_task_once_and_not_again_under_also_open() {
     let mind = TestMind::seeded();
     mind.committed(vec![spec("x"), run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
-    mind.committed(vec![brief("claimed", "Do the claimed thing.")]);
+    persona_commit(&mind, vec![brief("claimed", "Do the claimed thing.")]);
     mind.committed(vec![run("selfrun-a", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("claimed")])]);
     let ran = carry_with(&Seen::of(&mind), vec![Out(echo())], Some(0), false);
     let start = &ran.written()[0];

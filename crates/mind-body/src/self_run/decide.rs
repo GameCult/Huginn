@@ -7,25 +7,29 @@
 //! into events, reads the clock once per event, and executes the action. A
 //! timing rule is pinned here, by tables and by an enumeration of event orders.
 //!
-//! Delivery is counted, not guessed: every stdin line the actuator writes (the
-//! start message, a tell, the flush) increments `written`; every replay echo of
-//! a line increments `consumed`. The echo is the point the CLI takes a line into
-//! a request, folded into the running turn or queued for the next, so one rule
-//! serves both. Idle is derived: no turn open and `written == consumed`.
+//! Delivery is counted, not guessed, and at most one write is outstanding (ruling
+//! `eureka-body:ruling:self-session-one-outstanding-write`): the CLI joins the
+//! lines queued behind a request into one echo, so a second line is never
+//! written before the first one's echo. Every stdin line the actuator writes (the
+//! start message, a write of tells and the flush) increments `written`; every
+//! replay echo increments `consumed`. The echo is the point the CLI takes a line
+//! into a request, folded into the running turn or queued for the next. What
+//! waits (the briefs, the flush ask) is coalesced into the next single write.
+//! Idle is derived: no turn open and no write outstanding.
 //!
 //! The rules, in this order, while stdin is open and no signal is out:
 //! (1) a result that is blocked, or an error before any answer, closes stdin: no
 //! cache is worth keeping and a flush would fail the same way; (2) the first
-//! result after the flush's echo closes stdin, folded or queued alike; (3) a
-//! brief waiting and no flush written: tell it, idle or mid-turn; (4) the cap
-//! less `ROTATE_MARGIN_S`: ask the flush (rotation), idle or mid-turn; (5) idle
-//! with no brief waiting, at the last result's cache lifetime less a margin: ask
-//! the flush (idle). The ceiling asks the same flush from a request. Compaction
-//! is off in the CLI (`DISABLE_COMPACT=1`), so the flush is the only way a
-//! session ends short of its cache.
+//! result after the flush's echo closes stdin, folded or queued alike; (3) the
+//! cap less `ROTATE_MARGIN_S`: ask the flush (rotation), idle or mid-turn; (4)
+//! idle with no brief waiting, at the last result's cache lifetime less a margin:
+//! ask the flush (idle); (5) with nothing outstanding, write what waits: the
+//! briefs and the flush ask if there is one, as one line. The ceiling asks the
+//! same flush from a request. Compaction is off in the CLI (`DISABLE_COMPACT=1`),
+//! so the flush is the only way a session ends short of its cache.
 //!
 //! The headroom counts the requests after the flush's echo, from the prefix the
-//! flush was written at. The grace interrupt is at the earlier of the grace
+//! flush was asked at. The grace interrupt is at the earlier of the grace
 //! after the flush write and the cap less `LADDER_S`, so the signal ladder
 //! finishes before the unit's cap (ruling
 //! `eureka-body:ruling:flush-always-gets-a-turn`). At most one action comes out
@@ -74,9 +78,8 @@ pub(super) enum Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     None,
-    WriteFlush(Why),
-    /// Write the waiting briefs as one user line.
-    WriteTells,
+    /// The one write: the waiting briefs and the flush ask, coalesced into one user line.
+    Write { tells: bool, flush: Option<Why> },
     CloseStdin,
     /// To the child's whole process group.
     Signal(Stop),
@@ -85,11 +88,11 @@ pub(super) enum Action {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Flush {
-    /// The flush's line number: its echo is the `seq`-th.
-    seq: u32,
-    /// The prefix at which the flush was written: the headroom's base.
+    /// The flush's line number once written (its echo is the `seq`-th); none while it waits for the outstanding write's echo.
+    seq: Option<u32>,
+    /// The prefix at which the flush was asked: the headroom's base.
     prefix: u64,
-    written: DateTime<Utc>,
+    asked: DateTime<Utc>,
     /// Its echo has come: the CLI took it into a request.
     consumed: bool,
     /// A request after its echo reached the headroom.
@@ -116,8 +119,6 @@ pub(super) struct State {
     cap: Option<(DateTime<Utc>, i64)>,
     stdin_closed: bool,
     flush: Option<Flush>,
-    /// An ok result answered the flush.
-    flush_answered_ok: bool,
     /// The last signal attempted and when.
     stopping: Option<(Stop, DateTime<Utc>)>,
     /// The strongest signal delivered.
@@ -125,8 +126,6 @@ pub(super) struct State {
     exited: Option<(Option<i32>, DateTime<Utc>)>,
     eof: bool,
     finished: bool,
-    /// The clock at the last decision: where a due action says "now".
-    at: Option<DateTime<Utc>>,
 }
 
 impl State {
@@ -135,18 +134,18 @@ impl State {
         Self { written: 1, cap: Some((at, i64::try_from(run_cap_s).unwrap_or(i64::MAX))), ..Self::default() }
     }
 
+    /// A line written whose echo has not come.
+    fn outstanding(&self) -> bool {
+        self.written > self.consumed
+    }
+
     fn idle(&self) -> bool {
-        !self.turn_open && self.written == self.consumed
+        !self.turn_open && !self.outstanding()
     }
 
     /// Seconds idle since the last result, none while a line or a turn is outstanding.
     pub(super) fn idle_s(&self, now: DateTime<Utc>) -> Option<i64> {
         self.idle().then(|| self.last_result_at.map_or(0, |at| (now - at).num_seconds()))
-    }
-
-    /// The session went idle, its cache would have lapsed, and its idle flush was answered by an ok result.
-    pub(super) fn idle_end_answered(&self) -> bool {
-        self.flush_answered_ok && self.flush.as_ref().is_some_and(|flush| flush.why == Why::Idle)
     }
 }
 
@@ -166,28 +165,21 @@ fn cause(state: &State) -> Cause {
 /// When the flush's grace runs out: the grace after the write, never later than
 /// the point the signal ladder needs to finish before the unit's cap.
 fn grace_deadline(state: &State, flush: &Flush) -> DateTime<Utc> {
-    let grace = flush.written + Duration::seconds(FLUSH_GRACE_S);
+    let grace = flush.asked + Duration::seconds(FLUSH_GRACE_S);
     match state.cap {
         Some((started, cap)) => grace.min(started + Duration::seconds(cap.saturating_sub(LADDER_S))),
         None => grace,
     }
 }
 
-/// What the session does next on its own, and when.
-enum Due {
-    Tells,
-    Flush(Why),
-}
-
-fn due(state: &State) -> Option<(DateTime<Utc>, Due)> {
+/// When the flush is next asked on its own, and why: the cap's margin, or the
+/// cache's end while idle with no brief waiting.
+fn due(state: &State) -> Option<(DateTime<Utc>, Why)> {
     if state.stdin_closed || state.exited.is_some() || state.flush.is_some() {
         return None;
     }
-    if state.inbox {
-        return state.at.map(|at| (at, Due::Tells));
-    }
-    let rotation = state.cap.map(|(started, cap)| (started + Duration::seconds(cap.saturating_sub(ROTATE_MARGIN_S)), Due::Flush(Why::Rotation)));
-    let idle = state.idle().then_some(state.last_result_at).flatten().map(|last| (last + Duration::seconds(state.ttl_s - TTL_MARGIN_S), Due::Flush(Why::Idle)));
+    let rotation = state.cap.map(|(started, cap)| (started + Duration::seconds(cap.saturating_sub(ROTATE_MARGIN_S)), Why::Rotation));
+    let idle = (state.idle() && !state.inbox).then_some(state.last_result_at).flatten().map(|last| (last + Duration::seconds(state.ttl_s - TTL_MARGIN_S), Why::Idle));
     [rotation, idle].into_iter().flatten().min_by_key(|(at, _)| *at)
 }
 
@@ -209,34 +201,48 @@ pub(super) fn next_deadline(state: &State) -> Option<DateTime<Utc>> {
 }
 
 /// The flush is asked once, by the ceiling, the cap's margin or the cache's end;
-/// never to a child whose input is closed or that has exited.
+/// never to a child whose input is closed or that has exited. Asking writes
+/// nothing: `send` writes it when no write is outstanding.
 fn ask_flush(state: &mut State, now: DateTime<Utc>, why: Why) -> bool {
     if state.flush.is_some() || state.stdin_closed || state.exited.is_some() {
         return false;
     }
-    state.written += 1;
-    state.flush = Some(Flush { seq: state.written, prefix: state.prefix, written: now, consumed: false, exhausted: false, why });
+    state.flush = Some(Flush { seq: None, prefix: state.prefix, asked: now, consumed: false, exhausted: false, why });
     true
 }
 
-/// The lifecycle rules 3 to 5: tell a waiting brief, or ask the flush where it is due.
+/// The lifecycle rules 3 to 5: ask the flush where it is due, then write what waits.
 fn lifecycle(state: &mut State, now: DateTime<Utc>) -> Action {
-    match due(state) {
-        Some((at, Due::Tells)) if at <= now => {
-            state.inbox = false;
-            state.written += 1;
-            Action::WriteTells
-        }
-        Some((at, Due::Flush(why))) if at <= now && ask_flush(state, now, why) => Action::WriteFlush(why),
-        _ => Action::None,
+    if let Some((at, why)) = due(state)
+        && at <= now
+    {
+        ask_flush(state, now, why);
     }
+    send(state)
+}
+
+/// With nothing outstanding, the one write: the waiting briefs (until the flush
+/// is written) and the flush, if it has not been written, as one line.
+fn send(state: &mut State) -> Action {
+    if state.stdin_closed || state.exited.is_some() || state.outstanding() || state.flush.as_ref().is_some_and(|flush| flush.seq.is_some()) {
+        return Action::None;
+    }
+    let flush = state.flush.as_ref().map(|flush| flush.why);
+    if !state.inbox && flush.is_none() {
+        return Action::None;
+    }
+    state.written += 1;
+    let seq = state.written;
+    if let Some(flush) = state.flush.as_mut() {
+        flush.seq = Some(seq);
+    }
+    Action::Write { tells: std::mem::take(&mut state.inbox), flush }
 }
 
 pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (State, Action) {
     if state.finished {
         return (state, Action::None);
     }
-    state.at = Some(now);
     let mut action = Action::None;
     match event {
         Event::Request { id, prefix } => {
@@ -249,8 +255,8 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
                 {
                     flush.exhausted = true;
                 }
-                if prefix >= CEILING_TOKENS && ask_flush(&mut state, now, Why::Ceiling) {
-                    action = Action::WriteFlush(Why::Ceiling);
+                if prefix >= CEILING_TOKENS {
+                    ask_flush(&mut state, now, Why::Ceiling);
                 }
             }
         }
@@ -259,7 +265,7 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
             state.turn_open = true;
             let consumed = state.consumed;
             if let Some(flush) = state.flush.as_mut()
-                && consumed >= flush.seq
+                && flush.seq.is_some_and(|seq| consumed >= seq)
             {
                 flush.consumed = true;
             }
@@ -271,7 +277,6 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
             let no_answer = !ok && !state.answered_once;
             state.answered_once |= ok;
             let flush_answered = state.flush.as_ref().is_some_and(|flush| flush.consumed);
-            state.flush_answered_ok |= flush_answered && ok;
             if (blocked || no_answer || flush_answered) && !state.stdin_closed && state.exited.is_none() {
                 state.stdin_closed = true;
                 action = Action::CloseStdin;

@@ -807,11 +807,16 @@ in-force `operated_by Mind` Self run of its instance, which admission keeps uniq
 - Not its decision: continuation (fresh only until `self-run-measure`), the brake (the unit's
   gate), the stop (the hold), the budget (the run's `budget_usd`, from the dial at launch),
   the environment, token and permissions (the unit and managed settings, gamecult-ops).
-- Delivery is counted: `--replay-user-messages` makes the CLI echo each stdin line right before
-  the request that carries it, folded into the running turn or queued as the next, so the echo is
-  the consumption point and idle is `lines written == lines echoed` with no turn open. The flush
-  is answered at the first result after its echo, folded or queued alike; the grace interrupt
-  (earlier of 15 min after the write and the cap less the ladder) is the backstop. Compaction is
+- Delivery is counted, with one write outstanding (ruling `self-session-one-outstanding-write`):
+  `--replay-user-messages` makes the CLI echo each stdin line right before the request that
+  carries it, folded into the running turn or queued as the next, but it joins lines queued
+  behind one request into a single echo. So `drive` writes the next line only after the previous
+  line's echo, coalescing what waits (the briefs and the flush ask) into that one line, and idle
+  is no write outstanding with no turn open. The flush is answered at the first result after its
+  echo; the grace interrupt (earlier of 15 min after the ask and the cap less the ladder) is the
+  backstop. A brief is an in-force `self-run` follow-up her Persona turn admitted (the receipt's
+  agent, not the source the writer named); the actuator closes none, and a brief left open is
+  told to the next session. Compaction is
   off in the CLI (`DISABLE_COMPACT=1` in the child environment).
 - With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` set the CLI forces the permission mode to default:
   `--permission-mode bypassPermissions` has no effect there and only the seed's allow list decides
