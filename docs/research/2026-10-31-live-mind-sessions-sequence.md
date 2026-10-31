@@ -95,13 +95,22 @@ Today the lease grant carries the plan windows once, rendered into the start mes
 - **Hook injection is data.** The hook prints only spool entries the actuator wrote from the mind, framed as factual statements naming their source document (the docs warn that "out-of-band system commands" framing trips injection defences). In a subagent (hook input carries an agent id) it is a no-op, so tells reach only the main thread.
 - **Refresh purges** anything that never reached memory. Memory poisoning is the durable vector, and each memory carries its sources and is withdrawable (MAP 2.8).
 
+### 1.9 Evidence from the Cinny fork, and what it binds (Self, 2026-10-31 13:4xZ)
+
+The operator: "Aqua was gonna work on the notification sounds and ambient soundscape for it, Libby was working on the math and shaders for the background, Void was putting it all together. They were coordinating. And of course they just forgot all about it as soon as it rolled off the transcript." Self read the minds of void, libby and aqua. None holds a ruling, and nobody's mind holds the shared plan. In-force `chat-*` follow-ups never close: void 24, libby 23, aqua 22. Libby holds about 10 near-identical "CultMath noise survey" briefs (`chat-s239` to `chat-s318`), one asked per turn because she could not see the earlier answer. Real results exist as follow-ups (`cultmath-ts-noise-absent`, `cinny-estate-navigator-footprint`) and as AquaSynth PR #1.
+
+This binds two things.
+
+- **A brief is closed by its result.** An open self-run follow-up must mean open work, or the goals section (goals-in-turn) is noise and cut 1's inbox would re-tell every stale brief. Owner: the Self actuator. At each `result`, every brief told to the session before or during that turn that her Self has not resolved itself is resolved `Recorded` by the actuator, with the result text (cut on a character boundary at 3800 B, as f2e3805) as the rationale. A longer piece of work she takes on is a follow-up of her own, with a different owner. At session start the same rule is applied to the past: a self-run follow-up claimed by a closed run is resolved `Recorded`, citing that run, whose closure rationale already holds the result. Her Persona then sees results where the brief was, not a pile of open asks. In cut `self-session-live` r2.
+- **Agreements reach the mind of each Mind they bind.** Each Mind writes into her own mind, through memory-write, what she committed to (`committed`), what others agreed to do (`decided`, `about` the other Minds' ids), and the operator's decisions (`decided`, about the operator). A shared plan therefore exists federated, once in each participant's own words, with sources pointing to the same event ids. Whether one mind also holds the plan as a document the others read is question `shared-plan-home`. Where the operator's rulings about a stewarded campaign live is the existing question `ruling-home-for-stewarded-campaigns`. In `persona-memory-write` r3: the `remember` description names agreements between Minds, and the `about` enum takes every sender in the batch, Minds included.
+
 ## 2. Cut sequence (revised)
 
 Live first. Memory-write runs beside cut 1 with no shared file.
 
 | # | Cut | Repo | Supersedes (one-shot code that must end unable to run) | Runs beside |
 |---|---|---|---|---|
-| 1 | **`self-session-live`** (spec admitted): her Self stays alive across briefs; briefs to a live Self are told between tool calls; it ends at the task boundary, at the cache TTL, near the cap, or at the ceiling; a PreCompact block | Huginn | `decide.rs` `Result => CloseStdin`. A Self process cannot end at its first result, and `Busy` no longer drops a brief. | 2 |
+| 1 | **`self-session-live`** r2 (spec admitted): her Self stays alive across briefs; a brief is closed by its result; briefs to a live Self are told between tool calls; it ends at the task boundary, at the cache TTL, near the cap, or at the ceiling; a PreCompact block | Huginn | `decide.rs` `Result => CloseStdin`. A Self process cannot end at its first result, and `Busy` no longer drops a brief. | 2 |
 | 2 | **`persona-memory-write` r3** (spec admitted): r2 without its two `self_run.rs` changes (they move to cut 5) | Huginn | `admit_pulse` | 1 |
 | 3 | `plan-readout-live`: lease socket `plan` request; the Self appends a fresh plan line per batch | ModelConnector + Huginn | the start-message-only plan line | 1, 2 |
 | 4 | `self-session-resume`: transcripts in StateDirectory, `--resume <path>` when warm, rotation under the cap, rental rule; Self capture of memory (from r2) | Huginn | `claude_args` "no resume" and the "fresh session per run" `session_id(run)` | after 1, 2 |
