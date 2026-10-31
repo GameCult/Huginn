@@ -1503,17 +1503,17 @@ mod tests {
         };
         committed(admit(&mut mind, vec![pulse("vote", Some(60), false)]));
         committed(admit(&mut mind, vec![pulse("withdraw", None, true)]));
-        let newest = || {
+        let newest = |mind: &Mind<MemoryStore>| {
             let selection = Selection { descending: true, limit: Some(1), ..with(of_kinds(&[K::Pulse]), any_of("voted", &["true"])) };
             let page = mind.query(&selection).unwrap();
             headers(&page).to_vec()
         };
-        let found = newest();
+        let found = newest(&mind);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id.id.0, format!("{INSTANCE}:pulse:withdraw"));
         assert!(matches!(found[0].facts, PipelineFacts::Pulse { tempo_vote_beat_s: None, tempo_vote_withdrawn: true, .. }), "{:?}", found[0].facts);
         committed(admit(&mut mind, vec![pulse("again", Some(90), false)]));
-        let found = newest();
+        let found = newest(&mind);
         assert!(matches!(found[0].facts, PipelineFacts::Pulse { tempo_vote_beat_s: Some(90), tempo_vote_withdrawn: false, .. }), "{:?}", found[0].facts);
     }
 
