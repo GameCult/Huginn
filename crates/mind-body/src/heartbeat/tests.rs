@@ -585,3 +585,73 @@ fn an_old_heartbeat_store_fails_closed_naming_the_file_and_is_never_migrated() {
         assert!(error.contains(&path.display().to_string()) && error.contains("archive it, nothing migrates it"), "{error}");
     }
 }
+
+/// How many queries a poll asks of Ann's mind once she holds `pulses` pulses of
+/// one kind (`vote` or `urgency`): the count must not depend on the history.
+fn ann_queries_with(pulses: usize, beat: Option<u32>, urgency: Option<u16>) -> u32 {
+    let rig = Rig::new();
+    rig.turn(ANN, 100_000);
+    rig.turn(BOB, 100_000);
+    let mut done = 0;
+    while done < pulses {
+        let batch = (pulses - done).min(250);
+        rig.minds[ANN].admit_at(rig.now() - Duration::seconds(90_000));
+        rig.minds[ANN].committed(
+            (0..batch)
+                .map(|n| {
+                    eureka_pipeline::PipelineDocument::Pulse(eureka_pipeline::PipelinePulse {
+                        instance: Slug("ann".into()),
+                        label: eureka_pipeline::Label(format!("c{}", done + n)),
+                        tempo_vote_beat_s: beat,
+                        urgency_permille: urgency,
+                        note: "cost".into(),
+                    })
+                })
+                .collect(),
+        );
+        done += batch;
+    }
+    let before = rig.calls[ANN].get();
+    rig.poll();
+    rig.calls[ANN].get() - before
+}
+
+#[test]
+fn a_poll_costs_the_same_queries_at_any_pulse_history_length() {
+    for (beat, urgency) in [(Some(600), None), (None, Some(1))] {
+        let sizes = [200, 800, 5000].map(|pulses| ann_queries_with(pulses, beat, urgency));
+        assert_eq!(sizes[0], sizes[1], "{beat:?}/{urgency:?}: {sizes:?}");
+        assert_eq!(sizes[1], sizes[2], "{beat:?}/{urgency:?}: {sizes:?}");
+    }
+}
+
+#[test]
+fn a_poll_costs_the_same_queries_after_a_hundred_withdrawn_launches() {
+    let rig = Rig::new();
+    rig.turn(ANN, 5000);
+    rig.turn(BOB, 1000);
+    *rig.launcher.fail_for.borrow_mut() = Some(Slug("ann".into()));
+    let mut asked = Vec::new();
+    for beat in 1..=101 {
+        rig.advance(1000);
+        let before = rig.calls[ANN].get();
+        rig.poll();
+        rig.end_run(BOB);
+        if beat == 1 || beat == 101 {
+            asked.push(rig.calls[ANN].get() - before);
+        }
+    }
+    assert_eq!(asked[0], asked[1], "a poll after 100 withdrawn launches asks as much as the first");
+}
+
+#[test]
+fn her_standing_vote_is_the_newest_by_admission_not_by_the_clock() {
+    let rig = Rig::new();
+    rig.turn(ANN, 3000);
+    rig.turn(BOB, 3000);
+    rig.pulse(ANN, 100, Some(600), None);
+    rig.pulse(ANN, 200, Some(7200), None);
+    rig.poll();
+    let trace = rig.store.traces.borrow().last().cloned().unwrap();
+    assert_eq!(trace.instances[ANN].vote_beat_s, Some(7200), "admitted second, stamped earlier");
+}

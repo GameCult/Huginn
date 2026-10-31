@@ -29,7 +29,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
 use cultnet_rs::Selection;
 use eureka_pipeline::{PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
-use huginn_mind::{PipelineFacts, PipelinePageItems};
+use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 
 use crate::chat_client::{Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
@@ -41,7 +41,7 @@ use crate::tempo::{self, Standing};
 pub const AGENT: &str = "mind-heartbeat";
 /// How many handled operator mentions the state remembers.
 const MENTIONS_KEPT: usize = 64;
-/// How many of an instance's latest runs and pulses a poll looks at.
+/// How many of an instance's latest Self runs a poll looks at.
 const RECENT: u32 = 8;
 /// The most pages of pending chat one poll reads for one Persona.
 const PENDING_PAGES: usize = 16;
@@ -368,45 +368,34 @@ fn latest_resolution(
     Ok(ending.map(|(_, at, outcome)| (at, outcome)))
 }
 
-/// When her newest Persona turn that actually ran was admitted. A turn withdrawn
-/// unrun never happened: it neither resets her wait nor counts as her last turn,
-/// so the walk goes back past any number of them.
+/// When her newest Persona turn that actually ran was admitted: one bounded read
+/// of the runs the mind indexes as `ran`. A turn withdrawn unrun never happened,
+/// so it neither resets her wait nor counts as her last turn, and the cost of
+/// finding the last real turn does not grow with how many were withdrawn.
 fn last_turn(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime<Utc>>> {
     let turn = format!("{:?}", RunTurn::PersonaTurn);
     let operator = format!("{:?}", RunOperator::Mind);
     let runs = any_of(
         any_of(
-            any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]),
-            "turn",
-            &[&turn],
+            any_of(
+                any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]),
+                "turn",
+                &[&turn],
+            ),
+            "operated_by",
+            &[&operator],
         ),
-        "operated_by",
-        &[&operator],
+        "ran",
+        &["true"],
     );
-    let mut asking = Selection {
-        descending: true,
-        limit: Some(RECENT),
-        ..runs
-    };
-    loop {
-        let page = mind.query(&asking)?;
-        let PipelinePageItems::Headers(runs) = page.items else {
-            bail!("the mind answered documents to a header selection")
-        };
-        for run in runs {
-            if !matches!(run.facts, PipelineFacts::Run { .. }) {
-                continue;
-            }
-            if let Some((_, ResolutionOutcome::Withdrawn { .. })) = latest_resolution(mind, &run.id)? {
-                continue;
-            }
-            return Ok(Some(parse_time(&run.admission.admitted_at)?));
-        }
-        match page.next {
-            Some(cursor) => asking.cursor = Some(cursor),
-            None => return Ok(None),
-        }
-    }
+    Ok(newest(mind, runs)?.map(|header| header.admission.admitted_at).map(|at| parse_time(&at)).transpose()?)
+}
+
+/// The newest document a selection holds, by admission ordinal: one query.
+fn newest(mind: &dyn MindPort, selection: Selection) -> Result<Option<PipelineDocumentSummary>> {
+    let asking = Selection { descending: true, limit: Some(1), ..selection };
+    let PipelinePageItems::Headers(found) = mind.query(&asking)?.items else { bail!("the mind answered documents to a header selection") };
+    Ok(found.into_iter().next())
 }
 
 /// Whether `text` holds `name` as a whole word, ignoring case: the characters on
@@ -461,35 +450,24 @@ fn label_of(run: &eureka_pipeline::PipelineRef) -> String {
     run.id.0.rsplit(':').next().unwrap_or_default().to_string()
 }
 
-/// A Mind own newest heartbeat votes, read from her mind.
-struct Pulse {
-    admitted: DateTime<Utc>,
-    beat_s: Option<u32>,
-    urgency_permille: Option<u16>,
+/// Her standing vote: the newest pulse that carries one, by admission ordinal. A
+/// vote stands until she replaces it, however many pulses of other kinds follow.
+fn standing_vote(mind: &dyn MindPort, instance: &Slug) -> Result<Option<u32>> {
+    let pulses = any_of(any_of(of_kind(PipelineKind::Pulse), "root", &[&instance.0]), "voted", &["true"]);
+    Ok(newest(mind, pulses)?.and_then(|header| match header.facts {
+        PipelineFacts::Pulse { tempo_vote_beat_s, .. } => tempo_vote_beat_s,
+        _ => None,
+    }))
 }
 
-/// Her pulses, newest first by the time the mind admitted them, read back only as
-/// far as her standing vote and her newest declared urgency: a vote stands until
-/// she replaces it, however many pulses of other kinds follow.
-fn recent_pulses(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<Pulse>> {
-    let mut asking = Selection { descending: true, limit: Some(RECENT), ..any_of(of_kind(PipelineKind::Pulse), "root", &[&instance.0]) };
-    let mut pulses = Vec::new();
-    loop {
-        let page = mind.query(&asking)?;
-        let PipelinePageItems::Headers(found) = page.items else { bail!("the mind answered documents to a header selection") };
-        for header in found {
-            if let PipelineFacts::Pulse { tempo_vote_beat_s, urgency_permille, .. } = header.facts {
-                pulses.push(Pulse { admitted: parse_time(&header.admission.admitted_at)?, beat_s: tempo_vote_beat_s, urgency_permille });
-            }
-        }
-        let read_enough = pulses.iter().any(|pulse| pulse.beat_s.is_some()) && pulses.iter().any(|pulse| pulse.urgency_permille.is_some());
-        match page.next {
-            Some(cursor) if !read_enough => asking.cursor = Some(cursor),
-            _ => break,
-        }
-    }
-    pulses.sort_by(|a, b| b.admitted.cmp(&a.admitted));
-    Ok(pulses)
+/// The urgency she declared for herself and no turn has consumed: her newest
+/// declaration, if it is newer than her newest Persona turn.
+fn pending_urgency(mind: &dyn MindPort, instance: &Slug, last_turn: Option<DateTime<Utc>>) -> Result<u16> {
+    let pulses = any_of(any_of(of_kind(PipelineKind::Pulse), "root", &[&instance.0]), "urged", &["true"]);
+    let Some(header) = newest(mind, pulses)? else { return Ok(0) };
+    let PipelineFacts::Pulse { urgency_permille: Some(urgency), .. } = header.facts else { return Ok(0) };
+    let declared = parse_time(&header.admission.admitted_at)?;
+    Ok(if last_turn.is_none_or(|turn| declared > turn) { urgency } else { 0 })
 }
 
 /// When her Self runs last ended: the latest resolution among her recent Self runs.
@@ -513,34 +491,22 @@ struct MindRead {
     busy: bool,
     /// When her newest Persona turn was admitted.
     last_turn: Option<DateTime<Utc>>,
-    pulses: Vec<Pulse>,
+    /// Her standing vote for a beat.
+    vote: Option<u32>,
+    /// The urgency she declared and no turn has consumed.
+    urgency: u16,
     self_end: Option<DateTime<Utc>>,
 }
 
 fn read_mind(mind: &dyn MindPort, slug: &Slug) -> Result<MindRead> {
+    let last_turn = last_turn(mind, slug)?;
     Ok(MindRead {
         busy: !holders(mind, slug, RunTurn::PersonaTurn)?.is_empty(),
-        last_turn: last_turn(mind, slug)?,
-        pulses: recent_pulses(mind, slug)?,
+        last_turn,
+        vote: standing_vote(mind, slug)?,
+        urgency: pending_urgency(mind, slug, last_turn)?,
         self_end: last_self_end(mind, slug)?,
     })
-}
-
-impl MindRead {
-    /// Her newest vote for a beat.
-    fn vote(&self) -> Option<u32> {
-        self.pulses.iter().find_map(|pulse| pulse.beat_s)
-    }
-
-    /// The urgency she declared for herself and no turn has consumed: her newest
-    /// declaration, if it is newer than her newest Persona turn.
-    fn urgency(&self) -> u16 {
-        let declared = self.pulses.iter().find_map(|pulse| pulse.urgency_permille.map(|urgency| (pulse.admitted, urgency)));
-        match declared {
-            Some((at, urgency)) if self.last_turn.is_none_or(|turn| at > turn) => urgency,
-            _ => 0,
-        }
-    }
 }
 
 struct Row<'a> {
@@ -620,7 +586,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     }
 
     // The tempo is the tally over every Mind of the roster, braked or not; a Mind with no vote or no readable mind counts as the default beat.
-    let votes: Vec<Option<u32>> = rows.iter().map(|row| row.read.as_ref().and_then(MindRead::vote)).collect();
+    let votes: Vec<Option<u32>> = rows.iter().map(|row| row.read.as_ref().and_then(|read| read.vote)).collect();
     let beat_s = tempo::tally(&votes);
 
     let mut launches: Vec<String> = Vec::new();
@@ -679,7 +645,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
                 eligible: row.idle(),
                 waited_s: read.and_then(|read| read.last_turn).map(|turn| u64::try_from((now - turn).num_seconds()).unwrap_or(0)),
                 last_turn_ms: read.and_then(|read| read.last_turn).map(|turn| turn.timestamp_millis()),
-                self_permille: read.map_or(0, MindRead::urgency),
+                self_permille: read.map_or(0, |read| read.urgency),
                 // The seam for topic subscriptions (a later cut): a Mind's nearest subscription scores her deliveries here.
                 topic_permille: 0,
                 addressed_by_member: row.addressed_by_member(config),
@@ -716,7 +682,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
                 .zip(&standings)
                 .map(|(row, standing)| InstanceTrace {
                     instance: row.slug().0.clone(),
-                    vote_beat_s: row.read.as_ref().and_then(MindRead::vote),
+                    vote_beat_s: row.read.as_ref().and_then(|read| read.vote),
                     urgency_permille: standing.self_permille,
                     addressed: standing.addressed_by_member,
                     busy: row.busy,
