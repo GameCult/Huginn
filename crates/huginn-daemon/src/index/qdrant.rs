@@ -15,6 +15,9 @@ use super::{CollectionMeta, INDEX_CALL_TIMEOUT, Described, Hit, Http, Method, Po
 /// never lists or touches another.
 pub struct QdrantIndex {
     http: Http,
+    /// The collection the source port reads and writes: `huginn_sources`,
+    /// unless a live test points it at a scratch one.
+    sources: String,
 }
 
 /// The ids fetched per scroll page.
@@ -22,7 +25,13 @@ const SCROLL_PAGE: u64 = 1000;
 
 impl QdrantIndex {
     pub fn new(base_url: &str) -> Self {
-        Self { http: Http::new(base_url, INDEX_CALL_TIMEOUT) }
+        Self { http: Http::new(base_url, INDEX_CALL_TIMEOUT), sources: COLLECTION.to_owned() }
+    }
+
+    /// The source port on another collection, for a live test's scratch one.
+    pub fn with_sources_collection(mut self, collection: &str) -> Self {
+        self.sources = collection.to_owned();
+        self
     }
 
     fn ask(&self, method: Method, path: &str, body: Option<&Value>, ok: &[u16]) -> Result<(u16, Value)> {
@@ -222,8 +231,9 @@ fn sources_described(metadata: &Value) -> DescribedSources {
 
 impl SourceIndex for QdrantIndex {
     fn describe_sources(&mut self, within: Duration) -> Result<DescribedSources> {
+        let collection = self.sources.clone();
         let http = self.http.bounded(within);
-        let (status, answer) = self.ask_with(&http, Method::Get, &format!("/collections/{COLLECTION}"), None, &[200, 404])?;
+        let (status, answer) = self.ask_with(&http, Method::Get, &format!("/collections/{collection}"), None, &[200, 404])?;
         if status == 404 {
             return Ok(DescribedSources::Absent);
         }
@@ -231,7 +241,8 @@ impl SourceIndex for QdrantIndex {
     }
 
     fn recreate_sources(&mut self, meta: &SourcesMeta) -> Result<()> {
-        let path = format!("/collections/{COLLECTION}");
+        let collection = self.sources.clone();
+        let path = format!("/collections/{collection}");
         self.ask(Method::Delete, &format!("{path}?wait=true"), None, &[200, 404])?;
         let body = json!({
             "vectors": { "size": meta.dimensions, "distance": "Cosine", "on_disk": true },
@@ -254,40 +265,44 @@ impl SourceIndex for QdrantIndex {
     }
 
     fn set_cursors(&mut self, cursors: &BTreeMap<String, String>) -> Result<()> {
+        let collection = self.sources.clone();
         // Qdrant merges metadata by top-level key and replaces a nested object
         // whole, so this is the whole cursors object and nothing beside it.
         let body = json!({ "metadata": { "cursors": cursors } });
-        self.ask(Method::Patch, &format!("/collections/{COLLECTION}?wait=true"), Some(&body), &[200])?;
+        self.ask(Method::Patch, &format!("/collections/{collection}?wait=true"), Some(&body), &[200])?;
         Ok(())
     }
 
     fn delete_by(&mut self, repo: &str, paths: Option<&[String]>) -> Result<()> {
+        let collection = self.sources.clone();
         let mut must = vec![json!({ "key": "repo", "match": { "value": repo } })];
         if let Some(paths) = paths {
             must.push(json!({ "key": "path", "match": { "any": paths } }));
         }
         let body = json!({ "filter": { "must": must } });
-        self.ask(Method::Post, &format!("/collections/{COLLECTION}/points/delete?wait=true"), Some(&body), &[200])?;
+        self.ask(Method::Post, &format!("/collections/{collection}/points/delete?wait=true"), Some(&body), &[200])?;
         Ok(())
     }
 
     fn upsert_sources(&mut self, points: &[SourcePoint]) -> Result<()> {
+        let collection = self.sources.clone();
         let points: Vec<Value> = points
             .iter()
             .map(|point| json!({ "id": point.id, "vector": point.vector, "payload": payload_json(&point.payload) }))
             .collect();
-        self.ask(Method::Put, &format!("/collections/{COLLECTION}/points?wait=true"), Some(&json!({ "points": points })), &[200])?;
+        self.ask(Method::Put, &format!("/collections/{collection}/points?wait=true"), Some(&json!({ "points": points })), &[200])?;
         Ok(())
     }
 
     fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, limit: u32, within: Duration) -> Result<Vec<SourceRow>> {
+        let collection = self.sources.clone();
         let http = self.http.bounded(within);
         let mut body = json!({ "vector": vector, "limit": limit, "with_payload": true, "with_vector": false });
         if let Some(repo) = repo {
             body["filter"] = json!({ "must": [{ "key": "repo", "match": { "value": repo } }] });
         }
         let (_, answer) =
-            self.ask_with(&http, Method::Post, &format!("/collections/{COLLECTION}/points/search"), Some(&body), &[200])?;
+            self.ask_with(&http, Method::Post, &format!("/collections/{collection}/points/search"), Some(&body), &[200])?;
         let found = answer["result"].as_array().context("Qdrant's search has no result")?;
         found
             .iter()
