@@ -1143,6 +1143,8 @@ fn shared_with(
             closed,
             searches: searches.into(),
             found: Vec::new(),
+            source_searches: VecDeque::new(),
+            sources_found: Vec::new(),
             next_ticket: 0,
         }),
         Condvar::new(),

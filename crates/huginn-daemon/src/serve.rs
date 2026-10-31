@@ -167,7 +167,7 @@ pub fn startup<E, V>(
 ) -> Result<(Daemon<OwnedRedbMessagePackBackingStore, WorkerSink>, CultNetRudpServerHub, CultNetSchemaRegistry)>
 where
     E: Embedder + Send + 'static,
-    V: VectorIndex + Send + 'static,
+    V: VectorIndex + crate::sources::SourceIndex + Send + 'static,
 {
     let mind = Mind::open(&options.state_root, &options.instance)?;
     let hub = bind(options.bind, &runtime_id(&options.instance))?;

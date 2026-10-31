@@ -87,7 +87,9 @@ impl Mirror {
     pub fn fetch(&self, remote: &str) -> Result<String> {
         if !self.dir.join("HEAD").exists() {
             std::fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
-            run(Command::new("git").arg("init").arg("--bare").arg("--quiet").arg(&self.dir), "initialise a mirror")?;
+            let mut init = Command::new("git");
+            init.arg("init").arg("--bare").arg("--quiet").arg(&self.dir);
+            run(init, "initialise a mirror")?;
         }
         let refspec = format!("+refs/heads/{0}:refs/heads/{0}", self.branch);
         run(git(&self.dir, &["fetch", "--quiet", "--no-tags", remote, &refspec]), "fetch the default branch")?;
