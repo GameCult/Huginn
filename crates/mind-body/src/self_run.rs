@@ -674,7 +674,7 @@ fn drive(
         while let Some(heard_event) = events.pop_front() {
             let counted = state.requests;
             // The decision's inputs, as they stood when the event came.
-            let (ttl_s, inbox, idle_s) = (state.ttl_s, state.inbox, state.idle_s(now));
+            let (ttl_s, inbox, idle_s) = (state.ttl_s, state.inbox || matches!(&heard_event, Event::Inbox { pending: true }), state.idle_s(now));
             let (next, action) = decide(state, heard_event, now);
             state = next;
             heard.idle_end = state.idle_end_answered();

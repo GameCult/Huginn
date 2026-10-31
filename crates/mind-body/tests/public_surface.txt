@@ -207,16 +207,16 @@ mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq , PartialO
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Cause { Own , FlushRequested , Signalled (Stop) , Unstoppable , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Eof , Exited (Option < i32 >) , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , LeaseRefused { kind : LeaseRefusalKind } , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 } , }
-mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 } , Result , Other , Unreadable , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 } , Echo , Result { ok : bool , blocked : bool } , Other , Unreadable , }
 mind_body::self_run: const AGENT : & str
 mind_body::self_run: const CEILING_TOKENS : u64
 mind_body::self_run: const ESCALATE_AFTER_S : i64
 mind_body::self_run: const EXIT_DRAIN_S : i64
 mind_body::self_run: const FLUSH_GRACE_S : i64
 mind_body::self_run: const FLUSH_HEADROOM_TOKENS : u64
-mind_body::self_run: const FLUSH_MARGIN_S : i64
 mind_body::self_run: const FLUSH_MESSAGE : & str
 mind_body::self_run: const INBOX_POLL_S : i64
+mind_body::self_run: const LADDER_S : i64
 mind_body::self_run: const MAX_TURNS : u32
 mind_body::self_run: const ROTATE_MARGIN_S : i64
 mind_body::self_run: const RUN_CAP_VARIABLE : & str
@@ -227,14 +227,14 @@ mind_body::self_run: const TTL_1H_S : i64
 mind_body::self_run: const TTL_5M_S : i64
 mind_body::self_run: const TTL_MARGIN_S : i64
 mind_body::self_run: fn carry (mind : & dyn MindPort , clock : & dyn Clock , lender : & dyn Lender , spawner : & dyn Spawner , run_cap_s : u64 , out : & mut dyn Write) -> Result < SelfRunOutcome >
-mind_body::self_run: fn claude_args (session : Uuid , hooks : & Hooks) -> Vec < String >
+mind_body::self_run: fn claude_args (session : Uuid) -> Vec < String >
 mind_body::self_run: fn read_usage (line : & str) -> Usage
 mind_body::self_run: fn session_id (run : & PipelineRef) -> Uuid
 mind_body::self_run: fn start_message (instance : & Slug , run : & PipelineRef , plan_quota : & [PlanQuota] , now_ms : u64) -> String
 mind_body::self_run: fn writes_hour_cache (line : & str) -> Option < bool >
 mind_body::self_run: impl Child for ClaudeProcess
 mind_body::self_run: impl ClaudeSpawner
-mind_body::self_run: impl ClaudeSpawner: fn new (unit_environment : impl IntoIterator < Item = (OsString , OsString) > , injector : PathBuf) -> Result < Self >
+mind_body::self_run: impl ClaudeSpawner: fn new (unit_environment : impl IntoIterator < Item = (OsString , OsString) >) -> Result < Self >
 mind_body::self_run: impl Drop for FreshConfig
 mind_body::self_run: impl FreshConfig
 mind_body::self_run: impl Heard
@@ -247,30 +247,17 @@ mind_body::self_run: impl fmt :: Display for SelfRunOutcome
 mind_body::self_run: impl std :: error :: Error for SeedLinkRefused
 mind_body::self_run: mod inbox
 mind_body::self_run: pub trait Child { fn write_line (& mut self , line : & str) ; fn close_input (& mut self) ; fn next (& mut self , timeout : StdDuration) -> Read ; fn stop (& mut self , how : Stop) -> bool ; }
-mind_body::self_run: pub trait Spawner { fn hooks (& self) -> Hooks ; fn spawn (& self , args : & [String] , token : & TokenFd) -> Result < Box < dyn Child > > ; }
+mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String] , token : & TokenFd) -> Result < Box < dyn Child > > ; }
 mind_body::self_run: struct ClaudeSpawner  pub-fields[]
 mind_body::self_run::decide: impl State
 mind_body::self_run::inbox: const OWNER : & str
-mind_body::self_run::inbox: fn claim (spool : & Path) -> Result < Vec < Brief > >
+mind_body::self_run::inbox: fn backlog (mind : & dyn MindPort) -> Result < Vec < (Brief , String) > >
 mind_body::self_run::inbox: fn close (mind : & dyn MindPort , now : DateTime < Utc > , session : & str , briefs : & [(Brief , String)] , reason : & str) -> Result < usize >
-mind_body::self_run::inbox: fn close_past (mind : & dyn MindPort , now : DateTime < Utc > , session : & str) -> Result < usize >
-mind_body::self_run::inbox: fn derive (mind : & dyn MindPort , spool : & Path) -> Result < Vec < Brief > >
-mind_body::self_run::inbox: fn forget (spool : & Path , briefs : & [Brief])
-mind_body::self_run::inbox: fn inject (spool : & Path , input : & str , pre_compact : bool) -> Result < Injection >
-mind_body::self_run::inbox: fn mark_told (spool : & Path , briefs : & [Brief]) -> Result < () >
-mind_body::self_run::inbox: fn pending (spool : & Path) -> Result < bool >
+mind_body::self_run::inbox: fn derive (mind : & dyn MindPort , told : & HashSet < String >) -> Result < Vec < Brief > >
 mind_body::self_run::inbox: fn render (briefs : & [Brief] , plan : & str) -> String
-mind_body::self_run::inbox: fn reset (spool : & Path) -> Result < () >
-mind_body::self_run::inbox: fn spool (spool : & Path , briefs : & [Brief]) -> Result < () >
-mind_body::self_run::inbox: fn take_pre_compact (spool : & Path) -> bool
-mind_body::self_run::inbox: fn told (spool : & Path) -> Result < Vec < Brief > >
-mind_body::self_run::inbox: fn write_plan (spool : & Path , line : & str) -> Result < () >
+mind_body::self_run::inbox: fn resolving_sentence (id : & str) -> String
 mind_body::self_run::inbox: impl Brief
-mind_body::self_run::inbox: impl Hooks
-mind_body::self_run::inbox: impl Hooks: fn settings (& self) -> String
-mind_body::self_run::inbox: struct Brief # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[id: String, campaign: String, repo: String, item: String, ordinal: u64]
-mind_body::self_run::inbox: struct Hooks # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[spool: PathBuf, injector: PathBuf]
-mind_body::self_run::inbox: struct Injection # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[stdout: String, exit: i32]
+mind_body::self_run::inbox: struct Brief # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[id: String, campaign: String, repo: String, item: String, ordinal: u64]
 mind_body::tempo: const DEFAULT_BEAT_S : u32
 mind_body::tempo: const LOG_BOUND_ORDERS : f64
 mind_body::tempo: fn pick (rows : & [Standing] , beat_s : u32) -> Option < usize >

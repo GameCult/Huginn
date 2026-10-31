@@ -1,17 +1,13 @@
-//! The inbox over a real spool directory and a mind in memory: what is derived,
-//! the exactly-once claim, and the hook that prints it.
+//! The inbox over a mind in memory: what is a brief, what is told, what the
+//! backlog lists, and what the idle-end close resolves.
 
 use eureka_pipeline::{PipelineDocument, PipelineKind as K, RunOperator, RunTurn};
 
 use super::*;
-use crate::testkit::{TestMind, at, close as closing, follow_up, id, recorded, reference, run, run_ref, spec, spec_ref};
+use crate::testkit::{TestMind, at, close as closing, follow_up, id, recorded, reference, run, run_ref, spec};
 
-fn spool_dir() -> tempfile::TempDir {
-    tempfile::tempdir().unwrap()
-}
-
-fn brief_doc(label: &str, owner: &str) -> PipelineDocument {
-    let PipelineDocument::FollowUp(mut document) = follow_up(label, &spec_ref("x")) else { unreachable!() };
+fn brief_doc(label: &str, owner: &str, source: &PipelineRef) -> PipelineDocument {
+    let PipelineDocument::FollowUp(mut document) = follow_up(label, source) else { unreachable!() };
     document.owner = owner.into();
     document.item = format!("Do {label}.").as_str().into();
     PipelineDocument::FollowUp(document)
@@ -21,116 +17,86 @@ fn brief_ref(label: &str) -> PipelineRef {
     reference(K::FollowUp, &id("follow_up", label))
 }
 
-fn mind_with(documents: Vec<PipelineDocument>) -> TestMind {
+/// A mind holding a Persona turn's run `persona`, a Self run `selfrun` and a spec.
+fn mind() -> TestMind {
     let mind = TestMind::seeded();
     mind.committed(vec![spec("x")]);
-    mind.committed(documents);
+    mind.committed(vec![run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[]), run("selfrun", RunTurn::SelfRun, RunOperator::Mind, &[])]);
+    // Only one Self run is live at a time: hers has ended, and stays a Self run.
+    mind.committed(vec![closing(run_ref("selfrun"), recorded())]);
     mind
 }
 
-fn entry(n: u64) -> Brief {
-    Brief { id: format!("eureka-body:follow_up:b{n}"), campaign: "eureka-body".into(), repo: "GameCult/Huginn".into(), item: format!("Item {n}."), ordinal: n }
+fn ids(briefs: Vec<Brief>) -> Vec<String> {
+    briefs.into_iter().map(|brief| brief.id).collect()
 }
 
 #[test]
-fn the_inbox_is_the_open_self_run_briefs_that_no_closed_run_claims_and_the_session_does_not_hold() {
-    let mind = mind_with(vec![brief_doc("open", OWNER), brief_doc("claimed-by-old", OWNER), brief_doc("someone-elses", "Hands"), brief_doc("answered", OWNER), brief_doc("held", OWNER)]);
-    mind.committed(vec![run("old", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("claimed-by-old")])]);
-    mind.committed(vec![closing(run_ref("old"), recorded()), closing(brief_ref("answered"), recorded())]);
-    let spool = spool_dir();
-    mark_told(spool.path(), &[Brief { id: brief_ref("held").id.0, ..entry(9) }]).unwrap();
-    let derived: Vec<String> = derive(&mind, spool.path()).unwrap().into_iter().map(|brief| brief.id).collect();
-    assert_eq!(derived, vec![brief_ref("open").id.0], "only the open one nobody answered and nobody holds");
-    // A run that is still open claims without answering: its brief is still asked.
-    mind.committed(vec![run("live", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("open")])]);
-    assert_eq!(derive(&mind, spool.path()).unwrap().len(), 1);
+fn a_brief_is_an_in_force_self_run_follow_up_sourced_from_a_persona_turn() {
+    let mind = mind();
+    let persona = run_ref("persona");
+    mind.committed(vec![
+        brief_doc("from-persona", OWNER, &persona),
+        brief_doc("from-her-self", OWNER, &run_ref("selfrun")),
+        brief_doc("from-no-run", OWNER, &crate::testkit::spec_ref("x")),
+        brief_doc("someone-elses", "Hands", &persona),
+        brief_doc("answered", OWNER, &persona),
+    ]);
+    mind.committed(vec![closing(brief_ref("answered"), recorded())]);
+    assert_eq!(ids(derive(&mind, &HashSet::new()).unwrap()), vec![brief_ref("from-persona").id.0], "a follow-up her Self files for herself is never a brief");
 }
 
 #[test]
-fn spooled_entries_are_claimed_in_order_and_hand_back_what_was_written() {
-    let spool = spool_dir();
-    spool_briefs(spool.path(), &[entry(2), entry(1)]);
-    assert!(pending(spool.path()).unwrap());
-    let claimed = claim(spool.path()).unwrap();
-    assert_eq!(claimed, vec![entry(1), entry(2)], "oldest first");
-    assert!(!pending(spool.path()).unwrap() && claim(spool.path()).unwrap().is_empty(), "a claim empties the spool");
-    assert_eq!(told(spool.path()).unwrap(), vec![entry(1), entry(2)]);
-    forget(spool.path(), &claimed[..1]);
-    assert_eq!(told(spool.path()).unwrap(), vec![entry(2)]);
-}
-
-fn spool_briefs(dir: &Path, briefs: &[Brief]) {
-    spool(dir, briefs).unwrap();
+fn derive_leaves_out_what_the_session_was_told_and_orders_by_admission() {
+    let mind = mind();
+    let persona = run_ref("persona");
+    mind.committed(vec![brief_doc("first", OWNER, &persona)]);
+    mind.committed(vec![brief_doc("second", OWNER, &persona)]);
+    mind.committed(vec![brief_doc("third", OWNER, &persona)]);
+    let told: HashSet<String> = [brief_ref("second").id.0].into();
+    assert_eq!(ids(derive(&mind, &told).unwrap()), vec![brief_ref("first").id.0, brief_ref("third").id.0]);
 }
 
 #[test]
-fn a_hook_and_the_actuator_claiming_at_once_deliver_each_entry_to_exactly_one_of_them() {
-    for _ in 0..20 {
-        let spool = spool_dir();
-        let briefs: Vec<Brief> = (1..=60).map(entry).collect();
-        spool_briefs(spool.path(), &briefs);
-        let path = spool.path().to_path_buf();
-        let racers: Vec<_> = (0..4)
-            .map(|_| {
-                let path = path.clone();
-                std::thread::spawn(move || claim(&path).unwrap())
-            })
-            .collect();
-        let mut seen: Vec<u64> = racers.into_iter().flat_map(|racer| racer.join().unwrap()).map(|brief| brief.ordinal).collect();
-        seen.sort_unstable();
-        assert_eq!(seen, (1..=60).collect::<Vec<u64>>(), "every entry once, none twice, none lost");
-    }
+fn a_brief_a_closed_run_claimed_is_still_a_brief_and_no_standing_rule_closes_it() {
+    let mind = mind();
+    mind.committed(vec![brief_doc("old", OWNER, &run_ref("persona"))]);
+    mind.committed(vec![run("old-self", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("old")])]);
+    mind.committed(vec![closing(run_ref("old-self"), recorded())]);
+    assert_eq!(ids(derive(&mind, &HashSet::new()).unwrap()), vec![brief_ref("old").id.0], "derive does not filter by past claims");
 }
 
 #[test]
-fn the_hook_prints_data_only_and_only_for_the_main_thread() {
-    let spool = spool_dir();
-    write_plan(spool.path(), "Plan usage: unobserved.").unwrap();
-    assert_eq!(inject(spool.path(), "{}", false).unwrap(), Injection { stdout: String::new(), exit: 0 }, "an empty spool prints nothing");
-    spool_briefs(spool.path(), &[entry(1)]);
-    // A subagent's call (the input carries an agent id) prints nothing and claims nothing.
-    let subagent = inject(spool.path(), "{\"hook_event_name\":\"PostToolBatch\",\"agent_id\":\"a1\"}", false).unwrap();
-    assert_eq!(subagent, Injection { stdout: String::new(), exit: 0 });
-    assert!(pending(spool.path()).unwrap());
-    let printed = inject(spool.path(), "{\"hook_event_name\":\"PostToolBatch\"}", false).unwrap();
-    assert_eq!(printed.exit, 0);
-    let output: Value = serde_json::from_str(&printed.stdout).unwrap();
-    assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PostToolBatch");
-    let context = output["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-    for needle in ["eureka-body:follow_up:b1", "campaign eureka-body", "repo GameCult/Huginn", "Item 1.", "Your answer closes it", "Plan usage: unobserved."] {
-        assert!(context.contains(needle), "{needle}: {context}");
-    }
-    assert_eq!(inject(spool.path(), "{}", false).unwrap().stdout, "", "claimed once");
-    // Unreadable input is not a reason to lose a brief or to fail the tool call.
-    spool_briefs(spool.path(), &[entry(2)]);
-    assert!(inject(spool.path(), "not json", false).unwrap().stdout.contains("Item 2."));
+fn the_backlog_lists_in_force_persona_briefs_claimed_by_closed_runs_and_admits_nothing() {
+    let mind = mind();
+    let persona = run_ref("persona");
+    mind.committed(vec![brief_doc("stale", OWNER, &persona), brief_doc("fresh", OWNER, &persona), brief_doc("claimed-live", OWNER, &persona), brief_doc("hers", OWNER, &run_ref("selfrun"))]);
+    mind.committed(vec![run("closed-self", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("stale"), brief_ref("hers")])]);
+    mind.committed(vec![closing(run_ref("closed-self"), recorded())]);
+    mind.committed(vec![run("live-self", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("claimed-live")])]);
+    let before = mind.ids(K::Resolution).len();
+    let listed = backlog(&mind).unwrap();
+    assert_eq!(listed.iter().map(|(brief, run)| (brief.id.clone(), run.clone())).collect::<Vec<_>>(), vec![(brief_ref("stale").id.0, run_ref("closed-self").id.0)], "only a Persona brief claimed by a closed run");
+    assert_eq!(mind.ids(K::Resolution).len(), before, "listing admits nothing");
 }
 
 #[test]
-fn the_pre_compact_hook_blocks_with_exit_2_and_leaves_one_marker() {
-    let spool = spool_dir();
-    spool_briefs(spool.path(), &[entry(1)]);
-    assert_eq!(inject(spool.path(), "{}", true).unwrap(), Injection { stdout: String::new(), exit: 2 });
-    assert!(pending(spool.path()).unwrap(), "blocking claims nothing");
-    assert!(take_pre_compact(spool.path()) && !take_pre_compact(spool.path()), "the marker is consumed once");
-}
-
-#[test]
-fn the_settings_name_the_two_hooks_with_absolute_quoted_commands() {
-    let hooks = Hooks { spool: PathBuf::from("/run/mind-x-self/inbox"), injector: PathBuf::from("/opt/it's/mind-self-run") };
-    let settings: Value = serde_json::from_str(&hooks.settings()).unwrap();
-    let tell = settings["hooks"]["PostToolBatch"][0]["hooks"][0]["command"].as_str().unwrap();
-    assert_eq!(tell, "'/opt/it'\\''s/mind-self-run' inject --spool '/run/mind-x-self/inbox'");
-    let compact = &settings["hooks"]["PreCompact"][0];
-    assert_eq!(compact["matcher"], "auto");
-    assert_eq!(compact["hooks"][0]["command"].as_str().unwrap(), format!("{tell} --pre-compact"));
+fn a_tell_names_each_brief_the_plan_and_how_she_resolves_it() {
+    let brief = Brief { id: "eureka-body:follow_up:b1".into(), campaign: "eureka-body".into(), repo: "GameCult/Huginn".into(), item: "Wire the thing.".into(), ordinal: 1 };
+    let text = render(&[brief], "Plan: 5h at 40%.");
+    assert!(text.contains("eureka-body:follow_up:b1") && text.contains("Wire the thing."), "{text}");
+    assert!(text.contains("resolve follow-up eureka-body:follow_up:b1 Recorded") && text.contains("Withdrawn"), "she is told to resolve it: {text}");
+    assert!(text.ends_with("Plan: 5h at 40%."), "{text}");
+    assert!(!render(&[], "").contains("brief"), "no brief, no plan, nothing");
 }
 
 #[test]
 fn closing_resolves_only_the_briefs_still_in_force_in_one_admission() {
-    let mind = mind_with(vec![brief_doc("a", OWNER), brief_doc("b", OWNER)]);
+    let mind = mind();
+    mind.committed(vec![brief_doc("a", OWNER, &run_ref("persona")), brief_doc("b", OWNER, &run_ref("persona"))]);
     mind.committed(vec![closing(brief_ref("b"), recorded())]);
-    let briefs = [(Brief { id: brief_ref("a").id.0, ..entry(1) }, "The answer.".to_string()), (Brief { id: brief_ref("b").id.0, ..entry(2) }, "Ignored.".to_string())];
+    let entry = |label: &str, n: u64| Brief { id: brief_ref(label).id.0, campaign: "eureka-body".into(), repo: "GameCult/Huginn".into(), item: format!("Item {n}."), ordinal: n };
+    let briefs = [(entry("a", 1), "The answer.".to_string()), (entry("b", 2), "Ignored.".to_string())];
     let now = at(0);
     assert_eq!(close(&mind, now, "selfrun-a", &briefs, "answered").unwrap(), 1);
     let rationales: Vec<String> = mind

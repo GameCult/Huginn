@@ -59,6 +59,16 @@ fn result_line() -> String {
     PROBE.lines().nth(2).unwrap().to_string()
 }
 
+/// The replay echo of a user line the CLI took into a request.
+fn echo() -> String {
+    json!({"type": "user", "isReplay": true, "uuid": "00000000-0000-4000-8000-000000000001", "message": {"role": "user", "content": "a line"}}).to_string()
+}
+
+/// A turn that ended well, with an answer.
+fn ok_result() -> String {
+    json!({"type": "result", "subtype": "success", "is_error": false, "terminal_reason": "completed", "result": "The answer."}).to_string()
+}
+
 fn init_line() -> String {
     PROBE.lines().next().unwrap().to_string()
 }
@@ -188,29 +198,15 @@ struct Fake {
     child: RefCell<Option<Scripted>>,
     spawns: RefCell<Vec<Vec<String>>>,
     refuse: bool,
-    hooks: Hooks,
 }
 
 impl Fake {
     fn with(child: Option<Scripted>, refuse: bool) -> Self {
-        Self { child: RefCell::new(child), spawns: RefCell::new(Vec::new()), refuse, hooks: test_hooks() }
+        Self { child: RefCell::new(child), spawns: RefCell::new(Vec::new()), refuse }
     }
-}
-
-/// A spool of its own, so that tests running side by side share nothing. Its directory outlives
-/// the test: a run's spool is read back after `carry` returns.
-fn test_hooks() -> Hooks {
-    let dir = tempfile::tempdir().unwrap();
-    let spool = dir.path().join("inbox");
-    std::mem::forget(dir);
-    Hooks { spool, injector: PathBuf::from("/opt/mind-self-run") }
 }
 
 impl Spawner for Fake {
-    fn hooks(&self) -> Hooks {
-        self.hooks.clone()
-    }
-
     fn spawn(&self, args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
         self.spawns.borrow_mut().push(args.to_vec());
         if self.refuse {
@@ -337,7 +333,6 @@ impl MindPort for Seen<'_> {
 }
 
 struct Ran {
-    hooks: Hooks,
     outcome: Result<SelfRunOutcome>,
     out: String,
     events: Vec<Event>,
@@ -401,15 +396,13 @@ fn carry_signalled(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Op
 }
 
 fn carry_scripted(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Option<Stop>, refuses: &[Stop], hangs: bool) -> Ran {
-    carry_hooked(seen, steps, (code, dies_on, refuses, hangs), test_hooks())
+    carry_one(seen, steps, (code, dies_on, refuses, hangs))
 }
 
-/// The same with the spool the child's hooks drain named by the test, so that a step can fire the hook.
-fn carry_hooked(seen: &Seen, steps: Vec<Step>, (code, dies_on, refuses, hangs): (Option<i32>, Option<Stop>, &[Stop], bool), hooks: Hooks) -> Ran {
+fn carry_one(seen: &Seen, steps: Vec<Step>, (code, dies_on, refuses, hangs): (Option<i32>, Option<Stop>, &[Stop], bool)) -> Ran {
     let log = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(Fixed(Cell::new(at_start())));
-    let mut fake = Fake::with(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false, asked: 0 }), false);
-    fake.hooks = hooks;
+    let fake = Fake::with(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false, asked: 0 }), false);
     let lender = FakeLender::logging(log.clone(), Answer::Grant);
     let mut out = Vec::new();
     let outcome = carry(seen, &*clock, &lender, &fake, TEST_CAP_S, &mut out);
@@ -417,7 +410,7 @@ fn carry_hooked(seen: &Seen, steps: Vec<Step>, (code, dies_on, refuses, hangs): 
     // The child's own events; the lease's are in `all`, in order with them.
     let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Abandoned)).cloned().collect();
     let spawns = fake.spawns.borrow().clone();
-    Ran { hooks: fake.hooks(), outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
+    Ran { outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
 }
 
 fn at_start() -> chrono::DateTime<chrono::Utc> {
@@ -439,7 +432,7 @@ fn go(steps: Vec<Step>) -> Ran {
 type Seed = Box<dyn Fn(&TestMind)>;
 
 fn flushes(ran: &Ran) -> usize {
-    ran.written().iter().filter(|text| text.as_str() == FLUSH_MESSAGE).count()
+    ran.written().iter().filter(|text| text.starts_with(FLUSH_MESSAGE)).count()
 }
 
 // ---- who is carried -----------------------------------------------------
@@ -511,8 +504,7 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
 #[test]
 fn claude_args_is_exactly_the_fixed_list_for_a_session() {
     let session = Uuid::parse_str(SESSION_OF_RUN_A).unwrap();
-    let hooks = test_hooks();
-    let args = claude_args(session, &hooks);
+    let args = claude_args(session);
     assert_eq!(
         args,
         [
@@ -532,8 +524,7 @@ fn claude_args_is_exactly_the_fixed_list_for_a_session() {
             "none",
             "--setting-sources",
             "user",
-            "--settings",
-            hooks.settings().as_str(),
+            "--replay-user-messages",
         ]
     );
     // Those belong to the run measure or to the unit's managed settings.
@@ -561,7 +552,7 @@ fn the_child_is_started_for_her_run_with_the_fixed_list_whatever_the_run_record_
         mind.committed(vec![self_run("selfrun-b", budget)]);
         let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
         assert_eq!(ran.spawns.len(), 1, "{budget}");
-        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap(), &ran.hooks), "{budget}");
+        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap()), "{budget}");
     }
 }
 
@@ -718,7 +709,18 @@ fn read_usage_classifies_the_owners_real_records() {
         }
     }
     assert_eq!(seen.iter().map(|(_, prefix)| *prefix).collect::<Vec<_>>(), sums);
-    assert_eq!(read_usage(&result_line()), Usage::Result);
+    assert_eq!(read_usage(&result_line()), Usage::Result { ok: false, blocked: false });
+    assert_eq!(read_usage(&ok_result()), Usage::Result { ok: true, blocked: false });
+    let blocked = json!({"type": "result", "subtype": "success", "is_error": true, "terminal_reason": "blocking_limit", "result": "Prompt is too long"}).to_string();
+    assert_eq!(read_usage(&blocked), Usage::Result { ok: false, blocked: true });
+    // An echo is a main-thread user line the CLI replayed, with string content; nothing else is.
+    assert_eq!(read_usage(&echo()), Usage::Echo);
+    let tool_result = json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "x"}]}}).to_string();
+    assert_eq!(read_usage(&tool_result), Usage::Other, "a tool result is not one of our lines");
+    let not_replayed = json!({"type": "user", "isReplay": false, "message": {"role": "user", "content": "a line"}}).to_string();
+    assert_eq!(read_usage(&not_replayed), Usage::Other);
+    let subagent_echo = json!({"type": "user", "isReplay": true, "parent_tool_use_id": "toolu_1", "message": {"role": "user", "content": "a line"}}).to_string();
+    assert_eq!(read_usage(&subagent_echo), Usage::Other, "a subagent's line is not ours");
     assert_eq!(read_usage(&init_line()), Usage::Other);
     assert_eq!(read_usage(&subagent("m", 5)), Usage::Other, "a subagent's request is not the main thread's");
     let mut no_id: Value = serde_json::from_str(&at("m", 5)).unwrap();
@@ -779,9 +781,8 @@ fn below_the_ceiling_no_flush_is_written_and_at_it_exactly_one() {
 
 #[test]
 fn a_closed_input_is_never_asked_for_a_flush_whatever_the_prefix_grows_to() {
-    let cap = i64::try_from(TEST_CAP_S).unwrap();
-    // Rotation closes the idle session; a request that comes after it asks nothing.
-    let ran = go(vec![After(cap - 1400, at("m1", 10)), Out(result_line()), Idle(200), Out(at("m2", CEILING_TOKENS + 1))]);
+    // An error before any answer closes the input; a request that comes after it asks nothing.
+    let ran = go(vec![Out(echo()), Out(result_line()), Out(at("m2", CEILING_TOKENS + 1))]);
     assert_eq!(ran.count(&Event::InputClosed), 1);
     assert_eq!(flushes(&ran), 0);
     assert_eq!(ran.ended().0, Cause::Own);
@@ -789,15 +790,20 @@ fn a_closed_input_is_never_asked_for_a_flush_whatever_the_prefix_grows_to() {
 }
 
 #[test]
-fn stdin_closes_once_after_the_flushs_own_result_and_nothing_is_written_after() {
-    // The first result ends the turn the flush was queued behind; the second is the flush's own.
-    let flushed = go(vec![Out(at("m1", CEILING_TOKENS)), Out(result_line()), Out(result_line())]);
-    assert_eq!(flushed.count(&Event::InputClosed), 1);
-    let closed_at = flushed.events.iter().position(|event| *event == Event::InputClosed).unwrap();
-    assert_eq!(flushed.events[..closed_at].iter().filter(|event| matches!(event, Event::Wrote(_))).count(), 2, "start and flush before the close");
-    assert!(flushed.events[closed_at..].iter().all(|event| !matches!(event, Event::Wrote(_))));
-    // One result closes nothing: the flush is still to have its turn.
-    let one = go(vec![Out(at("m1", CEILING_TOKENS)), Out(result_line())]);
+fn stdin_closes_once_at_the_result_after_the_flushs_echo_folded_or_queued_and_nothing_is_written_after() {
+    let writes_before_close = |ran: &Ran| {
+        assert_eq!(ran.count(&Event::InputClosed), 1, "{:?}", ran.events);
+        let closed_at = ran.events.iter().position(|event| *event == Event::InputClosed).unwrap();
+        assert_eq!(ran.events[..closed_at].iter().filter(|event| matches!(event, Event::Wrote(_))).count(), 2, "start and flush before the close");
+        assert!(ran.events[closed_at..].iter().all(|event| !matches!(event, Event::Wrote(_))));
+        assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 0, "never a grace interrupt");
+    };
+    // Folded: the flush lands in the running turn; its one result answers it.
+    writes_before_close(&go(vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), Out(echo()), Out(at("m2", 11)), Out(ok_result())]));
+    // Queued: the first result ends the turn it was queued behind; the second is the flush's own.
+    writes_before_close(&go(vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), Out(ok_result()), Out(echo()), Out(at("m2", 11)), Out(ok_result())]));
+    // The first result of a queued flush closes nothing: the flush is still to have its turn.
+    let one = go(vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), Out(ok_result())]);
     assert_eq!(one.count(&Event::InputClosed), 0, "{:?}", one.events);
 
     let never = go(vec![Out(at("m1", 10))]);
@@ -840,17 +846,17 @@ fn the_wait_for_the_child_never_passes_the_grace_deadline_and_never_spins_after_
 #[test]
 fn the_headroom_counts_the_requests_after_the_first_result_that_follows_the_flush_and_one_short_of_it_does_not_interrupt() {
     let hard = CEILING_TOKENS + FLUSH_HEADROOM_TOKENS;
-    let short = go(vec![Out(at("m1", CEILING_TOKENS)), Out(result_line()), Out(at("m2", hard - 1))]);
+    let short = go(vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), Out(ok_result()), Out(echo()), Out(at("m2", hard - 1))]);
     assert_eq!(short.count(&Event::Stopped(Stop::Interrupt)), 0);
     assert_eq!(short.ended().0, Cause::FlushRequested);
 
-    let at_hard = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Out(result_line()), Out(at("m2", hard)), Out(at("m3", hard + 1))], Some(130), true);
+    let at_hard = carry_with(&Seen::of(&with_run()), vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), Out(ok_result()), Out(echo()), Out(at("m2", hard)), Out(at("m3", hard + 1))], Some(130), true);
     assert_eq!(at_hard.count(&Event::Stopped(Stop::Interrupt)), 1);
     assert_eq!(at_hard.ended().0, Cause::Signalled(Stop::Interrupt));
     assert_eq!(FLUSH_HEADROOM_TOKENS, 60_000);
 
-    // Before that result the running turn's own requests are not the flush's turn: however far they grow, no interrupt.
-    let same_turn = go(vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", hard)), Out(at("m3", hard + 500_000))]);
+    // Before the flush's echo the running turn's own requests are not the flush's turn: however far they grow, no interrupt.
+    let same_turn = go(vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), Out(at("m2", hard)), Out(at("m3", hard + 500_000))]);
     assert_eq!(same_turn.count(&Event::Stopped(Stop::Interrupt)), 0);
 }
 
@@ -858,7 +864,7 @@ fn the_headroom_counts_the_requests_after_the_first_result_that_follows_the_flus
 fn a_jump_past_the_ceiling_plus_the_headroom_writes_the_flush_and_the_running_turn_cannot_use_up_the_flushs_turn() {
     let jump = carry_with(
         &Seen::of(&with_run()),
-        vec![Out(at("m1", 290_000)), Out(at("m2", 400_000)), Out(at("m3", 470_000)), Out(result_line()), Out(at("m4", 459_999)), Out(at("m5", 460_000)), Out(at("m6", 470_000))],
+        vec![Out(echo()), Out(at("m1", 290_000)), Out(at("m2", 400_000)), Out(at("m3", 470_000)), Out(ok_result()), Out(echo()), Out(at("m4", 459_999)), Out(at("m5", 460_000)), Out(at("m6", 470_000))],
         Some(130),
         true,
     );
@@ -873,15 +879,15 @@ fn a_jump_past_the_ceiling_plus_the_headroom_writes_the_flush_and_the_running_tu
             _ => None,
         })
         .collect();
-    // Reads: m1, m2 (the jump, which writes the flush), m3 (the running turn's 470k, past the headroom: no interrupt).
-    assert_eq!(kinds[..5], ["read", "read", "flush", "read", "read"], "{kinds:?}");
+    // Reads: the start echo, m1, m2 (the jump, which writes the flush), then m3 (the running turn's 470k, past the headroom: no interrupt).
+    assert_eq!(kinds[..6], ["read", "read", "read", "flush", "read", "read"], "{kinds:?}");
     // The headroom is measured from the prefix the flush was asked at (400k) and counts the requests after the
-    // first result only: 459_999 does not interrupt; 460_000 does, once, and m6 is never read.
+    // flush's echo only: 459_999 does not interrupt; 460_000 does, once, and m6 is never read.
     assert_eq!(jump.count(&Event::Stopped(Stop::Interrupt)), 1, "{kinds:?}");
     assert_eq!(jump.lines(), "request 1 prefix 290000
 request 2 prefix 400000
 request 3 prefix 470000
-result subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed
+result subtype=success is_error=false: The answer.
 request 4 prefix 459999
 request 5 prefix 460000
 ");
@@ -933,10 +939,11 @@ fn a_usage_sum_that_overflows_is_at_or_over_the_ceiling_not_a_panic_or_a_wrap() 
 }
 
 #[test]
-fn a_result_before_any_request_leaves_the_input_open_and_the_run_ends_with_a_typed_outcome() {
-    // The shape of an API or authentication failure: the child reports an error result and no request ever came.
-    let ran = carry_with(&Seen::of(&with_run()), vec![Out(result_line())], Some(1), false);
-    assert_eq!(ran.count(&Event::InputClosed), 0);
+fn an_error_result_before_any_answer_closes_the_input_at_once_and_the_run_ends_with_a_typed_outcome() {
+    // The shape of an API or authentication failure: an error result before any answer. A flush would fail the same way.
+    let ran = carry_with(&Seen::of(&with_run()), vec![Out(echo()), Out(result_line())], Some(1), false);
+    assert_eq!(ran.count(&Event::InputClosed), 1);
+    assert_eq!(flushes(&ran), 0);
     assert_eq!(ran.ended(), (Cause::Own, Some(1), 0, 0));
     assert_eq!(ran.outcome.as_ref().unwrap().exit_status(), 1);
     assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 0);
@@ -944,8 +951,8 @@ fn a_result_before_any_request_leaves_the_input_open_and_the_run_ends_with_a_typ
 
 #[test]
 fn without_a_flush_nothing_is_ever_signalled_however_large_the_prefix_grows() {
-    let cap = i64::try_from(TEST_CAP_S).unwrap();
-    let ran = go(vec![After(cap - 1400, at("m1", 10)), Out(result_line()), Idle(200), Out(at("m2", 900_000)), Idle(100_000)]);
+    // An error before any answer closed the input: a request far over the ceiling asks for no flush and nothing is signalled.
+    let ran = go(vec![Out(echo()), Out(result_line()), Out(at("m2", 900_000)), Idle(100_000)]);
     assert_eq!(ran.events.iter().filter(|event| matches!(event, Event::Stopped(_))).count(), 0);
     assert_eq!(ran.ended().0, Cause::Own);
 }
@@ -1018,15 +1025,15 @@ fn the_clock_is_read_once_per_event_so_a_step_of_the_wall_clock_cannot_split_a_p
             now
         }
     }
-    let steps: VecDeque<Step> = vec![Out(at("m1", CEILING_TOKENS)), Out(at("m2", CEILING_TOKENS + 1)), Idle(0)].into();
+    let steps: VecDeque<Step> = vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), Out(at("m2", CEILING_TOKENS + 1)), Idle(0)].into();
     let child = Scripted { steps, log: log.clone(), clock: Rc::new(Fixed(Cell::new(at_start()))), code: Some(0), dies_on: None, refuses: vec![], hangs: false, exited: false, eof: false, asked: 0 };
     let fake = Fake::with(Some(child), false);
     let outcome = carry(&Seen::of(&mind), &Stepped(clock.clone()), &FakeLender::new(Answer::Grant), &fake, TEST_CAP_S, &mut Vec::new()).unwrap();
     let events = log.borrow().clone();
     let reads = events.iter().filter(|event| matches!(event, Event::Asked(_))).count() as u32;
-    // One read for the lease's expiry, one for closing the past, one before the first wait, then one per fact heard, and one for the closure:
+    // One read for the lease's expiry, one before the first wait, then one per fact heard, and one for the closure:
     // never a second read inside a pass.
-    assert_eq!(clock.1.get(), 4 + reads, "{events:?}");
+    assert_eq!(clock.1.get(), 3 + reads, "{events:?}");
     // The flush was written on the first request at time 0; the very next pass sees the stepped clock.
     // The flush pass itself has no interrupt, whatever the step: the interrupt is on a later event.
     let flush_at = events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains("context ceiling"))).unwrap();
@@ -1038,9 +1045,9 @@ fn the_clock_is_read_once_per_event_so_a_step_of_the_wall_clock_cannot_split_a_p
 #[test]
 fn a_deadline_that_came_during_a_line_is_answered_without_waiting_for_the_next_poll() {
     // The result arrives after the grace has run out: the input closes, and the interrupt is due at once.
-    let ran = carry_scripted(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Step::After(FLUSH_GRACE_S + 5, result_line())], Some(130), Some(Stop::Interrupt), &[], true);
+    let ran = carry_scripted(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Step::After(FLUSH_GRACE_S + 5, ok_result())], Some(130), Some(Stop::Interrupt), &[], true);
     assert_eq!(ran.count(&Event::Stopped(Stop::Interrupt)), 1);
-    assert_eq!(ran.count(&Event::InputClosed), 0, "the flush's turn has begun, not ended");
+    assert_eq!(ran.count(&Event::InputClosed), 0, "the flush is queued behind the turn that just ended: its echo has not come");
     let stop_at = ran.events.iter().position(|event| matches!(event, Event::Stopped(_))).unwrap();
     let reads_before = ran.events[..stop_at].iter().filter(|event| matches!(event, Event::Asked(_))).count();
     assert_eq!(reads_before, 2, "the interrupt is in the pass that heard the result, not a poll away: {:?}", ran.events);
@@ -1244,9 +1251,6 @@ mod process {
 
     struct Spawn(PathBuf);
     impl Spawner for Spawn {
-        fn hooks(&self) -> Hooks {
-            test_hooks()
-        }
         fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
             Ok(Box::new(Prompt(start_with(&self.0, args, token))))
         }
@@ -1273,9 +1277,6 @@ mod process {
 
     struct Patient(PathBuf);
     impl Spawner for Patient {
-        fn hooks(&self) -> Hooks {
-            test_hooks()
-        }
         fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
             Ok(Box::new(Bounded(start_with(&self.0, args, token), std::time::Instant::now())))
         }
@@ -1286,15 +1287,16 @@ mod process {
         let dir = tempfile::tempdir().unwrap();
         let lines = [at("m1", 10), at("m2", CEILING_TOKENS)].join("
 ");
-        let result = result_line();
-        // Prints two requests, waits for the flush on stdin, then the result, as a stand-in for a Self that obeys.
+        let (echo, result) = (echo(), ok_result());
+        // Prints two requests, waits for the start and the flush on stdin, echoes both, then answers, as a stand-in for a Self that obeys.
         let body = format!("cat <<'EOF'
 {lines}
 EOF
 read -t 5 start
 read -t 5 flush
 cat <<'EOF'
-{result}
+{echo}
+{echo}
 {result}
 EOF
 while read more; do :; done
@@ -1305,8 +1307,10 @@ exit 0");
         let outcome = carry(&Seen::of(&mind), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
         assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000 });
         let printed: String = String::from_utf8(out).unwrap().lines().filter(|line| !line.starts_with("decision ")).map(|line| format!("{line}\n")).collect();
-        let failed = "result subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed\n";
-        assert_eq!(printed, format!("request 1 prefix 10\nrequest 2 prefix 300000\n{failed}{failed}"));
+        assert_eq!(printed, "request 1 prefix 10
+request 2 prefix 300000
+result subtype=success is_error=false: The answer.
+");
     }
 
     #[test]
@@ -1485,17 +1489,15 @@ fn a_run_without_claims_gets_the_identity_lines_alone() {
 
 use eureka_pipeline::PipelineResolution;
 
-const NO_SIGNALS: &[Stop] = &[];
-
 fn live_mind() -> Rc<TestMind> {
     let mind = Rc::new(with_run());
-    mind.committed(vec![spec("x")]);
+    mind.committed(vec![spec("x"), run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
     mind
 }
 
-/// A brief from her Persona: a follow-up with owner `self-run`.
+/// A brief from her Persona: a follow-up with owner `self-run`, sourced from the Persona turn's run.
 fn brief(label: &str, item: &str) -> PipelineDocument {
-    let PipelineDocument::FollowUp(mut document) = follow_up(label, &spec_ref("x")) else { unreachable!() };
+    let PipelineDocument::FollowUp(mut document) = follow_up(label, &run_ref("persona")) else { unreachable!() };
     document.item = item.into();
     document.owner = inbox::OWNER.into();
     PipelineDocument::FollowUp(document)
@@ -1511,6 +1513,11 @@ fn admits(mind: &Rc<TestMind>, seconds: i64, documents: Vec<PipelineDocument>) -
     Step::Do(seconds, Rc::new(move || mind.committed(documents.clone())))
 }
 
+/// Her Self resolves the brief herself, through her mind tool.
+fn resolves(mind: &Rc<TestMind>, label: &str) -> Step {
+    admits(mind, 0, vec![close(brief_ref(label), recorded())])
+}
+
 fn resolutions_of(mind: &TestMind, subject: &PipelineRef) -> Vec<PipelineResolution> {
     mind.ids(K::Resolution)
         .iter()
@@ -1519,11 +1526,6 @@ fn resolutions_of(mind: &TestMind, subject: &PipelineRef) -> Vec<PipelineResolut
             _ => None,
         })
         .collect()
-}
-
-/// The text of the probe's result line: what a brief's closure carries.
-fn answer_text() -> String {
-    serde_json::from_str::<Value>(&result_line()).unwrap()["result"].as_str().unwrap().to_string()
 }
 
 fn five_minute_request(id: &str, prefix: u64) -> String {
@@ -1536,167 +1538,286 @@ fn tells(ran: &Ran) -> Vec<String> {
     ran.written().into_iter().filter(|text| text.contains("A brief from your Persona")).collect()
 }
 
+fn mind_run(mind: &Rc<TestMind>, steps: Vec<Step>) -> Ran {
+    carry_with(&Seen::of(mind), steps, Some(0), false)
+}
+
 #[test]
 fn a_result_never_ends_the_session_the_child_ends_it_or_the_cache_does() {
-    let ran = go(vec![Out(at("m1", 10)), Out(result_line())]);
+    let ran = go(vec![Out(echo()), Out(at("m1", 10)), Out(ok_result())]);
     assert_eq!(ran.count(&Event::InputClosed), 0, "a result is the end of a turn: {:?}", ran.events);
     assert_eq!(ran.ended().0, Cause::Own);
 }
 
 #[test]
-fn a_brief_to_a_working_self_is_told_once_between_turns_and_closed_by_the_result_that_answers_it() {
+fn a_brief_derived_while_a_turn_runs_is_written_at_once_counted_at_its_echo_and_never_told_twice() {
     let mind = live_mind();
     let steps = vec![
+        Out(echo()),
         Out(at("m1", 10)),
+        // The brief arrives while the first turn runs: the next poll writes it at once, mid-turn.
         admits(&mind, 31, vec![brief("b1", "Survey the noise functions.")]),
-        // The first turn ends: the brief was spooled while it ran, so it is told now, as the next turn.
-        Out(result_line()),
-        Idle(1),
-        // A later poll does not spool it again.
+        Out(echo()),
+        // Later polls do not tell it again.
         Idle(31),
-        Out(result_line()),
-        Idle(1),
+        Idle(31),
+        Out(ok_result()),
     ];
-    let ran = carry_with(&Seen::of(&mind), steps, Some(0), false);
+    let ran = mind_run(&mind, steps);
     let told = tells(&ran);
     assert_eq!(told.len(), 1, "{:?}", ran.written());
     assert!(told[0].contains(&brief_ref("b1").id.0) && told[0].contains("Survey the noise functions."), "{}", told[0]);
-    assert!(told[0].contains("Your answer closes it"), "{}", told[0]);
+    assert!(told[0].contains("resolve follow-up") && told[0].contains("Recorded"), "she is told how to close it: {}", told[0]);
+    assert_eq!(ran.written().len(), 2, "the start message and one tell: {:?}", ran.written());
+    assert!(ran.out.contains("decision WriteTells prefix 10 ttl_s 0 idle_s working inbox true written 2 consumed 1\n"), "{}", ran.out);
     assert_eq!(ran.count(&Event::InputClosed), 0);
-    let closures = resolutions_of(&mind, &brief_ref("b1"));
-    assert_eq!(closures.len(), 1, "closed once");
-    assert!(matches!(closures[0].outcome, ResolutionOutcome::Recorded { .. }));
-    assert_eq!(closures[0].rationale.0, answer_text());
-    assert!(!inbox::pending(&ran.hooks.spool).unwrap(), "nothing left to tell");
+    // A result is not an answer: nothing closes the brief by its timing.
+    assert!(resolutions_of(&mind, &brief_ref("b1")).is_empty());
 }
 
 #[test]
-fn a_brief_told_mid_turn_by_the_hook_is_closed_by_that_turns_result_and_never_told_twice() {
+fn a_brief_derived_while_the_session_is_idle_is_written_and_the_session_is_busy_until_its_echo() {
     let mind = live_mind();
-    let hooks = test_hooks();
-    let printed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let fire = {
-        let (spool, printed) = (hooks.spool.clone(), printed.clone());
-        Step::Do(0, Rc::new(move || printed.borrow_mut().push(inbox::inject(&spool, "{\"hook_event_name\":\"PostToolBatch\"}", false).unwrap().stdout)))
-    };
-    let steps = vec![Out(at("m1", 10)), admits(&mind, 31, vec![brief("b2", "Wire the shader uniforms.")]), fire.clone(), fire, Out(result_line()), Idle(1)];
-    let ran = carry_hooked(&Seen::of(&mind), steps, (Some(0), None, NO_SIGNALS, false), hooks);
-    let printed = printed.borrow();
-    assert!(printed[0].contains(&brief_ref("b2").id.0) && printed[0].contains("Wire the shader uniforms."), "{printed:?}");
-    assert_eq!(printed[1], "", "the second call finds nothing: each brief enters once");
-    assert!(tells(&ran).is_empty(), "the hook told it; the actuator did not: {:?}", ran.written());
-    let closures = resolutions_of(&mind, &brief_ref("b2"));
-    assert_eq!((closures.len(), closures[0].rationale.0.as_str()), (1, answer_text().as_str()));
-    // The closure is admitted under the run's own label.
-    let sessions: Vec<String> = mind
-        .ids(K::Resolution)
-        .iter()
-        .filter_map(|resolution| mind.view(K::Resolution, resolution))
-        .filter(|view| matches!(&view.document, PipelineDocument::Resolution(document) if document.subject == brief_ref("b2")))
-        .map(|view| view.admission.provenance.session.0)
-        .collect();
-    assert_eq!(sessions, vec!["selfrun-a".to_string()]);
+    let steps = vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), admits(&mind, 31, vec![brief("b2", "Wire the shader uniforms.")]), Out(echo()), Out(ok_result())];
+    let ran = mind_run(&mind, steps);
+    assert_eq!(tells(&ran).len(), 1, "{:?}", ran.written());
+    assert!(ran.out.contains("idle_s 31 inbox true written 2 consumed 1\n"), "idle when it was written: {}", ran.out);
+    assert_eq!(ran.count(&Event::InputClosed), 0);
+    assert!(resolutions_of(&mind, &brief_ref("b2")).is_empty());
 }
 
 #[test]
-fn a_brief_her_self_resolved_is_not_resolved_again_and_one_not_yet_told_stays_open_past_the_result() {
+fn a_brief_open_at_start_is_in_the_start_message_with_how_to_resolve_it_and_is_not_told_again() {
     let mind = live_mind();
-    let hooks = test_hooks();
-    let claim_and_resolve = {
-        let (spool, mind) = (hooks.spool.clone(), mind.clone());
-        Step::Do(
-            0,
-            Rc::new(move || {
-                inbox::inject(&spool, "{}", false).unwrap();
-                mind.committed(vec![close(brief_ref("b3"), recorded())]);
-            }),
-        )
-    };
-    let steps = vec![Out(at("m1", 10)), admits(&mind, 31, vec![brief("b3", "Mine.")]), claim_and_resolve, admits(&mind, 31, vec![brief("b4", "Later.")]), Out(result_line())];
-    let ran = carry_hooked(&Seen::of(&mind), steps, (Some(0), None, NO_SIGNALS, false), hooks);
-    assert_eq!(resolutions_of(&mind, &brief_ref("b3")).len(), 1, "her own resolution stands alone");
-    assert!(resolutions_of(&mind, &brief_ref("b4")).is_empty(), "told after the close: this result did not answer it");
-    assert_eq!(tells(&ran).len(), 1, "b4 is told once, in the result's own pass, after the close: {:?}", ran.written());
-    assert!(tells(&ran)[0].contains(&brief_ref("b4").id.0));
-}
-
-#[test]
-fn the_past_is_closed_at_session_start_and_only_what_no_closed_run_claimed_is_told() {
-    let mind = TestMind::seeded();
-    mind.committed(vec![spec("x")]);
-    mind.committed(vec![brief("p1", "Stale."), brief("p2", "Still open.")]);
-    mind.committed(vec![run("old", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("p1")])]);
-    mind.committed(vec![close(run_ref("old"), recorded())]);
-    mind.committed(vec![self_run("selfrun-a", "5")]);
-    let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
-    let closures = resolutions_of(&mind, &brief_ref("p1"));
-    assert_eq!(closures.len(), 1);
-    assert!(matches!(closures[0].outcome, ResolutionOutcome::Recorded { .. }));
-    assert!(closures[0].rationale.0.contains(&run_ref("old").id.0), "names the run that answered it: {}", closures[0].rationale.0);
+    mind.committed(vec![brief("p1", "Still open.")]);
+    let ran = mind_run(&mind, vec![Out(echo()), Idle(31), Idle(31)]);
     let start = &ran.written()[0];
-    assert!(start.contains("Also open for you") && start.contains(&brief_ref("p2").id.0) && start.contains("Still open."), "{start}");
-    assert!(!start.contains(&brief_ref("p1").id.0), "never told: {start}");
-    // The unclaimed one was told in the start message, so the first result answers it.
-    assert_eq!(resolutions_of(&mind, &brief_ref("p2")).len(), 1);
+    assert!(start.contains("Also open for you") && start.contains(&brief_ref("p1").id.0) && start.contains("Still open."), "{start}");
+    assert!(start.contains(&format!("resolve follow-up {} Recorded", brief_ref("p1").id.0)), "{start}");
+    assert_eq!(ran.written().len(), 1, "never told again: {:?}", ran.written());
+}
+
+#[test]
+fn a_follow_up_her_self_filed_for_herself_is_never_told() {
+    let mind = live_mind();
+    let PipelineDocument::FollowUp(mut hers) = follow_up("hers", &run_ref("selfrun-a")) else { unreachable!() };
+    hers.owner = inbox::OWNER.into();
+    mind.committed(vec![PipelineDocument::FollowUp(hers)]);
+    let ran = mind_run(&mind, vec![Out(echo()), Idle(31)]);
+    assert_eq!(ran.written().len(), 1, "{:?}", ran.written());
+    assert!(!ran.written()[0].contains("Also open"), "{}", ran.written()[0]);
+}
+
+#[test]
+fn an_idle_end_closes_the_briefs_she_left_open_saying_so_and_leaves_the_ones_she_resolved() {
+    let mind = live_mind();
+    mind.committed(vec![brief("p1", "Left open."), brief("p2", "Answered by her.")]);
+    let steps = vec![Out(echo()), Out(at("m1", 10)), resolves(&mind, "p2"), Out(ok_result()), Idle(3539), Idle(1), Out(echo()), Out(ok_result())];
+    let ran = mind_run(&mind, steps);
+    assert_eq!(ran.count(&Event::InputClosed), 1, "{:?}", ran.events);
+    let left = resolutions_of(&mind, &brief_ref("p1"));
+    assert_eq!(left.len(), 1);
+    let ResolutionOutcome::Recorded { reason } = &left[0].outcome else { panic!("{:?}", left[0].outcome) };
+    assert!(reason.0.contains("selfrun-a") && reason.0.contains("went idle") && reason.0.contains("without her resolving it"), "{}", reason.0);
+    assert_eq!(left[0].rationale.0, "The answer.", "the last ok result's text");
+    assert_eq!(resolutions_of(&mind, &brief_ref("p2")).len(), 1, "her own resolution stands alone");
+}
+
+#[test]
+fn a_rotation_a_ceiling_an_error_or_a_crash_leaves_the_told_briefs_open_for_the_successor() {
+    let cap = i64::try_from(TEST_CAP_S).unwrap();
+    let ends: Vec<(&str, Vec<Step>)> = vec![
+        ("rotation", vec![Out(echo()), After(cap - 1400, at("m1", 10)), Out(echo()), Out(ok_result())]),
+        ("ceiling", vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), Out(echo()), Out(ok_result())]),
+        ("error before an answer", vec![Out(echo()), Out(result_line())]),
+        ("idle flush answered by an error", vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), Idle(3539), Idle(1), Out(echo()), Out(result_line())]),
+        ("crash", vec![Out(echo()), Out(at("m1", 10)), Exit(Some(137))]),
+    ];
+    for (name, steps) in ends {
+        let mind = live_mind();
+        mind.committed(vec![brief("p1", "Left open.")]);
+        let ran = mind_run(&mind, steps);
+        assert!(ran.outcome.is_ok(), "{name}");
+        assert!(resolutions_of(&mind, &brief_ref("p1")).is_empty(), "{name}: the brief stays open");
+    }
+}
+
+#[test]
+fn a_brief_admitted_after_the_flush_is_written_stays_in_force_and_untold() {
+    let mind = live_mind();
+    let steps = vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), admits(&mind, 31, vec![brief("late", "Too late.")]), Idle(31), Out(echo()), Out(ok_result())];
+    let ran = mind_run(&mind, steps);
+    assert!(tells(&ran).is_empty(), "{:?}", ran.written());
+    assert_eq!(ran.written().len(), 2, "the start and the flush; no line after the flush");
+    assert!(resolutions_of(&mind, &brief_ref("late")).is_empty());
 }
 
 #[test]
 fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_brief_keeps_it_open() {
-    // An hour's cache: warm at 3539 s, the flush at 3540, the input closed after the flush's own result.
-    let hour = go(vec![Out(at("m1", 10)), Out(result_line()), Idle(3539), Idle(1), Out(result_line()), Idle(1)]);
-    assert_eq!(hour.written().iter().filter(|text| text.as_str() == FLUSH_MESSAGE).count(), 1);
+    // An hour's cache: warm at 3539 s, the flush at 3540, the input closed at the result after the flush's echo.
+    let hour = go(vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), Idle(3539), Idle(1), Out(echo()), Out(ok_result()), Idle(1)]);
+    assert_eq!(flushes(&hour), 1);
     let flush_at = hour.events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains(FLUSH_MESSAGE))).unwrap();
     let closed_at = hour.events.iter().position(|event| *event == Event::InputClosed).unwrap();
     assert!(flush_at < closed_at && hour.count(&Event::InputClosed) == 1, "{:?}", hour.events);
-    assert!(hour.out.contains("decision WriteFlush prefix 10 ttl_s 3600 idle_s 3540 inbox false briefs_closed 0
-"), "{}", hour.out);
+    assert!(hour.out.contains("decision WriteFlush(Idle) prefix 10 ttl_s 3600 idle_s 3540 inbox false written 2 consumed 1\n"), "{}", hour.out);
+    assert!(hour.written().iter().any(|text| text.contains("nothing is waiting and its cache would lapse") && text.contains("Resolve each brief you answered")), "{:?}", hour.written());
     // Five minutes' cache: the flush at 240 s.
-    let short = go(vec![Out(five_minute_request("m1", 10)), Out(result_line()), Idle(239), Idle(1), Out(result_line()), Idle(1)]);
+    let short = go(vec![Out(echo()), Out(five_minute_request("m1", 10)), Out(ok_result()), Idle(239), Idle(1), Out(echo()), Out(ok_result()), Idle(1)]);
     assert_eq!(flushes(&short), 1);
     // Not a second early.
-    let early = go(vec![Out(at("m1", 10)), Out(result_line()), Idle(3539)]);
+    let early = go(vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), Idle(3539)]);
     assert_eq!(flushes(&early), 0);
     // A brief waiting at the cache's end is told, not flushed: the session stays open.
     let mind = live_mind();
-    let steps = vec![Out(at("m1", 10)), Out(result_line()), admits(&mind, 3539, vec![brief("b5", "One more.")]), Idle(1), Idle(1), Out(result_line()), Idle(1)];
-    let ran = carry_with(&Seen::of(&mind), steps, Some(0), false);
-    assert_eq!((flushes(&ran), tells(&ran).len(), ran.count(&Event::InputClosed)), (0, 1, 0), "{:?}", ran.written());
+    let steps = vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), admits(&mind, 3539, vec![brief("b5", "One more.")]), Idle(1), Out(echo()), Out(ok_result()), Idle(1)];
+    let ran = mind_run(&mind, steps);
+    assert_eq!((flushes(&ran), tells(&ran).len(), ran.count(&Event::InputClosed)), (0, 1, 0), "{:?}
+{}", ran.written(), ran.out);
 }
 
 #[test]
-fn near_the_cap_an_idle_session_closes_for_rotation_and_a_working_one_is_asked_for_its_flush() {
+fn a_tell_that_is_not_yet_echoed_keeps_the_session_busy_so_the_cache_end_does_not_flush_over_it() {
+    let mind = live_mind();
+    let steps = vec![Out(echo()), Out(at("m1", 10)), Out(ok_result()), admits(&mind, 31, vec![brief("b6", "Pending.")]), Idle(3600)];
+    let ran = mind_run(&mind, steps);
+    assert_eq!((tells(&ran).len(), flushes(&ran)), (1, 0), "{:?}", ran.written());
+}
+
+#[test]
+fn near_the_cap_the_session_is_asked_for_its_flush_idle_or_working_and_closes_at_the_result_after_its_echo() {
     let cap = i64::try_from(TEST_CAP_S).unwrap();
-    // Idle at cap - 1200 s: closed, with no flush asked.
-    let idle = go(vec![After(cap - 1400, at("m1", 10)), Out(result_line()), Idle(199), Idle(1)]);
-    assert_eq!((idle.count(&Event::InputClosed), flushes(&idle)), (1, 0), "{:?}", idle.events);
-    let early = go(vec![After(cap - 1400, at("m1", 10)), Out(result_line()), Idle(199)]);
-    assert_eq!(early.count(&Event::InputClosed), 0);
-    // Mid-turn at cap - 600 s: the flush, once.
-    let working = go(vec![After(cap - 600, at("m1", 10))]);
-    assert_eq!(flushes(&working), 1);
-    let before = go(vec![After(cap - 601, at("m1", 10))]);
+    // Idle at cap - 1700 s: the flush at cap - 1500, not a second before.
+    let before = go(vec![Out(echo()), After(cap - 1700, at("m1", 10)), Out(ok_result()), Idle(199)]);
     assert_eq!(flushes(&before), 0);
+    let idle = go(vec![Out(echo()), After(cap - 1700, at("m1", 10)), Out(ok_result()), Idle(199), Idle(1), Out(echo()), Out(ok_result())]);
+    assert_eq!((flushes(&idle), idle.count(&Event::InputClosed)), (1, 1), "{:?}", idle.events);
+    assert!(idle.written().iter().any(|text| text.contains("the unit's time is nearly up")), "{:?}", idle.written());
+    // Mid-turn: the flush at cap - 1500, once.
+    let working = go(vec![Out(echo()), After(cap - 1500, at("m1", 10))]);
+    assert_eq!(flushes(&working), 1);
+    let not_yet = go(vec![Out(echo()), After(cap - 1501, at("m1", 10))]);
+    assert_eq!(flushes(&not_yet), 0);
 }
 
 #[test]
-fn a_session_starts_with_an_empty_spool_whatever_an_earlier_one_left() {
-    let hooks = test_hooks();
-    inbox::spool(&hooks.spool, &[Brief { id: "eureka-body:follow_up:stale".into(), campaign: "eureka-body".into(), repo: "GameCult/Huginn".into(), item: "Stale.".into(), ordinal: 1 }]).unwrap();
-    let mind = with_run();
-    let ran = carry_hooked(&Seen::of(&mind), vec![Out(result_line())], (Some(0), None, NO_SIGNALS, false), hooks);
-    assert!(!inbox::pending(&ran.hooks.spool).unwrap(), "the stale entry is gone");
-    assert_eq!(ran.written().len(), 1, "and was never told: {:?}", ran.written());
+fn no_stdin_line_is_written_after_the_flush_and_nothing_but_the_writer_writes() {
+    let mind = live_mind();
+    mind.committed(vec![brief("b7", "Early.")]);
+    let steps = vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), admits(&mind, 31, vec![brief("b8", "After the flush.")]), Idle(31), Idle(31), Out(echo()), Out(at("m2", 11)), Out(ok_result())];
+    let ran = mind_run(&mind, steps);
+    let written = ran.written();
+    assert_eq!(written.len(), 2, "{written:?}");
+    assert!(written[1].starts_with(FLUSH_MESSAGE), "{}", written[1]);
+    assert_eq!(ran.spawns.len(), 1);
+    assert!(ran.spawns[0].iter().all(|arg| arg != "--settings"), "no hooks on argv: {:?}", ran.spawns[0]);
 }
 
-#[test]
-fn a_pre_compact_block_leaves_a_marker_and_the_session_asks_for_the_flush_once() {
-    let hooks = test_hooks();
-    let fire = {
-        let spool = hooks.spool.clone();
-        Step::Do(1, Rc::new(move || assert_eq!(inbox::inject(&spool, "{}", true).unwrap().exit, 2)))
-    };
-    let mind = with_run();
-    let ran = carry_hooked(&Seen::of(&mind), vec![Out(at("m1", 10)), fire.clone(), fire, Out(result_line())], (Some(0), None, NO_SIGNALS, false), hooks);
-    assert_eq!(flushes(&ran), 1, "{:?}", ran.written());
-    assert!(!inbox::take_pre_compact(&ran.hooks.spool), "the marker was taken");
+/// The committed 2.1.312 streams, replayed through the real parser and the decision.
+mod live_session {
+    use crate::self_run::decide::{Action as Do, Event as Fact, Why};
+    use super::*;
+
+    /// One recorded line as the loop would hear it: a label for the stream, the decision's action.
+    fn replay(jsonl: &str) -> Vec<(String, Do)> {
+        let mut state = State::started(crate::testkit::at(0), 100_000);
+        let mut ttl_1h = false;
+        let mut trace = Vec::new();
+        for entry in jsonl.lines() {
+            let entry: Value = serde_json::from_str(entry).unwrap();
+            let Some(line) = entry.get("line").and_then(Value::as_str) else { continue };
+            let at = crate::testkit::at((entry["t"].as_f64().unwrap() * 1000.0) as i64);
+            if let Some(hour) = writes_hour_cache(line) {
+                ttl_1h = hour;
+            }
+            let (label, fact) = match read_usage(line) {
+                Usage::Request { id, prefix } => (format!("request:{prefix}"), Fact::Request { id, prefix }),
+                Usage::Echo => ("echo".to_string(), Fact::Echo),
+                Usage::Result { ok, blocked } => (format!("result:{}", if blocked { "blocked" } else if ok { "ok" } else { "error" }), Fact::Result { ok, blocked, ttl_1h }),
+                Usage::Other | Usage::Unreadable => ("other".to_string(), Fact::Tick),
+            };
+            let (next, action) = decide(state, fact, at);
+            state = next;
+            trace.push((label, action));
+        }
+        trace
+    }
+
+    fn kinds(trace: &[(String, Do)]) -> Vec<&str> {
+        trace.iter().map(|(label, _)| label.as_str()).collect()
+    }
+
+    /// The indexes at which the decision acted, and how.
+    fn acted(trace: &[(String, Do)]) -> Vec<(usize, Do)> {
+        trace.iter().enumerate().filter(|(_, (_, action))| *action != Do::None).map(|(at, (_, action))| (at, action.clone())).collect()
+    }
+
+    const FOLDED: &str = include_str!("claude-2.1.312-live-session-folded.jsonl");
+    const QUEUED: [&str; 2] = [include_str!("claude-2.1.312-live-session-queued.jsonl"), include_str!("claude-2.1.312-live-session-queued-scrub.jsonl")];
+    const CEILING_FOLDED: &str = include_str!("claude-2.1.312-live-session-ceiling-flush-folded.jsonl");
+    const CEILING_QUEUED: [&str; 2] = [include_str!("claude-2.1.312-live-session-ceiling-flush-queued.jsonl"), include_str!("claude-2.1.312-live-session-ceiling-flush-queued-scrub.jsonl")];
+    const API_ERROR: [&str; 2] = [include_str!("claude-2.1.312-live-session-api-error-first.jsonl"), include_str!("claude-2.1.312-live-session-api-error-first-scrub.jsonl")];
+    const BLOCKING: [&str; 2] = [include_str!("claude-2.1.312-live-session-blocking-limit.jsonl"), include_str!("claude-2.1.312-live-session-blocking-limit-scrub.jsonl")];
+    const COMPACTION_OFF: [&str; 2] = [include_str!("claude-2.1.312-live-session-compaction-off-360k.jsonl"), include_str!("claude-2.1.312-live-session-compaction-off-360k-scrub.jsonl")];
+
+    #[test]
+    fn a_line_written_during_a_tool_call_is_folded_one_result_and_its_echo_before_the_request_that_carries_it() {
+        let trace = replay(FOLDED);
+        // The tool_result's own user line is no echo: it is a foreign owner's array content.
+        assert_eq!(kinds(&trace), ["other", "echo", "request:10", "other", "other", "other", "echo", "request:10", "result:ok"]);
+        assert!(acted(&trace).is_empty(), "{:?}", acted(&trace));
+    }
+
+    #[test]
+    fn a_line_written_while_the_last_request_is_in_flight_is_queued_two_results_and_its_echo_after_the_first() {
+        for stream in QUEUED {
+            let trace = replay(stream);
+            assert_eq!(kinds(&trace), ["other", "echo", "request:10", "result:ok", "other", "echo", "request:10", "result:ok"]);
+            assert!(acted(&trace).is_empty(), "{:?}", acted(&trace));
+        }
+    }
+
+    #[test]
+    fn the_flush_folded_into_a_running_turn_is_answered_at_its_one_result() {
+        let trace = replay(CEILING_FOLDED);
+        assert_eq!(kinds(&trace), ["other", "echo", "request:300000", "other", "other", "other", "echo", "request:10", "result:ok"]);
+        assert_eq!(acted(&trace), vec![(2, Do::WriteFlush(Why::Ceiling)), (8, Do::CloseStdin)], "never a grace interrupt");
+    }
+
+    #[test]
+    fn the_flush_queued_behind_the_turn_that_reached_the_ceiling_is_answered_at_its_own_second_result() {
+        for stream in CEILING_QUEUED {
+            let trace = replay(stream);
+            assert_eq!(kinds(&trace), ["other", "echo", "request:300000", "result:ok", "other", "echo", "request:10", "result:ok"]);
+            // The first result ends the turn the flush was queued behind: it closes nothing.
+            assert_eq!(acted(&trace), vec![(2, Do::WriteFlush(Why::Ceiling)), (7, Do::CloseStdin)], "never a grace interrupt");
+        }
+    }
+
+    #[test]
+    fn an_api_error_before_any_answer_closes_the_session_at_once_with_no_flush() {
+        for stream in API_ERROR {
+            let trace = replay(stream);
+            assert_eq!(kinds(&trace), ["other", "echo", "request:0", "result:error"]);
+            assert_eq!(acted(&trace), vec![(3, Do::CloseStdin)]);
+        }
+    }
+
+    #[test]
+    fn a_context_over_the_blocking_limit_is_a_blocked_result_that_closes_the_session() {
+        for stream in BLOCKING {
+            let trace = replay(stream);
+            assert_eq!(kinds(&trace), ["other", "echo", "request:990000", "result:ok", "other", "echo", "request:0", "result:blocked"]);
+            assert_eq!(acted(&trace), vec![(2, Do::WriteFlush(Why::Ceiling)), (7, Do::CloseStdin)]);
+        }
+    }
+
+    #[test]
+    fn with_compaction_off_a_request_at_360k_is_sent_and_answered_not_compacted_or_blocked() {
+        for stream in COMPACTION_OFF {
+            let trace = replay(stream);
+            assert_eq!(kinds(&trace), ["other", "echo", "request:360000", "result:ok", "other", "echo", "request:10", "result:ok"]);
+            assert_eq!(acted(&trace), vec![(2, Do::WriteFlush(Why::Ceiling)), (7, Do::CloseStdin)]);
+        }
+    }
 }
