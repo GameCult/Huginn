@@ -139,3 +139,11 @@ fn a_resolve_that_fails_is_logged_and_tried_once() {
     assert_eq!(error.to_string(), "refused");
     assert_eq!(again.admits.get(), 1);
 }
+
+#[test]
+fn a_result_with_no_text_closes_with_the_carriers_sentence_not_an_empty_rationale() {
+    let mind = with_run();
+    carry_with(&Seen::of(&mind), vec![Out(result_with(""))], Some(0), false).outcome.unwrap();
+    assert!(rationale_of(&mind, "selfrun-a").contains("carrier closed the run"));
+    assert!(reason_of(&mind, "selfrun-a").contains("subtype=success"));
+}

@@ -1182,3 +1182,14 @@ fn a_persona_runs_rationale_stays_out_of_her_history_and_a_result_cannot_pass_fo
     let selfrun = lines.iter().find(|line| line.starts_with("self-one ")).unwrap();
     assert!(selfrun.lines().skip(1).all(|line| line.starts_with("    ")), "{selfrun:?}");
 }
+
+#[test]
+fn each_self_run_shows_its_own_rationale() {
+    let rig = Rig::new(vec![], &[]);
+    self_run_closed_with(&rig, "self-first", "alpha report");
+    self_run_closed_with(&rig, "self-second", "beta report");
+    let lines = recent_runs(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    let of = |label: &str| lines.iter().find(|line| line.starts_with(label)).unwrap().clone();
+    assert!(of("self-first ").contains("alpha report") && !of("self-first ").contains("beta"), "{lines:?}");
+    assert!(of("self-second ").contains("beta report") && !of("self-second ").contains("alpha"), "{lines:?}");
+}
