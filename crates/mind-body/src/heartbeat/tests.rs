@@ -463,6 +463,30 @@ fn the_operator_naming_a_persona_launches_her_at_once_off_the_beat_and_once_per_
 }
 
 #[test]
+fn another_mind_naming_a_persona_wakes_her_once_off_the_beat() {
+    let rig = Rig::new();
+    rig.turn(ANN, 10);
+    rig.turn(BOB, 10);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig.say(BOB, delivery(1, "@ann:chat", "Bob, a word", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] }, "a Mind of the roster wakes her at once");
+    rig.end_run(BOB);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "the same message polled again wakes nobody");
+    assert_eq!(rig.runs(BOB), 2);
+}
+
+#[test]
+fn a_mind_naming_no_one_or_herself_wakes_nobody() {
+    let rig = Rig::new();
+    rig.turn(ANN, 10);
+    rig.turn(BOB, 10);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig.say(BOB, delivery(1, "@ann:chat", "nothing to anyone", &[]));
+    rig.say(BOB, delivery(2, "@bob:chat", "Bob reminds Bob", &["@bob:chat"]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
+}
+
+#[test]
 fn a_member_naming_a_persona_launches_nobody_off_the_beat_but_counts_as_full_urgency_on_it() {
     let rig = Rig::new();
     rig.turn(ANN, 1000);

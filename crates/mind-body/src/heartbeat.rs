@@ -426,6 +426,14 @@ fn addresses(who: &PersonaId, delivery: &ChatDelivery) -> Option<&'static str> {
     }
 }
 
+/// Whether a delivery wakes `who` off the beat: the operator or another Mind of
+/// the roster addresses her. A Mind naming herself does not; a member does not.
+fn wakes(config: &Config, who: &PersonaId, delivery: &ChatDelivery) -> bool {
+    let from_operator = config.operators.contains(&delivery.sender);
+    let from_other_mind = delivery.sender != who.matrix_id && config.personas.iter().any(|mind| mind.matrix_id == delivery.sender);
+    (from_operator || from_other_mind) && addresses(who, delivery).is_some()
+}
+
 /// The mouth pages a pending answer, so fewer deliveries may come than wait.
 /// The heartbeat acks nothing: it asks again after the highest seq it has until
 /// the answer is empty. A mouth that never empties is cut off at `PENDING_PAGES`.
@@ -593,7 +601,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     let mut launches: Vec<String> = Vec::new();
     let mut launched: Vec<Slug> = Vec::new();
 
-    // Off the beat: the operator naming her, once per message, and her Self run
+    // Off the beat: the operator or another Mind of the roster naming her, once per message, and her Self run
     // having ended since her last turn. Neither waits for the beat; both need her
     // idle and released.
     for row in &mut rows {
@@ -606,7 +614,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
             pending.sort_by_key(|delivery| delivery.seq);
             pending
                 .into_iter()
-                .filter(|delivery| config.operators.contains(&delivery.sender) && addresses(&row.seat.who, delivery).is_some())
+                .filter(|delivery| wakes(config, &row.seat.who, delivery))
                 .map(|delivery| format!("{}:{}", slug.0, delivery.event_id))
                 .find(|key| !state.handled_mentions.contains(key))
         };
