@@ -1483,6 +1483,8 @@ fn a_run_without_claims_gets_the_identity_lines_alone() {
 
 // ---- the live session -----------------------------------------------------
 
+use eureka_pipeline::PipelineResolution;
+
 const NO_SIGNALS: &[Stop] = &[];
 
 fn live_mind() -> Rc<TestMind> {
@@ -1509,6 +1511,21 @@ fn admits(mind: &Rc<TestMind>, seconds: i64, documents: Vec<PipelineDocument>) -
     Step::Do(seconds, Rc::new(move || mind.committed(documents.clone())))
 }
 
+fn resolutions_of(mind: &TestMind, subject: &PipelineRef) -> Vec<PipelineResolution> {
+    mind.ids(K::Resolution)
+        .iter()
+        .filter_map(|resolution| match mind.view(K::Resolution, resolution)?.document {
+            PipelineDocument::Resolution(document) if document.subject == *subject => Some(document),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The text of the probe's result line: what a brief's closure carries.
+fn answer_text() -> String {
+    serde_json::from_str::<Value>(&result_line()).unwrap()["result"].as_str().unwrap().to_string()
+}
+
 fn five_minute_request(id: &str, prefix: u64) -> String {
     let mut event: Value = serde_json::from_str(&at(id, prefix)).unwrap();
     event["message"]["usage"]["cache_creation"] = json!({"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 100});
@@ -1527,7 +1544,7 @@ fn a_result_never_ends_the_session_the_child_ends_it_or_the_cache_does() {
 }
 
 #[test]
-fn a_brief_to_a_working_self_is_told_once_between_turns() {
+fn a_brief_to_a_working_self_is_told_once_between_turns_and_closed_by_the_result_that_answers_it() {
     let mind = live_mind();
     let steps = vec![
         Out(at("m1", 10)),
@@ -1544,13 +1561,17 @@ fn a_brief_to_a_working_self_is_told_once_between_turns() {
     let told = tells(&ran);
     assert_eq!(told.len(), 1, "{:?}", ran.written());
     assert!(told[0].contains(&brief_ref("b1").id.0) && told[0].contains("Survey the noise functions."), "{}", told[0]);
-    assert!(told[0].contains("Plan usage"), "the plan line ends a tell: {}", told[0]);
+    assert!(told[0].contains("Your answer closes it"), "{}", told[0]);
     assert_eq!(ran.count(&Event::InputClosed), 0);
+    let closures = resolutions_of(&mind, &brief_ref("b1"));
+    assert_eq!(closures.len(), 1, "closed once");
+    assert!(matches!(closures[0].outcome, ResolutionOutcome::Recorded { .. }));
+    assert_eq!(closures[0].rationale.0, answer_text());
     assert!(!inbox::pending(&ran.hooks.spool).unwrap(), "nothing left to tell");
 }
 
 #[test]
-fn a_brief_told_mid_turn_by_the_hook_is_never_told_again_by_the_actuator() {
+fn a_brief_told_mid_turn_by_the_hook_is_closed_by_that_turns_result_and_never_told_twice() {
     let mind = live_mind();
     let hooks = test_hooks();
     let printed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -1558,31 +1579,39 @@ fn a_brief_told_mid_turn_by_the_hook_is_never_told_again_by_the_actuator() {
         let (spool, printed) = (hooks.spool.clone(), printed.clone());
         Step::Do(0, Rc::new(move || printed.borrow_mut().push(inbox::inject(&spool, "{\"hook_event_name\":\"PostToolBatch\"}", false).unwrap().stdout)))
     };
-    let steps = vec![Out(at("m1", 10)), admits(&mind, 31, vec![brief("b2", "Wire the shader uniforms.")]), fire.clone(), fire, Out(result_line()), Idle(1), Idle(31)];
+    let steps = vec![Out(at("m1", 10)), admits(&mind, 31, vec![brief("b2", "Wire the shader uniforms.")]), fire.clone(), fire, Out(result_line()), Idle(1)];
     let ran = carry_hooked(&Seen::of(&mind), steps, (Some(0), None, NO_SIGNALS, false), hooks);
     let printed = printed.borrow();
     assert!(printed[0].contains(&brief_ref("b2").id.0) && printed[0].contains("Wire the shader uniforms."), "{printed:?}");
     assert_eq!(printed[1], "", "the second call finds nothing: each brief enters once");
-    assert_eq!(ran.written().len(), 1, "the hook told it; the actuator wrote nothing but the start: {:?}", ran.written());
+    assert!(tells(&ran).is_empty(), "the hook told it; the actuator did not: {:?}", ran.written());
+    let closures = resolutions_of(&mind, &brief_ref("b2"));
+    assert_eq!((closures.len(), closures[0].rationale.0.as_str()), (1, answer_text().as_str()));
 }
 
 #[test]
-fn a_brief_the_run_claims_is_told_once_in_the_start_message_and_not_listed_again() {
-    let mind = TestMind::seeded();
-    mind.committed(vec![spec("x")]);
-    mind.committed(vec![brief("c1", "Claimed work."), brief("c2", "Other work.")]);
-    let PipelineDocument::Run(mut document) = self_run("selfrun-a", "5") else { unreachable!() };
-    document.claims = vec![brief_ref("c1")];
-    mind.committed(vec![PipelineDocument::Run(document)]);
-    let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
-    let start = &ran.written()[0];
-    assert_eq!(start.matches("Claimed work.").count(), 1, "{start}");
-    let (task, also) = start.split_once("Also open for you").expect("the other brief is listed");
-    assert!(task.contains("Claimed work.") && also.contains("Other work.") && !also.contains("Claimed work."), "{start}");
+fn a_brief_her_self_resolved_is_not_resolved_again_and_one_not_yet_told_stays_open_past_the_result() {
+    let mind = live_mind();
+    let hooks = test_hooks();
+    let claim_and_resolve = {
+        let (spool, mind) = (hooks.spool.clone(), mind.clone());
+        Step::Do(
+            0,
+            Rc::new(move || {
+                inbox::inject(&spool, "{}", false).unwrap();
+                mind.committed(vec![close(brief_ref("b3"), recorded())]);
+            }),
+        )
+    };
+    let steps = vec![Out(at("m1", 10)), admits(&mind, 31, vec![brief("b3", "Mine.")]), claim_and_resolve, admits(&mind, 31, vec![brief("b4", "Later.")]), Out(result_line())];
+    let ran = carry_hooked(&Seen::of(&mind), steps, (Some(0), None, NO_SIGNALS, false), hooks);
+    assert_eq!(resolutions_of(&mind, &brief_ref("b3")).len(), 1, "her own resolution stands alone");
+    assert!(resolutions_of(&mind, &brief_ref("b4")).is_empty(), "spooled, never told: this result did not answer it");
+    assert!(tells(&ran).is_empty());
 }
 
 #[test]
-fn what_a_closed_run_claimed_is_never_told_and_what_nobody_claimed_is() {
+fn the_past_is_closed_at_session_start_and_only_what_no_closed_run_claimed_is_told() {
     let mind = TestMind::seeded();
     mind.committed(vec![spec("x")]);
     mind.committed(vec![brief("p1", "Stale."), brief("p2", "Still open.")]);
@@ -1590,9 +1619,15 @@ fn what_a_closed_run_claimed_is_never_told_and_what_nobody_claimed_is() {
     mind.committed(vec![close(run_ref("old"), recorded())]);
     mind.committed(vec![self_run("selfrun-a", "5")]);
     let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
+    let closures = resolutions_of(&mind, &brief_ref("p1"));
+    assert_eq!(closures.len(), 1);
+    assert!(matches!(closures[0].outcome, ResolutionOutcome::Recorded { .. }));
+    assert!(closures[0].rationale.0.contains(&run_ref("old").id.0), "names the run that answered it: {}", closures[0].rationale.0);
     let start = &ran.written()[0];
     assert!(start.contains("Also open for you") && start.contains(&brief_ref("p2").id.0) && start.contains("Still open."), "{start}");
     assert!(!start.contains(&brief_ref("p1").id.0), "never told: {start}");
+    // The unclaimed one was told in the start message, so the first result answers it.
+    assert_eq!(resolutions_of(&mind, &brief_ref("p2")).len(), 1);
 }
 
 #[test]
@@ -1603,7 +1638,7 @@ fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_
     let flush_at = hour.events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains(FLUSH_MESSAGE))).unwrap();
     let closed_at = hour.events.iter().position(|event| *event == Event::InputClosed).unwrap();
     assert!(flush_at < closed_at && hour.count(&Event::InputClosed) == 1, "{:?}", hour.events);
-    assert!(hour.out.contains("decision WriteFlush prefix 10 ttl_s 3600 idle_s 3540 inbox false
+    assert!(hour.out.contains("decision WriteFlush prefix 10 ttl_s 3600 idle_s 3540 inbox false briefs_closed 0
 "), "{}", hour.out);
     // Five minutes' cache: the flush at 240 s.
     let short = go(vec![Out(five_minute_request("m1", 10)), Out(result_line()), Idle(239), Idle(1), Out(result_line()), Idle(1)]);

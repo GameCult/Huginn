@@ -17,8 +17,9 @@
 //! her mind (the `inbox` module): an open follow-up with owner `self-run` is a
 //! brief not yet answered. The actuator polls for briefs and tells them to the
 //! session, between tool calls through the PostToolBatch hook and between turns
-//! as a user line. The session ends where its cache would be evicted, near the
-//! unit's cap, at the context ceiling, or after the flush each of those asks.
+//! as a user line; a result closes every brief told to that turn. The session
+//! ends where its cache would be evicted, near the unit's cap, at the context
+//! ceiling, or after the flush each of those asks.
 //!
 //! Every timing decision is one pure function, `decide` (the `decide` module,
 //! ruling `eureka-body:ruling:self-run-decider`). `carry` is the loop that turns
@@ -36,7 +37,7 @@
 //! `RuntimeMaxSec` and the context-ceiling flush. The grant carries the plan usage
 //! windows, which go to the child in its start message.
 //!
-//! The actuator admits only closures of Self runs, nothing else. Every exit of
+//! The actuator admits run closures and brief closures, nothing else. Every exit of
 //! `carry` that leaves her run open resolves it Recorded exactly once (the
 //! child's result in the rationale, or that it gave none in the reason). It reads neither the
 //! brake nor the environment and stops no unit: the gate and the brake hold own those.
@@ -126,7 +127,7 @@ const POLL: StdDuration = StdDuration::from_secs(INBOX_POLL_S as u64);
 /// skill: it names the skill, the instance and the run id.
 pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
     format!(
-        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. Work you take on beyond an answer is a follow-up of your own.\n\n{}",
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks, and each answer you give closes the brief it answers. Work you take on beyond an answer is a follow-up of your own.\n\n{}",
         instance.0,
         run.id.0,
         render_plan(plan_quota, now_ms)
@@ -394,6 +395,11 @@ impl Heard {
     }
 }
 
+/// The label of a run: the name its closure and its briefs' closures are admitted under.
+fn session_label(run: &PipelineRef) -> &str {
+    run.id.0.rsplit(':').next().unwrap_or(&run.id.0)
+}
+
 fn unix_ms(at: DateTime<Utc>) -> u64 {
     u64::try_from(at.timestamp_millis()).unwrap_or(0)
 }
@@ -464,7 +470,9 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let Some((run, claims)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
     let hooks = spawner.hooks();
+    // The briefs a closed run claimed were answered by that run: closed now, before anything is told.
     inbox::reset(&hooks.spool)?;
+    inbox::close_past(mind, clock.now(), session_label(&run))?;
     let mut task = task_section(mind, &claims)?;
     let open = inbox::derive(mind, &hooks.spool)?;
     let also: Vec<&Brief> = open.iter().filter(|brief| !claims.iter().any(|claim| claim.id.0 == brief.id)).collect();
@@ -555,6 +563,28 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
     writeln!(out, "{}", describe_result(&event, RESULT_TEXT_LIMIT))
 }
 
+/// What a brief's closing resolution says when the result had no text.
+const NO_ANSWER_TEXT: &str = "The turn ended with no answer text.";
+
+/// Resolves Recorded every brief told to the session that this result answers.
+/// A failed close leaves them told: the next result tries again.
+fn close_told(mind: &dyn MindPort, clock: &dyn Clock, hooks: &Hooks, session: &str, heard: &Heard, out: &mut dyn Write) -> Result<usize> {
+    let rationale = heard.concluded.as_ref().map(|(_, text)| text.as_str()).filter(|text| !text.is_empty()).unwrap_or(NO_ANSWER_TEXT);
+    let closed = inbox::told(&hooks.spool).and_then(|told| {
+        let answered: Vec<(Brief, String)> = told.iter().map(|brief| (brief.clone(), rationale.to_string())).collect();
+        let count = inbox::close(mind, clock.now(), session, &answered, "answered by the turn's result")?;
+        inbox::forget(&hooks.spool, &told);
+        Ok(count)
+    });
+    match closed {
+        Ok(count) => Ok(count),
+        Err(_) => {
+            writeln!(out, "briefs could not be closed: the next result tries again")?;
+            Ok(0)
+        }
+    }
+}
+
 /// The loop: facts in, one clock read per fact, actions out.
 #[allow(clippy::too_many_arguments, reason = "the loop's ports and the run's facts, passed on whole")]
 fn drive(
@@ -572,6 +602,7 @@ fn drive(
     inbox::write_plan(&hooks.spool, &plan)?;
     child.write_line(&user_line(&format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms))));
 
+    let session = session_label(run);
     let mut now = clock.now();
     let mut state = State::started(now, run_cap_s);
     let mut polled = now;
@@ -619,6 +650,7 @@ fn drive(
             if state.requests != counted {
                 writeln!(out, "request {} prefix {}", state.requests, state.prefix)?;
             }
+            let mut briefs_closed = 0;
             match &action {
                 Action::None => {}
                 Action::WriteFlush => child.write_line(&user_line(FLUSH_MESSAGE)),
@@ -633,6 +665,7 @@ fn drive(
                         events.push_front(Event::Inbox { pending: false });
                     }
                 },
+                Action::CloseBriefs => briefs_closed = close_told(mind, clock, hooks, session, heard, out)?,
                 Action::CloseStdin => {
                     child.close_input();
                     closed = true;
@@ -642,7 +675,7 @@ fn drive(
             }
             if !matches!(action, Action::None | Action::Finish(_)) {
                 let idle = idle_s.map_or_else(|| "working".to_string(), |seconds| seconds.to_string());
-                writeln!(out, "decision {action:?} prefix {} ttl_s {ttl_s} idle_s {idle} inbox {inbox}", state.prefix)?;
+                writeln!(out, "decision {action:?} prefix {} ttl_s {ttl_s} idle_s {idle} inbox {inbox} briefs_closed {briefs_closed}", state.prefix)?;
             }
             if let Action::Finish(outcome) = action {
                 return Ok(outcome);

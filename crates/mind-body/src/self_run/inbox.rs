@@ -1,5 +1,5 @@
 //! Her Self's inbox: the briefs her Persona has given her Self, derived from the
-//! mind, spooled for the session, and claimed exactly once.
+//! mind, spooled for the session, claimed exactly once, and closed by the answer.
 //!
 //! The mind owns what her Self is asked: an in-force follow-up with owner
 //! `self-run` is a brief not yet answered. `derive` lists those that no closed
@@ -7,18 +7,23 @@
 //! `<spool>/<ordinal>-<label>.json`. A claim renames entries into `<spool>/told/`
 //! and returns them: the rename is the exactly-once point, so the PostToolBatch
 //! hook (`inject`) and the actuator's idle tell race safely, and `told/` is the
-//! record of what this session has heard. Everything here is derived or a cache:
+//! record of what this session has heard. A brief is closed by the result that
+//! answers it (`close`), and the same rule closes, at session start, the briefs
+//! a closed run claimed (`close_past`). Everything here is derived or a cache:
 //! the spool is lost with the unit and rebuilt from the mind.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use eureka_pipeline::PipelineKind;
-use huginn_mind::{PipelineFacts, PipelineStatusSummary};
+use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
+use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome};
+use huginn_mind::{PipelineAdmissionOutcome, PipelineFacts, PipelineStatusSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::AGENT;
+use crate::launch::closure;
 use crate::queue::{MindPort, any_of, headers, in_force, of_kind};
 
 /// The owner a follow-up names when it is a brief for her Self.
@@ -45,6 +50,10 @@ pub struct Brief {
 }
 
 impl Brief {
+    fn follow_up(&self) -> PipelineRef {
+        PipelineRef { kind: PipelineKind::FollowUp, id: self.id.as_str().into() }
+    }
+
     fn file_name(&self) -> String {
         let label = self.id.rsplit(':').next().unwrap_or(&self.id);
         format!("{:020}-{label}.json", self.ordinal)
@@ -178,6 +187,18 @@ pub fn claim(spool: &Path) -> Result<Vec<Brief>> {
     Ok(taken)
 }
 
+/// The briefs this session has heard and not yet closed.
+pub fn told(spool: &Path) -> Result<Vec<Brief>> {
+    entries(&spool.join(TOLD))
+}
+
+/// Forgets heard briefs once they are closed.
+pub fn forget(spool: &Path, briefs: &[Brief]) {
+    for brief in briefs {
+        let _ = std::fs::remove_file(spool.join(TOLD).join(brief.file_name()));
+    }
+}
+
 /// Starts the spool empty: a session hears only what it is told after it starts.
 pub fn reset(spool: &Path) -> Result<()> {
     match std::fs::remove_dir_all(spool) {
@@ -200,7 +221,7 @@ pub fn render(briefs: &[Brief], plan: &str) -> String {
         .iter()
         .map(|brief| {
             format!(
-                "A brief from your Persona: follow-up {} (campaign {}, repo {}): {}. Work you take on beyond this answer is a follow-up of your own.",
+                "A brief from your Persona: follow-up {} (campaign {}, repo {}): {}. Your answer closes it; work you take on beyond this answer is a follow-up of your own.",
                 brief.id, brief.campaign, brief.repo, brief.item
             )
         })
@@ -209,6 +230,39 @@ pub fn render(briefs: &[Brief], plan: &str) -> String {
         blocks.push(plan.to_string());
     }
     blocks.join("\n\n")
+}
+
+/// Resolves Recorded each of `briefs` that is still in force, in one admission:
+/// a brief her Self resolved herself is left as it is. Returns how many.
+pub fn close(mind: &dyn MindPort, now: DateTime<Utc>, session: &str, briefs: &[(Brief, String)], reason: &str) -> Result<usize> {
+    let standing: HashSet<String> = headers(mind, &in_force(of_kind(PipelineKind::FollowUp)))?.into_iter().map(|summary| summary.id.id.0).collect();
+    let mut documents: Vec<PipelineDocument> = Vec::new();
+    for (brief, rationale) in briefs.iter().filter(|(brief, _)| standing.contains(&brief.id)) {
+        documents.push(closure(mind, &brief.follow_up(), now, ResolutionOutcome::Recorded { reason: reason.into() }, rationale)?);
+    }
+    let count = documents.len();
+    if count == 0 {
+        return Ok(0);
+    }
+    match mind.admit(AGENT, session, documents)? {
+        PipelineAdmissionOutcome::Committed { .. } => Ok(count),
+        _ => Err(anyhow!("the briefs could not be closed")),
+    }
+}
+
+/// The rule applied to the past: every open brief that a closed run claims is
+/// resolved Recorded, naming that run, whose closure holds the result.
+pub fn close_past(mind: &dyn MindPort, now: DateTime<Utc>, session: &str) -> Result<usize> {
+    let claimed = claimed_by_closed(mind)?;
+    let answered: Vec<(Brief, String)> = open_briefs(mind)?
+        .into_iter()
+        .filter_map(|brief| {
+            let run = claimed.get(&brief.id)?;
+            let rationale = format!("Claimed by run {run}, which has closed; its closure holds the result.");
+            Some((brief, rationale))
+        })
+        .collect();
+    close(mind, now, session, &answered, "answered by a closed run")
 }
 
 /// What a hook prints, and the status it exits with.

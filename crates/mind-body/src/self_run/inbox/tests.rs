@@ -1,10 +1,10 @@
 //! The inbox over a real spool directory and a mind in memory: what is derived,
 //! the exactly-once claim, and the hook that prints it.
 
-use eureka_pipeline::{PipelineDocument, PipelineKind as K, PipelineRef, RunOperator, RunTurn};
+use eureka_pipeline::{PipelineDocument, PipelineKind as K, RunOperator, RunTurn};
 
 use super::*;
-use crate::testkit::{TestMind, close as closing, follow_up, id, recorded, reference, run, run_ref, spec, spec_ref, withdrawn};
+use crate::testkit::{TestMind, at, close as closing, follow_up, id, recorded, reference, run, run_ref, spec, spec_ref};
 
 fn spool_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
@@ -36,7 +36,7 @@ fn entry(n: u64) -> Brief {
 fn the_inbox_is_the_open_self_run_briefs_that_no_closed_run_claims_and_the_session_does_not_hold() {
     let mind = mind_with(vec![brief_doc("open", OWNER), brief_doc("claimed-by-old", OWNER), brief_doc("someone-elses", "Hands"), brief_doc("answered", OWNER), brief_doc("held", OWNER)]);
     mind.committed(vec![run("old", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("claimed-by-old")])]);
-    mind.committed(vec![closing(run_ref("old"), recorded()), closing(brief_ref("answered"), withdrawn())]);
+    mind.committed(vec![closing(run_ref("old"), recorded()), closing(brief_ref("answered"), recorded())]);
     let spool = spool_dir();
     mark_told(spool.path(), &[Brief { id: brief_ref("held").id.0, ..entry(9) }]).unwrap();
     let derived: Vec<String> = derive(&mind, spool.path()).unwrap().into_iter().map(|brief| brief.id).collect();
@@ -54,7 +54,9 @@ fn spooled_entries_are_claimed_in_order_and_hand_back_what_was_written() {
     let claimed = claim(spool.path()).unwrap();
     assert_eq!(claimed, vec![entry(1), entry(2)], "oldest first");
     assert!(!pending(spool.path()).unwrap() && claim(spool.path()).unwrap().is_empty(), "a claim empties the spool");
-    assert_eq!(entries(&spool.path().join("told")).unwrap(), vec![entry(1), entry(2)], "the claimed entries are the session's record");
+    assert_eq!(told(spool.path()).unwrap(), vec![entry(1), entry(2)]);
+    forget(spool.path(), &claimed[..1]);
+    assert_eq!(told(spool.path()).unwrap(), vec![entry(2)]);
 }
 
 fn spool_briefs(dir: &Path, briefs: &[Brief]) {
@@ -95,7 +97,7 @@ fn the_hook_prints_data_only_and_only_for_the_main_thread() {
     let output: Value = serde_json::from_str(&printed.stdout).unwrap();
     assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PostToolBatch");
     let context = output["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-    for needle in ["eureka-body:follow_up:b1", "campaign eureka-body", "repo GameCult/Huginn", "Item 1.", "Plan usage: unobserved."] {
+    for needle in ["eureka-body:follow_up:b1", "campaign eureka-body", "repo GameCult/Huginn", "Item 1.", "Your answer closes it", "Plan usage: unobserved."] {
         assert!(context.contains(needle), "{needle}: {context}");
     }
     assert_eq!(inject(spool.path(), "{}", false).unwrap().stdout, "", "claimed once");
@@ -122,4 +124,23 @@ fn the_settings_name_the_two_hooks_with_absolute_quoted_commands() {
     let compact = &settings["hooks"]["PreCompact"][0];
     assert_eq!(compact["matcher"], "auto");
     assert_eq!(compact["hooks"][0]["command"].as_str().unwrap(), format!("{tell} --pre-compact"));
+}
+
+#[test]
+fn closing_resolves_only_the_briefs_still_in_force_in_one_admission() {
+    let mind = mind_with(vec![brief_doc("a", OWNER), brief_doc("b", OWNER)]);
+    mind.committed(vec![closing(brief_ref("b"), recorded())]);
+    let briefs = [(Brief { id: brief_ref("a").id.0, ..entry(1) }, "The answer.".to_string()), (Brief { id: brief_ref("b").id.0, ..entry(2) }, "Ignored.".to_string())];
+    let now = at(0);
+    assert_eq!(close(&mind, now, "selfrun-a", &briefs, "answered").unwrap(), 1);
+    let rationales: Vec<String> = mind
+        .ids(K::Resolution)
+        .iter()
+        .filter_map(|resolution| match mind.view(K::Resolution, resolution)?.document {
+            PipelineDocument::Resolution(document) if document.subject == brief_ref("a") => Some(document.rationale.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rationales, vec!["The answer.".to_string()]);
+    assert_eq!(close(&mind, now, "selfrun-a", &briefs[..1], "answered").unwrap(), 0, "already closed");
 }

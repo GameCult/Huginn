@@ -74,7 +74,7 @@ fn the_flush_is_asked_once_at_the_ceiling_and_never_after_a_result_or_an_exit_or
 #[test]
 fn a_result_ends_a_turn_and_never_closes_the_input_while_a_brief_waits_or_the_cache_is_warm() {
     // The result asks for its briefs to be closed and nothing else; the next pass has nothing to do.
-    assert_eq!(last(vec![(RESULT, 0)]), Action::None);
+    assert_eq!(last(vec![(RESULT, 0)]), Action::CloseBriefs);
     assert_eq!(last(vec![(RESULT, 0), (Event::Tick, 0)]), Action::None);
     assert_eq!(last(vec![(RESULT, 0), (Event::Tick, 3000)]), Action::None);
     // A waiting brief is told, however long the session has been idle, and the input stays open.
@@ -111,7 +111,8 @@ fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_closes_aft
     let flushed = vec![(RESULT, 0), (Event::Tick, TTL_1H_S - TTL_MARGIN_S)];
     assert_eq!(last([flushed.clone(), vec![(Event::Tick, TTL_1H_S)]].concat()), Action::None);
     let ended_turn = [flushed, vec![(SHORT_RESULT, TTL_1H_S)]].concat();
-    assert_eq!(last(ended_turn), Action::CloseStdin);
+    assert_eq!(last(ended_turn.clone()), Action::CloseBriefs);
+    assert_eq!(last([ended_turn, vec![(Event::Tick, TTL_1H_S)]].concat()), Action::CloseStdin);
 }
 
 #[test]
@@ -320,6 +321,7 @@ fn check_step(oracle: &mut Oracle, event: &Event, now: i64, action: &Action) {
     assert!(!oracle.finished || *action == Action::None, "an action after the run ended: {action:?} on {event:?}");
     let flush_before = oracle.flush;
     let was_exited = oracle.exited.is_some();
+    let was_idle = oracle.idle;
     match event {
         Event::Request { id, prefix } => {
             if !oracle.ids.contains(id) {
@@ -367,12 +369,13 @@ fn check_step(oracle: &mut Oracle, event: &Event, now: i64, action: &Action) {
         Action::WriteTells => {
             assert!(oracle.idle && oracle.inbox && !oracle.closed && !was_exited, "a tell outside idle with a brief waiting");
         }
+        Action::CloseBriefs => assert!(matches!(event, Event::Result { .. }), "briefs closed on {event:?}"),
         Action::CloseStdin => {
             oracle.closes += 1;
             oracle.closed = true;
             let flushed = oracle.flush.is_some() && oracle.boundary;
             let rotation = now >= i64::try_from(CAP_S).unwrap() - ROTATE_MARGIN_S;
-            assert!(oracle.idle && !was_exited && (flushed || rotation), "closed on {event:?} flushed {flushed} rotation {rotation}");
+            assert!(was_idle && !was_exited && (flushed || rotation), "closed on {event:?} idle {was_idle} flushed {flushed} rotation {rotation}");
         }
         Action::Signal(how) => {
             let (flushed_at, _) = flush_before.expect("a signal before the flush was written");

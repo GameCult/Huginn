@@ -15,8 +15,8 @@
 //! At most one action comes out of an event; a deadline that is already due
 //! yields its action at the next event, and `next_deadline` says it is now.
 //!
-//! A result ends a turn, never the session: it marks the session idle. A brief
-//! waiting while idle is told.
+//! A result ends a turn, never the session: it marks the session idle and asks
+//! for the briefs it answered to be closed. A brief waiting while idle is told.
 //! The session ends where its cache would be evicted (ruling
 //! `eureka-body:ruling:live-session-floor-cache-evicts`): at the last request's
 //! cache TTL less a margin, while no brief waits, the flush is asked, and stdin
@@ -61,6 +61,8 @@ pub(super) enum Action {
     WriteFlush,
     /// Claim the spool and write its briefs as one user line (the session is idle).
     WriteTells,
+    /// Resolve the briefs told up to this result.
+    CloseBriefs,
     CloseStdin,
     /// To the child's whole process group.
     Signal(Stop),
@@ -229,6 +231,7 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
             if state.flush.as_mut().is_some_and(|flush| !std::mem::replace(&mut flush.turn_begun, true)) {
                 state.busy = true;
             }
+            action = Action::CloseBriefs;
         }
         Event::Inbox { pending } => state.inbox = pending,
         Event::Told => {
