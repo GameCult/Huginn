@@ -92,7 +92,7 @@ const TOKEN_FD_VARIABLE: &str = "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR";
 const ENV_SCRUB_VARIABLE: &str = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB";
 /// Optional, set by the unit: `off` turns that scrub off for a run whose user holds root, where it
 /// protects nothing and its sandbox's no_new_privs would only stop `sudo`. Anything else keeps it on.
-pub const SCRUB_VARIABLE: &str = "MIND_SELF_SCRUB";
+const SCRUB_VARIABLE: &str = "MIND_SELF_SCRUB";
 /// The name the start message tells her to admit as.
 pub const AGENT: &str = "mind-self-run";
 /// The namespace of the session id: the run id is the name in it.
