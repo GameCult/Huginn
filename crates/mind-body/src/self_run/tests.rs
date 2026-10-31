@@ -488,6 +488,8 @@ fn claude_args_is_exactly_the_fixed_list_for_a_session_and_a_budget() {
             "12.25",
             "--max-turns",
             "500",
+            "--permission-mode",
+            "bypassPermissions",
             "--permission-prompts",
             "none",
             "--setting-sources",
@@ -495,9 +497,12 @@ fn claude_args_is_exactly_the_fixed_list_for_a_session_and_a_budget() {
         ]
     );
     // Those belong to the run measure or to the unit's managed settings.
-    for forbidden in ["--resume", "--continue", "--fork-session", "--model", "--permission-mode", "--dangerously-skip-permissions", "--settings", "--system-prompt"] {
-        assert!(!args.iter().any(|arg| arg.starts_with(forbidden) || arg.contains("dangerously") || arg == "bypassPermissions"), "{forbidden}");
+    for forbidden in ["--resume", "--continue", "--fork-session", "--model", "--dangerously-skip-permissions", "--settings", "--system-prompt"] {
+        assert!(!args.iter().any(|arg| arg.starts_with(forbidden) || arg.contains("dangerously")), "{forbidden}");
     }
+    // Print mode starts in Manual without a mode, and prompts none then denies.
+    let mode = args.iter().position(|arg| arg == "--permission-mode").expect("mode flag");
+    assert_eq!(args[mode + 1], "bypassPermissions");
     assert_eq!(MAX_TURNS, 500);
 }
 
