@@ -1451,6 +1451,39 @@ mod tests {
         assert!(matches!(mind.query(&other_kind), Err(MindRefusal::SelectionInvalid { .. })));
     }
 
+    /// `ran` leaves a withdrawn run out and keeps open and recorded ones; `voted`
+    /// and `urged` select the pulses that carry each field.
+    #[test]
+    fn the_ran_voted_and_urged_aliases_are_presence_indexes() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![run("kept", &[]), run("open", &[]), run("unrun", &[])]));
+        let id = |label: &str| r(K::Run, &format!("{INSTANCE}:run:{label}"));
+        committed(admit(&mut mind, vec![resolution(id("kept"), ResolutionOutcome::Recorded { reason: "done".into() })]));
+        committed(admit(&mut mind, vec![resolution(id("unrun"), withdrawn())]));
+        let ran = ids(&mind.query(&with(of_kinds(&[K::Run]), any_of("ran", &["true"]))).unwrap());
+        let run_id = |label: &str| format!("{INSTANCE}:run:{label}");
+        assert_eq!(ran, vec![run_id("kept"), run_id("open")]);
+        let pulse = |label: &str, beat: Option<u32>, urgency: Option<u16>| {
+            D::Pulse(eureka_pipeline::PipelinePulse {
+                instance: Slug(INSTANCE.into()),
+                label: Label(label.into()),
+                tempo_vote_beat_s: beat,
+                urgency_permille: urgency,
+                note: "n".into(),
+            })
+        };
+        committed(admit(&mut mind, vec![pulse("both", Some(60), Some(1)), pulse("vote", Some(60), None), pulse("urge", None, Some(1)), pulse("none", None, None)]));
+        let asking = |alias: &str| {
+            let selection = Selection { descending: true, limit: Some(1), ..with(of_kinds(&[K::Pulse]), any_of(alias, &["true"])) };
+            ids(&mind.query(&selection).unwrap())
+        };
+        let pulse_id = |label: &str| format!("{INSTANCE}:pulse:{label}");
+        assert_eq!(asking("voted"), vec![pulse_id("vote")]);
+        assert_eq!(asking("urged"), vec![pulse_id("urge")]);
+        let outside = with(of_kinds(&[K::Pulse]), any_of("voted", &["false"]));
+        assert!(invalid("fields[0].values", "false")(&refused(&mind, &outside)));
+    }
+
     /// The substrate's own refusals cross as themselves: an undeclared alias
     /// is a `SelectionInvalid` from the substrate's door, before the organ's.
     #[test]

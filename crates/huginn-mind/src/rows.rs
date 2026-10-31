@@ -44,14 +44,24 @@ pub(crate) enum Alias {
     Turn,
     /// A run's `operated_by`, read from its fields.
     OperatedBy,
+    /// `true` on a run that was not withdrawn: it opened and was not unmade
+    /// unrun, so a reader of her last real turn skips the withdrawn ones in the
+    /// index instead of walking past them.
+    Ran,
+    /// `true` on a pulse that casts a tempo vote.
+    Voted,
+    /// `true` on a pulse that declares an urgency.
+    Urged,
 }
 
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
 const OUTCOMES: [&str; 6] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn"];
 const BOOLEANS: [&str; 2] = ["true", "false"];
+/// The one value a presence alias answers with; a row without it answers nothing.
+const PRESENT: [&str; 1] = ["true"];
 
 impl Alias {
-    const ALL: [Alias; 13] = [
+    const ALL: [Alias; 16] = [
         Self::Root,
         Self::InForce,
         Self::Faculty,
@@ -65,6 +75,9 @@ impl Alias {
         Self::Outcome,
         Self::Turn,
         Self::OperatedBy,
+        Self::Ran,
+        Self::Voted,
+        Self::Urged,
     ];
 
     fn name(self) -> &'static str {
@@ -82,6 +95,9 @@ impl Alias {
             Self::Outcome => "outcome",
             Self::Turn => "turn",
             Self::OperatedBy => "operated_by",
+            Self::Ran => "ran",
+            Self::Voted => "voted",
+            Self::Urged => "urged",
         }
     }
 
@@ -101,7 +117,8 @@ impl Alias {
             Self::Authority => kind == K::Ruling,
             Self::ClaimOutcome => kind == K::Verdict,
             Self::Outcome => kind == K::Resolution,
-            Self::Turn | Self::OperatedBy => kind == K::Run,
+            Self::Turn | Self::OperatedBy | Self::Ran => kind == K::Run,
+            Self::Voted | Self::Urged => kind == K::Pulse,
         }
     }
 
@@ -118,6 +135,7 @@ impl Alias {
             Self::Outcome => Some(&OUTCOMES),
             Self::Turn => Some(RunTurn::NAMES),
             Self::OperatedBy => Some(RunOperator::NAMES),
+            Self::Ran | Self::Voted | Self::Urged => Some(&PRESENT),
             Self::Root | Self::Repo | Self::Cut => None,
         }
     }
@@ -222,6 +240,12 @@ impl SelectionRow {
             D::Run(run) => {
                 put(Alias::Turn, vec![format!("{:?}", run.turn)]);
                 put(Alias::OperatedBy, vec![format!("{:?}", run.operated_by)]);
+                let withdrawn = matches!(&view.status, crate::query::PipelineStatus::Resolved { record, .. } if matches!(record.outcome, ResolutionOutcome::Withdrawn { .. }));
+                put(Alias::Ran, if withdrawn { Vec::new() } else { vec!["true".into()] });
+            }
+            D::Pulse(pulse) => {
+                put(Alias::Voted, if pulse.tempo_vote_beat_s.is_some() { vec!["true".into()] } else { Vec::new() });
+                put(Alias::Urged, if pulse.urgency_permille.is_some() { vec!["true".into()] } else { Vec::new() });
             }
             _ => {}
         }
@@ -255,7 +279,7 @@ impl Row for SelectionRow {
     }
 }
 
-/// The organ's closed lists: fifteen schemas, eleven aliases, sixteen roles.
+/// The organ's closed lists: fifteen schemas, sixteen aliases, sixteen roles.
 /// A schema's name is its id, so the substrate's alias matching resolves
 /// nothing beyond exact ids.
 pub(crate) struct Vocabulary;
@@ -382,8 +406,8 @@ mod tests {
             (K::Instance, &[]),
             (K::Stewardship, &["repo"]),
             (K::HandOff, &["repo"]),
-            (K::Run, &["turn", "operated_by"]),
-            (K::Pulse, &[]),
+            (K::Run, &["turn", "operated_by", "ran"]),
+            (K::Pulse, &["voted", "urged"]),
         ];
         for (kind, extra) in table {
             let want = [&["root", "in_force", "faculty"][..], extra].concat();
