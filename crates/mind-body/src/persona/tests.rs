@@ -1105,3 +1105,16 @@ fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them(
     assert!(Config::from_args_and_env(&args("--instance eureka"), |name| if name == ENV_ROOMS { Some(String::new()) } else { env(name) }, "usage").is_err());
     assert!(Config::from_args_and_env(&args("--instance eureka"), |_| None, "usage").is_err());
 }
+
+#[test]
+fn a_vote_alone_or_an_urgency_alone_is_still_one_pulse() {
+    for (beat, urgency) in [(json!(600), json!(null)), (json!(null), json!(250))] {
+        let rig = Rig::new(vec![operator_says(1, "go")], &[voting(beat.clone(), urgency.clone())]);
+        let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+        assert_eq!(failure, None, "{beat} {urgency}");
+        let pulses = rig.mind.ids(K::Pulse);
+        assert_eq!(pulses.len(), 1, "{beat} {urgency}");
+        let PipelineDocument::Pulse(pulse) = rig.mind.view(K::Pulse, &pulses[0]).unwrap().document else { panic!("a pulse") };
+        assert_eq!((pulse.tempo_vote_beat_s.map(i64::from), pulse.urgency_permille.map(i64::from)), (beat.as_i64(), urgency.as_i64()));
+    }
+}
