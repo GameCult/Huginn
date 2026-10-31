@@ -153,7 +153,8 @@ mind_body::lease_client: struct LeaseRequest # [derive (Clone , Debug , PartialE
 mind_body::lease_client: struct SocketLender  pub-fields[]
 mind_body::lease_client: struct TokenFd  pub-fields[]
 mind_body::lease_client::socket: impl Lease for Granted
-mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Doctrine , DoctrineTooLarge , Connector , Undecodable , RoomNotAllowed , Send , SelfRun , Pulse , Ack , }
+mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq , Serialize , Deserialize)] # [serde (rename_all = "lowercase")] pub enum SettleOutcome { Done , Declined , Wrong , }
+mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Doctrine , DoctrineTooLarge , Connector , Undecodable , RoomNotAllowed , Send , SelfRun , Memory , Ack , }
 mind_body::persona: # [derive (Debug , PartialEq , Eq)] pub enum Outcome { Dead (HeldReason) , NoRun , Served { run : PipelineRef , answered : u32 , failure : Option < Failure > , self_run : Option < PipelineRef > } , }
 mind_body::persona: const AGENT : & str
 mind_body::persona: const DOCTRINE_MAX_BYTES : usize
@@ -162,7 +163,7 @@ mind_body::persona: const ENV_OPERATOR : & str
 mind_body::persona: const ENV_ROOMS : & str
 mind_body::persona: const ENV_SELF_SENDER : & str
 mind_body::persona: const MAX_TURNS_PER_START : u32
-mind_body::persona: fn reply_schema (rooms : & [String] , campaigns : & [String]) -> String
+mind_body::persona: fn reply_schema (rooms : & [String] , campaigns : & [String] , people : & [String] , asks : & [String]) -> String
 mind_body::persona: fn start (organs : & Organs , control : & impl ControlSource , swarm : & impl ControlSource , config : & Config) -> Result < Outcome >
 mind_body::persona: impl Config
 mind_body::persona: impl Config: fn from_args (args : & [String] , usage : & str) -> Result < (Self , Vec < String >) >
@@ -185,9 +186,11 @@ mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pu
 mind_body::persona: struct FileTrace  pub-fields[]
 mind_body::persona: struct HuginnPersona  pub-fields[]
 mind_body::persona: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, chat: & 'a dyn Chat, connector: & 'a dyn Connector, persona: & 'a dyn PersonaState, trace: & 'a dyn Trace, tempo: Option < & 'a dyn TempoView >]
-mind_body::persona: struct PersonaReply # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[say: Vec < Say >, start_self_run: Option < StartSelfRun >, tempo_vote_beat_s: Option < Option < u32 > >, urgency_permille: Option < u16 >]
+mind_body::persona: struct PersonaReply # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[say: Vec < Say >, start_self_run: Option < StartSelfRun >, remember: Vec < Remember >, settle: Vec < Settle >, tempo_vote_beat_s: Option < Option < u32 > >, urgency_permille: Option < u16 >]
+mind_body::persona: struct Remember # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[sort: MemorySort, text: String, about: Vec < String >, salience_permille: u16]
 mind_body::persona: struct Say # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[room: String, text: String]
-mind_body::persona: struct StartSelfRun # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[brief: String, repo: String, campaign: String]
+mind_body::persona: struct Settle # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[ask: String, outcome: SettleOutcome, why: String]
+mind_body::persona: struct StartSelfRun # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[brief: String, repo: String, campaign: String, for_ask: Option < String >]
 mind_body::persona: struct TraceItem # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[provenance: String, room: String, text: String]
 mind_body::persona: struct TurnRequest # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[caller: String, request_id: String, instructions: String, input: String, output_schema_json: String]
 mind_body::persona: struct TurnTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[run: String, turn: u32, at: DateTime < Utc >, inputs: Vec < TraceItem >, outputs: Vec < TraceItem >, outcome: String]
@@ -201,8 +204,9 @@ mind_body::queue: impl HuginnMind < 'static >
 mind_body::queue: impl HuginnMind < 'static >: fn new (client : HuginnClient) -> Self
 mind_body::queue: impl MindPort for HuginnMind < '_ >
 mind_body::queue: impl< 'a > HuginnMind < 'a >
-mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query (& self , selection : & Selection) -> Result < PipelineSelectionPage > ; fn admit (& self , agent : & str , session : & str , documents : Vec < PipelineDocument >) -> Result < PipelineAdmissionOutcome > ; }
+mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query (& self , selection : & Selection) -> Result < PipelineSelectionPage > ; fn query_near (& self , _selection : & Selection , _text : & str , _top_k : u32) -> Result < PipelineSelectionPage > { bail ! ("this mind port has no semantic index") } fn admit (& self , agent : & str , session : & str , documents : Vec < PipelineDocument >) -> Result < PipelineAdmissionOutcome > ; }
 mind_body::queue: struct HuginnMind< 'a >  pub-fields[]
+mind_body::recall: impl Recalled
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq , PartialOrd , Ord)] pub enum Stop { Interrupt , Terminate , Kill , }
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Cause { Own , FlushRequested , Signalled (Stop) , Unstoppable , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Eof , Exited (Option < i32 >) , }
