@@ -92,6 +92,15 @@ impl TestMind {
         Self::seeded_as(INSTANCE)
     }
 
+    /// A mind holding only its identity and the repo's stewardship: no campaign.
+    pub(crate) fn without_campaigns() -> Self {
+        let dir = TempDir::new().unwrap();
+        let mind = Mind::open(dir.path(), &Slug(INSTANCE.into())).unwrap();
+        let this = Self { _dir: dir, instance: Slug(INSTANCE.into()), mind: RefCell::new(mind), now: Cell::new(at(0)) };
+        this.put(vec![instance(INSTANCE), stewardship(INSTANCE)]);
+        this
+    }
+
     /// The same, for another instance name.
     pub(crate) fn seeded_as(name: &str) -> Self {
         let dir = TempDir::new().unwrap();

@@ -1012,12 +1012,15 @@ fn doctrine_files_lead_the_instructions_in_the_configured_order_ahead_of_the_per
 
 #[test]
 fn doctrine_is_read_at_every_turn_start() {
-    let rig = Rig::new(vec![operator_says(1, "a"), operator_says(2, "b")], &[says(&[("swarm", "x")]), says(&[])]);
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "x")]), says(&[])]);
     let path = write_doctrine(&rig, "d.md", "BEFORE-BUMP");
-    rig.chat.on_send.replace(Some(Box::new({
-        let path = path.clone();
-        move || std::fs::write(&path, "AFTER-BUMP").unwrap()
-    })));
+    let (deliveries, bump) = (rig.chat.deliveries.clone(), path.clone());
+    *rig.connector.during.borrow_mut() = Some(Box::new(move || {
+        if deliveries.borrow().len() == 1 {
+            deliveries.borrow_mut().push(operator_says(2, "b"));
+            std::fs::write(&bump, "AFTER-BUMP").unwrap();
+        }
+    }));
     rig.go_with(&Config { doctrine: vec![path], max_turns: 3, ..config() });
     let requests = rig.connector.requests.borrow();
     assert_eq!(requests.len(), 2);
@@ -1104,8 +1107,8 @@ fn a_self_run_naming_a_listed_campaign_passes_the_campaign_check() {
 
 #[test]
 fn with_no_campaign_in_force_the_instructions_say_so_and_the_schema_allows_no_start() {
-    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
-    rig.mind.committed(vec![close(PipelineRef { kind: K::Campaign, id: format!("{CAMPAIGN}:campaign:self").as_str().into() }, recorded())]);
+    let mut rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
+    rig.mind = TestMind::without_campaigns();
     rig.go();
     let requests = rig.connector.requests.borrow();
     assert!(requests[0].instructions.contains("No campaign is in force"), "{}", requests[0].instructions);
