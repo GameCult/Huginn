@@ -1014,7 +1014,7 @@ fn provenance_of(config: &Config, deliveries: &[ChatDelivery]) -> Provenance {
         }
         aliases.join(", ")
     };
-    while learned_in.len() > LEARNED_IN_MAX_BYTES || !learned_in.is_char_boundary(learned_in.len().min(LEARNED_IN_MAX_BYTES)) {
+    while learned_in.len() > LEARNED_IN_MAX_BYTES {
         learned_in.pop();
     }
     let mut sources: Vec<String> = deliveries.iter().rev().map(|delivery| delivery.event_id.clone()).filter(|id| !id.is_empty()).take(SOURCES_MAX).collect();

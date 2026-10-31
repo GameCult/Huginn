@@ -1572,3 +1572,54 @@ fn memories_and_the_pulse_are_one_admission_after_the_says_and_before_the_self_r
     assert!(follow_up.ordinal > m.ordinal);
     assert_eq!(rig.log.borrow().as_slice(), ["turn", "send", "ack"], "says, then the rest, then the ack");
 }
+
+#[test]
+fn the_asks_shown_are_what_the_schema_lets_her_settle_or_take_on() {
+    let rooms = ["swarm".to_string()];
+    let with = |asks: &[String]| -> serde_json::Value { serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()], &["@op:chat".to_string()], asks)).unwrap() };
+    let shown = with(&["yggdrasil:memory:a".to_string()]);
+    assert_eq!(shown["properties"]["settle"]["items"]["properties"]["ask"]["enum"], json!(["yggdrasil:memory:a"]));
+    let options = shown["properties"]["start_self_run"]["anyOf"][1]["properties"]["for_ask"]["anyOf"].as_array().unwrap().clone();
+    assert!(options.contains(&json!({ "type": "string", "enum": ["yggdrasil:memory:a"] })), "{options:?}");
+    assert!(options.contains(&json!({ "type": "string", "pattern": "^new:[0-7]$" })));
+    // With none shown she can settle nothing and can only take on an ask she writes now.
+    let none = with(&[]);
+    assert_eq!(none["properties"]["settle"]["maxItems"], 0);
+    let options = none["properties"]["start_self_run"]["anyOf"][1]["properties"]["for_ask"]["anyOf"].as_array().unwrap().clone();
+    assert!(options.iter().all(|option| option.get("enum").is_none()), "{options:?}");
+}
+
+#[test]
+fn resolution_sequences_count_up_per_subject() {
+    let rig = Rig::new(vec![], &[]);
+    rig.mind.committed(vec![crate::testkit::memory("m", eureka_pipeline::MemorySort::Asked, "x", &[])]);
+    let subject = reference(K::Memory, &format!("{INSTANCE}:memory:m"));
+    assert_eq!(next_sequence(&rig.mind, &subject).unwrap(), 1);
+    rig.mind.committed(vec![PipelineDocument::Resolution(eureka_pipeline::PipelineResolution {
+        subject: subject.clone(),
+        sequence: 1,
+        outcome: ResolutionOutcome::Withdrawn { reason: "no".into() },
+        rationale: "no".into(),
+        resolved_on: Date("2026-10-09".into()),
+    })]);
+    assert_eq!(next_sequence(&rig.mind, &subject).unwrap(), 2);
+}
+
+#[test]
+fn a_memorys_place_is_cut_to_what_a_short_holds_and_whole_characters() {
+    let place = |room_id: &str| provenance_of(&config(), &[ChatDelivery { is_direct: true, room_id: room_id.into(), ..delivery(1, "dm", "@a:chat", "x") }]).learned_in;
+    assert_eq!(place(&"r".repeat(200)).len(), 200, "exactly the bound is kept whole");
+    assert_eq!(place(&"r".repeat(201)).len(), 200);
+    let wide = format!("{}é", "r".repeat(199));
+    assert_eq!(place(&wide), "r".repeat(199), "a character that would straddle the bound goes whole");
+}
+
+#[test]
+fn a_batchs_other_senders_exclude_her_own_and_repeat_nobody_and_the_people_she_may_name_repeat_nobody() {
+    let c = config();
+    let batch = [delivery(1, "swarm", "@eureka:chat", "me"), delivery(2, "swarm", "@aqua:chat", "a"), delivery(3, "swarm", "@aqua:chat", "again"), delivery(4, "swarm", "@op:chat", "b")];
+    let senders = other_senders(&c, &batch);
+    assert_eq!(senders, vec!["@aqua:chat", "@op:chat"]);
+    assert_eq!(memory_people(&c, &senders), vec!["@aqua:chat".to_string(), "@op:chat".to_string()], "the operator is a sender and is listed once");
+    assert_eq!(memory_people(&c, &["@aqua:chat"]), vec!["@aqua:chat".to_string(), "@op:chat".to_string()]);
+}
