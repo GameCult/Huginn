@@ -615,10 +615,10 @@ fn memory_is_well_formed(memory: &PipelineMemory, at: &str) -> Result<(), Pipeli
     if memory.text.0.trim().is_empty() {
         return Err(format_error(&format!("{at}.text"), "an empty memory"));
     }
-    if let MemoryOrigin::Direct { with, .. } = &memory.origin {
-        if with.is_empty() {
-            return Err(format_error(&format!("{at}.origin.with"), "a direct memory that names no one she heard it from"));
-        }
+    if let MemoryOrigin::Direct { with, .. } = &memory.origin
+        && with.is_empty()
+    {
+        return Err(format_error(&format!("{at}.origin.with"), "a direct memory that names no one she heard it from"));
     }
     if memory.salience_permille > SALIENCE_MAX_PERMILLE {
         return Err(format_error(&format!("{at}.salience_permille"), &memory.salience_permille.to_string()));
@@ -1868,6 +1868,32 @@ mod tests {
         assert!(matches!(validated(&|memory| memory.about = vec![s("@a:chat"); 9]), Err(PipelineRefusal::FieldBound { limit: 8, .. })));
         assert!(matches!(validated(&|memory| memory.sources = vec![s("$e"); 9]), Err(PipelineRefusal::FieldBound { limit: 8, .. })));
         assert!(matches!(validated(&|memory| memory.text = Line("x".repeat(1001))), Err(PipelineRefusal::FieldBound { limit: 1000, .. })));
+    }
+
+    /// A memory's origin is bounded field by field, and a private one names whom she heard it from.
+    #[test]
+    fn a_memory_origin_is_bounded_and_a_direct_one_names_who_she_heard_it_from() {
+        let validated = |origin: MemoryOrigin| {
+            let mut memory = memory_sample();
+            memory.origin = origin;
+            PipelineDocument::Memory(memory).validate()
+        };
+        let long = Short("r".repeat(201));
+        let bound_200 = |outcome: Result<(), PipelineRefusal>| assert!(matches!(outcome, Err(PipelineRefusal::FieldBound { limit: 200, .. })), "{outcome:?}");
+        let bound_8 = |outcome: Result<(), PipelineRefusal>| assert!(matches!(outcome, Err(PipelineRefusal::FieldBound { limit: 8, .. })), "{outcome:?}");
+        assert_eq!(validated(MemoryOrigin::Wake), Ok(()));
+        assert_eq!(validated(MemoryOrigin::SelfRun { run: s("run-7") }), Ok(()));
+        assert_eq!(validated(MemoryOrigin::Room { rooms: s("swarm"), heard_from: vec![s("@a:chat"); 8] }), Ok(()));
+        assert_eq!(validated(MemoryOrigin::Direct { room: s("!dm:chat"), with: vec![s("@a:chat"); 8] }), Ok(()));
+        bound_200(validated(MemoryOrigin::Room { rooms: long.clone(), heard_from: vec![] }));
+        bound_8(validated(MemoryOrigin::Room { rooms: s("swarm"), heard_from: vec![s("@a:chat"); 9] }));
+        bound_200(validated(MemoryOrigin::Direct { room: long.clone(), with: vec![s("@a:chat")] }));
+        bound_8(validated(MemoryOrigin::Direct { room: s("!dm:chat"), with: vec![s("@a:chat"); 9] }));
+        bound_200(validated(MemoryOrigin::SelfRun { run: long }));
+        assert!(
+            matches!(validated(MemoryOrigin::Direct { room: s("!dm:chat"), with: vec![] }), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "memory.origin.with"),
+            "a private memory names no one"
+        );
     }
 
     /// A memory is instance-rooted and its label is its whole local.
