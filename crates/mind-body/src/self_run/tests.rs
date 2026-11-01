@@ -1686,3 +1686,53 @@ fn a_brief_the_run_claims_is_in_the_task_once_and_not_again_under_also_open() {
     assert_eq!(start.matches("claimed follow-up").count(), 1, "{start}");
     assert!(start.contains("Do the claimed thing.") && !start.contains("Also open for you"), "{start}");
 }
+
+/// The Persona's boundary: the bubblewrap wrapper `ClaudeSpawner` runs when it has a sandbox.
+#[cfg(unix)]
+mod sandbox {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[test]
+    fn the_sandbox_arguments_are_pinned() {
+        let args = sandbox_args(Path::new("/var/lib/mind-x/sandbox"), Path::new("/run/mind-x"));
+        let expected: Vec<String> = [
+            "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve", "--bind", "/run/mind-x", "/run/mind-x", "--tmpfs",
+            "/etc/gamecult", "--tmpfs", "/var/lib", "--bind", "/var/lib/mind-x/sandbox", "/var/lib/mind-x/sandbox", "--unshare-pid", "--die-with-parent", "--new-session", "--chdir", "/var/lib/mind-x/sandbox", "--",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(args, expected);
+        // The credentials are hidden before the sandbox and the scratch are bound back, and the network is not unshared.
+        let at = |needle: &str| args.iter().position(|arg| arg == needle).unwrap();
+        assert!(at("/run") < at("/run/mind-x") && at("/var/lib") < at("/var/lib/mind-x/sandbox"));
+        assert!(!args.iter().any(|arg| arg == "--unshare-net" || arg == "--unshare-all"));
+    }
+
+    #[test]
+    fn a_sandboxed_spawner_runs_bwrap_with_its_arguments_then_claude_and_the_child_sees_no_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, scratch, sandbox) = (dir.path().join("bin"), dir.path().join("scratch"), dir.path().join("sandbox"));
+        for made in [&bin, &scratch, &sandbox] {
+            std::fs::create_dir(made).unwrap();
+        }
+        let (argv, environment) = (dir.path().join("argv"), dir.path().join("environment"));
+        let fake = bin.join("bwrap");
+        std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\n' \"$@\" > {}\nenv > {}\n", argv.display(), environment.display())).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut unit = unit_environment();
+        unit.retain(|(name, _)| name != "PATH");
+        unit.push(("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()).into()));
+        unit.push((SCRATCH_VARIABLE.into(), scratch.clone().into_os_string()));
+        let spawner = ClaudeSpawner::in_sandbox(unit, "MIND_PERSONA_CONFIG_SEED", Some(sandbox.clone())).unwrap();
+        let mut child = spawner.spawn(&["--flag".to_string(), "value".to_string()], &token_holding("tok-canary")).unwrap();
+        while !matches!(child.next(StdDuration::from_secs(20)), Read::Exited(_) | Read::Timeout) {}
+        let recorded: Vec<String> = std::fs::read_to_string(&argv).unwrap().lines().map(String::from).collect();
+        let mut expected = sandbox_args(&sandbox, &scratch);
+        expected.extend(["claude", "--flag", "value"].map(String::from));
+        assert_eq!(recorded, expected, "bwrap, its arguments, then claude and its own");
+        let seen = std::fs::read_to_string(&environment).unwrap();
+        assert!(!seen.contains("canary") && !seen.contains("UNLISTED"), "the child's environment is the allow-list: {seen}");
+    }
+}
