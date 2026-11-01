@@ -870,7 +870,7 @@ fn a_saturated_report_stops_integration_toward_more_spend_only() {
     assert!(s.integral > integral, "not saturated, it integrates again");
     let integral = s.integral;
     let t = t + 60_000;
-    control(&T, &mut s, Some(&read(700, t)), t, 900, false, true);
+    control(&T, &mut s, Some(&read(480, t)), t, 900, false, true);
     assert!(
         s.integral < integral,
         "ahead, saturation does not hold the integral up"

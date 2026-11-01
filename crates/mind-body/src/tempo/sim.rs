@@ -235,7 +235,8 @@ fn drive(
     let mut rng = Rng(seed);
     let mut busy_rng = Rng(seed ^ 0xB05E_B05E_B05E_B05E);
     let mut busy_until = vec![W0; scenario.minds];
-    let mut stalled = false;
+    // The heartbeat's report: a beat since the last launch found every Mind busy.
+    let (mut stalled, mut found_busy) = (false, false);
     let mut state = Fallback::default();
     let mut used = scenario.start_used;
     let mut resets = W0 + WINDOW_MS;
@@ -309,7 +310,8 @@ fn drive(
         out.last_beat = beat;
         if now - last_turn >= i64::from(beat) * 1000 {
             if let Some(mind) = busy_until.iter().position(|&until| until <= now) {
-                stalled = false;
+                stalled = found_busy;
+                found_busy = false;
                 let step =
                     scenario.cost_step.map_or(
                         1.0,
@@ -331,6 +333,7 @@ fn drive(
                 }
             } else {
                 stalled = true;
+                found_busy = true;
                 out.stalls += 1;
             }
         }
