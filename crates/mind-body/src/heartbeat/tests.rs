@@ -522,6 +522,7 @@ fn neither_an_operator_mention_nor_a_self_run_end_launches_a_busy_or_braked_pers
     rig.self_run_ended(BOB, 50);
     // Bob is busy: a Persona run is open.
     rig.minds[BOB].committed(vec![run_in("bob", "open-turn", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    rig.launcher.revive_as(&Slug("bob".into()), RunTurn::PersonaTurn);
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
     assert_eq!(rig.launched(), vec![], "nothing started");
 }
@@ -536,6 +537,7 @@ fn a_braked_or_busy_persona_is_never_the_beat_winner() {
     rig.end_run(BOB);
     rig.control.braked.borrow_mut().clear();
     rig.minds[ANN].committed(vec![run_in("ann", "open-turn", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    rig.launcher.revive_as(&Slug("ann".into()), RunTurn::PersonaTurn);
     rig.advance(900);
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] }, "the longest waiter is in a turn");
 }
