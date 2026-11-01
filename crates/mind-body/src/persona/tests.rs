@@ -576,8 +576,8 @@ fn chat_mid_turn_is_answered_by_that_turns_result_and_a_later_delivery_waits_for
     assert_eq!((answered, failure), (1 + 1, None));
     let told: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
     assert_eq!(told.len(), 2);
-    assert!(told[0].contains("first") && !told[0].contains("second"));
-    assert!(told[1].contains("second") && !told[1].contains("text=\"first\""), "the first line is not told again");
+    assert!(told[0].contains(r#"text="first""#) && !told[0].contains(r#"text="second""#));
+    assert!(told[1].contains(r#"text="second""#) && !told[1].contains(r#"text="first""#), "the first line is not told again");
     assert_eq!(rig.chat.acked.borrow().as_slice(), &[1, 2], "each result acks through its own batch only");
     assert_eq!(rig.model.spawns.borrow().len(), 1);
 }
@@ -845,7 +845,7 @@ fn a_trace_that_cannot_be_written_stops_neither_the_answer_nor_the_ack_nor_the_c
     failed.trace.1.set(true);
     let Outcome::Served { failure, .. } = failed.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
-    assert_eq!(failed.closing_reason(), "failed after 0 answered: the reply is not a persona reply; 1 trace writes failed", "the run is closed, not left open");
+    assert_eq!(failed.closing_reason(), "failed after 0 answered: the reply is not a persona reply; 3 trace writes failed", "the run is closed, not left open");
 }
 
 #[test]
@@ -1212,7 +1212,7 @@ fn a_reply_that_votes_and_declares_nothing_admits_no_pulse() {
 #[test]
 fn a_vote_or_urgency_outside_its_bounds_fails_the_turn_without_a_pulse_or_an_ack() {
     for (beat, urgency) in [(json!(59), json!(null)), (json!(86_401), json!(null)), (json!(null), json!(1001)), (json!(null), json!(-1)), (json!("fast"), json!(null))] {
-        let rig = Rig::new(vec![operator_says(1, "go")], &[voting(Some(beat.clone()), urgency.clone())]);
+        let rig = Rig::new(vec![operator_says(1, "go")], &thrice(voting(Some(beat.clone()), urgency.clone())));
         let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
         assert_eq!(failure, Some(Failure::Undecodable), "{beat} {urgency}");
         assert!(rig.mind.ids(K::Pulse).is_empty() && rig.chat.acked.borrow().is_empty(), "{beat} {urgency}");
@@ -1418,8 +1418,6 @@ fn the_persona_flags_are_taken_out_and_the_rest_is_left_for_the_shared_parser() 
         "--rooms a --operator o --minds m --minds m --self-sender s",
         "--rooms a,,b --operator o --minds m --self-sender s",
         "--rooms a --rooms a --operator o --minds m --self-sender s",
-        "--rooms a --operator o --minds m --self-sender s --max-turns 0",
-        "--rooms a --operator o --minds m --self-sender s --max-turns x",
         "--rooms a --operator o --minds m --self-sender",
     ] {
         assert!(Config::from_args(&args(bad), "usage").is_err(), "{bad}");
@@ -1716,7 +1714,7 @@ fn an_ask_cannot_be_settled_and_taken_on_in_one_reply() {
     let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "fork it")], &[first]);
     assert_eq!(failure_of(rig.go()), None);
     let id = memories(&rig).remove(0).0;
-    rig.model.replies.borrow_mut().push_back(reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "x" }]), starting(json!(id))));
+    rig.model.replies.borrow_mut().extend(thrice(reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "x" }]), starting(json!(id)))));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "go"));
     assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable));
 }
@@ -2022,7 +2020,7 @@ fn settling_and_taking_on_a_commitment() {
     let id = memories(&rig).remove(0).0;
     assert!(matches!(outcome_of(&rig, &id), Some(ResolutionOutcome::Deferred { .. })));
     // new:<i> on anything else is a decode failure with nothing sent.
-    let rig = Rig::new(vec![delivery(1, "swarm", libby, "fork")], &[reply(&[("swarm", "x")], json!([keeps("Rapport", "we get on", &[libby])]), json!([]), starting(json!("new:0")))]);
+    let rig = Rig::new(vec![delivery(1, "swarm", libby, "fork")], &thrice(reply(&[("swarm", "x")], json!([keeps("Rapport", "we get on", &[libby])]), json!([]), starting(json!("new:0")))));
     assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable));
     assert!(rig.sent_texts().is_empty() && rig.mind.ids(K::Memory).is_empty());
 }
@@ -2078,7 +2076,7 @@ fn about_can_name_an_absent_mind() {
     assert_eq!(allowed, ["@libby:chat", "@early:chat", "@mentioned:chat", "@op:chat"].map(String::from), "the schema's enum is people_she_may_name");
     // A stranger is not in it, and naming one is undecodable with nothing sent.
     let stranger = reply(&[("swarm", "x")], json!([keeps("Idea", "someone", &["@stranger:chat"])]), json!([]), json!(null));
-    let rig = Rig::new(vec![delivery(1, "swarm", libby, "hi")], &[stranger]);
+    let rig = Rig::new(vec![delivery(1, "swarm", libby, "hi")], &thrice(stranger));
     assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable));
     assert!(rig.sent_texts().is_empty() && rig.chat.acked.borrow().is_empty());
 }
