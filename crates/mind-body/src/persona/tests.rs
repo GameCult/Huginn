@@ -336,9 +336,14 @@ impl Rig {
     }
 
     fn start_with(&self, config: &Config) -> Outcome {
+        self.start_over(&self.mind, config)
+    }
+
+    /// One start over `mind`, which is her mind or a wrapper of it.
+    fn start_over(&self, mind: &dyn MindPort, config: &Config) -> Outcome {
         let (sandbox, scratch) = (self.sandbox(), self.scratch());
         let organs = Organs {
-            mind: &self.mind,
+            mind,
             launcher: &self.launcher,
             clock: &self.clock,
             host: "yggdrasil-host",
@@ -618,7 +623,7 @@ fn the_decoder_holds_the_bounds_the_schema_states() {
         assert!(!ok(brief, repo, campaign), "{repo:?} {campaign:?} brief of {}", brief.chars().count());
     }
     // The decoder's bounds are the schema's, read from one place.
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&c.rooms, &[CAMPAIGN.to_string()], &[], &[])).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&c.rooms, &[CAMPAIGN.to_string()])).unwrap();
     let ask = &schema["properties"]["start_self_run"]["anyOf"][1]["properties"];
     assert_eq!(ask["repo"]["pattern"], REPO_PATTERN);
     assert_eq!(ask["campaign"]["enum"], json!([CAMPAIGN]));
@@ -1036,7 +1041,7 @@ fn input_for(mentions: &[&str], display: &str) -> String {
     aqua.sender_display = display.into();
     let mut said = delivery(2, "swarm", "@operator:chat", "a reply");
     said.mentions = mentions.iter().map(|m| (*m).to_string()).collect();
-    render_input(&config(), &[aqua, said], &[], "", "", "usage")
+    render_input(&config(), &[aqua, said], &[], "", "", "usage", &[])
 }
 
 fn message_two(input: &str) -> &str {
@@ -1124,7 +1129,7 @@ fn a_vote_or_urgency_outside_its_bounds_fails_the_turn_without_a_pulse_or_an_ack
 
 #[test]
 fn the_reply_schema_bounds_the_vote_and_the_urgency_to_the_pulse_kind() {
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[], &["@op:chat".to_string()], &[])).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[])).unwrap();
     assert_eq!(schema["required"], json!(["say", "start_self_run", "remember", "settle", "urgency_permille"]));
     assert_eq!(schema["properties"]["tempo_vote_beat_s"]["anyOf"][1], json!({ "type": "integer", "minimum": 60, "maximum": 86_400 }));
     let described = schema["properties"]["tempo_vote_beat_s"]["description"].as_str().expect("the vote key is described to the model");
@@ -1150,14 +1155,55 @@ fn the_turn_input_carries_the_usage_line_and_the_swarm_aim_and_a_high_usage_chan
 }
 
 #[test]
-fn the_turn_is_one_tool_less_call_constrained_to_the_reply_schema_with_her_rooms() {
+fn the_session_runs_under_the_reply_schema_with_her_rooms_and_her_instructions_as_its_system_prompt() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
     rig.go();
     let requests = rig.model.requests.borrow();
-    assert_eq!(requests[0].caller, INSTANCE);
     assert!(requests[0].instructions.contains("You are Eureka."));
     let schema: serde_json::Value = serde_json::from_str(&requests[0].output_schema_json).unwrap();
     assert_eq!(schema["properties"]["say"]["items"]["properties"]["room"]["enum"], json!(["swarm", "usage", "operator"]));
+    let spawns = rig.model.spawns.borrow();
+    assert_eq!(spawns.len(), 1);
+    let at = spawns[0].iter().position(|arg| arg == "--model").unwrap();
+    assert_eq!(spawns[0][at + 1], "claude-test-model");
+}
+
+#[test]
+fn persona_args_are_pinned() {
+    let session = Uuid::new_v5(&SESSION_NAMESPACE, b"a run");
+    let args = persona_args(session, "claude-m", "{\"schema\":1}", Path::new("/run/mind-x/persona-instructions.md"));
+    let expected: Vec<String> = [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--replay-user-messages",
+        "--session-id",
+        &session.to_string(),
+        "--max-turns",
+        "500",
+        "--model",
+        "claude-m",
+        "--json-schema",
+        "{\"schema\":1}",
+        "--append-system-prompt-file",
+        "/run/mind-x/persona-instructions.md",
+        "--permission-mode",
+        "bypassPermissions",
+        "--permission-prompts",
+        "none",
+        "--setting-sources",
+        "user",
+        "--strict-mcp-config",
+    ]
+    .map(String::from)
+    .to_vec();
+    assert_eq!(args, expected);
+    for forbidden in ["--resume", "--continue", "--fork-session", "--settings"] {
+        assert!(!args.iter().any(|arg| arg == forbidden), "{forbidden}");
+    }
 }
 
 #[test]
@@ -1237,8 +1283,8 @@ fn outcomes_and_failures_read_as_one_line_each_without_values() {
 }
 
 #[test]
-fn a_turn_is_named_by_its_run_and_its_number() {
-    let rig = Rig::new(vec![operator_says(1, "a")], &(0..4).map(|_| says(&[("swarm", "x")])).collect::<Vec<_>>());
+fn a_result_is_named_by_its_run_and_its_number_and_a_say_by_its_batch() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "x")]), says(&[("swarm", "y")])]);
     rig.mind.committed(vec![run("woken", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
     rig.clock.0.set(600_000);
     let (deliveries, next) = (rig.chat.deliveries.clone(), Cell::new(1));
@@ -1250,8 +1296,10 @@ fn a_turn_is_named_by_its_run_and_its_number() {
     }));
     let Outcome::Served { run: carried, answered, .. } = rig.start_with(&config()) else { panic!("served") };
     assert_eq!((carried, answered), (run_ref("woken"), 2));
-    let ids: Vec<_> = rig.model.requests.borrow().iter().map(|request| request.request_id.clone()).collect();
-    assert_eq!(ids, ["woken-t0", "woken-t1"]);
+    assert_eq!(rig.turns(), 2, "the delivery that arrived mid-turn is told to the same session");
+    assert_eq!(rig.model.spawns.borrow().len(), 1, "one conversation, one process");
+    let ids: Vec<_> = rig.chat.sent.borrow().iter().map(|sent| sent.request_id.clone()).collect();
+    assert_eq!(ids, ["s1-1-0", "s2-2-0"]);
     let trace = rig.trace.0.borrow();
     assert_eq!(trace.iter().map(|record| (record.run.as_str(), record.turn)).collect::<Vec<_>>(), [("woken", 0), ("woken", 1)]);
 }
@@ -1599,7 +1647,7 @@ fn where_and_from_whom_she_learned_a_memory_comes_from_the_batch_and_no_model_fi
     let (_, memory) = memories(&wake).remove(0);
     assert_eq!((memory.origin, memory.sources.len()), (MemoryOrigin::Wake, 0));
     // The schema has no such fields and the decoder refuses them.
-    let schema = reply_schema(&["swarm".to_string()], &[CAMPAIGN.to_string()], &["@op:chat".to_string()], &[]);
+    let schema = reply_schema(&["swarm".to_string()], &[CAMPAIGN.to_string()]);
     for field in ["origin", "heard_from", "sources"] {
         assert!(!schema.contains(field), "{field}");
     }
@@ -1630,9 +1678,9 @@ fn what_she_keeps_names_only_people_she_may_name_and_stays_in_bounds() {
     assert!(!ok(json!([{ "sort": "Idea", "text": "x", "about": [], "salience_permille": 1001 }])));
     let without = reply(&[], json!([]), json!([]), json!(null)).replace("\"remember\":[],", "");
     assert_eq!(decode_reply(&without, &rooms, &people, &[]), Err(Failure::Undecodable), "remember is required");
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()], &people, &["a".into()])).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()])).unwrap();
     let items = &schema["properties"]["remember"]["items"]["properties"];
-    assert_eq!(items["about"]["items"]["enum"], json!(people));
+    assert_eq!(items["about"]["items"], json!({ "type": "string" }), "the people she may name change with every batch: the decoder holds them, the line lists them");
     assert_eq!(items["sort"]["enum"], json!(["Asked", "Decided", "Committed", "Learned", "Did", "Idea", "Rapport"]));
     let described = schema["properties"]["remember"]["description"].as_str().unwrap();
     for word in ["asks of you", "your own commitments", "one Committed entry", "who holds each other part", "stays in front of you every turn", "Decided is for decisions that are not your own part", "brainstorming", "rapport", "Atlas"] {
@@ -1675,18 +1723,7 @@ fn a_mind_that_refuses_the_turns_documents_fails_the_turn_after_the_says_with_no
     let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "hi")], &[text]);
     rig.open_the_run();
     let refusing = RefusesMemories(&rig.mind);
-    let organs = Organs {
-        mind: &refusing,
-        launcher: &rig.launcher,
-        clock: &rig.clock,
-        host: "yggdrasil-host",
-        chat: &rig.chat,
-        connector: &rig.model,
-        persona: &rig.persona,
-        trace: &rig.trace,
-        tempo: None,
-    };
-    let Outcome::Served { failure, self_run, .. } = start(&organs, &FileSource::new(rig.store()), &FileSource::new(rig.swarm_store()), &config()).unwrap() else { panic!("served") };
+    let Outcome::Served { failure, self_run, .. } = rig.start_over(&refusing, &config()) else { panic!("served") };
     assert_eq!(failure, Some(Failure::Memory));
     assert_eq!(rig.sent_texts(), vec!["said".to_string()]);
     assert!(rig.chat.acked.borrow().is_empty() && self_run.is_none() && rig.mind.ids(K::FollowUp).is_empty() && rig.mind.ids(K::Memory).is_empty());
@@ -1709,19 +1746,21 @@ fn memories_and_the_pulse_are_one_admission_after_the_says_and_before_the_self_r
 }
 
 #[test]
-fn the_open_items_shown_are_what_the_schema_lets_her_settle_or_take_on() {
+fn the_open_items_shown_are_what_the_decoder_lets_her_settle_or_take_on() {
     let rooms = ["swarm".to_string()];
-    let with = |open: &[String]| -> serde_json::Value { serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()], &["@op:chat".to_string()], open)).unwrap() };
-    let shown = with(&["yggdrasil:memory:a".to_string()]);
-    assert_eq!(shown["properties"]["settle"]["items"]["properties"]["item"]["enum"], json!(["yggdrasil:memory:a"]));
-    let options = shown["properties"]["start_self_run"]["anyOf"][1]["properties"]["for_item"]["anyOf"].as_array().unwrap().clone();
-    assert!(options.contains(&json!({ "type": "string", "enum": ["yggdrasil:memory:a"] })), "{options:?}");
-    assert!(options.contains(&json!({ "type": "string", "pattern": "^new:[0-7]$" })));
-    // With none shown she can settle nothing and can only take on an item she writes now.
-    let none = with(&[]);
-    assert_eq!(none["properties"]["settle"]["maxItems"], 0);
-    let options = none["properties"]["start_self_run"]["anyOf"][1]["properties"]["for_item"]["anyOf"].as_array().unwrap().clone();
-    assert!(options.iter().all(|option| option.get("enum").is_none()), "{options:?}");
+    let shown = ["yggdrasil:memory:a".to_string()];
+    let settling = |item: &str| reply(&[], json!([]), json!([{ "item": item, "outcome": "done", "why": "x" }]), json!(null));
+    assert!(decode_reply(&settling("yggdrasil:memory:a"), &rooms, &[], &shown).is_ok());
+    assert_eq!(decode_reply(&settling("yggdrasil:memory:b"), &rooms, &[], &shown), Err(Failure::Undecodable), "an item not shown");
+    assert_eq!(decode_reply(&settling("yggdrasil:memory:a"), &rooms, &[], &[]), Err(Failure::Undecodable), "with none shown she can settle nothing");
+    let taking = |item: &str| reply(&[], json!([]), json!([]), starting(json!(item)));
+    assert!(decode_reply(&taking("yggdrasil:memory:a"), &rooms, &[], &shown).is_ok());
+    assert_eq!(decode_reply(&taking("yggdrasil:memory:b"), &rooms, &[], &shown), Err(Failure::Undecodable));
+    assert_eq!(decode_reply(&taking("new:0"), &rooms, &[], &shown), Err(Failure::Undecodable), "new:<i> names a memory this reply writes");
+    // The schema leaves the ids to the decoder and the line, and still offers the one-reply form.
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()])).unwrap();
+    assert_eq!(schema["properties"]["settle"]["items"]["properties"]["item"], json!({ "type": "string" }));
+    assert_eq!(schema["properties"]["start_self_run"]["anyOf"][1]["properties"]["for_item"]["anyOf"], json!([{ "type": "null" }, { "type": "string" }]));
 }
 
 #[test]
@@ -1802,14 +1841,17 @@ fn responsibilities_of(input: &str) -> &str {
     &input[start..end]
 }
 
+/// The ids of the open items a turn's line shows, which are what a reply to it may settle or take on.
 fn settle_enum(rig: &Rig, turn: usize) -> Vec<String> {
-    let schema: serde_json::Value = serde_json::from_str(&rig.model.requests.borrow()[turn].output_schema_json).unwrap();
-    schema["properties"]["settle"]["items"]["properties"]["item"]["enum"].as_array().map(|ids| ids.iter().map(|id| id.as_str().unwrap().to_string()).collect()).unwrap_or_default()
+    let input = input_of(rig, turn);
+    responsibilities_of(&input).lines().filter(|line| line.starts_with("- ") && line.contains(":memory:")).map(|line| line[2..].split(' ').next().unwrap().to_string()).collect()
 }
 
+/// The people a turn's line says she may name in a memory's `about`.
 fn about_enum(rig: &Rig, turn: usize) -> Vec<String> {
-    let schema: serde_json::Value = serde_json::from_str(&rig.model.requests.borrow()[turn].output_schema_json).unwrap();
-    schema["properties"]["remember"]["items"]["properties"]["about"]["items"]["enum"].as_array().unwrap().iter().map(|who| who.as_str().unwrap().to_string()).collect()
+    let input = input_of(rig, turn);
+    let line = input.lines().find_map(|line| line.strip_prefix("People you may name in a memory's about: ")).expect("the line lists the people she may name");
+    line.trim_end_matches('.').split(", ").filter(|who| !who.is_empty()).map(String::from).collect()
 }
 
 #[test]

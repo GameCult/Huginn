@@ -78,6 +78,10 @@ use model_connector::PlanQuota;
 use crate::queue::MindPort;
 
 pub(crate) use decide::Why;
+#[cfg(test)]
+use decide::{State, decide};
+#[cfg(test)]
+use serde_json::json;
 use inbox::Brief;
 use session::{Polled, SessionInbox};
 pub(crate) use session::drive;
