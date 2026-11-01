@@ -87,6 +87,10 @@ struct Scenario {
     busy_scale: f64,
     /// The most band crossings the controller may show here.
     max_crossings: u32,
+    /// The ceiling is below what the target needs for most of the week: no
+    /// controller ends on target, and the scenario only compares the controller
+    /// told of the stalls with the one that is not.
+    stress: bool,
 }
 
 const BASE: Scenario = Scenario {
@@ -103,6 +107,7 @@ const BASE: Scenario = Scenario {
     minds: MINDS,
     busy_scale: 1.0,
     max_crossings: 2,
+    stress: false,
 };
 
 fn scenarios() -> Vec<Scenario> {
@@ -164,6 +169,7 @@ fn scenarios() -> Vec<Scenario> {
             name: "cheap-then-x3",
             mean_cost: 0.6,
             cost_step: Some((84.0, 3.0)),
+            max_crossings: 3,
             ..BASE
         },
         Scenario {
@@ -172,6 +178,7 @@ fn scenarios() -> Vec<Scenario> {
             cost_step: Some((84.0, 3.0)),
             minds: 1,
             busy_scale: 45.0,
+            stress: true,
             ..BASE
         },
         Scenario {
@@ -385,6 +392,9 @@ fn sim_scenarios_meet_target() {
                 let o = run(&scenario, sensor, &GAINS, seed);
                 let tag = format!("{} {sensor:?} seed {seed}: {o:?}", scenario.name);
                 assert!(o.jumps_per_h <= JUMPS_PER_H_BOUND, "chatter {tag}");
+                if scenario.stress {
+                    continue;
+                }
                 if scenario.unreachable {
                     assert_eq!(o.last_beat, FALLBACK_MIN_S, "saturated {tag}");
                     assert!(o.frac_at_min > 0.9, "saturated {tag}");
@@ -438,7 +448,8 @@ fn sweep() {
                         for seed in SEEDS {
                             let o = run(s, sensor, &g, seed);
                             j = j.max(o.jumps_per_h);
-                            if s.unreachable {
+                            if s.stress {
+                            } else if s.unreachable {
                                 sat_ok &= o.last_beat == FALLBACK_MIN_S && o.frac_at_min > 0.9;
                             } else if s.overspent {
                                 sat_ok &= o.last_beat == FALLBACK_MAX_S && o.frac_at_max > 0.9;
@@ -483,5 +494,26 @@ fn sweep() {
     }
     if let Some(r) = rows.iter().find(|r| r.1 == GAINS) {
         println!("\nCHOSEN {:?}\n{}", r.1, r.7);
+    }
+}
+
+/// Against a ceiling the target cannot be reached under, the controller told
+/// that a beat found every Mind busy winds its integral less, so it overspends
+/// less at the end than the one that is not told.
+#[test]
+fn the_busy_report_lowers_the_overshoot_against_a_ceiling() {
+    let scenario = scenarios().into_iter().find(|s| s.stress).unwrap();
+    for sensor in SENSORS {
+        for seed in SEEDS {
+            let told = drive(&scenario, sensor, &GAINS, seed, true);
+            let blind = drive(&scenario, sensor, &GAINS, seed, false);
+            let tag = format!("{sensor:?} seed {seed}: told {told:?} blind {blind:?}");
+            assert!(told.stalls > 0, "the ceiling binds {tag}");
+            assert!(told.final_used[0] <= blind.final_used[0], "final {tag}");
+            assert!(
+                told.worst_error_last_day < blind.worst_error_last_day,
+                "error {tag}"
+            );
+        }
     }
 }

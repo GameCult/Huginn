@@ -860,17 +860,18 @@ fn a_gap_between_calls_integrates_at_most_one_longest_beat() {
 /// nothing else.
 #[test]
 fn a_saturated_report_stops_integration_toward_more_spend_only() {
-    let mut s = warm(&T);
+    let g = Gains { kd: 0.0, ..T };
+    let mut s = warm(&g);
     let integral = s.integral;
     let t = MID + 2 * HOUR;
-    control(&T, &mut s, Some(&read(300, t)), t, 900, false, true);
+    control(&g, &mut s, Some(&read(300, t)), t, 900, false, true);
     assert_eq!(s.integral, integral, "behind and saturated: nothing to buy");
     let t = t + 60_000;
-    control(&T, &mut s, Some(&read(300, t)), t, 900, false, false);
+    control(&g, &mut s, Some(&read(300, t)), t, 900, false, false);
     assert!(s.integral > integral, "not saturated, it integrates again");
     let integral = s.integral;
     let t = t + 60_000;
-    control(&T, &mut s, Some(&read(480, t)), t, 900, false, true);
+    control(&g, &mut s, Some(&read(480, t)), t, 900, false, true);
     assert!(
         s.integral < integral,
         "ahead, saturation does not hold the integral up"
