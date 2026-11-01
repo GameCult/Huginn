@@ -267,7 +267,7 @@ mind_body::tempo: const FALLBACK_MAX_S : u32
 mind_body::tempo: const FALLBACK_MIN_S : u32
 mind_body::tempo: const GAINS : Gains
 mind_body::tempo: const LOG_BOUND_ORDERS : f64
-mind_body::tempo: fn fallback_beat (state : & mut Fallback , reading : Option < & Reading > , now_ms : i64 , target_permille : u32 , voted : bool ,) -> u32
+mind_body::tempo: fn fallback_beat (state : & mut Fallback , reading : Option < & Reading > , now_ms : i64 , target_permille : u32 , voted : bool , saturated : bool ,) -> u32
 mind_body::tempo: fn pick (rows : & [Standing] , beat_s : u32) -> Option < usize >
 mind_body::tempo: fn score (standing : & Standing , beat_s : u32) -> f64
 mind_body::tempo: fn tally (votes : & [Option < u32 >]) -> u32

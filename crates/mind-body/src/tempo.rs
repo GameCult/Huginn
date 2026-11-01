@@ -30,6 +30,10 @@ const RESETS_JITTER_MS: u64 = 60_000;
 /// vote: the sensor's own poll period, since the vote's effect cannot show in a
 /// reading sooner.
 const CARRY_FADE_H: f64 = 0.25;
+/// The longest stretch of time one call may integrate: the longest beat, the
+/// longest wait between two calls of a running heartbeat. A longer silence (a
+/// restart, an outage) is not integrated as if the swarm had run through it.
+const MAX_STEP_MS: i64 = FALLBACK_MAX_S as i64 * 1000;
 /// The turn rate, in beats per hour, that `DEFAULT_BEAT_S` stands for: the
 /// controller's bias.
 const BIAS_PER_H: f64 = 3600.0 / DEFAULT_BEAT_S as f64;
@@ -64,7 +68,8 @@ pub const GAINS: Gains = Gains {
 /// never published as truth. `rate_per_h` is the last output as a turn rate
 /// (zero: none yet); while a vote decides the caller sets it to the voted beat's
 /// rate, and the controller turns the gap between that and its own answer into
-/// `carry_per_h`, which fades after release.
+/// `carry_per_h`, which fades after release, over the sensor's poll period
+/// whatever the vote's length.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Fallback {
     pub integral: f64,
@@ -79,12 +84,19 @@ pub struct Fallback {
 /// The beat when no vote is cast: a PID on the gap between the seven-day usage
 /// trajectory to `target_permille` and what was used, acting on the turn rate
 /// (behind the trajectory raises it). Derivative on the measurement, only
-/// between distinct observations; conditional integration against the beat
-/// limits.
+/// between distinct observations; conditional integration: it does not
+/// integrate error in the direction of a saturated actuator. `saturated` is the
+/// caller's one report that a shorter beat cannot buy more spend: the last beat
+/// was the floor, or launched nothing because every eligible Mind was busy
+/// (ruling `tempo-controller-knows-the-ceiling`); the slow limit needs no report,
+/// since the integral's own answer at it is the controller's. One call
+/// integrates at most `MAX_STEP_MS` of time.
 /// While `voted` nothing integrates and the controller notes how far the voted
 /// beat (held inside the beat bounds) is from its own answer, so release starts
-/// at the voted beat and the controller takes the wheel back within a poll
-/// period or two. A new window clears the integral and the derivative memory;
+/// at the voted beat, to within the one integration step of the first free call,
+/// and the controller takes the wheel back within a poll period or two. The
+/// carry fades on that period whatever the vote's length, so a vote of a minute
+/// costs the extra turns of a poll period or two of fast beat. A new window clears the integral and the derivative memory;
 /// with no usable reading (none, an expired window, or one observed more than
 /// `STALE_AFTER_MS` ago, which a connector replaying its last answer keeps
 /// producing) the last beat holds (`DEFAULT_BEAT_S` before any).
@@ -94,8 +106,17 @@ pub fn fallback_beat(
     now_ms: i64,
     target_permille: u32,
     voted: bool,
+    saturated: bool,
 ) -> u32 {
-    control(&GAINS, state, reading, now_ms, target_permille, voted)
+    control(
+        &GAINS,
+        state,
+        reading,
+        now_ms,
+        target_permille,
+        voted,
+        saturated,
+    )
 }
 
 fn beat_of(rate_per_h: f64) -> u32 {
@@ -125,9 +146,10 @@ fn control(
     now_ms: i64,
     target_permille: u32,
     voted: bool,
+    saturated: bool,
 ) -> u32 {
     let dt_h = if state.last_now_ms > 0 {
-        (now_ms - state.last_now_ms).max(0) as f64 / HOUR_MS
+        (now_ms - state.last_now_ms).clamp(0, MAX_STEP_MS) as f64 / HOUR_MS
     } else {
         0.0
     };
@@ -178,8 +200,9 @@ fn control(
         };
         return held(state);
     }
-    let before = rate(state.integral) + state.carry_per_h;
-    let winding = (before >= high && error > 0.0) || (before <= low && error < 0.0);
+    // The slow limit is judged on the integral's own answer: the carry is a
+    // transient that fades and must not decide what the integral absorbs.
+    let winding = (saturated && error > 0.0) || (rate(state.integral) <= low && error < 0.0);
     if !winding && !rolled {
         state.integral += error * dt_h;
     }

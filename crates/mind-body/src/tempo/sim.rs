@@ -1,6 +1,9 @@
 //! The plant the fallback controller is tuned against: one seven-day plan
 //! window at one-minute steps, each beat a Persona turn costing a lognormal
 //! number of permille, plus the operator's own usage on the same subscription.
+//! The swarm has a throughput ceiling: a turn needs a Mind that is not in one,
+//! each turn holds its Mind for a lognormal time, and when every Mind is busy
+//! the beat launches nothing and the controller is told so.
 //! Test-only. The controller here is `super::control`, the same one the
 //! heartbeat will call through `fallback_beat`; the sweep passes it candidate
 //! gains, `GAINS` is committed. Rerun the sweep with
@@ -19,6 +22,19 @@ const SELF_EVERY: u32 = 25;
 const SELF_FACTOR: f64 = 5.0;
 /// Half-width, in permille, of the band the error must leave to count as a side.
 const BAND: f64 = 15.0;
+/// The roster the heartbeat routes (aqua, eureka, heimdall, kiko, libby, nibu,
+/// void, weksa: the slugs it launched over 2026-10-30..11-01).
+const MINDS: usize = 8;
+/// How long a Persona turn holds its Mind, lognormal. Measured on Yggdrasil from
+/// the `mind-persona@*` start and stop lines over 29 h (1284 turns): mean 15.4 s,
+/// median 6.4 s, p90 27.7 s, p99 186 s; the fit below has median 7.5 s, p90 35 s.
+const BUSY_MEAN_S: f64 = 15.4;
+const BUSY_SIGMA: f64 = 1.2;
+/// The shortest spacing between two on-beat launches is one heartbeat poll
+/// (median 30 s over 4100 polls); the sim's step, 60 s, is the beat floor and is
+/// longer, so the spacing never binds.
+const POLL_S: i64 = 30;
+const _: () = assert!(POLL_S * 1000 <= STEP_MS);
 
 struct Rng(u64);
 
@@ -31,10 +47,10 @@ impl Rng {
         ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    fn lognormal(&mut self, mean: f64) -> f64 {
+    fn lognormal(&mut self, mean: f64, sigma: f64) -> f64 {
         let (a, b) = (self.next().max(1e-12), self.next());
         let normal = (-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos();
-        (mean.ln() - COST_SIGMA * COST_SIGMA / 2.0 + COST_SIGMA * normal).exp()
+        (mean.ln() - sigma * sigma / 2.0 + sigma * normal).exp()
     }
 }
 
@@ -66,6 +82,11 @@ struct Scenario {
     /// The vote itself spends the week: no controller can end on target, it
     /// can only stop burning once the vote is gone.
     overspent: bool,
+    /// Minds the heartbeat can launch, and the factor on how long a turn holds one.
+    minds: usize,
+    busy_scale: f64,
+    /// The most band crossings the controller may show here.
+    max_crossings: u32,
 }
 
 const BASE: Scenario = Scenario {
@@ -79,6 +100,9 @@ const BASE: Scenario = Scenario {
     gap: None,
     unreachable: false,
     overspent: false,
+    minds: MINDS,
+    busy_scale: 1.0,
+    max_crossings: 2,
 };
 
 fn scenarios() -> Vec<Scenario> {
@@ -112,6 +136,7 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "vote-60s-1h",
             vote: Some((48.0, 49.0, 60)),
+            max_crossings: 3,
             ..BASE
         },
         Scenario {
@@ -133,6 +158,20 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "vote-86400s-24h",
             vote: Some((48.0, 72.0, 86_400)),
+            ..BASE
+        },
+        Scenario {
+            name: "cheap-then-x3",
+            mean_cost: 0.6,
+            cost_step: Some((84.0, 3.0)),
+            ..BASE
+        },
+        Scenario {
+            name: "one-slow-mind",
+            mean_cost: 0.6,
+            cost_step: Some((84.0, 3.0)),
+            minds: 1,
+            busy_scale: 45.0,
             ..BASE
         },
         Scenario {
@@ -176,10 +215,27 @@ struct Outcome {
     frac_at_max: f64,
     /// The beat on the last minute.
     last_beat: u32,
+    /// Minutes the beat was due and every Mind was busy.
+    stalls: u32,
 }
 
 fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome {
+    drive(scenario, sensor, gains, seed, true)
+}
+
+/// `report_stalls` false withholds the busy half of the saturation report (the
+/// floor half is always given): the controller as it was before it was told.
+fn drive(
+    scenario: &Scenario,
+    sensor: Sensor,
+    gains: &Gains,
+    seed: u64,
+    report_stalls: bool,
+) -> Outcome {
     let mut rng = Rng(seed);
+    let mut busy_rng = Rng(seed ^ 0xB05E_B05E_B05E_B05E);
+    let mut busy_until = vec![W0; scenario.minds];
+    let mut stalled = false;
     let mut state = Fallback::default();
     let mut used = scenario.start_used;
     let mut resets = W0 + WINDOW_MS;
@@ -225,10 +281,21 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
         let beat = match vote {
             Some(beat) => {
                 state.rate_per_h = 3600.0 / f64::from(beat);
-                control(gains, &mut state, shown.as_ref(), now, TARGET, true);
+                control(gains, &mut state, shown.as_ref(), now, TARGET, true, false);
                 beat
             }
-            None => control(gains, &mut state, shown.as_ref(), now, TARGET, false),
+            None => {
+                let saturated = prev_beat == FALLBACK_MIN_S || (report_stalls && stalled);
+                control(
+                    gains,
+                    &mut state,
+                    shown.as_ref(),
+                    now,
+                    TARGET,
+                    false,
+                    saturated,
+                )
+            }
         };
         if vote.is_none() {
             if window + 1 == scenario.windows && in_window >= 144.0 {
@@ -241,20 +308,30 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
         prev_beat = beat;
         out.last_beat = beat;
         if now - last_turn >= i64::from(beat) * 1000 {
-            let step = scenario.cost_step.map_or(
-                1.0,
-                |(at, factor)| if in_window >= at { factor } else { 1.0 },
-            );
-            turns += 1;
-            let self_run = if turns % SELF_EVERY == 0 {
-                SELF_FACTOR
+            if let Some(mind) = busy_until.iter().position(|&until| until <= now) {
+                stalled = false;
+                let step =
+                    scenario.cost_step.map_or(
+                        1.0,
+                        |(at, factor)| if in_window >= at { factor } else { 1.0 },
+                    );
+                turns += 1;
+                let self_run = if turns % SELF_EVERY == 0 {
+                    SELF_FACTOR
+                } else {
+                    1.0
+                };
+                used += rng.lognormal(scenario.mean_cost * step, COST_SIGMA) * self_run;
+                busy_until[mind] = now
+                    + (busy_rng.lognormal(BUSY_MEAN_S * scenario.busy_scale, BUSY_SIGMA) * 1000.0)
+                        as i64;
+                last_turn = now;
+                if sensor == Sensor::Stream && !gap {
+                    reading = sense(used.min(1000.0), now, resets);
+                }
             } else {
-                1.0
-            };
-            used += rng.lognormal(scenario.mean_cost * step) * self_run;
-            last_turn = now;
-            if sensor == Sensor::Stream && !gap {
-                reading = sense(used.min(1000.0), now, resets);
+                stalled = true;
+                out.stalls += 1;
             }
         }
         used = used.min(1000.0);
@@ -329,7 +406,10 @@ fn sim_scenarios_meet_target() {
                     o.worst_error_last_day <= LAST_DAY_ERROR_BOUND,
                     "error {tag}"
                 );
-                assert!(o.band_crossings <= 3, "oscillation {tag}");
+                assert!(
+                    o.band_crossings <= scenario.max_crossings,
+                    "oscillation {tag}"
+                );
             }
         }
     }
@@ -350,7 +430,7 @@ fn sweep() {
                 let mut detail = String::new();
                 for s in &scen {
                     let (mut f, mut e, mut j, mut x) = (0f64, 0f64, 0f64, 0u32);
-                    let mut lastb = 0;
+                    let (mut lastb, mut stalls) = (0, 0);
                     for sensor in SENSORS {
                         for seed in SEEDS {
                             let o = run(s, sensor, &g, seed);
@@ -369,13 +449,14 @@ fn sweep() {
                                 x = x.max(o.band_crossings);
                             }
                             lastb = o.last_beat;
+                            stalls = stalls.max(o.stalls);
                         }
                     }
                     final_err = final_err.max(f);
                     err_day = err_day.max(e);
                     jumps = jumps.max(j);
                     detail.push_str(&format!(
-                        "    {:<14} final_err {f:6.1}  worst_err_last_day {e:6.1}  jumps/h {j:5.2}  crossings {x}  last_beat {lastb}\n",
+                        "    {:<14} final_err {f:6.1}  worst_err_last_day {e:6.1}  jumps/h {j:5.2}  crossings {x}  last_beat {lastb}  stalled_min {stalls}\n",
                         s.name
                     ));
                 }

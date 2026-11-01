@@ -237,6 +237,7 @@ fn behind_target_shortens_the_beat() {
             MID,
             900,
             false,
+            false,
         )
     };
     // Halfway through the window the trajectory is 450: error +50, 0, -50 is a
@@ -251,23 +252,47 @@ fn derivative_is_on_measurement() {
     let g = Gains { ki: 0.0, ..T };
     let mut s = Fallback::default();
     near(
-        control(&g, &mut s, Some(&read(410, MID)), MID, 900, false),
+        control(&g, &mut s, Some(&read(410, MID)), MID, 900, false, false),
         750,
     );
     // A new observation 10 permille higher a quarter hour on: the slope is 40 an hour.
     let next = read(420, MID + 15 * 60_000);
     near(
-        control(&g, &mut s, Some(&next), MID + 15 * 60_000, 900, false),
+        control(
+            &g,
+            &mut s,
+            Some(&next),
+            MID + 15 * 60_000,
+            900,
+            false,
+            false,
+        ),
         941,
     );
     // The same reading again carries no derivative term.
     near(
-        control(&g, &mut s, Some(&next), MID + 16 * 60_000, 900, false),
+        control(
+            &g,
+            &mut s,
+            Some(&next),
+            MID + 16 * 60_000,
+            900,
+            false,
+            false,
+        ),
         778,
     );
     // A step in the target with used unchanged moves the beat by kp x error alone.
     near(
-        control(&g, &mut s, Some(&next), MID + 18 * 60_000, 1000, false),
+        control(
+            &g,
+            &mut s,
+            Some(&next),
+            MID + 18 * 60_000,
+            1000,
+            false,
+            false,
+        ),
         639,
     );
 }
@@ -284,17 +309,17 @@ fn saturated_output_does_not_wind_up() {
     for i in 0..100 {
         let now = day5 + i * 60_000;
         assert_eq!(
-            control(&g, &mut s, Some(&read(0, now)), now, 900, false),
+            control(&g, &mut s, Some(&read(0, now)), now, 900, false, true),
             FALLBACK_MIN_S
         );
     }
     assert_eq!(
         s.integral, 0.0,
-        "error is positive and the output is at its limit"
+        "error is positive and the caller reports the floor"
     );
     for i in 100..110 {
         let now = day5 + i * 60_000;
-        control(&g, &mut s, Some(&read(600, now)), now, 900, false);
+        control(&g, &mut s, Some(&read(600, now)), now, 900, false, false);
     }
     assert!(s.integral > 0.0, "unsaturated again, it integrates");
 
@@ -308,7 +333,7 @@ fn saturated_output_does_not_wind_up() {
         ..Fallback::default()
     };
     assert_eq!(
-        control(&g, &mut s, Some(&read(400, MID)), MID, 900, false),
+        control(&g, &mut s, Some(&read(400, MID)), MID, 900, false, false),
         FALLBACK_MAX_S
     );
     assert!(s.integral > -1000.0);
@@ -319,26 +344,50 @@ fn vote_freezes_and_release_is_bumpless() {
     let reading = read(300, MID);
     let mut s = Fallback::default();
     for i in 0..5 {
-        control(&T, &mut s, Some(&reading), MID + i * 60_000, 900, false);
+        control(
+            &T,
+            &mut s,
+            Some(&reading),
+            MID + i * 60_000,
+            900,
+            false,
+            false,
+        );
     }
     s.rate_per_h = 3600.0 / 300.0;
     let (mut short, mut long) = (s.clone(), s.clone());
     let (t_short, t_long) = (MID + 6 * 60_000, MID + 6 * 60_000 + HOUR);
     assert_eq!(
-        control(&T, &mut short, Some(&reading), t_short, 900, true),
+        control(&T, &mut short, Some(&reading), t_short, 900, true, false),
         300
     );
     assert_eq!(
-        control(&T, &mut long, Some(&reading), t_long, 900, true),
+        control(&T, &mut long, Some(&reading), t_long, 900, true, false),
         300
     );
     // However long the vote held, the first beat after it is the voted beat.
     near(
-        control(&T, &mut short, Some(&reading), t_short + 60_000, 900, false),
+        control(
+            &T,
+            &mut short,
+            Some(&reading),
+            t_short + 60_000,
+            900,
+            false,
+            false,
+        ),
         300,
     );
     near(
-        control(&T, &mut long, Some(&reading), t_long + 60_000, 900, false),
+        control(
+            &T,
+            &mut long,
+            Some(&reading),
+            t_long + 60_000,
+            900,
+            false,
+            false,
+        ),
         300,
     );
 }
@@ -349,7 +398,7 @@ fn rollover_resets_memory() {
     let before = RESETS - 2 * HOUR;
     for i in 0..12 {
         let now = before + i * 10 * 60_000;
-        control(&T, &mut s, Some(&read(100, now)), now, 900, false);
+        control(&T, &mut s, Some(&read(100, now)), now, 900, false, false);
     }
     assert!(s.integral > 100.0);
     let new = Reading {
@@ -359,7 +408,7 @@ fn rollover_resets_memory() {
     };
     // Used fell from 100 to 5 across the reset: no derivative kick, no old integral.
     near(
-        control(&T, &mut s, Some(&new), RESETS + HOUR, 900, false),
+        control(&T, &mut s, Some(&new), RESETS + HOUR, 900, false, false),
         898,
     );
     assert!(s.integral < 2.0);
@@ -370,18 +419,18 @@ fn rollover_resets_memory() {
 fn no_reading_holds() {
     let mut s = Fallback::default();
     assert_eq!(
-        control(&T, &mut s, None, MID, 900, false),
+        control(&T, &mut s, None, MID, 900, false, false),
         DEFAULT_BEAT_S,
         "never set"
     );
     let live = read(400, MID + 60_000);
-    control(&T, &mut s, Some(&read(400, MID)), MID, 900, false);
-    let held = control(&T, &mut s, Some(&live), MID + 60_000, 900, false);
+    control(&T, &mut s, Some(&read(400, MID)), MID, 900, false, false);
+    let held = control(&T, &mut s, Some(&live), MID + 60_000, 900, false, false);
     assert_ne!(held, DEFAULT_BEAT_S);
     let integral = s.integral;
     assert!(integral > 0.0, "a fresh reading integrates");
     assert_eq!(
-        control(&T, &mut s, None, MID + 2 * 60_000, 900, false),
+        control(&T, &mut s, None, MID + 2 * 60_000, 900, false, false),
         held
     );
     // Observed just before the window it names began: not its reading.
@@ -397,7 +446,8 @@ fn no_reading_holds() {
             Some(&stale),
             RESETS - WINDOW_MS + 60_000,
             900,
-            false
+            false,
+            false,
         ),
         held
     );
@@ -407,7 +457,15 @@ fn no_reading_holds() {
         ..live
     };
     assert_eq!(
-        control(&T, &mut s, Some(&expired), MID + 6 * HOUR, 900, false),
+        control(
+            &T,
+            &mut s,
+            Some(&expired),
+            MID + 6 * HOUR,
+            900,
+            false,
+            false
+        ),
         held
     );
     assert_eq!(s.integral, integral, "nothing integrated while held");
@@ -418,6 +476,7 @@ fn no_reading_holds() {
         Some(&read(400, MID + 6 * HOUR + 60_000)),
         MID + 6 * HOUR + 60_000,
         900,
+        false,
         false,
     );
     assert!(
@@ -443,7 +502,8 @@ fn beat_is_bounded() {
             Some(&read(0, late)),
             late,
             900,
-            false
+            false,
+            false,
         ),
         FALLBACK_MIN_S
     );
@@ -454,7 +514,8 @@ fn beat_is_bounded() {
             Some(&read(1000, MID)),
             MID,
             900,
-            false
+            false,
+            false,
         ),
         FALLBACK_MAX_S
     );
@@ -468,6 +529,7 @@ fn beat_is_bounded() {
                     MID,
                     target,
                     false,
+                    false,
                 );
                 assert!((FALLBACK_MIN_S..=FALLBACK_MAX_S).contains(&beat), "{beat}");
             }
@@ -479,16 +541,19 @@ fn beat_is_bounded() {
 fn fallback_beat_is_the_controller_with_the_committed_gains() {
     let live = read(400, MID);
     let (mut a, mut b) = (Fallback::default(), Fallback::default());
-    let beat = fallback_beat(&mut a, Some(&live), MID, 900, false);
-    assert_eq!(beat, control(&GAINS, &mut b, Some(&live), MID, 900, false));
+    let beat = fallback_beat(&mut a, Some(&live), MID, 900, false, false);
+    assert_eq!(
+        beat,
+        control(&GAINS, &mut b, Some(&live), MID, 900, false, false)
+    );
     assert_ne!(beat, DEFAULT_BEAT_S, "behind the trajectory");
     assert_eq!(a, b);
     // On the trajectory with no memory the answer is the bias, whatever the gains.
     let on = read(450, MID);
-    let beat = fallback_beat(&mut Fallback::default(), Some(&on), MID, 900, false);
+    let beat = fallback_beat(&mut Fallback::default(), Some(&on), MID, 900, false, false);
     assert_eq!(beat, DEFAULT_BEAT_S);
     assert_eq!(
-        fallback_beat(&mut Fallback::default(), None, MID, 900, false),
+        fallback_beat(&mut Fallback::default(), None, MID, 900, false, false),
         DEFAULT_BEAT_S
     );
 }
@@ -497,7 +562,7 @@ fn fallback_beat_is_the_controller_with_the_committed_gains() {
 fn a_window_that_ends_this_instant_is_expired() {
     let mut s = Fallback::default();
     let live = read(400, MID);
-    let held = control(&T, &mut s, Some(&live), MID, 900, false);
+    let held = control(&T, &mut s, Some(&live), MID, 900, false, false);
     let ending = Reading {
         resets_at_ms: MID + 60_000,
         observed_at_ms: MID,
@@ -505,7 +570,7 @@ fn a_window_that_ends_this_instant_is_expired() {
     };
     // At its reset instant the window holds the last beat instead of steering.
     assert_eq!(
-        control(&T, &mut s, Some(&ending), MID + 60_000, 900, false),
+        control(&T, &mut s, Some(&ending), MID + 60_000, 900, false, false),
         held
     );
 }
@@ -515,7 +580,7 @@ fn warm(gains: &Gains) -> Fallback {
     let mut s = Fallback::default();
     for i in 0..7 {
         let now = MID + i * 10 * 60_000;
-        control(gains, &mut s, Some(&read(300, now)), now, 900, false);
+        control(gains, &mut s, Some(&read(300, now)), now, 900, false, false);
     }
     assert!(s.integral > 0.0);
     s
@@ -525,7 +590,7 @@ fn warm(gains: &Gains) -> Fallback {
 fn a_frozen_reading_does_not_wind_up() {
     let frozen = read(300, MID);
     let at = |s: &mut Fallback, hours: i64| {
-        control(&T, s, Some(&frozen), MID + hours * HOUR, 900, false)
+        control(&T, s, Some(&frozen), MID + hours * HOUR, 900, false, false)
     };
     let mut s = Fallback::default();
     at(&mut s, 0);
@@ -543,7 +608,7 @@ fn a_frozen_reading_does_not_wind_up() {
     assert_eq!(s.integral, integral);
     // A reading that advances takes over again.
     let now = MID + 82 * HOUR;
-    control(&T, &mut s, Some(&read(300, now)), now, 900, false);
+    control(&T, &mut s, Some(&read(300, now)), now, 900, false, false);
     assert_ne!(s.rate_per_h, 3600.0 / f64::from(held));
 }
 
@@ -553,24 +618,24 @@ fn one_millisecond_of_resets_jitter_is_the_same_window() {
     for i in 0..60 {
         let now = MID + i * 60_000;
         let r = read(300, now);
-        control(&T, &mut steady, Some(&r), now, 900, false);
+        control(&T, &mut steady, Some(&r), now, 900, false, false);
         let jitter = Reading {
             resets_at_ms: RESETS + i % 2,
             ..r
         };
-        control(&T, &mut jittery, Some(&jitter), now, 900, false);
+        control(&T, &mut jittery, Some(&jitter), now, 900, false, false);
     }
     assert!(steady.integral > 100.0);
     assert!((jittery.integral - steady.integral).abs() < 1e-3);
     // The jitter allowed is a minute, to the millisecond.
     for (jitter, same) in [(60_000, true), (60_001, false)] {
         let mut s = Fallback::default();
-        control(&T, &mut s, Some(&read(300, MID)), MID, 900, false);
+        control(&T, &mut s, Some(&read(300, MID)), MID, 900, false, false);
         let later = Reading {
             resets_at_ms: RESETS + jitter,
             ..read(300, MID + HOUR)
         };
-        control(&T, &mut s, Some(&later), MID + HOUR, 900, false);
+        control(&T, &mut s, Some(&later), MID + HOUR, 900, false, false);
         assert_eq!(s.integral > 0.0, same, "{jitter} ms");
     }
     // A window a week on is not the same window.
@@ -579,7 +644,7 @@ fn one_millisecond_of_resets_jitter_is_the_same_window() {
         resets_at_ms: RESETS + WINDOW_MS - 1_000,
         ..read(5, now)
     };
-    control(&T, &mut jittery, Some(&next), now, 900, false);
+    control(&T, &mut jittery, Some(&next), now, 900, false, false);
     assert!(jittery.integral < 1.0);
 }
 
@@ -590,17 +655,17 @@ fn a_vote_beyond_the_beat_bounds_leaves_the_integral_alone() {
         let integral = s.integral;
         s.rate_per_h = 3600.0 / voted_beat;
         let t = MID + 3 * HOUR;
-        control(&T, &mut s, Some(&read(300, t)), t, 900, true);
+        control(&T, &mut s, Some(&read(300, t)), t, 900, true, false);
         assert_eq!(s.integral, integral, "a vote integrates nothing");
         // The controller can answer no more than its longest beat.
         let t = t + 60_000;
-        assert!(control(&T, &mut s, Some(&read(300, t)), t, 900, false) > 3500);
+        assert!(control(&T, &mut s, Some(&read(300, t)), t, 900, false, false) > 3500);
         // And takes the wheel back: well behind the trajectory, two hours on, the
         // beat is its own again.
         let mut beat = 0;
         for i in 1..=12 {
             let t = t + i * 10 * 60_000;
-            beat = control(&T, &mut s, Some(&read(300, t)), t, 900, false);
+            beat = control(&T, &mut s, Some(&read(300, t)), t, 900, false, false);
         }
         assert!(beat < 700, "{beat}");
     }
@@ -610,7 +675,15 @@ fn a_vote_beyond_the_beat_bounds_leaves_the_integral_alone() {
 fn a_short_vote_while_ahead_does_not_outlive_itself() {
     let mut s = Fallback::default();
     let at = |s: &mut Fallback, ms: i64, voted: bool| {
-        control(&T, s, Some(&read(650, MID + ms)), MID + ms, 900, voted)
+        control(
+            &T,
+            s,
+            Some(&read(650, MID + ms)),
+            MID + ms,
+            900,
+            voted,
+            false,
+        )
     };
     at(&mut s, 0, false);
     s.rate_per_h = 60.0;
@@ -622,6 +695,10 @@ fn a_short_vote_while_ahead_does_not_outlive_itself() {
         at(&mut s, HOUR + i * 60_000, false);
     }
     assert_eq!(at(&mut s, HOUR + 122 * 60_000, false), FALLBACK_MAX_S);
+    assert_eq!(
+        s.integral, 0.0,
+        "the carry is not an output the integral absorbs"
+    );
 }
 
 #[test]
@@ -631,7 +708,7 @@ fn the_vote_carry_needs_no_integral_gain_and_a_set_rate() {
     let mut s = warm(&g);
     s.rate_per_h = 12.0;
     let t = MID + 3 * HOUR;
-    control(&g, &mut s, Some(&read(300, t)), t, 900, true);
+    control(&g, &mut s, Some(&read(300, t)), t, 900, true, false);
     near(
         control(
             &g,
@@ -640,17 +717,34 @@ fn the_vote_carry_needs_no_integral_gain_and_a_set_rate() {
             t + 60_000,
             900,
             false,
+            false,
         ),
         300,
     );
     // A vote cast before the caller set any rate is no carry at all.
     let (mut voted, mut plain) = (Fallback::default(), Fallback::default());
     let r = read(300, MID);
-    control(&T, &mut voted, Some(&r), MID, 900, true);
+    control(&T, &mut voted, Some(&r), MID, 900, true, false);
     let after = read(300, MID + 60_000);
     assert_eq!(
-        control(&T, &mut voted, Some(&after), MID + 60_000, 900, false),
-        control(&T, &mut plain, Some(&after), MID + 60_000, 900, false)
+        control(
+            &T,
+            &mut voted,
+            Some(&after),
+            MID + 60_000,
+            900,
+            false,
+            false
+        ),
+        control(
+            &T,
+            &mut plain,
+            Some(&after),
+            MID + 60_000,
+            900,
+            false,
+            false
+        )
     );
 }
 
@@ -659,7 +753,7 @@ fn a_clock_that_steps_back_integrates_and_fades_nothing_backwards() {
     let mut s = warm(&T);
     let integral = s.integral;
     let t = MID + 2 * HOUR;
-    control(&T, &mut s, Some(&read(300, t)), t, 900, false);
+    control(&T, &mut s, Some(&read(300, t)), t, 900, false, false);
     let after_forward = s.integral;
     assert!(after_forward > integral);
     control(
@@ -669,10 +763,19 @@ fn a_clock_that_steps_back_integrates_and_fades_nothing_backwards() {
         t - HOUR,
         900,
         false,
+        false,
     );
     assert_eq!(s.integral, after_forward, "no negative step");
     s.rate_per_h = 12.0;
-    control(&T, &mut s, Some(&read(300, t + 120_000)), t, 900, true);
+    control(
+        &T,
+        &mut s,
+        Some(&read(300, t + 120_000)),
+        t,
+        900,
+        true,
+        false,
+    );
     let carry = s.carry_per_h;
     control(
         &T,
@@ -681,6 +784,7 @@ fn a_clock_that_steps_back_integrates_and_fades_nothing_backwards() {
         t - HOUR,
         900,
         false,
+        false,
     );
     assert!(s.carry_per_h.abs() <= carry.abs(), "the carry only fades");
 }
@@ -688,15 +792,107 @@ fn a_clock_that_steps_back_integrates_and_fades_nothing_backwards() {
 #[test]
 fn a_released_vote_that_saturates_the_output_does_not_wind_the_integral() {
     let mut s = Fallback::default();
-    let at = |s: &mut Fallback, ms: i64, voted: bool| {
-        control(&T, s, Some(&read(300, MID + ms)), MID + ms, 900, voted)
+    let at = |s: &mut Fallback, ms: i64, voted: bool, saturated: bool| {
+        control(
+            &T,
+            s,
+            Some(&read(300, MID + ms)),
+            MID + ms,
+            900,
+            voted,
+            saturated,
+        )
     };
-    at(&mut s, 0, false);
+    at(&mut s, 0, false, false);
     s.rate_per_h = 60.0;
-    at(&mut s, 60_000, true);
+    at(&mut s, 60_000, true, false);
     // Behind the trajectory, the voted rate is the fastest the controller can
     // answer and the error pushes further: the carry is part of the output the
     // integral must not wind against.
-    at(&mut s, 120_000, false);
+    at(&mut s, 120_000, false, true);
     assert_eq!(s.integral, 0.0);
+}
+
+/// Time spent without a call is not integrated as if the swarm had run through
+/// it: one fresh reading after two days integrates one longest beat of error.
+#[test]
+fn a_gap_between_calls_integrates_at_most_one_longest_beat() {
+    let mut s = warm(&GAINS);
+    let before = s.integral;
+    let now = MID + 48 * HOUR;
+    let error = 900.0 * (now - (RESETS - WINDOW_MS)) as f64 / WINDOW_MS as f64 - 300.0;
+    let beat = control(
+        &GAINS,
+        &mut s,
+        Some(&read(300, now)),
+        now,
+        900,
+        false,
+        false,
+    );
+    let step = s.integral - before;
+    assert!(
+        (step - error * (MAX_STEP_MS as f64 / HOUR_MS)).abs() < 1e-6,
+        "{step} for error {error}"
+    );
+    assert!(
+        beat > 100,
+        "an outage did not park the controller at its floor: {beat}"
+    );
+    // A gap shorter than the cap is integrated whole.
+    let mut s = warm(&GAINS);
+    let before = s.integral;
+    let now = MID + 90 * 60_000;
+    let error = 900.0 * (now - (RESETS - WINDOW_MS)) as f64 / WINDOW_MS as f64 - 300.0;
+    control(
+        &GAINS,
+        &mut s,
+        Some(&read(300, now)),
+        now,
+        900,
+        false,
+        false,
+    );
+    assert!((s.integral - before - error * 0.5).abs() < 1e-6);
+}
+
+/// The caller's saturation report stops integration toward more spend and
+/// nothing else.
+#[test]
+fn a_saturated_report_stops_integration_toward_more_spend_only() {
+    let mut s = warm(&T);
+    let integral = s.integral;
+    let t = MID + 2 * HOUR;
+    control(&T, &mut s, Some(&read(300, t)), t, 900, false, true);
+    assert_eq!(s.integral, integral, "behind and saturated: nothing to buy");
+    let t = t + 60_000;
+    control(&T, &mut s, Some(&read(300, t)), t, 900, false, false);
+    assert!(s.integral > integral, "not saturated, it integrates again");
+    let integral = s.integral;
+    let t = t + 60_000;
+    control(&T, &mut s, Some(&read(700, t)), t, 900, false, true);
+    assert!(
+        s.integral < integral,
+        "ahead, saturation does not hold the integral up"
+    );
+}
+
+/// The vote's release is the voted beat less the one integration step the first
+/// free call takes before it answers.
+#[test]
+fn release_of_the_slowest_vote_is_within_one_integration_step() {
+    let mut s = warm(&T);
+    s.rate_per_h = 1.0;
+    let t = MID + 3 * HOUR;
+    control(&T, &mut s, Some(&read(300, t)), t, 900, true, false);
+    let beat = control(
+        &T,
+        &mut s,
+        Some(&read(300, t + 60_000)),
+        t + 60_000,
+        900,
+        false,
+        false,
+    );
+    assert!((3400..FALLBACK_MAX_S).contains(&beat), "{beat}");
 }
