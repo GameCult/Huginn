@@ -21,7 +21,11 @@ fn the_score_is_the_wait_in_beats_times_ten_to_the_urgency_in_orders() {
     assert_eq!(score(&standing, 900), 2.0, "two beats waited, no urgency");
     assert_eq!(score(&standing, 600), 3.0);
     standing.self_permille = 1000;
-    assert_eq!(score(&standing, 900), 20.0, "full urgency is worth one order of magnitude");
+    assert_eq!(
+        score(&standing, 900),
+        20.0,
+        "full urgency is worth one order of magnitude"
+    );
     standing.self_permille = 500;
     assert!((score(&standing, 900) - 2.0 * 10f64.sqrt()).abs() < 1e-9);
     assert_eq!(score(&mind("never", None), 900), f64::INFINITY);
@@ -55,15 +59,34 @@ fn the_tally_is_the_lower_median_and_one_outlier_cannot_move_it() {
 fn silence_is_abstention_and_only_cast_votes_are_counted() {
     let mut eight = vec![None; 8];
     eight[0] = Some(60);
-    assert_eq!(tally(&eight), 60, "one voter among eight silent Minds decides");
-    assert_eq!(tally(&[None; 8]), DEFAULT_BEAT_S, "none cast is the default");
-    assert_eq!(tally(&[Some(3600), None, Some(60)]), 60, "two cast: the lower median");
-    assert_eq!(tally(&[Some(3600), Some(1800), None, None, Some(60)]), 1800, "abstainers do not dilute the median");
+    assert_eq!(
+        tally(&eight),
+        60,
+        "one voter among eight silent Minds decides"
+    );
+    assert_eq!(
+        tally(&[None; 8]),
+        DEFAULT_BEAT_S,
+        "none cast is the default"
+    );
+    assert_eq!(
+        tally(&[Some(3600), None, Some(60)]),
+        60,
+        "two cast: the lower median"
+    );
+    assert_eq!(
+        tally(&[Some(3600), Some(1800), None, None, Some(60)]),
+        1800,
+        "abstainers do not dilute the median"
+    );
 }
 
 #[test]
 fn the_tally_does_not_depend_on_the_order_the_votes_came_in() {
-    assert_eq!(tally(&[Some(900), Some(60), None, Some(600)]), tally(&[None, Some(60), Some(600), Some(900)]));
+    assert_eq!(
+        tally(&[Some(900), Some(60), None, Some(600)]),
+        tally(&[None, Some(60), Some(600), Some(900)])
+    );
 }
 
 #[test]
@@ -258,10 +281,10 @@ fn saturated_output_does_not_wind_up() {
     };
     let day5 = RESETS - 2 * 24 * HOUR;
     let mut s = Fallback::default();
-    let behind = read(0, day5);
     for i in 0..100 {
+        let now = day5 + i * 60_000;
         assert_eq!(
-            control(&g, &mut s, Some(&behind), day5 + i * 60_000, 900, false),
+            control(&g, &mut s, Some(&read(0, now)), now, 900, false),
             FALLBACK_MIN_S
         );
     }
@@ -269,20 +292,26 @@ fn saturated_output_does_not_wind_up() {
         s.integral, 0.0,
         "error is positive and the output is at its limit"
     );
-    let near_on = read(600, day5 + 100 * 60_000);
     for i in 100..110 {
-        control(&g, &mut s, Some(&near_on), day5 + i * 60_000, 900, false);
+        let now = day5 + i * 60_000;
+        control(&g, &mut s, Some(&read(600, now)), now, 900, false);
     }
     assert!(s.integral > 0.0, "unsaturated again, it integrates");
 
     // Saturated at the slow limit with the error pulling the other way integrates.
     let mut s = Fallback {
         integral: -1000.0,
+        last_used_permille: 400,
+        last_observed_at_ms: MID - 60_000,
+        last_now_ms: MID - 60_000,
+        last_step_ms: MID - 60_000,
+        window_resets_at_ms: RESETS,
         ..Fallback::default()
     };
-    let reading = read(400, MID);
-    control(&g, &mut s, Some(&reading), MID, 900, false);
-    control(&g, &mut s, Some(&reading), MID + HOUR, 900, false);
+    assert_eq!(
+        control(&g, &mut s, Some(&read(400, MID)), MID, 900, false),
+        FALLBACK_MAX_S
+    );
     assert!(s.integral > -1000.0);
 }
 
@@ -321,7 +350,7 @@ fn rollover_resets_memory() {
     let before = RESETS - 2 * HOUR;
     for i in 0..12 {
         let now = before + i * 10 * 60_000;
-        control(&T, &mut s, Some(&read(100, before)), now, 900, false);
+        control(&T, &mut s, Some(&read(100, now)), now, 900, false);
     }
     assert!(s.integral > 100.0);
     let new = Reading {
@@ -346,11 +375,12 @@ fn no_reading_holds() {
         DEFAULT_BEAT_S,
         "never set"
     );
-    let live = read(400, MID);
-    control(&T, &mut s, Some(&live), MID, 900, false);
+    let live = read(400, MID + 60_000);
+    control(&T, &mut s, Some(&read(400, MID)), MID, 900, false);
     let held = control(&T, &mut s, Some(&live), MID + 60_000, 900, false);
     assert_ne!(held, DEFAULT_BEAT_S);
     let integral = s.integral;
+    assert!(integral > 0.0, "a fresh reading integrates");
     assert_eq!(
         control(&T, &mut s, None, MID + 2 * 60_000, 900, false),
         held
@@ -470,4 +500,160 @@ fn a_window_that_ends_this_instant_is_expired() {
         control(&T, &mut s, Some(&ending), MID + 60_000, 900, false),
         held
     );
+}
+
+/// A state mid-window with some integral, as after a quiet hour of fresh readings.
+fn warm(gains: &Gains) -> Fallback {
+    let mut s = Fallback::default();
+    for i in 0..7 {
+        let now = MID + i * 10 * 60_000;
+        control(gains, &mut s, Some(&read(300, now)), now, 900, false);
+    }
+    assert!(s.integral > 0.0);
+    s
+}
+
+#[test]
+fn a_frozen_reading_does_not_wind_up() {
+    let mut s = Fallback::default();
+    let frozen = read(300, MID);
+    for i in 0..=288 {
+        control(&T, &mut s, Some(&frozen), MID + i * 10 * 60_000, 900, false);
+    }
+    assert_eq!(
+        s.integral, 0.0,
+        "a reading that never advanced is no evidence"
+    );
+    // The first reading that does advance is accountable for at most the
+    // longest beat, not the silence before it.
+    let now = MID + 48 * HOUR;
+    control(&T, &mut s, Some(&read(300, now)), now, 900, false);
+    assert!(s.integral > 100.0 && s.integral < 450.0, "{}", s.integral);
+}
+
+#[test]
+fn one_millisecond_of_resets_jitter_is_the_same_window() {
+    let (mut steady, mut jittery) = (Fallback::default(), Fallback::default());
+    for i in 0..60 {
+        let now = MID + i * 60_000;
+        let r = read(300, now);
+        control(&T, &mut steady, Some(&r), now, 900, false);
+        let jitter = Reading {
+            resets_at_ms: RESETS + i % 2,
+            ..r
+        };
+        control(&T, &mut jittery, Some(&jitter), now, 900, false);
+    }
+    assert!(steady.integral > 100.0);
+    assert_eq!(jittery.integral, steady.integral);
+    // A window a week on is not the same window.
+    let next = Reading {
+        resets_at_ms: RESETS + WINDOW_MS - 1_000,
+        ..read(5, MID + 61 * 60_000)
+    };
+    control(&T, &mut jittery, Some(&next), MID + 61 * 60_000, 900, false);
+    assert!(jittery.integral < 1.0);
+}
+
+#[test]
+fn a_vote_beyond_the_beat_bounds_leaves_the_integral_alone() {
+    for voted_beat in [7200.0, 86_400.0] {
+        let mut s = warm(&T);
+        let integral = s.integral;
+        s.rate_per_h = 3600.0 / voted_beat;
+        let t = MID + 3 * HOUR;
+        control(&T, &mut s, Some(&read(300, t)), t, 900, true);
+        assert_eq!(s.integral, integral, "a vote integrates nothing");
+        // The controller can answer no more than its longest beat.
+        let t = t + 60_000;
+        assert_eq!(
+            control(&T, &mut s, Some(&read(300, t)), t, 900, false),
+            FALLBACK_MAX_S
+        );
+        // And takes the wheel back: well behind the trajectory, two hours on, the
+        // beat is its own again.
+        let t = t + 2 * HOUR;
+        assert!(control(&T, &mut s, Some(&read(300, t)), t, 900, false) < 700);
+    }
+}
+
+#[test]
+fn a_short_vote_while_ahead_does_not_outlive_itself() {
+    let mut s = Fallback::default();
+    let ahead = read(600, MID);
+    control(&T, &mut s, Some(&ahead), MID, 900, false);
+    s.rate_per_h = 60.0;
+    let t = MID + HOUR;
+    control(&T, &mut s, Some(&ahead), t, 900, true);
+    near(
+        control(&T, &mut s, Some(&ahead), t + 60_000, 900, false),
+        60,
+    );
+    // 150 permille ahead of the trajectory: two hours on it is back to the
+    // slowest beat or near it, not the 60 s it was voted.
+    for i in 2..=121 {
+        control(&T, &mut s, Some(&ahead), t + i * 60_000, 900, false);
+    }
+    assert!(control(&T, &mut s, Some(&ahead), t + 122 * 60_000, 900, false) > 3300);
+}
+
+#[test]
+fn the_vote_carry_needs_no_integral_gain_and_a_set_rate() {
+    // ki = 0: nothing to divide by; release is still the voted beat.
+    let g = Gains { ki: 0.0, ..T };
+    let mut s = warm(&g);
+    s.rate_per_h = 12.0;
+    let t = MID + 3 * HOUR;
+    control(&g, &mut s, Some(&read(300, t)), t, 900, true);
+    near(
+        control(
+            &g,
+            &mut s,
+            Some(&read(300, t + 60_000)),
+            t + 60_000,
+            900,
+            false,
+        ),
+        300,
+    );
+    // A vote cast before the caller set any rate is no carry at all.
+    let (mut voted, mut plain) = (Fallback::default(), Fallback::default());
+    let r = read(300, MID);
+    control(&T, &mut voted, Some(&r), MID, 900, true);
+    let after = read(300, MID + 60_000);
+    assert_eq!(
+        control(&T, &mut voted, Some(&after), MID + 60_000, 900, false),
+        control(&T, &mut plain, Some(&after), MID + 60_000, 900, false)
+    );
+}
+
+#[test]
+fn a_clock_that_steps_back_integrates_and_fades_nothing_backwards() {
+    let mut s = warm(&T);
+    let integral = s.integral;
+    let t = MID + HOUR;
+    control(&T, &mut s, Some(&read(300, t)), t, 900, false);
+    let after_forward = s.integral;
+    assert!(after_forward > integral);
+    control(
+        &T,
+        &mut s,
+        Some(&read(300, t + 60_000)),
+        t - HOUR,
+        900,
+        false,
+    );
+    assert_eq!(s.integral, after_forward, "no negative step");
+    s.rate_per_h = 12.0;
+    control(&T, &mut s, Some(&read(300, t + 120_000)), t, 900, true);
+    let carry = s.carry_per_h;
+    control(
+        &T,
+        &mut s,
+        Some(&read(300, t + 180_000)),
+        t - HOUR,
+        900,
+        false,
+    );
+    assert!(s.carry_per_h.abs() <= carry.abs(), "the carry only fades");
 }
