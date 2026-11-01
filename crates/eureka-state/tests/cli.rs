@@ -856,27 +856,41 @@ fn blocked_names_the_questions_that_hold_a_spec_as_the_gate_reads_them() {
         held("A").out
     );
 
-    let question = format!("{CAMPAIGN}:question:fork");
+    // A second run claims B, and a second question is raised in it: it holds B and never A.
+    let other_claim = PipelineRef { kind: PipelineKind::CutSpec, id: Short(spec_id("B")) };
     admit(
-        "question.json",
-        json!([value(PipelineDocument::Question(PipelineQuestion {
-            campaign: slug(CAMPAIGN),
-            label: "fork".into(),
-            title: "A fork".into(),
-            question: "Which?".into(),
-            options: ["reopen", "retire"]
-                .iter()
-                .map(|name| QuestionOption {
-                    label: (*name).into(),
-                    text: "an option".into()
-                })
-                .collect(),
-            recommended: "reopen".into(),
-            depends: vec![],
-            raised_in: Some(run),
-            asked_on: Date("2026-10-10".into()),
+        "other.json",
+        json!([value(PipelineDocument::Run(PipelineRun {
+            instance: slug(INSTANCE),
+            label: "other".into(),
+            operated_by: RunOperator::Mind,
+            turn: RunTurn::SelfRun,
+            host: "test".into(),
+            started_on: Date("2026-10-10".into()),
+            budget_usd: "0".into(),
+            claims: vec![other_claim],
+            campaigns: vec![slug(CAMPAIGN)],
         }))]),
     );
+    let other = PipelineRef { kind: PipelineKind::Run, id: Short(format!("{INSTANCE}:run:other")) };
+    admit("other-ended.json", json!([resolution(&other, ResolutionOutcome::Recorded { reason: "unit not active".into() })]));
+    let ask = |label: &str, raised_in: PipelineRef| {
+        value(PipelineDocument::Question(PipelineQuestion {
+            campaign: slug(CAMPAIGN),
+            label: label.into(),
+            title: "A fork".into(),
+            question: "Which?".into(),
+            options: ["reopen", "retire"].iter().map(|name| QuestionOption { label: (*name).into(), text: "an option".into() }).collect(),
+            recommended: "reopen".into(),
+            depends: vec![],
+            raised_in: Some(raised_in),
+            asked_on: Date("2026-10-10".into()),
+        }))
+    };
+    admit("other-question.json", json!([ask("fork2", other)]));
+    let other_question = format!("{CAMPAIGN}:question:fork2");
+    let question = format!("{CAMPAIGN}:question:fork");
+    admit("question.json", json!([ask("fork", run)]));
     let shown = held("A");
     assert_eq!(shown.code, 0, "{}", shown.err);
     assert!(

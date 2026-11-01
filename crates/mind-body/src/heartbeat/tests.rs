@@ -1098,7 +1098,7 @@ fn a_beat_with_no_held_brief_writes_no_held_note() {
     brief_by(&rig, ANN, crate::persona::AGENT, "free", &source);
     rig.poll();
     let notes: Vec<String> = rig.store.traces.borrow().iter().flat_map(|trace| trace.instances.iter().map(|instance| instance.note.clone())).collect();
-    assert!(notes.iter().all(|note| !note.contains("held")), "{notes:?}");
+    assert!(notes.iter().all(|note| !note.contains("held") && !note.contains("closing")), "{notes:?}: a free brief and no dead holder write no note");
 }
 
 /// Her Self run in force whose unit is gone, claiming `claims`, admitted `ago` seconds before now.
