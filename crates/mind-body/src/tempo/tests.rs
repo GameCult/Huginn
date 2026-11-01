@@ -183,19 +183,39 @@ fn a_longer_beat_does_not_change_who_wins_among_equal_urgency() {
 const RESETS: i64 = 1_000_000_000_000;
 const MID: i64 = RESETS - WINDOW_MS / 2;
 const HOUR: i64 = 3_600_000;
-const T: Gains = Gains { kp: 0.02, ki: 0.002, kd: 0.02 };
+const T: Gains = Gains {
+    kp: 0.02,
+    ki: 0.002,
+    kd: 0.02,
+};
 
 fn read(used_permille: u32, observed_at_ms: i64) -> Reading {
-    Reading { used_permille, observed_at_ms, resets_at_ms: RESETS }
+    Reading {
+        used_permille,
+        observed_at_ms,
+        resets_at_ms: RESETS,
+    }
 }
 
 fn near(got: u32, want: u32) {
-    assert!(got.abs_diff(want) <= 1, "{got} is not within one second of {want}");
+    assert!(
+        got.abs_diff(want) <= 1,
+        "{got} is not within one second of {want}"
+    );
 }
 
 #[test]
 fn behind_target_shortens_the_beat() {
-    let at = |used| control(&T, &mut Fallback::default(), Some(&read(used, MID)), MID, 900, false);
+    let at = |used| {
+        control(
+            &T,
+            &mut Fallback::default(),
+            Some(&read(used, MID)),
+            MID,
+            900,
+            false,
+        )
+    };
     // Halfway through the window the trajectory is 450: error +50, 0, -50 is a
     // turn rate of 5, 4 and 3 an hour.
     near(at(400), 720);
@@ -207,26 +227,48 @@ fn behind_target_shortens_the_beat() {
 fn derivative_is_on_measurement() {
     let g = Gains { ki: 0.0, ..T };
     let mut s = Fallback::default();
-    near(control(&g, &mut s, Some(&read(410, MID)), MID, 900, false), 750);
+    near(
+        control(&g, &mut s, Some(&read(410, MID)), MID, 900, false),
+        750,
+    );
     // A new observation 10 permille higher a quarter hour on: the slope is 40 an hour.
     let next = read(420, MID + 15 * 60_000);
-    near(control(&g, &mut s, Some(&next), MID + 15 * 60_000, 900, false), 941);
+    near(
+        control(&g, &mut s, Some(&next), MID + 15 * 60_000, 900, false),
+        941,
+    );
     // The same reading again carries no derivative term.
-    near(control(&g, &mut s, Some(&next), MID + 16 * 60_000, 900, false), 778);
+    near(
+        control(&g, &mut s, Some(&next), MID + 16 * 60_000, 900, false),
+        778,
+    );
     // A step in the target with used unchanged moves the beat by kp x error alone.
-    near(control(&g, &mut s, Some(&next), MID + 18 * 60_000, 1000, false), 639);
+    near(
+        control(&g, &mut s, Some(&next), MID + 18 * 60_000, 1000, false),
+        639,
+    );
 }
 
 #[test]
 fn saturated_output_does_not_wind_up() {
-    let g = Gains { kp: 0.1, ki: 0.01, kd: 0.0 };
+    let g = Gains {
+        kp: 0.1,
+        ki: 0.01,
+        kd: 0.0,
+    };
     let day5 = RESETS - 2 * 24 * HOUR;
     let mut s = Fallback::default();
     let behind = read(0, day5);
     for i in 0..100 {
-        assert_eq!(control(&g, &mut s, Some(&behind), day5 + i * 60_000, 900, false), FALLBACK_MIN_S);
+        assert_eq!(
+            control(&g, &mut s, Some(&behind), day5 + i * 60_000, 900, false),
+            FALLBACK_MIN_S
+        );
     }
-    assert_eq!(s.integral, 0.0, "error is positive and the output is at its limit");
+    assert_eq!(
+        s.integral, 0.0,
+        "error is positive and the output is at its limit"
+    );
     let near_on = read(600, day5 + 100 * 60_000);
     for i in 100..110 {
         control(&g, &mut s, Some(&near_on), day5 + i * 60_000, 900, false);
@@ -234,7 +276,10 @@ fn saturated_output_does_not_wind_up() {
     assert!(s.integral > 0.0, "unsaturated again, it integrates");
 
     // Saturated at the slow limit with the error pulling the other way integrates.
-    let mut s = Fallback { integral: -1000.0, ..Fallback::default() };
+    let mut s = Fallback {
+        integral: -1000.0,
+        ..Fallback::default()
+    };
     let reading = read(400, MID);
     control(&g, &mut s, Some(&reading), MID, 900, false);
     control(&g, &mut s, Some(&reading), MID + HOUR, 900, false);
@@ -251,11 +296,23 @@ fn vote_freezes_and_release_is_bumpless() {
     s.rate_per_h = 3600.0 / 300.0;
     let (mut short, mut long) = (s.clone(), s.clone());
     let (t_short, t_long) = (MID + 6 * 60_000, MID + 6 * 60_000 + HOUR);
-    assert_eq!(control(&T, &mut short, Some(&reading), t_short, 900, true), 300);
-    assert_eq!(control(&T, &mut long, Some(&reading), t_long, 900, true), 300);
+    assert_eq!(
+        control(&T, &mut short, Some(&reading), t_short, 900, true),
+        300
+    );
+    assert_eq!(
+        control(&T, &mut long, Some(&reading), t_long, 900, true),
+        300
+    );
     // However long the vote held, the first beat after it is the voted beat.
-    near(control(&T, &mut short, Some(&reading), t_short + 60_000, 900, false), 300);
-    near(control(&T, &mut long, Some(&reading), t_long + 60_000, 900, false), 300);
+    near(
+        control(&T, &mut short, Some(&reading), t_short + 60_000, 900, false),
+        300,
+    );
+    near(
+        control(&T, &mut long, Some(&reading), t_long + 60_000, 900, false),
+        300,
+    );
 }
 
 #[test]
@@ -267,9 +324,16 @@ fn rollover_resets_memory() {
         control(&T, &mut s, Some(&read(100, before)), now, 900, false);
     }
     assert!(s.integral > 100.0);
-    let new = Reading { used_permille: 5, observed_at_ms: RESETS + HOUR, resets_at_ms: RESETS + WINDOW_MS };
+    let new = Reading {
+        used_permille: 5,
+        observed_at_ms: RESETS + HOUR,
+        resets_at_ms: RESETS + WINDOW_MS,
+    };
     // Used fell from 100 to 5 across the reset: no derivative kick, no old integral.
-    near(control(&T, &mut s, Some(&new), RESETS + HOUR, 900, false), 898);
+    near(
+        control(&T, &mut s, Some(&new), RESETS + HOUR, 900, false),
+        898,
+    );
     assert!(s.integral < 2.0);
     assert_eq!(s.window_resets_at_ms, RESETS + WINDOW_MS);
 }
@@ -277,33 +341,96 @@ fn rollover_resets_memory() {
 #[test]
 fn no_reading_holds() {
     let mut s = Fallback::default();
-    assert_eq!(control(&T, &mut s, None, MID, 900, false), DEFAULT_BEAT_S, "never set");
+    assert_eq!(
+        control(&T, &mut s, None, MID, 900, false),
+        DEFAULT_BEAT_S,
+        "never set"
+    );
     let live = read(400, MID);
     control(&T, &mut s, Some(&live), MID, 900, false);
     let held = control(&T, &mut s, Some(&live), MID + 60_000, 900, false);
     assert_ne!(held, DEFAULT_BEAT_S);
     let integral = s.integral;
-    assert_eq!(control(&T, &mut s, None, MID + 2 * 60_000, 900, false), held);
-    let stale = Reading { observed_at_ms: RESETS - WINDOW_MS - 1, ..live };
-    assert_eq!(control(&T, &mut s, Some(&stale), MID + 3 * 60_000, 900, false), held);
-    let expired = Reading { resets_at_ms: MID + 4 * HOUR, observed_at_ms: MID + 4 * HOUR - WINDOW_MS, ..live };
-    assert_eq!(control(&T, &mut s, Some(&expired), MID + 6 * HOUR, 900, false), held);
+    assert_eq!(
+        control(&T, &mut s, None, MID + 2 * 60_000, 900, false),
+        held
+    );
+    let stale = Reading {
+        observed_at_ms: RESETS - WINDOW_MS - 1,
+        ..live
+    };
+    assert_eq!(
+        control(&T, &mut s, Some(&stale), MID + 3 * 60_000, 900, false),
+        held
+    );
+    let expired = Reading {
+        resets_at_ms: MID + 4 * HOUR,
+        observed_at_ms: MID + 4 * HOUR - WINDOW_MS,
+        ..live
+    };
+    assert_eq!(
+        control(&T, &mut s, Some(&expired), MID + 6 * HOUR, 900, false),
+        held
+    );
     assert_eq!(s.integral, integral, "nothing integrated while held");
     // The six hours without a reading are not integrated when it comes back.
-    control(&T, &mut s, Some(&read(400, MID + 6 * HOUR + 60_000)), MID + 6 * HOUR + 60_000, 900, false);
-    assert!(s.integral - integral < 2.0, "{} then {}", integral, s.integral);
+    control(
+        &T,
+        &mut s,
+        Some(&read(400, MID + 6 * HOUR + 60_000)),
+        MID + 6 * HOUR + 60_000,
+        900,
+        false,
+    );
+    assert!(
+        s.integral - integral < 2.0,
+        "{} then {}",
+        integral,
+        s.integral
+    );
 }
 
 #[test]
 fn beat_is_bounded() {
-    let wild = Gains { kp: 1.0, ki: 0.0, kd: 0.0 };
+    let wild = Gains {
+        kp: 1.0,
+        ki: 0.0,
+        kd: 0.0,
+    };
     let late = RESETS - 12 * HOUR;
-    assert_eq!(control(&wild, &mut Fallback::default(), Some(&read(0, late)), late, 900, false), FALLBACK_MIN_S);
-    assert_eq!(control(&wild, &mut Fallback::default(), Some(&read(1000, MID)), MID, 900, false), FALLBACK_MAX_S);
+    assert_eq!(
+        control(
+            &wild,
+            &mut Fallback::default(),
+            Some(&read(0, late)),
+            late,
+            900,
+            false
+        ),
+        FALLBACK_MIN_S
+    );
+    assert_eq!(
+        control(
+            &wild,
+            &mut Fallback::default(),
+            Some(&read(1000, MID)),
+            MID,
+            900,
+            false
+        ),
+        FALLBACK_MAX_S
+    );
     for used in [0, 1, 450, 900, 1000, 5000] {
         for target in [0, 900, 1000] {
             for gains in [wild, T, GAINS] {
-                let beat = control(&gains, &mut Fallback::default(), Some(&read(used, MID)), MID, target, false);
+                let beat = control(
+                    &gains,
+                    &mut Fallback::default(),
+                    Some(&read(used, MID)),
+                    MID,
+                    target,
+                    false,
+                );
                 assert!((FALLBACK_MIN_S..=FALLBACK_MAX_S).contains(&beat), "{beat}");
             }
         }

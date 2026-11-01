@@ -44,7 +44,11 @@ pub struct Gains {
 
 /// Chosen by the committed simulation (`docs/research/2026-11-01-tempo-pid-sim.md`),
 /// never by a run-time search.
-pub const GAINS: Gains = Gains { kp: 0.02, ki: 0.01, kd: 0.0 };
+pub const GAINS: Gains = Gains {
+    kp: 0.02,
+    ki: 0.01,
+    kd: 0.0,
+};
 
 /// The fallback controller's memory. The heartbeat owns persisting it; it is
 /// never published as truth. `rate_per_h` is the last output as a turn rate
@@ -79,7 +83,9 @@ pub fn fallback_beat(
 
 fn beat_of(rate_per_h: f64) -> u32 {
     if rate_per_h > 0.0 {
-        ((3600.0 / rate_per_h).round().clamp(f64::from(FALLBACK_MIN_S), f64::from(FALLBACK_MAX_S))) as u32
+        ((3600.0 / rate_per_h)
+            .round()
+            .clamp(f64::from(FALLBACK_MIN_S), f64::from(FALLBACK_MAX_S))) as u32
     } else {
         FALLBACK_MAX_S
     }
@@ -103,9 +109,15 @@ fn control(
     target_permille: u32,
     voted: bool,
 ) -> u32 {
-    let dt_h = if state.last_now_ms > 0 { (now_ms - state.last_now_ms).max(0) as f64 / HOUR_MS } else { 0.0 };
+    let dt_h = if state.last_now_ms > 0 {
+        (now_ms - state.last_now_ms).max(0) as f64 / HOUR_MS
+    } else {
+        0.0
+    };
     state.last_now_ms = now_ms;
-    let Some(r) = reading.filter(|r| now_ms < r.resets_at_ms && r.observed_at_ms >= r.resets_at_ms - WINDOW_MS) else {
+    let Some(r) = reading
+        .filter(|r| now_ms < r.resets_at_ms && r.observed_at_ms >= r.resets_at_ms - WINDOW_MS)
+    else {
         return held(state);
     };
     if r.resets_at_ms != state.window_resets_at_ms {
@@ -115,7 +127,8 @@ fn control(
         state.last_observed_at_ms = r.observed_at_ms;
     }
     let elapsed = (now_ms - (r.resets_at_ms - WINDOW_MS)).clamp(0, WINDOW_MS) as f64;
-    let error = f64::from(target_permille) * elapsed / WINDOW_MS as f64 - f64::from(r.used_permille);
+    let error =
+        f64::from(target_permille) * elapsed / WINDOW_MS as f64 - f64::from(r.used_permille);
     let fresh = r.observed_at_ms > state.last_observed_at_ms;
     let slope = if fresh {
         (f64::from(r.used_permille) - f64::from(state.last_used_permille))
@@ -133,8 +146,12 @@ fn control(
         }
         return held(state);
     }
-    let rate = |integral: f64| BIAS_PER_H + gains.kp * error + gains.ki * integral - gains.kd * slope;
-    let (low, high) = (3600.0 / f64::from(FALLBACK_MAX_S), 3600.0 / f64::from(FALLBACK_MIN_S));
+    let rate =
+        |integral: f64| BIAS_PER_H + gains.kp * error + gains.ki * integral - gains.kd * slope;
+    let (low, high) = (
+        3600.0 / f64::from(FALLBACK_MAX_S),
+        3600.0 / f64::from(FALLBACK_MIN_S),
+    );
     let before = rate(state.integral);
     let winding = (before >= high && error > 0.0) || (before <= low && error < 0.0);
     if !winding {

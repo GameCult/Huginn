@@ -80,15 +80,52 @@ const BASE: Scenario = Scenario {
 fn scenarios() -> Vec<Scenario> {
     vec![
         BASE,
-        Scenario { name: "cheap-turns", mean_cost: 0.6, ..BASE },
-        Scenario { name: "dear-turns", mean_cost: 3.0, ..BASE },
-        Scenario { name: "burst", burst: Some((48.0, 52.0, 200.0)), ..BASE },
-        Scenario { name: "cost-x3", cost_step: Some((84.0, 3.0)), ..BASE },
-        Scenario { name: "vote-300s-24h", vote: Some((48.0, 72.0, 300)), ..BASE },
-        Scenario { name: "rollover", windows: 2, ..BASE },
-        Scenario { name: "gap-6h", gap: Some((72.0, 78.0)), ..BASE },
-        Scenario { name: "start-ahead", start_used: 500.0, ..BASE },
-        Scenario { name: "unreachable", mean_cost: 0.05, unreachable: true, ..BASE },
+        Scenario {
+            name: "cheap-turns",
+            mean_cost: 0.6,
+            ..BASE
+        },
+        Scenario {
+            name: "dear-turns",
+            mean_cost: 3.0,
+            ..BASE
+        },
+        Scenario {
+            name: "burst",
+            burst: Some((48.0, 52.0, 200.0)),
+            ..BASE
+        },
+        Scenario {
+            name: "cost-x3",
+            cost_step: Some((84.0, 3.0)),
+            ..BASE
+        },
+        Scenario {
+            name: "vote-300s-24h",
+            vote: Some((48.0, 72.0, 300)),
+            ..BASE
+        },
+        Scenario {
+            name: "rollover",
+            windows: 2,
+            ..BASE
+        },
+        Scenario {
+            name: "gap-6h",
+            gap: Some((72.0, 78.0)),
+            ..BASE
+        },
+        Scenario {
+            name: "start-ahead",
+            start_used: 500.0,
+            ..BASE
+        },
+        Scenario {
+            name: "unreachable",
+            mean_cost: 0.05,
+            unreachable: true,
+            ..BASE
+        },
     ]
 }
 
@@ -142,11 +179,16 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
         {
             used += amount * STEP_MS as f64 / HOUR_MS / (to - from);
         }
-        let gap = scenario.gap.is_some_and(|(from, to)| in_window >= from && in_window < to);
+        let gap = scenario
+            .gap
+            .is_some_and(|(from, to)| in_window >= from && in_window < to);
         if sensor == Sensor::Poll && !gap && (now - W0) % POLL_MS == 0 {
             reading = sense(used, now, resets);
         }
-        let vote = scenario.vote.filter(|&(from, to, _)| in_window >= from && in_window < to).map(|v| v.2);
+        let vote = scenario
+            .vote
+            .filter(|&(from, to, _)| in_window >= from && in_window < to)
+            .map(|v| v.2);
         let shown = if gap { None } else { Some(reading) };
         let beat = match vote {
             Some(beat) => {
@@ -166,9 +208,16 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
         prev_beat = beat;
         out.last_beat = beat;
         if now - last_turn >= i64::from(beat) * 1000 {
-            let step = scenario.cost_step.map_or(1.0, |(at, factor)| if in_window >= at { factor } else { 1.0 });
+            let step = scenario.cost_step.map_or(
+                1.0,
+                |(at, factor)| if in_window >= at { factor } else { 1.0 },
+            );
             turns += 1;
-            let self_run = if turns % SELF_EVERY == 0 { SELF_FACTOR } else { 1.0 };
+            let self_run = if turns % SELF_EVERY == 0 {
+                SELF_FACTOR
+            } else {
+                1.0
+            };
             used += rng.lognormal(scenario.mean_cost * step) * self_run;
             last_turn = now;
             if sensor == Sensor::Stream && !gap {
@@ -176,7 +225,8 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
             }
         }
         used = used.min(1000.0);
-        let error = f64::from(TARGET) * (now - (resets - WINDOW_MS)) as f64 / WINDOW_MS as f64 - used;
+        let error =
+            f64::from(TARGET) * (now - (resets - WINDOW_MS)) as f64 / WINDOW_MS as f64 - used;
         if window + 1 == scenario.windows {
             if in_window >= 144.0 {
                 worst_day = worst_day.max(error.abs());
@@ -226,13 +276,22 @@ fn sim_scenarios_meet_target() {
                 if scenario.unreachable {
                     assert_eq!(o.last_beat, FALLBACK_MIN_S, "saturated {tag}");
                     assert!(o.frac_at_min > 0.9, "saturated {tag}");
-                    assert!(o.final_used.iter().all(|u| *u < f64::from(TARGET) - 100.0), "{tag}");
+                    assert!(
+                        o.final_used.iter().all(|u| *u < f64::from(TARGET) - 100.0),
+                        "{tag}"
+                    );
                     continue;
                 }
                 for used in &o.final_used {
-                    assert!((used - f64::from(TARGET)).abs() <= FINAL_TOLERANCE, "final {tag}");
+                    assert!(
+                        (used - f64::from(TARGET)).abs() <= FINAL_TOLERANCE,
+                        "final {tag}"
+                    );
                 }
-                assert!(o.worst_error_last_day <= LAST_DAY_ERROR_BOUND, "error {tag}");
+                assert!(
+                    o.worst_error_last_day <= LAST_DAY_ERROR_BOUND,
+                    "error {tag}"
+                );
                 assert!(o.band_crossings <= 2, "oscillation {tag}");
             }
         }
@@ -262,7 +321,10 @@ fn sweep() {
                             if s.unreachable {
                                 sat_ok &= o.last_beat == FALLBACK_MIN_S && o.frac_at_min > 0.9;
                             } else {
-                                f = o.final_used.iter().fold(f, |m, u| m.max((u - f64::from(TARGET)).abs()));
+                                f = o
+                                    .final_used
+                                    .iter()
+                                    .fold(f, |m, u| m.max((u - f64::from(TARGET)).abs()));
                                 e = e.max(o.worst_error_last_day);
                                 cross = cross.max(o.band_crossings);
                             }
@@ -283,9 +345,14 @@ fn sweep() {
         }
     }
     rows.sort_by(|a, b| a.0.total_cmp(&b.0));
-    println!("kp ki kd | worst final err | worst err last day | worst jumps/h | worst crossings | saturates when unreachable");
+    println!(
+        "kp ki kd | worst final err | worst err last day | worst jumps/h | worst crossings | saturates when unreachable"
+    );
     for r in &rows {
-        println!("{} {} {} | {:.1} | {:.1} | {:.2} | {} | {}", r.1.kp, r.1.ki, r.1.kd, r.2, r.3, r.4, r.5, r.6);
+        println!(
+            "{} {} {} | {:.1} | {:.1} | {:.2} | {} | {}",
+            r.1.kp, r.1.ki, r.1.kd, r.2, r.3, r.4, r.5, r.6
+        );
     }
     for r in rows.iter().take(4) {
         println!("\nBEST {:?}\n{}", r.1, r.7);
