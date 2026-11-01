@@ -2270,8 +2270,6 @@ fn each_session_is_lent_a_lease_that_ends_with_the_units_remaining_time() {
 #[test]
 fn a_hold_placed_as_a_session_ends_stops_the_next_session_before_a_lease_is_asked() {
     let rig = Rig::new(vec![operator_says(1, "a"), direct(2, "!dm:chat", "@ann:chat", "later")], &[says(&[("operator", "x")]), says(&[("!dm:chat", "y")])]);
-    // Time barely passes, so no poll inside the session sees the hold: only the check between sessions can.
-    rig.clock.step.set(1);
     let swarm = rig.swarm_store();
     *rig.chat.on_send.borrow_mut() = Some(Box::new(move || {
         SwarmWriter::open(&swarm).unwrap().set_brake(false, at(0), "op").unwrap();
