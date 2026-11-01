@@ -2555,7 +2555,8 @@ fn a_second_refusal_before_the_retell_is_written_keeps_the_first_batch_to_be_tol
     let (outcome, acked) = carry_children(&rig, vec![child]);
     let Outcome::Served { failure, .. } = outcome else { panic!("served") };
     assert_eq!(failure, None);
-    let retold = writes.borrow().last().cloned().expect("a retell was written");
+    let last: serde_json::Value = serde_json::from_str(writes.borrow().last().expect("a retell was written")).unwrap();
+    let retold = last["message"]["content"].as_str().unwrap().to_string();
     assert!(retold.contains(r#"text="three""#) && retold.contains(r#"text="four""#) && retold.contains(r#"text="five""#), "one line carries all three: {retold}");
     assert_eq!(rig.sent_texts(), ["for three, four and five"]);
     assert_eq!(acked, [5], "acked once, after the merged batch was answered: {acked:?}");
