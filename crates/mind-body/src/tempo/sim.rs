@@ -126,7 +126,7 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
     let (mut jumps, mut unvoted, mut at_min) = (0u32, 0u32, 0u32);
     let mut side = 0i8;
     let mut worst_day = 0f64;
-    for i in 1..=steps {
+    for i in 1..steps {
         let now = W0 + i * STEP_MS;
         if now >= resets {
             out.final_used.push(used);

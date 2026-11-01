@@ -250,10 +250,12 @@ fn vote_freezes_and_release_is_bumpless() {
     }
     s.rate_per_h = 3600.0 / 300.0;
     let (mut short, mut long) = (s.clone(), s.clone());
-    assert_eq!(control(&T, &mut short, Some(&reading), MID + 6 * 60_000, 900, true), 300);
-    assert_eq!(control(&T, &mut long, Some(&reading), MID + 6 * 60_000 + HOUR, 900, true), 300);
-    assert!((short.integral - long.integral).abs() < 1e-6, "a vote integrates nothing");
-    near(control(&T, &mut short, Some(&reading), MID + 7 * 60_000, 900, false), 300);
+    let (t_short, t_long) = (MID + 6 * 60_000, MID + 6 * 60_000 + HOUR);
+    assert_eq!(control(&T, &mut short, Some(&reading), t_short, 900, true), 300);
+    assert_eq!(control(&T, &mut long, Some(&reading), t_long, 900, true), 300);
+    // However long the vote held, the first beat after it is the voted beat.
+    near(control(&T, &mut short, Some(&reading), t_short + 60_000, 900, false), 300);
+    near(control(&T, &mut long, Some(&reading), t_long + 60_000, 900, false), 300);
 }
 
 #[test]
