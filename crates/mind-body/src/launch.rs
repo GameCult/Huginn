@@ -444,6 +444,7 @@ fn breaker_question(claim: &PipelineRef, run: &PipelineRef, held: usize, label: 
             "Run {} and the runs before it left nothing that cites the work it held (claims held: {held}), so none of it launches again. Answering or withdrawing this reopens every claim of that run with a fresh count.",
             run.id.0
         )
+        .as_str()
         .into(),
         options: vec![
             QuestionOption { label: "reopen".into(), text: "Answer to reopen every claim of the run with a fresh count.".into() },
