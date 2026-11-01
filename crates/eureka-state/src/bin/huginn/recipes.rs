@@ -1,6 +1,8 @@
 //! The campaign progress view as named subcommands. Each recipe is exactly the
 //! selection `references/campaign-state.md` gives (Eureka 278b881, "Recipes"),
 //! built per call and never cached. Each one's `--help` prints its selection.
+//! The one exception is `blocked`, which asks what a question holds and so
+//! reads through `eureka_state::hold`, the decider the heartbeat's gate reads.
 
 use clap::{Args, Subcommand};
 use huginn_mind::SemanticQuery;
@@ -66,7 +68,7 @@ pub enum Recipe {
         #[command(flatten)]
         page: Paging,
     },
-    /// Open questions raised in a spec: the spec waits on the operator.
+    /// Questions that hold a spec, answered-retire ones included: the spec waits on the operator.
     Blocked {
         spec_id: String,
         #[command(flatten)]
@@ -125,7 +127,12 @@ impl Recipe {
             Self::Open { campaigns, page } => (open(&campaigns), None, page),
             Self::Findings { campaign, blocking, page } => (findings(&campaign, blocking), None, page),
             Self::Unreported { campaign, page } => (unreported(&campaign), None, page),
-            Self::Blocked { spec_id, page } => (blocked(&spec_id), None, page),
+            // Several selections, not one: `main` answers it through `eureka_state::hold`.
+            Self::Blocked { .. } => {
+                return Err(Trouble::Internal(
+                    "blocked is answered by the hold, not by one selection".into(),
+                ));
+            }
             Self::Unjudged { campaign, page } => (unjudged(&campaign), None, page),
             Self::History { id, page } => (history(door::kind_of(&id)?.type_id(), &id), None, page),
             Self::Cut { campaign, label, page } => (cut(&campaign, &label), None, page),
@@ -198,14 +205,6 @@ fn unreported(campaign: &str) -> Value {
     })
 }
 
-fn blocked(spec_id: &str) -> Value {
-    json!({
-        "schemas": [schema(PipelineKind::Question)],
-        "fields": [in_force()],
-        "cites": { "target": { "schemaId": schema(PipelineKind::CutSpec), "recordKey": spec_id }, "role": "raised_in" },
-    })
-}
-
 fn unjudged(campaign: &str) -> Value {
     json!({
         "schemas": [schema(PipelineKind::CutReport)],
@@ -257,6 +256,18 @@ fn gaps() -> Value {
     })
 }
 
+/// `blocked` is not one selection: it reads the in-force questions and, for each,
+/// what it holds, by `eureka_state::hold`, the decider the heartbeat's gate reads.
+fn blocked_help() -> String {
+    let questions = json!({ "schemas": [schema(PipelineKind::Question)], "fields": [in_force()] });
+    format!(
+        "selection (first of several):
+{}
+A question holds the item it is raised in, or every claim of the run it is raised in;          one answered `retire` keeps holding the claims still in force. The recipe prints the questions that hold <id>.",
+        serde_json::to_string_pretty(&questions).unwrap_or_default()
+    )
+}
+
 /// Each recipe's `--help` addendum: its selection with placeholders in the
 /// arguments' places. The same builders as execution, so help cannot drift
 /// from what runs.
@@ -276,7 +287,7 @@ pub fn help() -> Vec<(&'static str, String)> {
         ("open", selection(open(&[c()]))),
         ("findings", findings_help),
         ("unreported", selection(unreported(&c()))),
-        ("blocked", selection(blocked("<id>"))),
+        ("blocked", blocked_help()),
         ("unjudged", selection(unjudged(&c()))),
         ("history", selection(history("epiphany.pipeline.<kind>.v2", "<id>"))),
         ("cut", selection(cut(&c(), "<label>"))),

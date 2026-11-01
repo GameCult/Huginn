@@ -63,7 +63,12 @@ impl Recording {
     }
 
     pub(crate) fn revive(&self, turn: RunTurn) {
-        self.running.borrow_mut().push((Slug(INSTANCE.into()), turn));
+        self.revive_as(&Slug(INSTANCE.into()), turn);
+    }
+
+    /// `revive` for a named instance.
+    pub(crate) fn revive_as(&self, instance: &Slug, turn: RunTurn) {
+        self.running.borrow_mut().push((instance.clone(), turn));
     }
 }
 
@@ -373,7 +378,7 @@ pub(crate) fn question_in(label: &str, item: &PipelineRef) -> PipelineDocument {
         label: label.into(),
         title: "A fork".into(),
         question: "Which?".into(),
-        options: ["A", "B"].iter().map(|name| QuestionOption { label: (*name).into(), text: "an option".into() }).collect(),
+        options: ["A", "B", "reopen", "retire"].iter().map(|name| QuestionOption { label: (*name).into(), text: "an option".into() }).collect(),
         recommended: "A".into(),
         depends: vec![],
         raised_in: Some(item.clone()),

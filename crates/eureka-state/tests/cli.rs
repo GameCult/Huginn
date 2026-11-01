@@ -11,9 +11,11 @@ use std::sync::{Arc, Mutex};
 use cultnet_rs::Selection;
 use huginn_mind::envelope::{OperationFailure, decode_request, encode_failure, encode_response};
 use huginn_mind::eureka_pipeline::{
-    CodeLocation, CommitRange, CutVerification, Date, Evidence, EvidenceKind, MutationRecord, OrgRepo, PipelineCutReport,
-    PipelineCutSpec, PipelineDocument, PipelineKind, PipelineRef, PipelineRuling, Promise, ReportCommit, RulingAuthority, Short,
-    StructuralDelta, pipeline_key,
+    CodeLocation, CommitRange, CutVerification, Date, Evidence, EvidenceKind, MutationRecord,
+    OrgRepo, PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineKind, PipelineQuestion,
+    PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, Promise, QuestionOption,
+    ReportCommit, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Short, StructuralDelta,
+    pipeline_key,
 };
 use huginn_mind::{
     AdmissionFacts, HuginnMindRequest, HuginnMindResponse, IndexStatus, MindRefusal, MindStatus, PersonaStatus, PipelineAdmissionOutcome, PipelineDocumentView,
@@ -748,17 +750,6 @@ fn the_recipes_send_exactly_the_pages_selections() {
             }),
         ),
         (
-            vec!["blocked", "eureka-substrate:cut_spec:cut-x.r1"],
-            json!({
-                "schemas": [schema("question")],
-                "fields": [in_force],
-                "cites": {
-                    "target": { "schemaId": schema("cut_spec"), "recordKey": "eureka-substrate:cut_spec:cut-x.r1" },
-                    "role": "raised_in",
-                },
-            }),
-        ),
-        (
             vec!["unjudged", c],
             json!({
                 "schemas": [schema("cut_report")],
@@ -800,6 +791,150 @@ fn the_recipes_send_exactly_the_pages_selections() {
         let expected = (args[0] == "precedent").then(|| ("the question in plain words".to_string(), 10));
         assert_eq!(semantic, expected, "{args:?}");
     }
+}
+
+/// `huginn blocked` answers with the hold the heartbeat's gate reads: a question
+/// raised in a run holds every claim of that run, and an answer of `retire`
+/// keeps holding the claims until they are resolved.
+#[test]
+fn blocked_names_the_questions_that_hold_a_spec_as_the_gate_reads_them() {
+    let server = live();
+    let dir = tempfile::tempdir().unwrap();
+    let admit = |name: &str, documents: Value| {
+        let file = write(&dir, name, &documents);
+        let ran = at(server.addr, &admit_args(&file), None);
+        assert_eq!(ran.code, 0, "{name}: {}", ran.err);
+    };
+    let value = |document: PipelineDocument| serde_json::to_value(document).unwrap();
+    let spec_id = |cut: &str| format!("{CAMPAIGN}:cut_spec:cut-{cut}.r1");
+    let held = |cut: &str| at(server.addr, &["blocked", &spec_id(cut)], None);
+    admit("campaign.json", json!([campaign_json()]));
+    admit("specs.json", json!([spec("A"), spec("B")]));
+    let claim = PipelineRef {
+        kind: PipelineKind::CutSpec,
+        id: Short(spec_id("A")),
+    };
+    admit(
+        "run.json",
+        json!([value(PipelineDocument::Run(PipelineRun {
+            instance: slug(INSTANCE),
+            label: "failed".into(),
+            operated_by: RunOperator::Mind,
+            turn: RunTurn::SelfRun,
+            host: "test".into(),
+            started_on: Date("2026-10-10".into()),
+            budget_usd: "0".into(),
+            claims: vec![claim.clone()],
+            campaigns: vec![slug(CAMPAIGN)],
+        }))]),
+    );
+    let run = PipelineRef {
+        kind: PipelineKind::Run,
+        id: Short(format!("{INSTANCE}:run:failed")),
+    };
+    let resolution = |subject: &PipelineRef, outcome: ResolutionOutcome| {
+        value(PipelineDocument::Resolution(PipelineResolution {
+            subject: subject.clone(),
+            sequence: 1,
+            outcome,
+            rationale: "So.".into(),
+            resolved_on: Date("2026-10-10".into()),
+        }))
+    };
+    admit(
+        "ended.json",
+        json!([resolution(
+            &run,
+            ResolutionOutcome::Recorded {
+                reason: "unit not active".into()
+            }
+        )]),
+    );
+    assert!(
+        held("A").out.starts_with("matched 0 "),
+        "no question yet: {}",
+        held("A").out
+    );
+
+    // A second run claims B, and a second question is raised in it: it holds B and never A.
+    let other_claim = PipelineRef { kind: PipelineKind::CutSpec, id: Short(spec_id("B")) };
+    admit(
+        "other.json",
+        json!([value(PipelineDocument::Run(PipelineRun {
+            instance: slug(INSTANCE),
+            label: "other".into(),
+            operated_by: RunOperator::Mind,
+            turn: RunTurn::SelfRun,
+            host: "test".into(),
+            started_on: Date("2026-10-10".into()),
+            budget_usd: "0".into(),
+            claims: vec![other_claim],
+            campaigns: vec![slug(CAMPAIGN)],
+        }))]),
+    );
+    let other = PipelineRef { kind: PipelineKind::Run, id: Short(format!("{INSTANCE}:run:other")) };
+    admit("other-ended.json", json!([resolution(&other, ResolutionOutcome::Recorded { reason: "unit not active".into() })]));
+    let ask = |label: &str, raised_in: PipelineRef| {
+        value(PipelineDocument::Question(PipelineQuestion {
+            campaign: slug(CAMPAIGN),
+            label: label.into(),
+            title: "A fork".into(),
+            question: "Which?".into(),
+            options: ["reopen", "retire"].iter().map(|name| QuestionOption { label: (*name).into(), text: "an option".into() }).collect(),
+            recommended: "reopen".into(),
+            depends: vec![],
+            raised_in: Some(raised_in),
+            asked_on: Date("2026-10-10".into()),
+        }))
+    };
+    admit("other-question.json", json!([ask("fork2", other)]));
+    let other_question = format!("{CAMPAIGN}:question:fork2");
+    let question = format!("{CAMPAIGN}:question:fork");
+    admit("question.json", json!([ask("fork", run)]));
+    let shown = held("A");
+    assert_eq!(shown.code, 0, "{}", shown.err);
+    assert!(
+        shown.out.starts_with(&format!("{question} InForce ")) && shown.out.contains("matched 1 "),
+        "a question raised in the run holds its claim: {}",
+        shown.out
+    );
+    assert!(!shown.out.contains(&other_question), "a question raised in another run does not hold A: {}", shown.out);
+    let shown = held("B");
+    assert!(
+        shown.out.starts_with(&format!("{other_question} InForce ")) && !shown.out.contains(&format!("{question} ")) && shown.out.contains("matched 1 "),
+        "B is held by its own run's question only: {}",
+        shown.out
+    );
+
+    let PipelineDocument::Ruling(mut answer) = ruling(None) else {
+        unreachable!()
+    };
+    (answer.answers, answer.choice) = (Some(Short(question.clone())), Some("retire".into()));
+    admit(
+        "answer.json",
+        json!([value(PipelineDocument::Ruling(answer))]),
+    );
+    let shown = held("A");
+    assert!(
+        shown.out.starts_with(&format!("{question} Resolved")) && shown.out.contains("matched 1 "),
+        "retired and not yet resolved, it still holds: {}",
+        shown.out
+    );
+
+    admit(
+        "withdrawn.json",
+        json!([resolution(
+            &claim,
+            ResolutionOutcome::Withdrawn {
+                reason: "retired".into()
+            }
+        )]),
+    );
+    assert!(
+        held("A").out.starts_with("matched 0 "),
+        "the claim resolved, nothing holds it: {}",
+        held("A").out
+    );
 }
 
 #[test]
