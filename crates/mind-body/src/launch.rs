@@ -443,7 +443,8 @@ fn breaker_question(claim: &PipelineRef, run: &PipelineRef, held: usize, label: 
         question: format!(
             "Run {} and the runs before it left nothing that cites the work it held (claims held: {held}), so none of it launches again. Answering or withdrawing this reopens every claim of that run with a fresh count.",
             run.id.0
-        ),
+        )
+        .into(),
         options: vec![
             QuestionOption { label: "reopen".into(), text: "Answer to reopen every claim of the run with a fresh count.".into() },
             QuestionOption { label: "retire".into(), text: "Resolve the claims so they are no longer worked, and answer with this option.".into() },
@@ -865,7 +866,7 @@ mod tests {
         let view = rig.mind.view(K::Question, &question).unwrap();
         let PipelineDocument::Question(asked) = &view.document else { panic!("not a question") };
         assert_eq!((asked.raised_in.clone(), asked.campaign.0.as_str()), (Some(run_ref("h2")), CAMPAIGN), "raised in the run whose end tripped it");
-        assert!(asked.question.contains(&run_ref("h2").id.0) && asked.question.contains("claims held: 1"), "{}", asked.question);
+        assert!(asked.question.0.contains(&run_ref("h2").id.0) && asked.question.0.contains("claims held: 1"), "{}", asked.question.0);
         assert_eq!(view.admission.provenance.session.0, "mind-20261009T131500000Z");
         // Open, the question blocks the item.
         assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")]), LaunchOutcome::NotQueued { item: spec_ref("x") });

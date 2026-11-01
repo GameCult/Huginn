@@ -42,7 +42,7 @@ use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 use crate::chat_client::{Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
-use crate::queue::{MindPort, any_of, citing, claims_of, headers, in_force, of_kind};
+use crate::queue::{MindPort, any_of, citing, claims_of, headers, of_kind};
 use crate::self_run::inbox;
 use crate::tempo::{self, Standing};
 
