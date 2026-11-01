@@ -2595,3 +2595,33 @@ fn a_batch_refused_between_answers_ends_the_session_at_its_third_refusal_with_no
     assert_eq!(rig.sent_texts(), ["for five", "for six"]);
     assert_eq!(acked, Vec::<u64>::new(), "3 and 4 were never answered: {acked:?}");
 }
+
+/// A line queued behind a batch's third refusal is still answered by the CLI after the session has been told to end, and its
+/// answer must not ack past the failed batch: 3 and 4 were never answered and are the very messages the bound retries next process.
+#[test]
+fn a_line_answered_after_a_batchs_third_refusal_acks_nothing_past_it() {
+    let rig = Rig::new(vec![operator_says(3, "three"), operator_says(4, "four")], &[]);
+    rig.clock.step.set(0);
+    let child = Timed {
+        writes: Rc::default(),
+        script: VecDeque::from([
+            (1, 0, echo_line()),
+            (1, 0, result_line(serde_json::Value::Null)),
+            (2, 0, echo_line()),
+            (2, 0, result_line(serde_json::Value::Null)),
+            (3, 6_000, echo_line()),
+            (4, 0, result_line(serde_json::Value::Null)),
+            (4, 0, echo_line()),
+            (4, 0, result_line(reply_saying("for five"))),
+            (4, 0, Read::Exited(Some(0))),
+        ]),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![(3, operator_says(5, "five"))],
+        now: rig.clock.now.clone(),
+        asked: 0,
+    };
+    let (outcome, acked) = carry_children(&rig, vec![child]);
+    let Outcome::Served { failure, .. } = outcome else { panic!("served") };
+    assert_eq!(failure, Some(Failure::Undecodable));
+    assert_eq!(acked, Vec::<u64>::new(), "3 and 4 were never answered: {acked:?}");
+}
