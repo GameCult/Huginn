@@ -1091,3 +1091,12 @@ fn a_trip_and_a_wait_say_so_in_the_trace() {
     beats_until(&rig, 12, || notes().contains(&waiting));
     assert!(notes().contains(&waiting), "{:?}", notes());
 }
+
+#[test]
+fn a_beat_with_no_held_brief_writes_no_held_note() {
+    let (rig, source) = rig_with_a_persona_turn();
+    brief_by(&rig, ANN, crate::persona::AGENT, "free", &source);
+    rig.poll();
+    let notes: Vec<String> = rig.store.traces.borrow().iter().flat_map(|trace| trace.instances.iter().map(|instance| instance.note.clone())).collect();
+    assert!(notes.iter().all(|note| !note.contains("held")), "{notes:?}");
+}

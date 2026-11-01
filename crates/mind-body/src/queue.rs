@@ -604,6 +604,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_question_in_a_run_that_did_not_claim_the_item_is_no_boundary() {
+        let (mind, item) = worked(&[E, E, E]);
+        mind.committed(vec![spec("y")]);
+        mind.committed(vec![run("other", RunTurn::SelfRun, RunOperator::Mind, &[spec_ref("y")])]);
+        mind.committed(vec![question_in("fork", &run_ref("other"))]);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip { run: run_ref("h2") }, "the question holds y's run, not x's count");
+    }
+
     /// A daemon that is not there: the failure names no input, endpoint or
     /// instance.
     #[test]
