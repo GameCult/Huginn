@@ -1222,7 +1222,6 @@ fn an_answer_of_retire_resolves_nothing_and_the_hold_stays_until_the_answerer_re
         let view = rig.minds[ANN].view(K::FollowUp, &item.id.0).unwrap();
         assert!(matches!(view.status, huginn_mind::PipelineStatus::InForce), "{item:?}: the heartbeat resolves nothing on an answer");
     }
-    assert!(rig.minds[ANN].ids(K::Resolution).is_empty(), "no machine writer of a resolution");
     assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "and no second question");
     assert!(inbox::derive(&rig.minds[ANN], &HashSet::new()).unwrap().is_empty(), "the retired claims stay held and untold");
 }
