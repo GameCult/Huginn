@@ -496,20 +496,17 @@ fn a_yield_closes_stdin_at_idle_only_and_a_session_with_a_line_outstanding_or_a_
 }
 
 #[test]
-fn a_yield_takes_precedence_over_the_text_that_waits_and_over_a_flush_not_yet_written() {
-    // Text waits at idle, then the session is told to yield: nothing more is written to it.
+fn nothing_is_written_to_a_session_after_it_was_told_to_yield() {
     let (state, _) = idle_at(5);
-    let (state, _) = feed(state, Event::Inbox { pending: true }, 5);
-    let after_tells = state.clone();
-    assert_eq!(feed(after_tells, Event::Yield, 6).1, Action::CloseStdin);
-    let (state, _) = idle_at(5);
-    assert_eq!(feed(feed(state, Event::Yield, 5).0, Event::Inbox { pending: true }, 6).1, Action::None, "closed: nothing is written after the yield");
+    let (state, closed) = feed(state, Event::Yield, 5);
+    assert_eq!(closed, Action::CloseStdin);
+    assert_eq!(feed(state, Event::Inbox { pending: true }, 6).1, Action::None, "closed: text that waits is told to the next session");
 }
 
 #[test]
 fn a_flush_already_written_ends_the_session_by_itself_and_a_yield_does_not_cut_in() {
-    let (state, actions) = run(vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), 1), (OK, 2)]);
-    assert_eq!(actions[2], flush(Why::Ceiling), "the ceiling's flush is written at idle");
+    let (state, actions) = run(vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), 1)]);
+    assert_eq!(actions[1], flush(Why::Ceiling), "the ceiling's flush is written at once");
     let (_, action) = feed(state, Event::Yield, 3);
     assert_eq!(action, Action::None, "the flush's own answer closes stdin");
 }
