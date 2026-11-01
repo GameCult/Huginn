@@ -1086,13 +1086,14 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         match step {
             Step::Answered(started) => {
                 // The one ack rule: through the highest answered seq, never past a delivery still told
-                // and unanswered (a retold batch, or a line written and not yet echoed). Deliveries are
+                // and unanswered (a retold batch, or a line written and not yet echoed), and nothing once the session has
+                // failed (a batch's third refusal leaves no retell to hold the ack back). Deliveries are
                 // told in seq order, so while one is unanswered below an answered seq, everything
                 // answered lies above it and nothing is acked; the ack follows its answer.
                 self.answered_through = self.answered_through.max(batch.iter().map(|delivery| delivery.seq).max().unwrap_or(0));
                 let unanswered = self.retell.iter().flat_map(|retell| &retell.batch).chain(self.written.iter().flat_map(|written| &written.batch)).map(|delivery| delivery.seq).min();
                 let past_unanswered = unanswered.is_some_and(|lowest| lowest <= self.answered_through);
-                if !past_unanswered && self.answered_through > self.progress.acked {
+                if !past_unanswered && self.progress.failure.is_none() && self.answered_through > self.progress.acked {
                     if self.organs.chat.ack(self.answered_through).is_err() {
                         self.progress.failure.get_or_insert(Failure::Ack);
                         return Ok((false, true));
