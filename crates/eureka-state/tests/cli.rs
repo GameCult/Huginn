@@ -898,10 +898,12 @@ fn blocked_names_the_questions_that_hold_a_spec_as_the_gate_reads_them() {
         "a question raised in the run holds its claim: {}",
         shown.out
     );
+    assert!(!shown.out.contains(&other_question), "a question raised in another run does not hold A: {}", shown.out);
+    let shown = held("B");
     assert!(
-        held("B").out.starts_with("matched 0 "),
-        "and not a spec the run never claimed: {}",
-        held("B").out
+        shown.out.starts_with(&format!("{other_question} InForce ")) && !shown.out.contains(&format!("{question} ")) && shown.out.contains("matched 1 "),
+        "B is held by its own run's question only: {}",
+        shown.out
     );
 
     let PipelineDocument::Ruling(mut answer) = ruling(None) else {
