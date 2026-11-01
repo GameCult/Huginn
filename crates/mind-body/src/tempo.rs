@@ -44,7 +44,7 @@ pub struct Gains {
 
 /// Chosen by the committed simulation (`docs/research/2026-11-01-tempo-pid-sim.md`),
 /// never by a run-time search.
-pub const GAINS: Gains = Gains { kp: 0.0, ki: 0.0, kd: 0.0 };
+pub const GAINS: Gains = Gains { kp: 0.02, ki: 0.01, kd: 0.0 };
 
 /// The fallback controller's memory. The heartbeat owns persisting it; it is
 /// never published as truth. `rate_per_h` is the last output as a turn rate
