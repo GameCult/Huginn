@@ -59,7 +59,7 @@ use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
 use crate::heartbeat::{PollTrace, TempoView};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
-use crate::queue::{MindPort, any_of, citing, headers, in_force, live_claims, of_kind};
+use crate::queue::{MindPort, any_of, citing, headers, in_force, live_claims, of_kind, on_hold};
 use crate::recall;
 
 /// The admitting agent's name on everything this organ admits.
@@ -955,7 +955,7 @@ fn start_self_run(
     }
     let Effective::Released(grant) = read(control, swarm, organs.mind.instance()) else { return Ok(Err(Failure::SelfRun)) };
     let ports = Ports { mind: organs.mind, launcher: organs.launcher, clock: organs.clock, host: organs.host };
-    let request = LaunchRequest { turn: RunTurn::SelfRun, claims: vec![claim], agent: AGENT.into(), grant };
+    let request = LaunchRequest { turn: RunTurn::SelfRun, claims: vec![claim], agent: AGENT.into(), grant, held: on_hold(organs.mind)? };
     Ok(match open_and_launch(&ports, request)? {
         LaunchOutcome::Launched { run } | LaunchOutcome::Busy { run } => Ok(run),
         _ => Err(Failure::SelfRun),

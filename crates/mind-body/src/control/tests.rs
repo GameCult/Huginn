@@ -131,7 +131,7 @@ mod grant {
     fn launch_as(mind_instance: &str, grant: Grant, turn: RunTurn) -> Result<LaunchOutcome> {
         let mind = SilentMind(slug(mind_instance));
         let ports = Ports { mind: &mind, launcher: &NoUnits, clock: &Now, host: "host" };
-        open_and_launch(&ports, LaunchRequest { turn, claims: vec![], agent: "agent".into(), grant })
+        open_and_launch(&ports, LaunchRequest { turn, claims: vec![], agent: "agent".into(), grant, held: crate::queue::Held::default() })
     }
 
     #[test]

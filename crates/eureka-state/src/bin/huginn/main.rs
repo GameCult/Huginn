@@ -22,13 +22,17 @@ mod render;
 mod schema;
 mod trouble;
 
+use std::cell::{Cell, RefCell};
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::OnceLock;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use cultnet_rs::{PROJECTION_DOCUMENT, Selection};
-use huginn_mind::eureka_pipeline::{Line, PipelineDocument, PipelineRef, Short, Slug, pipeline_key};
+use eureka_state::hold;
+use huginn_mind::eureka_pipeline::{
+    Line, PipelineDocument, PipelineKind, PipelineRef, Short, Slug, pipeline_key,
+};
 use huginn_mind::{
     BATCH_MAX, Faculty, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionBatch, PipelineAdmissionOutcome,
     PipelinePageItems, PipelineProvenance, PipelineSelectionPage, SemanticQuery, SourceQuery,
@@ -182,7 +186,15 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
             let semantic = near.map(|text| SemanticQuery { text: Line(text), top_k: top_k.unwrap_or(DEFAULT_TOP_K) });
             query(settings, selection, semantic, None, documents)
         }
-        Command::Sources { text, repo, top_k, json } => sources(settings, text, repo, top_k, json),
+        Command::Sources {
+            text,
+            repo,
+            top_k,
+            json,
+        } => sources(settings, text, repo, top_k, json),
+        Command::Recipe(Recipe::Blocked { spec_id, page }) => {
+            blocked(settings, &spec_id, page.cursor, page.documents)
+        }
         Command::Recipe(recipe) => {
             let ask = recipe.ask()?;
             query(settings, door::selection_value(&ask.selection)?, ask.semantic, ask.page.cursor, ask.page.documents)
@@ -264,9 +276,82 @@ fn query(
     }
 }
 
-fn sources(settings: &Settings, text: String, repo: Option<String>, top_k: Option<u32>, json: bool) -> Result<u8, Trouble> {
-    let query = SourceQuery { text: Line(text), top_k: top_k.unwrap_or(DEFAULT_TOP_K), repo: repo.map(Short) };
-    match settings.ask(|instance| HuginnMindRequest::SearchSources { instance: instance.clone(), query })? {
+/// The open questions that hold a spec, and the answered-`retire` ones whose
+/// claims are not yet resolved: `eureka_state::hold`'s answer, the one the
+/// heartbeat's gate reads, printed as a selection of those questions.
+fn blocked(
+    settings: &Settings,
+    spec_id: &str,
+    cursor: Option<String>,
+    documents: bool,
+) -> Result<u8, Trouble> {
+    let spec = PipelineRef {
+        kind: door::kind_of(spec_id)?,
+        id: Short(spec_id.to_string()),
+    };
+    let failure: RefCell<Option<Trouble>> = RefCell::new(None);
+    let as_of = Cell::new(0);
+    let ask = |selection: &Selection| -> anyhow::Result<PipelineSelectionPage> {
+        let selection = selection.clone();
+        match settings.ask(|instance| HuginnMindRequest::Query {
+            instance: instance.clone(),
+            selection,
+            semantic: None,
+        }) {
+            Ok(HuginnMindResponse::Query(page)) => {
+                as_of.set(page.as_of);
+                Ok(page)
+            }
+            Ok(_) => Err(anyhow::anyhow!(
+                "the mind answered a query with something else"
+            )),
+            Err(trouble) => {
+                *failure.borrow_mut() = Some(trouble);
+                Err(anyhow::anyhow!("the mind could not be asked"))
+            }
+        }
+    };
+    let holding = match hold::holds(&ask) {
+        Ok(holds) => holds,
+        Err(error) => {
+            return Err(failure
+                .take()
+                .unwrap_or_else(|| Trouble::Internal(error.to_string())));
+        }
+    };
+    let keys: Vec<String> = holding
+        .iter()
+        .filter(|held| held.items.contains(&spec))
+        .map(|held| held.question.id.id.0.clone())
+        .collect();
+    if keys.is_empty() {
+        say(format_args!("matched 0 as_of {} next -", as_of.get()));
+        return Ok(0);
+    }
+    let selection = Selection {
+        schemas: Some(vec![PipelineKind::Question.type_id().to_string()]),
+        keys: Some(keys),
+        ..Selection::default()
+    };
+    query(settings, selection, None, cursor, documents)
+}
+
+fn sources(
+    settings: &Settings,
+    text: String,
+    repo: Option<String>,
+    top_k: Option<u32>,
+    json: bool,
+) -> Result<u8, Trouble> {
+    let query = SourceQuery {
+        text: Line(text),
+        top_k: top_k.unwrap_or(DEFAULT_TOP_K),
+        repo: repo.map(Short),
+    };
+    match settings.ask(|instance| HuginnMindRequest::SearchSources {
+        instance: instance.clone(),
+        query,
+    })? {
         HuginnMindResponse::Sources(found) => {
             if json {
                 say(serde_json::to_string_pretty(&found).map_err(|error| Trouble::Internal(error.to_string()))?);

@@ -7,12 +7,17 @@
 //! record (target invariant run-is-the-grant).
 
 use anyhow::{Result, anyhow, bail};
-use cultnet_rs::{Citation, FieldPredicate, Incoming, RecordRef, Selection};
-use eureka_pipeline::{Line, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
+use cultnet_rs::{Incoming, Selection};
+use eureka_pipeline::{
+    Line, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn,
+    Slug,
+};
+use eureka_state::hold::{self, Hold};
 use eureka_state::{ClientError, HuginnClient};
 use huginn_mind::{
-    Faculty, HuginnMindRequest, HuginnMindResponse, PipelineAdmissionBatch, PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts,
-    PipelinePageItems, PipelineProvenance, PipelineSelectionPage, PipelineStatusSummary, SemanticQuery,
+    Faculty, HuginnMindRequest, HuginnMindResponse, PipelineAdmissionBatch,
+    PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts, PipelineProvenance,
+    PipelineSelectionPage, PipelineStatusSummary, SemanticQuery,
 };
 
 /// The last `CONSECUTIVE` ended runs over an item, all empty, trip its breaker.
@@ -109,42 +114,14 @@ fn client_error_code(error: &ClientError) -> &'static str {
     }
 }
 
-/// The documents that cite `target`, under `role` or any.
-pub(crate) fn citing(target: &PipelineRef, role: Option<&str>) -> Citation {
-    Citation { target: RecordRef::new(target.kind.type_id(), target.id.0.clone()), role: role.map(Into::into) }
-}
+pub(crate) use eureka_state::hold::{any_of, citing, in_force, of_kind};
 
-pub(crate) fn of_kind(kind: PipelineKind) -> Selection {
-    Selection { schemas: Some(vec![kind.type_id().to_string()]), ..Selection::default() }
-}
-
-pub(crate) fn any_of(mut selection: Selection, index: &str, values: &[&str]) -> Selection {
-    selection.fields.get_or_insert_with(Vec::new).push(FieldPredicate {
-        index: index.into(),
-        op: "any_of".into(),
-        values: Some(values.iter().map(|value| value.to_string()).collect()),
-        number: None,
-    });
-    selection
-}
-
-pub(crate) fn in_force(selection: Selection) -> Selection {
-    any_of(selection, "in_force", &["true"])
-}
-
-/// Every page of a selection, in the mind's order. The one paging loop.
-pub(crate) fn headers(mind: &dyn MindPort, selection: &Selection) -> Result<Vec<PipelineDocumentSummary>> {
-    let mut all = Vec::new();
-    let mut asking = selection.clone();
-    loop {
-        let page = mind.query(&asking)?;
-        let PipelinePageItems::Headers(items) = page.items else { bail!("the mind answered documents to a header selection") };
-        all.extend(items);
-        match page.next {
-            Some(cursor) => asking.cursor = Some(cursor),
-            None => return Ok(all),
-        }
-    }
+/// Every page of a selection, in the mind's order.
+pub(crate) fn headers(
+    mind: &dyn MindPort,
+    selection: &Selection,
+) -> Result<Vec<PipelineDocumentSummary>> {
+    hold::headers(&|asking| mind.query(asking), selection)
 }
 
 /// The claims of the runs of `instance` that are still in force and not in
@@ -165,43 +142,64 @@ pub(crate) fn live_claims(mind: &dyn MindPort, instance: &Slug, ending: &[Pipeli
 /// The claims of the run `run`, resolved or not (a citation outlives its
 /// resolution). Empty when the mind has no such run.
 pub(crate) fn claims_of(mind: &dyn MindPort, run: &PipelineRef) -> Result<Vec<PipelineRef>> {
-    let one = Selection { keys: Some(vec![run.id.0.clone()]), ..of_kind(PipelineKind::Run) };
-    Ok(headers(mind, &one)?
-        .into_iter()
-        .flat_map(|header| match header.facts {
-            PipelineFacts::Run { claims, .. } => claims,
-            _ => Vec::new(),
-        })
-        .collect())
+    hold::claims_of(&|asking| mind.query(asking), run)
 }
 
-/// The items an in-force question holds: the one owner of the stop. A question
-/// raised in a run holds every claim of that run, the set that failed together;
-/// a question raised in anything else holds that item. The question's text is
-/// display only, and a held item is released by answering or withdrawing it.
-pub fn on_hold(mind: &dyn MindPort) -> Result<Vec<PipelineRef>> {
-    let mut held: Vec<PipelineRef> = Vec::new();
-    for header in headers(mind, &in_force(of_kind(PipelineKind::Question)))? {
-        if let PipelineFacts::Question { raised_in: Some(item), .. } = header.facts {
-            if item.kind == PipelineKind::Run {
-                held.extend(claims_of(mind, &item)?);
-            } else {
-                held.push(item);
-            }
-        }
+/// Every question holding anything and what it holds: `eureka_state::hold`,
+/// the one decider, which `huginn blocked` reads too.
+pub fn holds(mind: &dyn MindPort) -> Result<Vec<Hold>> {
+    hold::holds(&|asking| mind.query(asking))
+}
+
+/// A snapshot of the items an open question holds, read once by whoever
+/// launches and passed to everything that launch consults, so the gate, the
+/// queue and the claims they chose cannot answer differently within one launch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Held(Vec<PipelineRef>);
+
+impl Held {
+    pub fn contains(&self, item: &PipelineRef) -> bool {
+        self.0.contains(item)
     }
-    Ok(held)
+
+    pub fn items(&self) -> &[PipelineRef] {
+        &self.0
+    }
+}
+
+/// The items an in-force question holds, read now: the one owner of the stop.
+pub fn on_hold(mind: &dyn MindPort) -> Result<Held> {
+    Ok(Held(
+        holds(mind)?
+            .into_iter()
+            .flat_map(|hold| hold.items)
+            .collect(),
+    ))
 }
 
 /// What may be worked, oldest first: the cut specs in force that no report
 /// answers, that no open question holds, and that no live run claims. A run in
 /// `ending` is one the caller closes in the same admission that opens the next,
 /// so it claims nothing here.
-pub fn queue(mind: &dyn MindPort, instance: &Slug, ending: &[PipelineRef]) -> Result<Vec<PipelineRef>> {
-    let unreported = Selection { cited: Some(Incoming { role: "cut_spec".into(), exists: false }), ..in_force(of_kind(PipelineKind::CutSpec)) };
-    let blocked = on_hold(mind)?;
+pub fn queue(
+    mind: &dyn MindPort,
+    instance: &Slug,
+    ending: &[PipelineRef],
+    held: &Held,
+) -> Result<Vec<PipelineRef>> {
+    let unreported = Selection {
+        cited: Some(Incoming {
+            role: "cut_spec".into(),
+            exists: false,
+        }),
+        ..in_force(of_kind(PipelineKind::CutSpec))
+    };
     let claimed = live_claims(mind, instance, ending)?;
-    Ok(headers(mind, &unreported)?.into_iter().map(|header| header.id).filter(|spec| !blocked.contains(spec) && !claimed.contains(spec)).collect())
+    Ok(headers(mind, &unreported)?
+        .into_iter()
+        .map(|header| header.id)
+        .filter(|spec| !held.contains(spec) && !claimed.contains(spec))
+        .collect())
 }
 
 /// Whether an item may still be launched on.
@@ -282,6 +280,15 @@ mod tests {
     use eureka_pipeline::{RunOperator, RunTurn};
 
     use super::*;
+
+    /// `queue` against a hold read now.
+    fn queued(
+        mind: &dyn MindPort,
+        instance: &Slug,
+        ending: &[PipelineRef],
+    ) -> Result<Vec<PipelineRef>> {
+        queue(mind, instance, ending, &on_hold(mind)?)
+    }
     use crate::testkit::*;
 
     /// A mind holding the spec `x` and a history of ended runs on it.
@@ -408,8 +415,19 @@ mod tests {
         assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear, "open, it is not yet ended");
         assert!(matches!(breaker(&mind, &item, &[run_ref("dying")]).unwrap(), Breaker::Trip { .. }));
         let instance = Slug(INSTANCE.into());
-        assert!(queue(&mind, &instance, &[]).unwrap().iter().all(|spec| *spec != item), "it claims the item");
-        assert!(queue(&mind, &instance, &[run_ref("dying")]).unwrap().contains(&item), "an ending run claims nothing");
+        assert!(
+            queued(&mind, &instance, &[])
+                .unwrap()
+                .iter()
+                .all(|spec| *spec != item),
+            "it claims the item"
+        );
+        assert!(
+            queued(&mind, &instance, &[run_ref("dying")])
+                .unwrap()
+                .contains(&item),
+            "an ending run claims nothing"
+        );
     }
 
     #[test]
@@ -468,7 +486,32 @@ mod tests {
         assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
         let facts = mind.view(PipelineKind::Run, &run_ref("p").id.0).unwrap().admission.provenance;
         assert_eq!(
-            (facts.faculty, facts.agent.0.as_str(), facts.session.0.as_str(), facts.tool.0.as_str()),
+            queued(&port, port.instance(), &[]).unwrap(),
+            vec![spec_ref("x")]
+        );
+        let outcome = port
+            .admit(
+                "agent-x",
+                "session-y",
+                vec![run("p", RunTurn::PersonaTurn, RunOperator::Mind, &[])],
+            )
+            .unwrap();
+        assert!(
+            matches!(outcome, PipelineAdmissionOutcome::Committed { .. }),
+            "{outcome:?}"
+        );
+        let facts = mind
+            .view(PipelineKind::Run, &run_ref("p").id.0)
+            .unwrap()
+            .admission
+            .provenance;
+        assert_eq!(
+            (
+                facts.faculty,
+                facts.agent.0.as_str(),
+                facts.session.0.as_str(),
+                facts.tool.0.as_str()
+            ),
             (Faculty::SelfFaculty, "agent-x", "session-y", "mind-body")
         );
         let refused = port.query(&any_of(of_kind(PipelineKind::Ruling), "turn", &["canary-turn-5d2e"])).unwrap_err();
@@ -523,19 +566,43 @@ mod tests {
         let mind = TestMind::seeded();
         mind.committed(vec![spec("a"), spec("b"), spec("c"), spec("d"), spec("e")]);
         let instance = Slug(INSTANCE.into());
-        let all: Vec<PipelineRef> = ["a", "b", "c", "d", "e"].iter().map(|cut| spec_ref(cut)).collect();
-        assert_eq!(queue(&mind, &instance, &[]).unwrap(), all);
+        let all: Vec<PipelineRef> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|cut| spec_ref(cut))
+            .collect();
+        assert_eq!(queued(&mind, &instance, &[]).unwrap(), all);
 
         mind.committed(vec![report("b")]);
         mind.committed(vec![question_in("fork", &spec_ref("c"))]);
-        mind.committed(vec![run("held", RunTurn::SelfRun, RunOperator::Operator, &[spec_ref("d")])]);
-        assert_eq!(queue(&mind, &instance, &[]).unwrap(), vec![spec_ref("a"), spec_ref("e")]);
+        mind.committed(vec![run(
+            "held",
+            RunTurn::SelfRun,
+            RunOperator::Operator,
+            &[spec_ref("d")],
+        )]);
+        assert_eq!(
+            queued(&mind, &instance, &[]).unwrap(),
+            vec![spec_ref("a"), spec_ref("e")]
+        );
 
         mind.committed(vec![close(run_ref("held"), recorded())]);
-        assert_eq!(queue(&mind, &instance, &[]).unwrap(), vec![spec_ref("a"), spec_ref("d"), spec_ref("e")], "a closed run claims nothing");
+        assert_eq!(
+            queued(&mind, &instance, &[]).unwrap(),
+            vec![spec_ref("a"), spec_ref("d"), spec_ref("e")],
+            "a closed run claims nothing"
+        );
         let other = Slug("another-instance".into());
-        mind.committed(vec![run("again", RunTurn::SelfRun, RunOperator::Operator, &[spec_ref("a")])]);
-        assert_eq!(queue(&mind, &other, &[]).unwrap().len(), 3, "claims are read for the instance asked");
+        mind.committed(vec![run(
+            "again",
+            RunTurn::SelfRun,
+            RunOperator::Operator,
+            &[spec_ref("a")],
+        )]);
+        assert_eq!(
+            queued(&mind, &other, &[]).unwrap().len(),
+            3,
+            "claims are read for the instance asked"
+        );
     }
 
     #[test]
@@ -563,26 +630,85 @@ mod tests {
     fn a_question_raised_in_a_run_holds_every_claim_of_it_until_answered_or_withdrawn() {
         for withdraw in [false, true] {
             let (mind, a, b) = bundle();
-            assert!(on_hold(&mind).unwrap().is_empty());
+            assert!(on_hold(&mind).unwrap().items().is_empty());
             mind.committed(vec![question_in("fork", &run_ref("f2"))]);
             let held = on_hold(&mind).unwrap();
-            assert!(held.contains(&a) && held.contains(&b) && held.len() == 2, "{held:?}: the claims of the resolved run");
-            assert_eq!(queue(&mind, &Slug(INSTANCE.into()), &[]).unwrap(), Vec::<PipelineRef>::new(), "queue reads the same hold");
+            assert!(
+                held.contains(&a) && held.contains(&b) && held.items().len() == 2,
+                "{held:?}: the claims of the resolved run"
+            );
+            assert_eq!(
+                queued(&mind, &Slug(INSTANCE.into()), &[]).unwrap(),
+                Vec::<PipelineRef>::new(),
+                "queue reads the same hold"
+            );
             let question = id("question", "fork");
             if withdraw {
                 mind.committed(vec![close(reference(PipelineKind::Question, &question), withdrawn())]);
             } else {
                 mind.committed(vec![ruling("answer", Some((&question, "A")))]);
             }
-            assert!(on_hold(&mind).unwrap().is_empty(), "answered or withdrawn, nothing is held (withdrawn: {withdraw})");
+            assert!(
+                on_hold(&mind).unwrap().items().is_empty(),
+                "answered or withdrawn, nothing is held (withdrawn: {withdraw})"
+            );
         }
+    }
+
+    #[test]
+    fn a_question_answered_retire_keeps_holding_the_claims_that_are_still_in_force() {
+        let (mind, a, b) = bundle();
+        mind.committed(vec![question_in("fork", &run_ref("f2"))]);
+        let question = id("question", "fork");
+        mind.committed(vec![ruling(
+            "answer",
+            Some((&question, eureka_state::hold::RETIRE)),
+        )]);
+        let held = on_hold(&mind).unwrap();
+        assert!(
+            held.contains(&a) && held.contains(&b) && held.items().len() == 2,
+            "{held:?}: retire holds what the answer retired"
+        );
+        let retired: Vec<bool> = holds(&mind)
+            .unwrap()
+            .iter()
+            .map(|hold| hold.retired)
+            .collect();
+        assert_eq!(retired, [true]);
+        mind.committed(vec![close(a.clone(), withdrawn())]);
+        assert_eq!(
+            on_hold(&mind).unwrap().items(),
+            [b.clone()],
+            "a resolved claim drops out"
+        );
+        mind.committed(vec![close(b, withdrawn())]);
+        assert!(
+            on_hold(&mind).unwrap().items().is_empty(),
+            "all resolved, nothing is held"
+        );
+    }
+
+    #[test]
+    fn a_question_answered_with_another_choice_holds_nothing() {
+        let (mind, _, _) = bundle();
+        mind.committed(vec![question_in("fork", &run_ref("f2"))]);
+        mind.committed(vec![ruling(
+            "answer",
+            Some((&id("question", "fork"), "reopen")),
+        )]);
+        assert!(on_hold(&mind).unwrap().items().is_empty());
+        assert!(holds(&mind).unwrap().is_empty());
     }
 
     #[test]
     fn a_question_raised_in_anything_else_holds_that_item_alone() {
         let (mind, a, b) = bundle();
         mind.committed(vec![question_in("fork", &a)]);
-        assert_eq!(on_hold(&mind).unwrap(), vec![a], "the legacy shape: raised in the item, it holds the item and no claimant");
+        assert_eq!(
+            on_hold(&mind).unwrap().items(),
+            [a],
+            "the legacy shape: raised in the item, it holds the item and no claimant"
+        );
         assert!(!on_hold(&mind).unwrap().contains(&b));
     }
 
@@ -619,8 +745,12 @@ mod tests {
     fn an_unreachable_mind_names_no_input() {
         let canary = "canary-instance-7f3a91";
         let endpoint: SocketAddr = "127.0.0.1:9".parse().unwrap();
-        let port = HuginnMind::new(HuginnClient::new(endpoint, Slug(canary.into()), Duration::from_millis(300)));
-        let error = queue(&port, &Slug(canary.into()), &[]).unwrap_err();
+        let port = HuginnMind::new(HuginnClient::new(
+            endpoint,
+            Slug(canary.into()),
+            Duration::from_millis(300),
+        ));
+        let error = queued(&port, &Slug(canary.into()), &[]).unwrap_err();
         let shown = format!("{error:#}");
         assert!(shown.contains("unavailable"), "{shown}");
         assert!(!shown.contains(canary) && !shown.contains("127.0.0.1"), "{shown}");

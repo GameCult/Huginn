@@ -41,8 +41,8 @@ use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 
 use crate::chat_client::{Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
-use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
-use crate::queue::{MindPort, any_of, citing, claims_of, headers, of_kind};
+use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch, retire_answered, slot};
+use crate::queue::{Held, MindPort, any_of, citing, claims_of, headers, of_kind, on_hold};
 use crate::self_run::inbox;
 use crate::tempo::{self, Standing};
 
@@ -557,13 +557,36 @@ enum Launched {
     Refused(String),
 }
 
+fn ports<'a>(organs: &Organs<'a>, mind: &'a dyn MindPort) -> Ports<'a> {
+    Ports {
+        mind,
+        launcher: organs.launcher,
+        clock: organs.clock,
+        host: organs.host,
+    }
+}
+
 /// The one way the heartbeat starts a run: the same brake read and the same
 /// opener for a Persona turn (a beat, an operator mention, a Self run that ended)
 /// and for the Self run a beat gives to the briefs her Self holds.
-fn launch(organs: &Organs, row: &Row, turn: RunTurn, claims: Vec<PipelineRef>) -> Result<Launched> {
-    let Effective::Released(grant) = organs.control.effective(row.slug()) else { return Ok(Launched::Refused("the brake is held".into())) };
-    let ports = Ports { mind: row.seat.mind, launcher: organs.launcher, clock: organs.clock, host: organs.host };
-    let request = LaunchRequest { turn, claims, agent: AGENT.into(), grant };
+fn launch(
+    organs: &Organs,
+    row: &Row,
+    turn: RunTurn,
+    claims: Vec<PipelineRef>,
+    held: Held,
+) -> Result<Launched> {
+    let Effective::Released(grant) = organs.control.effective(row.slug()) else {
+        return Ok(Launched::Refused("the brake is held".into()));
+    };
+    let request = LaunchRequest {
+        turn,
+        claims,
+        agent: AGENT.into(),
+        grant,
+        held,
+    };
+    let ports = ports(organs, row.seat.mind);
     Ok(match open_and_launch(&ports, request) {
         Ok(LaunchOutcome::Launched { run }) => Launched::Run(label_of(&run)),
         Ok(LaunchOutcome::Busy { .. }) => Launched::Busy,
@@ -579,25 +602,56 @@ fn launch(organs: &Organs, row: &Row, turn: RunTurn, claims: Vec<PipelineRef>) -
 /// The most briefs one Self run claims.
 const BRIEFS_PER_SELF_RUN: usize = 64;
 
+/// What a Self run would claim for this Mind, read at one instant.
+struct Claimable {
+    /// The briefs in force that no live Self run holds and no open question holds.
+    claims: Vec<PipelineRef>,
+    /// How many briefs an open question holds.
+    held: usize,
+    /// The hold they were chosen by, which the launch consults and reads no second time.
+    hold: Held,
+    /// Self runs in force whose unit is gone: the launch closes them.
+    dead: Vec<PipelineRef>,
+}
+
 /// The briefs a Self run would claim for this Mind: those in force that no live
-/// Self run holds and no open question holds, and how many an open question
-/// holds. A Self run claims up to `BRIEFS_PER_SELF_RUN` briefs and every run it
-/// ends empty counts against all of them, so one cause trips them together; a
-/// trip holds the claims of its run, not the Mind, until the operator answers
-/// or withdraws its question, and the count starts afresh. `inbox::derive`
-/// reads `queue::on_hold`; nothing here decides what is held.
-fn claimable(row: &Row) -> Result<(Vec<PipelineRef>, usize)> {
+/// Self run holds and no open question holds. A Self run claims up to
+/// `BRIEFS_PER_SELF_RUN` briefs and every run it ends empty counts against all
+/// of them, so one cause trips them together; a trip holds the claims of its
+/// run, not the Mind, until the operator answers or withdraws its question, and
+/// the count starts afresh. Whether a holder lives is `launch::slot`'s answer
+/// (a dead one is closed by the launch, so it does not stop the successor), and
+/// what is held is `queue::on_hold`'s, read once here and carried into the
+/// launch; nothing here decides either.
+fn claimable(organs: &Organs, row: &Row) -> Result<Claimable> {
     let mind = row.seat.mind;
-    if !holders(mind, row.slug(), RunTurn::SelfRun)?.is_empty() {
-        return Ok((Vec::new(), 0));
+    let hold = on_hold(mind)?;
+    let found = slot(
+        &ports(organs, mind),
+        row.slug(),
+        RunTurn::SelfRun,
+        organs.clock.now(),
+    )?;
+    if found.live.is_some() {
+        return Ok(Claimable {
+            claims: Vec::new(),
+            held: 0,
+            hold,
+            dead: Vec::new(),
+        });
     }
-    let (free, held) = inbox::derive_counting_held(mind, &HashSet::new())?;
+    let (free, held) = inbox::derive_counting_held(mind, &hold, &HashSet::new())?;
     let claims = free
         .into_iter()
         .map(|brief| PipelineRef { kind: PipelineKind::FollowUp, id: brief.id.as_str().into() })
         .take(BRIEFS_PER_SELF_RUN)
         .collect();
-    Ok((claims, held))
+    Ok(Claimable {
+        claims,
+        held,
+        hold,
+        dead: found.dead,
+    })
 }
 
 /// One poll.
@@ -664,7 +718,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
         if mentioned.is_none() && !self_ended {
             continue;
         }
-        match launch(organs, row, RunTurn::PersonaTurn, vec![])? {
+        match launch(organs, row, RunTurn::PersonaTurn, vec![], Held::default())? {
             Launched::Run(label) => {
                 if let Some(key) = mentioned {
                     state.handled_mentions.push(key);
@@ -703,15 +757,44 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     let mut passed: Vec<Standing> = standings.clone();
     while due && let Some(winner) = tempo::pick(&passed, beat_s) {
         // Her Self holds briefs: the beat is a Self run for them; otherwise a Persona turn.
-        let (claims, held) = claimable(&rows[winner]).unwrap_or_else(|error| {
-            rows[winner].note = format!("briefs: {error}");
-            (Vec::new(), 0)
-        });
-        if held > 0 {
-            rows[winner].note = format!("{held} briefs held by open questions");
+        // An answer of retire is written before the briefs are read, so a retired brief is resolved, not claimed.
+        if let Err(error) = retire_answered(rows[winner].seat.mind, AGENT, now) {
+            rows[winner].note = format!("retire: {error}");
         }
-        let turn = if claims.is_empty() { RunTurn::PersonaTurn } else { RunTurn::SelfRun };
-        match launch(organs, &rows[winner], turn, claims)? {
+        let Claimable {
+            claims,
+            held,
+            hold,
+            dead,
+        } = claimable(organs, &rows[winner]).unwrap_or_else(|error| {
+            rows[winner].note = format!("briefs: {error}");
+            Claimable {
+                claims: Vec::new(),
+                held: 0,
+                hold: Held::default(),
+                dead: Vec::new(),
+            }
+        });
+        let mut notes: Vec<String> = Vec::new();
+        if held > 0 {
+            notes.push(format!("{held} briefs held by open questions"));
+        }
+        if !claims.is_empty() && !dead.is_empty() {
+            let ids: Vec<&str> = dead.iter().map(|run| run.id.0.as_str()).collect();
+            notes.push(format!(
+                "closing the Self run whose unit is gone: {}",
+                ids.join(", ")
+            ));
+        }
+        if !notes.is_empty() {
+            rows[winner].note = notes.join("; ");
+        }
+        let turn = if claims.is_empty() {
+            RunTurn::PersonaTurn
+        } else {
+            RunTurn::SelfRun
+        };
+        match launch(organs, &rows[winner], turn, claims, hold)? {
             Launched::Run(label) => {
                 state.last_beat_at = now;
                 rows[winner].busy = turn == RunTurn::PersonaTurn;

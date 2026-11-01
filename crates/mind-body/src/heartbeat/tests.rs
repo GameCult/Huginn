@@ -1100,3 +1100,144 @@ fn a_beat_with_no_held_brief_writes_no_held_note() {
     let notes: Vec<String> = rig.store.traces.borrow().iter().flat_map(|trace| trace.instances.iter().map(|instance| instance.note.clone())).collect();
     assert!(notes.iter().all(|note| !note.contains("held")), "{notes:?}");
 }
+
+/// Her Self run in force whose unit is gone, claiming `claims`, admitted `ago` seconds before now.
+fn crashed_self_run(rig: &Rig, claims: &[PipelineRef], ago: i64) {
+    rig.minds[ANN].admit_at(rig.now() - Duration::seconds(ago));
+    rig.minds[ANN].committed(vec![run_in(
+        "ann",
+        "crashed",
+        RunTurn::SelfRun,
+        RunOperator::Mind,
+        claims,
+    )]);
+}
+
+/// Polls on, a beat apart, leaving every run to its unit: nothing here ends one.
+fn polls(rig: &Rig, count: usize) {
+    for _ in 0..count {
+        rig.advance(1000);
+        rig.poll();
+    }
+}
+
+fn notes_of(rig: &Rig) -> Vec<String> {
+    rig.store
+        .traces
+        .borrow()
+        .iter()
+        .flat_map(|trace| trace.instances.iter().map(|instance| instance.note.clone()))
+        .collect()
+}
+
+#[test]
+fn a_self_run_left_in_force_by_a_crash_is_closed_by_the_next_beat_and_the_successor_launches() {
+    let (rig, source) = rig_with_a_persona_turn();
+    brief_by(&rig, ANN, crate::persona::AGENT, "orphan", &source);
+    crashed_self_run(&rig, &[brief_ref("orphan")], 3600);
+    assert_eq!(self_runs(&rig, ANN).len(), 1);
+    polls(&rig, 8);
+    let runs = self_runs(&rig, ANN);
+    assert_eq!(runs.len(), 2, "one successor, once");
+    assert!(
+        matches!(
+            rig.minds[ANN]
+                .view(K::Run, "ann:run:crashed")
+                .unwrap()
+                .status,
+            huginn_mind::PipelineStatus::Resolved { .. }
+        ),
+        "the dead holder was closed by the launch"
+    );
+    assert_eq!(
+        claims_of_run(&runs[1]),
+        vec![brief_ref("orphan").id.0],
+        "claiming the brief the dead run left"
+    );
+    assert!(
+        notes_of(&rig)
+            .contains(&"closing the Self run whose unit is gone: ann:run:crashed".to_string()),
+        "{:?}",
+        notes_of(&rig)
+    );
+}
+
+#[test]
+fn a_self_run_whose_unit_may_still_be_starting_or_is_running_gets_no_successor() {
+    let (rig, source) = rig_with_a_persona_turn();
+    brief_by(&rig, ANN, crate::persona::AGENT, "orphan", &source);
+    crashed_self_run(&rig, &[brief_ref("orphan")], 30);
+    rig.advance(10);
+    rig.poll();
+    assert_eq!(
+        self_runs(&rig, ANN).len(),
+        1,
+        "inside the start grace the unit may still be starting"
+    );
+    rig.launcher
+        .revive_as(&Slug("ann".into()), RunTurn::SelfRun);
+    rig.advance(3600);
+    rig.poll();
+    polls(&rig, 4);
+    assert_eq!(
+        self_runs(&rig, ANN).len(),
+        1,
+        "a run whose unit is active holds the briefs however old it is"
+    );
+    assert!(matches!(
+        rig.minds[ANN]
+            .view(K::Run, "ann:run:crashed")
+            .unwrap()
+            .status,
+        huginn_mind::PipelineStatus::InForce
+    ));
+}
+
+#[test]
+fn one_held_brief_says_so_in_the_trace() {
+    let (rig, source) = rig_with_a_persona_turn();
+    brief_by(&rig, ANN, crate::persona::AGENT, "solo", &source);
+    fail_bundle(&rig, &[brief_ref("solo")]);
+    beats_until(&rig, 12, || {
+        notes_of(&rig).contains(&"1 briefs held by open questions".to_string())
+    });
+    assert!(
+        notes_of(&rig).contains(&"1 briefs held by open questions".to_string()),
+        "{:?}",
+        notes_of(&rig)
+    );
+}
+
+#[test]
+fn an_answer_of_retire_resolves_the_bundle_and_nothing_relaunches() {
+    let (rig, source) = rig_with_a_persona_turn();
+    let items = failed_bundle(&rig, &source);
+    beats(&rig, 3);
+    let question = rig.minds[ANN]
+        .ids(K::Question)
+        .pop()
+        .expect("the trip asked");
+    assert_eq!(self_runs(&rig, ANN).len(), 3);
+    rig.minds[ANN].committed(vec![crate::testkit::ruling(
+        "answer",
+        Some((&question, "retire")),
+    )]);
+    beats(&rig, 6);
+    assert_eq!(
+        self_runs(&rig, ANN).len(),
+        3,
+        "no Self run after the answer: retire does not relaunch"
+    );
+    for item in &items {
+        let view = rig.minds[ANN].view(K::FollowUp, &item.id.0).unwrap();
+        assert!(
+            matches!(view.status, huginn_mind::PipelineStatus::Resolved { record, .. } if matches!(record.outcome, eureka_pipeline::ResolutionOutcome::Withdrawn { .. })),
+            "{item:?} is resolved Withdrawn"
+        );
+    }
+    assert_eq!(
+        rig.minds[ANN].ids(K::Question).len(),
+        1,
+        "and no second question"
+    );
+}

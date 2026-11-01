@@ -227,7 +227,7 @@ impl Rig {
         let effective = read(&FileSource::new(self.store()), &FileSource::new(self.swarm_store()), self.mind.instance());
         if let Effective::Released(grant) = effective {
             let ports = Ports { mind: &self.mind, launcher: &Recording::default(), clock: &self.clock, host: "yggdrasil-host" };
-            let request = LaunchRequest { turn: RunTurn::PersonaTurn, claims: vec![], agent: "mind-heartbeat".into(), grant };
+            let request = LaunchRequest { turn: RunTurn::PersonaTurn, claims: vec![], agent: "mind-heartbeat".into(), grant, held: crate::queue::Held::default() };
             assert!(matches!(open_and_launch(&ports, request).unwrap(), LaunchOutcome::Launched { .. }));
         }
     }
