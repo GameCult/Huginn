@@ -481,7 +481,7 @@ mod tests {
         mind.committed(vec![spec("x")]);
         let port = HuginnMind::over(Slug(INSTANCE.into()), Box::new(|request| Ok(mind.answer(request))));
         assert_eq!(port.instance().0, INSTANCE);
-        assert_eq!(queue(&port, port.instance(), &[]).unwrap(), vec![spec_ref("x")]);
+        assert_eq!(queued(&port, port.instance(), &[]).unwrap(), vec![spec_ref("x")]);
         let outcome = port.admit("agent-x", "session-y", vec![run("p", RunTurn::PersonaTurn, RunOperator::Mind, &[])]).unwrap();
         assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
         let facts = mind.view(PipelineKind::Run, &run_ref("p").id.0).unwrap().admission.provenance;

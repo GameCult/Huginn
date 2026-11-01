@@ -1100,7 +1100,7 @@ mod tests {
             "the hold was read once for the whole launch"
         );
         assert_eq!(
-            on_hold(&rig.mind).unwrap().items(),
+            crate::queue::on_hold(&rig.mind).unwrap().items(),
             [spec_ref("x")],
             "the question did land"
         );
