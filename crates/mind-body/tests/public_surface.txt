@@ -195,7 +195,7 @@ mind_body::persona: struct StartSelfRun # [derive (Clone , Debug , PartialEq , E
 mind_body::persona: struct TraceItem # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[provenance: String, room: String, text: String]
 mind_body::persona: struct TurnRequest # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[caller: String, request_id: String, instructions: String, input: String, output_schema_json: String]
 mind_body::persona: struct TurnTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[run: String, turn: u32, at: DateTime < Utc >, inputs: Vec < TraceItem >, outputs: Vec < TraceItem >, outcome: String]
-mind_body::queue: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Breaker { Clear , Trip { run : PipelineRef , } , }
+mind_body::queue: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Breaker { Clear , Trip { run : PipelineRef } , }
 mind_body::queue: const CONSECUTIVE : usize
 mind_body::queue: const EMPTY_SHARE : usize
 mind_body::queue: const WINDOW : usize

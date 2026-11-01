@@ -1060,7 +1060,7 @@ fn a_resolved_tripped_brief_drops_out_and_the_question_holds_the_rest_and_nothin
     let runs = self_runs(&rig, ANN);
     assert_eq!(runs.len(), 4, "a new brief launched");
     assert_eq!(claims_of_run(&runs[3]), vec![brief_ref("new").id.0], "no Self run claims any of the five");
-    beats(&rig, 6);
+    beats(&rig, 2);
     assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "the question stays in force and no second is asked");
 }
 
