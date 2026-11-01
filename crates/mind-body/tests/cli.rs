@@ -3,29 +3,34 @@
 //! status. Nothing touches `/etc`.
 
 use chrono::{TimeZone, Utc};
-use eureka_pipeline::Slug;
 use mind_body::cli::{operator_name, run};
+use mind_body::launch::StopScope;
 
 fn go(root: &std::path::Path, args: &[&str], set_by: &str, secs: i64) -> (anyhow::Result<()>, String) {
     let (result, out, _) = go_stopping(root, args, set_by, secs, |_| Ok(()));
     (result, out)
 }
 
-/// Runs one command with a stopper that records the instance of every call and
-/// answers with `stop`. `stop` also sees the call before it returns.
+/// Runs one command with a stopper that records every call (the instance of a
+/// Mind's stop, None for the swarm's) and answers with `stop`. `stop` also
+/// sees the call before it returns.
 fn go_stopping(
     root: &std::path::Path,
     args: &[&str],
     set_by: &str,
     secs: i64,
-    mut stop: impl FnMut(&Slug) -> anyhow::Result<()>,
-) -> (anyhow::Result<()>, String, Vec<String>) {
+    mut stop: impl FnMut(Option<&str>) -> anyhow::Result<()>,
+) -> (anyhow::Result<()>, String, Vec<Option<String>>) {
     let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     let mut out = Vec::new();
     let mut calls = Vec::new();
     let now = Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap();
-    let result = run(&args, root, set_by, now, &mut out, &mut |instance| {
-        calls.push(instance.0.clone());
+    let result = run(&args, root, set_by, now, &mut out, &mut |scope| {
+        let instance = match scope {
+            StopScope::Mind(instance) => Some(instance.0.as_str()),
+            StopScope::Swarm => None,
+        };
+        calls.push(instance.map(str::to_string));
         stop(instance)
     });
     (result, String::from_utf8(out).unwrap(), calls)
@@ -268,7 +273,7 @@ fn brake_hold_stops_once_with_the_instance_and_the_store_already_held() {
         Ok(())
     });
     result.unwrap();
-    assert_eq!(calls, ["eureka"]);
+    assert_eq!(calls, [Some("eureka".to_string())]);
     assert!(seen_at_stop.contains("BrakeHeld"), "the write comes before the stop: {seen_at_stop}");
     assert!(out.contains("units: stopped mind-self@eureka.service mind-persona@eureka.service"), "{out}");
 }
@@ -314,7 +319,7 @@ fn a_failing_write_still_stops_and_the_hold_fails() {
     std::fs::create_dir_all(root.path().join("eureka").join("control.cc")).unwrap();
     let (result, out, calls) = go_stopping(root.path(), &["--instance", "eureka", "brake", "hold"], "op", 1, |_| Ok(()));
     let error = format!("{:#}", result.unwrap_err());
-    assert_eq!(calls, ["eureka"], "stopping does not wait on the write");
+    assert_eq!(calls, [Some("eureka".to_string())], "stopping does not wait on the write");
     assert!(error.contains("brake was not written"), "{error}");
     assert!(!out.contains("stopped"), "{out}");
 
@@ -451,13 +456,58 @@ fn swarm_verbs_round_trip() {
 }
 
 #[test]
-fn swarm_verbs_write_only_the_swarm_file_and_never_call_the_stopper() {
+fn swarm_verbs_write_only_the_swarm_file() {
     let root = tempfile::tempdir().unwrap();
-    let (result, _, calls) = go_stopping(root.path(), &["swarm", "brake", "hold"], "op", 0, |_| Ok(()));
-    result.unwrap();
-    assert!(calls.is_empty(), "the swarm hold has no instance to stop: {calls:?}");
+    go(root.path(), &["swarm", "brake", "hold"], "op", 0).0.unwrap();
     let names = listing(root.path());
     assert!(names.iter().all(|name| name.starts_with("swarm.cc")), "{names:?}");
+}
+
+#[test]
+fn swarm_brake_hold_stops_once_with_the_swarm_scope_and_the_swarm_store_already_held() {
+    let root = tempfile::tempdir().unwrap();
+    go(root.path(), &["swarm", "brake", "release"], "op", 0).0.unwrap();
+    let mut seen_at_stop = String::new();
+    let (result, out, calls) = go_stopping(root.path(), &["swarm", "brake", "hold"], "alice", 1, |_| {
+        seen_at_stop = swarm_show(root.path());
+        Ok(())
+    });
+    result.unwrap();
+    assert_eq!(calls, [None], "one stop, for the swarm");
+    assert!(seen_at_stop.contains("BrakeHeld"), "the write comes before the stop: {seen_at_stop}");
+    assert!(out.contains("units: stopped every mind-self@ and mind-persona@ unit"), "{out}");
+}
+
+#[test]
+fn a_failing_swarm_stopper_fails_the_hold_and_leaves_it_held() {
+    let root = tempfile::tempdir().unwrap();
+    let (result, out, calls) =
+        go_stopping(root.path(), &["swarm", "brake", "hold"], "op", 1, |_| Err(anyhow::anyhow!("systemctl stop failed with exit status 5")));
+    let error = format!("{:#}", result.unwrap_err());
+    assert_eq!(calls, [None]);
+    assert!(error.contains("the brake is held") && error.contains("exit status 5"), "{error}");
+    assert!(!out.contains("stopped"), "a failed stop printed success: {out}");
+    assert!(swarm_show(root.path()).contains("BrakeHeld"));
+}
+
+#[test]
+fn a_failing_swarm_write_still_stops_and_the_hold_fails() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("swarm.cc")).unwrap();
+    let (result, out, calls) = go_stopping(root.path(), &["swarm", "brake", "hold"], "op", 1, |_| Ok(()));
+    let error = format!("{:#}", result.unwrap_err());
+    assert_eq!(calls, [None], "stopping does not wait on the write");
+    assert!(error.contains("brake was not written"), "{error}");
+    assert!(!out.contains("stopped"), "{out}");
+}
+
+#[test]
+fn swarm_show_and_release_never_call_the_stopper() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [&["swarm", "show"][..], &["swarm", "brake", "release"], &["swarm", "brake", "release", "now"], &["swarm", "brake"]] {
+        let (_, _, calls) = go_stopping(root.path(), args, "op", 0, |_| Ok(()));
+        assert!(calls.is_empty(), "{args:?} called the stopper");
+    }
 }
 
 #[test]

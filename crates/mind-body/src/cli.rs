@@ -8,18 +8,19 @@
 //! mind-control --instance <slug> brake release
 //! mind-control [--root <dir>] --instance <slug> check
 //! mind-control [--root <dir>] swarm show
-//! mind-control swarm brake hold | release
+//! mind-control swarm brake hold | release     (hold also stops every Mind's units)
 //! ```
 //!
-//! The `swarm` verbs write `<root>/swarm.cc` and stop no unit: the swarm's
-//! brake is read by the organs that act on the swarm's behalf.
+//! The `swarm` verbs write `<root>/swarm.cc`; `swarm brake hold` also stops
+//! every Mind's units, and `swarm brake release` stops nothing.
 //!
 //! `check` exits 0 only when the instance brake and the swarm brake are released; a
 //! systemd unit runs it as its `ExecCondition`. It writes nothing.
 //!
-//! `brake hold` writes the brake held and then, whatever the write's outcome,
-//! stops the instance's running units through the `stop_units` parameter. It
-//! fails if either step failed. No other command stops anything.
+//! Either `brake hold` writes its brake held and then, whatever the write's
+//! outcome, stops the units it covers through the one `stop_units` parameter
+//! (a Mind's two units, or every Mind's). It fails if either step failed. No
+//! other command stops anything.
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -32,7 +33,7 @@ use eureka_pipeline::{RunTurn, Slug};
 use crate::control::{
     ControlWriter, Effective, FileSource, SwarmWriter, control_path, derive, derive_swarm, load_state, load_swarm_state, swarm_path,
 };
-use crate::launch::unit;
+use crate::launch::{StopScope, unit};
 
 const USAGE: &str =
     "usage: mind-control [--root <dir>] --instance <slug> show | check | brake hold | brake release | mind-control [--root <dir>] swarm show | brake hold | brake release";
@@ -77,14 +78,14 @@ pub fn operator_name(sudo_user: Option<String>, user: Option<String>) -> String 
 /// default; a leading `--root <dir>` argument replaces it (argv, not environment,
 /// because `sudo -E` carries the environment). The operator's name, the clock, the output and the stopper are parameters so a test drives
 /// the whole command without touching `/etc` or systemd. `stop_units` is
-/// called only by `brake hold`, after the write, whatever the write's outcome.
+/// called only by a `brake hold`, after the write, whatever the write's outcome.
 pub fn run(
     args: &[String],
     root: &Path,
     set_by: &str,
     now: DateTime<Utc>,
     out: &mut impl Write,
-    stop_units: &mut dyn FnMut(&Slug) -> Result<()>,
+    stop_units: &mut dyn FnMut(StopScope<'_>) -> Result<()>,
 ) -> Result<()> {
     let (root, args) = match args {
         [flag, dir, rest @ ..] if flag == "--root" => (Path::new(dir), rest),
@@ -93,7 +94,7 @@ pub fn run(
     if let [word, rest @ ..] = args
         && word == "swarm"
     {
-        return swarm(root, rest, set_by, now, out);
+        return swarm(root, rest, set_by, now, out, stop_units);
     }
     let (instance, command) = match args {
         [flag, instance, command @ ..] if flag == "--instance" => (Slug(instance.clone()), command),
@@ -106,15 +107,13 @@ pub fn run(
         ["check"] => check(root, &path, &instance, out),
         ["brake", "hold"] => {
             let written = ControlWriter::open(&path).and_then(|mut writer| writer.set_brake(false, now, set_by));
-            let stopped = stop_units(&instance);
+            let stopped = stop_units(StopScope::Mind(&instance));
             match (written, stopped) {
                 (Ok(()), Ok(())) => {
                     writeln!(out, "units: stopped {} {}", unit(&instance, RunTurn::SelfRun)?, unit(&instance, RunTurn::PersonaTurn)?)?;
                     Ok(())
                 }
-                (Err(write), Ok(())) => Err(write.context("the brake was not written; the units were stopped")),
-                (Ok(()), Err(stop)) => Err(stop.context("the brake is held; the stop failed")),
-                (Err(write), Err(stop)) => Err(anyhow!("the brake was not written ({write:#}) and the stop failed ({stop:#})")),
+                outcome => held(outcome),
             }
         }
         ["brake", "release"] => ControlWriter::open(&path)?.set_brake(true, now, set_by),
@@ -122,14 +121,40 @@ pub fn run(
     }
 }
 
+/// A hold whose write or stop failed: what was written, what was stopped, and
+/// which step failed, the same words for a Mind's hold and the swarm's.
+fn held(outcome: (Result<()>, Result<()>)) -> Result<()> {
+    match outcome {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(write), Ok(())) => Err(write.context("the brake was not written; the units were stopped")),
+        (Ok(()), Err(stop)) => Err(stop.context("the brake is held; the stop failed")),
+        (Err(write), Err(stop)) => Err(anyhow!("the brake was not written ({write:#}) and the stop failed ({stop:#})")),
+    }
+}
+
 /// The `swarm` verbs over `<root>/swarm.cc`. Every refusal happens before the
-/// writer is opened, so a refused command creates nothing.
-fn swarm(root: &Path, args: &[String], set_by: &str, now: DateTime<Utc>, out: &mut impl Write) -> Result<()> {
+/// writer is opened, so a refused command creates nothing. `brake hold` then
+/// stops every Mind's units, whatever the write's outcome.
+fn swarm(
+    root: &Path,
+    args: &[String],
+    set_by: &str,
+    now: DateTime<Utc>,
+    out: &mut impl Write,
+    stop_units: &mut dyn FnMut(StopScope<'_>) -> Result<()>,
+) -> Result<()> {
     let path = swarm_path(root);
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["show"] => show_swarm(&path, out),
-        ["brake", "hold"] => SwarmWriter::open(&path)?.set_brake(false, now, set_by),
+        ["brake", "hold"] => {
+            let written = SwarmWriter::open(&path).and_then(|mut writer| writer.set_brake(false, now, set_by));
+            let stopped = stop_units(StopScope::Swarm);
+            if written.is_ok() && stopped.is_ok() {
+                writeln!(out, "units: stopped every mind-self@ and mind-persona@ unit")?;
+            }
+            held((written, stopped))
+        }
         ["brake", "release"] => SwarmWriter::open(&path)?.set_brake(true, now, set_by),
         _ => bail!("{USAGE}"),
     }

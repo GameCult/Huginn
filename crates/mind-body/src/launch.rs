@@ -15,7 +15,8 @@
 //! Persona turn's run opens with no claims, so a request that carries any is
 //! refused. The primitive
 //! owns no file and stops no unit through the `Launcher` port: stopping her
-//! units is the operator's brake hold, through `SystemdLauncher::stop_all`.
+//! units is either brake's hold (one Mind's, or the swarm's for every Mind),
+//! through `SystemdLauncher::stop`.
 
 
 use anyhow::{Result, anyhow};
@@ -125,45 +126,63 @@ pub(crate) fn unit(instance: &Slug, turn: RunTurn) -> Result<String> {
     Ok(format!("{}@{}.service", template(turn), instance.0))
 }
 
-/// The arguments of the one synchronous stop: the exact unit `unit()` names
-/// for each turn of this instance, the same names start and alive use. No
-/// glob: a prefix glob also matches another instance (`eureka*` matches
-/// `eureka-two`) and a glob that matches no loaded unit exits 0. No
+/// What one stop reaches: the two units of one Mind, or every Mind's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopScope<'a> {
+    Mind(&'a Slug),
+    Swarm,
+}
+
+/// The arguments of the one synchronous stop. A Mind's: the exact unit `unit()`
+/// names for each turn of this instance, the same names start and alive use,
+/// with no glob (a prefix glob also matches another instance, `eureka*` matches
+/// `eureka-two`). The swarm's: each template's glob over the loaded units,
+/// which is exactly every running Mind and exits 0 when none is loaded. No
 /// `--no-block`: `systemctl stop` returns when the units are down. The
 /// instance is validated by `unit()`.
-pub(crate) fn stop_args(instance: &Slug) -> Result<Vec<String>> {
+pub(crate) fn stop_args(scope: StopScope<'_>) -> Result<Vec<String>> {
     let mut args = vec!["stop".to_string(), "--".to_string()];
     for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
-        args.push(unit(instance, turn)?);
+        args.push(match scope {
+            StopScope::Mind(instance) => unit(instance, turn)?,
+            StopScope::Swarm => format!("{}@*.service", template(turn)),
+        });
     }
     Ok(args)
 }
 
 impl SystemdLauncher {
-    /// Stops every unit of both turns of one instance and waits for them. An
-    /// inherent method, not on `Launcher`: only the operator's brake hold
-    /// calls it. A unit that is not installed is systemctl's exit 5, and the
-    /// others still stop; when the stop fails the error names each unit's
-    /// state, because systemd may have stopped one and not the other.
-    pub fn stop_all(&self, instance: &Slug) -> Result<()> {
-        let args = stop_args(instance)?;
+    /// Stops the units of one Mind, or of every Mind, and waits for them. An
+    /// inherent method, not on `Launcher`: only a brake hold calls it, through
+    /// `mind-control`. A unit that is not installed is systemctl's exit 5, and
+    /// the others still stop; when a Mind's stop fails the error names each
+    /// unit's state, because systemd may have stopped one and not the other,
+    /// and a failed swarm stop names systemctl's exit status only.
+    pub fn stop(&self, scope: StopScope<'_>) -> Result<()> {
+        let args = stop_args(scope)?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let reply = self.systemctl.run(&args)?;
         if reply.success {
             return Ok(());
         }
-        let states = [RunTurn::SelfRun, RunTurn::PersonaTurn]
-            .into_iter()
-            .map(|turn| {
-                let unit = unit(instance, turn)?;
-                let state = self.unit_state(&unit);
-                Ok(format!("{unit} is {state}"))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .join(", ");
+        let states = match scope {
+            StopScope::Mind(instance) => {
+                let states = [RunTurn::SelfRun, RunTurn::PersonaTurn]
+                    .into_iter()
+                    .map(|turn| {
+                        let unit = unit(instance, turn)?;
+                        let state = self.unit_state(&unit);
+                        Ok(format!("{unit} is {state}"))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .join(", ");
+                format!("; {states}")
+            }
+            StopScope::Swarm => String::new(),
+        };
         match reply.code {
-            Some(code) => Err(anyhow!("systemctl stop failed with exit status {code}; {states}")),
-            None => Err(anyhow!("systemctl stop was ended by a signal; {states}")),
+            Some(code) => Err(anyhow!("systemctl stop failed with exit status {code}{states}")),
+            None => Err(anyhow!("systemctl stop was ended by a signal{states}")),
         }
     }
 
@@ -1223,7 +1242,7 @@ mod tests {
     fn stop_args_is_one_synchronous_stop_of_exactly_the_units_start_names() {
         for name in ["eureka", "eureka.test", "eureka-two"] {
             let instance = Slug(name.into());
-            let args = stop_args(&instance).unwrap();
+            let args = stop_args(StopScope::Mind(&instance)).unwrap();
             assert_eq!(args[..2], ["stop", "--"], "one synchronous stop, no --no-block");
             let (launcher, spy) = spied();
             let mut started = Vec::new();
@@ -1234,21 +1253,42 @@ mod tests {
             assert_eq!(args[2..], started[..], "stop names exactly the units start names, for both turns");
             assert!(args[2..].iter().all(|unit| !unit.contains(['*', '?', '['])), "a glob can match another instance or none: {args:?}");
         }
-        assert_eq!(stop_args(&eureka()).unwrap(), ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service"]);
+        assert_eq!(stop_args(StopScope::Mind(&eureka())).unwrap(), ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service"]);
     }
 
     #[test]
-    fn stop_all_runs_the_one_stop_and_waits() {
+    fn stop_runs_the_one_stop_and_waits() {
         let (launcher, spy) = spied();
-        launcher.stop_all(&eureka()).unwrap();
-        assert_eq!(*spy.calls.borrow(), vec![stop_args(&eureka()).unwrap()]);
+        launcher.stop(StopScope::Mind(&eureka())).unwrap();
+        assert_eq!(*spy.calls.borrow(), vec![stop_args(StopScope::Mind(&eureka())).unwrap()]);
     }
 
     #[test]
-    fn stop_all_with_an_invalid_instance_is_an_error_and_runs_no_systemctl() {
+    fn the_swarm_stop_is_one_stop_of_both_templates_globs() {
+        let (launcher, spy) = spied();
+        launcher.stop(StopScope::Swarm).unwrap();
+        assert_eq!(*spy.calls.borrow(), vec![vec!["stop", "--", "mind-self@*.service", "mind-persona@*.service"]]);
+    }
+
+    #[test]
+    fn a_failed_swarm_stop_names_the_exit_status_and_asks_no_state() {
+        let (launcher, spy) = spied();
+        spy.success.set(false);
+        spy.code.set(Some(5));
+        *spy.stdout.borrow_mut() = "canary-output-7f3a91
+".to_string();
+        let shown = format!("{:#}", launcher.stop(StopScope::Swarm).unwrap_err());
+        assert!(shown.contains("exit status 5") && !shown.contains("canary"), "{shown}");
+        assert_eq!(spy.calls.borrow().len(), 1, "no per-unit query for the swarm");
+        spy.code.set(None);
+        assert!(format!("{:#}", launcher.stop(StopScope::Swarm).unwrap_err()).contains("signal"));
+    }
+
+    #[test]
+    fn stop_with_an_invalid_instance_is_an_error_and_runs_no_systemctl() {
         let (launcher, spy) = spied();
         for bad in ["canary-../evil-7f3a91", "canary instance", "", "canary*"] {
-            let error = launcher.stop_all(&Slug(bad.into())).unwrap_err();
+            let error = launcher.stop(StopScope::Mind(&Slug(bad.into()))).unwrap_err();
             assert!(!format!("{error:#}").contains("canary"), "{error:#}");
         }
         assert!(spy.calls.borrow().is_empty());
@@ -1260,7 +1300,7 @@ mod tests {
         spy.success.set(false);
         spy.code.set(Some(5));
         spy.states.borrow_mut().extend([("mind-self@eureka.service", "inactive\n"), ("mind-persona@eureka.service", "active\n")]);
-        let shown = format!("{:#}", launcher.stop_all(&eureka()).unwrap_err());
+        let shown = format!("{:#}", launcher.stop(StopScope::Mind(&eureka())).unwrap_err());
         assert!(shown.contains("exit status 5"), "{shown}");
         assert!(shown.contains("mind-self@eureka.service is inactive") && shown.contains("mind-persona@eureka.service is active"), "{shown}");
         let asked: Vec<Vec<String>> = spy.calls.borrow().iter().skip(1).cloned().collect();
@@ -1269,10 +1309,10 @@ mod tests {
         spy.states.borrow_mut().clear();
         *spy.stdout.borrow_mut() = "canary-output-7f3a91\n".to_string();
         spy.code.set(None);
-        let shown = format!("{:#}", launcher.stop_all(&eureka()).unwrap_err());
+        let shown = format!("{:#}", launcher.stop(StopScope::Mind(&eureka())).unwrap_err());
         assert!(shown.contains("signal") && shown.contains("is unknown") && !shown.contains("canary"), "{shown}");
         spy.states.borrow_mut().push(("mind-self@eureka.service", "failed\n"));
-        let shown = format!("{:#}", launcher.stop_all(&eureka()).unwrap_err());
+        let shown = format!("{:#}", launcher.stop(StopScope::Mind(&eureka())).unwrap_err());
         assert!(shown.contains("mind-self@eureka.service is failed"), "{shown}");
     }
 

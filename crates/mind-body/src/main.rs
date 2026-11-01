@@ -32,7 +32,7 @@ fn main() {
         &set_by,
         chrono::Utc::now(),
         &mut std::io::stdout(),
-        &mut |instance| mind_body::launch::SystemdLauncher::new().stop_all(instance),
+        &mut |scope| mind_body::launch::SystemdLauncher::new().stop(scope),
     );
     if let Err(error) = result {
         eprintln!("mind-control: {error:#}");
