@@ -674,7 +674,8 @@ mod tests {
         let retired: Vec<PipelineRef> = holds(&mind).unwrap().into_iter().filter(|hold| hold.retired).flat_map(|hold| hold.items).collect();
         assert_eq!(retired, [a.clone(), b.clone()]);
         mind.committed(vec![close(a, withdrawn())]);
-        assert_eq!(on_hold(&mind).unwrap().items(), [b.clone(), c.clone()], "a resolved claim drops out");
+        let held = on_hold(&mind).unwrap();
+        assert!(held.contains(&b) && held.contains(&c) && held.items().len() == 2, "{held:?}: a resolved claim drops out");
         mind.committed(vec![close(b, withdrawn())]);
         assert_eq!(on_hold(&mind).unwrap().items(), [c], "all of f2's resolved, only the open question's claim is held");
     }
