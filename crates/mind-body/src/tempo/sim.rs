@@ -103,6 +103,7 @@ struct Outcome {
     /// Times the error crossed from beyond +BAND to beyond -BAND (or back)
     /// during the last three days.
     band_crossings: u32,
+    /// Share of the last day of the last window spent at the minimum beat.
     frac_at_min: f64,
     /// The beat on the last minute.
     last_beat: u32,
@@ -123,7 +124,7 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
     let (mut last_turn, mut turns, mut prev_beat) = (W0, 0u32, DEFAULT_BEAT_S);
     let steps = i64::from(scenario.windows) * WINDOW_MS / STEP_MS;
     let mut out = Outcome::default();
-    let (mut jumps, mut unvoted, mut at_min) = (0u32, 0u32, 0u32);
+    let (mut jumps, mut at_min, mut last_day) = (0u32, 0u32, 0u32);
     let mut side = 0i8;
     let mut worst_day = 0f64;
     for i in 1..steps {
@@ -155,8 +156,10 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
             None => control(gains, &mut state, shown.as_ref(), now, TARGET, false),
         };
         if vote.is_none() {
-            unvoted += 1;
-            at_min += u32::from(beat == FALLBACK_MIN_S);
+            if window + 1 == scenario.windows && in_window >= 144.0 {
+                last_day += 1;
+                at_min += u32::from(beat == FALLBACK_MIN_S);
+            }
             jumps += u32::from(f64::from(beat.abs_diff(prev_beat)) > 0.05 * f64::from(prev_beat));
         }
         prev_beat = beat;
@@ -195,7 +198,7 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
     out.final_used.push(used);
     out.worst_error_last_day = worst_day;
     out.jumps_per_h = f64::from(jumps) / (f64::from(scenario.windows) * 168.0);
-    out.frac_at_min = f64::from(at_min) / f64::from(unvoted.max(1));
+    out.frac_at_min = f64::from(at_min) / f64::from(last_day.max(1));
     out
 }
 
@@ -235,9 +238,9 @@ fn sim_scenarios_meet_target() {
 fn sweep() {
     let scen = scenarios();
     let mut rows = Vec::new();
-    for kp in [0.0, 0.005, 0.01, 0.02, 0.05, 0.1] {
-        for ki in [0.0, 0.0005, 0.001, 0.002, 0.005, 0.01] {
-            for kd in [0.0, 0.01, 0.05, 0.1, 0.2] {
+    for kp in [0.01, 0.02, 0.03, 0.05, 0.1] {
+        for ki in [0.002, 0.005, 0.01, 0.02, 0.04] {
+            for kd in [0.0, 0.002, 0.005, 0.01, 0.02, 0.05] {
                 let g = Gains { kp, ki, kd };
                 let (mut final_err, mut err_day, mut jumps, mut cross) = (0f64, 0f64, 0f64, 0u32);
                 let mut sat_ok = true;
@@ -277,7 +280,7 @@ fn sweep() {
     for r in &rows {
         println!("{} {} {} | {:.1} | {:.1} | {:.2} | {} | {}", r.1.kp, r.1.ki, r.1.kd, r.2, r.3, r.4, r.5, r.6);
     }
-    for r in rows.iter().take(3) {
+    for r in rows.iter().take(4) {
         println!("\nBEST {:?}\n{}", r.1, r.7);
     }
     if let Some(r) = rows.iter().find(|r| r.1 == GAINS) {
