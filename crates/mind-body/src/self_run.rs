@@ -695,13 +695,17 @@ impl Spawner for ClaudeSpawner {
 }
 
 /// The bubblewrap arguments up to the program: the whole filesystem read-only, a private `/tmp`
-/// and `/run`, the unit's scratch directory and her sandbox writable, her unit's credentials
-/// (`/etc/gamecult`, the other `/var/lib` directories, the lease socket under `/run`) hidden, a
-/// private process table, and the child dead when the unit's process is. The network is shared: the
-/// web, `huginn` and the API are reachable. The boundary is the operating system's, not a pattern list
-/// (ruling `eureka-body:ruling:persona-git-personal-sandbox`).
+/// and `/run`, the unit's scratch directory read-only with only its `claude-config` writable (she
+/// cannot create, replace or link a file where the organ writes, such as the instructions file),
+/// her sandbox writable, her unit's credentials (`/etc/gamecult`, the other `/var/lib`
+/// directories, the lease socket under `/run`) hidden, a private process table, and the child dead
+/// when the unit's process is. The network is shared: the web, `huginn` and the API are reachable,
+/// and what she reaches on the host is the uid fence's (gamecult-ops `mind-fence.service`), which
+/// binds the organ and this sandbox alike. The boundary is the operating system's, not a pattern
+/// list (ruling `eureka-body:ruling:persona-git-personal-sandbox`).
 pub(crate) fn sandbox_args(sandbox: &Path, scratch: &Path) -> Vec<String> {
     let (sandbox, scratch) = (sandbox.to_string_lossy(), scratch.to_string_lossy());
+    let config = scratch.to_string() + "/" + CONFIG_DIR_NAME;
     [
         "--ro-bind", "/", "/",
         "--dev", "/dev",
@@ -709,7 +713,8 @@ pub(crate) fn sandbox_args(sandbox: &Path, scratch: &Path) -> Vec<String> {
         "--tmpfs", "/tmp",
         "--tmpfs", "/run",
         "--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve",
-        "--bind", &scratch, &scratch,
+        "--ro-bind", &scratch, &scratch,
+        "--bind", &config, &config,
         "--tmpfs", "/etc/gamecult",
         "--tmpfs", "/var/lib",
         "--bind", &sandbox, &sandbox,

@@ -1697,8 +1697,8 @@ mod sandbox {
     fn the_sandbox_arguments_are_pinned() {
         let args = sandbox_args(Path::new("/var/lib/mind-x/sandbox"), Path::new("/run/mind-x"));
         let expected: Vec<String> = [
-            "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve", "--bind", "/run/mind-x", "/run/mind-x", "--tmpfs",
-            "/etc/gamecult", "--tmpfs", "/var/lib", "--bind", "/var/lib/mind-x/sandbox", "/var/lib/mind-x/sandbox", "--unshare-pid", "--die-with-parent", "--new-session", "--chdir", "/var/lib/mind-x/sandbox", "--",
+            "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve", "--ro-bind", "/run/mind-x", "/run/mind-x", "--bind",
+            "/run/mind-x/claude-config", "/run/mind-x/claude-config", "--tmpfs", "/etc/gamecult", "--tmpfs", "/var/lib", "--bind", "/var/lib/mind-x/sandbox", "/var/lib/mind-x/sandbox", "--unshare-pid", "--die-with-parent", "--new-session", "--chdir", "/var/lib/mind-x/sandbox", "--",
         ]
         .map(String::from)
         .to_vec();
@@ -1706,6 +1706,8 @@ mod sandbox {
         // The credentials are hidden before the sandbox and the scratch are bound back, and the network is not unshared.
         let at = |needle: &str| args.iter().position(|arg| arg == needle).unwrap();
         assert!(at("/run") < at("/run/mind-x") && at("/var/lib") < at("/var/lib/mind-x/sandbox"));
+        // The scratch is read-only to her: no plain bind of it, so she cannot plant a link where the organ writes.
+        assert!(!args.windows(3).any(|w| w[0] == "--bind" && w[1] == "/run/mind-x"), "{args:?}");
         assert!(!args.iter().any(|arg| arg == "--unshare-net" || arg == "--unshare-all"));
     }
 
