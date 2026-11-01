@@ -2248,3 +2248,44 @@ fn whoever_a_shown_memory_or_open_item_names_may_be_named_in_the_next_reply() {
         assert!(allowed.contains(&who.to_string()), "{who} in {allowed:?}");
     }
 }
+
+#[test]
+fn each_session_is_lent_a_lease_that_ends_with_the_units_remaining_time() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("operator", "x")])]);
+    rig.go();
+    let asked = rig.lender.asked.borrow();
+    assert_eq!(asked.len(), 1);
+    let begun_ms = u64::try_from(at(0).timestamp_millis()).unwrap();
+    let expires = asked[0].expires_at_unix_ms;
+    assert!(expires >= begun_ms + (RUN_CAP_S - 60) * 1000 && expires <= begun_ms + (RUN_CAP_S + 60) * 1000, "{expires} for a cap of {RUN_CAP_S}s from {begun_ms}");
+}
+
+#[test]
+fn a_hold_placed_as_a_session_ends_stops_the_next_session_before_a_lease_is_asked() {
+    let rig = Rig::new(vec![operator_says(1, "a"), direct(2, "!dm:chat", "@ann:chat", "later")], &[says(&[("operator", "x")]), says(&[("!dm:chat", "y")])]);
+    let swarm = rig.swarm_store();
+    *rig.chat.on_send.borrow_mut() = Some(Box::new(move || {
+        SwarmWriter::open(&swarm).unwrap().set_brake(false, at(0), "op").unwrap();
+    }));
+    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, Some(Failure::Held(HeldReason::BrakeHeld)));
+    assert_eq!((rig.model.spawns.borrow().len(), rig.lender.asked.borrow().len()), (1, 1), "no second lease, no second process");
+}
+
+#[test]
+fn a_result_without_structured_output_is_traced_as_failed_and_told_back() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &thrice("null".to_string()));
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (0, Some(Failure::Undecodable)));
+    let traces = rig.trace.0.borrow();
+    assert_eq!(traces.len(), 3, "one trace for each result");
+    assert!(traces.iter().all(|trace| trace.outcome == "failed: the reply is not a persona reply" && trace.outputs.is_empty()), "{traces:?}");
+}
+
+#[test]
+fn a_say_is_named_by_the_batch_it_answers_and_its_place_in_the_reply() {
+    let rig = Rig::new(vec![operator_says(4, "a"), delivery(5, "swarm", "@bot:chat", "b")], &[says(&[("operator", "first"), ("swarm", "second")])]);
+    rig.go();
+    let ids: Vec<String> = rig.chat.sent.borrow().iter().map(|sent| sent.request_id.clone()).collect();
+    assert_eq!(ids, ["s4-5-0", "s4-5-1"]);
+}
