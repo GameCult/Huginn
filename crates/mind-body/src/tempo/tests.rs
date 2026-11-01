@@ -304,7 +304,6 @@ fn saturated_output_does_not_wind_up() {
         last_used_permille: 400,
         last_observed_at_ms: MID - 60_000,
         last_now_ms: MID - 60_000,
-        last_step_ms: MID - 60_000,
         window_resets_at_ms: RESETS,
         ..Fallback::default()
     };
@@ -515,20 +514,24 @@ fn warm(gains: &Gains) -> Fallback {
 
 #[test]
 fn a_frozen_reading_does_not_wind_up() {
-    let mut s = Fallback::default();
     let frozen = read(300, MID);
-    for i in 0..=288 {
-        control(&T, &mut s, Some(&frozen), MID + i * 10 * 60_000, 900, false);
-    }
-    assert_eq!(
-        s.integral, 0.0,
-        "a reading that never advanced is no evidence"
-    );
-    // The first reading that does advance is accountable for at most the
-    // longest beat, not the silence before it.
-    let now = MID + 48 * HOUR;
+    let at = |s: &mut Fallback, hours: i64| {
+        control(&T, s, Some(&frozen), MID + hours * HOUR, 900, false)
+    };
+    let mut s = Fallback::default();
+    at(&mut s, 0);
+    // Inside the horizon it is live; past it, the last beat holds and nothing
+    // integrates, however long the connector keeps replaying it.
+    at(&mut s, 1);
+    assert!(s.integral > 100.0 && s.integral < 200.0, "{}", s.integral);
+    let (held, integral) = (at(&mut s, 3), s.integral);
+    assert_eq!(at(&mut s, 48), held);
+    assert_eq!(at(&mut s, 80), held);
+    assert_eq!(s.integral, integral);
+    // A reading that advances takes over again.
+    let now = MID + 82 * HOUR;
     control(&T, &mut s, Some(&read(300, now)), now, 900, false);
-    assert!(s.integral > 100.0 && s.integral < 450.0, "{}", s.integral);
+    assert_ne!(s.rate_per_h, 3600.0 / f64::from(held));
 }
 
 #[test]
@@ -547,11 +550,12 @@ fn one_millisecond_of_resets_jitter_is_the_same_window() {
     assert!(steady.integral > 100.0);
     assert!((jittery.integral - steady.integral).abs() < 1e-3);
     // A window a week on is not the same window.
+    let now = RESETS + HOUR;
     let next = Reading {
         resets_at_ms: RESETS + WINDOW_MS - 1_000,
-        ..read(5, MID + 61 * 60_000)
+        ..read(5, now)
     };
-    control(&T, &mut jittery, Some(&next), MID + 61 * 60_000, 900, false);
+    control(&T, &mut jittery, Some(&next), now, 900, false);
     assert!(jittery.integral < 1.0);
 }
 
@@ -569,8 +573,12 @@ fn a_vote_beyond_the_beat_bounds_leaves_the_integral_alone() {
         assert!(control(&T, &mut s, Some(&read(300, t)), t, 900, false) > 3500);
         // And takes the wheel back: well behind the trajectory, two hours on, the
         // beat is its own again.
-        let t = t + 2 * HOUR;
-        assert!(control(&T, &mut s, Some(&read(300, t)), t, 900, false) < 700);
+        let mut beat = 0;
+        for i in 1..=12 {
+            let t = t + i * 10 * 60_000;
+            beat = control(&T, &mut s, Some(&read(300, t)), t, 900, false);
+        }
+        assert!(beat < 700, "{beat}");
     }
 }
 

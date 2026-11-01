@@ -20,6 +20,9 @@ pub const FALLBACK_MAX_S: u32 = 3600;
 
 const WINDOW_MS: i64 = 7 * 24 * 3_600_000;
 const HOUR_MS: f64 = 3_600_000.0;
+/// A reading observed longer ago than this is no evidence of where usage is now:
+/// twice the longest beat, since every turn refreshes it.
+const STALE_AFTER_MS: i64 = 2 * FALLBACK_MAX_S as i64 * 1000;
 /// Two `resets_at` values this close name one window: the connector reports
 /// whole unix seconds, and a new window starts a week on.
 const RESETS_JITTER_MS: u64 = 60_000;
@@ -61,15 +64,13 @@ pub const GAINS: Gains = Gains {
 /// never published as truth. `rate_per_h` is the last output as a turn rate
 /// (zero: none yet); while a vote decides the caller sets it to the voted beat's
 /// rate, and the controller turns the gap between that and its own answer into
-/// `carry_per_h`, which fades after release. `last_step_ms` is when the integral
-/// last took a step.
+/// `carry_per_h`, which fades after release.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Fallback {
     pub integral: f64,
     pub last_used_permille: u32,
     pub last_observed_at_ms: i64,
     pub last_now_ms: i64,
-    pub last_step_ms: i64,
     pub carry_per_h: f64,
     pub window_resets_at_ms: i64,
     pub rate_per_h: f64,
@@ -78,13 +79,15 @@ pub struct Fallback {
 /// The beat when no vote is cast: a PID on the gap between the seven-day usage
 /// trajectory to `target_permille` and what was used, acting on the turn rate
 /// (behind the trajectory raises it). Derivative on the measurement, only
-/// between distinct observations; the integral steps only on a reading that
-/// advanced, at most one longest beat each, and not against a beat limit.
+/// between distinct observations; conditional integration against the beat
+/// limits.
 /// While `voted` nothing integrates and the controller notes how far the voted
 /// beat (held inside the beat bounds) is from its own answer, so release starts
 /// at the voted beat and the controller takes the wheel back within a poll
 /// period or two. A new window clears the integral and the derivative memory;
-/// with no usable reading the last beat holds (`DEFAULT_BEAT_S` before any).
+/// with no usable reading (none, an expired window, or one observed more than
+/// `STALE_AFTER_MS` ago, which a connector replaying its last answer keeps
+/// producing) the last beat holds (`DEFAULT_BEAT_S` before any).
 pub fn fallback_beat(
     state: &mut Fallback,
     reading: Option<&Reading>,
@@ -123,23 +126,23 @@ fn control(
     target_permille: u32,
     voted: bool,
 ) -> u32 {
-    let call_h = if state.last_now_ms > 0 {
+    let dt_h = if state.last_now_ms > 0 {
         (now_ms - state.last_now_ms).max(0) as f64 / HOUR_MS
     } else {
         0.0
     };
     state.last_now_ms = now_ms;
-    let Some(r) = reading
-        .filter(|r| now_ms < r.resets_at_ms && r.observed_at_ms >= r.resets_at_ms - WINDOW_MS)
-    else {
-        state.last_step_ms = now_ms;
+    let Some(r) = reading.filter(|r| {
+        now_ms < r.resets_at_ms
+            && r.observed_at_ms >= r.resets_at_ms - WINDOW_MS
+            && now_ms - r.observed_at_ms <= STALE_AFTER_MS
+    }) else {
         return held(state);
     };
     if r.resets_at_ms.abs_diff(state.window_resets_at_ms) > RESETS_JITTER_MS {
         state.integral = 0.0;
         state.last_used_permille = r.used_permille;
         state.last_observed_at_ms = r.observed_at_ms;
-        state.last_step_ms = now_ms;
     }
     state.window_resets_at_ms = r.resets_at_ms;
     let elapsed = (now_ms - (r.resets_at_ms - WINDOW_MS)).clamp(0, WINDOW_MS) as f64;
@@ -167,7 +170,6 @@ fn control(
         // inside the beat bounds, which are all the controller can answer) and
         // what the controller would answer now, so release starts at the voted
         // beat; it fades once the vote is gone.
-        state.last_step_ms = now_ms;
         state.carry_per_h = if state.rate_per_h > 0.0 {
             state.rate_per_h.clamp(low, high) - rate(state.integral)
         } else {
@@ -177,20 +179,12 @@ fn control(
     }
     let before = rate(state.integral) + state.carry_per_h;
     let winding = (before >= high && error > 0.0) || (before <= low && error < 0.0);
-    if fresh {
-        // Only a reading that advanced is evidence; one step covers at most the
-        // longest beat, so a late reading does not repay the silence.
-        if !winding {
-            let step_h = (now_ms - state.last_step_ms).clamp(0, i64::from(FALLBACK_MAX_S) * 1000)
-                as f64
-                / HOUR_MS;
-            state.integral += error * step_h;
-        }
-        state.last_step_ms = now_ms;
+    if !winding {
+        state.integral += error * dt_h;
     }
     let beat = beat_of(rate(state.integral) + state.carry_per_h);
     state.rate_per_h = 3600.0 / f64::from(beat);
-    state.carry_per_h *= (-call_h / CARRY_FADE_H).exp();
+    state.carry_per_h *= (-dt_h / CARRY_FADE_H).exp();
     beat
 }
 
