@@ -482,7 +482,7 @@ fn committed(outcome: PipelineAdmissionOutcome) -> Result<(), Declined> {
 /// in force, in the admissions of one batch each: the one writer of a
 /// retirement, so that a retired claim leaves the follow-up lists and the queue
 /// instead of waiting held for ever. Returns how many it resolved.
-pub fn retire_answered(mind: &dyn MindPort, agent: &str, now: DateTime<Utc>) -> Result<usize> {
+pub(crate) fn retire_answered(mind: &dyn MindPort, agent: &str, now: DateTime<Utc>) -> Result<usize> {
     let retired: Vec<PipelineRef> = holds(mind)?
         .into_iter()
         .filter(|hold| hold.retired)

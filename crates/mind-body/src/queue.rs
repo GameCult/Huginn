@@ -147,7 +147,7 @@ pub(crate) fn claims_of(mind: &dyn MindPort, run: &PipelineRef) -> Result<Vec<Pi
 
 /// Every question holding anything and what it holds: `eureka_state::hold`,
 /// the one decider, which `huginn blocked` reads too.
-pub fn holds(mind: &dyn MindPort) -> Result<Vec<Hold>> {
+pub(crate) fn holds(mind: &dyn MindPort) -> Result<Vec<Hold>> {
     hold::holds(&|asking| mind.query(asking))
 }
 
