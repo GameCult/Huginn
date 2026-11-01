@@ -29,12 +29,16 @@ type Log = Rc<RefCell<Vec<String>>>;
 type Deliveries = Rc<RefCell<Vec<ChatDelivery>>>;
 type During = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
-struct Ticking(Cell<i64>);
+/// A clock that moves on by `step` milliseconds each time it is read; `now` is shared so a test can move it by hand.
+struct Ticking {
+    now: Rc<Cell<i64>>,
+    step: Cell<i64>,
+}
 
 impl Clock for Ticking {
     fn now(&self) -> DateTime<Utc> {
-        self.0.set(self.0.get() + 1000);
-        at(self.0.get())
+        self.now.set(self.now.get() + self.step.get());
+        at(self.now.get())
     }
 }
 
@@ -219,6 +223,8 @@ struct Rig {
     mind: TestMind,
     launcher: Recording,
     clock: Ticking,
+    /// The unit's cap in seconds.
+    cap: Cell<u64>,
     dir: TempDir,
     log: Log,
     chat: FakeChat,
@@ -277,7 +283,8 @@ impl Rig {
         let rig = Self {
             mind: TestMind::seeded(),
             launcher: Recording::default(),
-            clock: Ticking(Cell::new(0)),
+            clock: Ticking { now: Rc::new(Cell::new(0)), step: Cell::new(1000) },
+            cap: Cell::new(RUN_CAP_S),
             dir: TempDir::new().unwrap(),
             chat: FakeChat {
                 log: log.clone(),
@@ -364,7 +371,7 @@ impl Rig {
             tempo: None,
             lender: &self.lender,
             spawner: &self.model,
-            run_cap_s: RUN_CAP_S,
+            run_cap_s: self.cap.get(),
             sandbox: &sandbox,
             scratch: &scratch,
         };
@@ -734,7 +741,7 @@ fn an_unprompted_start_takes_one_turn_whoever_started_it() {
     let waker = Rig::new(vec![], &[says(&[("swarm", "good morning")])]);
     waker.mind.committed(vec![run("woken", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
     // Past the launch grace: only the unit being this process keeps the holder live.
-    waker.clock.0.set(600_000);
+    waker.clock.now.set(600_000);
     let Outcome::Served { run: carried, answered, .. } = waker.start_with(&config()) else { panic!("served") };
     assert_eq!(carried, run_ref("woken"), "the unit carries the run the waker opened");
     assert_eq!((waker.turns(), answered), (1, 1), "a wake turn happens once, then nothing is pending");
@@ -1378,7 +1385,7 @@ fn outcomes_and_failures_read_as_one_line_each_without_values() {
 fn a_result_is_named_by_its_run_and_its_number_and_a_say_by_its_batch() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "x")]), says(&[("swarm", "y")])]);
     rig.mind.committed(vec![run("woken", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
-    rig.clock.0.set(600_000);
+    rig.clock.now.set(600_000);
     let (deliveries, next) = (rig.chat.deliveries.clone(), Cell::new(1));
     *rig.model.during.borrow_mut() = Some(Box::new(move || {
         next.set(next.get() + 1);
@@ -2064,7 +2071,7 @@ fn about_can_name_an_absent_mind() {
     assert_eq!(rig.chat.acked.borrow().len(), 1);
     assert_eq!(memories(&rig).len(), 1);
     // Seven days later Libby writes: the decision is about her and comes back.
-    rig.clock.0.set(7 * 24 * 3600 * 1000);
+    rig.clock.now.set(7 * 24 * 3600 * 1000);
     let mut ready = delivery(2, "swarm", libby, "ready to wire the shaders in?");
     ready.context = vec![ContextLine { sender: "@early:chat".into(), text: "before".into(), at_unix_ms: 1 }];
     ready.mentions = vec!["@mentioned:chat".into()];
@@ -2263,6 +2270,8 @@ fn each_session_is_lent_a_lease_that_ends_with_the_units_remaining_time() {
 #[test]
 fn a_hold_placed_as_a_session_ends_stops_the_next_session_before_a_lease_is_asked() {
     let rig = Rig::new(vec![operator_says(1, "a"), direct(2, "!dm:chat", "@ann:chat", "later")], &[says(&[("operator", "x")]), says(&[("!dm:chat", "y")])]);
+    // Time barely passes, so no poll inside the session sees the hold: only the check between sessions can.
+    rig.clock.step.set(1);
     let swarm = rig.swarm_store();
     *rig.chat.on_send.borrow_mut() = Some(Box::new(move || {
         SwarmWriter::open(&swarm).unwrap().set_brake(false, at(0), "op").unwrap();
@@ -2288,4 +2297,33 @@ fn a_say_is_named_by_the_batch_it_answers_and_its_place_in_the_reply() {
     rig.go();
     let ids: Vec<String> = rig.chat.sent.borrow().iter().map(|sent| sent.request_id.clone()).collect();
     assert_eq!(ids, ["s4-5-0", "s4-5-1"]);
+}
+
+#[test]
+fn a_poll_while_the_turn_runs_does_not_tell_again_what_the_line_in_flight_carried() {
+    let rig = Rig::new(vec![operator_says(1, "first")], &[says(&[("operator", "one")]), says(&[("operator", "two")])]);
+    let (deliveries, now, pushed) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(false));
+    // The first line's turn takes ten seconds, and a delivery arrives in them.
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        if !pushed.replace(true) {
+            deliveries.borrow_mut().push(operator_says(2, "second"));
+            now.set(now.get() + 10_000);
+        }
+    }));
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (2, None));
+    let told: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
+    assert_eq!(told.len(), 2);
+    assert!(told[1].contains(r#"text="second""#) && !told[1].contains(r#"text="first""#), "{}", told[1]);
+}
+
+#[test]
+fn a_session_near_the_units_cap_is_told_to_put_what_it_must_keep_into_remember() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("operator", "x")]), says(&[])]);
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
+    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, None);
+    let told: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
+    let flush = told.iter().find(|line| line.contains("This session ends soon")).unwrap_or_else(|| panic!("no flush line in {told:?}"));
+    assert!(flush.contains("the unit's time is nearly up") && flush.contains("`remember`") && flush.contains("`settle`"), "{flush}");
 }
