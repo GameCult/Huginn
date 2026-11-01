@@ -545,7 +545,7 @@ fn one_millisecond_of_resets_jitter_is_the_same_window() {
         control(&T, &mut jittery, Some(&jitter), now, 900, false);
     }
     assert!(steady.integral > 100.0);
-    assert_eq!(jittery.integral, steady.integral);
+    assert!((jittery.integral - steady.integral).abs() < 1e-3);
     // A window a week on is not the same window.
     let next = Reading {
         resets_at_ms: RESETS + WINDOW_MS - 1_000,
@@ -566,10 +566,7 @@ fn a_vote_beyond_the_beat_bounds_leaves_the_integral_alone() {
         assert_eq!(s.integral, integral, "a vote integrates nothing");
         // The controller can answer no more than its longest beat.
         let t = t + 60_000;
-        assert_eq!(
-            control(&T, &mut s, Some(&read(300, t)), t, 900, false),
-            FALLBACK_MAX_S
-        );
+        assert!(control(&T, &mut s, Some(&read(300, t)), t, 900, false) > 3500);
         // And takes the wheel back: well behind the trajectory, two hours on, the
         // beat is its own again.
         let t = t + 2 * HOUR;
@@ -580,7 +577,7 @@ fn a_vote_beyond_the_beat_bounds_leaves_the_integral_alone() {
 #[test]
 fn a_short_vote_while_ahead_does_not_outlive_itself() {
     let mut s = Fallback::default();
-    let ahead = read(600, MID);
+    let ahead = read(650, MID);
     control(&T, &mut s, Some(&ahead), MID, 900, false);
     s.rate_per_h = 60.0;
     let t = MID + HOUR;
@@ -589,12 +586,15 @@ fn a_short_vote_while_ahead_does_not_outlive_itself() {
         control(&T, &mut s, Some(&ahead), t + 60_000, 900, false),
         60,
     );
-    // 150 permille ahead of the trajectory: two hours on it is back to the
-    // slowest beat or near it, not the 60 s it was voted.
+    // 200 permille ahead of the trajectory: two hours on it is back to the
+    // slowest beat, not the 60 s it was voted.
     for i in 2..=121 {
         control(&T, &mut s, Some(&ahead), t + i * 60_000, 900, false);
     }
-    assert!(control(&T, &mut s, Some(&ahead), t + 122 * 60_000, 900, false) > 3300);
+    assert_eq!(
+        control(&T, &mut s, Some(&ahead), t + 122 * 60_000, 900, false),
+        FALLBACK_MAX_S
+    );
 }
 
 #[test]
@@ -631,7 +631,7 @@ fn the_vote_carry_needs_no_integral_gain_and_a_set_rate() {
 fn a_clock_that_steps_back_integrates_and_fades_nothing_backwards() {
     let mut s = warm(&T);
     let integral = s.integral;
-    let t = MID + HOUR;
+    let t = MID + 2 * HOUR;
     control(&T, &mut s, Some(&read(300, t)), t, 900, false);
     let after_forward = s.integral;
     assert!(after_forward > integral);

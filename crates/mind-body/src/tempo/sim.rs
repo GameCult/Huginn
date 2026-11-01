@@ -349,7 +349,7 @@ fn sweep() {
                 let mut sat_ok = true;
                 let mut detail = String::new();
                 for s in &scen {
-                    let (mut f, mut e, mut j) = (0f64, 0f64, 0f64);
+                    let (mut f, mut e, mut j, mut x) = (0f64, 0f64, 0f64, 0u32);
                     let mut lastb = 0;
                     for sensor in SENSORS {
                         for seed in SEEDS {
@@ -366,6 +366,7 @@ fn sweep() {
                                     .fold(f, |m, u| m.max((u - f64::from(TARGET)).abs()));
                                 e = e.max(o.worst_error_last_day);
                                 cross = cross.max(o.band_crossings);
+                                x = x.max(o.band_crossings);
                             }
                             lastb = o.last_beat;
                         }
@@ -374,7 +375,7 @@ fn sweep() {
                     err_day = err_day.max(e);
                     jumps = jumps.max(j);
                     detail.push_str(&format!(
-                        "    {:<14} final_err {f:6.1}  worst_err_last_day {e:6.1}  jumps/h {j:5.2}  last_beat {lastb}\n",
+                        "    {:<14} final_err {f:6.1}  worst_err_last_day {e:6.1}  jumps/h {j:5.2}  crossings {x}  last_beat {lastb}\n",
                         s.name
                     ));
                 }
