@@ -80,8 +80,8 @@ pub const PERSONA_POLL_S: i64 = 5;
 pub const SANDBOX_DIR: &str = "sandbox";
 /// The file inside the unit's runtime directory that holds one process's system prompt.
 const INSTRUCTIONS_FILE: &str = "persona-instructions.md";
-/// A refused result is told back; this many in a row end the session.
-const REFUSALS_IN_A_ROW: u32 = 3;
+/// A refused batch is told back; its third refusal ends the session, however many answers lie between.
+const REFUSALS_PER_BATCH: u32 = 3;
 /// The environment variables the unit's `persona.env` sets for the persona flags.
 pub const ENV_ROOMS: &str = "MIND_PERSONA_ROOMS";
 pub const ENV_OPERATOR: &str = "MIND_PERSONA_OPERATOR";
@@ -840,8 +840,8 @@ fn one_process(
         written: None,
         echoed: Vec::new(),
         shown: Shown::default(),
+        echoed_refusals: 0,
         retell: None,
-        refusals: 0,
     };
     drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout())?;
     Ok(())
@@ -919,10 +919,20 @@ impl Shown {
     }
 }
 
-/// A line written whose echo has not come: the deliveries it carries and what it showed.
+/// A line written whose echo has not come: the deliveries it carries, what it showed, and how many
+/// times its batch was already refused.
 struct Written {
     batch: Vec<ChatDelivery>,
     shown: Shown,
+    refusals: u32,
+}
+
+/// Every refused batch not yet told again, merged into one, with the refusal to tell and the most
+/// refusals any of its deliveries has had.
+struct Retell {
+    batch: Vec<ChatDelivery>,
+    why: Failure,
+    refusals: u32,
 }
 
 /// The Persona's side of the session: her chat, in one conversation, told to the live session
@@ -952,10 +962,11 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     written: Option<Written>,
     /// Deliveries the CLI took in since the last result: the next result's batch.
     echoed: Vec<ChatDelivery>,
+    /// The most refusals any line echoed since the last result had already had.
+    echoed_refusals: u32,
     shown: Shown,
-    /// A refused result's batch, to be told again with the refusal.
-    retell: Option<(Vec<ChatDelivery>, Failure)>,
-    refusals: u32,
+    /// What refused results left to be told again.
+    retell: Option<Retell>,
 }
 
 impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
@@ -977,12 +988,12 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
     }
 
     /// Writes `batch` as one line: `text` with the lines before it, and notes what it carries.
-    fn write(&mut self, batch: Vec<ChatDelivery>, prefix: Option<String>) -> Result<String> {
+    fn write(&mut self, batch: Vec<ChatDelivery>, prefix: Option<String>, refusals: u32) -> Result<String> {
         let (input, shown) = self.render(&batch)?;
         if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
             self.told_through = self.told_through.max(through);
         }
-        self.written = Some(Written { batch, shown });
+        self.written = Some(Written { batch, shown, refusals });
         Ok(match prefix {
             Some(prefix) => format!("{prefix}\n\n{input}"),
             None => input,
@@ -1000,7 +1011,7 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
 impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S> {
     fn start_line(&mut self) -> Result<String> {
         let batch = std::mem::take(&mut self.start);
-        self.write(batch, None)
+        self.write(batch, None, 0)
     }
 
     fn poll_every_s(&self) -> i64 {
@@ -1027,11 +1038,11 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
     }
 
     fn tell(&mut self) -> Result<String> {
-        if let Some((batch, why)) = self.retell.take() {
-            return self.write(batch, Some(format!("Your last reply was refused ({why}). Answer the same messages again, as one reply.")));
+        if let Some(Retell { batch, why, refusals }) = self.retell.take() {
+            return self.write(batch, Some(format!("Your last reply was refused ({why}). Answer the same messages again, as one reply.")), refusals);
         }
         let batch = std::mem::take(&mut self.waiting);
-        self.write(batch, None)
+        self.write(batch, None, 0)
     }
 
     fn flush_text(&self, why: Why) -> String {
@@ -1044,18 +1055,21 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
     }
 
     fn echoed(&mut self) {
-        if let Some(Written { batch, shown }) = self.written.take() {
+        if let Some(Written { batch, shown, refusals }) = self.written.take() {
+            self.echoed_refusals = self.echoed_refusals.max(refusals);
             self.echoed.extend(batch);
             self.shown.add(shown);
         }
     }
 
     /// The result answers the deliveries echoed since the last one. A reply that cannot be decoded
-    /// is told back; the third in a row, a CLI error or any failure of the start ends the session
-    /// (decide sees a blocked result and closes stdin).
+    /// is told back, with every other batch refused and not yet told again; a batch's third refusal,
+    /// a CLI error or any failure of the start ends the session (decide sees a blocked result and
+    /// closes stdin).
     fn result(&mut self, line: &str, ok: bool, blocked: bool) -> Result<(bool, bool)> {
         let batch = std::mem::take(&mut self.echoed);
         let shown = std::mem::take(&mut self.shown);
+        let refused_before = std::mem::take(&mut self.echoed_refusals);
         if blocked || !ok {
             self.progress.failure.get_or_insert(Failure::Session);
             return Ok((false, true));
@@ -1076,7 +1090,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 // told in seq order, so while one is unanswered below an answered seq, everything
                 // answered lies above it and nothing is acked; the ack follows its answer.
                 self.answered_through = self.answered_through.max(batch.iter().map(|delivery| delivery.seq).max().unwrap_or(0));
-                let unanswered = self.retell.iter().flat_map(|(retold, _)| retold).chain(self.written.iter().flat_map(|written| &written.batch)).map(|delivery| delivery.seq).min();
+                let unanswered = self.retell.iter().flat_map(|retell| &retell.batch).chain(self.written.iter().flat_map(|written| &written.batch)).map(|delivery| delivery.seq).min();
                 let past_unanswered = unanswered.is_some_and(|lowest| lowest <= self.answered_through);
                 if !past_unanswered && self.answered_through > self.progress.acked {
                     if self.organs.chat.ack(self.answered_through).is_err() {
@@ -1085,7 +1099,6 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                     }
                     self.progress.acked = self.answered_through;
                 }
-                self.refusals = 0;
                 if started.is_some() {
                     self.progress.self_run = started;
                 }
@@ -1093,12 +1106,20 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 Ok((true, false))
             }
             Step::Refused(why) => {
-                self.refusals += 1;
-                if self.refusals >= REFUSALS_IN_A_ROW {
+                let refusals = refused_before + 1;
+                if refusals >= REFUSALS_PER_BATCH {
                     self.progress.failure.get_or_insert(why);
                     return Ok((false, true));
                 }
-                self.retell = Some((batch, why));
+                let mut merged = batch;
+                let mut most = refusals;
+                if let Some(waiting) = self.retell.take() {
+                    most = most.max(waiting.refusals);
+                    merged.extend(waiting.batch);
+                }
+                merged.sort_by_key(|delivery| delivery.seq);
+                merged.dedup_by_key(|delivery| delivery.seq);
+                self.retell = Some(Retell { batch: merged, why, refusals: most });
                 Ok((true, false))
             }
             Step::Failed(why) => {
