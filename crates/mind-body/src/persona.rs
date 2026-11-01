@@ -1,36 +1,42 @@
-//! The Persona organ: one start of `mind-persona@<instance>` drains her pending
-//! chat.
+//! The Persona organ: one start of `mind-persona@<instance>` carries her live session.
 //!
 //! A start (ruling `eureka-body:ruling:persona-turn-drains-deliveries`) reads the
 //! instance brake and the swarm brake once, and a held brake ends it
-//! dead before the mind, the chat or the connector is touched. Otherwise it
+//! dead before the mind, the chat or the lease is touched. Otherwise it
 //! adopts the Persona run the heartbeat opened for it; a start with no such run
 //! opens none and ends `NoRun`, because only the heartbeat opens Persona turns.
-//! Then it takes up to `max_turns` turns. The first turn is taken whether or not anything is pending (an unprompted
-//! start is a wake: she may speak or start work); later turns need pending
-//! deliveries. Nothing meters a start: it is bounded by `max_turns`.
-//! A turn re-reads the gate, pulls the pending deliveries, builds one input,
-//! makes one tool-less connector call whose output is constrained to the
-//! `PersonaReply` schema (ruling `eureka-body:ruling:persona-reply-typed-by-schema`),
-//! decodes the answer into that one type and acts on it: each `say` is sent,
-//! each `remember` becomes a memory in her own mind and each `settle` closes an
-//! open commitment or ask there (ruling `eureka-body:ruling:persona-memory-written-not-transcript`),
-//! with her vote in the same admission; `start_self_run` admits its brief as a
-//! follow-up and opens a Self run that claims it (ruling
-//! `eureka-body:ruling:self-run-brief-claimed-follow-up`), taking an open item on when
-//! it names one; and only then are the deliveries acked. Before the call, the responsibilities
-//! section shows her open commitments and asks whatever was said, and `recall`
-//! reads what her mind holds for this turn. A turn that fails for any reason
-//! sends nothing further, acks nothing and ends the start; the run is closed
-//! Recorded with the failure, so the breaker and the next wake see it. Nothing
-//! is acked that was not answered, and a repeat of a send carries the same
-//! request id, so a start that dies between a send and its ack repeats no
-//! message.
 //!
-//! The reply is decoded, never scanned: text that is not one `PersonaReply` is
-//! a failed turn. Chat, connector, persona state and trace are ports; the
-//! connector transport is `connector::KitConnector` and the chat transport is
-//! `chat_rudp::RudpChat`, both wired by the binary.
+//! Then it carries her session (rulings `eureka-body:ruling:persona-session-full-sandbox`
+//! and `eureka-body:ruling:live-mind-sessions`): per conversation it lends a
+//! credential (`lease_client`), starts one `claude` under bubblewrap in her sandbox and hands it to
+//! `self_run::session::drive`, the Self's own driver, with her chat as the inbox.
+//! A session is one conversation, the public rooms together or one direct message room. It
+//! ends when another conversation's delivery is the oldest unanswered, when decide's flush ends it
+//! (the context ceiling, the cache, the unit's cap) or when a result cannot be acted on; the start
+//! goes on to the next conversation until nothing is pending or the cap's rotation margin is
+//! reached, and closes the run once.
+//!
+//! Her instructions (doctrine, persona state, the campaigns in force) are the session's system
+//! prompt, read once per process. What reaches her in the stream is one line per batch of
+//! deliveries: the messages, her responsibilities, what her mind recalls, the plan windows the
+//! lease granted and the tempo. A batch is the deliveries the CLI echoed since the last result;
+//! each result is constrained to one `PersonaReply` schema (ruling
+//! `eureka-body:ruling:persona-reply-typed-by-schema`), decoded into that one type and acted on:
+//! each `say` is sent, each `remember` becomes a memory in her own mind and each `settle`
+//! closes an open commitment or ask there (ruling `eureka-body:ruling:persona-memory-written-not-transcript`),
+//! with her vote in the same admission; `start_self_run` admits its brief as a follow-up and opens
+//! a Self run that claims it (ruling `eureka-body:ruling:self-run-brief-claimed-follow-up`),
+//! taking an open item on when it names one; and only then are the deliveries acked. A reply that
+//! cannot be decoded sends nothing, acks nothing and is told back to her with the refusal; the
+//! third in a row ends the session. Any other failure sends nothing further, acks nothing and
+//! ends the start; the run is closed Recorded with the failure, so the breaker and the next wake
+//! see it. Nothing is acked that was not answered, and a repeat of a send carries the same
+//! request id, so a start that dies between a send and its ack repeats no message.
+//!
+//! The reply is decoded, never scanned: text that is not one `PersonaReply` is a refused
+//! result. Chat, persona state and trace are ports; the chat transport is `chat_rudp::RudpChat`,
+//! wired by the binary. Inside her sandbox her session has the full toolset, a shell and the web
+//! included; her effects in the world are only what `act` does with a result.
 //!
 //! The organ admits only her memories and the resolutions that settle or take on
 //! an ask, a follow-up, a run's closing resolution, her own `Pulse` (the tempo
@@ -39,7 +45,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -53,28 +60,44 @@ use eureka_state::HuginnClient;
 use huginn_mind::{HuginnMindResponse, PipelineAdmissionOutcome, PipelineFacts, PipelinePageItems};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::chat_client::{Chat, ChatDelivery, ChatSendRequest};
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
 use crate::heartbeat::{PollTrace, TempoView};
+use crate::lease_client::{LeaseRequest, Lender, Lent};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
 use crate::queue::{MindPort, any_of, citing, headers, in_force, live_claims, of_kind};
 use crate::recall;
+use crate::self_run::session::{Polled, SessionInbox, drive};
+use crate::self_run::{MAX_TURNS, ROTATE_MARGIN_S, SESSION_NAMESPACE, Spawner, Why};
 
 /// The admitting agent's name on everything this organ admits.
 pub const AGENT: &str = "mind-persona";
-/// Turns one start may take before it exits; the next ring or wake takes more.
-pub const MAX_TURNS_PER_START: u32 = 4;
+/// How often the mouth is asked for new deliveries while her session is live.
+pub const PERSONA_POLL_S: i64 = 5;
+/// The directory of her sandbox inside the unit's state directory.
+pub const SANDBOX_DIR: &str = "sandbox";
+/// The file inside the unit's runtime directory that holds one process's system prompt.
+const INSTRUCTIONS_FILE: &str = "persona-instructions.md";
+/// A refused result is told back; this many in a row end the session.
+const REFUSALS_IN_A_ROW: u32 = 3;
 /// The environment variables the unit's `persona.env` sets for the persona flags.
 pub const ENV_ROOMS: &str = "MIND_PERSONA_ROOMS";
 pub const ENV_OPERATOR: &str = "MIND_PERSONA_OPERATOR";
 /// The Matrix ids of the swarm's Minds, comma-separated.
 pub const ENV_MINDS: &str = "MIND_PERSONA_MINDS";
 pub const ENV_SELF_SENDER: &str = "MIND_PERSONA_SELF_SENDER";
-/// Colon-separated absolute paths of the doctrine files whose text leads every turn's instructions, in order.
+/// The model her session runs: the name `claude --model` takes.
+pub const ENV_MODEL: &str = "MIND_PERSONA_MODEL";
+/// The unit's `RuntimeMaxSec` in seconds: the one length of a start.
+pub const ENV_RUN_CAP: &str = "MIND_PERSONA_RUN_CAP_S";
+/// A directory root owns, copied into each process's fresh configuration (settings and onboarding).
+pub const ENV_CONFIG_SEED: &str = "MIND_PERSONA_CONFIG_SEED";
+/// Colon-separated absolute paths of the doctrine files whose text leads every process's instructions, in order.
 pub const ENV_DOCTRINE: &str = "MIND_PERSONA_DOCTRINE";
-/// The most doctrine text, in bytes, one turn's instructions may carry.
+/// The most doctrine text, in bytes, one process's instructions may carry.
 pub const DOCTRINE_MAX_BYTES: usize = 96 * 1024;
 /// How many of her latest runs a turn's input lists.
 const RECENT_RUNS: u32 = 5;
@@ -115,8 +138,9 @@ pub struct Config {
     pub minds: Vec<String>,
     /// Her own sender id: lines from it are her own.
     pub own_sender: String,
-    pub max_turns: u32,
-    /// Doctrine files, read at every turn start and put ahead of her persona, in this order. Empty is legal.
+    /// The model her session runs. Set from `MIND_PERSONA_MODEL` by `from_args_and_env`; empty from `from_args`.
+    pub model: String,
+    /// Doctrine files, read at every process start and put ahead of her persona, in this order. Empty is legal.
     pub doctrine: Vec<PathBuf>,
 }
 
@@ -139,12 +163,12 @@ impl Sender {
 
 impl Config {
     /// Takes the persona flags out of `args` (`--rooms a,b`,
-    /// `--operator id[,id]`, `--minds id[,id]`, `--self-sender id`, optionally `--max-turns n`) and
+    /// `--operator id[,id]`, `--minds id[,id]`, `--self-sender id`) and
     /// returns the rest for the shared `--instance`/`--endpoint` parser. A flag
-    /// twice, a missing one, an empty list or a zero `--max-turns` is
-    /// refused with `usage`; nothing parsed is echoed.
+    /// twice, a missing one or an empty list is refused with `usage`; nothing
+    /// parsed is echoed.
     pub fn from_args(args: &[String], usage: &str) -> Result<(Self, Vec<String>)> {
-        let (mut rooms, mut operators, mut minds, mut own, mut turns) = (None, None, None, None, None);
+        let (mut rooms, mut operators, mut minds, mut own) = (None, None, None, None);
         let mut rest = Vec::new();
         let mut args = args.iter();
         while let Some(flag) = args.next() {
@@ -153,7 +177,6 @@ impl Config {
                 "--operator" => &mut operators,
                 "--minds" => &mut minds,
                 "--self-sender" => &mut own,
-                "--max-turns" => &mut turns,
                 _ => {
                     rest.push(flag.clone());
                     continue;
@@ -169,11 +192,7 @@ impl Config {
             if items.iter().any(String::is_empty) { Err(anyhow!("{usage}")) } else { Ok(items) }
         };
         let rooms = list(rooms)?;
-        let max_turns = turns.map_or(Ok(MAX_TURNS_PER_START), |turns| turns.parse::<u32>().map_err(|_| anyhow!("{usage}")))?;
-        if max_turns == 0 {
-            bail!("{usage}");
-        }
-        let config = Self { rooms, operators: list(operators)?, minds: list(minds)?, own_sender: own.ok_or_else(|| anyhow!("{usage}"))?, max_turns, doctrine: Vec::new() };
+        let config = Self { rooms, operators: list(operators)?, minds: list(minds)?, own_sender: own.ok_or_else(|| anyhow!("{usage}"))?, model: String::new(), doctrine: Vec::new() };
         Ok((config, rest))
     }
 
@@ -181,7 +200,7 @@ impl Config {
     /// environment (`MIND_PERSONA_ROOMS`, `MIND_PERSONA_MINDS`,
     /// `MIND_PERSONA_OPERATOR`, `MIND_PERSONA_SELF_SENDER`) through `lookup`, which
     /// the binary supplies because this library reads no environment. A flag on
-    /// the command line wins; an empty variable is unset. `MIND_PERSONA_DOCTRINE`
+    /// the command line wins; an empty variable is unset. `MIND_PERSONA_MODEL` is required. `MIND_PERSONA_DOCTRINE`
     /// (absolute paths separated by `:`) fills `doctrine`; a relative path is refused.
     pub fn from_args_and_env(args: &[String], lookup: impl Fn(&str) -> Option<String>, usage: &str) -> Result<(Self, Vec<String>)> {
         let mut args = args.to_vec();
@@ -193,6 +212,7 @@ impl Config {
             }
         }
         let (mut config, rest) = Self::from_args(&args, usage)?;
+        config.model = lookup(ENV_MODEL).filter(|value| !value.is_empty()).ok_or_else(|| anyhow!("{ENV_MODEL} is not set"))?;
         if let Some(paths) = lookup(ENV_DOCTRINE) {
             config.doctrine = paths.split(':').filter(|path| !path.is_empty()).map(PathBuf::from).collect();
             if config.doctrine.iter().any(|path| !path.is_absolute()) {
@@ -218,7 +238,7 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(deserializer: 
     T::deserialize(deserializer).map(Some)
 }
 
-/// Her one reply to a turn. The connector is asked for exactly this and the
+/// Her one reply to a result. The session is constrained to exactly this and the
 /// answer is decoded into exactly this.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -288,8 +308,8 @@ pub struct Settle {
     pub why: String,
 }
 
-/// The bounds of a Self-run start, one contract for the schema the connector
-/// constrains the answer to and for `decode_reply`, which checks the same.
+/// The bounds of a Self-run start, one contract for the schema the session is
+/// constrained to and for `decode_reply`, which checks the same.
 const BRIEF_MAX_CHARS: usize = 1000;
 const REPO_PATTERN: &str = "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$";
 
@@ -314,19 +334,16 @@ fn start_in_bounds(ask: &StartSelfRun) -> bool {
     (1..=BRIEF_MAX_CHARS).contains(&ask.brief.chars().count()) && repo_in_bounds(&ask.repo) && campaign_in_bounds(&ask.campaign)
 }
 
-/// The JSON Schema the connector constrains the answer to, with the room enum
-/// from the config and the campaign enum from the mind's campaigns in force
-/// (none in force: `start_self_run` can only be null). Text, because the
-/// contract carries it as text.
-const REMEMBER_DESCRIPTION: &str = "What you must still know when this conversation is gone, in your own words; the chat will not be there to read again. One entry for each of: asks of you (sort Asked); decisions, the operator's and those you agreed with other Minds (Decided); your own commitments (Committed): a shared plan you are in is one Committed entry, your part in your own words and who holds each other part, with about naming those Minds; it stays in front of you every turn until you settle it. Decided is for decisions that are not your own part of the work; what you learned (Learned) and did (Did); ideas, your own brainstorming and other Minds' ideas (Idea, about whose); rapport, how you and another Mind or person work and bounce off each other (Rapport, about that one). For Asked, about names who asked. Agreements between Minds and their parts are kept here until the shared Atlas mind takes them. Do not invent a bond from one exchange, do not keep an echo of what others said as your own, and do not keep every joke. Leave empty when nothing here is worth keeping.";
-const SETTLE_DESCRIPTION: &str = "Close an open item shown under 'You committed to' or 'Asked of you, not yet taken on': done when you have done it, declined when you will not (a commitment you let go: tell whoever holds the other parts), wrong when it was a mistake. Leave empty when you close none.";
-const FOR_ITEM_DESCRIPTION: &str = "The open commitment or ask this Self run answers: null, an open item id shown this turn, or new:<i> for remember[i] (sort Asked or Committed) written in this same reply. An item taken on leaves the open lists.";
+/// The JSON Schema every result of a process is constrained to: one per process, with the room
+/// enum from the process's conversation and the campaign enum from the mind's campaigns in force
+/// (none in force: `start_self_run` can only be null). The people she may name and the open items
+/// she may settle change with every batch, so the schema holds them as strings and `decode_reply`
+/// holds them to the batch. Text, because the CLI takes it as an argument.
+const REMEMBER_DESCRIPTION: &str = "What you must still know when this conversation is gone, in your own words; the chat will not be there to read again. One entry for each of: asks of you (sort Asked); decisions, the operator's and those you agreed with other Minds (Decided); your own commitments (Committed): a shared plan you are in is one Committed entry, your part in your own words and who holds each other part, with about naming those Minds; it stays in front of you every turn until you settle it. Decided is for decisions that are not your own part of the work; what you learned (Learned) and did (Did); ideas, your own brainstorming and other Minds' ideas (Idea, about whose); rapport, how you and another Mind or person work and bounce off each other (Rapport, about that one). For Asked, about names who asked. Agreements between Minds and their parts are kept here until the shared Atlas mind takes them. Do not invent a bond from one exchange, do not keep an echo of what others said as your own, and do not keep every joke. Leave empty when nothing here is worth keeping. About holds Matrix ids the latest messages or your responsibilities show you.";
+const SETTLE_DESCRIPTION: &str = "Close an open item shown under 'You committed to' or 'Asked of you, not yet taken on' in the latest messages: done when you have done it, declined when you will not (a commitment you let go: tell whoever holds the other parts), wrong when it was a mistake. Item is the id shown there. Leave empty when you close none.";
+const FOR_ITEM_DESCRIPTION: &str = "The open commitment or ask this Self run answers: null, an open item id shown in the latest messages, or new:<i> for remember[i] (sort Asked or Committed) written in this same reply. An item taken on leaves the open lists.";
 
-pub fn reply_schema(rooms: &[String], campaigns: &[String], people: &[String], open: &[String]) -> String {
-    let mut for_item_options = vec![json!({ "type": "null" }), json!({ "type": "string", "pattern": format!("^new:[0-{}]$", REMEMBER_MAX - 1) })];
-    if !open.is_empty() {
-        for_item_options.push(json!({ "type": "string", "enum": open }));
-    }
+pub fn reply_schema(rooms: &[String], campaigns: &[String]) -> String {
     let remember = json!({
         "description": REMEMBER_DESCRIPTION,
         "type": "array",
@@ -338,30 +355,26 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String], people: &[String], o
             "properties": {
                 "sort": { "type": "string", "enum": MemorySort::NAMES },
                 "text": { "type": "string", "minLength": 1, "description": format!("At most {REMEMBER_TEXT_MAX_BYTES} bytes.") },
-                "about": { "type": "array", "maxItems": ABOUT_MAX, "uniqueItems": true, "items": { "type": "string", "enum": people } },
+                "about": { "type": "array", "maxItems": ABOUT_MAX, "uniqueItems": true, "items": { "type": "string" } },
                 "salience_permille": { "type": "integer", "minimum": 0, "maximum": SALIENCE_MAX_PERMILLE, "description": "How much it matters, in thousandths; with how recent it is, it decides which memories you see when not all fit." }
             }
         }
     });
-    let settle = if open.is_empty() {
-        json!({ "description": SETTLE_DESCRIPTION, "type": "array", "maxItems": 0 })
-    } else {
-        json!({
-            "description": SETTLE_DESCRIPTION,
-            "type": "array",
-            "maxItems": SETTLE_MAX,
-            "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["item", "outcome", "why"],
-                "properties": {
-                    "item": { "type": "string", "enum": open },
-                    "outcome": { "type": "string", "enum": ["done", "declined", "wrong"] },
-                    "why": { "type": "string", "minLength": 1, "maxLength": WHY_MAX_CHARS }
-                }
+    let settle = json!({
+        "description": SETTLE_DESCRIPTION,
+        "type": "array",
+        "maxItems": SETTLE_MAX,
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["item", "outcome", "why"],
+            "properties": {
+                "item": { "type": "string" },
+                "outcome": { "type": "string", "enum": ["done", "declined", "wrong"] },
+                "why": { "type": "string", "minLength": 1, "maxLength": WHY_MAX_CHARS }
             }
-        })
-    };
+        }
+    });
     let start = if campaigns.is_empty() {
         json!({ "type": "null" })
     } else {
@@ -376,7 +389,7 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String], people: &[String], o
                         "brief": { "type": "string", "minLength": 1, "maxLength": BRIEF_MAX_CHARS },
                         "repo": { "type": "string", "pattern": REPO_PATTERN },
                         "campaign": { "type": "string", "enum": campaigns },
-                        "for_item": { "description": FOR_ITEM_DESCRIPTION, "anyOf": for_item_options }
+                        "for_item": { "description": FOR_ITEM_DESCRIPTION, "anyOf": [{ "type": "null" }, { "type": "string" }] }
                     }
                 }
             ]
@@ -409,31 +422,10 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String], people: &[String], o
     .to_string()
 }
 
-/// One connector call: tool-less, constrained to `output_schema_json`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TurnRequest {
-    /// The caller id the connector bills: the instance.
-    pub caller: String,
-    /// Names this turn of this run, so a repeat of the call is the same request
-    /// to the connector (its replay store answers it without a second provider call).
-    pub request_id: String,
-    pub instructions: String,
-    pub input: String,
-    pub output_schema_json: String,
-}
+/// What the plan's usage windows say, as the lease grant carries them: the kit's own type, not a copy.
+pub use model_connector::PlanQuota;
 
-/// What the plan's usage windows say right now
-/// (`gamecult.model.usage_readout.v1`): the kit's own types, not a copy.
-pub use model_connector::{PlanQuota, UsageReadout};
-
-/// The model connector, as the organ uses it.
-pub trait Connector {
-    /// The assistant text of one tool-less call.
-    fn turn(&self, request: &TurnRequest) -> Result<String>;
-    fn usage_readout(&self) -> Result<UsageReadout>;
-}
-
-/// Her persona state, rendered as the instructions of a turn.
+/// Her persona state, rendered as the instructions of a session.
 pub trait PersonaState {
     fn instructions(&self) -> Result<String>;
 }
@@ -492,7 +484,7 @@ impl Trace for FileTrace {
     }
 }
 
-/// Her persona state from the mind, rendered once per turn.
+/// Her persona state from the mind, rendered once per process.
 pub struct HuginnPersona {
     client: HuginnClient,
 }
@@ -585,14 +577,23 @@ pub struct Organs<'a> {
     pub clock: &'a dyn Clock,
     pub host: &'a str,
     pub chat: &'a dyn Chat,
-    pub connector: &'a dyn Connector,
     pub persona: &'a dyn PersonaState,
     pub trace: &'a dyn Trace,
     /// `heartbeat.cc`, read-only: the tempo and every Mind vote. None when the unit is not given it.
     pub tempo: Option<&'a dyn TempoView>,
+    /// Where each process's credential lease comes from.
+    pub lender: &'a dyn Lender,
+    /// Starts her `claude`, under bubblewrap in her sandbox.
+    pub spawner: &'a dyn Spawner,
+    /// The unit's `RuntimeMaxSec` in seconds: the one length of a start.
+    pub run_cap_s: u64,
+    /// Her sandbox: the one directory her tools write, made owner-only if absent. Never read by an organ.
+    pub sandbox: &'a Path,
+    /// The unit's runtime directory: each process's instructions file is written here.
+    pub scratch: &'a Path,
 }
 
-/// Why a turn did not complete.
+/// Why a start did not complete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
     Held(HeldReason),
@@ -602,7 +603,10 @@ pub enum Failure {
     Doctrine,
     /// The doctrine files together exceed `DOCTRINE_MAX_BYTES`.
     DoctrineTooLarge,
-    Connector,
+    /// The connector would not lend, or could not be asked.
+    Lease,
+    /// Her child could not be started, or ended without answering.
+    Session,
     Undecodable,
     RoomNotAllowed,
     Send,
@@ -620,7 +624,8 @@ impl fmt::Display for Failure {
             Self::Persona => f.write_str("no persona state"),
             Self::Doctrine => f.write_str("a configured doctrine file could not be read"),
             Self::DoctrineTooLarge => f.write_str("the doctrine files exceed the size bound"),
-            Self::Connector => f.write_str("the connector call failed"),
+            Self::Lease => f.write_str("the credential lease was refused or unavailable"),
+            Self::Session => f.write_str("her session could not be started or ended without answering"),
             Self::Undecodable => f.write_str("the reply is not a persona reply"),
             Self::RoomNotAllowed => f.write_str("the reply speaks outside her rooms"),
             Self::Send => f.write_str("a send was refused or failed"),
@@ -662,10 +667,26 @@ impl fmt::Display for Outcome {
     }
 }
 
+/// How one result ended.
 enum Step {
-    Idle,
-    Answered,
+    /// Answered; the Self run its reply started, if any.
+    Answered(Option<PipelineRef>),
+    /// The reply could not be decoded: it is told back to her, and sends and acks nothing.
+    Refused(Failure),
+    /// The start cannot go on.
     Failed(Failure),
+}
+
+/// What a start has done so far, across its processes.
+#[derive(Default)]
+struct Progress {
+    /// The mouth's ack position: every delivery through it is answered.
+    acked: u64,
+    /// Results seen: the number the next one is named by.
+    turn: u32,
+    answered: u32,
+    failure: Option<Failure>,
+    self_run: Option<PipelineRef>,
 }
 
 /// The instance brake and the swarm store read once: what they allow.
@@ -681,8 +702,15 @@ fn date(now: DateTime<Utc>) -> Date {
     Date(now.format("%Y-%m-%d").to_string())
 }
 
+fn unix_ms(at: DateTime<Utc>) -> u64 {
+    u64::try_from(at.timestamp_millis()).unwrap_or(0)
+}
+
 /// One start. `control` is the instance's control store and `swarm` the swarm's.
-pub fn start(organs: &Organs, control: &impl ControlSource, swarm: &impl ControlSource, config: &Config) -> Result<Outcome> {
+/// Brakes first; then the heartbeat's Persona run; then one session per conversation, each under
+/// its own lease, until nothing is pending or the cap's rotation margin is reached; then the run
+/// is closed once. A lease the connector refuses is `Failure::Lease`.
+pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl ControlSource, config: &Config) -> Result<Outcome> {
     let noted = Noted { inner: organs.trace, failures: std::cell::Cell::new(0) };
     let organs = &Organs {
         mind: organs.mind,
@@ -690,10 +718,14 @@ pub fn start(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
         clock: organs.clock,
         host: organs.host,
         chat: organs.chat,
-        connector: organs.connector,
         persona: organs.persona,
         trace: &noted,
         tempo: organs.tempo,
+        lender: organs.lender,
+        spawner: organs.spawner,
+        run_cap_s: organs.run_cap_s,
+        sandbox: organs.sandbox,
+        scratch: organs.scratch,
     };
     let instance = organs.mind.instance().clone();
     match read(control, swarm, &instance) {
@@ -703,94 +735,400 @@ pub fn start(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
     // The run is the one the heartbeat opened for this unit; none held, none run.
     let Some(holder) = holders(organs.mind, &instance, RunTurn::PersonaTurn)?.into_iter().next() else { return Ok(Outcome::NoRun) };
     let run = holder.id;
-    let mut after_seq = 0;
-    let mut answered = 0;
-    let mut failure = None;
-    let mut self_run = None;
-    for turn in 0..config.max_turns {
-        match one_turn(organs, control, swarm, config, &run, turn, &mut after_seq, &mut self_run)? {
-            Step::Idle => break,
-            Step::Answered => answered += 1,
-            Step::Failed(why) => {
-                failure = Some(why);
-                break;
-            }
+    make_sandbox(organs.sandbox)?;
+    let mut progress = Progress::default();
+    let started = organs.clock.now();
+    for process in 0u32.. {
+        if process > 0
+            && let Effective::Held { reason } = read(control, swarm, &instance)
+        {
+            progress.failure = Some(Failure::Held(reason));
+            break;
+        }
+        let Ok(pending) = organs.chat.pending(progress.acked) else {
+            progress.failure = Some(Failure::Chat);
+            break;
+        };
+        let first = next_batch(pending);
+        let remaining_s = i64::try_from(organs.run_cap_s).unwrap_or(i64::MAX).saturating_sub((organs.clock.now() - started).num_seconds());
+        if process > 0 && (first.is_empty() || remaining_s <= ROTATE_MARGIN_S) {
+            break;
+        }
+        let turns = progress.turn;
+        one_process(organs, control, swarm, config, &run, process, first, u64::try_from(remaining_s.max(1)).unwrap_or(1), &mut progress)?;
+        // A process that gave no result answered nothing: another would only repeat it.
+        if progress.failure.is_none() && progress.turn == turns {
+            progress.failure = Some(Failure::Session);
+        }
+        if progress.failure.is_some() {
+            break;
         }
     }
-    close_run(organs, &run, answered, failure, noted.failures.get())?;
-    Ok(Outcome::Served { run, answered, failure, self_run })
+    close_run(organs, &run, progress.answered, progress.failure, noted.failures.get())?;
+    Ok(Outcome::Served { run, answered: progress.answered, failure: progress.failure, self_run: progress.self_run })
 }
 
-#[allow(clippy::too_many_arguments, reason = "one turn's state is these few things, and a struct for them would be a second owner")]
-fn one_turn(
+/// Her sandbox, owner-only, if it is not there yet.
+fn make_sandbox(dir: &Path) -> Result<()> {
+    let mut made = std::fs::DirBuilder::new();
+    made.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut made, 0o700);
+    made.create(dir).map_err(|_| anyhow!("her sandbox directory could not be made"))
+}
+
+/// One conversation's session: instructions, lease, `claude` and the drive. A failure of the
+/// start is recorded in `progress`; only a mind that cannot be reached is an error.
+#[allow(clippy::too_many_arguments, reason = "one process's state is these few things, and a struct for them would be a second owner")]
+fn one_process(
     organs: &Organs,
     control: &impl ControlSource,
     swarm: &impl ControlSource,
     config: &Config,
     run: &PipelineRef,
-    turn: u32,
-    after_seq: &mut u64,
-    self_run: &mut Option<PipelineRef>,
-) -> Result<Step> {
-    let instance = organs.mind.instance().clone();
-    // The gate runs before every connector call.
-    let effective = read(control, swarm, &instance);
-    if let Effective::Held { reason } = effective {
-        return Ok(Step::Failed(Failure::Held(reason)));
-    }
-    let Ok(pending) = organs.chat.pending(*after_seq) else { return Ok(Step::Failed(Failure::Chat)) };
-    let deliveries = next_batch(pending);
-    if deliveries.is_empty() && turn > 0 {
-        return Ok(Step::Idle);
-    }
-    let Ok(persona) = organs.persona.instructions() else { return Ok(Step::Failed(Failure::Persona)) };
+    process: u32,
+    first: Vec<ChatDelivery>,
+    remaining_s: u64,
+    progress: &mut Progress,
+) -> Result<()> {
+    let Ok(persona) = organs.persona.instructions() else {
+        progress.failure = Some(Failure::Persona);
+        return Ok(());
+    };
     let doctrine = match read_doctrine(&config.doctrine) {
         Ok(doctrine) => doctrine,
-        Err(why) => return Ok(Step::Failed(why)),
+        Err(why) => {
+            progress.failure = Some(why);
+            return Ok(());
+        }
     };
-    // The usage line is display only: a readout that cannot be had says so and the turn goes on.
-    let usage = organs.connector.usage_readout().map_or_else(|_| "Plan usage: unavailable.".to_string(), |readout| render_plan(&readout.plan_quota, readout.at_unix_ms));
-    let tempo = render_tempo(organs.tempo, &instance);
-    let history = recent_runs(organs.mind, &instance)?;
-    let names = sender_names(&deliveries);
-    let goals = render_responsibilities(organs.mind, &instance, &names)?;
-    let senders = other_senders(config, &deliveries);
-    let cue = recall::Cue { senders, texts: deliveries.iter().rev().map(|delivery| delivery.text.as_str()).collect(), names: names.clone(), listed: &goals.listed, now: organs.clock.now() };
-    let recalled = recall::select(organs.mind, &cue)?;
-    let shown: Vec<&str> = goals.people.iter().map(String::as_str).chain(recalled.entries().flat_map(|entry| entry.people.iter().map(String::as_str))).collect();
-    let people = people_she_may_name(config, &deliveries, &shown);
-    let open = goals.open.clone();
     let campaigns = campaigns_in_force(organs.mind)?;
-    let instructions = format!("{doctrine}{persona}\n\n{}", render_campaigns(&campaigns));
-    let rooms = reply_rooms(config, &deliveries);
-    let request = TurnRequest {
-        caller: instance.0.clone(),
-        request_id: format!("{}-t{turn}", label_of(run)),
-        instructions,
-        input: render_input(config, &deliveries, &history, &goals.text, &recall::render(&recalled), &format!("{usage}\n\n{tempo}")),
-        output_schema_json: reply_schema(&rooms, &campaigns.iter().map(|(slug, _)| slug.clone()).collect::<Vec<_>>(), &people, &open),
+    let rooms = reply_rooms(config, &first);
+    let schema = reply_schema(&rooms, &campaigns.iter().map(|(slug, _)| slug.clone()).collect::<Vec<_>>());
+    let prompt = organs.scratch.join(INSTRUCTIONS_FILE);
+    if std::fs::write(&prompt, format!("{doctrine}{persona}\n\n{}", render_campaigns(&campaigns))).is_err() {
+        progress.failure = Some(Failure::Session);
+        return Ok(());
+    }
+    let started_ms = unix_ms(organs.clock.now());
+    let lease = match organs.lender.lend(&LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(remaining_s.saturating_mul(1000)) }) {
+        Ok(Lent::Granted(lease)) => lease,
+        Ok(Lent::Refused(_)) | Err(_) => {
+            progress.failure = Some(Failure::Lease);
+            return Ok(());
+        }
     };
-    let inputs = trace_inputs(config, &deliveries);
+    let session = Uuid::new_v5(&SESSION_NAMESPACE, format!("{}:p{process}", run.id.0).as_bytes());
+    let Ok(child) = organs.spawner.spawn(&persona_args(session, &config.model, &schema, &prompt), lease.token()) else {
+        progress.failure = Some(Failure::Session);
+        return Ok(());
+    };
+    let conversation = first.first().map_or(Conversation::Public, Conversation::of);
+    let mut inbox = PersonaInbox {
+        organs,
+        control,
+        swarm,
+        config,
+        run,
+        progress,
+        rooms,
+        conversation,
+        plan: render_plan(lease.plan_quota(), started_ms),
+        start: first,
+        waiting: Vec::new(),
+        told_through: 0,
+        written: None,
+        echoed: Vec::new(),
+        shown: Shown::default(),
+        retell: None,
+        refusals: 0,
+    };
+    drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout())?;
+    Ok(())
+}
+
+/// What her session is started with: the Self's argument list is the model for it, with her
+/// model, her schema and her instructions file, and no resume, continue or fork.
+fn persona_args(session: Uuid, model: &str, schema: &str, system_prompt_file: &Path) -> Vec<String> {
+    let session = session.to_string();
+    let max_turns = MAX_TURNS.to_string();
+    let file = system_prompt_file.to_string_lossy();
+    [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--replay-user-messages",
+        "--session-id",
+        &session,
+        "--max-turns",
+        &max_turns,
+        "--model",
+        model,
+        "--json-schema",
+        schema,
+        "--append-system-prompt-file",
+        &file,
+        "--permission-mode",
+        "bypassPermissions",
+        "--permission-prompts",
+        "none",
+        "--setting-sources",
+        "user",
+        "--strict-mcp-config",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+/// A conversation: the public rooms together, or one direct message room alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Conversation {
+    Public,
+    Direct(String),
+}
+
+impl Conversation {
+    fn of(delivery: &ChatDelivery) -> Self {
+        if delivery.is_direct { Self::Direct(delivery.room_id.clone()) } else { Self::Public }
+    }
+}
+
+/// What a batch's line showed her: the only people she may name and the only open items she may
+/// settle or take on in the result that answers it.
+#[derive(Default)]
+struct Shown {
+    people: Vec<String>,
+    open: Vec<String>,
+}
+
+impl Shown {
+    fn add(&mut self, other: Shown) {
+        for person in other.people {
+            if !self.people.contains(&person) {
+                self.people.push(person);
+            }
+        }
+        for item in other.open {
+            if !self.open.contains(&item) {
+                self.open.push(item);
+            }
+        }
+    }
+}
+
+/// A line written whose echo has not come: the deliveries it carries and what it showed.
+struct Written {
+    batch: Vec<ChatDelivery>,
+    shown: Shown,
+}
+
+/// The Persona's side of the session: her chat, in one conversation, told to the live session
+/// by the Self's own driver. Its caches (what was told, what was echoed) are the process's;
+/// the mouth's ack is the truth.
+struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
+    organs: &'a Organs<'a>,
+    control: &'a C,
+    swarm: &'a S,
+    config: &'a Config,
+    run: &'a PipelineRef,
+    progress: &'a mut Progress,
+    rooms: Vec<String>,
+    conversation: Conversation,
+    /// The plan windows the lease granted, as one line.
+    plan: String,
+    /// The batch the first line carries; taken by it.
+    start: Vec<ChatDelivery>,
+    /// The deliveries derived at the last poll that no line has carried yet.
+    waiting: Vec<ChatDelivery>,
+    /// The highest seq written to the child.
+    told_through: u64,
+    written: Option<Written>,
+    /// Deliveries the CLI took in since the last result: the next result's batch.
+    echoed: Vec<ChatDelivery>,
+    shown: Shown,
+    /// A refused result's batch, to be told again with the refusal.
+    retell: Option<(Vec<ChatDelivery>, Failure)>,
+    refusals: u32,
+}
+
+impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
+    /// One batch's line: the gate was read by the caller; this renders what she sees and notes it.
+    fn render(&self, deliveries: &[ChatDelivery]) -> Result<(String, Shown)> {
+        let organs = self.organs;
+        let instance = organs.mind.instance().clone();
+        let tempo = render_tempo(organs.tempo, &instance);
+        let history = recent_runs(organs.mind, &instance)?;
+        let names = sender_names(deliveries);
+        let goals = render_responsibilities(organs.mind, &instance, &names)?;
+        let senders = other_senders(self.config, deliveries);
+        let cue = recall::Cue { senders, texts: deliveries.iter().rev().map(|delivery| delivery.text.as_str()).collect(), names: names.clone(), listed: &goals.listed, now: organs.clock.now() };
+        let recalled = recall::select(organs.mind, &cue)?;
+        let shown: Vec<&str> = goals.people.iter().map(String::as_str).chain(recalled.entries().flat_map(|entry| entry.people.iter().map(String::as_str))).collect();
+        let people = people_she_may_name(self.config, deliveries, &shown);
+        let input = render_input(self.config, deliveries, &history, &goals.text, &recall::render(&recalled), &format!("{}\n\n{tempo}", self.plan));
+        Ok((input, Shown { people, open: goals.open }))
+    }
+
+    /// Writes `batch` as one line: `text` with the lines before it, and notes what it carries.
+    fn write(&mut self, batch: Vec<ChatDelivery>, prefix: Option<String>) -> Result<String> {
+        let (input, shown) = self.render(&batch)?;
+        if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
+            self.told_through = self.told_through.max(through);
+        }
+        self.written = Some(Written { batch, shown });
+        Ok(match prefix {
+            Some(prefix) => format!("{prefix}\n\n{input}"),
+            None => input,
+        })
+    }
+
+    fn held(&self) -> Option<HeldReason> {
+        match read(self.control, self.swarm, self.organs.mind.instance()) {
+            Effective::Held { reason } => Some(reason),
+            Effective::Released(_) => None,
+        }
+    }
+}
+
+impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S> {
+    fn start_line(&mut self) -> Result<String> {
+        let batch = std::mem::take(&mut self.start);
+        self.write(batch, None)
+    }
+
+    fn poll_every_s(&self) -> i64 {
+        PERSONA_POLL_S
+    }
+
+    /// What waits is the untold front of the mouth's pending, in this conversation. If the oldest
+    /// unanswered delivery is another conversation's, the session yields at its next idle: an ack
+    /// through a newer seq would pass it. A held brake yields too, and is recorded.
+    fn poll(&mut self) -> Result<Polled> {
+        if let Some(reason) = self.held() {
+            self.progress.failure.get_or_insert(Failure::Held(reason));
+            return Ok(Polled { pending: false, yield_now: true });
+        }
+        let mut pending = self.organs.chat.pending(self.progress.acked)?;
+        pending.sort_by_key(|delivery| delivery.seq);
+        let Some(oldest) = pending.first() else { return Ok(Polled { pending: self.retell.is_some(), yield_now: false }) };
+        if Conversation::of(oldest) != self.conversation {
+            return Ok(Polled { pending: false, yield_now: true });
+        }
+        self.waiting = pending.into_iter().filter(|delivery| delivery.seq > self.told_through).take_while(|delivery| Conversation::of(delivery) == self.conversation).collect();
+        Ok(Polled { pending: !self.waiting.is_empty() || self.retell.is_some(), yield_now: false })
+    }
+
+    fn tell(&mut self) -> Result<String> {
+        if let Some((batch, why)) = self.retell.take() {
+            return self.write(batch, Some(format!("Your last reply was refused ({why}). Answer the same messages again, as one reply.")));
+        }
+        let batch = std::mem::take(&mut self.waiting);
+        self.write(batch, None)
+    }
+
+    fn flush_text(&self, why: Why) -> String {
+        let cause = match why {
+            Why::Ceiling => "its context is full",
+            Why::Rotation => "the unit's time is nearly up",
+            Why::Idle => "nothing is waiting and its cache would lapse",
+        };
+        format!("This session ends soon ({cause}). Put into `remember` whatever you must still know when it is gone and `settle` what is finished. Say nothing unless a message still needs an answer.")
+    }
+
+    fn echoed(&mut self) {
+        if let Some(Written { batch, shown }) = self.written.take() {
+            self.echoed.extend(batch);
+            self.shown.add(shown);
+        }
+    }
+
+    /// The result answers the deliveries echoed since the last one. A reply that cannot be decoded
+    /// is told back; the third in a row, a CLI error or any failure of the start ends the session
+    /// (decide sees a blocked result and closes stdin).
+    fn result(&mut self, line: &str, ok: bool, blocked: bool) -> Result<(bool, bool)> {
+        let batch = std::mem::take(&mut self.echoed);
+        let shown = std::mem::take(&mut self.shown);
+        if blocked || !ok {
+            self.progress.failure.get_or_insert(Failure::Session);
+            return Ok((false, true));
+        }
+        let turn = self.progress.turn;
+        self.progress.turn += 1;
+        let step = match structured_output(line) {
+            Some(text) => act(self, &batch, &shown, turn, &text)?,
+            None => {
+                self.record_refusal(&batch, turn)?;
+                Step::Refused(Failure::Undecodable)
+            }
+        };
+        match step {
+            Step::Answered(started) => {
+                self.refusals = 0;
+                if started.is_some() {
+                    self.progress.self_run = started;
+                }
+                self.progress.answered += 1;
+                if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
+                    self.progress.acked = self.progress.acked.max(through);
+                }
+                Ok((true, false))
+            }
+            Step::Refused(why) => {
+                self.refusals += 1;
+                if self.refusals >= REFUSALS_IN_A_ROW {
+                    self.progress.failure.get_or_insert(why);
+                    return Ok((false, true));
+                }
+                self.retell = Some((batch, why));
+                Ok((true, false))
+            }
+            Step::Failed(why) => {
+                self.progress.failure.get_or_insert(why);
+                Ok((false, true))
+            }
+        }
+    }
+}
+
+/// The structured output of a result line, as the text `decode_reply` reads; none when it has none.
+fn structured_output(line: &str) -> Option<String> {
+    let event: Value = serde_json::from_str(line).ok()?;
+    event.get("structured_output").filter(|output| !output.is_null()).map(Value::to_string)
+}
+
+impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
+    /// The trace of a result that gave nothing to decode.
+    fn record_refusal(&self, batch: &[ChatDelivery], turn: u32) -> Result<()> {
+        self.organs.trace.record(&TurnTrace { run: label_of(self.run).into(), turn, at: self.organs.clock.now(), inputs: trace_inputs(self.config, batch), outputs: vec![], outcome: format!("failed: {}", Failure::Undecodable) })
+    }
+}
+
+/// What one result does in the world: decode, say, remember, settle, start a Self run, trace, and
+/// only then ack (the caller moves the position). `batch` is what the result answers; `shown`
+/// is what the lines showed her.
+fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch: &[ChatDelivery], shown: &Shown, turn: u32, text: &str) -> Result<Step> {
+    let (organs, config, run) = (inbox.organs, inbox.config, inbox.run);
+    let instance = organs.mind.instance().clone();
+    let (control, swarm) = (inbox.control, inbox.swarm);
+    let inputs = trace_inputs(config, batch);
     let now = organs.clock.now();
     let record = |outputs: Vec<TraceItem>, outcome: String| TurnTrace { run: label_of(run).into(), turn, at: now, inputs: inputs.clone(), outputs, outcome };
-
-    let Ok(text) = organs.connector.turn(&request) else {
-        organs.trace.record(&record(vec![], "failed: connector".into()))?;
-        return Ok(Step::Failed(Failure::Connector));
-    };
-    let reply = match decode_reply(&text, &rooms, &people, &open) {
+    let reply = match decode_reply(text, &inbox.rooms, &shown.people, &shown.open) {
         Ok(reply) => reply,
         Err(why) => {
             let raw = TraceItem { provenance: "her own".into(), room: String::new(), text: text.chars().take(TRACE_RAW_MAX).collect() };
             organs.trace.record(&record(vec![raw], format!("failed: {why}")))?;
-            return Ok(Step::Failed(why));
+            return Ok(Step::Refused(why));
         }
     };
 
     // Request ids name the batch of deliveries and the say, so a repeat is the same send.
-    let batch = match (deliveries.iter().map(|delivery| delivery.seq).min(), deliveries.iter().map(|delivery| delivery.seq).max()) {
+    let batch_id = match (batch.iter().map(|delivery| delivery.seq).min(), batch.iter().map(|delivery| delivery.seq).max()) {
         (Some(first), Some(last)) => format!("s{first}-{last}"),
-        _ => label_of(run).to_string(),
+        _ => format!("{}-t{turn}", label_of(run)),
     };
     let mut outputs = Vec::new();
     for (index, say) in reply.say.iter().enumerate() {
@@ -800,7 +1138,7 @@ fn one_turn(
             return Ok(Step::Failed(Failure::Held(reason)));
         }
         let text = say.text.clone();
-        let sent = ChatSendRequest { request_id: format!("{batch}-{index}"), persona: instance.0.clone(), room_alias: say.room.clone(), text: text.clone() };
+        let sent = ChatSendRequest { request_id: format!("{batch_id}-{index}"), persona: instance.0.clone(), room_alias: say.room.clone(), text: text.clone() };
         let delivered = organs.chat.send(&sent).is_ok_and(|receipt| receipt.refusal.is_none() && receipt.event_id.is_some());
         if !delivered {
             organs.trace.record(&record(outputs, "failed: send".into()))?;
@@ -808,7 +1146,7 @@ fn one_turn(
         }
         outputs.push(TraceItem { provenance: "her own".into(), room: say.room.clone(), text });
     }
-    let memories = build_memories(&instance, run, turn, &reply, &origin_of(config, &deliveries));
+    let memories = build_memories(&instance, run, turn, &reply, &origin_of(config, batch));
     for remembered in &reply.remember {
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("remember {:?}: {}", remembered.sort, remembered.text) });
     }
@@ -822,11 +1160,12 @@ fn one_turn(
         organs.trace.record(&record(outputs, "failed: memory".into()))?;
         return Ok(Step::Failed(Failure::Memory));
     }
+    let mut started = None;
     if let Some(ask) = &reply.start_self_run {
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("start_self_run {} {}: {}", ask.campaign, ask.repo, ask.brief) });
         let taken = item_taken(ask, &memories)?;
-        match start_self_run(organs, control, swarm, run, &batch, ask, taken)? {
-            Ok(started) => *self_run = Some(started),
+        match start_self_run(organs, control, swarm, run, &batch_id, ask, taken)? {
+            Ok(launched) => started = Some(launched),
             Err(why) => {
                 organs.trace.record(&record(outputs, format!("failed: {why}")))?;
                 return Ok(Step::Failed(why));
@@ -834,13 +1173,12 @@ fn one_turn(
         }
     }
     organs.trace.record(&record(outputs, "answered".into()))?;
-    if let Some(through) = deliveries.iter().map(|delivery| delivery.seq).max() {
-        if organs.chat.ack(through).is_err() {
-            return Ok(Step::Failed(Failure::Ack));
-        }
-        *after_seq = through;
+    if let Some(through) = batch.iter().map(|delivery| delivery.seq).max()
+        && organs.chat.ack(through).is_err()
+    {
+        return Ok(Step::Failed(Failure::Ack));
     }
-    Ok(Step::Answered)
+    Ok(Step::Answered(started))
 }
 
 /// The oldest deliveries that share a conversation: the public rooms together, or one direct

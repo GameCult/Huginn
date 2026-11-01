@@ -3,8 +3,13 @@
 //! so a field the leaf adds to a kind is one edit.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::rc::Rc;
+use std::time::Duration as StdDuration;
 
 use anyhow::{Result, anyhow};
+use chrono::Duration as ChronoDuration;
+use model_connector::PlanQuota;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{
@@ -19,7 +24,9 @@ use huginn_mind::{
 use tempfile::TempDir;
 
 use crate::launch::{Clock, Launcher};
+use crate::lease_client::{Lease, LeaseRefusalKind, LeaseRefused, LeaseRequest, Lender, Lent, TokenFd, token_holding};
 use crate::queue::MindPort;
+use crate::self_run::{Child, Read, Spawner, Stop};
 
 pub(crate) const INSTANCE: &str = "yggdrasil";
 pub(crate) const CAMPAIGN: &str = "eureka-body";
@@ -472,3 +479,208 @@ pub(crate) fn follow_up(label: &str, source: &PipelineRef) -> PipelineDocument {
         owner: "Hands".into(),
     })
 }
+
+// The scripted child, the fake spawner and the fake lease: the stream and the lease the Self and the Persona organs are tested against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Event {
+    Wrote(String),
+    InputClosed,
+    /// A signal was attempted, delivered or not.
+    Stopped(Stop),
+    Asked(StdDuration),
+    /// The connector was asked for a lease and answered one.
+    Lent,
+    /// A child was started.
+    Spawned,
+    /// The lease was dropped, which ends it: nothing is settled.
+    Abandoned,
+}
+
+#[derive(Clone)]
+pub(crate) enum Step {
+    Line(String),
+    /// Time passes with no output: the clock moves and the read times out.
+    Idle(i64),
+    /// The clock moves, then this line arrives.
+    After(i64, String),
+    /// The child is reaped with this code; its stream stays open.
+    Exit(Option<i32>),
+    /// Its stdout ends; the child is not reaped yet.
+    Eof,
+    /// The clock moves, this runs (the mind changes, a tool call's hook fires), and the read times out.
+    Do(i64, Rc<dyn Fn()>),
+}
+
+pub(crate) struct Scripted {
+    pub(crate) steps: VecDeque<Step>,
+    pub(crate) log: Rc<RefCell<Vec<Event>>>,
+    pub(crate) clock: Rc<Fixed>,
+    pub(crate) code: Option<i32>,
+    /// The weakest signal that ends it; weaker ones are ignored.
+    pub(crate) dies_on: Option<Stop>,
+    /// Signals that cannot be delivered (no `kill` program, say).
+    pub(crate) refuses: Vec<Stop>,
+    /// When the steps run out it neither exits nor closes its stream: time just passes.
+    pub(crate) hangs: bool,
+    pub(crate) exited: bool,
+    pub(crate) eof: bool,
+    /// How many times it was asked: a loop that never ends is a failure, not a hang.
+    pub(crate) asked: u32,
+}
+
+impl Child for Scripted {
+    fn write_line(&mut self, line: &str) {
+        self.log.borrow_mut().push(Event::Wrote(line.to_string()));
+    }
+
+    fn close_input(&mut self) {
+        self.log.borrow_mut().push(Event::InputClosed);
+    }
+
+    fn next(&mut self, timeout: StdDuration) -> Read {
+        self.log.borrow_mut().push(Event::Asked(timeout));
+        self.asked += 1;
+        assert!(self.asked < 500, "the loop never ended");
+        match self.steps.pop_front() {
+            Some(Step::Line(line)) => Read::Line(line),
+            Some(Step::Idle(seconds)) => {
+                self.clock.0.set(self.clock.0.get() + ChronoDuration::seconds(seconds));
+                Read::Timeout
+            }
+            Some(Step::After(seconds, line)) => {
+                self.clock.0.set(self.clock.0.get() + ChronoDuration::seconds(seconds));
+                Read::Line(line)
+            }
+            Some(Step::Exit(code)) => {
+                self.exited = true;
+                Read::Exited(code)
+            }
+            Some(Step::Do(seconds, act)) => {
+                self.clock.0.set(self.clock.0.get() + ChronoDuration::seconds(seconds));
+                act();
+                Read::Timeout
+            }
+            Some(Step::Eof) => {
+                self.eof = true;
+                Read::Eof
+            }
+            // The stream is over: the child is reaped, then its stdout ends.
+            None if self.hangs => {
+                self.clock.0.set(self.clock.0.get() + ChronoDuration::seconds(timeout.as_secs() as i64));
+                Read::Timeout
+            }
+            None if !self.exited => {
+                self.exited = true;
+                Read::Exited(self.code)
+            }
+            None if !self.eof => {
+                self.eof = true;
+                Read::Eof
+            }
+            None => panic!("the loop kept waiting on a child that ended"),
+        }
+    }
+
+    fn stop(&mut self, how: Stop) -> bool {
+        self.log.borrow_mut().push(Event::Stopped(how));
+        if self.refuses.contains(&how) {
+            return false;
+        }
+        if self.dies_on.is_some_and(|weakest| how >= weakest) {
+            self.steps.clear();
+            self.hangs = false;
+        }
+        true
+    }
+}
+
+pub(crate) struct Fake {
+    pub(crate) child: RefCell<Option<Scripted>>,
+    pub(crate) spawns: RefCell<Vec<Vec<String>>>,
+    pub(crate) refuse: bool,
+}
+
+impl Fake {
+    pub(crate) fn with(child: Option<Scripted>, refuse: bool) -> Self {
+        Self { child: RefCell::new(child), spawns: RefCell::new(Vec::new()), refuse }
+    }
+}
+
+impl Spawner for Fake {
+    fn spawn(&self, args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
+        self.spawns.borrow_mut().push(args.to_vec());
+        if self.refuse {
+            return Err(anyhow!("refused"));
+        }
+        let child = self.child.borrow_mut().take().expect("spawned twice");
+        child.log.borrow_mut().push(Event::Spawned);
+        Ok(Box::new(child))
+    }
+}
+
+/// What the connector answers.
+#[derive(Clone, Copy)]
+pub(crate) enum Answer {
+    Grant,
+    Refuse(LeaseRefusalKind),
+    Unreachable,
+}
+
+/// The connector, as the actuator asks it: it logs into the child's log, so the
+/// order of lend, spawn, the child's end and settle is one sequence.
+pub(crate) struct FakeLender {
+    pub(crate) log: Rc<RefCell<Vec<Event>>>,
+    pub(crate) asked: RefCell<Vec<LeaseRequest>>,
+    pub(crate) answer: Answer,
+}
+
+impl FakeLender {
+    pub(crate) fn new(answer: Answer) -> Self {
+        Self::logging(Rc::new(RefCell::new(Vec::new())), answer)
+    }
+
+    pub(crate) fn logging(log: Rc<RefCell<Vec<Event>>>, answer: Answer) -> Self {
+        Self { log, asked: RefCell::new(Vec::new()), answer }
+    }
+}
+
+impl Lender for FakeLender {
+    fn lend(&self, request: &LeaseRequest) -> Result<Lent> {
+        self.asked.borrow_mut().push(request.clone());
+        match self.answer {
+            Answer::Grant => {
+                self.log.borrow_mut().push(Event::Lent);
+                Ok(Lent::Granted(Box::new(FakeLease { log: self.log.clone(), token: token_holding("tok-canary"), plan: vec![plan_window()] })))
+            }
+            Answer::Refuse(kind) => Ok(Lent::Refused(LeaseRefused { kind, detail: "detail-canary".into() })),
+            Answer::Unreachable => Err(anyhow!("down")),
+        }
+    }
+}
+
+pub(crate) fn plan_window() -> PlanQuota {
+    PlanQuota { window: "five_hour".into(), utilization_permille: Some(423), resets_at_unix_ms: 1_793_307_000_000, status: "allowed".into(), observed_at_unix_ms: 1_793_306_000_000 }
+}
+
+pub(crate) struct FakeLease {
+    pub(crate) log: Rc<RefCell<Vec<Event>>>,
+    pub(crate) token: TokenFd,
+    pub(crate) plan: Vec<PlanQuota>,
+}
+
+impl Lease for FakeLease {
+    fn token(&self) -> &TokenFd {
+        &self.token
+    }
+
+    fn plan_quota(&self) -> &[PlanQuota] {
+        &self.plan
+    }
+}
+
+impl Drop for FakeLease {
+    fn drop(&mut self) {
+        self.log.borrow_mut().push(Event::Abandoned);
+    }
+}
+

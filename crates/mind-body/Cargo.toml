@@ -51,9 +51,6 @@ rustix = { version = "1", default-features = false, features = ["std", "net"] }
 # tests/public_surface.rs, which pins its public surface. All three are already
 # in the workspace's graph (serde's derive uses them); they are test-only.
 [dev-dependencies]
-# The kit's serve loop and service, for the test that runs the connector client
-# against the real server with a fake provider behind it.
-model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "c1802d85bee3ae04b0c5737563c8343c1fef515d", package = "model-connector", features = ["daemon"] }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

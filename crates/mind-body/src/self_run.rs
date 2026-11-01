@@ -54,7 +54,7 @@
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
 //! parsed is stored.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
@@ -77,8 +77,10 @@ use crate::lease_client::{LeaseRefusalKind, LeaseRequest, Lender, Lent, TokenFd}
 use model_connector::PlanQuota;
 use crate::queue::MindPort;
 
-use decide::{Action, Event, State, Why, decide, next_deadline};
+pub(crate) use decide::Why;
 use inbox::Brief;
+use session::{Polled, SessionInbox};
+pub(crate) use session::drive;
 
 /// The measured Self ceiling: at this prefix the flush is asked for.
 pub const CEILING_TOKENS: u64 = 300_000;
@@ -139,9 +141,6 @@ const SCRUB_VARIABLE: &str = "MIND_SELF_SCRUB";
 pub const AGENT: &str = "mind-self-run";
 /// The namespace of the session id: the run id is the name in it.
 pub const SESSION_NAMESPACE: Uuid = Uuid::NAMESPACE_OID;
-
-/// The longest the loop waits on the child when no deadline is nearer.
-const POLL: StdDuration = StdDuration::from_secs(INBOX_POLL_S as u64);
 
 /// What the child is told at the start. The contract with the `eureka`
 /// skill: it names the skill, the instance and the run id.
@@ -551,7 +550,56 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
     let child = spawner.spawn(&claude_args(session_id(run)), lease.token())?;
-    drive(mind, clock, child, (run, task), (lease.plan_quota(), started_ms, run_cap_s), told, heard, out)
+    let mut inbox = SelfInbox::new(mind, run, task, (lease.plan_quota(), started_ms), told, heard);
+    drive(clock, child, &mut inbox, run_cap_s, out)
+}
+
+/// The Self's side of the session: her briefs, derived from the mind, are what she is told.
+struct SelfInbox<'a> {
+    mind: &'a dyn MindPort,
+    start: String,
+    plan: String,
+    told: &'a mut Vec<Brief>,
+    /// The briefs derived at the last poll that no line has carried yet.
+    waiting: Vec<Brief>,
+    heard: &'a mut Heard,
+}
+
+impl<'a> SelfInbox<'a> {
+    fn new(mind: &'a dyn MindPort, run: &PipelineRef, task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), told: &'a mut Vec<Brief>, heard: &'a mut Heard) -> Self {
+        let start = format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms));
+        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard }
+    }
+}
+
+impl SessionInbox for SelfInbox<'_> {
+    fn start_line(&mut self) -> Result<String> {
+        Ok(self.start.clone())
+    }
+
+    fn poll_every_s(&self) -> i64 {
+        INBOX_POLL_S
+    }
+
+    fn poll(&mut self) -> Result<Polled> {
+        let held: HashSet<String> = self.told.iter().map(|brief| brief.id.clone()).collect();
+        self.waiting = inbox::derive(self.mind, &held)?;
+        Ok(Polled { pending: !self.waiting.is_empty(), yield_now: false })
+    }
+
+    fn tell(&mut self) -> Result<String> {
+        let text = inbox::render(&self.waiting, &self.plan);
+        self.told.append(&mut self.waiting);
+        Ok(text)
+    }
+
+    fn flush_text(&self, why: Why) -> String {
+        flush_text(why)
+    }
+
+    fn line(&mut self, line: &str) {
+        self.heard.hear(line);
+    }
 }
 
 /// The most of a result's text that reaches the journal.
@@ -601,104 +649,6 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
     writeln!(out, "{}", describe_result(&event, RESULT_TEXT_LIMIT))
 }
 
-/// The loop: facts in, one clock read per fact, actions out. The one writer into her session.
-#[allow(clippy::too_many_arguments, reason = "the loop's ports and the run's facts, passed on whole")]
-fn drive(
-    mind: &dyn MindPort,
-    clock: &dyn Clock,
-    mut child: Box<dyn Child>,
-    (run, task): (&PipelineRef, &str),
-    (plan_quota, now_ms, run_cap_s): (&[PlanQuota], u64, u64),
-    told: &mut Vec<Brief>,
-    heard: &mut Heard,
-    out: &mut dyn Write,
-) -> Result<SelfRunOutcome> {
-    let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
-    let plan = render_plan(plan_quota, now_ms);
-    child.write_line(&user_line(&format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms))));
-
-    let mut now = clock.now();
-    let mut state = State::started(now, run_cap_s);
-    let mut polled = now;
-    let mut ttl_1h = false;
-    let mut closed = false;
-    // The briefs derived at the last poll that no line has carried yet.
-    let mut waiting: Vec<Brief> = Vec::new();
-    loop {
-        let poll_due = polled + ChronoDuration::seconds(INBOX_POLL_S);
-        let wake = next_deadline(&state).into_iter().chain((!closed).then_some(poll_due)).min();
-        let wait = wake.map_or(POLL, |at| (at - now).to_std().unwrap_or_default().min(POLL));
-        let fact = match child.next(wait) {
-            Read::Line(line) => {
-                heard.hear(&line);
-                write_result(&line, out)?;
-                if let Some(hour) = writes_hour_cache(&line) {
-                    ttl_1h = hour;
-                }
-                match read_usage(&line) {
-                    Usage::Request { id, prefix } => Event::Request { id, prefix },
-                    Usage::Echo => Event::Echo,
-                    Usage::Result { ok, blocked } => Event::Result { ok, blocked, ttl_1h },
-                    Usage::Other | Usage::Unreadable => Event::Tick,
-                }
-            }
-            Read::Timeout => Event::Tick,
-            Read::Eof => Event::StdoutEof,
-            Read::Exited(code) => Event::ChildExited(code),
-        };
-        now = clock.now();
-        let mut events = VecDeque::from([fact]);
-        if !closed && now >= poll_due {
-            polled = now;
-            let held: HashSet<String> = told.iter().map(|brief| brief.id.clone()).collect();
-            match inbox::derive(mind, &held) {
-                Ok(briefs) => {
-                    events.push_back(Event::Inbox { pending: !briefs.is_empty() });
-                    waiting = briefs;
-                }
-                Err(_) => writeln!(out, "inbox poll failed")?,
-            }
-        }
-        while let Some(heard_event) = events.pop_front() {
-            let counted = state.requests;
-            // The decision's inputs, as they stood when the event came.
-            let (ttl_s, inbox, idle_s) = (state.ttl_s, state.inbox || matches!(&heard_event, Event::Inbox { pending: true }), state.idle_s(now));
-            let (next, action) = decide(state, heard_event, now);
-            state = next;
-            if state.requests != counted {
-                writeln!(out, "request {} prefix {}", state.requests, state.prefix)?;
-            }
-            match &action {
-                Action::None => {}
-                Action::Write { tells, flush } => {
-                    let mut parts = Vec::new();
-                    if *tells {
-                        parts.push(inbox::render(&waiting, &plan));
-                        told.append(&mut waiting);
-                    }
-                    parts.extend(flush.map(flush_text));
-                    child.write_line(&user_line(&parts.join("
-
-")));
-                }
-                Action::CloseStdin => {
-                    child.close_input();
-                    closed = true;
-                }
-                Action::Signal(how) => events.push_front(Event::Signalled { how: *how, delivered: child.stop(*how) }),
-                Action::Finish(_) => {}
-            }
-            if !matches!(action, Action::None | Action::Finish(_)) {
-                let idle = idle_s.map_or_else(|| "working".to_string(), |seconds| seconds.to_string());
-                writeln!(out, "decision {action:?} prefix {} ttl_s {ttl_s} idle_s {idle} inbox {inbox} written {} consumed {}", state.prefix, state.written, state.consumed)?;
-            }
-            if let Action::Finish(outcome) = action {
-                return Ok(outcome);
-            }
-        }
-    }
-}
-
 /// The real spawner: the `claude` on the unit's `PATH`, its stderr in the
 /// journal. Its credential is the lease's descriptor, named in the one variable
 /// that says where to read it; the token is in no environment, argument or file.
@@ -708,25 +658,65 @@ pub struct ClaudeSpawner {
     unit_environment: Vec<(OsString, OsString)>,
     scratch: PathBuf,
     seed: Option<PathBuf>,
+    /// Her sandbox: with it the child runs under bubblewrap (`sandbox_args`), the Persona's; the Self passes none.
+    sandbox: Option<PathBuf>,
 }
 
 impl ClaudeSpawner {
     /// From the unit's environment: it must name [`SCRATCH_VARIABLE`], and may name [`SEED_VARIABLE`].
     pub fn new(unit_environment: impl IntoIterator<Item = (OsString, OsString)>) -> Result<Self> {
+        Self::in_sandbox(unit_environment, SEED_VARIABLE, None)
+    }
+
+    /// The same, with the seed named by `seed_variable` and, if `sandbox` is given, the child run under bubblewrap with that directory as its writable home.
+    pub fn in_sandbox(unit_environment: impl IntoIterator<Item = (OsString, OsString)>, seed_variable: &str, sandbox: Option<PathBuf>) -> Result<Self> {
         let unit_environment: Vec<(OsString, OsString)> = unit_environment.into_iter().collect();
         let named = |variable: &str| unit_environment.iter().find(|(name, _)| name == variable).map(|(_, value)| PathBuf::from(value));
         // systemd lists several runtime directories colon-separated; the unit names one.
         let scratch = named(SCRATCH_VARIABLE).filter(|path| !path.as_os_str().is_empty()).ok_or_else(|| anyhow!("{SCRATCH_VARIABLE} is not set: the unit needs RuntimeDirectory="))?;
-        let seed = named(SEED_VARIABLE).filter(|path| !path.as_os_str().is_empty());
-        Ok(Self { unit_environment, scratch, seed })
+        let seed = named(seed_variable).filter(|path| !path.as_os_str().is_empty());
+        Ok(Self { unit_environment, scratch, seed, sandbox })
     }
 }
 
 impl Spawner for ClaudeSpawner {
     fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
         let config = FreshConfig::create(&self.scratch, self.seed.as_deref())?;
-        spawn_program(Path::new("claude"), args, token, &self.unit_environment, config)
+        let Some(sandbox) = &self.sandbox else { return spawn_program(Path::new("claude"), args, token, &self.unit_environment, config) };
+        let mut wrapped = sandbox_args(sandbox, &self.scratch);
+        wrapped.push("claude".into());
+        wrapped.extend(args.iter().cloned());
+        spawn_program(Path::new("bwrap"), &wrapped, token, &self.unit_environment, config)
     }
+}
+
+/// The bubblewrap arguments up to the program: the whole filesystem read-only, a private `/tmp`
+/// and `/run`, the unit's scratch directory and her sandbox writable, her unit's credentials
+/// (`/etc/gamecult`, the other `/var/lib` directories, the lease socket under `/run`) hidden, a
+/// private process table, and the child dead when the unit's process is. The network is shared: the
+/// web, `huginn` and the API are reachable. The boundary is the operating system's, not a pattern list
+/// (ruling `eureka-body:ruling:persona-git-personal-sandbox`).
+pub(crate) fn sandbox_args(sandbox: &Path, scratch: &Path) -> Vec<String> {
+    let (sandbox, scratch) = (sandbox.to_string_lossy(), scratch.to_string_lossy());
+    [
+        "--ro-bind", "/", "/",
+        "--dev", "/dev",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+        "--tmpfs", "/run",
+        "--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve",
+        "--bind", &scratch, &scratch,
+        "--tmpfs", "/etc/gamecult",
+        "--tmpfs", "/var/lib",
+        "--bind", &sandbox, &sandbox,
+        "--unshare-pid",
+        "--die-with-parent",
+        "--new-session",
+        "--chdir", &sandbox,
+        "--",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// The directory name of a child's configuration inside the scratch directory.
@@ -932,6 +922,7 @@ impl Child for ClaudeProcess {
 
 mod decide;
 pub mod inbox;
+pub(crate) mod session;
 
 #[cfg(test)]
 mod tests;

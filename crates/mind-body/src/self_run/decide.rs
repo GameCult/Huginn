@@ -23,7 +23,7 @@
 //! result after the flush's echo closes stdin, folded or queued alike; (3) the
 //! cap less `ROTATE_MARGIN_S`: ask the flush (rotation), idle or mid-turn; (4)
 //! idle with no brief waiting, at the last result's cache lifetime less a margin:
-//! ask the flush (idle); (5) with nothing outstanding, write what waits: the
+//! ask the flush (idle); (4b) a session told to yield closes stdin at idle, with nothing outstanding and no flush written; (5) with nothing outstanding, write what waits: the
 //! briefs and the flush ask if there is one, as one line. The ceiling asks the
 //! same flush from a request. Compaction is off in the CLI (`DISABLE_COMPACT=1`),
 //! so the flush is the only way a session ends short of its cache.
@@ -46,7 +46,7 @@ use super::{
 
 /// Why the flush was asked: the session's own end, three ways.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Why {
+pub(crate) enum Why {
     /// The context reached the ceiling.
     Ceiling,
     /// The unit's cap is near.
@@ -73,6 +73,8 @@ pub(super) enum Event {
     Tick,
     /// What the operating system said of the signal the last action sent.
     Signalled { how: Stop, delivered: bool },
+    /// The inbox's owner wants the session over at its next idle: what is oldest and unanswered is another conversation's. Only the Persona sends it.
+    Yield,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +117,8 @@ pub(super) struct State {
     /// The cache lifetime the last result left, in seconds.
     pub(super) ttl_s: i64,
     pub(super) inbox: bool,
+    /// The session is to end at its next idle (`Event::Yield`); once asked it stays asked.
+    yielding: bool,
     /// When the process started and the unit's cap in seconds; none where no cap is known.
     cap: Option<(DateTime<Utc>, i64)>,
     stdin_closed: bool,
@@ -218,6 +222,11 @@ fn lifecycle(state: &mut State, now: DateTime<Utc>) -> Action {
     {
         ask_flush(state, now, why);
     }
+    // A yielding session ends at idle: its own text waits for the next one. A flush already written keeps its own end.
+    if state.yielding && state.idle() && !state.stdin_closed && state.exited.is_none() && state.flush.as_ref().is_none_or(|flush| flush.seq.is_none()) {
+        state.stdin_closed = true;
+        return Action::CloseStdin;
+    }
     send(state)
 }
 
@@ -283,6 +292,7 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
             }
         }
         Event::Inbox { pending } => state.inbox = pending,
+        Event::Yield => state.yielding = true,
         Event::ChildExited(code) => {
             state.exited.get_or_insert((code, now));
         }
