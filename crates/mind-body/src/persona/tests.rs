@@ -103,6 +103,9 @@ struct FakeSession {
     spawns: RefCell<Vec<Vec<String>>>,
     /// Runs inside each written line, where time passes and the world changes.
     during: During,
+    /// Runs when a line's echo is handed out, before its result: where time passes after the
+    /// driver has read the clock for the start and a poll falls due while the turn runs.
+    after_echo: During,
     /// The chat's deliveries, which the child watches to know whether anything is left to wait for.
     pending: Deliveries,
     /// The child cannot be started.
@@ -122,6 +125,7 @@ impl Spawner for FakeSession {
             replies: self.replies.clone(),
             requests: self.requests.clone(),
             during: self.during.clone(),
+            after_echo: self.after_echo.clone(),
             pending: self.pending.clone(),
             instructions,
             schema: after("--json-schema"),
@@ -138,6 +142,7 @@ struct Replying {
     replies: Rc<RefCell<VecDeque<String>>>,
     requests: Rc<RefCell<Vec<Told>>>,
     during: During,
+    after_echo: During,
     pending: Deliveries,
     instructions: String,
     schema: String,
@@ -180,6 +185,11 @@ impl Child for Replying {
         self.asked += 1;
         assert!(self.asked < 3000, "the loop never ended");
         if let Some(read) = self.queue.pop_front() {
+            if matches!(&read, Read::Line(line) if line.contains("isReplay"))
+                && let Some(after_echo) = &*self.after_echo.borrow()
+            {
+                after_echo();
+            }
             return read;
         }
         if self.closed || (self.answered && (self.replies.borrow().is_empty() || self.pending.borrow().is_empty())) {
@@ -302,6 +312,7 @@ impl Rig {
                 requests: Rc::default(),
                 spawns: RefCell::default(),
                 during: Rc::default(),
+                after_echo: Rc::default(),
                 pending,
                 refuse: Cell::new(false),
             },
@@ -2280,6 +2291,19 @@ fn a_hold_placed_as_a_session_ends_stops_the_next_session_before_a_lease_is_aske
 }
 
 #[test]
+fn a_hold_placed_after_the_last_poll_stops_the_next_session_before_a_lease_is_asked() {
+    let rig = Rig::new(vec![operator_says(1, "a"), direct(2, "!dm:chat", "@ann:chat", "later")], &[says(&[("operator", "x")])]);
+    // A clock that never moves: no poll is ever due, so the only reads of the brake are the gate and the one between sessions.
+    rig.clock.step.set(0);
+    let swarm = rig.swarm_store();
+    *rig.chat.on_send.borrow_mut() = Some(Box::new(move || {
+        SwarmWriter::open(&swarm).unwrap().set_brake(false, at(0), "op").unwrap();
+    }));
+    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((rig.model.spawns.borrow().len(), rig.lender.asked.borrow().len()), (1, 1), "no second lease, no second process; failure {failure:?}");
+}
+
+#[test]
 fn a_result_without_structured_output_is_traced_as_failed_and_told_back() {
     let rig = Rig::new(vec![operator_says(1, "a")], &thrice("null".to_string()));
     let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
@@ -2313,6 +2337,135 @@ fn a_poll_while_the_turn_runs_does_not_tell_again_what_the_line_in_flight_carrie
     let told: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
     assert_eq!(told.len(), 2);
     assert!(told[1].contains(r#"text="second""#) && !told[1].contains(r#"text="first""#), "{}", told[1]);
+}
+
+#[test]
+fn a_poll_that_falls_due_after_the_echo_does_not_tell_again_what_the_line_in_flight_carried() {
+    let rig = Rig::new(vec![operator_says(1, "first")], &[says(&[("operator", "one")]), says(&[("operator", "two")])]);
+    let (deliveries, now, pushed) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(false));
+    // The first line is echoed, and then the clock passes a poll's due time with delivery 1 still unanswered and 2 arrived.
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        if !pushed.replace(true) {
+            deliveries.borrow_mut().push(operator_says(2, "second"));
+            now.set(now.get() + 6_000);
+        }
+    }));
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (2, None));
+    let told: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
+    assert_eq!(told.len(), 2);
+    assert!(told[1].contains(r#"text="second""#) && !told[1].contains(r#"text="first""#), "{}", told[1]);
+}
+
+/// A child that plays a script: each entry waits for that many lines to have been written to it. Delivery 5
+/// arrives on its first read, after the start line.
+struct Scripted {
+    writes: Rc<RefCell<Vec<String>>>,
+    script: VecDeque<(usize, Read)>,
+    deliveries: Option<Deliveries>,
+    asked: u32,
+}
+
+impl Child for Scripted {
+    fn write_line(&mut self, line: &str) {
+        self.writes.borrow_mut().push(line.to_string());
+    }
+
+    fn close_input(&mut self) {}
+
+    fn next(&mut self, _timeout: StdDuration) -> Read {
+        self.asked += 1;
+        assert!(self.asked < 3000, "the loop never ended");
+        if let Some(deliveries) = self.deliveries.take() {
+            deliveries.borrow_mut().push(operator_says(5, "five"));
+        }
+        match self.script.front() {
+            Some((need, _)) if self.writes.borrow().len() >= *need => self.script.pop_front().unwrap().1,
+            Some(_) => Read::Timeout,
+            None => Read::Eof,
+        }
+    }
+
+    fn stop(&mut self, _how: Stop) -> bool {
+        true
+    }
+}
+
+/// Hands out the scripted children in order, one per process.
+struct ScriptedSpawner(RefCell<VecDeque<Scripted>>);
+
+impl crate::self_run::Spawner for ScriptedSpawner {
+    fn spawn(&self, _args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
+        self.0.borrow_mut().pop_front().map(|child| Box::new(child) as Box<dyn Child>).ok_or_else(|| anyhow!("no more processes"))
+    }
+}
+
+fn echo_line() -> Read {
+    Read::Line(json!({"type": "user", "isReplay": true, "uuid": "00000000-0000-4000-8000-000000000001", "message": {"role": "user", "content": "a line"}}).to_string())
+}
+
+fn result_line(output: serde_json::Value) -> Read {
+    Read::Line(json!({"type": "result", "subtype": "success", "is_error": false, "terminal_reason": "completed", "result": "", "structured_output": output}).to_string())
+}
+
+fn reply_saying(text: &str) -> serde_json::Value {
+    serde_json::from_str(&says(&[("operator", text)])).unwrap()
+}
+
+/// Runs `carry` over `children`, one per process; returns the acks the mouth saw.
+fn carry_scripted(rig: &Rig, children: Vec<Scripted>) -> Vec<u64> {
+    rig.open_the_run();
+    let spawner = ScriptedSpawner(RefCell::new(children.into()));
+    let (sandbox, scratch) = (rig.sandbox(), rig.scratch());
+    let organs = Organs {
+        mind: &rig.mind,
+        launcher: &rig.launcher,
+        clock: &rig.clock,
+        host: "yggdrasil-host",
+        chat: &rig.chat,
+        persona: &rig.persona,
+        trace: &rig.trace,
+        tempo: None,
+        lender: &rig.lender,
+        spawner: &spawner,
+        run_cap_s: rig.cap.get(),
+        sandbox: &sandbox,
+        scratch: &scratch,
+    };
+    carry(&organs, &FileSource::new(rig.store()), &FileSource::new(rig.swarm_store()), &config()).unwrap();
+    let acked = rig.chat.acked.borrow().clone();
+    acked
+}
+
+/// The CLI replays a line queued while its turn is finishing at the start of the next turn, after the
+/// result. Here 3 and 4 are told, 5 is written mid-turn, the result for 3 and 4 is refused, 5's echo
+/// opens the next turn and the retell of 3 and 4 is written during it. That turn's result answers 5
+/// alone: its ack must not pass the unanswered 3 and 4. `then` is what the child does after.
+fn racing_first_process(then: Vec<(usize, Read)>, deliveries: Deliveries) -> Scripted {
+    let mut script = VecDeque::from([(1, echo_line()), (2, result_line(serde_json::Value::Null)), (2, echo_line()), (3, result_line(reply_saying("for five")))]);
+    script.extend(then);
+    Scripted { writes: Rc::default(), script, deliveries: Some(deliveries), asked: 0 }
+}
+
+#[test]
+fn an_ack_never_passes_a_retold_batch_and_is_made_once_it_is_answered() {
+    let rig = Rig::new(vec![operator_says(3, "three"), operator_says(4, "four")], &[]);
+    let first = racing_first_process(vec![(3, echo_line()), (3, result_line(reply_saying("for three and four"))), (3, Read::Exited(Some(0)))], rig.chat.deliveries.clone());
+    let acked = carry_scripted(&rig, vec![first]);
+    assert_eq!(rig.sent_texts(), ["for five", "for three and four"]);
+    assert_eq!(acked, [5], "one ack, after the retold batch was answered: {acked:?}");
+}
+
+#[test]
+fn a_session_that_ends_with_a_batch_retold_leaves_it_unacked_for_the_next_process() {
+    let rig = Rig::new(vec![operator_says(3, "three"), operator_says(4, "four")], &[]);
+    let first = racing_first_process(vec![(3, Read::Exited(Some(0)))], rig.chat.deliveries.clone());
+    let writes: Rc<RefCell<Vec<String>>> = Rc::default();
+    let second = Scripted { writes: writes.clone(), script: VecDeque::from([(1, echo_line()), (1, result_line(reply_saying("all three"))), (1, Read::Exited(Some(0)))]), deliveries: None, asked: 0 };
+    let acked = carry_scripted(&rig, vec![first, second]);
+    let opening = writes.borrow().first().cloned().unwrap_or_default();
+    assert!(opening.contains(r#"text="three""#) && opening.contains(r#"text="four""#) && opening.contains(r#"text="five""#), "the next process is told 3, 4 and 5: {opening}");
+    assert_eq!(acked, [5], "the first process acked nothing; the second answered all three: {acked:?}");
 }
 
 #[test]
