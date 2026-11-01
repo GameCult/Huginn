@@ -136,10 +136,11 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
             window += 1;
         }
         let in_window = (now - (resets - WINDOW_MS)) as f64 / HOUR_MS;
-        if let Some((from, to, amount)) = scenario.burst {
-            if in_window >= from && in_window < to {
-                used += amount * STEP_MS as f64 / HOUR_MS / (to - from);
-            }
+        if let Some((from, to, amount)) = scenario.burst
+            && in_window >= from
+            && in_window < to
+        {
+            used += amount * STEP_MS as f64 / HOUR_MS / (to - from);
         }
         let gap = scenario.gap.is_some_and(|(from, to)| in_window >= from && in_window < to);
         if sensor == Sensor::Poll && !gap && (now - W0) % POLL_MS == 0 {
