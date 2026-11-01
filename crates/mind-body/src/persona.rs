@@ -45,7 +45,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};

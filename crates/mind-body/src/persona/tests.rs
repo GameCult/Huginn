@@ -1,13 +1,17 @@
 //! The Persona organ's tests: a real mind over a temporary directory, the real
 //! control store written by the operator's writer and read by the real
-//! derivation, and fakes for the ports the organ does not own (chat,
-//! connector, persona state, trace). Order is observed where it is decided: the
-//! fakes append to one log, so "sends, then one ack" is a comparison of the log.
+//! derivation, and fakes for the ports the organ does not own (chat, the
+//! scripted `claude` child, the lease, persona state, trace). Order is observed
+//! where it is decided: the fakes append to one log, so "sends, then one ack"
+//! is a comparison of the log. The child is the Self's `Child` port: each line
+//! written to it yields its replay echo and a result whose structured output is
+//! the next canned reply, and it ends when the canned replies are spent.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration as StdDuration;
 
 use eureka_pipeline::{MemoryOrigin, PipelineDocument, PipelineKind as K, PipelineMemory, ResolutionOutcome, RunOperator, RunTurn, Short, Slug};
 use huginn_mind::PipelineAdmissionOutcome as AdmissionOutcome;
@@ -17,10 +21,13 @@ use tempfile::TempDir;
 use super::*;
 use crate::chat_client::{ChatSendReceipt, ContextLine};
 use crate::control::{ControlWriter, FileSource, SwarmWriter};
+use crate::lease_client::TokenFd;
+use crate::self_run::{Child, Read, Stop};
 use crate::testkit::*;
 
 type Log = Rc<RefCell<Vec<String>>>;
 type Deliveries = Rc<RefCell<Vec<ChatDelivery>>>;
+type During = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
 struct Ticking(Cell<i64>);
 
@@ -75,31 +82,110 @@ impl Chat for FakeChat {
     }
 }
 
-struct FakeConnector {
-    log: Log,
-    replies: RefCell<VecDeque<String>>,
-    requests: RefCell<Vec<TurnRequest>>,
-    readout_fails: Cell<bool>,
-    /// The readout's clock, in unix ms, which a call may advance.
-    at: Rc<Cell<u64>>,
-    /// Runs inside each call, where time passes and the world changes.
-    during: RefCell<Option<Box<dyn Fn()>>>,
+/// One line written to her child: the system prompt of its process, the line, and the schema it runs under.
+#[derive(Clone, Debug)]
+struct Told {
+    instructions: String,
+    input: String,
+    output_schema_json: String,
 }
 
-impl Connector for FakeConnector {
-    fn turn(&self, request: &TurnRequest) -> Result<String> {
+/// The spawner: every child it starts shares these, so the tests see across processes.
+struct FakeSession {
+    log: Log,
+    replies: Rc<RefCell<VecDeque<String>>>,
+    requests: Rc<RefCell<Vec<Told>>>,
+    /// Every argument list a child was started with.
+    spawns: RefCell<Vec<Vec<String>>>,
+    /// Runs inside each written line, where time passes and the world changes.
+    during: During,
+    /// The child cannot be started.
+    refuse: Cell<bool>,
+}
+
+impl Spawner for FakeSession {
+    fn spawn(&self, args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
+        if self.refuse.get() {
+            return Err(anyhow!("refused"));
+        }
+        self.spawns.borrow_mut().push(args.to_vec());
+        let after = |flag: &str| args.iter().position(|arg| arg == flag).and_then(|at| args.get(at + 1)).cloned().unwrap_or_default();
+        let instructions = std::fs::read_to_string(after("--append-system-prompt-file")).unwrap_or_default();
+        Ok(Box::new(Replying {
+            log: self.log.clone(),
+            replies: self.replies.clone(),
+            requests: self.requests.clone(),
+            during: self.during.clone(),
+            instructions,
+            schema: after("--json-schema"),
+            queue: VecDeque::new(),
+            closed: false,
+            answered: false,
+            asked: 0,
+        }))
+    }
+}
+
+struct Replying {
+    log: Log,
+    replies: Rc<RefCell<VecDeque<String>>>,
+    requests: Rc<RefCell<Vec<Told>>>,
+    during: During,
+    instructions: String,
+    schema: String,
+    queue: VecDeque<Read>,
+    closed: bool,
+    /// A canned reply was given; once they are spent and the queue is empty the child ends.
+    answered: bool,
+    asked: u32,
+}
+
+impl Child for Replying {
+    fn write_line(&mut self, line: &str) {
+        if self.closed {
+            return;
+        }
+        let written: serde_json::Value = serde_json::from_str(line).unwrap();
+        let input = written["message"]["content"].as_str().unwrap().to_string();
         self.log.borrow_mut().push("turn".into());
-        self.requests.borrow_mut().push(request.clone());
+        self.requests.borrow_mut().push(Told { instructions: self.instructions.clone(), input, output_schema_json: self.schema.clone() });
         if let Some(during) = &*self.during.borrow() {
             during();
         }
-        self.replies.borrow_mut().pop_front().ok_or_else(|| anyhow!("the connector is down"))
+        self.queue.push_back(Read::Line(json!({"type": "user", "isReplay": true, "uuid": "00000000-0000-4000-8000-000000000001", "message": {"role": "user", "content": "a line"}}).to_string()));
+        let result = match self.replies.borrow_mut().pop_front() {
+            Some(reply) => {
+                self.answered = true;
+                let output = serde_json::from_str::<serde_json::Value>(&reply).unwrap_or(serde_json::Value::String(reply));
+                json!({"type": "result", "subtype": "success", "is_error": false, "terminal_reason": "completed", "result": "", "structured_output": output})
+            }
+            None => json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "terminal_reason": "error", "result": "the child failed"}),
+        };
+        self.queue.push_back(Read::Line(result.to_string()));
     }
 
-    fn usage_readout(&self) -> Result<UsageReadout> {
-        let mut readout = readout();
-        readout.at_unix_ms = self.at.get();
-        if self.readout_fails.get() { Err(anyhow!("no readout")) } else { Ok(readout) }
+    fn close_input(&mut self) {
+        self.closed = true;
+    }
+
+    fn next(&mut self, _timeout: StdDuration) -> Read {
+        self.asked += 1;
+        assert!(self.asked < 3000, "the loop never ended");
+        if let Some(read) = self.queue.pop_front() {
+            return read;
+        }
+        if self.closed || (self.answered && self.replies.borrow().is_empty()) {
+            // The child ends: reaped first, then its stdout.
+            self.queue.push_back(Read::Eof);
+            return Read::Exited(Some(0));
+        }
+        Read::Timeout
+    }
+
+    fn stop(&mut self, _how: Stop) -> bool {
+        self.queue.clear();
+        self.closed = true;
+        true
     }
 }
 
@@ -132,10 +218,15 @@ struct Rig {
     dir: TempDir,
     log: Log,
     chat: FakeChat,
-    connector: FakeConnector,
+    /// The scripted `claude`: what was written to it, and what it answers.
+    model: FakeSession,
+    lender: FakeLender,
     persona: FakePersona,
     trace: FakeTrace,
 }
+
+/// The unit's cap in seconds: a number no constant of the library equals.
+const RUN_CAP_S: u64 = 14_400;
 
 fn config() -> Config {
     Config {
@@ -143,7 +234,7 @@ fn config() -> Config {
         operators: vec!["@op:chat".into()],
         minds: vec!["@eureka:chat".into(), "@libby:chat".into()],
         own_sender: "@eureka:chat".into(),
-        max_turns: 4,
+        model: "claude-test-model".into(),
         doctrine: vec![],
     }
 }
@@ -162,11 +253,6 @@ fn delivery(seq: u64, room: &str, sender: &str, text: &str) -> ChatDelivery {
         mentions: vec![],
         is_direct: false,
     }
-}
-
-fn readout() -> UsageReadout {
-    let windows = vec![PlanQuota { window: "five_hour".into(), utilization_permille: Some(423), resets_at_unix_ms: 2, status: "allowed".into(), observed_at_unix_ms: 1 }];
-    UsageReadout::new(1, model_connector::PlanQuotaSnapshot { windows })
 }
 
 fn says(lines: &[(&str, &str)]) -> String {
@@ -193,14 +279,15 @@ impl Rig {
                 receipt: Cell::new(0),
                 on_send: RefCell::new(None),
             },
-            connector: FakeConnector {
+            model: FakeSession {
                 log: log.clone(),
-                replies: RefCell::new(replies.iter().cloned().collect()),
-                requests: RefCell::default(),
-                readout_fails: Cell::new(false),
-                at: Rc::new(Cell::new(1)),
-                during: RefCell::new(None),
+                replies: Rc::new(RefCell::new(replies.iter().cloned().collect())),
+                requests: Rc::default(),
+                spawns: RefCell::default(),
+                during: Rc::default(),
+                refuse: Cell::new(false),
             },
+            lender: FakeLender::new(Answer::Grant),
             persona: FakePersona(Cell::new(false)),
             trace: FakeTrace::default(),
             log,
@@ -222,6 +309,17 @@ impl Rig {
         self.dir.path().join("swarm.cc")
     }
 
+    /// Her sandbox, as the unit gives it: inside the state directory.
+    fn sandbox(&self) -> PathBuf {
+        self.dir.path().join("state").join(SANDBOX_DIR)
+    }
+
+    fn scratch(&self) -> PathBuf {
+        let scratch = self.dir.path().join("runtime");
+        std::fs::create_dir_all(&scratch).unwrap();
+        scratch
+    }
+
     /// The heartbeat's part: the run a Persona unit starts under.
     fn open_the_run(&self) {
         let effective = read(&FileSource::new(self.store()), &FileSource::new(self.swarm_store()), self.mind.instance());
@@ -238,18 +336,23 @@ impl Rig {
     }
 
     fn start_with(&self, config: &Config) -> Outcome {
+        let (sandbox, scratch) = (self.sandbox(), self.scratch());
         let organs = Organs {
             mind: &self.mind,
             launcher: &self.launcher,
             clock: &self.clock,
             host: "yggdrasil-host",
             chat: &self.chat,
-            connector: &self.connector,
             persona: &self.persona,
             trace: &self.trace,
             tempo: None,
+            lender: &self.lender,
+            spawner: &self.model,
+            run_cap_s: RUN_CAP_S,
+            sandbox: &sandbox,
+            scratch: &scratch,
         };
-        start(&organs, &FileSource::new(self.store()), &FileSource::new(self.swarm_store()), config).unwrap()
+        carry(&organs, &FileSource::new(self.store()), &FileSource::new(self.swarm_store()), config).unwrap()
     }
 
     fn go(&self) -> Outcome {
@@ -260,8 +363,9 @@ impl Rig {
         self.chat.sent.borrow().iter().map(|sent| sent.text.clone()).collect()
     }
 
+    /// Lines written to her child, her start line included.
     fn turns(&self) -> usize {
-        self.connector.requests.borrow().len()
+        self.model.requests.borrow().len()
     }
 
     /// The reason the only closing resolution of the only Persona run gives.
@@ -280,7 +384,7 @@ fn operator_says(seq: u64, text: &str) -> ChatDelivery {
 }
 
 #[test]
-fn no_grant_no_connector_call() {
+fn no_grant_no_session() {
     for setup in ["no store", "brake held", "swarm absent", "swarm held"] {
         let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[("operator", "hi")])]);
         match setup {
@@ -308,7 +412,7 @@ fn a_start_the_heartbeat_did_not_make_opens_nothing_and_touches_nothing() {
 }
 
 #[test]
-fn the_gate_is_read_again_before_every_connector_call() {
+fn the_gate_is_read_again_before_every_say_and_every_line_told() {
     let rig = Rig::new(vec![operator_says(1, "one")], &[says(&[("operator", "a")]), says(&[("operator", "b")])]);
     let (store, deliveries) = (rig.store(), rig.chat.deliveries.clone());
     *rig.chat.on_send.borrow_mut() = Some(Box::new(move || {
@@ -363,7 +467,7 @@ fn a_held_swarm_envelope_stops_a_running_turn() {
         deliveries.borrow_mut().push(operator_says(2, "two"));
     }));
     let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
-    assert_eq!((rig.turns(), answered), (1, 1), "the second turn makes no connector call");
+    assert_eq!((rig.turns(), answered), (1, 1), "the held brake ends the session before another line is told");
     assert_eq!(failure, Some(Failure::Held(HeldReason::BrakeHeld)));
 }
 
@@ -372,7 +476,7 @@ fn a_hold_placed_while_the_model_answers_stops_the_send_whichever_brake_it_is() 
     for swarm_wide in [true, false] {
         let rig = Rig::new(vec![operator_says(1, "one")], &[says(&[("operator", "a"), ("swarm", "b")])]);
         let (swarm, store) = (rig.swarm_store(), rig.store());
-        *rig.connector.during.borrow_mut() = Some(Box::new(move || {
+        *rig.model.during.borrow_mut() = Some(Box::new(move || {
             if swarm_wide {
                 SwarmWriter::open(&swarm).unwrap().set_brake(false, at(0), "op").unwrap();
             } else {
@@ -522,26 +626,13 @@ fn the_decoder_holds_the_bounds_the_schema_states() {
 }
 
 #[test]
-fn the_start_takes_at_most_max_turns_while_deliveries_keep_arriving() {
-    let replies: Vec<_> = (0..8).map(|_| says(&[("swarm", "x")])).collect();
-    let rig = Rig::new(vec![operator_says(1, "a")], &replies);
-    let (deliveries, next) = (rig.chat.deliveries.clone(), Cell::new(1));
-    *rig.connector.during.borrow_mut() = Some(Box::new(move || {
-        next.set(next.get() + 1);
-        deliveries.borrow_mut().push(operator_says(next.get(), "more"));
-    }));
-    let Outcome::Served { answered, failure, .. } = rig.go_with(&Config { max_turns: 3, ..config() }) else { panic!("served") };
-    assert_eq!((rig.turns(), answered, failure), (3, 3, None));
-}
-
-#[test]
 fn an_unprompted_start_takes_one_turn_whoever_started_it() {
-    let ring = Rig::new(vec![], &[says(&[("swarm", "x")]), says(&[("swarm", "y")])]);
+    let ring = Rig::new(vec![], &[says(&[("swarm", "x")])]);
     let Outcome::Served { answered, .. } = ring.go() else { panic!("served") };
     assert_eq!((ring.turns(), answered), (1, 1), "an unprompted start takes one turn and stops with nothing pending");
     assert_eq!(ring.mind.ids(K::Run).len(), 1, "the unit carries the one run the heartbeat opened");
 
-    let waker = Rig::new(vec![], &[says(&[("swarm", "good morning")]), says(&[("swarm", "again")])]);
+    let waker = Rig::new(vec![], &[says(&[("swarm", "good morning")])]);
     waker.mind.committed(vec![run("woken", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
     // Past the launch grace: only the unit being this process keeps the holder live.
     waker.clock.0.set(600_000);
@@ -574,7 +665,7 @@ fn a_repeat_after_a_failed_send_reuses_the_request_ids() {
 }
 
 #[test]
-fn a_persona_that_is_absent_or_a_connector_that_fails_fails_the_turn() {
+fn a_persona_that_is_absent_or_a_session_that_fails_fails_the_start() {
     let absent = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
     absent.persona.0.set(true);
     let Outcome::Served { failure, .. } = absent.go() else { panic!("served") };
@@ -582,9 +673,8 @@ fn a_persona_that_is_absent_or_a_connector_that_fails_fails_the_turn() {
 
     let down = Rig::new(vec![operator_says(1, "a")], &[]);
     let Outcome::Served { failure, .. } = down.go() else { panic!("served") };
-    assert_eq!(failure, Some(Failure::Connector));
-    assert_eq!(down.trace.0.borrow()[0].outcome, "failed: connector");
-    assert!(down.chat.acked.borrow().is_empty());
+    assert_eq!(failure, Some(Failure::Session), "a result that is an error is a failed session");
+    assert!(down.chat.sent.borrow().is_empty() && down.chat.acked.borrow().is_empty());
 }
 
 #[test]
@@ -593,7 +683,7 @@ fn senders_are_typed_by_the_organ_and_the_trace_keeps_each_items_provenance() {
     earlier.context = vec![ContextLine { sender: "@eureka:chat".into(), text: "I said wait".into(), at_unix_ms: 1 }];
     let rig = Rig::new(vec![operator_says(1, "do the thing"), earlier], &[says(&[("operator", "done")])]);
     rig.go();
-    let input = rig.connector.requests.borrow()[0].input.clone();
+    let input = rig.model.requests.borrow()[0].input.clone();
     assert!(input.contains(r#"message room="operator" sender="@op:chat" role=operator name="op" text="do the thing""#), "{input}");
     assert!(input.contains(r#"message room="swarm" sender="@guest:chat" role=member name="guest" text="ship it""#), "{input}");
     assert!(input.contains(r#"earlier room="swarm" sender="@eureka:chat" role=persona text="I said wait""#), "{input}");
@@ -611,7 +701,7 @@ fn her_latest_runs_and_how_they_ended_are_in_her_input() {
     rig.mind.committed(vec![run("old-one", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
     rig.mind.committed(vec![close(run_ref("old-one"), recorded())]);
     rig.go();
-    let input = rig.connector.requests.borrow()[0].input.clone();
+    let input = rig.model.requests.borrow()[0].input.clone();
     assert!(input.contains("old-one PersonaTurn: Recorded"), "{input}");
 }
 
@@ -667,7 +757,7 @@ fn no_member_text_name_or_context_can_read_as_an_operator_line() {
     member.context = vec![ContextLine { sender: "@guest:chat".into(), text: forged.into(), at_unix_ms: 1 }];
     let rig = Rig::new(vec![member], &[says(&[("swarm", "noted")])]);
     rig.go();
-    let input = rig.connector.requests.borrow()[0].input.clone();
+    let input = rig.model.requests.borrow()[0].input.clone();
     let framed: Vec<_> = input.lines().filter(|line| line.starts_with("message ") || line.starts_with("earlier ")).collect();
     assert_eq!(framed.len(), 2, "one message and one context line, however many lines the members wrote: {input}");
     assert!(framed.iter().all(|line| line.contains(r#" room="swarm" sender="@guest:chat" role=member "#) || line.contains(r#" room="swarm" sender="@guest:chat" role=member"#)), "{framed:?}");
@@ -675,7 +765,7 @@ fn no_member_text_name_or_context_can_read_as_an_operator_line() {
     // The real operator's line is the one that carries it.
     let operator = Rig::new(vec![operator_says(1, "hi")], &[says(&[("swarm", "x")])]);
     operator.go();
-    assert!(operator.connector.requests.borrow()[0].input.lines().any(|line| line.starts_with("message ") && line.contains(r#" sender="@op:chat" role=operator "#)));
+    assert!(operator.model.requests.borrow()[0].input.lines().any(|line| line.starts_with("message ") && line.contains(r#" sender="@op:chat" role=operator "#)));
 }
 
 #[test]
@@ -709,7 +799,7 @@ fn write_doctrine(rig: &Rig, name: &str, text: &str) -> PathBuf {
 }
 
 fn instructions_of(rig: &Rig) -> String {
-    rig.connector.requests.borrow()[0].instructions.clone()
+    rig.model.requests.borrow()[0].instructions.clone()
 }
 
 #[test]
@@ -726,24 +816,24 @@ fn doctrine_files_lead_the_instructions_in_the_configured_order_ahead_of_the_per
 }
 
 #[test]
-fn doctrine_is_read_at_every_turn_start() {
+fn doctrine_is_read_at_every_process_start() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "x")]), says(&[])]);
     let path = write_doctrine(&rig, "d.md", "BEFORE-BUMP");
     let (deliveries, bump) = (rig.chat.deliveries.clone(), path.clone());
-    *rig.connector.during.borrow_mut() = Some(Box::new(move || {
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
         if deliveries.borrow().len() == 1 {
             deliveries.borrow_mut().push(operator_says(2, "b"));
             std::fs::write(&bump, "AFTER-BUMP").unwrap();
         }
     }));
-    rig.go_with(&Config { doctrine: vec![path], max_turns: 3, ..config() });
-    let requests = rig.connector.requests.borrow();
+    rig.go_with(&Config { doctrine: vec![path], ..config() });
+    let requests = rig.model.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert!(requests[0].instructions.contains("BEFORE-BUMP") && requests[1].instructions.contains("AFTER-BUMP") && !requests[1].instructions.contains("BEFORE-BUMP"));
 }
 
 #[test]
-fn a_missing_doctrine_file_fails_the_turn_before_the_connector_is_called() {
+fn a_missing_doctrine_file_fails_the_start_before_a_lease_is_asked() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "never")])]);
     let present = write_doctrine(&rig, "ok.md", "x");
     let Outcome::Served { answered, failure, .. } = rig.go_with(&Config { doctrine: vec![present, rig.dir.path().join("absent.md")], ..config() }) else { panic!("served") };
@@ -805,7 +895,7 @@ fn the_campaigns_in_force_are_listed_and_are_the_schemas_campaign_enum() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
     rig.mind.committed(vec![campaign_named("zeta", "Zeta work")]);
     rig.go();
-    let requests = rig.connector.requests.borrow();
+    let requests = rig.model.requests.borrow();
     let text = &requests[0].instructions;
     assert!(text.contains(&format!("- {CAMPAIGN}: Eureka body\n")) && text.contains("- zeta: Zeta work\n"), "{text}");
     assert!(text.find(CAMPAIGN).unwrap() < text.find("zeta").unwrap(), "listed by slug");
@@ -827,7 +917,7 @@ fn with_no_campaign_in_force_the_instructions_say_so_and_the_schema_allows_no_st
     let mut rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
     rig.mind = TestMind::without_campaigns();
     rig.go();
-    let requests = rig.connector.requests.borrow();
+    let requests = rig.model.requests.borrow();
     assert!(requests[0].instructions.contains("No campaign is in force"), "{}", requests[0].instructions);
     assert!(!requests[0].instructions.contains("- eureka-body:"));
     let schema: serde_json::Value = serde_json::from_str(&requests[0].output_schema_json).unwrap();
@@ -859,7 +949,7 @@ fn open_follow_up(label: &str, source: &PipelineRef, item: &str) -> PipelineDocu
 
 fn first_input(rig: &Rig) -> String {
     rig.go();
-    let requests = rig.connector.requests.borrow();
+    let requests = rig.model.requests.borrow();
     requests[0].input.clone()
 }
 
@@ -1052,7 +1142,7 @@ fn the_turn_input_carries_the_usage_line_and_the_swarm_aim_and_a_high_usage_chan
         let _ = permille;
         let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
         assert_eq!((failure, answered), (None, 1));
-        let input = rig.connector.requests.borrow()[0].input.clone();
+        let input = rig.model.requests.borrow()[0].input.clone();
         assert!(input.contains("Plan usage: five_hour 42.3% allowed"), "{input}");
         assert!(input.contains("aims to have used about 90% of the weekly allowance at reset; nothing enforces it"), "{input}");
         assert!(input.contains("Tempo: not yet read."), "{input}");
@@ -1060,19 +1150,10 @@ fn the_turn_input_carries_the_usage_line_and_the_swarm_aim_and_a_high_usage_chan
 }
 
 #[test]
-fn a_usage_readout_that_cannot_be_had_is_said_and_the_turn_goes_on() {
-    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[("operator", "hi")])]);
-    rig.connector.readout_fails.set(true);
-    let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
-    assert_eq!((failure, answered), (None, 1), "usage is display only");
-    assert!(rig.connector.requests.borrow()[0].input.contains("Plan usage: unavailable."));
-}
-
-#[test]
 fn the_turn_is_one_tool_less_call_constrained_to_the_reply_schema_with_her_rooms() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[])]);
     rig.go();
-    let requests = rig.connector.requests.borrow();
+    let requests = rig.model.requests.borrow();
     assert_eq!(requests[0].caller, INSTANCE);
     assert!(requests[0].instructions.contains("You are Eureka."));
     let schema: serde_json::Value = serde_json::from_str(&requests[0].output_schema_json).unwrap();
@@ -1086,7 +1167,7 @@ fn a_members_dm_is_answered_in_its_room_and_no_other_unconfigured_room_is() {
     let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
     assert_eq!((failure, answered), (None, 1));
     assert_eq!(rig.chat.sent.borrow()[0].room_alias, dm);
-    let request = &rig.connector.requests.borrow()[0];
+    let request = &rig.model.requests.borrow()[0];
     let schema: serde_json::Value = serde_json::from_str(&request.output_schema_json).unwrap();
     assert_eq!(schema["properties"]["say"]["items"]["properties"]["room"]["enum"], json!(["swarm", "usage", "operator", dm]));
     assert!(request.input.contains(dm), "the DM's room is among the rooms she is told she may speak in");
@@ -1115,7 +1196,7 @@ fn deliveries_from_different_dm_rooms_are_never_in_one_turn() {
     let rig = Rig::new(pending, &replies);
     let Outcome::Served { failure, answered, .. } = rig.go() else { panic!("served") };
     assert_eq!((failure, answered), (None, 4));
-    let inputs: Vec<String> = rig.connector.requests.borrow().iter().map(|request| request.input.clone()).collect();
+    let inputs: Vec<String> = rig.model.requests.borrow().iter().map(|request| request.input.clone()).collect();
     let texts = ["secret-a", "hi-b", "public-c", "more-a"];
     for (turn, input) in inputs.iter().enumerate() {
         for (other, text) in texts.iter().enumerate() {
@@ -1139,7 +1220,8 @@ fn outcomes_and_failures_read_as_one_line_each_without_values() {
         Failure::Persona,
         Failure::Doctrine,
         Failure::DoctrineTooLarge,
-        Failure::Connector,
+        Failure::Lease,
+        Failure::Session,
         Failure::Undecodable,
         Failure::RoomNotAllowed,
         Failure::Send,
@@ -1160,7 +1242,7 @@ fn a_turn_is_named_by_its_run_and_its_number() {
     rig.mind.committed(vec![run("woken", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
     rig.clock.0.set(600_000);
     let (deliveries, next) = (rig.chat.deliveries.clone(), Cell::new(1));
-    *rig.connector.during.borrow_mut() = Some(Box::new(move || {
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
         next.set(next.get() + 1);
         if next.get() < 3 {
             deliveries.borrow_mut().push(operator_says(next.get(), "more"));
@@ -1168,7 +1250,7 @@ fn a_turn_is_named_by_its_run_and_its_number() {
     }));
     let Outcome::Served { run: carried, answered, .. } = rig.start_with(&config()) else { panic!("served") };
     assert_eq!((carried, answered), (run_ref("woken"), 2));
-    let ids: Vec<_> = rig.connector.requests.borrow().iter().map(|request| request.request_id.clone()).collect();
+    let ids: Vec<_> = rig.model.requests.borrow().iter().map(|request| request.request_id.clone()).collect();
     assert_eq!(ids, ["woken-t0", "woken-t1"]);
     let trace = rig.trace.0.borrow();
     assert_eq!(trace.iter().map(|record| (record.run.as_str(), record.turn)).collect::<Vec<_>>(), [("woken", 0), ("woken", 1)]);
@@ -1183,12 +1265,12 @@ fn the_persona_flags_are_taken_out_and_the_rest_is_left_for_the_shared_parser() 
     )
     .unwrap();
     assert_eq!(parsed.rooms, ["swarm", "usage", "operator"]);
-    assert_eq!((parsed.own_sender.as_str(), parsed.max_turns), ("@eureka:chat", MAX_TURNS_PER_START));
+    assert_eq!(parsed.own_sender.as_str(), "@eureka:chat");
     assert_eq!(parsed.operators, ["@op:chat", "@op2:chat"]);
     assert_eq!(parsed.minds, ["@eureka:chat", "@libby:chat"]);
     assert_eq!(rest, args("--instance eureka --endpoint rudp://10.0.0.1:1"));
-    let (two, _) = Config::from_args(&args("--rooms a --operator o --minds m --self-sender s --max-turns 2"), "usage").unwrap();
-    assert_eq!(two.max_turns, 2);
+    let (_, rest) = Config::from_args(&args("--rooms a --operator o --minds m --self-sender s --max-turns 2"), "usage").unwrap();
+    assert_eq!(rest, args("--max-turns 2"), "--max-turns is no persona flag: it is left for the shared parser, which refuses it");
     for bad in [
         "--rooms a --operator o --minds m",
         "--rooms a --operator o --self-sender s",
@@ -1222,7 +1304,7 @@ fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them(
     let (config, rest) = Config::from_args_and_env(&args("--instance eureka"), env, "usage").unwrap();
     assert_eq!(
         config,
-        Config { rooms: vec!["swarm".into(), "usage".into()], operators: vec!["@op:chat".into(), "@op2:chat".into()], minds: vec!["@libby:chat".into(), "@aqua:chat".into()], own_sender: "@eureka:chat".into(), max_turns: MAX_TURNS_PER_START, doctrine: vec![] }
+        Config { rooms: vec!["swarm".into(), "usage".into()], operators: vec!["@op:chat".into(), "@op2:chat".into()], minds: vec!["@libby:chat".into(), "@aqua:chat".into()], own_sender: "@eureka:chat".into(), model: String::new(), doctrine: vec![] }
     );
     assert_eq!(rest, ["--instance", "eureka"]);
     // A flag wins over its variable, one at a time.
@@ -1286,7 +1368,7 @@ fn a_self_runs_result_over_a_reasons_line_reaches_her_next_turn_whole() {
     assert!(result.len() > 1000 && result.len() < 3800);
     self_run_closed_with(&rig, "self-long", &result);
     rig.go();
-    let input = rig.connector.requests.borrow()[0].input.clone();
+    let input = rig.model.requests.borrow()[0].input.clone();
     assert!(input.contains("self-long SelfRun: Recorded"), "{input}");
     assert!(input.contains("    THE END OF MY REPORT"), "{input}");
     assert_eq!(input.matches("    line of my report").count(), 150);
@@ -1358,7 +1440,7 @@ fn outcome_of(rig: &Rig, subject: &str) -> Option<ResolutionOutcome> {
 }
 
 fn input_of(rig: &Rig, turn: usize) -> String {
-    rig.connector.requests.borrow()[turn].input.clone()
+    rig.model.requests.borrow()[turn].input.clone()
 }
 
 fn failure_of(outcome: Outcome) -> Option<Failure> {
@@ -1436,7 +1518,7 @@ fn an_ask_shown_earlier_can_be_taken_on_by_its_id() {
     let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "fork it")], &[first]);
     assert_eq!(failure_of(rig.go()), None);
     let id = memories(&rig).remove(0).0;
-    rig.connector.replies.borrow_mut().push_back(reply(&[], json!([]), json!([]), starting(json!(id))));
+    rig.model.replies.borrow_mut().push_back(reply(&[], json!([]), json!([]), starting(json!(id))));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "go"));
     assert_eq!(failure_of(rig.go()), None);
     let follow_ups = rig.mind.ids(K::FollowUp);
@@ -1454,14 +1536,14 @@ fn settling_an_ask_records_or_withdraws_it_with_the_reason() {
         { "item": ids[1], "outcome": "declined", "why": "not mine" },
         { "item": ids[2], "outcome": "wrong", "why": "misread" },
     ]);
-    rig.connector.replies.borrow_mut().push_back(reply(&[], json!([]), settle, json!(null)));
+    rig.model.replies.borrow_mut().push_back(reply(&[], json!([]), settle, json!(null)));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "status"));
     assert_eq!(failure_of(rig.go()), None);
     assert_eq!(outcome_of(&rig, &ids[0]), Some(ResolutionOutcome::Recorded { reason: "finished it".into() }));
     assert_eq!(outcome_of(&rig, &ids[1]), Some(ResolutionOutcome::Withdrawn { reason: "not mine".into() }));
     assert_eq!(outcome_of(&rig, &ids[2]), Some(ResolutionOutcome::Withdrawn { reason: "misread".into() }));
     // Settled asks leave the open list.
-    rig.connector.replies.borrow_mut().push_back(says(&[]));
+    rig.model.replies.borrow_mut().push_back(says(&[]));
     rig.chat.deliveries.borrow_mut().push(delivery(3, "swarm", "@op:chat", "again"));
     assert_eq!(failure_of(rig.go()), None);
     assert!(!input_of(&rig, 2).contains("Asked of you, not yet taken on"));
@@ -1491,7 +1573,7 @@ fn an_ask_cannot_be_settled_and_taken_on_in_one_reply() {
     let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "fork it")], &[first]);
     assert_eq!(failure_of(rig.go()), None);
     let id = memories(&rig).remove(0).0;
-    rig.connector.replies.borrow_mut().push_back(reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "x" }]), starting(json!(id))));
+    rig.model.replies.borrow_mut().push_back(reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "x" }]), starting(json!(id))));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "go"));
     assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable));
 }
@@ -1599,7 +1681,7 @@ fn a_mind_that_refuses_the_turns_documents_fails_the_turn_after_the_says_with_no
         clock: &rig.clock,
         host: "yggdrasil-host",
         chat: &rig.chat,
-        connector: &rig.connector,
+        connector: &rig.model,
         persona: &rig.persona,
         trace: &rig.trace,
         tempo: None,
@@ -1721,12 +1803,12 @@ fn responsibilities_of(input: &str) -> &str {
 }
 
 fn settle_enum(rig: &Rig, turn: usize) -> Vec<String> {
-    let schema: serde_json::Value = serde_json::from_str(&rig.connector.requests.borrow()[turn].output_schema_json).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&rig.model.requests.borrow()[turn].output_schema_json).unwrap();
     schema["properties"]["settle"]["items"]["properties"]["item"]["enum"].as_array().map(|ids| ids.iter().map(|id| id.as_str().unwrap().to_string()).collect()).unwrap_or_default()
 }
 
 fn about_enum(rig: &Rig, turn: usize) -> Vec<String> {
-    let schema: serde_json::Value = serde_json::from_str(&rig.connector.requests.borrow()[turn].output_schema_json).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&rig.model.requests.borrow()[turn].output_schema_json).unwrap();
     schema["properties"]["remember"]["items"]["properties"]["about"]["items"]["enum"].as_array().unwrap().iter().map(|who| who.as_str().unwrap().to_string()).collect()
 }
 
@@ -1775,8 +1857,8 @@ fn settling_and_taking_on_a_commitment() {
     let rig = Rig::new(vec![delivery(1, "swarm", libby, "plan")], &[plan()]);
     assert_eq!(failure_of(rig.go()), None);
     let id = memories(&rig).remove(0).0;
-    rig.connector.replies.borrow_mut().push_back(reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "integrated" }]), json!(null)));
-    rig.connector.replies.borrow_mut().push_back(says(&[]));
+    rig.model.replies.borrow_mut().push_back(reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "integrated" }]), json!(null)));
+    rig.model.replies.borrow_mut().push_back(says(&[]));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", libby, "status"));
     assert_eq!(failure_of(rig.go()), None);
     assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "integrated".into() }));
@@ -1787,8 +1869,8 @@ fn settling_and_taking_on_a_commitment() {
     let rig = Rig::new(vec![delivery(1, "swarm", libby, "plan")], &[plan()]);
     assert_eq!(failure_of(rig.go()), None);
     let id = memories(&rig).remove(0).0;
-    rig.connector.replies.borrow_mut().push_back(reply(&[], json!([]), json!([]), starting(json!(id))));
-    rig.connector.replies.borrow_mut().push_back(says(&[]));
+    rig.model.replies.borrow_mut().push_back(reply(&[], json!([]), json!([]), starting(json!(id))));
+    rig.model.replies.borrow_mut().push_back(says(&[]));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", libby, "go"));
     assert_eq!(failure_of(rig.go()), None);
     let follow_ups = rig.mind.ids(K::FollowUp);
@@ -1933,7 +2015,7 @@ fn nine_short_asks_are_all_shown_with_ids_and_the_oldest_can_be_settled() {
     assert_eq!(failure_of(rig.go()), None);
     let ids: Vec<String> = memories(&rig).into_iter().map(|(id, _)| id).collect();
     assert_eq!(ids.len(), 9);
-    rig.connector.replies.borrow_mut().push_back(reply(&[], json!([]), json!([{ "item": ids[0], "outcome": "done", "why": "did it" }]), json!(null)));
+    rig.model.replies.borrow_mut().push_back(reply(&[], json!([]), json!([{ "item": ids[0], "outcome": "done", "why": "did it" }]), json!(null)));
     rig.chat.deliveries.borrow_mut().push(delivery(3, "swarm", "@op:chat", "status"));
     assert_eq!(failure_of(rig.go()), None);
     let input = input_of(&rig, 2);
