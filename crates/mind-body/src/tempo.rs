@@ -139,7 +139,8 @@ fn control(
     }) else {
         return held(state);
     };
-    if r.resets_at_ms.abs_diff(state.window_resets_at_ms) > RESETS_JITTER_MS {
+    let rolled = r.resets_at_ms.abs_diff(state.window_resets_at_ms) > RESETS_JITTER_MS;
+    if rolled {
         state.integral = 0.0;
         state.last_used_permille = r.used_permille;
         state.last_observed_at_ms = r.observed_at_ms;
@@ -179,7 +180,7 @@ fn control(
     }
     let before = rate(state.integral) + state.carry_per_h;
     let winding = (before >= high && error > 0.0) || (before <= low && error < 0.0);
-    if !winding {
+    if !winding && !rolled {
         state.integral += error * dt_h;
     }
     let beat = beat_of(rate(state.integral) + state.carry_per_h);

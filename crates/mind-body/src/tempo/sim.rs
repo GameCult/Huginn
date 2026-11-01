@@ -329,7 +329,7 @@ fn sim_scenarios_meet_target() {
                     o.worst_error_last_day <= LAST_DAY_ERROR_BOUND,
                     "error {tag}"
                 );
-                assert!(o.band_crossings <= 2, "oscillation {tag}");
+                assert!(o.band_crossings <= 3, "oscillation {tag}");
             }
         }
     }

@@ -585,24 +585,19 @@ fn a_vote_beyond_the_beat_bounds_leaves_the_integral_alone() {
 #[test]
 fn a_short_vote_while_ahead_does_not_outlive_itself() {
     let mut s = Fallback::default();
-    let ahead = read(650, MID);
-    control(&T, &mut s, Some(&ahead), MID, 900, false);
+    let at = |s: &mut Fallback, ms: i64, voted: bool| {
+        control(&T, s, Some(&read(650, MID + ms)), MID + ms, 900, voted)
+    };
+    at(&mut s, 0, false);
     s.rate_per_h = 60.0;
-    let t = MID + HOUR;
-    control(&T, &mut s, Some(&ahead), t, 900, true);
-    near(
-        control(&T, &mut s, Some(&ahead), t + 60_000, 900, false),
-        60,
-    );
+    at(&mut s, HOUR, true);
+    near(at(&mut s, HOUR + 60_000, false), 60);
     // 200 permille ahead of the trajectory: two hours on it is back to the
     // slowest beat, not the 60 s it was voted.
     for i in 2..=121 {
-        control(&T, &mut s, Some(&ahead), t + i * 60_000, 900, false);
+        at(&mut s, HOUR + i * 60_000, false);
     }
-    assert_eq!(
-        control(&T, &mut s, Some(&ahead), t + 122 * 60_000, 900, false),
-        FALLBACK_MAX_S
-    );
+    assert_eq!(at(&mut s, HOUR + 122 * 60_000, false), FALLBACK_MAX_S);
 }
 
 #[test]
