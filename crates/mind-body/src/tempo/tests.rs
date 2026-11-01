@@ -384,12 +384,21 @@ fn no_reading_holds() {
         control(&T, &mut s, None, MID + 2 * 60_000, 900, false),
         held
     );
+    // Observed just before the window it names began: not its reading.
     let stale = Reading {
-        observed_at_ms: RESETS - WINDOW_MS - 1,
+        observed_at_ms: RESETS - WINDOW_MS - 60_000,
+        used_permille: 900,
         ..live
     };
     assert_eq!(
-        control(&T, &mut s, Some(&stale), MID + 3 * 60_000, 900, false),
+        control(
+            &T,
+            &mut s,
+            Some(&stale),
+            RESETS - WINDOW_MS + 60_000,
+            900,
+            false
+        ),
         held
     );
     let expired = Reading {
@@ -491,7 +500,7 @@ fn a_window_that_ends_this_instant_is_expired() {
     let held = control(&T, &mut s, Some(&live), MID, 900, false);
     let ending = Reading {
         resets_at_ms: MID + 60_000,
-        observed_at_ms: MID + 60_000 - WINDOW_MS,
+        observed_at_ms: MID,
         used_permille: 0,
     };
     // At its reset instant the window holds the last beat instead of steering.
@@ -524,6 +533,10 @@ fn a_frozen_reading_does_not_wind_up() {
     // integrates, however long the connector keeps replaying it.
     at(&mut s, 1);
     assert!(s.integral > 100.0 && s.integral < 200.0, "{}", s.integral);
+    // Observed exactly two hours ago still counts; the horizon is not shorter.
+    let before = s.integral;
+    at(&mut s, 2);
+    assert!(s.integral > before, "{} then {}", before, s.integral);
     let (held, integral) = (at(&mut s, 3), s.integral);
     assert_eq!(at(&mut s, 48), held);
     assert_eq!(at(&mut s, 80), held);
@@ -549,6 +562,17 @@ fn one_millisecond_of_resets_jitter_is_the_same_window() {
     }
     assert!(steady.integral > 100.0);
     assert!((jittery.integral - steady.integral).abs() < 1e-3);
+    // The jitter allowed is a minute, to the millisecond.
+    for (jitter, same) in [(60_000, true), (60_001, false)] {
+        let mut s = Fallback::default();
+        control(&T, &mut s, Some(&read(300, MID)), MID, 900, false);
+        let later = Reading {
+            resets_at_ms: RESETS + jitter,
+            ..read(300, MID + HOUR)
+        };
+        control(&T, &mut s, Some(&later), MID + HOUR, 900, false);
+        assert_eq!(s.integral > 0.0, same, "{jitter} ms");
+    }
     // A window a week on is not the same window.
     let now = RESETS + HOUR;
     let next = Reading {
@@ -659,4 +683,20 @@ fn a_clock_that_steps_back_integrates_and_fades_nothing_backwards() {
         false,
     );
     assert!(s.carry_per_h.abs() <= carry.abs(), "the carry only fades");
+}
+
+#[test]
+fn a_released_vote_that_saturates_the_output_does_not_wind_the_integral() {
+    let mut s = Fallback::default();
+    let at = |s: &mut Fallback, ms: i64, voted: bool| {
+        control(&T, s, Some(&read(300, MID + ms)), MID + ms, 900, voted)
+    };
+    at(&mut s, 0, false);
+    s.rate_per_h = 60.0;
+    at(&mut s, 60_000, true);
+    // Behind the trajectory, the voted rate is the fastest the controller can
+    // answer and the error pushes further: the carry is part of the output the
+    // integral must not wind against.
+    at(&mut s, 120_000, false);
+    assert_eq!(s.integral, 0.0);
 }
