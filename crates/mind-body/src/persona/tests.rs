@@ -2392,11 +2392,12 @@ impl Child for Scripted {
 }
 
 /// A scripted child whose entries also move the shared clock before they are handed out, and whose first
-/// read brings in `arriving`: a turn shorter than a poll, or longer, as the entry says.
+/// delivery in `arriving` reaches the mouth once that many lines have been written.
 struct Timed {
     writes: Rc<RefCell<Vec<String>>>,
     script: VecDeque<(usize, i64, Read)>,
-    arriving: Option<(Deliveries, Vec<ChatDelivery>)>,
+    deliveries: Deliveries,
+    arriving: Vec<(usize, ChatDelivery)>,
     now: Rc<Cell<i64>>,
     asked: u32,
 }
@@ -2411,9 +2412,10 @@ impl Child for Timed {
     fn next(&mut self, _timeout: StdDuration) -> Read {
         self.asked += 1;
         assert!(self.asked < 3000, "the loop never ended");
-        if let Some((deliveries, more)) = self.arriving.take() {
-            deliveries.borrow_mut().extend(more);
-        }
+        let written = self.writes.borrow().len();
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.arriving).into_iter().partition(|(need, _)| written >= *need);
+        self.arriving = later;
+        self.deliveries.borrow_mut().extend(due.into_iter().map(|(_, delivery)| delivery));
         match self.script.front() {
             Some((need, _, _)) if self.writes.borrow().len() >= *need => {
                 let (_, advance_ms, read) = self.script.pop_front().unwrap();
@@ -2545,7 +2547,8 @@ fn a_second_refusal_before_the_retell_is_written_keeps_the_first_batch_to_be_tol
             (3, 0, result_line(reply_saying("for three, four and five"))),
             (3, 0, Read::Exited(Some(0))),
         ]),
-        arriving: Some((rig.chat.deliveries.clone(), vec![operator_says(5, "five")])),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![(0, operator_says(5, "five"))],
         now: rig.clock.now.clone(),
         asked: 0,
     };
@@ -2558,8 +2561,9 @@ fn a_second_refusal_before_the_retell_is_written_keeps_the_first_batch_to_be_tol
     assert_eq!(acked, [5], "acked once, after the merged batch was answered: {acked:?}");
 }
 
-/// The retold 3 and 4 is refused each time while 5 is answered between: an answer does not clear a batch's
-/// refusals, so its third refusal ends the session as a failed turn does, and nothing past 3 is acked.
+/// The retold 3 and 4 is refused each time while a delivery told around it is answered: an answer does not clear
+/// a batch's refusals, so its third refusal ends the session as a failed turn does, and nothing past 3 is acked.
+/// Each retold line is followed at once by a new delivery's, so the refusals are never three results in a row.
 #[test]
 fn a_batch_refused_between_answers_ends_the_session_at_its_third_refusal_with_no_ack_past_it() {
     let rig = Rig::new(vec![operator_says(3, "three"), operator_says(4, "four")], &[]);
@@ -2569,23 +2573,24 @@ fn a_batch_refused_between_answers_ends_the_session_at_its_third_refusal_with_no
         script: VecDeque::from([
             (1, 6_000, echo_line()),
             (2, 0, result_line(serde_json::Value::Null)),
-            (2, 6_000, echo_line()),
+            (2, 0, echo_line()),
             (3, 0, result_line(reply_saying("for five"))),
             (3, 0, echo_line()),
-            (3, 0, result_line(serde_json::Value::Null)),
-            (4, 6_000, echo_line()),
             (4, 0, result_line(serde_json::Value::Null)),
-            (5, 6_000, echo_line()),
+            (4, 0, echo_line()),
+            (4, 0, result_line(reply_saying("for six"))),
+            (5, 0, echo_line()),
             (5, 0, result_line(serde_json::Value::Null)),
             (5, 0, Read::Exited(Some(0))),
         ]),
-        arriving: Some((rig.chat.deliveries.clone(), vec![operator_says(5, "five")])),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![(0, operator_says(5, "five")), (3, operator_says(6, "six"))],
         now: rig.clock.now.clone(),
         asked: 0,
     };
     let (outcome, acked) = carry_children(&rig, vec![child]);
     let Outcome::Served { failure, .. } = outcome else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
-    assert_eq!(rig.sent_texts(), ["for five"]);
+    assert_eq!(rig.sent_texts(), ["for five", "for six"]);
     assert_eq!(acked, Vec::<u64>::new(), "3 and 4 were never answered: {acked:?}");
 }
