@@ -18,7 +18,7 @@ use eureka_pipeline::PipelineKind;
 use huginn_mind::{PipelineFacts, PipelineStatusSummary};
 
 use crate::persona;
-use crate::queue::{MindPort, any_of, headers, in_force, of_kind};
+use crate::queue::{MindPort, any_of, headers, in_force, of_kind, on_hold};
 
 /// The owner a follow-up names when it is a brief for her Self.
 pub const OWNER: &str = "self-run";
@@ -65,9 +65,19 @@ fn open_briefs(mind: &dyn MindPort) -> Result<Vec<Brief>> {
     Ok(briefs)
 }
 
-/// Her briefs in force that the session has not been told.
+/// Her briefs in force that the session has not been told and no open question
+/// holds: a held brief is neither claimed nor told until its question is
+/// answered or withdrawn.
 pub fn derive(mind: &dyn MindPort, told: &HashSet<String>) -> Result<Vec<Brief>> {
-    Ok(open_briefs(mind)?.into_iter().filter(|brief| !told.contains(&brief.id)).collect())
+    Ok(derive_counting_held(mind, told)?.0)
+}
+
+/// `derive`, and how many of her briefs in force an open question holds.
+pub fn derive_counting_held(mind: &dyn MindPort, told: &HashSet<String>) -> Result<(Vec<Brief>, usize)> {
+    let holds = on_hold(mind)?;
+    let (held, free): (Vec<Brief>, Vec<Brief>) =
+        open_briefs(mind)?.into_iter().partition(|brief| holds.iter().any(|item| item.kind == PipelineKind::FollowUp && item.id.0 == brief.id));
+    Ok((free.into_iter().filter(|brief| !told.contains(&brief.id)).collect(), held.len()))
 }
 
 /// Her briefs in force that a closed run claimed, with that run's id: a list for

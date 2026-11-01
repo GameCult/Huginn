@@ -13,8 +13,10 @@
 //! Self holds briefs (`inbox::derive`) is a Self run claiming them, in place of
 //! her Persona turn: a session that ended with a brief open, or a brief admitted
 //! after its flush, is never an orphan, and a Self start takes the beat like any
-//! launch. A brief with an open question raised in it (the repetition breaker's
-//! trip) is not claimed until that question is answered. Nothing is metered here:
+//! launch. A brief an open question holds (raised in it, or in a run that claims it:
+//! the repetition breaker's trip holds the claims of the run it belongs to) is
+//! neither claimed nor told until that question is answered or withdrawn; other
+//! briefs are. Nothing is metered here:
 //! no meter and no model call.
 //!
 //! The heartbeat owns `heartbeat.cc` and is its only writer; Persona units read
@@ -40,7 +42,7 @@ use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 use crate::chat_client::{Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
-use crate::queue::{MindPort, any_of, citing, headers, in_force, of_kind};
+use crate::queue::{MindPort, any_of, citing, claims_of, headers, in_force, of_kind};
 use crate::self_run::inbox;
 use crate::tempo::{self, Standing};
 
@@ -565,6 +567,10 @@ fn launch(organs: &Organs, row: &Row, turn: RunTurn, claims: Vec<PipelineRef>) -
     Ok(match open_and_launch(&ports, request) {
         Ok(LaunchOutcome::Launched { run }) => Launched::Run(label_of(&run)),
         Ok(LaunchOutcome::Busy { .. }) => Launched::Busy,
+        Ok(LaunchOutcome::Tripped { run, question }) => {
+            let held = claims_of(row.seat.mind, &run).map_or(0, |claims| claims.len());
+            Launched::Refused(format!("tripped: {} holds the {held} claims of {}", question.id.0, run.id.0))
+        }
         Ok(_) => Launched::Refused("launch refused".into()),
         Err(error) => Launched::Refused(format!("launch failed: {error}")),
     })
@@ -574,27 +580,24 @@ fn launch(organs: &Organs, row: &Row, turn: RunTurn, claims: Vec<PipelineRef>) -
 const BRIEFS_PER_SELF_RUN: usize = 64;
 
 /// The briefs a Self run would claim for this Mind: those in force that no live
-/// Self run holds. None while a question is open in a brief of hers. A Self run
-/// claims up to `BRIEFS_PER_SELF_RUN` briefs and every run it ends empty counts
-/// against all of them, so one cause trips them together; a trip is the Mind's
-/// stop, one question for the cause, not one per brief. It lasts until the
-/// operator answers or withdraws that question, and the count starts afresh.
-fn claimable(row: &Row) -> Result<Vec<PipelineRef>> {
+/// Self run holds and no open question holds, and how many an open question
+/// holds. A Self run claims up to `BRIEFS_PER_SELF_RUN` briefs and every run it
+/// ends empty counts against all of them, so one cause trips them together; a
+/// trip holds the claims of its run, not the Mind, until the operator answers
+/// or withdraws its question, and the count starts afresh. `inbox::derive`
+/// reads `queue::on_hold`; nothing here decides what is held.
+fn claimable(row: &Row) -> Result<(Vec<PipelineRef>, usize)> {
     let mind = row.seat.mind;
     if !holders(mind, row.slug(), RunTurn::SelfRun)?.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
-    let tripped = headers(mind, &in_force(of_kind(PipelineKind::Question)))?
-        .into_iter()
-        .any(|header| matches!(header.facts, PipelineFacts::Question { raised_in: Some(item), .. } if item.kind == PipelineKind::FollowUp));
-    if tripped {
-        return Ok(Vec::new());
-    }
-    Ok(inbox::derive(mind, &HashSet::new())?
+    let (free, held) = inbox::derive_counting_held(mind, &HashSet::new())?;
+    let claims = free
         .into_iter()
         .map(|brief| PipelineRef { kind: PipelineKind::FollowUp, id: brief.id.as_str().into() })
         .take(BRIEFS_PER_SELF_RUN)
-        .collect())
+        .collect();
+    Ok((claims, held))
 }
 
 /// One poll.
@@ -700,10 +703,13 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     let mut passed: Vec<Standing> = standings.clone();
     while due && let Some(winner) = tempo::pick(&passed, beat_s) {
         // Her Self holds briefs: the beat is a Self run for them; otherwise a Persona turn.
-        let claims = claimable(&rows[winner]).unwrap_or_else(|error| {
+        let (claims, held) = claimable(&rows[winner]).unwrap_or_else(|error| {
             rows[winner].note = format!("briefs: {error}");
-            Vec::new()
+            (Vec::new(), 0)
         });
+        if held > 0 {
+            rows[winner].note = format!("{held} briefs held by open questions");
+        }
         let turn = if claims.is_empty() { RunTurn::PersonaTurn } else { RunTurn::SelfRun };
         match launch(organs, &rows[winner], turn, claims)? {
             Launched::Run(label) => {

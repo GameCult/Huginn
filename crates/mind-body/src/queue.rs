@@ -162,27 +162,55 @@ pub(crate) fn live_claims(mind: &dyn MindPort, instance: &Slug, ending: &[Pipeli
     Ok(claims)
 }
 
+/// The claims of the run `run`, resolved or not (a citation outlives its
+/// resolution). Empty when the mind has no such run.
+pub(crate) fn claims_of(mind: &dyn MindPort, run: &PipelineRef) -> Result<Vec<PipelineRef>> {
+    let one = Selection { keys: Some(vec![run.id.0.clone()]), ..of_kind(PipelineKind::Run) };
+    Ok(headers(mind, &one)?
+        .into_iter()
+        .flat_map(|header| match header.facts {
+            PipelineFacts::Run { claims, .. } => claims,
+            _ => Vec::new(),
+        })
+        .collect())
+}
+
+/// The items an in-force question holds: the one owner of the stop. A question
+/// raised in a run holds every claim of that run, the set that failed together;
+/// a question raised in anything else holds that item. The question's text is
+/// display only, and a held item is released by answering or withdrawing it.
+pub fn on_hold(mind: &dyn MindPort) -> Result<Vec<PipelineRef>> {
+    let mut held: Vec<PipelineRef> = Vec::new();
+    for header in headers(mind, &in_force(of_kind(PipelineKind::Question)))? {
+        if let PipelineFacts::Question { raised_in: Some(item), .. } = header.facts {
+            if item.kind == PipelineKind::Run {
+                held.extend(claims_of(mind, &item)?);
+            } else {
+                held.push(item);
+            }
+        }
+    }
+    Ok(held)
+}
+
 /// What may be worked, oldest first: the cut specs in force that no report
-/// answers, that no open question blocks, and that no live run claims. A run in
+/// answers, that no open question holds, and that no live run claims. A run in
 /// `ending` is one the caller closes in the same admission that opens the next,
 /// so it claims nothing here.
 pub fn queue(mind: &dyn MindPort, instance: &Slug, ending: &[PipelineRef]) -> Result<Vec<PipelineRef>> {
     let unreported = Selection { cited: Some(Incoming { role: "cut_spec".into(), exists: false }), ..in_force(of_kind(PipelineKind::CutSpec)) };
-    let mut blocked: Vec<PipelineRef> = Vec::new();
-    for header in headers(mind, &in_force(of_kind(PipelineKind::Question)))? {
-        if let PipelineFacts::Question { raised_in: Some(item), .. } = header.facts {
-            blocked.push(item);
-        }
-    }
+    let blocked = on_hold(mind)?;
     let claimed = live_claims(mind, instance, ending)?;
     Ok(headers(mind, &unreported)?.into_iter().map(|header| header.id).filter(|spec| !blocked.contains(spec) && !claimed.contains(spec)).collect())
 }
 
 /// Whether an item may still be launched on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Breaker {
     Clear,
-    Trip,
+    /// Tripped, and the trip belongs to `run`: the newest ended counted run on
+    /// the item, the run whose end completed the streak or the share.
+    Trip { run: PipelineRef },
 }
 
 /// The repetition breaker, derived from the documents that cite the item.
@@ -196,29 +224,34 @@ pub enum Breaker {
 /// withdrawn run never ran and is no run here. A counted run is ended when
 /// resolved or listed in `ending`, and is empty when no document of the set
 /// other than a run was admitted from its own admission up to the next counted
-/// run's (or to now). Trip when the last `CONSECUTIVE` ended runs are empty, or
+/// run's (or to now). Trip, naming the newest ended counted run, when the last `CONSECUTIVE` ended runs are empty, or
 /// `EMPTY_SHARE` of the last `WINDOW`. What else the mind admitted, such as a
 /// Persona turn's run or an unrelated ruling, cites nothing here and counts for
 /// nothing.
 pub fn breaker(mind: &dyn MindPort, item: &PipelineRef, ending: &[PipelineRef]) -> Result<Breaker> {
     let mut set = headers(mind, &Selection { cites: Some(citing(item, None)), ..Selection::default() })?;
     set.sort_by_key(|header| header.admission.ordinal);
-    let boundary = set
+    let asked_in_item = set
         .iter()
         .filter(|header| matches!(&header.facts, PipelineFacts::Question { raised_in: Some(raised), .. } if raised == item))
-        .map(|header| header.admission.ordinal)
-        .max();
+        .map(|header| header.admission.ordinal);
+    let asked_in_run = Selection {
+        cites: Some(citing(item, Some("claims"))),
+        cited: Some(Incoming { role: "raised_in".into(), exists: true }),
+        ..of_kind(PipelineKind::Run)
+    };
+    let boundary = asked_in_item.chain(headers(mind, &asked_in_run)?.into_iter().map(|run| run.admission.ordinal)).max();
     let after = |header: &&PipelineDocumentSummary| boundary.is_none_or(|boundary| header.admission.ordinal > boundary);
     let withdrawn =
         |run: &PipelineDocumentSummary| matches!(run.status, PipelineStatusSummary::Resolved { outcome: ResolutionOutcome::Withdrawn { .. }, .. });
-    // (admission ordinal, ended) of each counted run, oldest first.
-    let ran: Vec<(u64, bool)> = set
+    // (admission ordinal, ended, ref) of each counted run, oldest first.
+    let ran: Vec<(u64, bool, PipelineRef)> = set
         .iter()
         .filter(after)
         .filter(|header| {
             matches!(header.facts, PipelineFacts::Run { turn: RunTurn::SelfRun, operated_by: RunOperator::Mind, .. }) && !withdrawn(header)
         })
-        .map(|run| (run.admission.ordinal, matches!(run.status, PipelineStatusSummary::Resolved { .. }) || ending.contains(&run.id)))
+        .map(|run| (run.admission.ordinal, matches!(run.status, PipelineStatusSummary::Resolved { .. }) || ending.contains(&run.id), run.id.clone()))
         .collect();
     let ended: Vec<usize> = (0..ran.len()).filter(|index| ran[*index].1).collect();
     let considered: Vec<usize> = ended.iter().rev().take(WINDOW).copied().collect();
@@ -235,7 +268,10 @@ pub fn breaker(mind: &dyn MindPort, item: &PipelineRef, ending: &[PipelineRef]) 
         .collect();
     let consecutive = empty.len() >= CONSECUTIVE && empty[..CONSECUTIVE].iter().all(|empty| *empty);
     let share = empty.iter().filter(|empty| **empty).count() >= EMPTY_SHARE;
-    Ok(if consecutive || share { Breaker::Trip } else { Breaker::Clear })
+    Ok(match ended.last() {
+        Some(newest) if consecutive || share => Breaker::Trip { run: ran[*newest].2.clone() },
+        _ => Breaker::Clear,
+    })
 }
 
 #[cfg(test)]
@@ -262,7 +298,7 @@ mod tests {
 
     fn tripped(runs: &[bool]) -> bool {
         let (mind, item) = worked(runs);
-        breaker(&mind, &item, &[]).unwrap() == Breaker::Trip
+        matches!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip { .. })
     }
 
     #[test]
@@ -307,7 +343,7 @@ mod tests {
             mind.committed(vec![close(run_ref("third"), recorded())]);
             breaker(&mind, &item, &[]).unwrap()
         };
-        assert_eq!(after_a_run_by(RunOperator::Mind), Breaker::Trip, "hers, the third empty one");
+        assert!(matches!(after_a_run_by(RunOperator::Mind), Breaker::Trip { .. }), "hers, the third empty one");
         assert_eq!(after_a_run_by(RunOperator::Operator), Breaker::Clear, "his, counted for nothing");
     }
 
@@ -362,7 +398,7 @@ mod tests {
             ended_run(&mind, &item, "h", n, false);
             mind.committed(vec![close(run_ref(&format!("p{n}")), recorded())]);
         }
-        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip);
+        assert!(matches!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip { .. }));
     }
 
     #[test]
@@ -370,7 +406,7 @@ mod tests {
         let (mind, item) = worked(&[E, E]);
         mind.committed(vec![run("dying", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item))]);
         assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear, "open, it is not yet ended");
-        assert_eq!(breaker(&mind, &item, &[run_ref("dying")]).unwrap(), Breaker::Trip);
+        assert!(matches!(breaker(&mind, &item, &[run_ref("dying")]).unwrap(), Breaker::Trip { .. }));
         let instance = Slug(INSTANCE.into());
         assert!(queue(&mind, &instance, &[]).unwrap().iter().all(|spec| *spec != item), "it claims the item");
         assert!(queue(&mind, &instance, &[run_ref("dying")]).unwrap().contains(&item), "an ending run claims nothing");
@@ -387,7 +423,7 @@ mod tests {
         assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Clear, "the tenth empty run, but nine of them are before the question");
         ended_run(&mind, &item, "g", 1, false);
         ended_run(&mind, &item, "g", 2, false);
-        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip, "three empty runs after it");
+        assert!(matches!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip { .. }), "three empty runs after it");
     }
 
     #[test]
@@ -403,7 +439,7 @@ mod tests {
             ended_run(&mind, &item, "h", 2, false);
             breaker(&mind, &item, &[]).unwrap()
         };
-        assert_eq!(withdrawn_between(false), Breaker::Trip, "the withdrawn run is neither counted nor does it break the streak");
+        assert!(matches!(withdrawn_between(false), Breaker::Trip { .. }), "the withdrawn run is neither counted nor does it break the streak");
         assert_eq!(withdrawn_between(true), Breaker::Clear, "a document after the withdrawn run still lands in the first run's window");
     }
 
@@ -417,7 +453,7 @@ mod tests {
 
         let (mind, item) = worked(&[E, E, E]);
         mind.committed(vec![run("live", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item)), follow_up("with-next", &item)]);
-        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip, "the next run's batch is not the previous run's window");
+        assert!(matches!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip { .. }), "the next run's batch is not the previous run's window");
     }
 
     /// The adapter over the wire vocabulary, answered by a real mind.
@@ -469,7 +505,7 @@ mod tests {
         history_as(&mind, &spec_ref("x"), "x", &[E, E]);
         history_as(&mind, &spec_ref("y"), "y", &[E, E, E]);
         assert_eq!(breaker(&mind, &spec_ref("x"), &[]).unwrap(), Breaker::Clear);
-        assert_eq!(breaker(&mind, &spec_ref("y"), &[]).unwrap(), Breaker::Trip);
+        assert!(matches!(breaker(&mind, &spec_ref("y"), &[]).unwrap(), Breaker::Trip { .. }));
     }
 
     #[test]
@@ -500,6 +536,72 @@ mod tests {
         let other = Slug("another-instance".into());
         mind.committed(vec![run("again", RunTurn::SelfRun, RunOperator::Operator, &[spec_ref("a")])]);
         assert_eq!(queue(&mind, &other, &[]).unwrap().len(), 3, "claims are read for the instance asked");
+    }
+
+    #[test]
+    fn a_trip_names_the_newest_ended_counted_run() {
+        let (mind, item) = worked(&[E, E, E, E]);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip { run: run_ref("h3") });
+        mind.committed(vec![run("live", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item))]);
+        assert_eq!(breaker(&mind, &item, &[]).unwrap(), Breaker::Trip { run: run_ref("h3") }, "a run still open is not ended");
+        assert_eq!(breaker(&mind, &item, &[run_ref("live")]).unwrap(), Breaker::Trip { run: run_ref("live") }, "a run in ending is");
+    }
+
+    /// Two items claimed together by every run of a history; the last one ended empty.
+    fn bundle() -> (TestMind, PipelineRef, PipelineRef) {
+        let mind = TestMind::seeded();
+        mind.committed(vec![spec("a"), spec("b")]);
+        let (a, b) = (spec_ref("a"), spec_ref("b"));
+        for n in 0..3 {
+            mind.committed(vec![run(&format!("f{n}"), RunTurn::SelfRun, RunOperator::Mind, &[a.clone(), b.clone()])]);
+            mind.committed(vec![close(run_ref(&format!("f{n}")), recorded())]);
+        }
+        (mind, a, b)
+    }
+
+    #[test]
+    fn a_question_raised_in_a_run_holds_every_claim_of_it_until_answered_or_withdrawn() {
+        for withdraw in [false, true] {
+            let (mind, a, b) = bundle();
+            assert!(on_hold(&mind).unwrap().is_empty());
+            mind.committed(vec![question_in("fork", &run_ref("f2"))]);
+            let held = on_hold(&mind).unwrap();
+            assert!(held.contains(&a) && held.contains(&b) && held.len() == 2, "{held:?}: the claims of the resolved run");
+            assert_eq!(queue(&mind, &Slug(INSTANCE.into()), &[]).unwrap(), Vec::<PipelineRef>::new(), "queue reads the same hold");
+            let question = id("question", "fork");
+            if withdraw {
+                mind.committed(vec![close(reference(PipelineKind::Question, &question), withdrawn())]);
+            } else {
+                mind.committed(vec![ruling("answer", Some((&question, "A")))]);
+            }
+            assert!(on_hold(&mind).unwrap().is_empty(), "answered or withdrawn, nothing is held (withdrawn: {withdraw})");
+        }
+    }
+
+    #[test]
+    fn a_question_raised_in_anything_else_holds_that_item_alone() {
+        let (mind, a, b) = bundle();
+        mind.committed(vec![question_in("fork", &a)]);
+        assert_eq!(on_hold(&mind).unwrap(), vec![a], "the legacy shape: raised in the item, it holds the item and no claimant");
+        assert!(!on_hold(&mind).unwrap().contains(&b));
+    }
+
+    #[test]
+    fn answering_a_question_in_the_run_gives_every_claim_of_it_a_fresh_count() {
+        let (mind, a, b) = bundle();
+        assert_eq!(breaker(&mind, &a, &[]).unwrap(), Breaker::Trip { run: run_ref("f2") });
+        assert_eq!(breaker(&mind, &b, &[]).unwrap(), Breaker::Trip { run: run_ref("f2") });
+        mind.committed(vec![question_in("fork", &run_ref("f2"))]);
+        mind.committed(vec![ruling("answer", Some((&id("question", "fork"), "A")))]);
+        for item in [&a, &b] {
+            assert_eq!(breaker(&mind, item, &[]).unwrap(), Breaker::Clear, "counts only runs after f2");
+        }
+        for n in 0..3 {
+            mind.committed(vec![run(&format!("g{n}"), RunTurn::SelfRun, RunOperator::Mind, &[a.clone(), b.clone()])]);
+            mind.committed(vec![close(run_ref(&format!("g{n}")), recorded())]);
+            let expected = if n == 2 { Breaker::Trip { run: run_ref("g2") } } else { Breaker::Clear };
+            assert_eq!(breaker(&mind, &b, &[]).unwrap(), expected, "b has no question of its own and trips after three fresh empty runs, never before");
+        }
     }
 
     /// A daemon that is not there: the failure names no input, endpoint or

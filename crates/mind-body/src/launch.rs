@@ -3,8 +3,9 @@
 //! `open_and_launch` is the whole path, in this order: (0) the in-force runs of
 //! hers of the request's turn are read, a live one (its unit active, or
 //! admitted within `START_GRACE_S`) answers Busy and a dead one is to be closed
-//! Recorded; (1) every cut-spec claim must be in the queue; (2) no claim may
-//! trip the repetition breaker; (3) the run is admitted, in the one batch that
+//! Recorded; (1) every cut-spec claim must be in the queue; (2) no claim may be held by an open question, and none may
+//! trip the repetition breaker (a trip raises one question in the run whose end
+//! tripped it, which holds that run's claims); (3) the run is admitted, in the one batch that
 //! closes the dead holders, so liveness is decided by the in-force record alone
 //! and the unit table is only the evidence for a close; (4) the unit is started,
 //! only after that batch commits. The run is the grant (target invariant
@@ -28,7 +29,7 @@ use eureka_pipeline::{
 use huginn_mind::{MindRefusal, PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts};
 
 use crate::control::Grant;
-use crate::queue::{Breaker, MindPort, any_of, breaker, citing, headers, in_force, of_kind, queue};
+use crate::queue::{Breaker, MindPort, any_of, breaker, citing, claims_of, headers, in_force, of_kind, on_hold, queue};
 
 /// How long a run just admitted may have no active unit before its slot is
 /// treated as dead: `systemctl start --no-block` returns before the unit runs.
@@ -245,8 +246,9 @@ pub enum LaunchOutcome {
     NotQueued {
         item: PipelineRef,
     },
+    /// The trip belongs to `run`, the run whose end tripped it; `question` is raised in it.
     Tripped {
-        item: PipelineRef,
+        run: PipelineRef,
         question: PipelineRef,
     },
     /// The live holder of the request's turn, from step 0 or from admission.
@@ -344,16 +346,18 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
 
     if turn == RunTurn::SelfRun {
         let open = queue(ports.mind, &instance, &ending)?;
-        if let Some(item) = claims.iter().find(|claim| claim.kind == PipelineKind::CutSpec && !open.contains(claim)) {
+        let held = on_hold(ports.mind)?;
+        if let Some(item) = claims.iter().find(|claim| held.contains(claim) || (claim.kind == PipelineKind::CutSpec && !open.contains(claim))) {
             return Ok(LaunchOutcome::NotQueued { item: item.clone() });
         }
         for item in &claims {
-            if breaker(ports.mind, item, &ending)? == Breaker::Trip {
-                let question = PipelineDocument::Question(breaker_question(item, &label, now));
+            if let Breaker::Trip { run } = breaker(ports.mind, item, &ending)? {
+                let held = claims_of(ports.mind, &run)?.len();
+                let question = PipelineDocument::Question(breaker_question(item, &run, held, &label, now));
                 let id = PipelineRef { kind: PipelineKind::Question, id: key_of(&question)?.as_str().into() };
                 batch.push(question);
                 return Ok(match committed(ports.mind.admit(&agent, &label.0, batch)?) {
-                    Ok(()) => LaunchOutcome::Tripped { item: item.clone(), question: id },
+                    Ok(()) => LaunchOutcome::Tripped { run, question: id },
                     Err(declined) => LaunchOutcome::Refused(declined),
                 });
             }
@@ -429,22 +433,24 @@ fn breaker_label(label: &Label) -> Label {
     Label(format!("breaker-{}", label.0))
 }
 
-/// The question a tripped item raises, in the item's own campaign.
-fn breaker_question(item: &PipelineRef, label: &Label, now: DateTime<Utc>) -> PipelineQuestion {
+/// The question a trip raises, in the campaign of the claim that tripped: one
+/// per trip, raised in `run` and holding the `held` claims it claimed.
+fn breaker_question(claim: &PipelineRef, run: &PipelineRef, held: usize, label: &Label, now: DateTime<Utc>) -> PipelineQuestion {
     PipelineQuestion {
-        campaign: Slug(root_of(item).to_string()),
+        campaign: Slug(root_of(claim).to_string()),
         label: breaker_label(label),
-        title: "Repeated runs on one item admitted nothing".into(),
-        question:
-            "The last runs on this item left nothing that cites it, so it launches no more. Answering this reopens the item and starts a fresh count."
-                .into(),
+        title: "Repeated runs on the same work admitted nothing".into(),
+        question: format!(
+            "Run {} and the runs before it left nothing that cites the work it held (claims held: {held}), so none of it launches again. Answering or withdrawing this reopens every claim of that run with a fresh count.",
+            run.id.0
+        ),
         options: vec![
-            QuestionOption { label: "reopen".into(), text: "Rule on the item, which reopens it.".into() },
-            QuestionOption { label: "retire".into(), text: "Resolve the item so it is no longer worked.".into() },
+            QuestionOption { label: "reopen".into(), text: "Answer to reopen every claim of the run with a fresh count.".into() },
+            QuestionOption { label: "retire".into(), text: "Resolve the claims so they are no longer worked, and answer with this option.".into() },
         ],
         recommended: "reopen".into(),
         depends: vec![],
-        raised_in: Some(item.clone()),
+        raised_in: Some(run.clone()),
         asked_on: date(now),
     }
 }
@@ -853,12 +859,13 @@ mod tests {
         let before = rig.runs();
         let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]);
         let question = id("question", "breaker-mind-20261009T131500000Z");
-        assert_eq!(outcome, LaunchOutcome::Tripped { item: spec_ref("x"), question: reference(K::Question, &question) });
+        assert_eq!(outcome, LaunchOutcome::Tripped { run: run_ref("h2"), question: reference(K::Question, &question) });
         assert_eq!((rig.runs(), rig.started()), (before, 0));
         assert_eq!(rig.mind.ids(K::Question), vec![question.clone()]);
         let view = rig.mind.view(K::Question, &question).unwrap();
         let PipelineDocument::Question(asked) = &view.document else { panic!("not a question") };
-        assert_eq!((asked.raised_in.clone(), asked.campaign.0.as_str()), (Some(spec_ref("x")), CAMPAIGN));
+        assert_eq!((asked.raised_in.clone(), asked.campaign.0.as_str()), (Some(run_ref("h2")), CAMPAIGN), "raised in the run whose end tripped it");
+        assert!(asked.question.contains(&run_ref("h2").id.0) && asked.question.contains("claims held: 1"), "{}", asked.question);
         assert_eq!(view.admission.provenance.session.0, "mind-20261009T131500000Z");
         // Open, the question blocks the item.
         assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")]), LaunchOutcome::NotQueued { item: spec_ref("x") });
@@ -918,7 +925,27 @@ mod tests {
         let outcome = rig.launch(RunTurn::SelfRun, &[spec_ref("x")]);
         assert!(matches!(outcome, LaunchOutcome::Tripped { .. }), "{outcome:?}");
         assert!(!rig.in_force("dead"), "the trip's batch closes the dead run too");
+        let question = rig.mind.ids(K::Question).pop().expect("the trip asked");
+        let PipelineDocument::Question(asked) = rig.mind.view(K::Question, &question).unwrap().document else { panic!("not a question") };
+        assert_eq!(asked.raised_in, Some(run_ref("dead")), "the dead holder, closed in the same batch, is the run the question is raised in");
         assert_eq!((rig.runs(), rig.started()), (3, 0));
+    }
+
+    #[test]
+    fn the_gate_refuses_a_claim_an_open_question_holds_whatever_its_kind() {
+        let rig = Rig::new();
+        rig.mind.committed(vec![spec("x"), follow_up("brief", &spec_ref("x"))]);
+        let brief = reference(K::FollowUp, &id("follow_up", "brief"));
+        // A question raised in a run holds the follow-up that run claimed, though the follow-up is no cut spec.
+        rig.mind.committed(vec![run("failed", RunTurn::SelfRun, RunOperator::Mind, &[brief.clone(), spec_ref("x")])]);
+        rig.mind.committed(vec![close(run_ref("failed"), recorded())]);
+        rig.mind.committed(vec![question_in("fork", &run_ref("failed"))]);
+        let runs = rig.runs();
+        assert_eq!(rig.launch(RunTurn::SelfRun, std::slice::from_ref(&brief)), LaunchOutcome::NotQueued { item: brief.clone() });
+        assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")]), LaunchOutcome::NotQueued { item: spec_ref("x") }, "a cut spec held by a run-raised question");
+        assert_eq!((rig.runs(), rig.started()), (runs, 0), "nothing admitted, nothing started");
+        rig.mind.committed(vec![close(reference(K::Question, &id("question", "fork")), withdrawn())]);
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[brief]), LaunchOutcome::Launched { .. }), "withdrawn, the hold lifts");
     }
 
     /// The one source of every drawn case: splitmix64 from a fixed seed, so a

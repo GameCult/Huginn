@@ -114,7 +114,7 @@ mind_body::heartbeat: struct PersonaId # [derive (Clone , Debug , PartialEq , Eq
 mind_body::heartbeat: struct PollTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[at: DateTime < Utc >, tempo_s: u32, instances: Vec < InstanceTrace >, launches: Vec < String >]
 mind_body::heartbeat: struct Seat< 'a >  pub-fields[who: PersonaId, mind: & 'a dyn MindPort, chat: & 'a dyn Chat]
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Declined { Admission (MindRefusal) , Conflict , AlreadyAdmitted , StartFailed , GrantForOtherInstance , PersonaRunTakesNoClaims , }
-mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum LaunchOutcome { Launched { run : PipelineRef , } , NotQueued { item : PipelineRef , } , Tripped { item : PipelineRef , question : PipelineRef , } , Busy { run : PipelineRef , } , Refused (Declined) , }
+mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum LaunchOutcome { Launched { run : PipelineRef , } , NotQueued { item : PipelineRef , } , Tripped { run : PipelineRef , question : PipelineRef , } , Busy { run : PipelineRef , } , Refused (Declined) , }
 mind_body::launch: const START_GRACE_S : i64
 mind_body::launch: fn open_and_launch (ports : & Ports , request : LaunchRequest) -> Result < LaunchOutcome >
 mind_body::launch: fn run_label (now : DateTime < Utc >) -> Label
@@ -195,11 +195,12 @@ mind_body::persona: struct StartSelfRun # [derive (Clone , Debug , PartialEq , E
 mind_body::persona: struct TraceItem # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[provenance: String, room: String, text: String]
 mind_body::persona: struct TurnRequest # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[caller: String, request_id: String, instructions: String, input: String, output_schema_json: String]
 mind_body::persona: struct TurnTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[run: String, turn: u32, at: DateTime < Utc >, inputs: Vec < TraceItem >, outputs: Vec < TraceItem >, outcome: String]
-mind_body::queue: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Breaker { Clear , Trip , }
+mind_body::queue: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Breaker { Clear , Trip { run : PipelineRef , } , }
 mind_body::queue: const CONSECUTIVE : usize
 mind_body::queue: const EMPTY_SHARE : usize
 mind_body::queue: const WINDOW : usize
 mind_body::queue: fn breaker (mind : & dyn MindPort , item : & PipelineRef , ending : & [PipelineRef]) -> Result < Breaker >
+mind_body::queue: fn on_hold (mind : & dyn MindPort) -> Result < Vec < PipelineRef > >
 mind_body::queue: fn queue (mind : & dyn MindPort , instance : & Slug , ending : & [PipelineRef]) -> Result < Vec < PipelineRef > >
 mind_body::queue: impl HuginnMind < 'static >
 mind_body::queue: impl HuginnMind < 'static >: fn new (client : HuginnClient) -> Self
@@ -259,6 +260,7 @@ mind_body::self_run::decide: impl State
 mind_body::self_run::inbox: const OWNER : & str
 mind_body::self_run::inbox: fn backlog (mind : & dyn MindPort) -> Result < Vec < (Brief , String) > >
 mind_body::self_run::inbox: fn derive (mind : & dyn MindPort , told : & HashSet < String >) -> Result < Vec < Brief > >
+mind_body::self_run::inbox: fn derive_counting_held (mind : & dyn MindPort , told : & HashSet < String >) -> Result < (Vec < Brief > , usize) >
 mind_body::self_run::inbox: fn render (briefs : & [Brief] , plan : & str) -> String
 mind_body::self_run::inbox: fn resolving_sentence (id : & str) -> String
 mind_body::self_run::inbox: struct Brief # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[id: String, campaign: String, repo: String, item: String, ordinal: u64]
