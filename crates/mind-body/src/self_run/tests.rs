@@ -15,8 +15,7 @@ use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
 use super::*;
 use cultnet_rs::Selection;
 use huginn_mind::PipelinePageItems;
-use crate::lease_client::{Lease, LeaseRefused, token_holding};
-use model_connector::PlanQuota;
+use crate::lease_client::token_holding;
 use crate::testkit::*;
 
 /// A cap no constant of the library equals, so that a request of it came from the argument.
@@ -1721,8 +1720,7 @@ mod sandbox {
         let fake = bin.join("bwrap");
         std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\n' \"$@\" > {}\nenv > {}\n", argv.display(), environment.display())).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut unit = unit_environment();
-        unit.retain(|(name, _)| name != "PATH");
+        let mut unit: Vec<(std::ffi::OsString, std::ffi::OsString)> = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "UNLISTED_VARIABLE"].iter().map(|name| ((*name).into(), format!("canary-{name}").into())).collect();
         unit.push(("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()).into()));
         unit.push((SCRATCH_VARIABLE.into(), scratch.clone().into_os_string()));
         let spawner = ClaudeSpawner::in_sandbox(unit, "MIND_PERSONA_CONFIG_SEED", Some(sandbox.clone())).unwrap();
