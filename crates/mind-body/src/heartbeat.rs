@@ -21,7 +21,7 @@
 //!
 //! The heartbeat owns `heartbeat.cc` and is its only writer; Persona units read
 //! it. The brakes stay the operator's and are read on every poll. Busy and idle
-//! are the mind's: an in-force Persona run is busy. The launch is
+//! are the slot's: a Persona run whose unit lives (or is within its start grace) is busy; a dead holder is not, and the next launch closes it. The launch is
 //! `open_and_launch`, the only opener. The heartbeat never acks a delivery; the
 //! Persona turn drains them.
 //!
@@ -41,7 +41,7 @@ use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 
 use crate::chat_client::{Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
-use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch, slot};
+use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, open_and_launch, slot};
 use crate::queue::{MindPort, any_of, citing, claims_of, headers, of_kind, on_hold};
 use crate::self_run::inbox;
 use crate::tempo::{self, Standing};
@@ -516,10 +516,13 @@ struct MindRead {
     self_end: Option<DateTime<Utc>>,
 }
 
-fn read_mind(mind: &dyn MindPort, slug: &Slug) -> Result<MindRead> {
+fn read_mind(organs: &Organs, mind: &dyn MindPort, slug: &Slug) -> Result<MindRead> {
     let turn = last_turn(mind, slug)?;
     Ok(MindRead {
-        busy: !holders(mind, slug, RunTurn::PersonaTurn)?.is_empty(),
+        // Busy is the slot's own reading of life: a holder whose unit is not active
+        // (past its start grace) is dead, not busy, so the next launch reaches
+        // `slot` step 0 and closes it there.
+        busy: slot(&ports(organs, mind), slug, RunTurn::PersonaTurn, organs.clock.now())?.live.is_some(),
         last_turn: turn.as_ref().map(|header| parse_time(&header.admission.admitted_at)).transpose()?,
         vote: standing_vote(mind, slug)?,
         urgency: pending_urgency(mind, slug, turn.as_ref())?,
@@ -661,7 +664,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     for seat in organs.seats {
         let released = matches!(organs.control.effective(&seat.who.slug), Effective::Released(_));
         // One Mind daemon down skips her for this poll; the others are served.
-        let (read, note) = match read_mind(seat.mind, &seat.who.slug) {
+        let (read, note) = match read_mind(organs, seat.mind, &seat.who.slug) {
             Ok(read) => (Some(read), String::new()),
             Err(error) => {
                 eventful = true;
