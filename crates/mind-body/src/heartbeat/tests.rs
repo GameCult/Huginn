@@ -1225,3 +1225,33 @@ fn an_answer_of_retire_resolves_nothing_and_the_hold_stays_until_the_answerer_re
     assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "and no second question");
     assert!(inbox::derive(&rig.minds[ANN], &HashSet::new()).unwrap().is_empty(), "the retired claims stay held and untold");
 }
+
+/// Bob's Persona turn admitted `ago` seconds back and left in force; the operator names him.
+fn bob_in_a_turn_and_named(ago: i64) -> Box<Rig> {
+    let rig = Rig::new();
+    rig.turn(ANN, 10);
+    rig.turn(BOB, 10);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig.minds[BOB].admit_at(rig.now() - Duration::seconds(ago));
+    rig.minds[BOB].committed(vec![run_in("bob", "held", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    rig.minds[BOB].admit_at(rig.now());
+    rig.say(BOB, delivery(1, "@op:chat", "Bob, a word", &[]));
+    rig
+}
+
+#[test]
+fn a_persona_run_whose_unit_is_gone_is_not_busy_and_the_next_launch_closes_it() {
+    // A brake hold stopped her unit mid-turn: the run is in force, no unit is active.
+    let rig = bob_in_a_turn_and_named(3600);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] }, "a dead holder does not make her busy");
+    assert!(matches!(rig.minds[BOB].view(K::Run, "bob:run:held").unwrap().status, huginn_mind::PipelineStatus::Resolved { .. }), "slot step 0 closed the dead run");
+}
+
+#[test]
+fn a_persona_run_whose_unit_is_active_is_busy() {
+    let rig = bob_in_a_turn_and_named(3600);
+    rig.launcher.revive_as(&Slug("bob".into()), RunTurn::PersonaTurn);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
+    assert_eq!(rig.launched(), vec![]);
+    assert!(matches!(rig.minds[BOB].view(K::Run, "bob:run:held").unwrap().status, huginn_mind::PipelineStatus::InForce));
+}
