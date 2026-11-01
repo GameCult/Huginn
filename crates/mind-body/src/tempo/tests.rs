@@ -897,3 +897,19 @@ fn release_of_the_slowest_vote_is_within_one_integration_step() {
     );
     assert!((3400..FALLBACK_MAX_S).contains(&beat), "{beat}");
 }
+
+/// A vote under the 60 s floor is held at the floor's rate: the carry is the gap
+/// to that, not to the faster rate voted.
+#[test]
+fn a_vote_under_the_floor_carries_the_floor_not_the_vote() {
+    let mut s = warm(&T);
+    s.rate_per_h = 120.0;
+    let t = MID + 3 * HOUR;
+    control(&T, &mut s, Some(&read(300, t)), t, 900, true, false);
+    let own = BIAS_PER_H + T.kp * 178.0 + T.ki * s.integral;
+    assert!(
+        (s.carry_per_h + own - 60.0).abs() < 2.0,
+        "carry {} over own {own}",
+        s.carry_per_h
+    );
+}
