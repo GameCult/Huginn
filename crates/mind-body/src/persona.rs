@@ -1071,17 +1071,19 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         };
         match step {
             Step::Answered(started) => {
-                // The one ack rule: through the highest answered seq, never past a delivery still
-                // told and unanswered (a retold batch, or a line written and not yet echoed).
+                // The one ack rule: through the highest answered seq, never past a delivery still told
+                // and unanswered (a retold batch, or a line written and not yet echoed). Deliveries are
+                // told in seq order, so while one is unanswered below an answered seq, everything
+                // answered lies above it and nothing is acked; the ack follows its answer.
                 self.answered_through = self.answered_through.max(batch.iter().map(|delivery| delivery.seq).max().unwrap_or(0));
                 let unanswered = self.retell.iter().flat_map(|(retold, _)| retold).chain(self.written.iter().flat_map(|written| &written.batch)).map(|delivery| delivery.seq).min();
-                let through = unanswered.map_or(self.answered_through, |lowest| self.answered_through.min(lowest.saturating_sub(1)));
-                if through > self.progress.acked {
-                    if self.organs.chat.ack(through).is_err() {
+                let past_unanswered = unanswered.is_some_and(|lowest| lowest <= self.answered_through);
+                if !past_unanswered && self.answered_through > self.progress.acked {
+                    if self.organs.chat.ack(self.answered_through).is_err() {
                         self.progress.failure.get_or_insert(Failure::Ack);
                         return Ok((false, true));
                     }
-                    self.progress.acked = through;
+                    self.progress.acked = self.answered_through;
                 }
                 self.refusals = 0;
                 if started.is_some() {

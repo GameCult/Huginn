@@ -2462,7 +2462,8 @@ fn a_session_that_ends_with_a_batch_retold_leaves_it_unacked_for_the_next_proces
     let writes: Rc<RefCell<Vec<String>>> = Rc::default();
     let second = Scripted { writes: writes.clone(), script: VecDeque::from([(1, echo_line()), (1, result_line(reply_saying("all three"))), (1, Read::Exited(Some(0)))]), deliveries: None, asked: 0 };
     let acked = carry_scripted(&rig, vec![first, second]);
-    let opening = writes.borrow().first().cloned().unwrap_or_default();
+    let first_line: serde_json::Value = serde_json::from_str(writes.borrow().first().expect("the next process was told a line")).unwrap();
+    let opening = first_line["message"]["content"].as_str().unwrap();
     assert!(opening.contains(r#"text="three""#) && opening.contains(r#"text="four""#) && opening.contains(r#"text="five""#), "the next process is told 3, 4 and 5: {opening}");
     assert_eq!(acked, [5], "the first process acked nothing; the second answered all three: {acked:?}");
 }
