@@ -31,7 +31,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use cultnet_rs::{PROJECTION_DOCUMENT, Selection};
 use eureka_state::hold;
 use huginn_mind::eureka_pipeline::{
-    Line, PipelineDocument, PipelineKind, PipelineRef, Short, Slug, pipeline_key,
+    Line, PipelineDocument, PipelineRef, Short, Slug, pipeline_key,
 };
 use huginn_mind::{
     BATCH_MAX, Faculty, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionBatch, PipelineAdmissionOutcome,
@@ -329,7 +329,6 @@ fn blocked(
         return Ok(0);
     }
     let selection = Selection {
-        schemas: Some(vec![PipelineKind::Question.type_id().to_string()]),
         keys: Some(keys),
         ..Selection::default()
     };

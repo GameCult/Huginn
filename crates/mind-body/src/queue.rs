@@ -665,23 +665,18 @@ mod tests {
             held.contains(&a) && held.contains(&b) && held.items().len() == 2,
             "{held:?}: retire holds what the answer retired"
         );
-        let retired: Vec<bool> = holds(&mind)
-            .unwrap()
-            .iter()
-            .map(|hold| hold.retired)
-            .collect();
-        assert_eq!(retired, [true]);
-        mind.committed(vec![close(a.clone(), withdrawn())]);
-        assert_eq!(
-            on_hold(&mind).unwrap().items(),
-            std::slice::from_ref(&b),
-            "a resolved claim drops out"
-        );
+        // Another run's question, still open, is not this answer's: only the claims of f2 are retired.
+        let c = spec_ref("c");
+        mind.committed(vec![spec("c")]);
+        mind.committed(vec![run("g", RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&c))]);
+        mind.committed(vec![close(run_ref("g"), recorded())]);
+        mind.committed(vec![question_in("other", &run_ref("g"))]);
+        let retired: Vec<PipelineRef> = holds(&mind).unwrap().into_iter().filter(|hold| hold.retired).flat_map(|hold| hold.items).collect();
+        assert_eq!(retired, [a.clone(), b.clone()]);
+        mind.committed(vec![close(a, withdrawn())]);
+        assert_eq!(on_hold(&mind).unwrap().items(), [b.clone(), c.clone()], "a resolved claim drops out");
         mind.committed(vec![close(b, withdrawn())]);
-        assert!(
-            on_hold(&mind).unwrap().items().is_empty(),
-            "all resolved, nothing is held"
-        );
+        assert_eq!(on_hold(&mind).unwrap().items(), [c], "all of f2's resolved, only the open question's claim is held");
     }
 
     #[test]
