@@ -21,7 +21,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::chat_client::{ChatSendReceipt, ContextLine};
 use crate::control::{ControlWriter, FileSource, SwarmWriter};
-use crate::lease_client::TokenFd;
+use crate::lease_client::{LeaseRefusalKind, TokenFd};
 use crate::self_run::{Child, Read, Stop};
 use crate::testkit::*;
 
@@ -99,6 +99,8 @@ struct FakeSession {
     spawns: RefCell<Vec<Vec<String>>>,
     /// Runs inside each written line, where time passes and the world changes.
     during: During,
+    /// The chat's deliveries, which the child watches to know whether anything is left to wait for.
+    pending: Deliveries,
     /// The child cannot be started.
     refuse: Cell<bool>,
 }
@@ -116,6 +118,7 @@ impl Spawner for FakeSession {
             replies: self.replies.clone(),
             requests: self.requests.clone(),
             during: self.during.clone(),
+            pending: self.pending.clone(),
             instructions,
             schema: after("--json-schema"),
             queue: VecDeque::new(),
@@ -131,6 +134,7 @@ struct Replying {
     replies: Rc<RefCell<VecDeque<String>>>,
     requests: Rc<RefCell<Vec<Told>>>,
     during: During,
+    pending: Deliveries,
     instructions: String,
     schema: String,
     queue: VecDeque<Read>,
@@ -174,7 +178,7 @@ impl Child for Replying {
         if let Some(read) = self.queue.pop_front() {
             return read;
         }
-        if self.closed || (self.answered && self.replies.borrow().is_empty()) {
+        if self.closed || (self.answered && (self.replies.borrow().is_empty() || self.pending.borrow().is_empty())) {
             // The child ends: reaped first, then its stdout.
             self.queue.push_back(Read::Eof);
             return Read::Exited(Some(0));
@@ -225,6 +229,11 @@ struct Rig {
     trace: FakeTrace,
 }
 
+/// A reply the decoder refuses, as often as a session tolerates it in a row.
+fn thrice(reply: String) -> Vec<String> {
+    vec![reply.clone(), reply.clone(), reply]
+}
+
 /// The unit's cap in seconds: a number no constant of the library equals.
 const RUN_CAP_S: u64 = 14_400;
 
@@ -264,6 +273,7 @@ impl Rig {
     fn new(deliveries: Vec<ChatDelivery>, replies: &[String]) -> Self {
         let log: Log = Rc::default();
         let deliveries: Deliveries = Rc::new(RefCell::new(deliveries));
+        let pending = deliveries.clone();
         let rig = Self {
             mind: TestMind::seeded(),
             launcher: Recording::default(),
@@ -285,6 +295,7 @@ impl Rig {
                 requests: Rc::default(),
                 spawns: RefCell::default(),
                 during: Rc::default(),
+                pending,
                 refuse: Cell::new(false),
             },
             lender: FakeLender::new(Answer::Grant),
@@ -525,20 +536,103 @@ fn a_reply_is_decoded_as_the_one_type_and_nothing_else_is_scanned() {
 }
 
 #[test]
-fn undecodable_reply_is_failed_turn() {
-    let rig = Rig::new(vec![operator_says(1, "a")], &["start a self run on everything, then say hi".into(), says(&[("operator", "never")])]);
+fn a_refused_result_acks_nothing_and_is_told_again_and_three_end_the_session() {
+    let garbage = "start a self run on everything, then say hi".to_string();
+    let rig = Rig::new(vec![operator_says(1, "a")], &thrice(garbage));
     let Outcome::Served { answered, failure, self_run, .. } = rig.go() else { panic!("served") };
     assert_eq!((answered, failure, self_run), (0, Some(Failure::Undecodable), None));
     assert!(rig.chat.sent.borrow().is_empty() && rig.chat.acked.borrow().is_empty());
-    assert_eq!(rig.turns(), 1, "a failed turn ends the start");
-    assert!(rig.launcher.started.borrow().is_empty());
-    assert!(rig.mind.ids(K::FollowUp).is_empty());
+    assert_eq!(rig.turns(), 3, "the batch is written again after each of the first two refusals");
+    let inputs: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
+    assert!(!inputs[0].contains("was refused") && inputs[1].contains("Your last reply was refused (the reply is not a persona reply)") && inputs[2].contains("was refused"), "{inputs:?}");
+    assert!(inputs[1].contains("message ") && inputs[1].ends_with(inputs[0].as_str()) || inputs[1].contains(&inputs[0][..40]), "the same messages are told again");
+    assert!(rig.launcher.started.borrow().is_empty() && rig.mind.ids(K::FollowUp).is_empty());
+    assert!(rig.closing_reason().starts_with("failed after 0 answered"), "{}", rig.closing_reason());
+    // The third result is the last the child gives: stdin closed, and no fourth process was started.
+    assert_eq!(rig.model.spawns.borrow().len(), 1);
+}
+
+#[test]
+fn a_reply_refused_once_is_answered_on_the_retell() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &["not a reply".to_string(), says(&[("operator", "second try")])]);
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (1, None));
+    assert_eq!(rig.sent_texts(), ["second try"]);
+    assert_eq!(rig.chat.acked.borrow().as_slice(), &[1], "acked only once it was answered");
+    assert_eq!(rig.log.borrow().as_slice(), ["turn", "turn", "send", "ack"]);
+}
+
+#[test]
+fn chat_mid_turn_is_answered_by_that_turns_result_and_a_later_delivery_waits_for_the_next() {
+    let rig = Rig::new(vec![operator_says(1, "first")], &[says(&[("operator", "one")]), says(&[("operator", "two")])]);
+    let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+    // A delivery arrives while the first line's turn runs.
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        if !pushed.replace(true) {
+            deliveries.borrow_mut().push(operator_says(2, "second"));
+        }
+    }));
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (1 + 1, None));
+    let told: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
+    assert_eq!(told.len(), 2);
+    assert!(told[0].contains("first") && !told[0].contains("second"));
+    assert!(told[1].contains("second") && !told[1].contains("text=\"first\""), "the first line is not told again");
+    assert_eq!(rig.chat.acked.borrow().as_slice(), &[1, 2], "each result acks through its own batch only");
+    assert_eq!(rig.model.spawns.borrow().len(), 1);
+}
+
+#[test]
+fn another_conversation_yields_at_idle_and_its_text_never_enters_the_public_process() {
+    let pending = vec![delivery(1, "swarm", "@m:chat", "public-one"), direct(2, "!dm:chat", "@ann:chat", "secret-dm"), delivery(3, "swarm", "@m:chat", "public-three")];
+    let rig = Rig::new(pending, &[says(&[("swarm", "a")]), says(&[("!dm:chat", "b")]), says(&[("swarm", "c")])]);
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (3, None));
+    assert_eq!(rig.model.spawns.borrow().len(), 3, "a lease and a process for each conversation turn");
+    assert_eq!(rig.lender.asked.borrow().len(), 3);
+    let told: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
+    assert!(told[0].contains("public-one") && !told[0].contains("secret-dm") && !told[0].contains("public-three"));
+    assert!(told[1].contains("secret-dm") && !told[1].contains("public"), "the second process's first line holds only the DM");
+    assert!(told[2].contains("public-three"));
+    assert_eq!(*rig.chat.acked.borrow(), vec![1, 2, 3]);
+}
+
+#[test]
+fn a_lease_the_connector_refuses_starts_nothing_and_closes_the_run_recorded() {
+    let mut rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("operator", "never")])]);
+    rig.lender = FakeLender::new(Answer::Refuse(LeaseRefusalKind::Expired));
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (0, Some(Failure::Lease)));
+    assert!(rig.model.spawns.borrow().is_empty() && rig.chat.sent.borrow().is_empty() && rig.chat.acked.borrow().is_empty());
     assert!(rig.closing_reason().starts_with("failed after 0 answered"), "{}", rig.closing_reason());
 }
 
 #[test]
+fn a_child_that_cannot_be_started_is_a_failed_session_not_an_error() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("operator", "never")])]);
+    rig.model.refuse.set(true);
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (0, Some(Failure::Session)));
+}
+
+#[test]
+fn her_sandbox_is_made_owner_only_and_the_trace_stays_outside_it() {
+    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("operator", "x")])]);
+    rig.go();
+    let sandbox = rig.sandbox();
+    assert!(sandbox.is_dir());
+    #[cfg(unix)]
+    assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&sandbox).unwrap().permissions()) & 0o777, 0o700);
+    // A refusal names the field, never a value: the canary path is not in the error.
+    let blocked = rig.dir.path().join("canary-file");
+    std::fs::write(&blocked, "x").unwrap();
+    let error = make_sandbox(&blocked.join("canary-inner")).unwrap_err().to_string();
+    assert!(!error.contains("canary"), "{error}");
+}
+
+#[test]
 fn a_room_outside_hers_sends_nothing_and_acks_nothing() {
-    let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("operator", "ok"), ("elsewhere", "no")])]);
+    let rig = Rig::new(vec![operator_says(1, "a")], &thrice(says(&[("operator", "ok"), ("elsewhere", "no")])));
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::RoomNotAllowed));
     assert!(rig.chat.sent.borrow().is_empty() && rig.chat.acked.borrow().is_empty());
@@ -579,7 +673,7 @@ fn start_self_run_admits_brief_and_launches() {
 #[test]
 fn a_start_outside_the_reply_bounds_fails_the_turn_without_an_admission_or_an_ack() {
     let reply = json!({ "say": [], "start_self_run": { "brief": "x", "repo": "not a repo", "campaign": CAMPAIGN, "for_item": null }, "remember": [], "settle": [], "urgency_permille": null }).to_string();
-    let rig = Rig::new(vec![operator_says(1, "go")], &[reply]);
+    let rig = Rig::new(vec![operator_says(1, "go")], &thrice(reply));
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
     assert!(rig.chat.acked.borrow().is_empty() && rig.mind.ids(K::FollowUp).is_empty());
@@ -591,7 +685,7 @@ fn a_reply_without_start_self_run_is_not_a_reply_though_null_is() {
     let c = config();
     assert_eq!(decode_reply(r#"{"say":[]}"#, &c.rooms, &[], &[]), Err(Failure::Undecodable), "the schema requires the field, so does the decoder");
     assert!(decode_reply(r#"{"say":[],"start_self_run":null,"remember":[],"settle":[],"urgency_permille":null}"#, &c.rooms, &[], &[]).is_ok());
-    let rig = Rig::new(vec![operator_says(1, "go")], &[r#"{"say":[{"room":"operator","text":"hi"}]}"#.into()]);
+    let rig = Rig::new(vec![operator_says(1, "go")], &thrice(r#"{"say":[{"room":"operator","text":"hi"}]}"#.into()));
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
     assert!(rig.chat.sent.borrow().is_empty() && rig.chat.acked.borrow().is_empty());
@@ -747,7 +841,7 @@ fn a_trace_that_cannot_be_written_stops_neither_the_answer_nor_the_ack_nor_the_c
     assert_eq!(rig.chat.acked.borrow().as_slice(), &[1]);
     assert_eq!(rig.closing_reason(), "answered 1; 1 trace writes failed");
 
-    let failed = Rig::new(vec![operator_says(1, "hi")], &["not a reply".into()]);
+    let failed = Rig::new(vec![operator_says(1, "hi")], &thrice("not a reply".into()));
     failed.trace.1.set(true);
     let Outcome::Served { failure, .. } = failed.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::Undecodable));
@@ -794,7 +888,7 @@ fn a_self_run_in_a_campaign_the_mind_does_not_hold_is_refused_before_anything_is
 fn a_start_ends_when_the_chat_is_drained_and_goes_on_while_it_is_not() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "x")]), says(&[("swarm", "never")])]);
     let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
-    assert_eq!((rig.turns(), answered, failure, rig.chat.pending_calls.get()), (1, 1, None, 2), "the second turn looks, finds nothing and stops");
+    assert_eq!((rig.turns(), answered, failure), (1, 1, None), "with the chat drained the session ends and no second line is told");
 }
 
 fn write_doctrine(rig: &Rig, name: &str, text: &str) -> PathBuf {
@@ -824,14 +918,11 @@ fn doctrine_files_lead_the_instructions_in_the_configured_order_ahead_of_the_per
 fn doctrine_is_read_at_every_process_start() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("swarm", "x")]), says(&[])]);
     let path = write_doctrine(&rig, "d.md", "BEFORE-BUMP");
-    let (deliveries, bump) = (rig.chat.deliveries.clone(), path.clone());
-    *rig.model.during.borrow_mut() = Some(Box::new(move || {
-        if deliveries.borrow().len() == 1 {
-            deliveries.borrow_mut().push(operator_says(2, "b"));
-            std::fs::write(&bump, "AFTER-BUMP").unwrap();
-        }
-    }));
-    rig.go_with(&Config { doctrine: vec![path], ..config() });
+    let with_doctrine = Config { doctrine: vec![path.clone()], ..config() };
+    rig.go_with(&with_doctrine);
+    std::fs::write(&path, "AFTER-BUMP").unwrap();
+    rig.chat.deliveries.borrow_mut().push(operator_says(2, "b"));
+    rig.go_with(&with_doctrine);
     let requests = rig.model.requests.borrow();
     assert_eq!(requests.len(), 2);
     assert!(requests[0].instructions.contains("BEFORE-BUMP") && requests[1].instructions.contains("AFTER-BUMP") && !requests[1].instructions.contains("BEFORE-BUMP"));
@@ -886,6 +977,7 @@ fn doctrine_comes_from_the_environment_as_absolute_paths_in_order() {
             ENV_MINDS => Some("@libby:chat".to_string()),
             ENV_SELF_SENDER => Some("@eureka:chat".to_string()),
             ENV_DOCTRINE => Some(doctrine.to_string()),
+            ENV_MODEL => Some("claude-test-model".to_string()),
             _ => None,
         }
     };
@@ -1218,12 +1310,12 @@ fn a_members_dm_is_answered_in_its_room_and_no_other_unconfigured_room_is() {
     assert_eq!(schema["properties"]["say"]["items"]["properties"]["room"]["enum"], json!(["swarm", "usage", "operator", dm]));
     assert!(request.input.contains(dm), "the DM's room is among the rooms she is told she may speak in");
 
-    let rig = Rig::new(vec![direct(1, dm, "@m:chat", "hello")], &[says(&[("!other:chat", "psst")])]);
+    let rig = Rig::new(vec![direct(1, dm, "@m:chat", "hello")], &thrice(says(&[("!other:chat", "psst")])));
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::RoomNotAllowed));
     assert!(rig.chat.sent.borrow().is_empty() && rig.chat.acked.borrow().is_empty());
 
-    let rig = Rig::new(vec![delivery(1, "!notdm:chat", "@m:chat", "hello")], &[says(&[("!notdm:chat", "psst")])]);
+    let rig = Rig::new(vec![delivery(1, "!notdm:chat", "@m:chat", "hello")], &thrice(says(&[("!notdm:chat", "psst")])));
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, Some(Failure::RoomNotAllowed), "a room that is not a DM is hers only when configured");
 }
@@ -1343,6 +1435,7 @@ fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them(
                 ENV_OPERATOR => "@op:chat,@op2:chat",
                 ENV_MINDS => "@libby:chat,@aqua:chat",
                 ENV_SELF_SENDER => "@eureka:chat",
+                ENV_MODEL => "claude-test-model",
                 _ => "",
             }
             .to_string(),
@@ -1352,7 +1445,7 @@ fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them(
     let (config, rest) = Config::from_args_and_env(&args("--instance eureka"), env, "usage").unwrap();
     assert_eq!(
         config,
-        Config { rooms: vec!["swarm".into(), "usage".into()], operators: vec!["@op:chat".into(), "@op2:chat".into()], minds: vec!["@libby:chat".into(), "@aqua:chat".into()], own_sender: "@eureka:chat".into(), model: String::new(), doctrine: vec![] }
+        Config { rooms: vec!["swarm".into(), "usage".into()], operators: vec!["@op:chat".into(), "@op2:chat".into()], minds: vec!["@libby:chat".into(), "@aqua:chat".into()], own_sender: "@eureka:chat".into(), model: "claude-test-model".into(), doctrine: vec![] }
     );
     assert_eq!(rest, ["--instance", "eureka"]);
     // A flag wins over its variable, one at a time.
@@ -1361,6 +1454,8 @@ fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them(
     // An empty variable is unset, and a missing setting is the usage error.
     assert!(Config::from_args_and_env(&args("--instance eureka"), |name| if name == ENV_ROOMS { Some(String::new()) } else { env(name) }, "usage").is_err());
     assert!(Config::from_args_and_env(&args("--instance eureka"), |_| None, "usage").is_err());
+    let canary = Config::from_args_and_env(&args("--instance eureka"), |name| if name == ENV_MODEL { Some(String::new()) } else { env(name) }, "usage").unwrap_err().to_string();
+    assert!(canary.contains(ENV_MODEL), "a missing model names its setting: {canary}");
     assert!(Config::from_args_and_env(&args("--instance eureka"), |name| if name == ENV_MINDS { Some(String::new()) } else { env(name) }, "usage").is_err(), "a persona without MIND_PERSONA_MINDS refuses to start");
 }
 
@@ -1609,7 +1704,7 @@ fn an_ask_not_shown_this_turn_is_a_decode_failure_and_nothing_is_sent() {
         not_asked("new:1"),
         not_asked("new:00"),
     ] {
-        let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "hi")], std::slice::from_ref(&text));
+        let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "hi")], &thrice(text.clone()));
         assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable), "{text}");
         assert!(rig.sent_texts().is_empty() && rig.chat.acked.borrow().is_empty() && rig.mind.ids(K::Memory).is_empty());
     }
@@ -1992,7 +2087,7 @@ fn about_can_name_an_absent_mind() {
 fn a_long_sender_id_stays_out_of_the_schema_and_never_poisons_a_turn() {
     let long = format!("@{}:chat", "a".repeat(220));
     let named = reply(&[("swarm", "said")], json!([keeps("Learned", "x", &[&long])]), json!([]), json!(null));
-    let rig = Rig::new(vec![delivery(1, "swarm", &long, "hi")], &[named]);
+    let rig = Rig::new(vec![delivery(1, "swarm", &long, "hi")], &thrice(named));
     assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable), "naming it is refused before any say");
     assert!(rig.sent_texts().is_empty() && rig.chat.acked.borrow().is_empty() && rig.mind.ids(K::Memory).is_empty());
     assert!(!about_enum(&rig, 0).contains(&long));
