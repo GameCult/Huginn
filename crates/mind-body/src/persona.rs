@@ -836,6 +836,7 @@ fn one_process(
         start: first,
         waiting: Vec::new(),
         told_through: 0,
+        answered_through: 0,
         written: None,
         echoed: Vec::new(),
         shown: Shown::default(),
@@ -944,6 +945,10 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     waiting: Vec<ChatDelivery>,
     /// The highest seq written to the child.
     told_through: u64,
+    /// The highest seq an answered result carried in this process. A result acks only through
+    /// the lowest seq still told and unanswered, so this can lie above the mouth's ack until the
+    /// retold batch is answered; a process that ends first leaves the mouth's ack, the truth.
+    answered_through: u64,
     written: Option<Written>,
     /// Deliveries the CLI took in since the last result: the next result's batch.
     echoed: Vec<ChatDelivery>,
@@ -1004,7 +1009,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
 
     /// What waits is the untold front of the mouth's pending, in this conversation. If the oldest
     /// unanswered delivery is another conversation's, the session yields at its next idle: an ack
-    /// through a newer seq would pass it. A held brake yields too, and is recorded.
+    /// through a newer seq would pass it. A held brake yields too, and is recorded: this read
+    /// stops nothing, the hold's stop is `mind-control`'s.
     fn poll(&mut self) -> Result<Polled> {
         if let Some(reason) = self.held() {
             self.progress.failure.get_or_insert(Failure::Held(reason));
@@ -1065,14 +1071,23 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         };
         match step {
             Step::Answered(started) => {
+                // The one ack rule: through the highest answered seq, never past a delivery still
+                // told and unanswered (a retold batch, or a line written and not yet echoed).
+                self.answered_through = self.answered_through.max(batch.iter().map(|delivery| delivery.seq).max().unwrap_or(0));
+                let unanswered = self.retell.iter().flat_map(|(retold, _)| retold).chain(self.written.iter().flat_map(|written| &written.batch)).map(|delivery| delivery.seq).min();
+                let through = unanswered.map_or(self.answered_through, |lowest| self.answered_through.min(lowest.saturating_sub(1)));
+                if through > self.progress.acked {
+                    if self.organs.chat.ack(through).is_err() {
+                        self.progress.failure.get_or_insert(Failure::Ack);
+                        return Ok((false, true));
+                    }
+                    self.progress.acked = through;
+                }
                 self.refusals = 0;
                 if started.is_some() {
                     self.progress.self_run = started;
                 }
                 self.progress.answered += 1;
-                if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
-                    self.progress.acked = self.progress.acked.max(through);
-                }
                 Ok((true, false))
             }
             Step::Refused(why) => {
@@ -1105,9 +1120,9 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
     }
 }
 
-/// What one result does in the world: decode, say, remember, settle, start a Self run, trace, and
-/// only then ack (the caller moves the position). `batch` is what the result answers; `shown`
-/// is what the lines showed her.
+/// What one result does in the world: decode, say, remember, settle, start a Self run, and trace.
+/// It acks nothing: the caller acks after it, once, from what is still unanswered. `batch` is what
+/// the result answers; `shown` is what the lines showed her.
 fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch: &[ChatDelivery], shown: &Shown, turn: u32, text: &str) -> Result<Step> {
     let (organs, config, run) = (inbox.organs, inbox.config, inbox.run);
     let instance = organs.mind.instance().clone();
@@ -1172,11 +1187,6 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
         }
     }
     organs.trace.record(&record(outputs, "answered".into()))?;
-    if let Some(through) = batch.iter().map(|delivery| delivery.seq).max()
-        && organs.chat.ack(through).is_err()
-    {
-        return Ok(Step::Failed(Failure::Ack));
-    }
     Ok(Step::Answered(started))
 }
 
