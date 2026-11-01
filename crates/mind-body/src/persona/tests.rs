@@ -2433,8 +2433,7 @@ fn carry_scripted(rig: &Rig, children: Vec<Scripted>) -> Vec<u64> {
         scratch: &scratch,
     };
     carry(&organs, &FileSource::new(rig.store()), &FileSource::new(rig.swarm_store()), &config()).unwrap();
-    let acked = rig.chat.acked.borrow().clone();
-    acked
+    rig.chat.acked.borrow().clone()
 }
 
 /// The CLI replays a line queued while its turn is finishing at the start of the next turn, after the
