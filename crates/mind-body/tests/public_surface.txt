@@ -107,7 +107,7 @@ mind_body::heartbeat: struct PersonaId # [derive (Clone , Debug , PartialEq , Eq
 mind_body::heartbeat: struct PollTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[at: DateTime < Utc >, tempo_s: u32, instances: Vec < InstanceTrace >, launches: Vec < String >]
 mind_body::heartbeat: struct Seat< 'a >  pub-fields[who: PersonaId, mind: & 'a dyn MindPort, chat: & 'a dyn Chat]
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Declined { Admission (MindRefusal) , Conflict , AlreadyAdmitted , StartFailed , GrantForOtherInstance , PersonaRunTakesNoClaims , }
-mind_body::launch: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum StopScope < 'a > { Mind (& 'a Slug) , Swarm }
+mind_body::launch: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum StopScope < 'a > { Mind (& 'a Slug) , Swarm , }
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum LaunchOutcome { Launched { run : PipelineRef , } , NotQueued { item : PipelineRef , } , Tripped { item : PipelineRef , question : PipelineRef , } , Busy { run : PipelineRef , } , Refused (Declined) , }
 mind_body::launch: const START_GRACE_S : i64
 mind_body::launch: fn open_and_launch (ports : & Ports , request : LaunchRequest) -> Result < LaunchOutcome >
