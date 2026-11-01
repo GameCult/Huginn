@@ -436,3 +436,38 @@ fn beat_is_bounded() {
         }
     }
 }
+
+#[test]
+fn fallback_beat_is_the_controller_with_the_committed_gains() {
+    let live = read(400, MID);
+    let (mut a, mut b) = (Fallback::default(), Fallback::default());
+    let beat = fallback_beat(&mut a, Some(&live), MID, 900, false);
+    assert_eq!(beat, control(&GAINS, &mut b, Some(&live), MID, 900, false));
+    assert_ne!(beat, DEFAULT_BEAT_S, "behind the trajectory");
+    assert_eq!(a, b);
+    // On the trajectory with no memory the answer is the bias, whatever the gains.
+    let on = read(450, MID);
+    let beat = fallback_beat(&mut Fallback::default(), Some(&on), MID, 900, false);
+    assert_eq!(beat, DEFAULT_BEAT_S);
+    assert_eq!(
+        fallback_beat(&mut Fallback::default(), None, MID, 900, false),
+        DEFAULT_BEAT_S
+    );
+}
+
+#[test]
+fn a_window_that_ends_this_instant_is_expired() {
+    let mut s = Fallback::default();
+    let live = read(400, MID);
+    let held = control(&T, &mut s, Some(&live), MID, 900, false);
+    let ending = Reading {
+        resets_at_ms: MID + 60_000,
+        observed_at_ms: MID + 60_000 - WINDOW_MS,
+        used_permille: 0,
+    };
+    // At its reset instant the window holds the last beat instead of steering.
+    assert_eq!(
+        control(&T, &mut s, Some(&ending), MID + 60_000, 900, false),
+        held
+    );
+}
