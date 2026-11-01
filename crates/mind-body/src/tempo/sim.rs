@@ -63,6 +63,9 @@ struct Scenario {
     gap: Option<(f64, f64)>,
     /// The cost is too low to reach the target even at the minimum beat.
     unreachable: bool,
+    /// The vote itself spends the week: no controller can end on target, it
+    /// can only stop burning once the vote is gone.
+    overspent: bool,
 }
 
 const BASE: Scenario = Scenario {
@@ -75,6 +78,7 @@ const BASE: Scenario = Scenario {
     vote: None,
     gap: None,
     unreachable: false,
+    overspent: false,
 };
 
 fn scenarios() -> Vec<Scenario> {
@@ -103,6 +107,32 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "vote-300s-24h",
             vote: Some((48.0, 72.0, 300)),
+            ..BASE
+        },
+        Scenario {
+            name: "vote-60s-1h",
+            vote: Some((48.0, 49.0, 60)),
+            ..BASE
+        },
+        Scenario {
+            name: "vote-60s-4h",
+            vote: Some((48.0, 52.0, 60)),
+            ..BASE
+        },
+        Scenario {
+            name: "vote-60s-24h",
+            vote: Some((48.0, 72.0, 60)),
+            overspent: true,
+            ..BASE
+        },
+        Scenario {
+            name: "vote-7200s-24h",
+            vote: Some((48.0, 72.0, 7200)),
+            ..BASE
+        },
+        Scenario {
+            name: "vote-86400s-24h",
+            vote: Some((48.0, 72.0, 86_400)),
             ..BASE
         },
         Scenario {
@@ -142,6 +172,8 @@ struct Outcome {
     band_crossings: u32,
     /// Share of the last day of the last window spent at the minimum beat.
     frac_at_min: f64,
+    /// The same at the maximum beat.
+    frac_at_max: f64,
     /// The beat on the last minute.
     last_beat: u32,
 }
@@ -161,7 +193,7 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
     let (mut last_turn, mut turns, mut prev_beat) = (W0, 0u32, DEFAULT_BEAT_S);
     let steps = i64::from(scenario.windows) * WINDOW_MS / STEP_MS;
     let mut out = Outcome::default();
-    let (mut jumps, mut at_min, mut last_day) = (0u32, 0u32, 0u32);
+    let (mut jumps, mut at_min, mut at_max, mut last_day) = (0u32, 0u32, 0u32, 0u32);
     let mut side = 0i8;
     let mut worst_day = 0f64;
     for i in 1..steps {
@@ -202,6 +234,7 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
             if window + 1 == scenario.windows && in_window >= 144.0 {
                 last_day += 1;
                 at_min += u32::from(beat == FALLBACK_MIN_S);
+                at_max += u32::from(beat == FALLBACK_MAX_S);
             }
             jumps += u32::from(f64::from(beat.abs_diff(prev_beat)) > 0.05 * f64::from(prev_beat));
         }
@@ -250,6 +283,7 @@ fn run(scenario: &Scenario, sensor: Sensor, gains: &Gains, seed: u64) -> Outcome
     out.worst_error_last_day = worst_day;
     out.jumps_per_h = f64::from(jumps) / (f64::from(scenario.windows) * 168.0);
     out.frac_at_min = f64::from(at_min) / f64::from(last_day.max(1));
+    out.frac_at_max = f64::from(at_max) / f64::from(last_day.max(1));
     out
 }
 
@@ -258,11 +292,9 @@ const SEEDS: [u64; 3] = [11, 23, 47];
 
 /// The most chatter, in jumps per hour, `GAINS` may show on any scenario.
 const JUMPS_PER_H_BOUND: f64 = 0.5;
-/// How far from the target, in permille, a reachable scenario may end. The
-/// plant's own lumps (a Self run is five turns' cost) are ~15-60 permille in
-/// the dear-turns scenario, so this is wider than the spec's 30.
-const FINAL_TOLERANCE: f64 = 35.0;
-/// The worst |error| on the last day: the vote scenario's recovery sets it.
+/// How far from the target, in permille, a reachable scenario may end.
+const FINAL_TOLERANCE: f64 = 30.0;
+/// The worst |error| on the last day: the vote scenarios' recovery sets it.
 const LAST_DAY_ERROR_BOUND: f64 = 75.0;
 
 #[test]
@@ -280,6 +312,11 @@ fn sim_scenarios_meet_target() {
                         o.final_used.iter().all(|u| *u < f64::from(TARGET) - 100.0),
                         "{tag}"
                     );
+                    continue;
+                }
+                if scenario.overspent {
+                    assert_eq!(o.last_beat, FALLBACK_MAX_S, "backs off {tag}");
+                    assert!(o.frac_at_max > 0.9, "backs off {tag}");
                     continue;
                 }
                 for used in &o.final_used {
@@ -320,6 +357,8 @@ fn sweep() {
                             j = j.max(o.jumps_per_h);
                             if s.unreachable {
                                 sat_ok &= o.last_beat == FALLBACK_MIN_S && o.frac_at_min > 0.9;
+                            } else if s.overspent {
+                                sat_ok &= o.last_beat == FALLBACK_MAX_S && o.frac_at_max > 0.9;
                             } else {
                                 f = o
                                     .final_used
@@ -346,7 +385,7 @@ fn sweep() {
     }
     rows.sort_by(|a, b| a.0.total_cmp(&b.0));
     println!(
-        "kp ki kd | worst final err | worst err last day | worst jumps/h | worst crossings | saturates when unreachable"
+        "kp ki kd | worst final err | worst err last day | worst jumps/h | worst crossings | saturates when unreachable or overspent"
     );
     for r in &rows {
         println!(
