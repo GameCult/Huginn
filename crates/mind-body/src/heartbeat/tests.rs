@@ -906,3 +906,60 @@ fn a_brief_that_keeps_failing_trips_once_and_a_trip_is_a_stop_until_the_question
     assert_eq!(self_runs(&rig, ANN).len(), before, "no Self run after the trip");
     assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "the breaker asked once; an open question is not asked again nor a fresh count");
 }
+
+/// Three Self runs that each claimed every one of `items` and ended leaving nothing.
+fn fail_bundle(rig: &Rig, items: &[PipelineRef]) {
+    for n in 0..3 {
+        let label = format!("failed-{n}");
+        rig.minds[ANN].committed(vec![run_in("ann", &label, RunTurn::SelfRun, RunOperator::Mind, items)]);
+        rig.minds[ANN].committed(vec![close(reference(K::Run, &format!("ann:run:{label}")), recorded())]);
+    }
+}
+
+/// Beats on which every live run ends at once; the Self runs and questions the Mind has after them.
+fn beats(rig: &Rig, count: usize) {
+    for _ in 0..count {
+        rig.advance(1000);
+        rig.poll();
+        for who in [ANN, BOB] {
+            if rig.minds[who].ids(K::Run).last().is_some_and(|id| rig.minds[who].view(K::Run, id).is_some_and(|view| matches!(view.status, huginn_mind::PipelineStatus::InForce))) {
+                rig.end_run(who);
+            }
+        }
+    }
+}
+
+#[test]
+fn one_cause_failing_a_bundle_of_briefs_is_one_question_not_one_per_brief() {
+    let (rig, source) = rig_with_a_persona_turn();
+    let labels = ["a", "b", "c", "d", "e"];
+    let items: Vec<PipelineRef> = labels.iter().map(|label| reference(K::FollowUp, &format!("eureka-body:follow_up:{label}"))).collect();
+    for label in labels {
+        brief_by(&rig, ANN, crate::persona::AGENT, label, &source);
+    }
+    fail_bundle(&rig, &items);
+    let before = self_runs(&rig, ANN).len();
+    beats(&rig, 10);
+    assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "five briefs, one cause, one question on the desk");
+    assert_eq!(self_runs(&rig, ANN).len(), before, "and no Self run launches while it is open");
+    assert!(rig.minds[BOB].ids(K::Question).is_empty(), "another Mind is not stopped");
+}
+
+#[test]
+fn a_trip_stops_the_minds_successor_for_a_fresh_brief_too_and_the_answer_resumes_it() {
+    let (rig, source) = rig_with_a_persona_turn();
+    brief_by(&rig, ANN, crate::persona::AGENT, "stuck", &source);
+    fail_bundle(&rig, &[reference(K::FollowUp, "eureka-body:follow_up:stuck")]);
+    beats(&rig, 2);
+    let question = rig.minds[ANN].ids(K::Question).pop().expect("the trip asked");
+    let stopped = self_runs(&rig, ANN).len();
+    brief_by(&rig, ANN, crate::persona::AGENT, "fresh", &source);
+    beats(&rig, 4);
+    assert_eq!(self_runs(&rig, ANN).len(), stopped, "a brief that arrives while the question is open waits for the answer");
+    rig.minds[ANN].committed(vec![crate::testkit::ruling("answer", Some((&question, "reopen")))]);
+    beats(&rig, 1);
+    let runs = self_runs(&rig, ANN);
+    assert_eq!(runs.len(), stopped + 1, "answered, the successor launches again");
+    let claimed: Vec<String> = runs.last().unwrap().claims.iter().map(|claim| claim.id.0.clone()).collect();
+    assert_eq!(claimed.len(), 2, "both briefs, the stuck one reopened: {claimed:?}");
+}

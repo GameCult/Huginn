@@ -574,25 +574,25 @@ fn launch(organs: &Organs, row: &Row, turn: RunTurn, claims: Vec<PipelineRef>) -
 const BRIEFS_PER_SELF_RUN: usize = 64;
 
 /// The briefs a Self run would claim for this Mind: those in force that no live
-/// Self run holds and that no open question blocks. A question raised in a brief
-/// is the repetition breaker's trip; it stays blocking until it is answered or
-/// withdrawn, so a trip is a stop and never a fresh count.
+/// Self run holds. None while a question is open in a brief of hers. A Self run
+/// claims up to `BRIEFS_PER_SELF_RUN` briefs and every run it ends empty counts
+/// against all of them, so one cause trips them together; a trip is the Mind's
+/// stop, one question for the cause, not one per brief. It lasts until the
+/// operator answers or withdraws that question, and the count starts afresh.
 fn claimable(row: &Row) -> Result<Vec<PipelineRef>> {
     let mind = row.seat.mind;
     if !holders(mind, row.slug(), RunTurn::SelfRun)?.is_empty() {
         return Ok(Vec::new());
     }
-    let blocked: Vec<PipelineRef> = headers(mind, &in_force(of_kind(PipelineKind::Question)))?
+    let tripped = headers(mind, &in_force(of_kind(PipelineKind::Question)))?
         .into_iter()
-        .filter_map(|header| match header.facts {
-            PipelineFacts::Question { raised_in: Some(item), .. } => Some(item),
-            _ => None,
-        })
-        .collect();
+        .any(|header| matches!(header.facts, PipelineFacts::Question { raised_in: Some(item), .. } if item.kind == PipelineKind::FollowUp));
+    if tripped {
+        return Ok(Vec::new());
+    }
     Ok(inbox::derive(mind, &HashSet::new())?
         .into_iter()
         .map(|brief| PipelineRef { kind: PipelineKind::FollowUp, id: brief.id.as_str().into() })
-        .filter(|claim| !blocked.contains(claim))
         .take(BRIEFS_PER_SELF_RUN)
         .collect())
 }
