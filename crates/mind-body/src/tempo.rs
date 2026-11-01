@@ -5,12 +5,145 @@
 //! The Minds jointly hold the lever to one heartbeat. `tally` turns their votes
 //! into the beat; `pick` chooses who takes the turn when a beat falls. The
 //! heartbeat owns when a beat falls and what it launches; this module owns only
-//! the two decisions.
+//! the decisions: the swarm's tempo, who takes the turn, and the third, the
+//! beat when no vote is cast (`fallback_beat`, rulings
+//! `tempo-default-is-usage-fitter`, `tempo-fallback-pid-tuned-by-sim`).
 
 use std::cmp::Ordering;
 
 /// The beat, in seconds, when no vote is cast.
 pub const DEFAULT_BEAT_S: u32 = 900;
+
+/// The shortest and longest beat the fallback controller may answer, in seconds.
+pub const FALLBACK_MIN_S: u32 = 60;
+pub const FALLBACK_MAX_S: u32 = 3600;
+
+const WINDOW_MS: i64 = 7 * 24 * 3_600_000;
+const HOUR_MS: f64 = 3_600_000.0;
+/// The turn rate, in beats per hour, that `DEFAULT_BEAT_S` stands for: the
+/// controller's bias.
+const BIAS_PER_H: f64 = 3600.0 / DEFAULT_BEAT_S as f64;
+
+/// The seven-day plan window as the connector last read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reading {
+    pub used_permille: u32,
+    pub observed_at_ms: i64,
+    pub resets_at_ms: i64,
+}
+
+/// PID gains. The actuator is the turn rate in beats per hour and the error is
+/// in permille of the plan, so `kp` is beats/h per permille, `ki` beats/h per
+/// permille-hour and `kd` beats/h per (permille/h).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gains {
+    pub kp: f64,
+    pub ki: f64,
+    pub kd: f64,
+}
+
+/// Chosen by the committed simulation (`docs/research/2026-11-01-tempo-pid-sim.md`),
+/// never by a run-time search.
+pub const GAINS: Gains = Gains { kp: 0.0, ki: 0.0, kd: 0.0 };
+
+/// The fallback controller's memory. The heartbeat owns persisting it; it is
+/// never published as truth. `rate_per_h` is the last output as a turn rate
+/// (zero: none yet); while a vote decides the caller sets it to the voted beat's
+/// rate, so the release is bumpless.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Fallback {
+    pub integral: f64,
+    pub last_used_permille: u32,
+    pub last_observed_at_ms: i64,
+    pub last_now_ms: i64,
+    pub window_resets_at_ms: i64,
+    pub rate_per_h: f64,
+}
+
+/// The beat when no vote is cast: a PID on the gap between the seven-day usage
+/// trajectory to `target_permille` and what was used, acting on the turn rate
+/// (behind the trajectory raises it). Derivative on the measurement, only
+/// between distinct observations; conditional integration against the beat
+/// bounds; while `voted` nothing integrates and the integral tracks the voted
+/// rate, so release is bumpless. A new window clears the memory; with no
+/// usable reading the last beat holds (`DEFAULT_BEAT_S` before any).
+pub fn fallback_beat(
+    state: &mut Fallback,
+    reading: Option<&Reading>,
+    now_ms: i64,
+    target_permille: u32,
+    voted: bool,
+) -> u32 {
+    control(&GAINS, state, reading, now_ms, target_permille, voted)
+}
+
+fn beat_of(rate_per_h: f64) -> u32 {
+    if rate_per_h > 0.0 {
+        ((3600.0 / rate_per_h).round().clamp(f64::from(FALLBACK_MIN_S), f64::from(FALLBACK_MAX_S))) as u32
+    } else {
+        FALLBACK_MAX_S
+    }
+}
+
+fn held(state: &Fallback) -> u32 {
+    if state.rate_per_h == 0.0 {
+        DEFAULT_BEAT_S
+    } else {
+        beat_of(state.rate_per_h)
+    }
+}
+
+/// The one controller; `fallback_beat` is it with `GAINS`, the simulation is it
+/// with candidates.
+fn control(
+    gains: &Gains,
+    state: &mut Fallback,
+    reading: Option<&Reading>,
+    now_ms: i64,
+    target_permille: u32,
+    voted: bool,
+) -> u32 {
+    let dt_h = if state.last_now_ms > 0 { (now_ms - state.last_now_ms).max(0) as f64 / HOUR_MS } else { 0.0 };
+    state.last_now_ms = now_ms;
+    let Some(r) = reading.filter(|r| now_ms < r.resets_at_ms && r.observed_at_ms >= r.resets_at_ms - WINDOW_MS) else {
+        return held(state);
+    };
+    if r.resets_at_ms != state.window_resets_at_ms {
+        state.window_resets_at_ms = r.resets_at_ms;
+        state.integral = 0.0;
+        state.last_used_permille = r.used_permille;
+        state.last_observed_at_ms = r.observed_at_ms;
+    }
+    let elapsed = (now_ms - (r.resets_at_ms - WINDOW_MS)).clamp(0, WINDOW_MS) as f64;
+    let error = f64::from(target_permille) * elapsed / WINDOW_MS as f64 - f64::from(r.used_permille);
+    let fresh = r.observed_at_ms > state.last_observed_at_ms;
+    let slope = if fresh {
+        (f64::from(r.used_permille) - f64::from(state.last_used_permille))
+            / ((r.observed_at_ms - state.last_observed_at_ms) as f64 / HOUR_MS)
+    } else {
+        0.0
+    };
+    if fresh {
+        state.last_used_permille = r.used_permille;
+        state.last_observed_at_ms = r.observed_at_ms;
+    }
+    if voted {
+        if gains.ki != 0.0 && state.rate_per_h > 0.0 {
+            state.integral = (state.rate_per_h - BIAS_PER_H - gains.kp * error) / gains.ki;
+        }
+        return held(state);
+    }
+    let rate = |integral: f64| BIAS_PER_H + gains.kp * error + gains.ki * integral - gains.kd * slope;
+    let (low, high) = (3600.0 / f64::from(FALLBACK_MAX_S), 3600.0 / f64::from(FALLBACK_MIN_S));
+    let before = rate(state.integral);
+    let winding = (before >= high && error > 0.0) || (before <= low && error < 0.0);
+    if !winding {
+        state.integral += error * dt_h;
+    }
+    let beat = beat_of(rate(state.integral));
+    state.rate_per_h = 3600.0 / f64::from(beat);
+    beat
+}
 
 /// How many orders of magnitude a full urgency may multiply a Mind's wait by.
 /// Interim, per `swarm-shares-log-bound`, until the swarm's governance sets it.
@@ -92,5 +225,7 @@ pub fn pick(rows: &[Standing], beat_s: u32) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+#[cfg(test)]
+mod sim;
 #[cfg(test)]
 mod tests;
