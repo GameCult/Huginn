@@ -3,7 +3,7 @@
 //! `open_and_launch` is the whole path, in this order: (0) the in-force runs of
 //! hers of the request's turn are read through `slot`, which tells a live one
 //! (its unit active, or admitted within `START_GRACE_S`: it answers Busy) from a
-//! dead one (to be closed Recorded); (1) every cut-spec claim must be in the queue; (2) no claim may be held by an open question (the `Held` snapshot the request carries), and none may
+//! dead one (to be closed Recorded); (1) every cut-spec claim must be in the queue; (2) no claim may be held by an open question (the gate reads the hold itself, once, after the breaker reads and just before the admission, and takes no caller's word for it), and none may
 //! trip the repetition breaker (a trip raises one question in the run whose end
 //! tripped it, which holds that run's claims); (3) the run is admitted, in the one batch that
 //! closes the dead holders, so liveness is decided by the in-force record alone
@@ -27,13 +27,12 @@ use eureka_pipeline::{
     RunOperator, RunTurn, Slug, pipeline_key,
 };
 use huginn_mind::{
-    BATCH_MAX, MindRefusal, PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts,
+    MindRefusal, PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts,
 };
 
 use crate::control::Grant;
 use crate::queue::{
-    Breaker, Held, MindPort, any_of, breaker, citing, claims_of, headers, holds, in_force, of_kind,
-    queue,
+    Breaker, MindPort, any_of, breaker, citing, claims_of, headers, in_force, of_kind, on_hold, queue,
 };
 use eureka_state::hold::RETIRE;
 
@@ -227,10 +226,6 @@ pub struct LaunchRequest {
     /// The reading of a released instance brake and a released swarm brake.
     /// Taken by value, so one reading opens at most one run.
     pub grant: Grant,
-    /// The hold the caller chose its claims by, read once with `on_hold`: the
-    /// gate refuses against it and reads it no second time. A Persona turn
-    /// claims nothing, so it carries the empty one.
-    pub held: Held,
 }
 
 /// Why admission did not open the run: its own refusal, or one of the two
@@ -365,7 +360,6 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
         claims,
         agent,
         grant,
-        held,
     } = request;
     let instance = ports.mind.instance().clone();
     if grant.instance() != &instance {
@@ -391,27 +385,36 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
     }
 
     if turn == RunTurn::SelfRun {
+        // Every read of the breaker comes first, so the hold snapshot below is the
+        // last read of the mind before the admission; a refusal by a hold still
+        // outranks a trip.
+        let mut tripped: Option<(&PipelineRef, PipelineRef)> = None;
+        for item in &claims {
+            if let Breaker::Trip { run } = breaker(ports.mind, item, &ending)? {
+                tripped = Some((item, run));
+                break;
+            }
+        }
+        let held = on_hold(ports.mind)?;
         let open = queue(ports.mind, &instance, &ending, &held)?;
         if let Some(item) = claims.iter().find(|claim| {
             held.contains(claim) || (claim.kind == PipelineKind::CutSpec && !open.contains(claim))
         }) {
             return Ok(LaunchOutcome::NotQueued { item: item.clone() });
         }
-        for item in &claims {
-            if let Breaker::Trip { run } = breaker(ports.mind, item, &ending)? {
-                let count = claims_of(ports.mind, &run)?.len();
-                let question =
-                    PipelineDocument::Question(breaker_question(item, &run, count, &label, now));
-                let id = PipelineRef {
-                    kind: PipelineKind::Question,
-                    id: key_of(&question)?.as_str().into(),
-                };
-                batch.push(question);
-                return Ok(match committed(ports.mind.admit(&agent, &label.0, batch)?) {
-                    Ok(()) => LaunchOutcome::Tripped { run, question: id },
-                    Err(declined) => LaunchOutcome::Refused(declined),
-                });
-            }
+        if let Some((item, run)) = tripped {
+            let count = claims_of(ports.mind, &run)?.len();
+            let question =
+                PipelineDocument::Question(breaker_question(item, &run, count, &label, now));
+            let id = PipelineRef {
+                kind: PipelineKind::Question,
+                id: key_of(&question)?.as_str().into(),
+            };
+            batch.push(question);
+            return Ok(match committed(ports.mind.admit(&agent, &label.0, batch)?) {
+                Ok(()) => LaunchOutcome::Tripped { run, question: id },
+                Err(declined) => LaunchOutcome::Refused(declined),
+            });
         }
     }
 
@@ -478,34 +481,6 @@ fn committed(outcome: PipelineAdmissionOutcome) -> Result<(), Declined> {
     }
 }
 
-/// Resolves, Withdrawn, every item an answer `retire` keeps held that is still
-/// in force, in the admissions of one batch each: the one writer of a
-/// retirement, so that a retired claim leaves the follow-up lists and the queue
-/// instead of waiting held for ever. Returns how many it resolved.
-pub(crate) fn retire_answered(mind: &dyn MindPort, agent: &str, now: DateTime<Utc>) -> Result<usize> {
-    let retired: Vec<PipelineRef> = holds(mind)?
-        .into_iter()
-        .filter(|hold| hold.retired)
-        .flat_map(|hold| hold.items)
-        .collect();
-    let label = run_label(now);
-    let mut resolved = 0;
-    for chunk in retired.chunks(BATCH_MAX) {
-        let mut batch = Vec::new();
-        for item in chunk {
-            let outcome = ResolutionOutcome::Withdrawn {
-                reason: "retired by the answer to a breaker question".into(),
-            };
-            batch.push(closure(mind, item, now, outcome, "The operator answered the breaker question for the run that claimed this item with retire, so it is no longer worked.")?);
-        }
-        match committed(mind.admit(agent, &format!("retire-{}", label.0), batch)?) {
-            Ok(()) => resolved += chunk.len(),
-            Err(_) => return Err(anyhow!("the retired claims could not be resolved")),
-        }
-    }
-    Ok(resolved)
-}
-
 /// `breaker-<run label>`: one question per trip, since each trip is a launch
 /// with a label of its own.
 fn breaker_label(label: &Label) -> Label {
@@ -520,14 +495,14 @@ fn breaker_question(claim: &PipelineRef, run: &PipelineRef, held: usize, label: 
         label: breaker_label(label),
         title: "Repeated runs on the same work admitted nothing".into(),
         question: format!(
-            "Run {} and the runs before it left nothing that cites the work it held (claims held: {held}), so none of it launches again. Answering with reopen, or withdrawing this, reopens every claim of that run with a fresh count; answering with retire resolves every claim of it Withdrawn.",
+            "Run {} and the runs before it left nothing that cites the work it held (claims held: {held}), so none of it launches again. Answering with reopen, or withdrawing this, reopens every claim of that run with a fresh count. To stop working them, resolve the claims, then answer with retire.",
             run.id.0
         )
         .as_str()
         .into(),
         options: vec![
             QuestionOption { label: "reopen".into(), text: "Answer to reopen every claim of the run with a fresh count.".into() },
-            QuestionOption { label: RETIRE.into(), text: "Answer to retire every claim of the run: each is resolved Withdrawn and none is worked again.".into() },
+            QuestionOption { label: RETIRE.into(), text: "Resolve the claims so they are no longer worked, and answer with this option.".into() },
         ],
         recommended: "reopen".into(),
         depends: vec![],
@@ -575,7 +550,6 @@ mod tests {
                     claims: claims.to_vec(),
                     agent: "agent-x".into(),
                     grant,
-                    held: crate::queue::on_hold(mind)?,
                 },
             )
         }
@@ -956,6 +930,15 @@ mod tests {
         let PipelineDocument::Question(asked) = &view.document else { panic!("not a question") };
         assert_eq!((asked.raised_in.clone(), asked.campaign.0.as_str()), (Some(run_ref("h2")), CAMPAIGN), "raised in the run whose end tripped it");
         assert!(asked.question.0.contains(&run_ref("h2").id.0) && asked.question.0.contains("claims held: 1"), "{}", asked.question.0);
+        let texts: Vec<(&str, &str)> = asked.options.iter().map(|option| (option.label.0.as_str(), option.text.0.as_str())).collect();
+        assert_eq!(
+            texts,
+            [
+                ("reopen", "Answer to reopen every claim of the run with a fresh count."),
+                ("retire", "Resolve the claims so they are no longer worked, and answer with this option.")
+            ],
+            "retire is resolved by its answerer: no option promises the machine will"
+        );
         assert_eq!(view.admission.provenance.session.0, "mind-20261009T131500000Z");
         // Open, the question blocks the item.
         assert_eq!(rig.launch(RunTurn::SelfRun, &[spec_ref("x")]), LaunchOutcome::NotQueued { item: spec_ref("x") });
@@ -1021,6 +1004,34 @@ mod tests {
         assert_eq!((rig.runs(), rig.started()), (3, 0));
     }
 
+    /// A caller's earlier read of the hold (the heartbeat's, choosing its claims)
+    /// is advisory: a question that lands after it and before the gate is seen.
+    #[test]
+    fn a_question_landing_before_the_gate_reads_is_seen_by_the_run_it_would_have_opened() {
+        let rig = Rig::new();
+        rig.mind.committed(vec![spec("x"), follow_up("brief", &spec_ref("x"))]);
+        let brief = reference(K::FollowUp, &id("follow_up", "brief"));
+        let landing = Landing {
+            inner: &rig.mind,
+            question: RefCell::new(Some(vec![question_in("fork", &brief)])),
+            hold_reads: Cell::new(0),
+            lands_on: reads_anything,
+        };
+        let outcome = rig.launch_through(&landing, RunTurn::SelfRun, std::slice::from_ref(&brief));
+        assert_eq!(outcome, LaunchOutcome::NotQueued { item: brief });
+        assert_eq!((landing.hold_reads.get(), rig.runs(), rig.started()), (1, 0, 0), "one read, nothing admitted");
+    }
+
+    #[test]
+    fn a_brief_an_open_question_is_raised_in_cannot_be_launched_on() {
+        let rig = Rig::new();
+        rig.mind.committed(vec![spec("x"), follow_up("brief", &spec_ref("x"))]);
+        let brief = reference(K::FollowUp, &id("follow_up", "brief"));
+        rig.mind.committed(vec![question_in("fork", &brief)]);
+        assert_eq!(rig.launch(RunTurn::SelfRun, std::slice::from_ref(&brief)), LaunchOutcome::NotQueued { item: brief });
+        assert_eq!((rig.runs(), rig.started()), (0, 0));
+    }
+
     #[test]
     fn the_gate_refuses_a_claim_an_open_question_holds_whatever_its_kind() {
         let rig = Rig::new();
@@ -1038,11 +1049,21 @@ mod tests {
         assert!(matches!(rig.launch(RunTurn::SelfRun, &[brief]), LaunchOutcome::Launched { .. }), "withdrawn, the hold lifts");
     }
 
-    /// A mind where a question lands the moment the hold has been read once.
+    /// A mind where a question lands the moment `lands_on` reads a selection.
     struct Landing<'a> {
         inner: &'a TestMind,
         question: RefCell<Option<Vec<PipelineDocument>>>,
         hold_reads: Cell<u32>,
+        lands_on: fn(&Selection) -> bool,
+    }
+
+    fn reads_the_hold(selection: &Selection) -> bool {
+        selection.schemas.as_deref() == Some(&[K::Question.type_id().to_string()][..])
+            && selection.fields.iter().flatten().any(|predicate| predicate.index == "in_force")
+    }
+
+    fn reads_anything(_: &Selection) -> bool {
+        true
     }
 
     impl MindPort for Landing<'_> {
@@ -1052,18 +1073,13 @@ mod tests {
 
         fn query(&self, selection: &Selection) -> Result<huginn_mind::PipelineSelectionPage> {
             let answer = self.inner.query(selection);
-            let reads_the_hold = selection.schemas.as_deref()
-                == Some(&[K::Question.type_id().to_string()][..])
-                && selection
-                    .fields
-                    .iter()
-                    .flatten()
-                    .any(|predicate| predicate.index == "in_force");
-            if reads_the_hold {
+            if reads_the_hold(selection) {
                 self.hold_reads.set(self.hold_reads.get() + 1);
-                if let Some(documents) = self.question.take() {
-                    self.inner.committed(documents);
-                }
+            }
+            if (self.lands_on)(selection)
+                && let Some(documents) = self.question.take()
+            {
+                self.inner.committed(documents);
             }
             answer
         }
@@ -1087,8 +1103,9 @@ mod tests {
             inner: &rig.mind,
             question: RefCell::new(Some(vec![question_in("fork", &spec_ref("x"))])),
             hold_reads: Cell::new(0),
+            lands_on: reads_the_hold,
         };
-        // The request's snapshot is read first (the question lands behind it); the queue and the gate use that one.
+        // The gate's own snapshot is read first (the question lands behind it); the queue and the gate use that one.
         let outcome = rig.launch_through(&landing, RunTurn::SelfRun, &[spec_ref("x")]);
         assert!(
             matches!(outcome, LaunchOutcome::Launched { .. }),
@@ -1104,60 +1121,6 @@ mod tests {
             [spec_ref("x")],
             "the question did land"
         );
-    }
-
-    #[test]
-    fn retiring_resolves_every_claim_an_answer_of_retire_holds_once() {
-        let rig = Rig::new();
-        rig.mind
-            .committed(vec![spec("x"), follow_up("brief", &spec_ref("x"))]);
-        let brief = reference(K::FollowUp, &id("follow_up", "brief"));
-        rig.mind.committed(vec![run(
-            "failed",
-            RunTurn::SelfRun,
-            RunOperator::Mind,
-            &[brief.clone(), spec_ref("x")],
-        )]);
-        rig.mind
-            .committed(vec![close(run_ref("failed"), recorded())]);
-        rig.mind
-            .committed(vec![question_in("fork", &run_ref("failed"))]);
-        let question = id("question", "fork");
-        assert_eq!(
-            retire_answered(&rig.mind, "agent-x", rig.clock.now()).unwrap(),
-            0,
-            "an open question retires nothing"
-        );
-        rig.mind
-            .committed(vec![ruling("answer", Some((&question, "reopen")))]);
-        assert_eq!(
-            retire_answered(&rig.mind, "agent-x", rig.clock.now()).unwrap(),
-            0,
-            "reopen retires nothing"
-        );
-        rig.mind
-            .committed(vec![question_in("fork2", &run_ref("failed"))]);
-        rig.mind.committed(vec![ruling(
-            "answer2",
-            Some((&id("question", "fork2"), "retire")),
-        )]);
-        assert_eq!(
-            retire_answered(&rig.mind, "agent-x", rig.clock.now()).unwrap(),
-            2
-        );
-        for item in [&brief, &spec_ref("x")] {
-            let view = rig.mind.view(item.kind, &item.id.0).unwrap();
-            assert!(
-                matches!(view.status, PipelineStatus::Resolved { record, .. } if matches!(record.outcome, ResolutionOutcome::Withdrawn { .. })),
-                "{item:?}"
-            );
-        }
-        assert_eq!(
-            retire_answered(&rig.mind, "agent-x", rig.clock.now()).unwrap(),
-            0,
-            "resolved, nothing is left to retire"
-        );
-        assert!(rig.mind.ids(K::Run).len() == 1, "and nothing launched");
     }
 
     /// The one source of every drawn case: splitmix64 from a fixed seed, so a
@@ -1291,7 +1254,6 @@ mod tests {
                 claims,
                 agent: "agent-x".into(),
                 grant,
-                held: Held::default(),
             },
         );
         assert!(launcher.started.borrow().is_empty());

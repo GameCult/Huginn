@@ -128,7 +128,7 @@ mind_body::launch: impl SystemdLauncher: fn stop_all (& self , instance : & Slug
 mind_body::launch: pub trait Clock { fn now (& self) -> DateTime < Utc > ; }
 mind_body::launch: pub trait Launcher { fn start (& self , instance : & Slug , turn : RunTurn) -> Result < () > ; fn alive (& self , instance : & Slug , turn : RunTurn) -> bool ; }
 mind_body::launch: pub trait Systemctl { fn run (& self , args : & [& str]) -> Result < SystemctlReply > ; }
-mind_body::launch: struct LaunchRequest  pub-fields[turn: RunTurn, claims: Vec < PipelineRef >, agent: String, grant: Grant, held: Held]
+mind_body::launch: struct LaunchRequest  pub-fields[turn: RunTurn, claims: Vec < PipelineRef >, agent: String, grant: Grant]
 mind_body::launch: struct Ports< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str]
 mind_body::launch: struct SystemClock  pub-fields[]
 mind_body::launch: struct SystemctlReply  pub-fields[success: bool, code: Option < i32 >, stdout: String]
@@ -210,7 +210,7 @@ mind_body::queue: impl HuginnMind < 'static >: fn new (client : HuginnClient) ->
 mind_body::queue: impl MindPort for HuginnMind < '_ >
 mind_body::queue: impl< 'a > HuginnMind < 'a >
 mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query (& self , selection : & Selection) -> Result < PipelineSelectionPage > ; fn query_near (& self , _selection : & Selection , _text : & str , _top_k : u32) -> Result < PipelineSelectionPage > { bail ! ("this mind port has no semantic index") } fn admit (& self , agent : & str , session : & str , documents : Vec < PipelineDocument >) -> Result < PipelineAdmissionOutcome > ; }
-mind_body::queue: struct Held # [derive (Clone , Debug , Default , PartialEq , Eq)] pub-fields[]
+mind_body::queue: struct Held # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[]
 mind_body::queue: struct HuginnMind< 'a >  pub-fields[]
 mind_body::recall: impl Lane
 mind_body::recall: impl Recalled

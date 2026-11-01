@@ -1209,35 +1209,20 @@ fn one_held_brief_says_so_in_the_trace() {
 }
 
 #[test]
-fn an_answer_of_retire_resolves_the_bundle_and_nothing_relaunches() {
+fn an_answer_of_retire_resolves_nothing_and_the_hold_stays_until_the_answerer_resolves() {
     let (rig, source) = rig_with_a_persona_turn();
     let items = failed_bundle(&rig, &source);
     beats(&rig, 3);
-    let question = rig.minds[ANN]
-        .ids(K::Question)
-        .pop()
-        .expect("the trip asked");
+    let question = rig.minds[ANN].ids(K::Question).pop().expect("the trip asked");
     assert_eq!(self_runs(&rig, ANN).len(), 3);
-    rig.minds[ANN].committed(vec![crate::testkit::ruling(
-        "answer",
-        Some((&question, "retire")),
-    )]);
+    rig.minds[ANN].committed(vec![crate::testkit::ruling("answer", Some((&question, "retire")))]);
     beats(&rig, 6);
-    assert_eq!(
-        self_runs(&rig, ANN).len(),
-        3,
-        "no Self run after the answer: retire does not relaunch"
-    );
+    assert_eq!(self_runs(&rig, ANN).len(), 3, "no Self run after the answer: retire does not relaunch");
     for item in &items {
         let view = rig.minds[ANN].view(K::FollowUp, &item.id.0).unwrap();
-        assert!(
-            matches!(view.status, huginn_mind::PipelineStatus::Resolved { record, .. } if matches!(record.outcome, eureka_pipeline::ResolutionOutcome::Withdrawn { .. })),
-            "{item:?} is resolved Withdrawn"
-        );
+        assert!(matches!(view.status, huginn_mind::PipelineStatus::InForce), "{item:?}: the heartbeat resolves nothing on an answer");
     }
-    assert_eq!(
-        rig.minds[ANN].ids(K::Question).len(),
-        1,
-        "and no second question"
-    );
+    assert!(rig.minds[ANN].ids(K::Resolution).is_empty(), "no machine writer of a resolution");
+    assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "and no second question");
+    assert!(inbox::derive(&rig.minds[ANN], &HashSet::new()).unwrap().is_empty(), "the retired claims stay held and untold");
 }

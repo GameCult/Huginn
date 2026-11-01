@@ -41,8 +41,8 @@ use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 
 use crate::chat_client::{Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
-use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch, retire_answered, slot};
-use crate::queue::{Held, MindPort, any_of, citing, claims_of, headers, of_kind, on_hold};
+use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch, slot};
+use crate::queue::{MindPort, any_of, citing, claims_of, headers, of_kind, on_hold};
 use crate::self_run::inbox;
 use crate::tempo::{self, Standing};
 
@@ -574,7 +574,6 @@ fn launch(
     row: &Row,
     turn: RunTurn,
     claims: Vec<PipelineRef>,
-    held: Held,
 ) -> Result<Launched> {
     let Effective::Released(grant) = organs.control.effective(row.slug()) else {
         return Ok(Launched::Refused("the brake is held".into()));
@@ -584,7 +583,6 @@ fn launch(
         claims,
         agent: AGENT.into(),
         grant,
-        held,
     };
     let ports = ports(organs, row.seat.mind);
     Ok(match open_and_launch(&ports, request) {
@@ -608,8 +606,6 @@ struct Claimable {
     claims: Vec<PipelineRef>,
     /// How many briefs an open question holds.
     held: usize,
-    /// The hold they were chosen by, which the launch consults and reads no second time.
-    hold: Held,
     /// Self runs in force whose unit is gone: the launch closes them.
     dead: Vec<PipelineRef>,
 }
@@ -621,11 +617,10 @@ struct Claimable {
 /// run, not the Mind, until the operator answers or withdraws its question, and
 /// the count starts afresh. Whether a holder lives is `launch::slot`'s answer
 /// (a dead one is closed by the launch, so it does not stop the successor), and
-/// what is held is `queue::on_hold`'s, read once here and carried into the
-/// launch; nothing here decides either.
+/// what is held is `queue::on_hold`'s. The read here only chooses the claims;
+/// the launch's gate reads the hold again at admission and decides.
 fn claimable(organs: &Organs, row: &Row) -> Result<Claimable> {
     let mind = row.seat.mind;
-    let hold = on_hold(mind)?;
     let found = slot(
         &ports(organs, mind),
         row.slug(),
@@ -636,11 +631,10 @@ fn claimable(organs: &Organs, row: &Row) -> Result<Claimable> {
         return Ok(Claimable {
             claims: Vec::new(),
             held: 0,
-            hold,
             dead: Vec::new(),
         });
     }
-    let (free, held) = inbox::derive_counting_held(mind, &hold, &HashSet::new())?;
+    let (free, held) = inbox::derive_counting_held(mind, &on_hold(mind)?, &HashSet::new())?;
     let claims = free
         .into_iter()
         .map(|brief| PipelineRef { kind: PipelineKind::FollowUp, id: brief.id.as_str().into() })
@@ -649,7 +643,6 @@ fn claimable(organs: &Organs, row: &Row) -> Result<Claimable> {
     Ok(Claimable {
         claims,
         held,
-        hold,
         dead: found.dead,
     })
 }
@@ -718,7 +711,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
         if mentioned.is_none() && !self_ended {
             continue;
         }
-        match launch(organs, row, RunTurn::PersonaTurn, vec![], Held::default())? {
+        match launch(organs, row, RunTurn::PersonaTurn, vec![])? {
             Launched::Run(label) => {
                 if let Some(key) = mentioned {
                     state.handled_mentions.push(key);
@@ -757,21 +750,15 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     let mut passed: Vec<Standing> = standings.clone();
     while due && let Some(winner) = tempo::pick(&passed, beat_s) {
         // Her Self holds briefs: the beat is a Self run for them; otherwise a Persona turn.
-        // An answer of retire is written before the briefs are read, so a retired brief is resolved, not claimed.
-        if let Err(error) = retire_answered(rows[winner].seat.mind, AGENT, now) {
-            rows[winner].note = format!("retire: {error}");
-        }
         let Claimable {
             claims,
             held,
-            hold,
             dead,
         } = claimable(organs, &rows[winner]).unwrap_or_else(|error| {
             rows[winner].note = format!("briefs: {error}");
             Claimable {
                 claims: Vec::new(),
                 held: 0,
-                hold: Held::default(),
                 dead: Vec::new(),
             }
         });
@@ -794,7 +781,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
         } else {
             RunTurn::SelfRun
         };
-        match launch(organs, &rows[winner], turn, claims, hold)? {
+        match launch(organs, &rows[winner], turn, claims)? {
             Launched::Run(label) => {
                 state.last_beat_at = now;
                 rows[winner].busy = turn == RunTurn::PersonaTurn;

@@ -151,10 +151,10 @@ pub(crate) fn holds(mind: &dyn MindPort) -> Result<Vec<Hold>> {
     hold::holds(&|asking| mind.query(asking))
 }
 
-/// A snapshot of the items an open question holds, read once by whoever
-/// launches and passed to everything that launch consults, so the gate, the
-/// queue and the claims they chose cannot answer differently within one launch.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A snapshot of the items an open question holds. Only `on_hold` makes one
+/// (there is no empty default), and the launch gate reads its own, once, at
+/// admission; a reader that chooses claims by one is advisory.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Held(Vec<PipelineRef>);
 
 impl Held {
