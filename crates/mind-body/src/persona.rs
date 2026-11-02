@@ -20,8 +20,8 @@
 //! prompt, read once per process. What reaches her in the stream is one line per batch of
 //! deliveries. A session's first line carries her whole machine: her responsibilities, what her mind
 //! recalls, the plan windows the lease granted, the tempo and the messages. A later line carries the
-//! messages and nothing else (ruling `eureka-body:ruling:tell-is-just-the-message`), with a room's
-//! tail the first time this session shows that room: the process is the session, nothing compacts
+//! messages and nothing else (ruling `eureka-body:ruling:tell-is-just-the-message`), with any line
+//! of the room or thread this session has not yet shown: the process is the session, nothing compacts
 //! it, what she needs beyond that she asks her mind for, and a restart tells the whole machine again.
 //! A batch is the deliveries the CLI echoed since the last result;
 //! each result is constrained to one `PersonaReply` schema (ruling
