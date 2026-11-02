@@ -4674,7 +4674,7 @@ fn polls_inside_the_interval_ask_nothing() {
 /// A read that fails keeps the cursor: the next one asks the same `after`, and nothing is lost or told twice. Her chat goes on.
 #[test]
 fn a_failed_activity_read_keeps_the_cursor() {
-    let rig = stewarding_rig(4);
+    let rig = stewarding_rig(8);
     let push = event(150, "GameCult/Huginn", "nibu", RepoChange::Pushed { commits: 1 });
     let forged = Forged::over(&rig.mind, vec![activity(100, vec![]), None, activity(150, vec![push])]);
     let lines = live_session(&rig, &forged, PAST_THE_REPO_READ_MS, true, 4);
@@ -4689,7 +4689,7 @@ fn a_failed_activity_read_keeps_the_cursor() {
 /// by a later read that tells nothing of what it finds (that passed unread, and shows on the next first line).
 #[test]
 fn a_failed_first_read_does_not_fail_the_session() {
-    let rig = stewarding_rig(3);
+    let rig = stewarding_rig(8);
     let passed = vec![event(60, "GameCult/Huginn", "nibu", RepoChange::Pushed { commits: 4 })];
     let forged = Forged::over(&rig.mind, vec![None, activity(70, passed), activity(80, vec![event(80, "GameCult/Huginn", "void", RepoChange::Pushed { commits: 1 })])]);
     let lines = live_session(&rig, &forged, PAST_THE_REPO_READ_MS, true, 4);
@@ -4705,7 +4705,7 @@ fn a_failed_first_read_does_not_fail_the_session() {
 #[test]
 fn a_first_line_shows_wear_after_her_responsibilities() {
     let rig = stewarding_rig(2);
-    let now = 1_700_000_000_000_u64;
+    let now = unix_ms(at(0));
     let pr = |number, author: &str, hours: u64| huginn_mind::OpenPr { repo: "GameCult/Huginn".into(), number, author: Short(author.into()), updated_at: now - hours * 3_600_000 };
     let read = RepoActivity {
         head: 100,
