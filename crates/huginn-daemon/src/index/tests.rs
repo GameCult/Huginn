@@ -1079,6 +1079,29 @@ fn a_search_refuses_when_the_index_is_not_reconciled_with_the_model() {
     assert!(projector.stale(), "and the reconciliation is to be redone");
 }
 
+/// The source delete names the repo, the paths when given, and, when it keeps a
+/// commit, excludes that commit's points: the filter is what spares the chunks
+/// just written.
+#[test]
+fn qdrant_source_delete_filters_by_repo_paths_and_the_commit_it_keeps() {
+    use crate::sources::SourceIndex;
+    let deleting = stub(&[("POST /collections/", 200, r#"{"result":{"status":"completed"},"status":"ok"}"#)]);
+    let mut store = QdrantIndex::new(&deleting.url);
+    store.delete_by("Demo", Some(&["a.rs".to_owned()]), Some("abc123")).unwrap();
+    store.delete_by("Gone", None, None).unwrap();
+    let seen = deleting.seen.lock().unwrap();
+    let bodies: Vec<serde_json::Value> = seen.iter().map(|(_, _, body)| serde_json::from_str(body).unwrap()).collect();
+    assert!(seen.iter().all(|(method, path, _)| method == "POST" && path.ends_with("/points/delete?wait=true")));
+    assert_eq!(
+        bodies[0]["filter"],
+        serde_json::json!({
+            "must": [{ "key": "repo", "match": { "value": "Demo" } }, { "key": "path", "match": { "any": ["a.rs"] } }],
+            "must_not": [{ "key": "commit", "match": { "value": "abc123" } }]
+        })
+    );
+    assert_eq!(bodies[1]["filter"], serde_json::json!({ "must": [{ "key": "repo", "match": { "value": "Gone" } }] }));
+}
+
 /// The search scores exactly the points it is handed (a has_id filter, exact
 /// search; which documents are members is the mind's), and reads back the
 /// document id, the kind and the score, in the order Qdrant gave them. A hit
