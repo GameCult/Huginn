@@ -2832,18 +2832,30 @@ fn a_flush_reply_keeps_its_memories_when_an_earlier_turn_closed_the_item_it_also
     let traced = rig.trace.0.borrow();
     assert!(traced.last().unwrap().outputs.iter().any(|item| item.text.contains(&format!("settle {id} dropped"))), "{traced:?}");
 }
-/// Lines written to her child move the clock and bring deliveries: the nth write (counting from one) moves it on by
-/// `steps[n - 1].0` milliseconds and brings `steps[n - 1].1`. The clock stands still between reads.
-fn on_writes(rig: &Rig, steps: Vec<(i64, Option<ChatDelivery>)>) {
+/// A step of a scripted timeline: the milliseconds the clock moves on, and the delivery that reaches the mouth.
+type Moment = (i64, Option<ChatDelivery>);
+
+/// The nth time the hook fires (counting from one) takes `steps[n - 1]`. The clock stands still between reads.
+fn timeline(rig: &Rig, steps: Vec<Moment>) -> Box<dyn Fn()> {
     rig.clock.step.set(0);
     let (deliveries, now, count) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(0));
-    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+    Box::new(move || {
         count.set(count.get() + 1);
         if let Some((advance, arriving)) = steps.get(count.get() - 1) {
             now.set(now.get() + advance);
             deliveries.borrow_mut().extend(arriving.clone());
         }
-    }));
+    })
+}
+
+/// Steps taken as the CLI echoes our nth line, which is after the loop has begun reading the clock.
+fn on_echoes(rig: &Rig, steps: Vec<Moment>) {
+    *rig.model.after_echo.borrow_mut() = Some(timeline(rig, steps));
+}
+
+/// Steps taken as our nth line is written.
+fn on_writes(rig: &Rig, steps: Vec<Moment>) {
+    *rig.model.during.borrow_mut() = Some(timeline(rig, steps));
 }
 
 #[test]
@@ -2853,7 +2865,7 @@ fn a_tell_reply_keeps_its_memories_when_the_turn_running_as_it_was_written_close
     rig.model.replies.borrow_mut().push_back(settling(&[("swarm", "again")], json!([keeps("Did", "Closed the fork with Libby", &["@libby:chat"])]), &id, "again"));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@libby:chat", "status"));
     // Delivery 3 arrives, and a poll falls due, while the first line's turn runs: the tell shows the item before the first result is admitted.
-    on_writes(&rig, vec![(6_000, Some(delivery(3, "swarm", "@libby:chat", "more")))]);
+    on_echoes(&rig, vec![(6_000, Some(delivery(3, "swarm", "@libby:chat", "more")))]);
     let outcome = rig.go();
     assert!(told(&rig).iter().any(|line| line.contains(r#"text="more""#)), "the tell was written: {:?}", told(&rig));
     assert_eq!(failure_of(outcome), None, "{:?}", told(&rig));
@@ -2871,7 +2883,7 @@ fn a_flush_may_not_settle_an_item_opened_after_the_session_last_line() {
     // The first reply opens the commitment after the first and second lines were written; the flush is written after that reply is admitted.
     let rig = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "plan")], &[opening(), says(&[("swarm", "two")]), settling(&[], json!([]), &id, "guessed")]);
     rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap() + 7);
-    on_writes(&rig, vec![(6_000, Some(delivery(2, "swarm", "@libby:chat", "status"))), (2_000, None)]);
+    on_echoes(&rig, vec![(6_000, Some(delivery(2, "swarm", "@libby:chat", "status"))), (2_000, None)]);
     let _ = rig.go();
     assert_eq!(told(&rig).iter().filter(|line| line.contains("This session ends soon")).count(), 1, "{:?}", told(&rig));
     assert_eq!(memories(&rig).iter().map(|(found, _)| found.clone()).collect::<Vec<_>>(), [id.clone()], "the commitment the first reply opened");
@@ -2885,7 +2897,8 @@ fn a_flush_written_beside_a_tell_leaves_the_tell_to_be_answered_and_acked() {
     rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap() + 7);
     // Delivery 2 is told while the first turn runs. The second line is outstanding when the rotation falls due and
     // delivery 3 waits, so the third write carries the tell and the flush ask together.
-    on_writes(&rig, vec![(6_000, Some(operator_says(2, "two"))), (6_000, Some(operator_says(3, "three")))]);
+    on_echoes(&rig, vec![(6_000, Some(operator_says(2, "two")))]);
+    on_writes(&rig, vec![(0, None), (6_000, Some(operator_says(3, "three")))]);
     let outcome = rig.go();
     assert_eq!(failure_of(outcome), None, "{:?}", told(&rig));
     let flushed: Vec<String> = told(&rig).into_iter().filter(|line| line.contains("This session ends soon")).collect();
