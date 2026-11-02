@@ -3261,9 +3261,10 @@ fn a_rooms_earlier_lines_keep_the_newest_within_the_bound() {
         with_context(delivery(2, "swarm", "@op:chat", "two"), vec![line('b'), line('c')]),
         with_context(delivery(3, "operator", "@op:chat", "three"), vec![line('d'), line('e')]),
     ];
-    let rig = Rig::new(messages, &[says(&[("swarm", "ok")])]);
+    // Two rooms' full tails pass the line's bound, so operator's comes on the next line.
+    let rig = Rig::new(messages, &[says(&[("swarm", "ok")]), says(&[("operator", "ok")])]);
     assert_eq!(failure_of(rig.go()), None);
-    let shown = earlier_lines(&rig.model.requests.borrow()[0].input);
+    let shown: Vec<String> = told(&rig).iter().flat_map(|line| earlier_lines(line)).collect();
     let marks: Vec<char> = shown.iter().filter_map(|line| line.rsplit("text=\"").next().and_then(|text| text.chars().next())).collect();
     assert_eq!(marks, ['b', 'c', 'd', 'e'], "b and c fill swarm's bound exactly, so tiny and a are gone though tiny would fit; operator keeps its own");
 }
@@ -4256,10 +4257,10 @@ fn a_holder_that_ends_with_her_brief_open_and_the_run_that_takes_it_each_make_on
 /// A run that ends leaving her brief open is not the brief's last word: the next run to take it makes its own notice.
 #[test]
 fn every_run_that_takes_her_brief_makes_a_notice_not_only_the_first() {
-    let (_rig, lines, ..) = a_start_answered_busy_then(vec![Elsewhere::TakeHerBrief("self-a"), Elsewhere::TakeHerBrief("self-b")]);
+    let (_rig, lines, ..) = a_start_answered_busy_then(vec![Elsewhere::CloseTheSelfRuns, Elsewhere::TakeHerBrief("self-a"), Elsewhere::TakeHerBrief("self-b")]);
     let notices = all_notices(&lines);
-    assert_eq!(notices.len(), 2, "{lines:?}");
-    assert!(notices[0].contains("self-a") && notices[1].contains("self-b"), "{notices:?}");
+    assert_eq!(notices.len(), 3, "{lines:?}");
+    assert!(notices[0].contains("self-holder") && notices[1].contains("self-a") && notices[2].contains("self-b"), "{notices:?}");
 }
 
 /// A run that ends leaving her brief open does not end the watch of it.
@@ -4392,7 +4393,7 @@ fn a_burst_is_told_over_lines_within_the_bound() {
     let lines = told(&rig);
     assert_eq!(lines.len(), 3, "{}", lines.len());
     let carried = |line: &str| line.lines().filter(|line| line.starts_with("message ")).count();
-    assert_eq!((carried(&lines[1]), carried(&lines[2])), (7, 3), "32 KiB of rendered 4000 B messages, the rest next");
+    assert_eq!((carried(&lines[1]), carried(&lines[2])), (8, 2), "32 KiB of rendered 4000 B messages, the rest next");
     assert_eq!(rig.chat.acked.borrow().last(), Some(&11));
 }
 
@@ -4404,7 +4405,7 @@ fn a_burst_waiting_at_a_start_is_told_over_lines_within_the_bound() {
     assert_eq!(failure_of(rig.go()), None);
     let lines = told(&rig);
     let carried = |line: &str| line.lines().filter(|line| line.starts_with("message ")).count();
-    assert_eq!(lines.iter().map(|line| carried(line)).collect::<Vec<_>>(), [7, 3]);
+    assert_eq!(lines.iter().map(|line| carried(line)).collect::<Vec<_>>(), [8, 2]);
     assert_eq!(rig.chat.acked.borrow().last(), Some(&10));
 }
 
@@ -4465,12 +4466,12 @@ fn the_line_bound_counts_the_earlier_lines_a_message_brings() {
 #[test]
 fn a_small_message_does_not_overtake_a_large_one_past_the_bound() {
     let big = |seq: u64| delivery(seq, "swarm", "@op:chat", &format!("big{seq} {}", "b".repeat(3990)));
-    let mut burst: Vec<ChatDelivery> = (2..=9).map(big).collect();
-    burst.push(delivery(10, "swarm", "@op:chat", "small"));
+    let mut burst: Vec<ChatDelivery> = (2..=10).map(big).collect();
+    burst.push(delivery(11, "swarm", "@op:chat", "small"));
     let lines = tell_a_burst(burst, 2);
-    assert_eq!(lines.iter().map(|line| messages_in(line)).collect::<Vec<_>>(), [7, 2]);
+    assert_eq!(lines.iter().map(|line| messages_in(line)).collect::<Vec<_>>(), [8, 2]);
     assert!(!lines[0].contains(r#"text="small""#), "{}", lines[0].len());
-    assert!(lines[1].contains("big9") && lines[1].contains(r#"text="small""#), "{}", lines[1].len());
+    assert!(lines[1].contains("big10") && lines[1].contains(r#"text="small""#), "{}", lines[1].len());
 }
 
 /// A line the room's budget skipped is not told, so a later message that still carries it prints it.
