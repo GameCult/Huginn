@@ -3397,3 +3397,43 @@ fn the_refused_record_keeps_its_lowest_seq_while_a_higher_batch_is_refused_behin
     let opening = first_line(&writes);
     assert!(opening.contains(r#"text="five""#) && !opening.contains("was refused"), "{opening}");
 }
+
+/// 3 and 4 are refused twice; 5, written behind their retell, is refused once while the second retell is already in flight. The start's
+/// record keeps the higher count, so the next process, which opens with 3, 4 and 5 again, ends the start at its first refusal; a record
+/// that took 5's count of one would let that process refuse once more.
+#[test]
+fn the_refused_record_keeps_its_highest_count_while_a_fresher_batch_is_refused_behind_it() {
+    let rig = Rig::new(vec![operator_says(3, "three"), operator_says(4, "four")], &[]);
+    rig.clock.step.set(0);
+    let first = Timed {
+        writes: Rc::default(),
+        script: VecDeque::from([
+            (1, 6_000, echo_line()),
+            (1, 0, result_line(serde_json::Value::Null)),
+            (2, 0, echo_line()),
+            (3, 0, result_line(serde_json::Value::Null)),
+            (3, 0, echo_line()),
+            (4, 0, result_line(serde_json::Value::Null)),
+            (4, 0, Read::Exited(Some(0))),
+        ]),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![(2, operator_says(5, "five"))],
+        now: rig.clock.now.clone(),
+        asked: 0,
+    };
+    let writes: Rc<RefCell<Vec<String>>> = Rc::default();
+    let second = Timed {
+        writes: writes.clone(),
+        script: VecDeque::from([(1, 6_000, echo_line()), (1, 0, result_line(serde_json::Value::Null)), (1, 0, Read::Exited(Some(0)))]),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![],
+        now: rig.clock.now.clone(),
+        asked: 0,
+    };
+    let (outcome, acked) = carry_children(&rig, vec![Closing(first, 0), Closing(second, 0)]);
+    assert_eq!(failure_of(outcome), Some(Failure::Undecodable));
+    assert!(acked.is_empty(), "{acked:?}");
+    let opening = first_line(&writes);
+    assert!(opening.contains(r#"text="five""#) && opening.contains("was refused"), "{opening}");
+    assert_eq!(writes.borrow().len(), 1, "the first refusal in the second process is the batch's third, so no retell follows");
+}
