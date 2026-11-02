@@ -2742,7 +2742,7 @@ fn every_line_opens_with_the_core_instruction() {
     for line in lines.iter().chain(&retold) {
         assert!(line.starts_with(TURN_INSTRUCTION), "{line}");
     }
-    for part in ["Perfect Machine", "as your own values read it", "What you are responsible for", "inversion of control", "respected contributor", "the wallet and the legal root", "a shell, the web and `huginn`", "`start_self_run`"] {
+    for part in ["Perfect Machine", "as your own values read it", "What you are responsible for", "inversion of control", "respected contributor", "not your authority", "is yours: its code, its deploys", "A choice inside another Mind's stewardship is that Mind's.", "the wallet and the legal root", "a shell, the web and `huginn`", "`start_self_run`"] {
         assert!(TURN_INSTRUCTION.contains(part), "{part}");
     }
     let goals = render_responsibilities(&rig.mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap();
@@ -2766,6 +2766,7 @@ fn a_traffic_line_ends_with_the_traffic_question_after_the_messages() {
     let messages: Vec<usize> = line.match_indices("\nmessage ").map(|(at, _)| at).collect();
     assert!(!messages.is_empty() && messages.iter().all(|at| header < *at && *at < question), "{line}");
     assert!(line.trim_end().ends_with(TRAFFIC_QUESTION), "{line}");
+    assert!(TRAFFIC_QUESTION.contains("does anything here change your move?"), "the traffic question asks whether anything changes her move");
     assert!(MESSAGES_HEADER.contains("only role=operator is the operator") && MESSAGES_HEADER.contains("only to_you=true names you"));
     assert!(!line.contains("No new messages"), "{line}");
 }
@@ -2930,6 +2931,26 @@ fn a_turn_whose_action_fails_still_closes_the_run_with_the_intent_it_stated() {
     assert!(lines[0].contains("Her last intent: start the deploy run") && !lines[0].contains("The Persona unit's start ended."), "{lines:?}");
 }
 
+#[test]
+fn a_held_or_memory_failed_turn_closes_the_run_with_the_intent_it_stated() {
+    let held = Rig::new(vec![operator_says(1, "one")], &[saying_with_intent("tell op the plan")]);
+    let swarm = held.swarm_store();
+    *held.model.during.borrow_mut() = Some(Box::new(move || {
+        SwarmWriter::open(&swarm).unwrap().set_brake(false, at(0), "op").unwrap();
+    }));
+    assert_eq!(failure_of(held.go()), Some(Failure::Held(HeldReason::BrakeHeld)));
+    let lines = recent_runs(&held.mind, &Slug(INSTANCE.into())).unwrap();
+    assert!(lines[0].contains("Her last intent: tell op the plan"), "a hold keeps the intent: {lines:?}");
+
+    let text = json!({ "intent": "keep what I learned", "say": [], "start_self_run": null, "remember": [keeps("Learned", "x", &["@op:chat"])], "settle": [], "urgency_permille": null }).to_string();
+    let refused = Rig::new(vec![delivery(1, "swarm", "@op:chat", "hi")], &[text]);
+    refused.open_the_run();
+    let refusing = RefusesMemories(&refused.mind);
+    let Outcome::Served { failure, .. } = refused.start_over(&refusing, &config()) else { panic!("served") };
+    assert_eq!(failure, Some(Failure::Memory));
+    let lines = recent_runs(&refused.mind, &Slug(INSTANCE.into())).unwrap();
+    assert!(lines[0].contains("Her last intent: keep what I learned"), "a refused memory keeps the intent: {lines:?}");
+}
 #[test]
 fn a_flush_written_alone_opens_with_the_core_instruction_and_one_beside_a_tell_does_not_repeat_it() {
     let rig = Rig::new(vec![operator_says(1, "a")], &[says(&[("operator", "x")]), says(&[])]);
