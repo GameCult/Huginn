@@ -3225,6 +3225,9 @@ fn every_memory_bound_names_its_own_field() {
     let about = |count: usize| keeping(json!([memory(json!(many[..count]), "x", 1)]));
     assert!(decode_reply(&about(ABOUT_MAX), &rooms, &many, &open).is_ok());
     assert_eq!(decode_reply(&about(ABOUT_MAX + 1), &rooms, &many, &open), Err(Failure::OutOfBounds("remember.about: too many entries or one repeated")));
+    // A reason in four-byte characters: within its characters, and bound by its bytes too.
+    assert!(decode_reply(&settling(json!([done(&"\u{1F40D}".repeat(250))])), &rooms, &people, &open).is_ok());
+    assert_eq!(decode_reply(&settling(json!([done(&"\u{1F40D}".repeat(251))])), &rooms, &people, &open), Err(Failure::OutOfBounds("settle.why: blank or over its length bound")));
     let items: Vec<String> = (0..=SETTLE_MAX).map(|index| format!("yggdrasil:memory:i{index}")).collect();
     let settles = |count: usize| settling(json!(items[..count].iter().map(|item| json!({ "item": item, "outcome": "done", "why": "x" })).collect::<Vec<_>>()));
     assert!(decode_reply(&settles(SETTLE_MAX), &rooms, &people, &items).is_ok());
