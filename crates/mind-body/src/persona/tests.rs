@@ -809,7 +809,7 @@ fn senders_are_typed_by_the_organ_and_the_trace_keeps_each_items_provenance() {
     assert_eq!(trace.len(), 1);
     let provenance: Vec<_> = trace[0].inputs.iter().map(|item| item.provenance.as_str()).collect();
     assert_eq!(provenance, ["operator", "member"]);
-    assert_eq!(trace[0].outputs, vec![TraceItem { provenance: "her own".into(), room: "operator".into(), text: "done".into() }]);
+    assert_eq!(trace[0].outputs, vec![TraceItem { provenance: "her own".into(), room: String::new(), text: "intent: Settle the open ask".into() }, TraceItem { provenance: "her own".into(), room: "operator".into(), text: "done".into() }]);
     assert_eq!(trace[0].outcome, "answered");
 }
 
@@ -2718,10 +2718,9 @@ fn told(rig: &Rig) -> Vec<String> {
 
 /// A second delivery arrives while the first turn runs, so the session tells it as a second line.
 fn tell_one_more(rig: &Rig) {
-    let deliveries = rig.chat.deliveries.clone();
-    let once = Cell::new(true);
-    *rig.chat.on_send.borrow_mut() = Some(Box::new(move || {
-        if once.replace(false) {
+    let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        if !pushed.replace(true) {
             deliveries.borrow_mut().push(operator_says(2, "two"));
         }
     }));
