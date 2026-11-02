@@ -2832,6 +2832,19 @@ fn a_flush_reply_keeps_its_memories_when_an_earlier_turn_closed_the_item_it_also
     let traced = rig.trace.0.borrow();
     assert!(traced.last().unwrap().outputs.iter().any(|item| item.text.contains(&format!("settle {id} dropped"))), "{traced:?}");
 }
+/// Lines written to her child move the clock and bring deliveries: the nth write (counting from one) moves it on by
+/// `steps[n - 1].0` milliseconds and brings `steps[n - 1].1`. The clock stands still between reads.
+fn on_writes(rig: &Rig, steps: Vec<(i64, Option<ChatDelivery>)>) {
+    rig.clock.step.set(0);
+    let (deliveries, now, count) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(0));
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        count.set(count.get() + 1);
+        if let Some((advance, arriving)) = steps.get(count.get() - 1) {
+            now.set(now.get() + advance);
+            deliveries.borrow_mut().extend(arriving.clone());
+        }
+    }));
+}
 
 #[test]
 fn a_tell_reply_keeps_its_memories_when_the_turn_running_as_it_was_written_closed_the_item_it_also_settles() {
@@ -2839,16 +2852,11 @@ fn a_tell_reply_keeps_its_memories_when_the_turn_running_as_it_was_written_close
     rig.model.replies.borrow_mut().push_back(settling(&[("swarm", "done")], json!([]), &id, "first"));
     rig.model.replies.borrow_mut().push_back(settling(&[("swarm", "again")], json!([keeps("Did", "Closed the fork with Libby", &["@libby:chat"])]), &id, "again"));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@libby:chat", "status"));
-    let (deliveries, now, pushed) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(false));
-    // The second line is written while the first line's turn runs, so it shows the item before the first result is admitted.
-    *rig.model.during.borrow_mut() = Some(Box::new(move || {
-        if !pushed.replace(true) {
-            deliveries.borrow_mut().push(delivery(3, "swarm", "@libby:chat", "more"));
-            now.set(now.get() + 10_000);
-        }
-    }));
-    assert_eq!(failure_of(rig.go()), None);
+    // Delivery 3 arrives, and a poll falls due, while the first line's turn runs: the tell shows the item before the first result is admitted.
+    on_writes(&rig, vec![(6_000, Some(delivery(3, "swarm", "@libby:chat", "more")))]);
+    let outcome = rig.go();
     assert!(told(&rig).iter().any(|line| line.contains(r#"text="more""#)), "the tell was written: {:?}", told(&rig));
+    assert_eq!(failure_of(outcome), None, "{:?}", told(&rig));
     assert_eq!(last_outcome(&rig), "answered");
     assert!(memories(&rig).iter().any(|(_, memory)| memory.text.0 == "Closed the fork with Libby"), "{:?}", memories(&rig));
     assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "first".into() }));
@@ -2856,39 +2864,32 @@ fn a_tell_reply_keeps_its_memories_when_the_turn_running_as_it_was_written_close
 
 #[test]
 fn a_flush_may_not_settle_an_item_opened_after_the_session_last_line() {
-    let rig = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "plan")], &[reply(&[("swarm", "ok")], json!([keeps("Committed", "I integrate the fork", &["@libby:chat"])]), json!([]), json!(null)), says(&[])]);
+    let opening = || reply(&[("swarm", "ok")], json!([keeps("Committed", "I integrate the fork", &["@libby:chat"])]), json!([]), json!(null));
+    let learn = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "plan")], &[opening()]);
+    let _ = learn.go();
+    let id = memories(&learn).remove(0).0;
+    // The first reply opens the commitment after the first and second lines were written; the flush is written after that reply is admitted.
+    let rig = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "plan")], &[opening(), says(&[("swarm", "two")]), settling(&[], json!([]), &id, "guessed")]);
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap() + 7);
+    on_writes(&rig, vec![(6_000, Some(delivery(2, "swarm", "@libby:chat", "status"))), (2_000, None)]);
     let _ = rig.go();
-    let id = memories(&rig).remove(0).0;
-    // A second run of the same shape: the commitment is opened by the first line's own reply, after that line was written.
-    let fresh = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "plan")], &[]);
-    fresh.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap() + 15);
-    let opened = reply(&[("swarm", "ok")], json!([keeps("Committed", "I integrate the fork", &["@libby:chat"])]), json!([]), json!(null));
-    let guess = settling(&[], json!([]), &id, "guessed");
-    *fresh.model.replies.borrow_mut() = VecDeque::from([opened, guess.clone(), guess]);
-    let _ = fresh.go();
-    assert_eq!(memories(&fresh).iter().map(|(found, _)| found.clone()).collect::<Vec<_>>(), [id.clone()], "the same commitment, opened by the first reply");
-    assert_eq!(outcome_of(&fresh, &id), None, "the flush named an item no line of the session showed");
-    assert_eq!(last_outcome(&fresh), "failed: the reply is not a persona reply");
+    assert_eq!(told(&rig).iter().filter(|line| line.contains("This session ends soon")).count(), 1, "{:?}", told(&rig));
+    assert_eq!(memories(&rig).iter().map(|(found, _)| found.clone()).collect::<Vec<_>>(), [id.clone()], "the commitment the first reply opened");
+    assert_eq!(outcome_of(&rig, &id), None, "the flush named an item no line of the session showed");
+    assert_eq!(last_outcome(&rig), "failed: the reply is not a persona reply");
 }
 
 #[test]
 fn a_flush_written_beside_a_tell_leaves_the_tell_to_be_answered_and_acked() {
     let rig = Rig::new(vec![operator_says(1, "one")], &[says(&[("operator", "for one")]), says(&[("operator", "for two")]), says(&[("operator", "for three")])]);
-    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap() + 15);
-    let (deliveries, now, count) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(0));
-    // Each of the first two lines is written as a delivery arrives and the clock passes a poll; the second line is
-    // outstanding when the rotation falls due, so the third write carries delivery 3 and the flush ask together.
-    *rig.model.during.borrow_mut() = Some(Box::new(move || {
-        count.set(count.get() + 1);
-        if count.get() <= 2 {
-            deliveries.borrow_mut().push(operator_says(count.get() + 1, "more"));
-            now.set(now.get() + 10_000);
-        }
-    }));
-    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
-    assert_eq!(failure, None);
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap() + 7);
+    // Delivery 2 is told while the first turn runs. The second line is outstanding when the rotation falls due and
+    // delivery 3 waits, so the third write carries the tell and the flush ask together.
+    on_writes(&rig, vec![(6_000, Some(operator_says(2, "two"))), (6_000, Some(operator_says(3, "three")))]);
+    let outcome = rig.go();
+    assert_eq!(failure_of(outcome), None, "{:?}", told(&rig));
     let flushed: Vec<String> = told(&rig).into_iter().filter(|line| line.contains("This session ends soon")).collect();
-    assert_eq!(flushed.len(), 1, "one line carries the tell and the flush: {:?}", told(&rig));
-    assert!(flushed[0].contains(r#"text="more""#), "{}", flushed[0]);
+    assert_eq!(flushed.len(), 1, "{:?}", told(&rig));
+    assert!(flushed[0].contains(r#"text="three""#), "one line carries the tell and the flush: {}", flushed[0]);
     assert_eq!(rig.chat.acked.borrow().last().copied(), Some(3), "the tell beside the flush is answered and acked: {:?}", rig.chat.acked.borrow());
 }
