@@ -2578,10 +2578,14 @@ fn a_flush_alone_may_not_name_a_stranger_or_settle_a_closed_item() {
     let again = reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "again" }]), json!(null));
     rig.model.replies.borrow_mut().clear();
     rig.model.replies.borrow_mut().push_back(reply(&[("swarm", "closing")], json!([]), json!([{ "item": id, "outcome": "done", "why": "integrated" }]), json!(null)));
+    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", libby, "status"));
+    let _ = rig.go();
+    assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "integrated".into() }));
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
+    rig.model.replies.borrow_mut().push_back(says(&[("swarm", "ok")]));
     rig.model.replies.borrow_mut().push_back(again.clone());
     rig.model.replies.borrow_mut().push_back(again);
-    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
-    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", libby, "status"));
+    rig.chat.deliveries.borrow_mut().push(delivery(3, "swarm", libby, "more"));
     let _ = rig.go();
     assert_eq!(last_outcome(&rig), "failed: the reply is not a persona reply");
     assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "integrated".into() }));
