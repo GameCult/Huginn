@@ -1235,7 +1235,7 @@ impl huginn_daemon::sources::SourceIndex for Desk {
         anyhow::bail!("a daemon never writes the source index")
     }
 
-    fn delete_by(&mut self, _repo: &str, _paths: Option<&[String]>) -> anyhow::Result<()> {
+    fn delete_by(&mut self, _repo: &str, _paths: Option<&[String]>, _keeping: Option<&str>) -> anyhow::Result<()> {
         anyhow::bail!("a daemon never writes the source index")
     }
 

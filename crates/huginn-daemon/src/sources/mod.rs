@@ -115,9 +115,10 @@ pub trait SourceIndex {
     fn recreate_sources(&mut self, meta: &SourcesMeta) -> Result<()>;
     /// Replaces the cursors object whole.
     fn set_cursors(&mut self, cursors: &BTreeMap<String, String>) -> Result<()>;
-    /// Deletes a repo's chunks: those at `paths`, or all of them when `None`.
-    /// Acknowledged before it returns.
-    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>) -> Result<()>;
+    /// Deletes a repo's chunks: those at `paths`, or all of them when `None`;
+    /// with `keeping`, only those not stamped with that commit. Acknowledged
+    /// before it returns.
+    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>, keeping: Option<&str>) -> Result<()>;
     /// Writes chunks, acknowledged before it returns.
     fn upsert_sources(&mut self, points: &[SourcePoint]) -> Result<()>;
     /// The `limit` nearest chunks, best first, in `repo` alone when given.
@@ -309,7 +310,7 @@ fn retire<S: SourceIndex>(
 }
 
 fn retire_one<S: SourceIndex>(index: &mut S, name: &str, mirrors: &Path, cursors: &mut BTreeMap<String, String>) -> Result<()> {
-    index.delete_by(name, None).with_context(|| format!("deleting the chunks of retired {name}"))?;
+    index.delete_by(name, None, None).with_context(|| format!("deleting the chunks of retired {name}"))?;
     if cursors.remove(name).is_some() {
         index.set_cursors(cursors).context("dropping a retired repo's cursor")?;
     }
@@ -342,22 +343,15 @@ fn refresh_repo<E: Embedder, S: SourceIndex, F: Forge>(
         Some(old) if mirror.is_ancestor(old, &head) => Some(mirror.changed_paths(old, &head)?.into_iter().collect()),
         _ => None,
     };
-    // From the first delete on, the collection holds no single commit's chunks
+    // From the first upsert on, the collection holds no single commit's chunks
     // for this repo until the run finishes. Say so before changing anything:
     // the cursor is dropped, so a run that dies half way leaves a repo the next
     // run re-ingests whole, whatever head it finds then. A cursor left at the
     // old commit would let a later head that reverts the files hide the hole.
+    // Nothing is deleted until the new chunks are written (below), so a failed
+    // embed leaves what the index held.
     if cursors.remove(&repo.name).is_some() {
         index.set_cursors(cursors).context("dropping the cursor before the repo's chunks change")?;
-    }
-    match &changed {
-        Some(paths) => {
-            let paths: Vec<String> = paths.iter().cloned().collect();
-            for slice in paths.chunks(DELETE_PATHS_PER_CALL) {
-                index.delete_by(&repo.name, Some(slice)).context("deleting the changed paths' chunks")?;
-            }
-        }
-        None => index.delete_by(&repo.name, None).context("deleting the repo's chunks")?,
     }
     let files: Vec<TreeFile> = mirror
         .files(&head)?
@@ -398,6 +392,18 @@ fn refresh_repo<E: Embedder, S: SourceIndex, F: Forge>(
         }
     }
     batch.write(embedder, index, *dimensions)?;
+    // Every chunk at this head now carries it (a chunk id is its content, so a
+    // rewritten one replaced its old self). What is left in scope with another
+    // commit is stale: edited or deleted paths' chunks, or a repo's old self.
+    match &changed {
+        Some(paths) => {
+            let paths: Vec<String> = paths.iter().cloned().collect();
+            for slice in paths.chunks(DELETE_PATHS_PER_CALL) {
+                index.delete_by(&repo.name, Some(slice), Some(&head)).context("deleting the changed paths' stale chunks")?;
+            }
+        }
+        None => index.delete_by(&repo.name, None, Some(&head)).context("deleting the repo's stale chunks")?,
+    }
     cursors.insert(repo.name.clone(), head);
     index.set_cursors(cursors).context("advancing the cursor")?;
     Ok(report)
