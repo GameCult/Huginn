@@ -2596,7 +2596,7 @@ fn a_flush_alone_may_not_name_a_stranger_or_settle_a_closed_item() {
     rig.model.replies.borrow_mut().push_back(again);
     rig.chat.deliveries.borrow_mut().push(delivery(3, "swarm", libby, "more"));
     let _ = rig.go();
-    assert_eq!(last_outcome(&rig), "failed: the reply is not a persona reply");
+    assert_eq!(last_outcome(&rig), format!("failed: {SETTLE_ITEM_FAULT}"));
     assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "integrated".into() }));
 }
 
