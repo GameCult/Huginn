@@ -4595,11 +4595,9 @@ fn event(id: u64, repo: &str, actor: &str, change: RepoChange) -> RepoEvent {
     RepoEvent { id, at: 1_700_000_000_000, repo: repo.into(), actor: Short(actor.into()), change }
 }
 
-/// A rig whose Mind stewards `GameCult/Huginn`.
+/// A rig whose seeded Mind stewards `GameCult/Huginn`, and only it.
 fn stewarding_rig(replies: usize) -> Rig {
-    let rig = Rig::new(vec![operator_says(1, "hello")], &vec![says(&[]); replies]);
-    rig.mind.committed(vec![steward_of("GameCult/Huginn", "the organ.")]);
-    rig
+    Rig::new(vec![operator_says(1, "hello")], &vec![says(&[]); replies])
 }
 
 /// A live session over `mind`: each echo moves the clock on by `advance_ms`, and until the `stop`th it brings one more message
@@ -4728,13 +4726,17 @@ fn a_first_line_shows_wear_after_her_responsibilities() {
     assert!(input.find("What you are responsible for").unwrap() < input.find("Where your machine shows wear").unwrap());
 }
 
-/// A Mind with no stewardship asks the forge nothing and prints no section.
+/// The repos the forge is asked about are her stewardships in force and nothing else: a Mind with none asks about none (and so
+/// prints no section).
 #[test]
-fn a_mind_with_no_stewardship_prints_no_wear_and_asks_nothing() {
-    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[])]);
-    let forged = Forged::over(&rig.mind, vec![]);
-    let lines = live_session(&rig, &forged, PAST_THE_REPO_READ_MS, false, 1);
-    assert!(forged.asked.borrow().is_empty() && !lines[0].contains("Where your machine shows wear"));
+fn the_repos_asked_about_are_her_stewardships_in_force() {
+    let none = render_responsibilities(&TestMind::bare(), &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap();
+    assert!(none.repos.is_empty());
+    let mind = TestMind::seeded();
+    mind.committed(vec![steward_of("GameCult/cinny", "the chat client")]);
+    let mut repos = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().repos;
+    repos.sort();
+    assert_eq!(repos, [OrgRepo::from("GameCult/cinny"), OrgRepo::from("GameCult/Huginn")]);
 }
 
 #[test]
