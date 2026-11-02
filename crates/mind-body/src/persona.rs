@@ -677,8 +677,8 @@ enum Step {
     Answered(Option<PipelineRef>, String),
     /// The reply could not be decoded: it is told back to her, and sends and acks nothing.
     Refused(Failure),
-    /// The start cannot go on.
-    Failed(Failure),
+    /// The start cannot go on; the intent her decoded reply stated still closes the run beside the failure.
+    Failed(Failure, String),
 }
 
 /// What a start has done so far, across its processes.
@@ -689,7 +689,7 @@ struct Progress {
     /// Results seen: the number the next one is named by.
     turn: u32,
     answered: u32,
-    /// The intent of the latest answered reply: the run's closing rationale.
+    /// The intent of the latest decoded reply, answered or failed: the run's closing rationale.
     last_intent: Option<String>,
     failure: Option<Failure>,
     self_run: Option<PipelineRef>,
@@ -981,7 +981,7 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
 
 impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
     /// One batch's line: the gate was read by the caller; this renders what she sees and notes it.
-    fn render(&self, deliveries: &[ChatDelivery]) -> Result<(String, Shown)> {
+    fn render(&self, deliveries: &[ChatDelivery], note: Option<&str>) -> Result<(String, Shown)> {
         let organs = self.organs;
         let instance = organs.mind.instance().clone();
         let tempo = render_tempo(organs.tempo, &instance);
@@ -993,22 +993,19 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
         let recalled = recall::select(organs.mind, &cue)?;
         let shown: Vec<&str> = goals.people.iter().map(String::as_str).chain(recalled.entries().flat_map(|entry| entry.people.iter().map(String::as_str))).collect();
         let people = people_she_may_name(self.config, deliveries, &shown);
-        let input = render_input(self.config, deliveries, &history, &goals.text, &recall::render(&recalled), &format!("{}\n\n{tempo}", self.plan), &people);
+        let input = render_input(self.config, deliveries, note, &history, &goals.text, &recall::render(&recalled), &format!("{}\n\n{tempo}", self.plan), &people);
         Ok((input, Shown { people, open: goals.open }))
     }
 
     /// Writes `batch` as one line: `text` with the lines before it, and notes what it carries.
     fn write(&mut self, batch: Vec<ChatDelivery>, prefix: Option<String>, refusals: u32) -> Result<String> {
-        let (input, shown) = self.render(&batch)?;
+        let (input, shown) = self.render(&batch, prefix.as_deref())?;
         if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
             self.told_through = self.told_through.max(through);
         }
         self.seen.add(shown.clone());
         self.written = Some(Written { batch, shown, refusals });
-        Ok(match prefix {
-            Some(prefix) => format!("{prefix}\n\n{input}"),
-            None => input,
-        })
+        Ok(input)
     }
 
     fn held(&self) -> Option<HeldReason> {
@@ -1057,18 +1054,15 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
     }
 
     fn flush_text(&mut self, why: Why) -> String {
-        let cause = match why {
-            Why::Ceiling => "its context is full",
-            Why::Rotation => "the unit's time is nearly up",
-            Why::Idle => "nothing is waiting and its cache would lapse",
-        };
-        let text = format!("This session ends soon ({cause}). Put into `remember` what you must still know when it is gone, including what you were in the middle of and why, and `settle` what is finished. Speak only if leaving would strand something someone is waiting on.");
+        let mut text = flush_ask(why);
         if self.written.is_none() {
             // A flush alone is a line like any other: it may name the people and settle the items the session showed.
             // Which of those items are still open is read when its reply is decoded, after every earlier result is admitted.
             let shown: Vec<&str> = self.seen.people.iter().map(String::as_str).collect();
             let people = people_she_may_name(self.config, &[], &shown);
             self.written = Some(Written { batch: Vec::new(), shown: Shown { people, open: self.seen.open.clone() }, refusals: 0 });
+            // Beside a tell the line already opened with the instruction; alone, the flush opens it.
+            text = format!("{TURN_INSTRUCTION}\n\n{text}");
         }
         text
     }
@@ -1143,7 +1137,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 self.retell = Some(Retell { batch: merged, why, refusals: most });
                 Ok((true, false))
             }
-            Step::Failed(why) => {
+            Step::Failed(why, intent) => {
+                self.progress.last_intent = Some(intent);
                 self.progress.failure.get_or_insert(why);
                 Ok((false, true))
             }
@@ -1206,14 +1201,14 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
         // The gate binds the send as it bound the call: a hold placed while the model was answering stops the reply.
         if let Effective::Held { reason } = read(control, swarm, &instance) {
             organs.trace.record(&record(outputs, format!("failed: {}", Failure::Held(reason))))?;
-            return Ok(Step::Failed(Failure::Held(reason)));
+            return Ok(Step::Failed(Failure::Held(reason), reply.intent));
         }
         let text = say.text.clone();
         let sent = ChatSendRequest { request_id: format!("{batch_id}-{index}"), persona: instance.0.clone(), room_alias: say.room.clone(), text: text.clone() };
         let delivered = organs.chat.send(&sent).is_ok_and(|receipt| receipt.refusal.is_none() && receipt.event_id.is_some());
         if !delivered {
             organs.trace.record(&record(outputs, "failed: send".into()))?;
-            return Ok(Step::Failed(Failure::Send));
+            return Ok(Step::Failed(Failure::Send, reply.intent));
         }
         outputs.push(TraceItem { provenance: "her own".into(), room: say.room.clone(), text });
     }
@@ -1229,7 +1224,7 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
     }
     if !admit_turn_documents(organs, run, turn, &reply, memories.clone())? {
         organs.trace.record(&record(outputs, "failed: memory".into()))?;
-        return Ok(Step::Failed(Failure::Memory));
+        return Ok(Step::Failed(Failure::Memory, reply.intent));
     }
     let mut started = None;
     if let Some(ask) = &reply.start_self_run {
@@ -1239,7 +1234,7 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
             Ok(launched) => started = Some(launched),
             Err(why) => {
                 organs.trace.record(&record(outputs, format!("failed: {why}")))?;
-                return Ok(Step::Failed(why));
+                return Ok(Step::Failed(why, reply.intent));
             }
         }
     }
@@ -1725,7 +1720,7 @@ fn recent_runs(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<String>> {
             let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
             if let Some(PipelineDocument::Resolution(closing)) = views.into_iter().next().map(|view| view.document) {
                 // Indented, so no line of a result can pass for a framed message.
-                for text_line in closing.rationale.0.lines() {
+                for text_line in closing.rationale.0.split(is_line_break) {
                     line.push_str(&format!("\n    {text_line}"));
                 }
             }
@@ -1740,6 +1735,21 @@ fn trace_inputs(config: &Config, deliveries: &[ChatDelivery]) -> Vec<TraceItem> 
         .iter()
         .map(|delivery| TraceItem { provenance: config.sender(&delivery.sender).tag().into(), room: delivery.room_alias.clone(), text: delivery.text.clone() })
         .collect()
+}
+
+/// What a flush asks of her, for the cause that ended the session.
+fn flush_ask(why: Why) -> String {
+    let cause = match why {
+        Why::Ceiling => "its context is full",
+        Why::Rotation => "the unit's time is nearly up",
+        Why::Idle => "nothing is waiting and its cache would lapse",
+    };
+    format!("This session ends soon ({cause}). Put into `remember` what you must still know when it is gone, including what you were in the middle of and why, and `settle` what is finished. Speak only if leaving would strand something someone is waiting on.")
+}
+
+/// Every character a line-separator reader splits a line on, `\n` among them.
+fn is_line_break(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{000b}' | '\u{000c}' | '\u{0085}' | '\u{2028}' | '\u{2029}')
 }
 
 /// A string as a JSON string literal on one line: whatever it holds, it cannot
@@ -1790,13 +1800,16 @@ const WAKE_QUESTION: &str = "No new messages. Where is your machine least perfec
 /// Last text of a line with deliveries, after the messages.
 const TRAFFIC_QUESTION: &str = "Answer what needs you. Then the question of every turn: where is your machine least perfect right now, by your values, and does anything here change your move? Put that in `intent` first.";
 
-/// A batch's line: the core instruction, her latest runs, what she is responsible for, what she
+/// A batch's line: the core instruction (then the note a retell opens with), her latest runs, what she is responsible for, what she
 /// remembers, the usage and tempo, the rooms and people she may name, the messages (each a framed
 /// line whose role the organ derived from the sender id and not from anything the sender wrote),
 /// and the question.
-fn render_input(config: &Config, deliveries: &[ChatDelivery], history: &[String], goals: &str, remembered: &str, steer: &str, people: &[String]) -> String {
+fn render_input(config: &Config, deliveries: &[ChatDelivery], note: Option<&str>, history: &[String], goals: &str, remembered: &str, steer: &str, people: &[String]) -> String {
     let mut out = String::new();
     out.push_str(TURN_INSTRUCTION);
+    if let Some(note) = note {
+        out.push_str(&format!("\n\n{note}"));
+    }
     out.push_str("\n\nYour latest runs:\n");
     for line in history {
         out.push_str(&format!("- {line}\n"));
