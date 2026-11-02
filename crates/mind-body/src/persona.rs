@@ -43,7 +43,7 @@
 //! she votes for and the urgency she declares) and, through `open_and_launch`, a
 //! Self run. It never writes the brakes or her persona state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -61,7 +61,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::chat_client::{Chat, ChatDelivery, ChatSendRequest};
+use crate::chat_client::{Chat, ChatDelivery, ChatSendRequest, ContextLine};
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
 use crate::heartbeat::{PollTrace, TempoView};
@@ -80,8 +80,11 @@ pub const PERSONA_POLL_S: i64 = 5;
 pub const SANDBOX_DIR: &str = "sandbox";
 /// The file inside the unit's runtime directory that holds one process's system prompt.
 const INSTRUCTIONS_FILE: &str = "persona-instructions.md";
-/// A refused batch is told back; its third refusal ends the session, however many answers lie between.
+/// A refused batch is told back; its third refusal ends the start, however many answers or session restarts lie between.
 const REFUSALS_PER_BATCH: u32 = 3;
+/// The most bytes of `earlier` text one line carries for one room: the room's tail, newest kept. Each delivery brings its own
+/// context, so a batch repeats a room's tail per message; `earlier_shown` owns this bound because a line's size decides how soon the session hits its ceiling.
+const EARLIER_MAX_BYTES_PER_ROOM: usize = 16 * 1024;
 /// The environment variables the unit's `persona.env` sets for the persona flags.
 pub const ENV_ROOMS: &str = "MIND_PERSONA_ROOMS";
 pub const ENV_OPERATOR: &str = "MIND_PERSONA_OPERATOR";
@@ -106,6 +109,13 @@ const GOALS_MAX_BYTES: usize = 6 * 1024;
 const GOALS_RULINGS_RESERVE: usize = 1024;
 /// The most rulings a turn's input resolves.
 const GOALS_RULINGS_MAX: usize = 12;
+/// What a refusal tells her about the fields she can be asked to correct most often.
+const INTENT_FAULT: &str = "intent: blank or over its length bound";
+const START_FAULT: &str = "start_self_run: its brief, repo or campaign is out of bounds";
+const VOTE_FAULT: &str = "tempo_vote_beat_s or urgency_permille: outside its range";
+const ABOUT_FAULT: &str = "remember.about: every entry must be an id copied exactly from the People line";
+const SETTLE_ITEM_FAULT: &str = "settle.item: not an open item this conversation showed";
+const FOR_ITEM_FAULT: &str = "start_self_run.for_item: not an open item shown, or new:<i> for an Asked or Committed entry of this reply";
 /// The most memories, and the most settles, one reply carries.
 const REMEMBER_MAX: usize = 8;
 const SETTLE_MAX: usize = 8;
@@ -612,6 +622,8 @@ pub enum Failure {
     /// Her child could not be started, or ended without answering.
     Session,
     Undecodable,
+    /// A reply that parsed and broke the bound of the field this names: the organ's words, never the reply's.
+    OutOfBounds(&'static str),
     RoomNotAllowed,
     Send,
     SelfRun,
@@ -631,6 +643,7 @@ impl fmt::Display for Failure {
             Self::Lease => f.write_str("the credential lease was refused or unavailable"),
             Self::Session => f.write_str("her session could not be started or ended without answering"),
             Self::Undecodable => f.write_str("the reply is not a persona reply"),
+            Self::OutOfBounds(field) => f.write_str(field),
             Self::RoomNotAllowed => f.write_str("the reply speaks outside her rooms"),
             Self::Send => f.write_str("a send was refused or failed"),
             Self::SelfRun => f.write_str("the Self run could not be started"),
@@ -693,6 +706,16 @@ struct Progress {
     last_intent: Option<String>,
     failure: Option<Failure>,
     self_run: Option<PipelineRef>,
+    /// The batch refused and not yet answered: a session restart does not reset its count or what she is told.
+    refused: Option<Refused>,
+}
+
+/// A refused batch as the start remembers it. The mouth still holds its deliveries, so this needs only their lowest seq.
+#[derive(Clone, Copy)]
+struct Refused {
+    lowest: u64,
+    why: Failure,
+    refusals: u32,
 }
 
 /// The instance brake and the swarm store read once: what they allow.
@@ -1017,9 +1040,13 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
 }
 
 impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S> {
+    /// The first line of a process. A batch an earlier process left refused opens with that refusal and keeps its count.
     fn start_line(&mut self) -> Result<String> {
         let batch = std::mem::take(&mut self.start);
-        self.write(batch, None, 0)
+        match self.progress.refused {
+            Some(Refused { why, refusals, .. }) => self.write(batch, Some(refused_note(why)), refusals),
+            None => self.write(batch, None, 0),
+        }
     }
 
     fn poll_every_s(&self) -> i64 {
@@ -1047,7 +1074,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
 
     fn tell(&mut self) -> Result<String> {
         if let Some(Retell { batch, why, refusals }) = self.retell.take() {
-            return self.write(batch, Some(format!("Your last reply was refused ({why}). Answer the same messages again, as one reply.")), refusals);
+            return self.write(batch, Some(refused_note(why)), refusals);
         }
         let batch = std::mem::take(&mut self.waiting);
         self.write(batch, None, 0)
@@ -1104,6 +1131,9 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 // told in seq order, so while one is unanswered below an answered seq, everything
                 // answered lies above it and nothing is acked; the ack follows its answer.
                 self.answered_through = self.answered_through.max(batch.iter().map(|delivery| delivery.seq).max().unwrap_or(0));
+                if self.progress.refused.is_some_and(|refused| batch.iter().any(|delivery| delivery.seq == refused.lowest)) {
+                    self.progress.refused = None;
+                }
                 let unanswered = self.retell.iter().flat_map(|retell| &retell.batch).chain(self.written.iter().flat_map(|written| &written.batch)).map(|delivery| delivery.seq).min();
                 let past_unanswered = unanswered.is_some_and(|lowest| lowest <= self.answered_through);
                 if !past_unanswered && self.progress.failure.is_none() && self.answered_through > self.progress.acked {
@@ -1134,6 +1164,12 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 }
                 merged.sort_by_key(|delivery| delivery.seq);
                 merged.dedup_by_key(|delivery| delivery.seq);
+                // A line in flight may hold a batch at a higher count than this result's, so the start's record only rises.
+                let held = self.progress.refused.take();
+                self.progress.refused = merged
+                    .first()
+                    .map(|first| Refused { lowest: held.map_or(first.seq, |held| held.lowest.min(first.seq)), why, refusals: held.map_or(most, |held| held.refusals.max(most)) })
+                    .or(held);
                 self.retell = Some(Retell { batch: merged, why, refusals: most });
                 Ok((true, false))
             }
@@ -1144,6 +1180,11 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
             }
         }
     }
+}
+
+/// What a refused batch's next line opens with: which field to correct, and that the refused reply did nothing.
+fn refused_note(why: Failure) -> String {
+    format!("Your last reply was refused ({why}), so nothing in it was said or kept: answer the same messages again, as one reply.")
 }
 
 /// The structured output of a result line, as the text `decode_reply` reads; none when it has none.
@@ -1271,23 +1312,40 @@ fn distinct<T: PartialEq>(items: &[T]) -> bool {
     items.iter().enumerate().all(|(index, item)| !items[..index].contains(item))
 }
 
-/// What she keeps and settles is in the schema's bounds, names only people she may name, and
-/// settles or takes on only an open item shown this turn (or a `new:<i>` ask or commitment she writes now).
-fn memory_in_bounds(reply: &PersonaReply, people: &[String], open: &[String]) -> bool {
-    let remembered = reply.remember.len() <= REMEMBER_MAX
-        && reply.remember.iter().all(|remember| {
-            (1..=REMEMBER_TEXT_MAX_BYTES).contains(&remember.text.len())
-                && !remember.text.trim().is_empty()
-                && remember.salience_permille <= SALIENCE_MAX_PERMILLE
-                && remember.about.len() <= ABOUT_MAX
-                && remember.about.iter().all(|who| people.contains(who))
-                && distinct(&remember.about)
-        });
-    let settled = reply.settle.len() <= SETTLE_MAX
-        && reply.settle.iter().all(|settle| {
-            open.contains(&settle.item) && (1..=WHY_MAX_CHARS).contains(&settle.why.chars().count()) && settle.why.len() <= 1000 && !settle.why.trim().is_empty()
-        })
-        && distinct(&reply.settle.iter().map(|settle| settle.item.as_str()).collect::<Vec<_>>());
+/// The field a memory or settle breaks, if any: what she keeps and settles is in the schema's bounds, names only people she may
+/// name, and settles or takes on only an open item shown this turn (or a `new:<i>` ask or commitment she writes now).
+fn memory_fault(reply: &PersonaReply, people: &[String], open: &[String]) -> Option<&'static str> {
+    if reply.remember.len() > REMEMBER_MAX {
+        return Some("remember: more entries than one reply may carry");
+    }
+    for remember in &reply.remember {
+        if !(1..=REMEMBER_TEXT_MAX_BYTES).contains(&remember.text.len()) || remember.text.trim().is_empty() {
+            return Some("remember.text: blank or over its length bound");
+        }
+        if remember.salience_permille > SALIENCE_MAX_PERMILLE {
+            return Some("remember.salience_permille: over its maximum");
+        }
+        if remember.about.len() > ABOUT_MAX || !distinct(&remember.about) {
+            return Some("remember.about: too many entries or one repeated");
+        }
+        if !remember.about.iter().all(|who| people.contains(who)) {
+            return Some(ABOUT_FAULT);
+        }
+    }
+    if reply.settle.len() > SETTLE_MAX {
+        return Some("settle: more entries than one reply may carry");
+    }
+    for settle in &reply.settle {
+        if !open.contains(&settle.item) {
+            return Some(SETTLE_ITEM_FAULT);
+        }
+        if !(1..=WHY_MAX_CHARS).contains(&settle.why.chars().count()) || settle.why.len() > 1000 || settle.why.trim().is_empty() {
+            return Some("settle.why: blank or over its length bound");
+        }
+    }
+    if !distinct(&reply.settle.iter().map(|settle| settle.item.as_str()).collect::<Vec<_>>()) {
+        return Some("settle: one item settled twice");
+    }
     let taken = reply.start_self_run.as_ref().and_then(|start| start.for_item.as_deref()).is_none_or(|item| match item.strip_prefix("new:") {
         Some(index) => {
             index.len() == 1
@@ -1295,15 +1353,24 @@ fn memory_in_bounds(reply: &PersonaReply, people: &[String], open: &[String]) ->
         }
         None => open.iter().any(|shown| shown == item) && !reply.settle.iter().any(|settle| settle.item == item),
     });
-    remembered && settled && taken
+    (!taken).then_some(FOR_ITEM_FAULT)
 }
 
 /// The reply as the one type it must be, with every room one of `rooms`, every person one of
 /// `people` and every settled or taken-on item one of the `open` items shown this turn.
 fn decode_reply(text: &str, rooms: &[String], people: &[String], open: &[String]) -> Result<PersonaReply, Failure> {
     let reply: PersonaReply = serde_json::from_str(text).map_err(|_| Failure::Undecodable)?;
-    if reply.intent.trim().is_empty() || reply.intent.chars().count() > INTENT_MAX_CHARS || reply.start_self_run.as_ref().is_some_and(|ask| !start_in_bounds(ask)) || !vote_in_bounds(&reply) || !memory_in_bounds(&reply, people, open) {
-        return Err(Failure::Undecodable);
+    if reply.intent.trim().is_empty() || reply.intent.chars().count() > INTENT_MAX_CHARS {
+        return Err(Failure::OutOfBounds(INTENT_FAULT));
+    }
+    if reply.start_self_run.as_ref().is_some_and(|ask| !start_in_bounds(ask)) {
+        return Err(Failure::OutOfBounds(START_FAULT));
+    }
+    if !vote_in_bounds(&reply) {
+        return Err(Failure::OutOfBounds(VOTE_FAULT));
+    }
+    if let Some(field) = memory_fault(&reply, people, open) {
+        return Err(Failure::OutOfBounds(field));
     }
     if reply.say.iter().any(|say| !rooms.contains(&say.room) || say.text.trim().is_empty()) {
         return Err(Failure::RoomNotAllowed);
@@ -1800,6 +1867,29 @@ const WAKE_QUESTION: &str = "No new messages. Where is your machine least perfec
 /// Last text of a line with deliveries, after the messages.
 const TRAFFIC_QUESTION: &str = "Answer what needs you. Then the question of every turn: where is your machine least perfect right now, by your values, and does anything here change your move? Put that in `intent` first.";
 
+/// The `earlier` lines a batch's line shows, one list per delivery: each distinct line of a room once, where it first
+/// comes in the batch, none the batch carries as a message, and of each room only the newest within `EARLIER_MAX_BYTES_PER_ROOM`.
+fn earlier_shown(deliveries: &[ChatDelivery]) -> Vec<Vec<&ContextLine>> {
+    let mut seen: BTreeSet<(&str, &str, &str)> = deliveries.iter().map(|delivery| (delivery.room_alias.as_str(), delivery.sender.as_str(), delivery.text.as_str())).collect();
+    let mut shown: Vec<Vec<&ContextLine>> =
+        deliveries.iter().map(|delivery| delivery.context.iter().filter(|line| seen.insert((delivery.room_alias.as_str(), line.sender.as_str(), line.text.as_str()))).collect()).collect();
+    let mut left: BTreeMap<&str, usize> = BTreeMap::new();
+    for (delivery, lines) in deliveries.iter().zip(&mut shown).rev() {
+        let room = left.entry(delivery.room_alias.as_str()).or_insert(EARLIER_MAX_BYTES_PER_ROOM);
+        let kept = lines
+            .iter()
+            .rev()
+            .take_while(|line| {
+                let fits = line.text.len() <= *room;
+                *room = if fits { *room - line.text.len() } else { 0 };
+                fits
+            })
+            .count();
+        lines.drain(..lines.len() - kept);
+    }
+    shown
+}
+
 /// A batch's line: the core instruction (then the note a retell opens with), her latest runs, what she is responsible for, what she
 /// remembers, the usage and tempo, the rooms and people she may name, the messages (each a framed
 /// line whose role the organ derived from the sender id and not from anything the sender wrote),
@@ -1831,8 +1921,8 @@ fn render_input(config: &Config, deliveries: &[ChatDelivery], note: Option<&str>
     out.push_str(MESSAGES_HEADER);
     out.push('\n');
     let names = sender_names(deliveries);
-    for delivery in deliveries {
-        for earlier in &delivery.context {
+    for (delivery, shown) in deliveries.iter().zip(earlier_shown(deliveries)) {
+        for earlier in shown {
             out.push_str(&message_line(config, "earlier", &delivery.room_alias, &earlier.sender, None, &Addressees { to_you: false, others: vec![] }, &earlier.text));
         }
         let to = addressees(config, &delivery.mentions, &names);

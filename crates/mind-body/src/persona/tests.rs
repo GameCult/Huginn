@@ -694,7 +694,7 @@ fn a_start_outside_the_reply_bounds_fails_the_turn_without_an_admission_or_an_ac
     let reply = json!({ "intent": "Settle the open ask", "say": [], "start_self_run": { "brief": "x", "repo": "not a repo", "campaign": CAMPAIGN, "for_item": null }, "remember": [], "settle": [], "urgency_permille": null }).to_string();
     let rig = Rig::new(vec![operator_says(1, "go")], &thrice(reply));
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
-    assert_eq!(failure, Some(Failure::Undecodable));
+    assert_eq!(failure, Some(Failure::OutOfBounds(START_FAULT)));
     assert!(rig.chat.acked.borrow().is_empty() && rig.mind.ids(K::FollowUp).is_empty());
     assert!(rig.launcher.started.borrow().is_empty());
 }
@@ -1228,7 +1228,7 @@ fn a_vote_or_urgency_outside_its_bounds_fails_the_turn_without_a_pulse_or_an_ack
     for (beat, urgency) in [(json!(59), json!(null)), (json!(86_401), json!(null)), (json!(null), json!(1001)), (json!(null), json!(-1)), (json!("fast"), json!(null))] {
         let rig = Rig::new(vec![operator_says(1, "go")], &thrice(voting(Some(beat.clone()), urgency.clone())));
         let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
-        assert_eq!(failure, Some(Failure::Undecodable), "{beat} {urgency}");
+        assert!(matches!(failure, Some(Failure::Undecodable | Failure::OutOfBounds(VOTE_FAULT))), "{beat} {urgency}: {failure:?}");
         assert!(rig.mind.ids(K::Pulse).is_empty() && rig.chat.acked.borrow().is_empty(), "{beat} {urgency}");
     }
 }
@@ -1375,6 +1375,7 @@ fn outcomes_and_failures_read_as_one_line_each_without_values() {
         Failure::Lease,
         Failure::Session,
         Failure::Undecodable,
+        Failure::OutOfBounds(ABOUT_FAULT),
         Failure::RoomNotAllowed,
         Failure::Send,
         Failure::SelfRun,
@@ -1718,7 +1719,8 @@ fn an_ask_not_shown_this_turn_is_a_decode_failure_and_nothing_is_sent() {
         not_asked("new:00"),
     ] {
         let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "hi")], &thrice(text.clone()));
-        assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable), "{text}");
+        let failure = failure_of(rig.go());
+        assert!(matches!(failure, Some(Failure::Undecodable | Failure::OutOfBounds(_))), "{text}: {failure:?}");
         assert!(rig.sent_texts().is_empty() && rig.chat.acked.borrow().is_empty() && rig.mind.ids(K::Memory).is_empty());
     }
 }
@@ -1731,7 +1733,7 @@ fn an_ask_cannot_be_settled_and_taken_on_in_one_reply() {
     let id = memories(&rig).remove(0).0;
     rig.model.replies.borrow_mut().extend(thrice(reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "x" }]), starting(json!(id)))));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "go"));
-    assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable));
+    assert_eq!(failure_of(rig.go()), Some(Failure::OutOfBounds(FOR_ITEM_FAULT)));
 }
 
 #[test]
@@ -1859,12 +1861,12 @@ fn the_open_items_shown_are_what_the_decoder_lets_her_settle_or_take_on() {
     let shown = ["yggdrasil:memory:a".to_string()];
     let settling = |item: &str| reply(&[], json!([]), json!([{ "item": item, "outcome": "done", "why": "x" }]), json!(null));
     assert!(decode_reply(&settling("yggdrasil:memory:a"), &rooms, &[], &shown).is_ok());
-    assert_eq!(decode_reply(&settling("yggdrasil:memory:b"), &rooms, &[], &shown), Err(Failure::Undecodable), "an item not shown");
-    assert_eq!(decode_reply(&settling("yggdrasil:memory:a"), &rooms, &[], &[]), Err(Failure::Undecodable), "with none shown she can settle nothing");
+    assert_eq!(decode_reply(&settling("yggdrasil:memory:b"), &rooms, &[], &shown), Err(Failure::OutOfBounds(SETTLE_ITEM_FAULT)), "an item not shown");
+    assert_eq!(decode_reply(&settling("yggdrasil:memory:a"), &rooms, &[], &[]), Err(Failure::OutOfBounds(SETTLE_ITEM_FAULT)), "with none shown she can settle nothing");
     let taking = |item: &str| reply(&[], json!([]), json!([]), starting(json!(item)));
     assert!(decode_reply(&taking("yggdrasil:memory:a"), &rooms, &[], &shown).is_ok());
-    assert_eq!(decode_reply(&taking("yggdrasil:memory:b"), &rooms, &[], &shown), Err(Failure::Undecodable));
-    assert_eq!(decode_reply(&taking("new:0"), &rooms, &[], &shown), Err(Failure::Undecodable), "new:<i> names a memory this reply writes");
+    assert_eq!(decode_reply(&taking("yggdrasil:memory:b"), &rooms, &[], &shown), Err(Failure::OutOfBounds(FOR_ITEM_FAULT)));
+    assert_eq!(decode_reply(&taking("new:0"), &rooms, &[], &shown), Err(Failure::OutOfBounds(FOR_ITEM_FAULT)), "new:<i> names a memory this reply writes");
     // The schema leaves the ids to the decoder and the line, and still offers the one-reply form.
     let schema: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()])).unwrap();
     assert_eq!(schema["properties"]["settle"]["items"]["properties"]["item"], json!({ "type": "string" }));
@@ -2036,7 +2038,7 @@ fn settling_and_taking_on_a_commitment() {
     assert!(matches!(outcome_of(&rig, &id), Some(ResolutionOutcome::Deferred { .. })));
     // new:<i> on anything else is a decode failure with nothing sent.
     let rig = Rig::new(vec![delivery(1, "swarm", libby, "fork")], &thrice(reply(&[("swarm", "x")], json!([keeps("Rapport", "we get on", &[libby])]), json!([]), starting(json!("new:0")))));
-    assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable));
+    assert_eq!(failure_of(rig.go()), Some(Failure::OutOfBounds(FOR_ITEM_FAULT)));
     assert!(rig.sent_texts().is_empty() && rig.mind.ids(K::Memory).is_empty());
 }
 
@@ -2092,7 +2094,7 @@ fn about_can_name_an_absent_mind() {
     // A stranger is not in it, and naming one is undecodable with nothing sent.
     let stranger = reply(&[("swarm", "x")], json!([keeps("Idea", "someone", &["@stranger:chat"])]), json!([]), json!(null));
     let rig = Rig::new(vec![delivery(1, "swarm", libby, "hi")], &thrice(stranger));
-    assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable));
+    assert_eq!(failure_of(rig.go()), Some(Failure::OutOfBounds(ABOUT_FAULT)));
     assert!(rig.sent_texts().is_empty() && rig.chat.acked.borrow().is_empty());
 }
 
@@ -2101,7 +2103,7 @@ fn a_long_sender_id_stays_out_of_the_schema_and_never_poisons_a_turn() {
     let long = format!("@{}:chat", "a".repeat(220));
     let named = reply(&[("swarm", "said")], json!([keeps("Learned", "x", &[&long])]), json!([]), json!(null));
     let rig = Rig::new(vec![delivery(1, "swarm", &long, "hi")], &thrice(named));
-    assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable), "naming it is refused before any say");
+    assert_eq!(failure_of(rig.go()), Some(Failure::OutOfBounds(ABOUT_FAULT)), "naming it is refused before any say");
     assert!(rig.sent_texts().is_empty() && rig.chat.acked.borrow().is_empty() && rig.mind.ids(K::Memory).is_empty());
     assert!(!about_enum(&rig, 0).contains(&long));
     // A reply that does not name it is admitted and acked; the member's message still reads as a message.
@@ -2779,8 +2781,9 @@ fn a_reply_states_its_intent_first() {
     let rooms = ["operator".to_string()];
     assert!(decode_reply(&intending(&"x".repeat(600)), &rooms, &[], &[]).is_ok());
     let missing = json!({ "say": [], "start_self_run": null, "remember": [], "settle": [], "urgency_permille": null }).to_string();
-    for refused in [intending(&"x".repeat(601)), intending(""), intending("  \n"), missing] {
-        assert_eq!(decode_reply(&refused, &rooms, &[], &[]), Err(Failure::Undecodable), "{refused}");
+    assert_eq!(decode_reply(&missing, &rooms, &[], &[]), Err(Failure::Undecodable));
+    for refused in [intending(&"x".repeat(601)), intending(""), intending("  \n")] {
+        assert_eq!(decode_reply(&refused, &rooms, &[], &[]), Err(Failure::OutOfBounds(INTENT_FAULT)), "{refused}");
     }
 }
 
@@ -3051,7 +3054,7 @@ fn over_the_ceiling(rig: &Rig, replies: [serde_json::Value; 3]) -> (Closing, Rc<
             (1, 6_000, echo_line()),
             (1, 0, result_line(first)),
             (2, 0, echo_line()),
-            (2, 0, request_at("m-over", CEILING_TOKENS_FOR_TESTS)),
+            (2, 0, request_at("m-over", crate::self_run::CEILING_TOKENS)),
             (3, 0, result_line(retold)),
             (3, 0, echo_line()),
             (3, 0, result_line(flush)),
@@ -3064,7 +3067,23 @@ fn over_the_ceiling(rig: &Rig, replies: [serde_json::Value; 3]) -> (Closing, Rc<
     (Closing(child, false), writes)
 }
 
-const CEILING_TOKENS_FOR_TESTS: u64 = crate::self_run::CEILING_TOKENS;
+/// One process that says nothing more than a good reply to its first line, then ends when the mouth is empty.
+fn answering(rig: &Rig, reply: serde_json::Value) -> (Closing, Rc<RefCell<Vec<String>>>) {
+    let writes: Rc<RefCell<Vec<String>>> = Rc::default();
+    let child = Timed { writes: writes.clone(), script: VecDeque::from([(1, 6_000, echo_line()), (1, 0, result_line(reply))]), deliveries: rig.chat.deliveries.clone(), arriving: vec![], now: rig.clock.now.clone(), asked: 0 };
+    (Closing(child, false), writes)
+}
+
+fn empty_reply() -> serde_json::Value {
+    json!({"intent": "Nothing is stranded", "say": [], "remember": [], "settle": [], "start_self_run": null, "urgency_permille": null})
+}
+
+/// The text of the first line a process was told.
+fn first_line(writes: &Rc<RefCell<Vec<String>>>) -> String {
+    let written = writes.borrow();
+    let event: serde_json::Value = serde_json::from_str(&written[0]).unwrap();
+    event["message"]["content"].as_str().unwrap().to_string()
+}
 
 #[test]
 fn a_batch_refused_across_ceiling_restarts_ends_the_start_at_its_third_refusal() {
@@ -3075,7 +3094,192 @@ fn a_batch_refused_across_ceiling_restarts_ends_the_start_at_its_third_refusal()
     let (outcome, acked) = carry_children(&rig, children);
     let processes = writes.iter().filter(|written| !written.borrow().is_empty()).count();
     assert_eq!(processes, 2, "the first process refuses twice, the second's first refusal is the batch's third");
-    assert!(failure_of(outcome).is_some());
+    assert_eq!(failure_of(outcome), Some(Failure::OutOfBounds(ABOUT_FAULT)));
     assert!(rig.chat.sent.borrow().is_empty() && acked.is_empty(), "nothing was said and nothing passes the ack, so the mouth still holds both messages");
     assert_eq!(rig.chat.deliveries.borrow().len(), 2);
+    assert!(rig.closing_reason().contains(ABOUT_FAULT), "the run's closing names the field: {}", rig.closing_reason());
+    let restarted = first_line(&writes[1]);
+    assert!(restarted.contains(&format!("Your last reply was refused ({ABOUT_FAULT}), so nothing in it was said or kept")), "a fresh session is told what the last one was refused: {restarted}");
+    assert!(restarted.contains(r#"text="three""#) && restarted.contains(r#"text="four""#));
+}
+
+/// The one reply that broke the loop on 2026-11-02 came from a fresh process, and it is acked as any answer is.
+#[test]
+fn a_batch_refused_before_a_restart_and_answered_after_it_is_acked() {
+    let rig = Rig::new(vec![operator_says(3, "three")], &[]);
+    rig.clock.step.set(0);
+    let refused = over_the_ceiling(&rig, [reply_about_bare_name(), reply_about_bare_name(), reply_about_bare_name()]);
+    let answered = answering(&rig, reply_saying("corrected"));
+    let writes = [refused.1.clone(), answered.1.clone()];
+    let (outcome, acked) = carry_children(&rig, vec![refused.0, answered.0]);
+    assert_eq!(failure_of(outcome), None);
+    assert_eq!(rig.sent_texts(), ["corrected"]);
+    assert_eq!(acked, [3]);
+    assert!(first_line(&writes[1]).contains("was refused"));
+}
+
+/// A flush alone carries no batch, so a good reply to it answers nothing: the batch's count stands.
+#[test]
+fn a_good_flush_after_a_refused_batch_leaves_the_batchs_count_standing() {
+    let rig = Rig::new(vec![operator_says(3, "three")], &[]);
+    rig.clock.step.set(0);
+    let bare = reply_about_bare_name;
+    let (children, writes): (Vec<_>, Vec<_>) = [over_the_ceiling(&rig, [bare(), bare(), empty_reply()]), over_the_ceiling(&rig, [bare(), bare(), bare()]), over_the_ceiling(&rig, [bare(), bare(), bare()])].into_iter().unzip();
+    let (outcome, acked) = carry_children(&rig, children);
+    assert_eq!(failure_of(outcome), Some(Failure::OutOfBounds(ABOUT_FAULT)));
+    assert_eq!(writes.iter().filter(|written| !written.borrow().is_empty()).count(), 2);
+    assert!(acked.is_empty());
+}
+
+/// A new batch after an answered one starts at no refusals, across a restart too.
+#[test]
+fn an_answer_clears_the_count_so_a_later_batch_gets_its_own_three() {
+    let rig = Rig::new(vec![operator_says(3, "three")], &[]);
+    rig.clock.step.set(0);
+    let bare = reply_about_bare_name;
+    let first = over_the_ceiling(&rig, [bare(), bare(), bare()]);
+    let writes: Rc<RefCell<Vec<String>>> = Rc::default();
+    // The retold 3 is answered, 5 arrives and is refused once, and the ceiling ends the process.
+    let second = Timed {
+        writes: writes.clone(),
+        script: VecDeque::from([
+            (1, 6_000, echo_line()),
+            (1, 0, result_line(reply_saying("for three"))),
+            (2, 0, echo_line()),
+            (2, 0, request_at("m-over-2", crate::self_run::CEILING_TOKENS)),
+            (3, 0, result_line(bare())),
+            (3, 0, echo_line()),
+            (3, 0, result_line(empty_reply())),
+        ]),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![(1, operator_says(5, "five"))],
+        now: rig.clock.now.clone(),
+        asked: 0,
+    };
+    // 5 is refused once more here, its second: added to 3's two it would be a third and end the start.
+    let third_writes: Rc<RefCell<Vec<String>>> = Rc::default();
+    let third = Timed {
+        writes: third_writes.clone(),
+        script: VecDeque::from([(1, 6_000, echo_line()), (1, 0, result_line(bare())), (2, 0, echo_line()), (2, 0, result_line(reply_saying("for five")))]),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![],
+        now: rig.clock.now.clone(),
+        asked: 0,
+    };
+    let (outcome, acked) = carry_children(&rig, vec![first.0, Closing(second, false), Closing(third, false)]);
+    assert_eq!(failure_of(outcome), None, "5's one refusal is not added to 3's two");
+    assert_eq!(rig.sent_texts(), ["for three", "for five"]);
+    assert_eq!(acked, [3, 5]);
+    assert!(first_line(&third_writes).contains("was refused"), "5's refusal crosses the restart");
+}
+
+/// The reply itself never reaches the note or the closing: the field is named in the organ's words.
+#[test]
+fn a_refusal_names_the_field_and_echoes_nothing_she_wrote() {
+    let canary = "@canary-value:nowhere";
+    let reply = json!({"intent": "x", "say": [], "remember": [{"sort": "Did", "text": "kept", "about": [canary], "salience_permille": 1}], "settle": [], "start_self_run": null, "urgency_permille": null}).to_string();
+    let rig = Rig::new(vec![operator_says(1, "a")], &thrice(reply));
+    assert_eq!(failure_of(rig.go()), Some(Failure::OutOfBounds(ABOUT_FAULT)));
+    let told = rig.model.requests.borrow()[1].input.clone();
+    assert!(told.contains(ABOUT_FAULT), "{told}");
+    assert!(!told.contains(canary) && !rig.closing_reason().contains(canary));
+}
+
+#[test]
+fn every_memory_bound_names_its_own_field() {
+    let rooms = ["swarm".to_string()];
+    let people = ["@aqua:chat".to_string()];
+    let memory = |about: serde_json::Value, text: &str, salience: u16| json!({"sort": "Did", "text": text, "about": about, "salience_permille": salience});
+    let keeping = |remember: serde_json::Value| reply(&[], remember, json!([]), json!(null));
+    let settling = |settle: serde_json::Value| reply(&[], json!([]), settle, json!(null));
+    let open = ["yggdrasil:memory:a".to_string()];
+    let done = |why: &str| json!({ "item": "yggdrasil:memory:a", "outcome": "done", "why": why });
+    let eight_more = json!((0..9).map(|_| memory(json!([]), "x", 1)).collect::<Vec<_>>());
+    for (text, field) in [
+        (keeping(eight_more), "remember: more entries than one reply may carry"),
+        (keeping(json!([memory(json!([]), "  ", 1)])), "remember.text: blank or over its length bound"),
+        (keeping(json!([memory(json!([]), &"x".repeat(REMEMBER_TEXT_MAX_BYTES + 1), 1)])), "remember.text: blank or over its length bound"),
+        (keeping(json!([memory(json!([]), "x", SALIENCE_MAX_PERMILLE + 1)])), "remember.salience_permille: over its maximum"),
+        (keeping(json!([memory(json!(["@aqua:chat", "@aqua:chat"]), "x", 1)])), "remember.about: too many entries or one repeated"),
+        (keeping(json!([memory(json!(["aqua"]), "x", 1)])), ABOUT_FAULT),
+        (settling(json!((0..SETTLE_MAX + 1).map(|_| done("x")).collect::<Vec<_>>())), "settle: more entries than one reply may carry"),
+        (settling(json!([done("  ")])), "settle.why: blank or over its length bound"),
+        (settling(json!([done(&"x".repeat(WHY_MAX_CHARS + 1))])), "settle.why: blank or over its length bound"),
+        (settling(json!([done("x"), done("y")])), "settle: one item settled twice"),
+    ] {
+        assert_eq!(decode_reply(&text, &rooms, &people, &open), Err(Failure::OutOfBounds(field)), "{field}");
+    }
+    assert!(decode_reply(&keeping(json!([memory(json!(["@aqua:chat"]), "x", SALIENCE_MAX_PERMILLE)])), &rooms, &people, &open).is_ok());
+    assert!(decode_reply(&settling(json!([done(&"x".repeat(WHY_MAX_CHARS))])), &rooms, &people, &open).is_ok());
+}
+
+fn earlier(sender: &str, text: &str) -> ContextLine {
+    ContextLine { sender: sender.into(), text: text.into(), at_unix_ms: 1_700_000_000_000 }
+}
+
+fn with_context(mut message: ChatDelivery, context: Vec<ContextLine>) -> ChatDelivery {
+    message.context = context;
+    message
+}
+
+fn earlier_lines(input: &str) -> Vec<String> {
+    input.lines().filter(|line| line.starts_with("earlier ")).map(String::from).collect()
+}
+
+/// Nibu's line of 2026-11-02 in small: every message carries the room's tail, which holds the batch's own earlier messages.
+#[test]
+fn a_batchs_line_shows_each_earlier_line_once_where_it_first_comes() {
+    let (old, older) = (earlier("@aqua:chat", "old"), earlier("@libby:chat", "older"));
+    let messages = vec![
+        with_context(delivery(1, "swarm", "@op:chat", "one"), vec![older.clone(), old.clone()]),
+        with_context(delivery(2, "swarm", "@op:chat", "two"), vec![old.clone(), earlier("@op:chat", "one"), earlier("@nibu:chat", "her own between")]),
+        with_context(delivery(3, "swarm", "@op:chat", "three"), vec![earlier("@op:chat", "one"), earlier("@nibu:chat", "her own between"), earlier("@op:chat", "two")]),
+    ];
+    let rig = Rig::new(messages, &[says(&[("swarm", "ok")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let input = rig.model.requests.borrow()[0].input.clone();
+    let shown = earlier_lines(&input);
+    assert_eq!(shown.len(), 3, "older, old and her line, and no message of the batch again: {shown:?}");
+    let at = |needle: &str| input.find(needle).unwrap_or_else(|| panic!("{needle} in {input}"));
+    assert!(at(r#"text="older""#) < at(r#"text="old""#) && at(r#"text="old""#) < at(r#"text="one""#), "a room's lines stay in order");
+    assert!(at(r#"text="one""#) < at(r#"text="her own between""#) && at(r#"text="her own between""#) < at(r#"text="two""#), "a line shows where it first comes");
+}
+
+#[test]
+fn the_same_text_in_another_room_is_another_line() {
+    let line = earlier("@aqua:chat", "same words");
+    let messages = vec![with_context(delivery(1, "swarm", "@op:chat", "one"), vec![line.clone()]), with_context(delivery(2, "operator", "@op:chat", "two"), vec![line])];
+    let rig = Rig::new(messages, &[says(&[("swarm", "ok")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(earlier_lines(&rig.model.requests.borrow()[0].input).len(), 2);
+}
+
+/// The bound keeps the tail: the newest lines whole up to exactly the bound, nothing older past the first that does not fit, and each room its own.
+#[test]
+fn a_rooms_earlier_lines_keep_the_newest_within_the_bound() {
+    let half = EARLIER_MAX_BYTES_PER_ROOM / 2;
+    let line = |mark: char| earlier("@aqua:chat", &mark.to_string().repeat(half));
+    let messages = vec![
+        with_context(delivery(1, "swarm", "@op:chat", "one"), vec![line('a'), earlier("@aqua:chat", "tiny")]),
+        with_context(delivery(2, "swarm", "@op:chat", "two"), vec![line('b'), line('c')]),
+        with_context(delivery(3, "operator", "@op:chat", "three"), vec![line('d'), line('e')]),
+    ];
+    let rig = Rig::new(messages, &[says(&[("swarm", "ok")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let shown = earlier_lines(&rig.model.requests.borrow()[0].input);
+    let marks: Vec<char> = shown.iter().filter_map(|line| line.rsplit("text=\"").next().and_then(|text| text.chars().next())).collect();
+    assert_eq!(marks, ['b', 'c', 'd', 'e'], "b and c fill swarm's bound exactly, so tiny and a are gone though tiny would fit; operator keeps its own");
+}
+
+/// The line that blew the prefix: 34 messages, each with its 20 of context, down to the room's distinct lines.
+#[test]
+fn thirty_four_messages_with_a_shared_tail_do_not_repeat_it() {
+    let tail: Vec<ContextLine> = (0..40).map(|index| earlier("@aqua:chat", &format!("line {index}"))).collect();
+    let messages: Vec<ChatDelivery> = (0..34u64).map(|seq| {
+        let start = usize::try_from(seq).unwrap() / 2;
+        with_context(delivery(seq + 1, "swarm", "@op:chat", &format!("message {seq}")), tail[start..start + 20].to_vec())
+    }).collect();
+    let rig = Rig::new(messages, &[says(&[("swarm", "ok")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(earlier_lines(&rig.model.requests.borrow()[0].input).len(), 36, "16 starts and 20 of tail, not 680");
 }
