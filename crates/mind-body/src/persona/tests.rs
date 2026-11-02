@@ -1225,10 +1225,16 @@ fn a_reply_that_votes_and_declares_nothing_admits_no_pulse() {
 
 #[test]
 fn a_vote_or_urgency_outside_its_bounds_fails_the_turn_without_a_pulse_or_an_ack() {
-    for (beat, urgency) in [(json!(59), json!(null)), (json!(86_401), json!(null)), (json!(null), json!(1001)), (json!(null), json!(-1)), (json!("fast"), json!(null))] {
+    for (beat, urgency, refusal) in [
+        (json!(59), json!(null), Failure::OutOfBounds(VOTE_FAULT)),
+        (json!(86_401), json!(null), Failure::OutOfBounds(VOTE_FAULT)),
+        (json!(null), json!(1001), Failure::OutOfBounds(VOTE_FAULT)),
+        (json!(null), json!(-1), Failure::Undecodable),
+        (json!("fast"), json!(null), Failure::Undecodable),
+    ] {
         let rig = Rig::new(vec![operator_says(1, "go")], &thrice(voting(Some(beat.clone()), urgency.clone())));
         let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
-        assert!(matches!(failure, Some(Failure::Undecodable | Failure::OutOfBounds(VOTE_FAULT))), "{beat} {urgency}: {failure:?}");
+        assert_eq!(failure, Some(refusal), "{beat} {urgency}");
         assert!(rig.mind.ids(K::Pulse).is_empty() && rig.chat.acked.borrow().is_empty(), "{beat} {urgency}");
     }
 }
@@ -1711,16 +1717,16 @@ fn an_ask_not_shown_this_turn_is_a_decode_failure_and_nothing_is_sent() {
     let bad_settle = json!([{ "item": format!("{INSTANCE}:memory:nope"), "outcome": "done", "why": "x" }]);
     let bad_take = starting(json!(format!("{INSTANCE}:memory:nope")));
     let not_asked = |for_item: &str| reply(&[("swarm", "x")], json!([keeps("Idea", "an idea", &[])]), json!([]), starting(json!(for_item)));
-    for text in [
-        reply(&[("swarm", "x")], json!([]), bad_settle, json!(null)),
-        reply(&[("swarm", "x")], json!([]), json!([]), bad_take),
-        not_asked("new:0"),
-        not_asked("new:1"),
-        not_asked("new:00"),
+    for (text, refusal) in [
+        (reply(&[("swarm", "x")], json!([]), bad_settle, json!(null)), SETTLE_ITEM_FAULT),
+        (reply(&[("swarm", "x")], json!([]), json!([]), bad_take), FOR_ITEM_FAULT),
+        (not_asked("new:0"), FOR_ITEM_FAULT),
+        (not_asked("new:1"), FOR_ITEM_FAULT),
+        (not_asked("new:00"), FOR_ITEM_FAULT),
     ] {
         let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "hi")], &thrice(text.clone()));
         let failure = failure_of(rig.go());
-        assert!(matches!(failure, Some(Failure::Undecodable | Failure::OutOfBounds(_))), "{text}: {failure:?}");
+        assert_eq!(failure, Some(Failure::OutOfBounds(refusal)), "{text}");
         assert!(rig.sent_texts().is_empty() && rig.chat.acked.borrow().is_empty() && rig.mind.ids(K::Memory).is_empty());
     }
 }
@@ -3278,7 +3284,7 @@ fn the_same_text_in_another_room_is_another_line() {
 /// The bound keeps the tail: the newest lines whole up to exactly the bound, nothing older past the first that does not fit, and each room its own.
 #[test]
 fn a_rooms_earlier_lines_keep_the_newest_within_the_bound() {
-    let half = EARLIER_MAX_BYTES_PER_ROOM / 2;
+    let half = EARLIER_MAX_BYTES_PER_ROOM / 2 - 2; // the two quotes make each line exactly half
     let line = |mark: char| earlier("@aqua:chat", &mark.to_string().repeat(half));
     let messages = vec![
         with_context(delivery(1, "swarm", "@op:chat", "one"), vec![line('a'), earlier("@aqua:chat", "tiny")]),
@@ -3312,4 +3318,42 @@ fn thirty_four_messages_with_a_shared_tail_do_not_repeat_it() {
     let rig = Rig::new(messages, &[says(&[("swarm", "ok")])]);
     assert_eq!(failure_of(rig.go()), None);
     assert_eq!(earlier_lines(&rig.model.requests.borrow()[0].input).len(), 36, "16 starts and 20 of tail, not 680");
+}
+
+/// One line too big for the room never blanks it: it is skipped and the older lines that fit stay.
+#[test]
+fn an_oversize_line_is_skipped_and_the_older_lines_that_fit_stay() {
+    let huge = earlier("@aqua:chat", &"h".repeat(EARLIER_MAX_BYTES_PER_ROOM));
+    let tail = vec![earlier("@aqua:chat", "old"), earlier("@libby:chat", "older still"), huge, earlier("@aqua:chat", "newest")];
+    let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@op:chat", "one"), tail)], &[says(&[("swarm", "ok")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let shown = earlier_lines(&rig.model.requests.borrow()[0].input);
+    assert_eq!(shown.len(), 3, "{shown:?}");
+    assert!(shown[0].ends_with(r#"text="old""#) && shown[1].ends_with(r#"text="older still""#) && shown[2].ends_with(r#"text="newest""#), "{shown:?}");
+}
+
+/// The bound counts what enters the prompt: a quote is two bytes there, so these two lines (10 000 raw bytes) do not both fit.
+#[test]
+fn the_earlier_bound_counts_the_quoted_bytes() {
+    let quotes = |mark: &str| earlier(mark, &"\"".repeat(5000));
+    let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@op:chat", "one"), vec![quotes("@aqua:chat"), quotes("@libby:chat")])], &[says(&[("swarm", "ok")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let shown = earlier_lines(&rig.model.requests.borrow()[0].input);
+    assert_eq!(shown.len(), 1, "{}", shown.len());
+    assert!(shown[0].contains(r#"sender="@libby:chat""#), "the newest stays");
+}
+
+/// The mouth stamps a message and its copy in a later context with one instant; the same words at another instant are said again.
+#[test]
+fn a_genuine_repeat_at_another_instant_is_another_line() {
+    let said = |at: u64| ContextLine { sender: "@aqua:chat".into(), text: "ok".into(), at_unix_ms: at };
+    let rig = Rig::new(
+        vec![
+            with_context(delivery(1, "swarm", "@op:chat", "one"), vec![said(10), said(20), said(10)]),
+            with_context(delivery(2, "swarm", "@op:chat", "two"), vec![said(10), said(20), said(30)]),
+        ],
+        &[says(&[("swarm", "ok")])],
+    );
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(earlier_lines(&rig.model.requests.borrow()[0].input).len(), 3, "10, 20 and 30 once each");
 }

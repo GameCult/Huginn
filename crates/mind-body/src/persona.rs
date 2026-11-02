@@ -82,7 +82,7 @@ pub const SANDBOX_DIR: &str = "sandbox";
 const INSTRUCTIONS_FILE: &str = "persona-instructions.md";
 /// A refused batch is told back; its third refusal ends the start, however many answers or session restarts lie between.
 const REFUSALS_PER_BATCH: u32 = 3;
-/// The most bytes of `earlier` text one line carries for one room: the room's tail, newest kept. Each delivery brings its own
+/// The most bytes of `earlier` text, as rendered into the line (JSON-quoted), one line carries for one room: the room's tail, newest kept. Each delivery brings its own
 /// context, so a batch repeats a room's tail per message; `earlier_shown` owns this bound because a line's size decides how soon the session hits its ceiling.
 const EARLIER_MAX_BYTES_PER_ROOM: usize = 16 * 1024;
 /// The environment variables the unit's `persona.env` sets for the persona flags.
@@ -1867,25 +1867,30 @@ const WAKE_QUESTION: &str = "No new messages. Where is your machine least perfec
 /// Last text of a line with deliveries, after the messages.
 const TRAFFIC_QUESTION: &str = "Answer what needs you. Then the question of every turn: where is your machine least perfect right now, by your values, and does anything here change your move? Put that in `intent` first.";
 
-/// The `earlier` lines a batch's line shows, one list per delivery: each distinct line of a room once, where it first
-/// comes in the batch, none the batch carries as a message, and of each room only the newest within `EARLIER_MAX_BYTES_PER_ROOM`.
+/// The `earlier` lines a batch's line shows, one list per delivery: each distinct line of a room once (the mouth stamps a
+/// message and its copy in a later context with one `at_unix_ms`, so a genuine repeat at another instant is another line),
+/// where it first comes in the batch, none the batch carries as a message, and of each room the newest lines whose rendered
+/// (quoted) text fits `EARLIER_MAX_BYTES_PER_ROOM`. A line too big for what is left is skipped, never a reason to drop the
+/// older lines that fit.
 fn earlier_shown(deliveries: &[ChatDelivery]) -> Vec<Vec<&ContextLine>> {
-    let mut seen: BTreeSet<(&str, &str, &str)> = deliveries.iter().map(|delivery| (delivery.room_alias.as_str(), delivery.sender.as_str(), delivery.text.as_str())).collect();
-    let mut shown: Vec<Vec<&ContextLine>> =
-        deliveries.iter().map(|delivery| delivery.context.iter().filter(|line| seen.insert((delivery.room_alias.as_str(), line.sender.as_str(), line.text.as_str()))).collect()).collect();
+    let mut seen: BTreeSet<(&str, &str, &str, u64)> = deliveries.iter().map(|delivery| (delivery.room_alias.as_str(), delivery.sender.as_str(), delivery.text.as_str(), delivery.at_unix_ms)).collect();
+    let mut shown: Vec<Vec<&ContextLine>> = deliveries
+        .iter()
+        .map(|delivery| delivery.context.iter().filter(|line| seen.insert((delivery.room_alias.as_str(), line.sender.as_str(), line.text.as_str(), line.at_unix_ms))).collect())
+        .collect();
     let mut left: BTreeMap<&str, usize> = BTreeMap::new();
     for (delivery, lines) in deliveries.iter().zip(&mut shown).rev() {
         let room = left.entry(delivery.room_alias.as_str()).or_insert(EARLIER_MAX_BYTES_PER_ROOM);
-        let kept = lines
-            .iter()
-            .rev()
-            .take_while(|line| {
-                let fits = line.text.len() <= *room;
-                *room = if fits { *room - line.text.len() } else { 0 };
-                fits
-            })
-            .count();
-        lines.drain(..lines.len() - kept);
+        let mut kept: Vec<&ContextLine> = Vec::new();
+        for line in lines.iter().rev() {
+            let size = quoted(&line.text).len();
+            if size <= *room {
+                *room -= size;
+                kept.push(line);
+            }
+        }
+        kept.reverse();
+        *lines = kept;
     }
     shown
 }
