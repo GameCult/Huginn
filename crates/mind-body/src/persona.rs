@@ -782,7 +782,7 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
             progress.failure = Some(Failure::Chat);
             break;
         };
-        let first = next_batch(pending);
+        let first = next_batch(config, pending, unix_ms(organs.clock.now()));
         let remaining_s = i64::try_from(organs.run_cap_s).unwrap_or(i64::MAX).saturating_sub((organs.clock.now() - started).num_seconds());
         if process > 0 && (first.is_empty() || remaining_s <= ROTATE_MARGIN_S) {
             break;
@@ -878,7 +878,8 @@ fn one_process(
         echoed_refusals: 0,
         seen: Shown::default(),
         retell: None,
-        watching: Vec::new(),
+        watched_briefs: Vec::new(),
+        watched_runs: Vec::new(),
         noticed: BTreeSet::new(),
         ended: Vec::new(),
     };
@@ -1020,10 +1021,13 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     seen: Shown,
     /// What refused results left to be told again.
     retell: Option<Retell>,
-    /// The briefs her replies gave in this process, as follow-ups, until a run that took one is seen to end. A brief, not a run:
-    /// a start answered Busy leaves hers in the queue for a run that does not exist yet.
-    watching: Vec<PipelineRef>,
-    /// The runs already noticed: one run can take several of her briefs.
+    /// The briefs her replies gave in this process, as follow-ups, until each is resolved: a run that ends leaving one open
+    /// can be followed by another that takes it.
+    watched_briefs: Vec<PipelineRef>,
+    /// The runs her work is with, until each is seen to end: the run a start was answered with, the one that launched for her
+    /// brief or the live holder whose inbox tells it her brief with no claim, and every run that claims a watched brief.
+    watched_runs: Vec<PipelineRef>,
+    /// The runs already noticed: one run can hold several of her briefs.
     noticed: BTreeSet<String>,
     /// The notice lines for runs seen to end, to go with the next tell. Only a live session fills them, so a notice never starts one.
     ended: Vec<String>,
@@ -1073,21 +1077,44 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
         input
     }
 
-    /// Each run that took a brief of hers and has ended becomes one notice, once. A read that fails keeps the brief for the next
-    /// poll: a mind that does not answer delays a notice and costs her neither the notice nor her chat, which needs no mind.
+    /// Each run her work is with becomes one notice when it ends, and then nothing more is read of it; a brief is read until it
+    /// is resolved. A read that fails keeps what it asked about for the next poll: a mind that does not answer delays a notice
+    /// and costs her neither the notice nor her chat, which needs no mind.
     fn note_ended_runs(&mut self) {
+        let mind = self.organs.mind;
         let mut open = Vec::new();
-        for brief in std::mem::take(&mut self.watching) {
-            match run_that_took_it_and_ended(self.organs.mind, &brief) {
-                Ok(Some((run, outcome))) => {
-                    if self.noticed.insert(label_of(&run).to_string()) {
-                        self.ended.push(notice_line(label_of(&run), &outcome, unix_ms(self.organs.clock.now())));
+        for brief in std::mem::take(&mut self.watched_briefs) {
+            match runs_that_claim(mind, &brief).and_then(|takers| Ok((takers, closing_of(mind, &brief)?))) {
+                Ok((takers, closing)) => {
+                    for run in takers {
+                        self.watch_run(run);
+                    }
+                    if closing.is_none() {
+                        open.push(brief);
                     }
                 }
-                Ok(None) | Err(_) => open.push(brief),
+                Err(_) => open.push(brief),
             }
         }
-        self.watching = open;
+        self.watched_briefs = open;
+        let mut live = Vec::new();
+        for run in std::mem::take(&mut self.watched_runs) {
+            match closing_of(mind, &run) {
+                Ok(Some(outcome)) => {
+                    self.noticed.insert(label_of(&run).to_string());
+                    self.ended.push(notice_line(label_of(&run), &outcome, unix_ms(self.organs.clock.now())));
+                }
+                Ok(None) | Err(_) => live.push(run),
+            }
+        }
+        self.watched_runs = live;
+    }
+
+    /// A run joins the watch once, and never again once noticed.
+    fn watch_run(&mut self, run: PipelineRef) {
+        if !self.noticed.contains(label_of(&run)) && !self.watched_runs.contains(&run) {
+            self.watched_runs.push(run);
+        }
     }
 
     fn held(&self) -> Option<HeldReason> {
@@ -1127,7 +1154,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         if Conversation::of(oldest) != self.conversation {
             return Ok(Polled { pending: false, yield_now: true });
         }
-        self.waiting = one_line_of(pending.into_iter().filter(|delivery| delivery.seq > self.told_through).take_while(|delivery| Conversation::of(delivery) == self.conversation));
+        let untold = pending.into_iter().filter(|delivery| delivery.seq > self.told_through).take_while(|delivery| Conversation::of(delivery) == self.conversation).collect();
+        self.waiting = one_line_of(untold, |batch| message_lines(self.config, batch, &self.earlier(batch)).len());
         Ok(Polled { pending: !self.waiting.is_empty() || self.retell.is_some() || !self.ended.is_empty(), yield_now: false })
     }
 
@@ -1200,7 +1228,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                     self.progress.acked = self.answered_through;
                 }
                 if let Some((run, brief)) = started {
-                    self.watching.push(brief);
+                    self.watched_briefs.push(brief);
+                    self.watch_run(run.clone());
                     self.progress.self_run = Some(run);
                 }
                 self.progress.last_intent = Some(intent);
@@ -1351,29 +1380,27 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
 /// The oldest deliveries that share a conversation: the public rooms together, or one direct
 /// message room alone. A prefix by seq, so an ack through its last never passes an unanswered one,
 /// and one member's DM text never enters another room's turn.
-fn next_batch(mut deliveries: Vec<ChatDelivery>) -> Vec<ChatDelivery> {
+fn next_batch(config: &Config, mut deliveries: Vec<ChatDelivery>, started_ms: u64) -> Vec<ChatDelivery> {
     deliveries.sort_by_key(|delivery| delivery.seq);
     let Some(first) = deliveries.first() else { return deliveries };
     let (direct, room) = (first.is_direct, first.room_id.clone());
     let end = deliveries.iter().position(|delivery| delivery.is_direct != direct || (direct && delivery.room_id != room)).unwrap_or(deliveries.len());
     deliveries.truncate(end);
-    one_line_of(deliveries.into_iter())
+    let told = BTreeSet::new();
+    one_line_of(deliveries, |batch| message_lines(config, batch, &earlier_shown(batch, &told, &config.own_sender, started_ms)).len())
 }
 
-/// The most bytes of message text one line carries; what is past it waits unacked for the next line. A line is in her context
-/// until the session ends. Live messages run near 700 B and the mouth clips one at 4000.
+/// The most bytes of message lines, `earlier` lines among them, as rendered, that one line carries; what is past it waits unacked for
+/// the next line. A line is in her context until the session ends, and that is the rendered line.
 const LINE_MESSAGES_MAX_BYTES: usize = 32 * 1024;
 
-/// The front of what waits that one line carries: the oldest delivery whatever its size, then what fits.
-fn one_line_of(waiting: impl Iterator<Item = ChatDelivery>) -> Vec<ChatDelivery> {
-    let mut used = 0;
+/// The front of what waits that one line carries: the oldest delivery whatever its size, then the longest prefix that renders
+/// within the bound. A prefix, never a skip: the ack and `told_through` pass only what was told.
+fn one_line_of(mut waiting: Vec<ChatDelivery>, rendered_bytes: impl Fn(&[ChatDelivery]) -> usize) -> Vec<ChatDelivery> {
+    let longer: Vec<usize> = (2..=waiting.len()).collect();
+    let fit = longer.partition_point(|&end| rendered_bytes(&waiting[..end]) <= LINE_MESSAGES_MAX_BYTES);
+    waiting.truncate(1 + fit);
     waiting
-        .take_while(|delivery| {
-            let fits = used == 0 || used + delivery.text.len() <= LINE_MESSAGES_MAX_BYTES;
-            used += delivery.text.len();
-            fits
-        })
-        .collect()
 }
 
 /// The rooms a reply to these deliveries may name: hers, and the room each
@@ -1883,12 +1910,17 @@ fn last_closing(mind: &dyn MindPort, run: &PipelineRef) -> Result<Option<(u32, P
         .max_by_key(|(sequence, ..)| *sequence))
 }
 
-/// A run that claims this brief and has a closing in force, with that closing: the holder of the slot when she started counts
-/// only if it took her brief.
-fn run_that_took_it_and_ended(mind: &dyn MindPort, brief: &PipelineRef) -> Result<Option<(PipelineRef, ResolutionOutcome)>> {
+/// The runs that claim this brief, ended or not.
+fn runs_that_claim(mind: &dyn MindPort, brief: &PipelineRef) -> Result<Vec<PipelineRef>> {
     let takers = Selection { cites: Some(citing(brief, Some("claims"))), ..of_kind(PipelineKind::Run) };
-    Ok(headers(mind, &takers)?.into_iter().find_map(|run| match run.status {
-        PipelineStatusSummary::Resolved { outcome, .. } => Some((run.id, outcome)),
+    Ok(headers(mind, &takers)?.into_iter().map(|run| run.id).collect())
+}
+
+/// The closing in force of a run or a brief; `None` while it stands open.
+fn closing_of(mind: &dyn MindPort, subject: &PipelineRef) -> Result<Option<ResolutionOutcome>> {
+    let one = Selection { keys: Some(vec![subject.id.0.clone()]), ..of_kind(subject.kind) };
+    Ok(headers(mind, &one)?.into_iter().find_map(|document| match document.status {
+        PipelineStatusSummary::Resolved { outcome, .. } => Some(outcome),
         PipelineStatusSummary::InForce => None,
     }))
 }
