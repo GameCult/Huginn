@@ -3403,6 +3403,8 @@ fn the_refused_record_keeps_its_highest_count_while_a_fresher_batch_is_refused_b
 #[test]
 fn a_for_item_closed_earlier_in_the_session_is_refused() {
     let (rig, id) = rig_with_open_commitment();
+    // Another memory stays in force, so the refusal is about this item and not an empty mind.
+    rig.mind.committed(vec![crate::testkit::memory("other", MemorySort::Learned, "Something else stands", &[])]);
     rig.model.replies.borrow_mut().push_back(settling(&[("swarm", "done")], json!([]), &id, "first"));
     rig.model.replies.borrow_mut().push_back(reply(&[("swarm", "on it")], json!([]), json!([]), starting(json!(id))));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@libby:chat", "status"));
