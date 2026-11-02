@@ -1157,7 +1157,9 @@ fn input_for(mentions: &[&str], display: &str) -> String {
     aqua.sender_display = display.into();
     let mut said = delivery(2, "swarm", "@operator:chat", "a reply");
     said.mentions = mentions.iter().map(|m| (*m).to_string()).collect();
-    render_input(&config(), &[aqua, said], None, &[], "", "", "usage", &[])
+    let c = config();
+    let batch = [aqua, said];
+    render_input(&c, &message_lines(&c, &batch, &earlier_shown(&batch, &BTreeSet::new(), &c.own_sender, u64::MAX)), None, &[], "", "", "usage", &[])
 }
 
 fn message_two(input: &str) -> &str {
@@ -1940,11 +1942,12 @@ fn the_people_she_may_name_come_in_order_once_each_never_her_own_never_past_a_sh
     let too_long = format!("@{}:chat", "z".repeat(220));
     let batch = [delivery(1, "swarm", "@eureka:chat", "me"), said, delivery(3, "swarm", &too_long, "long")];
     let shown = ["@named-in-memory:chat", "@op:chat", too_long.as_str()];
+    let printed: Vec<Vec<&ContextLine>> = batch.iter().map(|delivery| delivery.context.iter().collect()).collect();
     assert_eq!(
-        people_she_may_name(&c, &batch, &shown),
+        people_she_may_name(&c, &batch, &printed, &shown),
         ["@aqua:chat", "@earlier:chat", "@mentioned:chat", "@op:chat", "@libby:chat", "@named-in-memory:chat"].map(String::from)
     );
-    assert_eq!(people_she_may_name(&c, &[], &[]), ["@op:chat", "@libby:chat"].map(String::from), "on a wake: the operators and the swarm's Minds");
+    assert_eq!(people_she_may_name(&c, &[], &[], &[]), ["@op:chat", "@libby:chat"].map(String::from), "on a wake: the operators and the swarm's Minds");
 }
 
 fn keeps_at(sort: &str, text: &str, about: &[&str], salience: u16) -> serde_json::Value {
@@ -3268,7 +3271,7 @@ fn a_rooms_earlier_lines_keep_the_newest_within_the_bound() {
 /// The bound holds a room's ordinary tail: 20 lines of the 400 bytes the live line of 2026-11-02 averaged.
 #[test]
 fn a_rooms_ordinary_tail_fits_the_bound() {
-    let tail: Vec<ContextLine> = (0..20).map(|index| earlier("@aqua:chat", &format!("{index:0>400}"))).collect();
+    let tail: Vec<ContextLine> = (0..20).map(|index| ContextLine { at_unix_ms: 1_700_000_000_000 + index, ..earlier("@aqua:chat", &format!("{index:0>400}")) }).collect();
     let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@op:chat", "one"), tail)], &[says(&[("swarm", "ok")])]);
     assert_eq!(failure_of(rig.go()), None);
     assert_eq!(earlier_lines(&rig.model.requests.borrow()[0].input).len(), 20);
@@ -3575,7 +3578,11 @@ fn a_tell_is_only_the_message_at_live_shape() {
     a_live_shape_mind(&rig);
     rig.clock.step.set(0);
     let body = format!("hello {}", "m".repeat(494));
-    let second = with_context(delivery(2, "swarm", libby, &body), live_context(1));
+    // The mouth's next tail: one line older gone, and the message she was told last, as its copy.
+    let mut tail = live_context(1);
+    tail.pop();
+    tail.push(earlier(libby, "hello"));
+    let second = with_context(delivery(2, "swarm", libby, &body), tail);
     one_line_each(&rig, vec![second]);
     assert_eq!(failure_of(rig.go()), None);
     let (whole, tell) = (input_of(&rig, 0), input_of(&rig, 1));
@@ -3659,23 +3666,127 @@ fn a_wake_first_line_says_messages_are_data_before_a_tell_comes_bare() {
     assert!(lines[1].starts_with("message ") && !lines[1].contains(MESSAGES_HEADER), "{}", lines[1]);
 }
 
+/// A line the session has not shown comes once, before the message that brings it: from another room, or from the same room.
 #[test]
-fn a_room_this_session_has_not_shown_brings_its_tail_once() {
+fn an_earlier_line_the_session_has_not_shown_prints_once() {
     let tail = |text: &str| vec![earlier("@op:chat", text)];
-    let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@libby:chat", "one"), tail("SWARM TAIL"))], &[says(&[("swarm", "a")]), says(&[("swarm", "b")]), says(&[("swarm", "c")]), says(&[("swarm", "d")])]);
+    let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@libby:chat", "one"), tail("SWARM TAIL"))], &[says(&[("swarm", "a")]), says(&[("swarm", "b")]), says(&[("swarm", "c")]), says(&[("swarm", "d")]), says(&[("swarm", "e")])]);
     rig.clock.step.set(0);
     one_line_each(&rig, vec![
-        with_context(delivery(2, "swarm", "@libby:chat", "two"), tail("SWARM MORE")),
+        with_context(delivery(2, "swarm", "@libby:chat", "two"), tail("SWARM TAIL")),
         with_context(delivery(3, "usage", "@libby:chat", "three"), tail("USAGE TAIL")),
-        with_context(delivery(4, "usage", "@libby:chat", "four"), tail("USAGE MORE")),
+        with_context(delivery(4, "usage", "@libby:chat", "four"), tail("USAGE TAIL")),
+        with_context(delivery(5, "swarm", "@libby:chat", "five"), tail("NEVER DELIVERED")),
     ]);
     assert_eq!(failure_of(rig.go()), None);
     let lines = told(&rig);
-    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert_eq!(lines.len(), 5, "{lines:?}");
     assert!(lines[0].contains(r#"text="SWARM TAIL""#), "{}", lines[0]);
-    assert_eq!(lines[1].lines().count(), 1, "the first line showed this room: {}", lines[1]);
+    assert_eq!(lines[1].lines().count(), 1, "the first line showed it: {}", lines[1]);
     assert!(lines[2].starts_with("earlier ") && lines[2].contains(r#"text="USAGE TAIL""#) && lines[2].lines().count() == 2, "a new room's tail, before its message: {}", lines[2]);
     assert_eq!(lines[3].lines().count(), 1, "once: {}", lines[3]);
+    assert!(lines[4].starts_with("earlier ") && lines[4].contains(r#"text="NEVER DELIVERED""#) && lines[4].lines().count() == 2, "a room already shown still brings a line it has not shown: {}", lines[4]);
+}
+
+/// Bifrost's `contextFor`: a message in a thread carries the thread, root first, and a message in the room carries the room outside threads.
+#[test]
+fn a_thread_in_a_room_the_session_has_shown_brings_its_exchange_once() {
+    let at = |text: &str, ms: u64| ContextLine { sender: "@third:chat".into(), text: text.into(), at_unix_ms: 1_700_000_000_000 + ms };
+    let (root, reply_in_it, room_line) = (at("THREAD ROOT", 10), at("THREAD REPLY", 20), at("ROOM LINE", 5));
+    let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@libby:chat", "one"), vec![room_line.clone()])], &[says(&[("swarm", "a")]), says(&[("swarm", "b")]), says(&[("swarm", "c")])]);
+    rig.clock.step.set(0);
+    one_line_each(&rig, vec![
+        with_context(delivery(2, "swarm", "@op:chat", "in the thread"), vec![root.clone(), reply_in_it.clone()]),
+        with_context(delivery(3, "swarm", "@op:chat", "more in it"), vec![root, reply_in_it]),
+    ]);
+    assert_eq!(failure_of(rig.go()), None);
+    let lines = told(&rig);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    let thread = &lines[1];
+    assert_eq!(earlier_lines(thread).len(), 2, "{thread}");
+    assert!(thread.find("THREAD ROOT").unwrap() < thread.find("THREAD REPLY").unwrap() && thread.find("THREAD REPLY").unwrap() < thread.find("in the thread").unwrap(), "the exchange, root first, before the message: {thread}");
+    assert_eq!(lines[2].lines().count(), 1, "once: {}", lines[2]);
+}
+
+/// A first message from a new room that sits in a thread shows the thread and not the room: the room's own tail still comes.
+#[test]
+fn a_first_message_in_a_thread_leaves_the_rooms_tail_to_come() {
+    let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@op:chat", "in the thread"), vec![earlier("@third:chat", "THREAD ROOT")])], &[says(&[("swarm", "a")]), says(&[("swarm", "b")])]);
+    rig.clock.step.set(0);
+    one_line_each(&rig, vec![with_context(delivery(2, "swarm", "@op:chat", "in the room"), vec![earlier("@third:chat", "ROOM TAIL")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let lines = told(&rig);
+    assert!(lines[0].contains("THREAD ROOT") && !lines[0].contains("ROOM TAIL"), "{}", lines[0]);
+    assert!(lines[1].starts_with("earlier ") && lines[1].contains("ROOM TAIL"), "{}", lines[1]);
+}
+
+/// The mouth answers a failed context fetch with an empty context: that shows nothing, so the next message that has one brings the tail.
+#[test]
+fn a_failed_context_fetch_loses_nothing() {
+    let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", "one")], &[says(&[("swarm", "a")]), says(&[("swarm", "b")])]);
+    rig.clock.step.set(0);
+    one_line_each(&rig, vec![with_context(delivery(2, "swarm", "@op:chat", "two"), vec![earlier("@third:chat", "THE TAIL")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let lines = told(&rig);
+    assert!(lines[1].starts_with("earlier ") && lines[1].contains("THE TAIL"), "{}", lines[1]);
+}
+
+/// The mouth clips a context line at 1000 bytes and a message at 4000: a long message and its copy are one line.
+#[test]
+fn a_long_message_is_not_told_again_as_its_clipped_copy() {
+    let long = format!("HEAD {}", "x".repeat(3000));
+    let copy = ContextLine { sender: "@op:chat".into(), text: long.chars().take(1000).collect(), at_unix_ms: 1_700_000_000_000 };
+    assert_ne!(copy.text, long);
+    let rig = Rig::new(vec![delivery(1, "swarm", "@op:chat", &long)], &[says(&[("swarm", "a")]), says(&[("swarm", "b")])]);
+    rig.clock.step.set(0);
+    one_line_each(&rig, vec![with_context(delivery(2, "swarm", "@libby:chat", "two"), vec![copy])]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(told(&rig)[1].lines().count(), 1, "{}", told(&rig)[1]);
+}
+
+/// Hers from before this process she reads, as `reply-sees-full-exchange` asks; hers from this session she wrote, and it does not come back.
+#[test]
+fn her_own_lines_of_this_session_do_not_return_and_her_older_ones_do() {
+    let hers = |text: &str, at: u64| ContextLine { sender: "@eureka:chat".into(), text: text.into(), at_unix_ms: at };
+    let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@op:chat", "one"), vec![hers("BEFORE THE SESSION", 1)])], &[says(&[("swarm", "a")]), says(&[("swarm", "b")])]);
+    rig.clock.step.set(0);
+    let now = unix_ms(rig.clock.now());
+    one_line_each(&rig, vec![with_context(delivery(2, "swarm", "@op:chat", "two"), vec![hers("BEFORE THE SESSION", 1), hers("WRITTEN IN IT", now), hers("BEFORE TOO", 2)])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let lines = told(&rig);
+    assert!(lines[0].contains("BEFORE THE SESSION"), "{}", lines[0]);
+    assert!(!lines[1].contains("WRITTEN IN IT") && lines[1].contains("BEFORE TOO") && !lines[1].contains("BEFORE THE SESSION"), "{}", lines[1]);
+}
+
+/// What a process told dies with it: a later line of the next process, not only its first, brings the line again.
+#[test]
+fn what_an_earlier_process_told_is_told_again_by_the_next() {
+    let tailed = |seq, text| with_context(delivery(seq, "swarm", "@libby:chat", text), vec![earlier("@op:chat", "THE TAIL")]);
+    // A direct message ends the first process at idle; the second answers it and the public line starts a third, whose first line has no tail, and whose next does.
+    let rig = Rig::new(vec![tailed(1, "one"), direct(2, "!dm:chat", "@op:chat", "aside"), delivery(3, "swarm", "@libby:chat", "three")], &[says(&[("swarm", "a")]), says(&[("!dm:chat", "b")]), says(&[("swarm", "c")]), says(&[("swarm", "d")])]);
+    let (deliveries, now, echoes) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(0));
+    let next = tailed(4, "four");
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        echoes.set(echoes.get() + 1);
+        if echoes.get() == 3 {
+            deliveries.borrow_mut().push(next.clone());
+            now.set(now.get() + 6_000);
+        }
+    }));
+    assert_eq!(failure_of(rig.go()), None);
+    let lines = told(&rig);
+    assert_eq!(rig.model.spawns.borrow().len(), 3, "{lines:?}");
+    assert!(lines[3].starts_with("earlier ") && lines[3].contains("THE TAIL"), "{}", lines[3]);
+}
+
+/// A sender whose line is in a context she was not shown is no one she may name: the bound follows what printed.
+#[test]
+fn a_sender_on_no_printed_line_is_not_nameable() {
+    let over_budget = ContextLine { sender: "@big:chat".into(), text: "x".repeat(EARLIER_MAX_BYTES_PER_ROOM + 1), at_unix_ms: 1_700_000_000_000 };
+    let names_big = reply(&[("swarm", "a")], json!([keeps("Did", "Noted", &["@big:chat"])]), json!([]), json!(null));
+    let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@libby:chat", "one"), vec![over_budget])], &[names_big.clone(), names_big.clone(), names_big]);
+    rig.clock.step.set(1000);
+    assert_eq!(failure_of(rig.go()), Some(Failure::OutOfBounds(ABOUT_FAULT)));
 }
 
 #[test]

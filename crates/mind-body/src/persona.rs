@@ -867,7 +867,8 @@ fn one_process(
         rooms,
         conversation,
         plan: render_plan(lease.plan_quota(), started_ms),
-        rooms_shown: BTreeSet::new(),
+        started_ms,
+        told: BTreeSet::new(),
         start: first,
         waiting: Vec::new(),
         told_through: 0,
@@ -973,6 +974,13 @@ struct Retell {
     refusals: u32,
 }
 
+/// A rendered line: its text, what it lets a reply name, and the lines it tells.
+struct Rendered {
+    input: String,
+    shown: Shown,
+    told: Vec<LineKey>,
+}
+
 /// The Persona's side of the session: her chat, in one conversation, told to the live session
 /// by the Self's own driver. Its caches (what was told, what was echoed) are the process's;
 /// the mouth's ack is the truth.
@@ -987,8 +995,10 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     conversation: Conversation,
     /// The plan windows the lease granted, as one line.
     plan: String,
-    /// The rooms a line of this session has shown: a later message from another brings that room's tail once.
-    rooms_shown: BTreeSet<String>,
+    /// When this process began: a line of her own from then on she wrote in this session.
+    started_ms: u64,
+    /// Every message and `earlier` line a line of this process has told: an `earlier` line prints once, in a thread or a room alike.
+    told: BTreeSet<LineKey>,
     /// The batch the first line carries; taken by it.
     start: Vec<ChatDelivery>,
     /// The deliveries derived at the last poll that no line has carried yet.
@@ -1016,8 +1026,13 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
 }
 
 impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
+    /// The `earlier` lines a batch brings now.
+    fn earlier<'d>(&self, deliveries: &'d [ChatDelivery]) -> Vec<Vec<&'d ContextLine>> {
+        earlier_shown(deliveries, &self.told, &self.config.own_sender, self.started_ms)
+    }
+
     /// A session's first line: her whole machine. The gate was read by the caller.
-    fn whole_line(&self, deliveries: &[ChatDelivery], note: Option<&str>) -> Result<(String, Shown)> {
+    fn whole_line(&self, deliveries: &[ChatDelivery], note: Option<&str>) -> Result<Rendered> {
         let organs = self.organs;
         let instance = organs.mind.instance().clone();
         let tempo = render_tempo(organs.tempo, &instance);
@@ -1028,26 +1043,28 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
         let cue = recall::Cue { senders, texts: deliveries.iter().rev().map(|delivery| delivery.text.as_str()).collect(), names: names.clone(), listed: &goals.listed, now: organs.clock.now() };
         let recalled = recall::select(organs.mind, &cue)?;
         let shown: Vec<&str> = goals.people.iter().map(String::as_str).chain(recalled.entries().flat_map(|entry| entry.people.iter().map(String::as_str))).collect();
-        let people = people_she_may_name(self.config, deliveries, &shown);
-        let input = render_input(self.config, deliveries, note, &history, &goals.text, &recall::render(&recalled), &format!("{}\n\n{tempo}", self.plan), &people);
-        Ok((input, Shown { people, open: goals.open }))
+        let earlier = self.earlier(deliveries);
+        let people = people_she_may_name(self.config, deliveries, &earlier, &shown);
+        let input = render_input(self.config, &message_lines(self.config, deliveries, &earlier), note, &history, &goals.text, &recall::render(&recalled), &format!("{}\n\n{tempo}", self.plan), &people);
+        Ok(Rendered { input, shown: Shown { people, open: goals.open }, told: lines_told(deliveries, &earlier) })
     }
 
     /// A later line: the messages, a refused batch's note before them, the notices of her ended runs, and nothing else read from her mind.
     /// What a reply to it may name is what the session showed, and whoever is on this line.
     /// The organ's notices of her ended runs come first: they are not messages and answer to no delivery.
-    fn tell_line(&self, deliveries: &[ChatDelivery], note: Option<&str>, notices: &str) -> (String, Shown) {
-        let lines = format!("{notices}{}", message_lines(self.config, deliveries, &self.rooms_shown));
+    fn tell_line(&self, deliveries: &[ChatDelivery], note: Option<&str>, notices: &str) -> Rendered {
+        let earlier = self.earlier(deliveries);
+        let lines = format!("{notices}{}", message_lines(self.config, deliveries, &earlier));
         let input = note.map_or_else(|| lines.clone(), |note| format!("{note}\n\n{lines}"));
-        (input, Shown { people: people_she_may_name(self.config, deliveries, &[]), open: Vec::new() })
+        Rendered { input, shown: Shown { people: people_she_may_name(self.config, deliveries, &earlier, &[]), open: Vec::new() }, told: lines_told(deliveries, &earlier) }
     }
 
     /// Notes what a rendered line carries, as it goes to the child.
-    fn write(&mut self, batch: Vec<ChatDelivery>, (input, shown): (String, Shown), refusals: u32) -> String {
+    fn write(&mut self, batch: Vec<ChatDelivery>, Rendered { input, shown, told }: Rendered, refusals: u32) -> String {
         if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
             self.told_through = self.told_through.max(through);
         }
-        self.rooms_shown.extend(batch.iter().map(|delivery| delivery.room_alias.clone()));
+        self.told.extend(told);
         self.written = Some(Written { batch, shown, refusals });
         input
     }
@@ -1621,9 +1638,9 @@ fn other_senders<'a>(config: &Config, deliveries: &'a [ChatDelivery]) -> Vec<&'a
 }
 
 /// Whom a memory may be about, each within `Short`'s bound, once, in this order: the batch's other
-/// senders, the senders of the earlier lines shown beside them, the Minds mentioned, the operators,
+/// senders, the senders of the earlier lines this line prints, the Minds mentioned, the operators,
 /// the swarm's Minds, then everyone a memory shown this turn names. Never her own id.
-fn people_she_may_name(config: &Config, deliveries: &[ChatDelivery], shown: &[&str]) -> Vec<String> {
+fn people_she_may_name(config: &Config, deliveries: &[ChatDelivery], earlier: &[Vec<&ContextLine>], shown: &[&str]) -> Vec<String> {
     let mut people: Vec<String> = Vec::new();
     let mut add = |id: &str| {
         if id != config.own_sender && id.len() <= SHORT_MAX_BYTES && !id.is_empty() && !people.iter().any(|known| known == id) {
@@ -1631,7 +1648,7 @@ fn people_she_may_name(config: &Config, deliveries: &[ChatDelivery], shown: &[&s
         }
     };
     other_senders(config, deliveries).into_iter().for_each(&mut add);
-    deliveries.iter().flat_map(|delivery| delivery.context.iter().map(|line| line.sender.as_str())).for_each(&mut add);
+    earlier.iter().flatten().map(|line| line.sender.as_str()).for_each(&mut add);
     deliveries.iter().flat_map(|delivery| delivery.mentions.iter().map(String::as_str)).for_each(&mut add);
     config.operators.iter().map(String::as_str).for_each(&mut add);
     config.minds.iter().map(String::as_str).for_each(&mut add);
@@ -1929,16 +1946,41 @@ const WAKE_QUESTION: &str = "No new messages. Where is your machine least perfec
 /// Last text of a line with deliveries, after the messages.
 const TRAFFIC_QUESTION: &str = "Answer what needs you. Then the question of every turn: where is your machine least perfect right now, by your values, and does anything here change your move? Put that in `intent` first.";
 
-/// The `earlier` lines a batch's line shows, one list per delivery: each distinct line of a room once (the mouth stamps a
-/// message and its copy in a later context with one `at_unix_ms`, so a genuine repeat at another instant is another line),
-/// where it first comes in the batch, none the batch carries as a message, and of each room the newest lines whose rendered
-/// (quoted) text fits `EARLIER_MAX_BYTES_PER_ROOM`. A line too big for what is left is skipped, never a reason to drop the
-/// older lines that fit. A room this session has already shown brings none: its tail comes once.
-fn earlier_shown<'a>(deliveries: &'a [ChatDelivery], rooms_shown: &BTreeSet<String>) -> Vec<Vec<&'a ContextLine>> {
-    let mut seen: BTreeSet<(&str, &str, &str, u64)> = deliveries.iter().map(|delivery| (delivery.room_alias.as_str(), delivery.sender.as_str(), delivery.text.as_str(), delivery.at_unix_ms)).collect();
+/// How much of a line's text its key holds: the mouth clips a message's copy in a later context at 1000 bytes and the message
+/// itself at 4000, so a long message and its copy agree only on their head. 200 chars are at most 800 bytes.
+const LINE_KEY_TEXT_CHARS: usize = 200;
+
+/// A line of a room, as a session knows it: room, sender, instant and the head of its text. The mouth stamps a message and its copy
+/// in a later context with one `at_unix_ms`, so a genuine repeat at another instant is another line.
+type LineKey = (String, String, u64, String);
+
+fn line_key(room: &str, sender: &str, at_unix_ms: u64, text: &str) -> LineKey {
+    (room.to_owned(), sender.to_owned(), at_unix_ms, text.chars().take(LINE_KEY_TEXT_CHARS).collect())
+}
+
+fn message_key(delivery: &ChatDelivery) -> LineKey {
+    line_key(&delivery.room_alias, &delivery.sender, delivery.at_unix_ms, &delivery.text)
+}
+
+/// What a line tells: its messages and the `earlier` lines it prints. A line the budget skipped is not among them.
+fn lines_told(deliveries: &[ChatDelivery], earlier: &[Vec<&ContextLine>]) -> Vec<LineKey> {
+    let printed = deliveries.iter().zip(earlier).flat_map(|(delivery, lines)| lines.iter().map(|line| line_key(&delivery.room_alias, &line.sender, line.at_unix_ms, &line.text)));
+    deliveries.iter().map(message_key).chain(printed).collect()
+}
+
+/// The `earlier` lines a batch's line shows, one list per delivery: the one rule is that a line this session has not shown prints
+/// once, whether the mouth read it from a thread or the room. So it prints where it first comes in the batch, never if the
+/// batch carries it as a message or a line of this process told it, and never if it is her own from this session. Of each room
+/// the newest lines whose rendered (quoted) text fits `EARLIER_MAX_BYTES_PER_ROOM`: a line too big for what is left is skipped,
+/// never a reason to drop the older lines that fit, and it can still come with a later message.
+fn earlier_shown<'a>(deliveries: &'a [ChatDelivery], told: &BTreeSet<LineKey>, own_sender: &str, started_ms: u64) -> Vec<Vec<&'a ContextLine>> {
+    let mut seen = told.clone();
+    seen.extend(deliveries.iter().map(message_key));
     let mut shown: Vec<Vec<&ContextLine>> = deliveries
         .iter()
-        .map(|delivery| delivery.context.iter().filter(|_| !rooms_shown.contains(&delivery.room_alias)).filter(|line| seen.insert((delivery.room_alias.as_str(), line.sender.as_str(), line.text.as_str(), line.at_unix_ms))).collect())
+        .map(|delivery| {
+            delivery.context.iter().filter(|line| line.sender != own_sender || line.at_unix_ms < started_ms).filter(|line| seen.insert(line_key(&delivery.room_alias, &line.sender, line.at_unix_ms, &line.text))).collect()
+        })
         .collect();
     let mut left: BTreeMap<&str, usize> = BTreeMap::new();
     for (delivery, lines) in deliveries.iter().zip(&mut shown).rev() {
@@ -1961,7 +2003,7 @@ fn earlier_shown<'a>(deliveries: &'a [ChatDelivery], rooms_shown: &BTreeSet<Stri
 /// remembers, the usage and tempo, the rooms and people she may name, the messages (each a framed
 /// line whose role the organ derived from the sender id and not from anything the sender wrote),
 /// and the question.
-fn render_input(config: &Config, deliveries: &[ChatDelivery], note: Option<&str>, history: &[String], goals: &str, remembered: &str, steer: &str, people: &[String]) -> String {
+fn render_input(config: &Config, messages: &str, note: Option<&str>, history: &[String], goals: &str, remembered: &str, steer: &str, people: &[String]) -> String {
     let mut out = String::new();
     out.push_str(TURN_INSTRUCTION);
     if let Some(note) = note {
@@ -1982,13 +2024,13 @@ fn render_input(config: &Config, deliveries: &[ChatDelivery], note: Option<&str>
     out.push_str(&format!("People you may name in a memory's about: {}.\n\n", people.join(", ")));
     out.push_str(MESSAGES_HEADER);
     out.push('\n');
-    if deliveries.is_empty() {
+    if messages.is_empty() {
         out.push('\n');
         out.push_str(WAKE_QUESTION);
         out.push('\n');
         return out;
     }
-    out.push_str(&message_lines(config, deliveries, &BTreeSet::new()));
+    out.push_str(messages);
     out.push('\n');
     out.push_str(TRAFFIC_QUESTION);
     out.push('\n');
@@ -1996,10 +2038,10 @@ fn render_input(config: &Config, deliveries: &[ChatDelivery], note: Option<&str>
 }
 
 /// A batch as framed lines: each message, after the `earlier` lines it brings.
-fn message_lines(config: &Config, deliveries: &[ChatDelivery], rooms_shown: &BTreeSet<String>) -> String {
+fn message_lines(config: &Config, deliveries: &[ChatDelivery], earlier: &[Vec<&ContextLine>]) -> String {
     let mut out = String::new();
     let names = sender_names(deliveries);
-    for (delivery, shown) in deliveries.iter().zip(earlier_shown(deliveries, rooms_shown)) {
+    for (delivery, shown) in deliveries.iter().zip(earlier) {
         for earlier in shown {
             out.push_str(&message_line(config, "earlier", &delivery.room_alias, &earlier.sender, None, &Addressees { to_you: false, others: vec![] }, earlier.at_unix_ms, &earlier.text));
         }
