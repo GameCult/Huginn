@@ -205,17 +205,17 @@ mod tests {
     fn a_slow_reserve_answers_under_its_own_bound_where_a_gpus_would_have_failed() {
         let dark = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            format!("http://{}", listener.local_addr().unwrap())
+            [format!("http://{}", listener.local_addr().unwrap())]
         };
-        let cpu = slow_ollama(Duration::from_millis(900));
+        let cpu = [slow_ollama(Duration::from_millis(900))];
         let quick = EmbedBounds { connect: Duration::from_secs(1), floor: Duration::from_millis(300), per_text: Duration::ZERO };
         let patient = EmbedBounds { floor: Duration::from_secs(5), ..quick };
 
-        let mut as_reserve = pool_bounded(&[dark.clone()], &[cpu.clone()], "m:1", quick, patient);
+        let mut as_reserve = pool_bounded(&dark, &cpu, "m:1", quick, patient);
         let vectors = as_reserve.embed(&["a".to_owned()], Duration::from_secs(20)).unwrap();
         assert_eq!(vectors, vec![vec![1.0_f32]]);
 
-        let mut as_a_gpu = pool_bounded(&[dark], &[cpu], "m:1", quick, quick);
+        let mut as_a_gpu = pool_bounded(&dark, &cpu, "m:1", quick, quick);
         assert!(as_a_gpu.embed(&["a".to_owned()], Duration::from_secs(20)).is_err());
     }
 }
