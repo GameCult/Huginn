@@ -1309,6 +1309,8 @@ fn persona_args_are_pinned() {
         "--setting-sources",
         "user",
         "--strict-mcp-config",
+        "--tools",
+        "Bash,WebFetch,WebSearch",
     ]
     .map(String::from)
     .to_vec();

@@ -35,8 +35,8 @@
 //!
 //! The reply is decoded, never scanned: text that is not one `PersonaReply` is a refused
 //! result. Chat, persona state and trace are ports; the chat transport is `chat_rudp::RudpChat`,
-//! wired by the binary. Inside her sandbox her session has the full toolset, a shell and the web
-//! included; her effects in the world are only what `act` does with a result.
+//! wired by the binary. Inside her sandbox her session has a shell and the web (`--tools`);
+//! her effects in the world are only what `act` does with a result.
 //!
 //! The organ admits only her memories and the resolutions that settle or take on
 //! an ask, a follow-up, a run's closing resolution, her own `Pulse` (the tempo
@@ -909,6 +909,8 @@ fn persona_args(session: Uuid, model: &str, schema: &str, system_prompt_file: &P
         "--setting-sources",
         "user",
         "--strict-mcp-config",
+        "--tools",
+        "Bash,WebFetch,WebSearch",
     ]
     .map(String::from)
     .to_vec()
