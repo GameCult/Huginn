@@ -3762,21 +3762,25 @@ fn her_own_lines_of_this_session_do_not_return_and_her_older_ones_do() {
 #[test]
 fn what_an_earlier_process_told_is_told_again_by_the_next() {
     let tailed = |seq, text| with_context(delivery(seq, "swarm", "@libby:chat", text), vec![earlier("@op:chat", "THE TAIL")]);
-    // A direct message ends the first process at idle; the second answers it and the public line starts a third, whose first line has no tail, and whose next does.
-    let rig = Rig::new(vec![tailed(1, "one"), direct(2, "!dm:chat", "@op:chat", "aside"), delivery(3, "swarm", "@libby:chat", "three")], &[says(&[("swarm", "a")]), says(&[("!dm:chat", "b")]), says(&[("swarm", "c")]), says(&[("swarm", "d")])]);
+    let rig = Rig::new(vec![tailed(1, "one")], &[says(&[("swarm", "a")]), says(&[("swarm", "b")]), says(&[("!dm:chat", "c")]), says(&[("swarm", "d")]), says(&[("swarm", "e")])]);
+    // The first process tells two lines; a direct message then ends it at idle; the second answers that; the third opens on a line with no tail, and its next line has one.
     let (deliveries, now, echoes) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(0));
-    let next = tailed(4, "four");
+    let next = tailed(5, "five");
     *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
         echoes.set(echoes.get() + 1);
-        if echoes.get() == 3 {
-            deliveries.borrow_mut().push(next.clone());
-            now.set(now.get() + 6_000);
+        match echoes.get() {
+            1 => deliveries.borrow_mut().extend([delivery(2, "swarm", "@libby:chat", "two"), direct(3, "!dm:chat", "@op:chat", "aside"), delivery(4, "swarm", "@libby:chat", "four")]),
+            4 => deliveries.borrow_mut().push(next.clone()),
+            _ => return,
         }
+        now.set(now.get() + 6_000);
     }));
     assert_eq!(failure_of(rig.go()), None);
     let lines = told(&rig);
     assert_eq!(rig.model.spawns.borrow().len(), 3, "{lines:?}");
-    assert!(lines[3].starts_with("earlier ") && lines[3].contains("THE TAIL"), "{}", lines[3]);
+    assert_eq!(lines.len(), 5, "{lines:?}");
+    assert!(lines[0].contains("THE TAIL") && !lines[1].contains("THE TAIL") && !lines[3].contains("THE TAIL"), "{lines:?}");
+    assert!(lines[4].starts_with("earlier ") && lines[4].contains("THE TAIL"), "{}", lines[4]);
 }
 
 /// A sender whose line is in a context she was not shown is no one she may name: the bound follows what printed.
@@ -4321,6 +4325,18 @@ fn a_burst_is_told_over_lines_within_the_bound() {
     let carried = |line: &str| line.lines().filter(|line| line.starts_with("message ")).count();
     assert_eq!((carried(&lines[1]), carried(&lines[2])), (8, 2), "32 KiB of 4000 B messages, the rest next");
     assert_eq!(rig.chat.acked.borrow().last(), Some(&11));
+}
+
+/// What waits when a process starts is bound as a tell is: its first line carries what fits and the next line the rest.
+#[test]
+fn a_burst_waiting_at_a_start_is_told_over_lines_within_the_bound() {
+    let big = |seq: u64| delivery(seq, "swarm", "@op:chat", &format!("{seq:03} {}", "b".repeat(3996)));
+    let rig = Rig::new((1..=10).map(big).collect(), &[says(&[]), says(&[])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let lines = told(&rig);
+    let carried = |line: &str| line.lines().filter(|line| line.starts_with("message ")).count();
+    assert_eq!(lines.iter().map(|line| carried(line)).collect::<Vec<_>>(), [8, 2]);
+    assert_eq!(rig.chat.acked.borrow().last(), Some(&10));
 }
 
 #[test]
