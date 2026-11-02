@@ -2528,6 +2528,65 @@ fn a_session_near_the_units_cap_is_told_to_put_what_it_must_keep_into_remember()
     assert!(flush.contains("the unit's time is nearly up") && flush.contains("`remember`") && flush.contains("`settle`"), "{flush}");
 }
 
+/// The last traced turn's outcome, which a flush reply's turn is.
+fn last_outcome(rig: &Rig) -> String {
+    rig.trace.0.borrow().last().expect("a turn was traced").outcome.clone()
+}
+
+#[test]
+fn a_flush_alone_may_keep_a_memory_about_a_mind_the_session_showed() {
+    let libby = "@libby:chat";
+    let rig = Rig::new(vec![delivery(1, "swarm", libby, "plan")], &[says(&[("swarm", "ok")]), reply(&[], json!([keeps("Did", "Libby and I planned the fork", &[libby])]), json!([]), json!(null))]);
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(last_outcome(&rig), "answered");
+    let kept = memories(&rig);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].1.text.0, "Libby and I planned the fork");
+    assert!(kept[0].1.about.iter().any(|about| about.0 == libby), "{:?}", kept[0].1.about);
+}
+
+#[test]
+fn a_flush_alone_may_settle_an_open_commitment() {
+    let libby = "@libby:chat";
+    let rig = Rig::new(vec![delivery(1, "swarm", libby, "plan")], &[reply(&[("swarm", "ok")], json!([keeps("Committed", "I integrate the fork", &[libby])]), json!([]), json!(null)), says(&[])]);
+    let _ = rig.go();
+    let id = memories(&rig).remove(0).0;
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
+    rig.model.replies.borrow_mut().clear();
+    rig.model.replies.borrow_mut().push_back(says(&[("swarm", "status ok")]));
+    rig.model.replies.borrow_mut().push_back(reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "integrated" }]), json!(null)));
+    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", libby, "status"));
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(last_outcome(&rig), "answered");
+    assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "integrated".into() }));
+}
+
+#[test]
+fn a_flush_alone_may_not_name_a_stranger_or_settle_a_closed_item() {
+    let libby = "@libby:chat";
+    let stranger = reply(&[], json!([keeps("Did", "I met someone", &["@stranger:chat"])]), json!([]), json!(null));
+    let rig = Rig::new(vec![delivery(1, "swarm", libby, "plan")], &[says(&[("swarm", "ok")]), stranger.clone(), stranger]);
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
+    let _ = rig.go();
+    assert_eq!(last_outcome(&rig), "failed: the reply is not a persona reply");
+    assert!(memories(&rig).is_empty(), "{:?}", memories(&rig));
+
+    let rig = Rig::new(vec![delivery(1, "swarm", libby, "plan")], &[reply(&[("swarm", "ok")], json!([keeps("Committed", "I integrate the fork", &[libby])]), json!([]), json!(null)), says(&[])]);
+    let _ = rig.go();
+    let id = memories(&rig).remove(0).0;
+    let again = reply(&[], json!([]), json!([{ "item": id, "outcome": "done", "why": "again" }]), json!(null));
+    rig.model.replies.borrow_mut().clear();
+    rig.model.replies.borrow_mut().push_back(reply(&[("swarm", "closing")], json!([]), json!([{ "item": id, "outcome": "done", "why": "integrated" }]), json!(null)));
+    rig.model.replies.borrow_mut().push_back(again.clone());
+    rig.model.replies.borrow_mut().push_back(again);
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
+    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", libby, "status"));
+    let _ = rig.go();
+    assert_eq!(last_outcome(&rig), "failed: the reply is not a persona reply");
+    assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "integrated".into() }));
+}
+
 /// 3 and 4 are told; a poll writes 5 while their turn runs; their result is refused; 5's echo opens the next
 /// turn, and 5's result is refused too before a poll falls due (a turn shorter than the poll). Both refused
 /// batches are told again together, as one line, and the one answer acks through 5.
