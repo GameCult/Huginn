@@ -4048,6 +4048,8 @@ enum Elsewhere {
     TakeHerBrief(&'static str),
     /// The live holder hears every open brief from its inbox, answers each with no Run claiming it, and ends. The cell counts what it heard.
     TheHolderAnswersHerBriefs(Rc<Cell<usize>>),
+    /// The watch's reads start or stop failing.
+    TheMindAnswers(bool),
 }
 
 /// Her mind, with what the tests' timelines do to it between her lines, and the reads of a watch, counted in `reads`, that fail while `down`.
@@ -4076,6 +4078,7 @@ impl MindPort for Watched<'_> {
                     self.mind.committed(vec![run(label, RunTurn::SelfRun, RunOperator::Mind, &[brief])]);
                     self.mind.committed(vec![close(run_ref(label), recorded())]);
                 }
+                Elsewhere::TheMindAnswers(answers) => self.down.set(!answers),
                 Elsewhere::TheHolderAnswersHerBriefs(heard) => {
                     let briefs = crate::self_run::inbox::derive(self.mind, &std::collections::HashSet::new())?;
                     heard.set(briefs.len());
@@ -4261,6 +4264,24 @@ fn every_run_that_takes_her_brief_makes_a_notice_not_only_the_first() {
     let notices = all_notices(&lines);
     assert_eq!(notices.len(), 3, "{lines:?}");
     assert!(notices[0].contains("self-holder") && notices[1].contains("self-a") && notices[2].contains("self-b"), "{notices:?}");
+}
+
+/// A failed read of a run that holds no claim of hers keeps it watched: nothing else would ever lead back to it.
+#[test]
+fn a_holder_that_ends_while_the_mind_does_not_answer_is_noticed_when_it_does() {
+    let (_rig, lines, ..) = a_start_answered_busy_then(vec![Elsewhere::TheMindAnswers(false), Elsewhere::CloseTheSelfRuns, Elsewhere::TheMindAnswers(true)]);
+    let notices = all_notices(&lines);
+    assert_eq!(notices.len(), 1, "{lines:?}");
+    assert!(notices[0].contains("self-holder"), "{notices:?}");
+}
+
+/// A failed read of a brief keeps it watched, so a run that takes it in the outage is still found.
+#[test]
+fn a_run_that_takes_her_brief_while_the_mind_does_not_answer_is_noticed_when_it_does() {
+    let (_rig, lines, ..) = a_start_answered_busy_then(vec![Elsewhere::CloseTheSelfRuns, Elsewhere::TheMindAnswers(false), Elsewhere::TakeHerBrief("self-later"), Elsewhere::TheMindAnswers(true)]);
+    let notices = all_notices(&lines);
+    assert_eq!(notices.len(), 2, "{lines:?}");
+    assert!(notices[0].contains("self-holder") && notices[1].contains("self-later"), "{notices:?}");
 }
 
 /// A run that ends leaving her brief open does not end the watch of it.
@@ -4465,7 +4486,7 @@ fn the_line_bound_counts_the_earlier_lines_a_message_brings() {
 /// A small message past one too big for the line waits behind it: the line is a prefix, or the ack would pass the big one unread.
 #[test]
 fn a_small_message_does_not_overtake_a_large_one_past_the_bound() {
-    let big = |seq: u64| delivery(seq, "swarm", "@op:chat", &format!("big{seq} {}", "b".repeat(3990)));
+    let big = |seq: u64| delivery(seq, "swarm", "@op:chat", &format!("big{seq} {}", "b".repeat(3900)));
     let mut burst: Vec<ChatDelivery> = (2..=10).map(big).collect();
     burst.push(delivery(11, "swarm", "@op:chat", "small"));
     let lines = tell_a_burst(burst, 2);
