@@ -3013,7 +3013,7 @@ fn the_turn_text_keeps_the_operators_rulings_and_none_of_the_mailbox_lines() {
 }
 
 /// A child the Timed script drives until stdin closes, then gone: what a real `claude` does at close.
-struct Closing(Timed, bool);
+struct Closing(Timed, u32);
 
 impl Child for Closing {
     fn write_line(&mut self, line: &str) {
@@ -3021,11 +3021,18 @@ impl Child for Closing {
     }
 
     fn close_input(&mut self) {
-        self.1 = true;
+        self.1 = 1;
     }
 
     fn next(&mut self, timeout: StdDuration) -> Read {
-        if self.1 { Read::Exited(Some(0)) } else { self.0.next(timeout) }
+        match self.1 {
+            0 => self.0.next(timeout),
+            1 => {
+                self.1 = 2;
+                Read::Exited(Some(0))
+            }
+            _ => Read::Eof,
+        }
     }
 
     fn stop(&mut self, _how: Stop) -> bool {
@@ -3064,14 +3071,14 @@ fn over_the_ceiling(rig: &Rig, replies: [serde_json::Value; 3]) -> (Closing, Rc<
         now: rig.clock.now.clone(),
         asked: 0,
     };
-    (Closing(child, false), writes)
+    (Closing(child, 0), writes)
 }
 
 /// One process that says nothing more than a good reply to its first line, then ends when the mouth is empty.
 fn answering(rig: &Rig, reply: serde_json::Value) -> (Closing, Rc<RefCell<Vec<String>>>) {
     let writes: Rc<RefCell<Vec<String>>> = Rc::default();
     let child = Timed { writes: writes.clone(), script: VecDeque::from([(1, 6_000, echo_line()), (1, 0, result_line(reply))]), deliveries: rig.chat.deliveries.clone(), arriving: vec![], now: rig.clock.now.clone(), asked: 0 };
-    (Closing(child, false), writes)
+    (Closing(child, 0), writes)
 }
 
 fn empty_reply() -> serde_json::Value {
@@ -3166,7 +3173,7 @@ fn an_answer_clears_the_count_so_a_later_batch_gets_its_own_three() {
         now: rig.clock.now.clone(),
         asked: 0,
     };
-    let (outcome, acked) = carry_children(&rig, vec![first.0, Closing(second, false), Closing(third, false)]);
+    let (outcome, acked) = carry_children(&rig, vec![first.0, Closing(second, 0), Closing(third, 0)]);
     assert_eq!(failure_of(outcome), None, "5's one refusal is not added to 3's two");
     assert_eq!(rig.sent_texts(), ["for three", "for five"]);
     assert_eq!(acked, [3, 5]);
