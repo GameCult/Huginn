@@ -1799,6 +1799,9 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, names: &BTreeMa
     for steward in &stewards {
         if let PipelineFacts::Stewardship { repo, note, .. } = &steward.facts {
             out.push_str(&format!("- steward of {}: {}\n", repo.0, note.0));
+            if !repos.contains(repo) {
+                repos.push(repo.clone());
+            }
             cite(ruling_ids_in(&note.0));
         }
     }
