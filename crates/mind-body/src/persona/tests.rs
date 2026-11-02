@@ -2591,6 +2591,16 @@ fn a_flush_alone_may_not_name_a_stranger_or_settle_a_closed_item() {
     assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "integrated".into() }));
 }
 
+#[test]
+fn a_flush_alone_may_name_a_member_an_earlier_line_showed_though_no_mind_or_operator() {
+    let guest = "@guest:chat";
+    let rig = Rig::new(vec![delivery(1, "swarm", guest, "hello")], &[says(&[("swarm", "hi")]), reply(&[], json!([keeps("Did", "Greeted the guest", &[guest])]), json!([]), json!(null))]);
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(last_outcome(&rig), "answered");
+    assert_eq!(memories(&rig).len(), 1);
+}
+
 /// 3 and 4 are told; a poll writes 5 while their turn runs; their result is refused; 5's echo opens the next
 /// turn, and 5's result is refused too before a poll falls due (a turn shorter than the poll). Both refused
 /// batches are told again together, as one line, and the one answer acks through 5.
