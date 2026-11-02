@@ -61,6 +61,8 @@ impl Gate {
 pub(crate) struct EmbedderState {
     pub(crate) identity: ModelIdentity,
     pub(crate) down: bool,
+    /// Whether embedding fails while the identity read still answers.
+    pub(crate) embed_fails: bool,
     /// The texts of every completed call, in order.
     pub(crate) embedded: Vec<Vec<String>>,
     /// The bound each completed call was given, in order.
@@ -85,7 +87,7 @@ pub(crate) struct FakeEmbedder {
 
 impl FakeEmbedder {
     pub(crate) fn new(digest: &str) -> Self {
-        let state = EmbedderState { identity: identity(digest), down: false, embedded: Vec::new(), bounds: Vec::new(), vector_length: None, identity_bounds: Vec::new(), hang_identity: false, identity_delay: Duration::ZERO };
+        let state = EmbedderState { identity: identity(digest), down: false, embed_fails: false, embedded: Vec::new(), bounds: Vec::new(), vector_length: None, identity_bounds: Vec::new(), hang_identity: false, identity_delay: Duration::ZERO };
         Self { state: Arc::new(Mutex::new(state)), gate: None }
     }
 
@@ -122,7 +124,7 @@ impl Embedder for FakeEmbedder {
             gate.pass();
         }
         let mut state = self.state.lock().unwrap();
-        if state.down {
+        if state.down || state.embed_fails {
             bail!("the embedder is down");
         }
         state.embedded.push(texts.to_vec());
@@ -327,14 +329,16 @@ impl SourceIndex for FakeSources {
         Ok(())
     }
 
-    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>) -> Result<()> {
+    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>, keeping: Option<&str>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         if state.fail_deletes_of.as_deref() == Some(repo) {
             bail!("the vector store refused the delete");
         }
         state.deletes.push((repo.to_owned(), paths.map(<[String]>::to_vec)));
         state.points.retain(|_, point| {
-            !(point.payload.repo == repo && paths.is_none_or(|paths| paths.contains(&point.payload.path)))
+            !(point.payload.repo == repo
+                && paths.is_none_or(|paths| paths.contains(&point.payload.path))
+                && keeping.is_none_or(|commit| point.payload.commit != commit))
         });
         Ok(())
     }
@@ -376,8 +380,8 @@ impl SourceIndex for FakeIndex {
     fn set_cursors(&mut self, cursors: &BTreeMap<String, String>) -> Result<()> {
         self.sources.set_cursors(cursors)
     }
-    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>) -> Result<()> {
-        self.sources.delete_by(repo, paths)
+    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>, keeping: Option<&str>) -> Result<()> {
+        self.sources.delete_by(repo, paths, keeping)
     }
     fn upsert_sources(&mut self, points: &[SourcePoint]) -> Result<()> {
         self.sources.upsert_sources(points)

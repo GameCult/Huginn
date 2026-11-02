@@ -273,13 +273,17 @@ impl SourceIndex for QdrantIndex {
         Ok(())
     }
 
-    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>) -> Result<()> {
+    fn delete_by(&mut self, repo: &str, paths: Option<&[String]>, keeping: Option<&str>) -> Result<()> {
         let collection = self.sources.clone();
         let mut must = vec![json!({ "key": "repo", "match": { "value": repo } })];
         if let Some(paths) = paths {
             must.push(json!({ "key": "path", "match": { "any": paths } }));
         }
-        let body = json!({ "filter": { "must": must } });
+        let mut filter = json!({ "must": must });
+        if let Some(commit) = keeping {
+            filter["must_not"] = json!([{ "key": "commit", "match": { "value": commit } }]);
+        }
+        let body = json!({ "filter": filter });
         self.ask(Method::Post, &format!("/collections/{collection}/points/delete?wait=true"), Some(&body), &[200])?;
         Ok(())
     }
