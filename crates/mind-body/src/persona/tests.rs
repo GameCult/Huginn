@@ -3357,3 +3357,43 @@ fn a_genuine_repeat_at_another_instant_is_another_line() {
     assert_eq!(failure_of(rig.go()), None);
     assert_eq!(earlier_lines(&rig.model.requests.borrow()[0].input).len(), 3, "10, 20 and 30 once each");
 }
+
+/// 3 and 4 are refused while 5 is already written behind them; the retell of 3 and 4 is written before 5's result arrives, and 5 is refused too.
+/// The start's record of refused batches keeps the lowest seq it holds, so the answer to 3 and 4 clears it: a record moved up to 5 would
+/// outlive that answer and open the next process, whose batch is 5, with a refusal note.
+#[test]
+fn the_refused_record_keeps_its_lowest_seq_while_a_higher_batch_is_refused_behind_it() {
+    let rig = Rig::new(vec![operator_says(3, "three"), operator_says(4, "four")], &[]);
+    rig.clock.step.set(0);
+    let first = Timed {
+        writes: Rc::default(),
+        script: VecDeque::from([
+            (1, 6_000, echo_line()),
+            (2, 0, result_line(serde_json::Value::Null)),
+            (2, 0, echo_line()),
+            (3, 0, result_line(serde_json::Value::Null)),
+            (3, 0, echo_line()),
+            (3, 0, result_line(reply_saying("for three and four"))),
+            (3, 0, Read::Exited(Some(0))),
+        ]),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![(0, operator_says(5, "five"))],
+        now: rig.clock.now.clone(),
+        asked: 0,
+    };
+    let writes: Rc<RefCell<Vec<String>>> = Rc::default();
+    let second = Timed {
+        writes: writes.clone(),
+        script: VecDeque::from([(1, 6_000, echo_line()), (1, 0, result_line(reply_saying("for five"))), (1, 0, Read::Exited(Some(0)))]),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![],
+        now: rig.clock.now.clone(),
+        asked: 0,
+    };
+    let (outcome, acked) = carry_children(&rig, vec![Closing(first, 0), Closing(second, 0)]);
+    assert_eq!(failure_of(outcome), None);
+    assert_eq!(rig.sent_texts(), ["for three and four", "for five"]);
+    assert_eq!(acked, [4, 5]);
+    let opening = first_line(&writes);
+    assert!(opening.contains(r#"text="five""#) && !opening.contains("was refused"), "{opening}");
+}
