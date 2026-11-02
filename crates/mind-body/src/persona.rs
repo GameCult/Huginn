@@ -1789,41 +1789,26 @@ const TRAFFIC_QUESTION: &str = "Answer what needs you. Then the question of ever
 fn render_input(config: &Config, deliveries: &[ChatDelivery], history: &[String], goals: &str, remembered: &str, steer: &str, people: &[String]) -> String {
     let mut out = String::new();
     out.push_str(TURN_INSTRUCTION);
-    out.push_str("
-
-Your latest runs:
-");
+    out.push_str("\n\nYour latest runs:\n");
     for line in history {
-        out.push_str(&format!("- {line}
-"));
+        out.push_str(&format!("- {line}\n"));
     }
-    out.push('
-');
+    out.push('\n');
     out.push_str(goals);
-    out.push('
-');
+    out.push('\n');
     out.push_str(remembered);
-    out.push_str("
-
-");
+    out.push_str("\n\n");
     out.push_str(steer);
-    out.push_str("
-
-");
-    out.push_str(&format!("Rooms you may speak in: {}.
-", config.rooms.join(", ")));
-    out.push_str(&format!("People you may name in a memory's about: {}.
-
-", people.join(", ")));
+    out.push_str("\n\n");
+    out.push_str(&format!("Rooms you may speak in: {}.\n", config.rooms.join(", ")));
+    out.push_str(&format!("People you may name in a memory's about: {}.\n\n", people.join(", ")));
     if deliveries.is_empty() {
         out.push_str(WAKE_QUESTION);
-        out.push('
-');
+        out.push('\n');
         return out;
     }
     out.push_str(MESSAGES_HEADER);
-    out.push('
-');
+    out.push('\n');
     let names = sender_names(deliveries);
     for delivery in deliveries {
         for earlier in &delivery.context {
@@ -1832,11 +1817,9 @@ Your latest runs:
         let to = addressees(config, &delivery.mentions, &names);
         out.push_str(&message_line(config, "message", &delivery.room_alias, &delivery.sender, Some(&delivery.sender_display), &to, &delivery.text));
     }
-    out.push('
-');
+    out.push('\n');
     out.push_str(TRAFFIC_QUESTION);
-    out.push('
-');
+    out.push('\n');
     out
 }
 
