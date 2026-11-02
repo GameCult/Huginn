@@ -597,8 +597,8 @@ impl SessionInbox for SelfInbox<'_> {
         Ok(text)
     }
 
-    fn flush_text(&mut self, why: Why) -> Result<String> {
-        Ok(flush_text(why))
+    fn flush_text(&mut self, why: Why) -> String {
+        flush_text(why)
     }
 
     fn line(&mut self, line: &str) {

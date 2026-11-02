@@ -848,7 +848,7 @@ fn one_process(
         echoed: Vec::new(),
         shown: Shown::default(),
         echoed_refusals: 0,
-        seen: Vec::new(),
+        seen: Shown::default(),
         retell: None,
     };
     drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout())?;
@@ -906,7 +906,7 @@ impl Conversation {
 
 /// What a batch's line showed her: the only people she may name and the only open items she may
 /// settle or take on in the result that answers it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Shown {
     people: Vec<String>,
     open: Vec<String>,
@@ -973,8 +973,8 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     /// The most refusals any line echoed since the last result had already had.
     echoed_refusals: u32,
     shown: Shown,
-    /// Every person a line this process wrote showed: the bound a flush written alone starts from.
-    seen: Vec<String>,
+    /// Everyone and every open item the lines this process wrote showed: what a flush written alone may name and settle.
+    seen: Shown,
     /// What refused results left to be told again.
     retell: Option<Retell>,
 }
@@ -1003,11 +1003,7 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
         if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
             self.told_through = self.told_through.max(through);
         }
-        for person in &shown.people {
-            if !self.seen.contains(person) {
-                self.seen.push(person.clone());
-            }
-        }
+        self.seen.add(shown.clone());
         self.written = Some(Written { batch, shown, refusals });
         Ok(match prefix {
             Some(prefix) => format!("{prefix}\n\n{input}"),
@@ -1060,7 +1056,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         self.write(batch, None, 0)
     }
 
-    fn flush_text(&mut self, why: Why) -> Result<String> {
+    fn flush_text(&mut self, why: Why) -> String {
         let cause = match why {
             Why::Ceiling => "its context is full",
             Why::Rotation => "the unit's time is nearly up",
@@ -1068,14 +1064,13 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         };
         let text = format!("This session ends soon ({cause}). Put into `remember` what you must still know when it is gone, including what you were in the middle of and why, and `settle` what is finished. Speak only if leaving would strand something someone is waiting on.");
         if self.written.is_none() {
-            // A flush alone is a line like any other: it shows the people the session showed and the items open now.
-            let organs = self.organs;
-            let goals = render_responsibilities(organs.mind, organs.mind.instance(), &BTreeMap::new())?;
-            let shown: Vec<&str> = self.seen.iter().map(String::as_str).chain(goals.people.iter().map(String::as_str)).collect();
+            // A flush alone is a line like any other: it may name the people and settle the items the session showed.
+            // Which of those items are still open is read when its reply is decoded, after every earlier result is admitted.
+            let shown: Vec<&str> = self.seen.people.iter().map(String::as_str).collect();
             let people = people_she_may_name(self.config, &[], &shown);
-            self.written = Some(Written { batch: Vec::new(), shown: Shown { people, open: goals.open }, refusals: 0 });
+            self.written = Some(Written { batch: Vec::new(), shown: Shown { people, open: self.seen.open.clone() }, refusals: 0 });
         }
-        Ok(text)
+        text
     }
 
     fn echoed(&mut self) {
@@ -1179,7 +1174,7 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
     let inputs = trace_inputs(config, batch);
     let now = organs.clock.now();
     let record = |outputs: Vec<TraceItem>, outcome: String| TurnTrace { run: label_of(run).into(), turn, at: now, inputs: inputs.clone(), outputs, outcome };
-    let reply = match decode_reply(text, &inbox.rooms, &shown.people, &shown.open) {
+    let mut reply = match decode_reply(text, &inbox.rooms, &shown.people, &shown.open) {
         Ok(reply) => reply,
         Err(why) => {
             let raw = TraceItem { provenance: "her own".into(), room: String::new(), text: text.chars().take(TRACE_RAW_MAX).collect() };
@@ -1193,7 +1188,20 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
         (Some(first), Some(last)) => format!("s{first}-{last}"),
         _ => format!("{}-t{turn}", label_of(run)),
     };
+    // An item shown to her and closed since (by an earlier turn of this session) is not a reason to lose the reply.
+    let mut closed = Vec::new();
+    for settled in std::mem::take(&mut reply.settle) {
+        let keys = Selection { keys: Some(vec![settled.item.clone()]), ..in_force(of_kind(PipelineKind::Memory)) };
+        if headers(organs.mind, &keys)?.is_empty() {
+            closed.push(settled.item);
+        } else {
+            reply.settle.push(settled);
+        }
+    }
     let mut outputs = vec![TraceItem { provenance: "her own".into(), room: String::new(), text: format!("intent: {}", reply.intent) }];
+    for item in closed {
+        outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("settle {item} dropped: already closed") });
+    }
     for (index, say) in reply.say.iter().enumerate() {
         // The gate binds the send as it bound the call: a hold placed while the model was answering stops the reply.
         if let Effective::Held { reason } = read(control, swarm, &instance) {

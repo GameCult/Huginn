@@ -35,7 +35,7 @@ pub(crate) trait SessionInbox {
     fn poll(&mut self) -> Result<Polled>;
     /// The text of what waits, which is thereby told.
     fn tell(&mut self) -> Result<String>;
-    fn flush_text(&mut self, why: Why) -> Result<String>;
+    fn flush_text(&mut self, why: Why) -> String;
     /// Every line of the child's stream, before it is read.
     fn line(&mut self, _line: &str) {}
     /// The CLI took one of our lines into a request.
@@ -117,7 +117,7 @@ pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dy
                         parts.push(inbox.tell()?);
                     }
                     if let Some(why) = *flush {
-                        parts.push(inbox.flush_text(why)?);
+                        parts.push(inbox.flush_text(why));
                     }
                     child.write_line(&user_line(&parts.join("\n\n")));
                 }
