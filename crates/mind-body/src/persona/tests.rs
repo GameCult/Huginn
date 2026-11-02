@@ -2822,7 +2822,7 @@ fn settling(say: &[(&str, &str)], remember: serde_json::Value, id: &str, why: &s
 fn a_flush_reply_keeps_its_memories_when_an_earlier_turn_closed_the_item_it_also_settles() {
     let (rig, id) = rig_with_open_commitment();
     rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
-    rig.model.replies.borrow_mut().push_back(settling(&[("swarm", "done")], json!([]), &id, "first"));
+    rig.model.replies.borrow_mut().push_back(settling(&[("swarm", "done")], json!([keeps("Did", "Noted the status", &[])]), &id, "first"));
     rig.model.replies.borrow_mut().push_back(settling(&[], json!([keeps("Did", "Closed the fork with Libby", &["@libby:chat"])]), &id, "again"));
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@libby:chat", "status"));
     assert_eq!(failure_of(rig.go()), None);
