@@ -3218,6 +3218,17 @@ fn every_memory_bound_names_its_own_field() {
     }
     assert!(decode_reply(&keeping(json!([memory(json!(["@aqua:chat"]), "x", SALIENCE_MAX_PERMILLE)])), &rooms, &people, &open).is_ok());
     assert!(decode_reply(&settling(json!([done(&"x".repeat(WHY_MAX_CHARS))])), &rooms, &people, &open).is_ok());
+    // Each bound holds at exactly its value and breaks one past it.
+    let at_most = |entries: usize| json!((0..entries).map(|index| memory(json!([]), &format!("kept {index}"), 1)).collect::<Vec<_>>());
+    assert!(decode_reply(&keeping(at_most(REMEMBER_MAX)), &rooms, &people, &open).is_ok());
+    let many: Vec<String> = (0..=ABOUT_MAX).map(|index| format!("@p{index}:chat")).collect();
+    let about = |count: usize| keeping(json!([memory(json!(many[..count]), "x", 1)]));
+    assert!(decode_reply(&about(ABOUT_MAX), &rooms, &many, &open).is_ok());
+    assert_eq!(decode_reply(&about(ABOUT_MAX + 1), &rooms, &many, &open), Err(Failure::OutOfBounds("remember.about: too many entries or one repeated")));
+    let items: Vec<String> = (0..=SETTLE_MAX).map(|index| format!("yggdrasil:memory:i{index}")).collect();
+    let settles = |count: usize| settling(json!(items[..count].iter().map(|item| json!({ "item": item, "outcome": "done", "why": "x" })).collect::<Vec<_>>()));
+    assert!(decode_reply(&settles(SETTLE_MAX), &rooms, &people, &items).is_ok());
+    assert_eq!(decode_reply(&settles(SETTLE_MAX + 1), &rooms, &people, &items), Err(Failure::OutOfBounds("settle: more entries than one reply may carry")));
 }
 
 fn earlier(sender: &str, text: &str) -> ContextLine {
@@ -3276,6 +3287,15 @@ fn a_rooms_earlier_lines_keep_the_newest_within_the_bound() {
     let shown = earlier_lines(&rig.model.requests.borrow()[0].input);
     let marks: Vec<char> = shown.iter().filter_map(|line| line.rsplit("text=\"").next().and_then(|text| text.chars().next())).collect();
     assert_eq!(marks, ['b', 'c', 'd', 'e'], "b and c fill swarm's bound exactly, so tiny and a are gone though tiny would fit; operator keeps its own");
+}
+
+/// The bound holds a room's ordinary tail: 20 lines of the 400 bytes the live line of 2026-11-02 averaged.
+#[test]
+fn a_rooms_ordinary_tail_fits_the_bound() {
+    let tail: Vec<ContextLine> = (0..20).map(|index| earlier("@aqua:chat", &format!("{index:0>400}"))).collect();
+    let rig = Rig::new(vec![with_context(delivery(1, "swarm", "@op:chat", "one"), tail)], &[says(&[("swarm", "ok")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(earlier_lines(&rig.model.requests.borrow()[0].input).len(), 20);
 }
 
 /// The line that blew the prefix: 34 messages, each with its 20 of context, down to the room's distinct lines.
