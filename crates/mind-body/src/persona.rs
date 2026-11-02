@@ -1164,12 +1164,11 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 }
                 merged.sort_by_key(|delivery| delivery.seq);
                 merged.dedup_by_key(|delivery| delivery.seq);
-                // A line in flight may hold a batch at a higher count than this result's, so the start's record only rises.
+                // A line in flight may hold a batch at a higher count than this result's, so the start's record only rises. A refusal always has a batch: the result that carries none is a flush alone, and a flush is written alone only when no refused batch waits, so one in flight has its own result first, whose refusal puts it back in the retell this one merges.
                 let held = self.progress.refused.take();
                 self.progress.refused = merged
                     .first()
-                    .map(|first| Refused { lowest: held.map_or(first.seq, |held| held.lowest.min(first.seq)), why, refusals: held.map_or(most, |held| held.refusals.max(most)) })
-                    .or(held);
+                    .map(|first| Refused { lowest: held.map_or(first.seq, |held| held.lowest.min(first.seq)), why, refusals: held.map_or(most, |held| held.refusals.max(most)) });
                 self.retell = Some(Retell { batch: merged, why, refusals: most });
                 Ok((true, false))
             }
