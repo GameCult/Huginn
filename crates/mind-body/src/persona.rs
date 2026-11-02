@@ -841,6 +841,7 @@ fn one_process(
         echoed: Vec::new(),
         shown: Shown::default(),
         echoed_refusals: 0,
+        seen: Vec::new(),
         retell: None,
     };
     drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout())?;
@@ -965,6 +966,8 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     /// The most refusals any line echoed since the last result had already had.
     echoed_refusals: u32,
     shown: Shown,
+    /// Every person a line this process wrote showed: the bound a flush written alone starts from.
+    seen: Vec<String>,
     /// What refused results left to be told again.
     retell: Option<Retell>,
 }
@@ -992,6 +995,11 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
         let (input, shown) = self.render(&batch)?;
         if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
             self.told_through = self.told_through.max(through);
+        }
+        for person in &shown.people {
+            if !self.seen.contains(person) {
+                self.seen.push(person.clone());
+            }
         }
         self.written = Some(Written { batch, shown, refusals });
         Ok(match prefix {
@@ -1045,13 +1053,22 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         self.write(batch, None, 0)
     }
 
-    fn flush_text(&self, why: Why) -> String {
+    fn flush_text(&mut self, why: Why) -> Result<String> {
         let cause = match why {
             Why::Ceiling => "its context is full",
             Why::Rotation => "the unit's time is nearly up",
             Why::Idle => "nothing is waiting and its cache would lapse",
         };
-        format!("This session ends soon ({cause}). Put into `remember` whatever you must still know when it is gone and `settle` what is finished. Say nothing unless a message still needs an answer.")
+        let text = format!("This session ends soon ({cause}). Put into `remember` whatever you must still know when it is gone and `settle` what is finished. Say nothing unless a message still needs an answer.");
+        if self.written.is_none() {
+            // A flush alone is a line like any other: it shows the people the session showed and the items open now.
+            let organs = self.organs;
+            let goals = render_responsibilities(organs.mind, organs.mind.instance(), &BTreeMap::new())?;
+            let shown: Vec<&str> = self.seen.iter().map(String::as_str).chain(goals.people.iter().map(String::as_str)).collect();
+            let people = people_she_may_name(self.config, &[], &shown);
+            self.written = Some(Written { batch: Vec::new(), shown: Shown { people, open: goals.open }, refusals: 0 });
+        }
+        Ok(text)
     }
 
     fn echoed(&mut self) {
