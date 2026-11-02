@@ -2894,6 +2894,7 @@ fn a_flush_may_not_settle_an_item_opened_after_the_session_last_line() {
     assert_eq!(outcome_of(&rig, &id), None, "the flush named an item no line of the session showed");
     assert_eq!(last_outcome(&rig), "failed: the reply is not a persona reply");
 }
+
 #[test]
 fn a_flush_written_beside_a_tell_leaves_the_tell_to_be_answered_and_acked() {
     let rig = Rig::new(vec![operator_says(1, "one")], &[says(&[("operator", "for one")]), says(&[("operator", "for two")]), says(&[("operator", "for three")])]);
