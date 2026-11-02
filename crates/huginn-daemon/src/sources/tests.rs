@@ -217,10 +217,10 @@ fn cursor_never_leads() {
     assert_eq!(rig.index.ids(), clean.index.ids());
 }
 
-/// A run that fails between a repo's deletes and its upserts leaves chunks of
-/// no single commit. A head that then reverts the files to the old content
-/// makes an empty diff from the old commit, which would keep the deleted
-/// chunks deleted; the repo is ingested whole instead.
+/// A run that fails part way through a repo's upserts leaves chunks of two
+/// commits. A head that then reverts the files to the old content makes an
+/// empty diff from the old commit, which would keep the half-written new chunks;
+/// the repo is ingested whole instead and only the head's chunks remain.
 #[test]
 fn a_failed_run_then_a_revert_converges() {
     let remote = Remote::new();
@@ -242,7 +242,8 @@ fn a_failed_run_then_a_revert_converges() {
     }
     let (refreshed, _) = rig.run(&mut forge);
     assert_eq!(refreshed.unwrap().failed, ["Demo"]);
-    assert!(rig.index.held().len() < 40, "the failed run left a partial repo");
+    let commits: BTreeSet<String> = rig.index.held().into_iter().map(|(.., commit)| commit).collect();
+    assert_eq!(commits.len(), 2, "the failed run left chunks of two commits");
 
     rig.index.state.lock().unwrap().fail_upserts_after = None;
     let c = remote.commit(&original, &[]);

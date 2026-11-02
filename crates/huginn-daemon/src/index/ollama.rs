@@ -170,9 +170,7 @@ mod tests {
                             Ok(read) => buffer.extend_from_slice(&chunk[..read]),
                         }
                         let text = String::from_utf8_lossy(&buffer).into_owned();
-                        if let Some(end) = text.find("
-
-") {
+                        if let Some(end) = text.find("\r\n\r\n") {
                             let length = text.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
                             break (end + 4, length);
                         }
@@ -193,10 +191,7 @@ mod tests {
                         std::thread::sleep(delay);
                         r#"{"embeddings":[[1.0]]}"#
                     };
-                    let _ = write!(stream, "HTTP/1.1 200 OK
-content-length: {}
-
-{body}", body.len());
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}", body.len());
                 });
             }
         });
