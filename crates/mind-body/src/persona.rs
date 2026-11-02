@@ -350,11 +350,11 @@ fn start_in_bounds(ask: &StartSelfRun) -> bool {
 /// (none in force: `start_self_run` can only be null). The people she may name and the open items
 /// she may settle change with every batch, so the schema holds them as strings and `decode_reply`
 /// holds them to the batch. Text, because the CLI takes it as an argument.
-const REMEMBER_DESCRIPTION: &str = "What you must still know when this conversation is gone, in your own words; the chat will not be there to read again. One entry for each of: asks of you (sort Asked); decisions, the operator's and those you agreed with other Minds (Decided); your own commitments (Committed): a shared plan you are in is one Committed entry, your part in your own words and who holds each other part, with about naming those Minds; it stays in front of you every turn until you settle it. Decided is for decisions that are not your own part of the work; what you learned (Learned) and did (Did); ideas, your own brainstorming and other Minds' ideas (Idea, about whose); rapport, how you and another Mind or person work and bounce off each other (Rapport, about that one). For Asked, about names who asked. Agreements between Minds and their parts are kept here until the shared Atlas mind takes them. Do not invent a bond from one exchange, do not keep an echo of what others said as your own, and do not keep every joke. Leave empty when nothing here is worth keeping. About holds Matrix ids the latest messages or your responsibilities show you.";
+const REMEMBER_DESCRIPTION: &str = "What you must still know when this conversation is gone, in your own words; the chat will not be there to read again. One entry for each of: asks of you (sort Asked); decisions, the operator's and those you agreed with other Minds (Decided); your own commitments (Committed): a shared plan you are in is one Committed entry, your part in your own words and who holds each other part, with about naming those Minds; it stays in front of you every turn until you settle it. Decided is for decisions that are not your own part of the work; what you learned (Learned) and did (Did); ideas, your own brainstorming and other Minds' ideas (Idea, about whose); rapport, how you and another Mind or person work and bounce off each other (Rapport, about that one). For Asked, about names who asked. Agreements between Minds and their parts are kept here until the shared Atlas mind takes them. Do not invent a bond from one exchange, do not keep an echo of what others said as your own, and do not keep every joke. Leave empty when nothing here is worth keeping. About holds Matrix ids this session has shown you.";
 const INTENT_DESCRIPTION: &str = "Write this first. Where your machine is least perfect right now, by your own values, and what this reply does about it. Name the thing: a repo, a run, a commitment, a person, an idea. Waiting is an answer only when you name whose decision you wait on, why it is theirs and not yours, and what this turn does instead.";
 const INTENT_MAX_CHARS: usize = 600;
-const SETTLE_DESCRIPTION: &str = "Close an open item shown under 'You committed to' or 'Asked of you, not yet taken on' in the latest messages: done when you have done it, declined when you will not (a commitment you let go: tell whoever holds the other parts), wrong when it was a mistake. Item is the id shown there. Leave empty when you close none.";
-const FOR_ITEM_DESCRIPTION: &str = "The open commitment or ask this Self run answers: null, an open item id shown in the latest messages, or new:<i> for remember[i] (sort Asked or Committed) written in this same reply. An item taken on leaves the open lists.";
+const SETTLE_DESCRIPTION: &str = "Close an open item shown under 'You committed to' or 'Asked of you, not yet taken on' in this session: done when you have done it, declined when you will not (a commitment you let go: tell whoever holds the other parts), wrong when it was a mistake. Item is the id shown there. Leave empty when you close none.";
+const FOR_ITEM_DESCRIPTION: &str = "The open commitment or ask this Self run answers: null, an open item id shown in this session, or new:<i> for remember[i] (sort Asked or Committed) written in this same reply. An item taken on leaves the open lists.";
 
 pub fn reply_schema(rooms: &[String], campaigns: &[String]) -> String {
     let remember = json!({
@@ -869,7 +869,6 @@ fn one_process(
         answered_through: 0,
         written: None,
         echoed: Vec::new(),
-        shown: Shown::default(),
         echoed_refusals: 0,
         seen: Shown::default(),
         retell: None,
@@ -929,8 +928,7 @@ impl Conversation {
     }
 }
 
-/// What a batch's line showed her: the only people she may name and the only open items she may
-/// settle or take on in the result that answers it.
+/// What a batch's line showed her. Once the CLI has taken the line, it joins what a reply may name.
 #[derive(Clone, Default)]
 struct Shown {
     people: Vec<String>,
@@ -997,8 +995,8 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     echoed: Vec<ChatDelivery>,
     /// The most refusals any line echoed since the last result had already had.
     echoed_refusals: u32,
-    shown: Shown,
-    /// Everyone and every open item the lines this process wrote showed: what a flush written alone may name and settle.
+    /// Everyone and every open item the lines the CLI took in this process showed: the only people a
+    /// reply may name and the only open items it may settle or take on. A line in flight bounds nothing yet.
     seen: Shown,
     /// What refused results left to be told again.
     retell: Option<Retell>,
@@ -1028,7 +1026,6 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
         if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
             self.told_through = self.told_through.max(through);
         }
-        self.seen.add(shown.clone());
         self.written = Some(Written { batch, shown, refusals });
         Ok(input)
     }
@@ -1085,11 +1082,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
     fn flush_text(&mut self, why: Why) -> String {
         let mut text = flush_ask(why);
         if self.written.is_none() {
-            // A flush alone is a line like any other: it may name the people and settle the items the session showed.
-            // Which of those items are still open is read when its reply is decoded, after every earlier result is admitted.
-            let shown: Vec<&str> = self.seen.people.iter().map(String::as_str).collect();
-            let people = people_she_may_name(self.config, &[], &shown);
-            self.written = Some(Written { batch: Vec::new(), shown: Shown { people, open: self.seen.open.clone() }, refusals: 0 });
+            self.written = Some(Written { batch: Vec::new(), shown: Shown::default(), refusals: 0 });
             // Beside a tell the line already opened with the instruction; alone, the flush opens it.
             text = format!("{TURN_INSTRUCTION}\n\n{text}");
         }
@@ -1100,7 +1093,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         if let Some(Written { batch, shown, refusals }) = self.written.take() {
             self.echoed_refusals = self.echoed_refusals.max(refusals);
             self.echoed.extend(batch);
-            self.shown.add(shown);
+            self.seen.add(shown);
         }
     }
 
@@ -1110,7 +1103,6 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
     /// closes stdin).
     fn result(&mut self, line: &str, ok: bool, blocked: bool) -> Result<(bool, bool)> {
         let batch = std::mem::take(&mut self.echoed);
-        let shown = std::mem::take(&mut self.shown);
         let refused_before = std::mem::take(&mut self.echoed_refusals);
         if blocked || !ok {
             self.progress.failure.get_or_insert(Failure::Session);
@@ -1119,7 +1111,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         let turn = self.progress.turn;
         self.progress.turn += 1;
         let step = match structured_output(line) {
-            Some(text) => act(self, &batch, &shown, turn, &text)?,
+            Some(text) => act(self, &batch, turn, &text)?,
             None => {
                 self.record_refusal(&batch, turn)?;
                 Step::Refused(Failure::Undecodable)
@@ -1203,21 +1195,22 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
 
 /// What one result does in the world: decode, say, remember, settle, start a Self run, and trace.
 /// It acks nothing: the caller acks after it, once, from what is still unanswered. `batch` is what
-/// the result answers; `shown` is what the lines showed her.
-fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch: &[ChatDelivery], shown: &Shown, turn: u32, text: &str) -> Result<Step> {
+/// the result answers.
+fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch: &[ChatDelivery], turn: u32, text: &str) -> Result<Step> {
     let (organs, config, run) = (inbox.organs, inbox.config, inbox.run);
     let instance = organs.mind.instance().clone();
     let (control, swarm) = (inbox.control, inbox.swarm);
     let inputs = trace_inputs(config, batch);
     let now = organs.clock.now();
     let record = |outputs: Vec<TraceItem>, outcome: String| TurnTrace { run: label_of(run).into(), turn, at: now, inputs: inputs.clone(), outputs, outcome };
-    let mut reply = match decode_reply(text, &inbox.rooms, &shown.people, &shown.open) {
+    let refuse = |why: Failure| -> Result<Step> {
+        let raw = TraceItem { provenance: "her own".into(), room: String::new(), text: text.chars().take(TRACE_RAW_MAX).collect() };
+        organs.trace.record(&record(vec![raw], format!("failed: {why}")))?;
+        Ok(Step::Refused(why))
+    };
+    let mut reply = match decode_reply(text, &inbox.rooms, &inbox.seen.people, &inbox.seen.open) {
         Ok(reply) => reply,
-        Err(why) => {
-            let raw = TraceItem { provenance: "her own".into(), room: String::new(), text: text.chars().take(TRACE_RAW_MAX).collect() };
-            organs.trace.record(&record(vec![raw], format!("failed: {why}")))?;
-            return Ok(Step::Refused(why));
-        }
+        Err(why) => return refuse(why),
     };
 
     // Request ids name the batch of deliveries and the say, so a repeat is the same send.
@@ -1233,6 +1226,13 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
             closed.push(settled.item);
         } else {
             reply.settle.push(settled);
+        }
+    }
+    // The bound is all the session showed, so it can name an item closed since; taking that one on cannot stand.
+    if let Some(item) = reply.start_self_run.as_ref().and_then(|start| start.for_item.as_deref()).filter(|item| !item.starts_with("new:")) {
+        let keys = Selection { keys: Some(vec![item.to_string()]), ..in_force(of_kind(PipelineKind::Memory)) };
+        if headers(organs.mind, &keys)?.is_empty() {
+            return refuse(Failure::OutOfBounds(FOR_ITEM_FAULT));
         }
     }
     let mut outputs = vec![TraceItem { provenance: "her own".into(), room: String::new(), text: format!("intent: {}", reply.intent) }];

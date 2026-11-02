@@ -3439,3 +3439,21 @@ fn the_refused_record_keeps_its_highest_count_while_a_fresher_batch_is_refused_b
     assert!(opening.contains(r#"text="five""#) && opening.contains("was refused"), "{opening}");
     assert_eq!(writes.borrow().len(), 1, "the first refusal in the second process is the batch's third, so no retell follows");
 }
+
+#[test]
+fn a_for_item_closed_earlier_in_the_session_is_refused() {
+    let (rig, id) = rig_with_open_commitment();
+    rig.model.replies.borrow_mut().push_back(settling(&[("swarm", "done")], json!([]), &id, "first"));
+    rig.model.replies.borrow_mut().push_back(reply(&[("swarm", "on it")], json!([]), json!([]), starting(json!(id))));
+    rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@libby:chat", "status"));
+    // Delivery 3 is told while the first turn runs, so the second reply comes after the settle was admitted.
+    on_echoes(&rig, vec![(6_000, Some(delivery(3, "swarm", "@libby:chat", "take the fork")))]);
+    let (follow_ups, sent) = (rig.mind.ids(K::FollowUp).len(), rig.sent_texts().len());
+    let _ = rig.go();
+    assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "first".into() }));
+    let refused = format!("failed: {FOR_ITEM_FAULT}");
+    assert!(rig.trace.0.borrow().iter().any(|turn| turn.outcome == refused), "{:?}", rig.trace.0.borrow().iter().map(|turn| turn.outcome.clone()).collect::<Vec<_>>());
+    assert_eq!(rig.mind.ids(K::FollowUp).len(), follow_ups, "no follow-up admitted");
+    assert!(rig.launcher.started.borrow().iter().all(|(_, turn)| *turn != RunTurn::SelfRun), "no run started");
+    assert_eq!(rig.sent_texts()[sent..], ["done"], "the refused reply said nothing");
+}
