@@ -80,6 +80,12 @@ use crate::self_run::{MAX_TURNS, ROTATE_MARGIN_S, SESSION_NAMESPACE, Spawner, Wh
 pub const AGENT: &str = "mind-persona";
 /// How often the mouth is asked for new deliveries while her session is live.
 pub const PERSONA_POLL_S: i64 = 5;
+
+/// How often a live session reads who holds her Self run slot, slower than chat's poll. On Eureka's 14.7k-document mind that read
+/// cost 1.4 to 2 s of daemon CPU (2026-11-02): 28-41% of a core at the 5 s poll, 9-14% here. A run shorter than the interval can pass
+/// unseen; over the Minds' 157 Self runs so far, about 10 would at 15 s, 8 at 5 s and 35 at 60 s.
+const SLOT_READ_EVERY_S: u64 = 15;
+
 /// The directory of her sandbox inside the unit's state directory.
 pub const SANDBOX_DIR: &str = "sandbox";
 /// The file inside the unit's runtime directory that holds one process's system prompt.
@@ -690,8 +696,8 @@ impl fmt::Display for Outcome {
 
 /// How one result ended.
 enum Step {
-    /// Answered; the Self run its reply started or found live with the brief it gave, if any, the intent it stated, and the ids of the open items (Asked, Committed) it wrote.
-    Answered(Option<(PipelineRef, PipelineRef)>, String, Vec<String>),
+    /// Answered; the Self run its reply started or found live, if any, the intent it stated, and the ids of the open items (Asked, Committed) it wrote.
+    Answered(Option<PipelineRef>, String, Vec<String>),
     /// The reply could not be decoded: it is told back to her, and sends and acks nothing.
     Refused(Failure),
     /// The start cannot go on; the intent her decoded reply stated still closes the run beside the failure.
@@ -878,9 +884,8 @@ fn one_process(
         echoed_refusals: 0,
         seen: Shown::default(),
         retell: None,
-        watched_briefs: Vec::new(),
-        watched_runs: Vec::new(),
-        noticed: BTreeSet::new(),
+        slot_seen: Vec::new(),
+        slot_read_due_ms: 0,
         ended: Vec::new(),
     };
     drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout())?;
@@ -1021,14 +1026,11 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     seen: Shown,
     /// What refused results left to be told again.
     retell: Option<Retell>,
-    /// The briefs her replies gave in this process, as follow-ups, until each is resolved: a run that ends leaving one open
-    /// can be followed by another that takes it.
-    watched_briefs: Vec<PipelineRef>,
-    /// The runs her work is with, until each is seen to end: the run a start was answered with, the one that launched for her
-    /// brief or the live holder whose inbox tells it her brief with no claim, and every run that claims a watched brief.
-    watched_runs: Vec<PipelineRef>,
-    /// The runs already noticed: one run can hold several of her briefs.
-    noticed: BTreeSet<String>,
+    /// Her Self runs last seen holding the slot, each until a read shows it gone and how it closed: whoever started it, her, the
+    /// heartbeat or an earlier process. A failed read leaves this as it stood.
+    slot_seen: Vec<PipelineRef>,
+    /// When the slot is next read; 0 reads it at the first chance, the session's first line.
+    slot_read_due_ms: u64,
     /// The notice lines for runs seen to end, to go with the next tell. Only a live session fills them, so a notice never starts one.
     ended: Vec<String>,
 }
@@ -1077,43 +1079,27 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
         input
     }
 
-    /// Each run her work is with becomes one notice when it ends, and then nothing more is read of it; a brief is read until it
-    /// is resolved. A read that fails keeps what it asked about for the next poll: a mind that does not answer delays a notice
-    /// and costs her neither the notice nor her chat, which needs no mind.
+    /// A run that was in her Self run slot and has left it becomes one notice. The slot is read at most once in
+    /// `SLOT_READ_EVERY_S`, and a run that left has its closing read once. A read that fails keeps what was last seen for the next
+    /// read: a mind that does not answer delays a notice and costs her neither the notice nor her chat, which needs no mind.
+    /// A run that opens and ends between two reads is seen by neither and makes no notice; the next first line still shows it.
     fn note_ended_runs(&mut self) {
+        let now = unix_ms(self.organs.clock.now());
+        if now < self.slot_read_due_ms {
+            return;
+        }
+        self.slot_read_due_ms = now + SLOT_READ_EVERY_S * 1000;
         let mind = self.organs.mind;
-        let mut open = Vec::new();
-        for brief in std::mem::take(&mut self.watched_briefs) {
-            match runs_that_claim(mind, &brief).and_then(|takers| Ok((takers, closing_of(mind, &brief)?))) {
-                Ok((takers, closing)) => {
-                    for run in takers {
-                        self.watch_run(run);
-                    }
-                    if closing.is_none() {
-                        open.push(brief);
-                    }
-                }
-                Err(_) => open.push(brief),
+        let Ok(holding) = holders(mind, mind.instance(), RunTurn::SelfRun) else { return };
+        let holding: Vec<PipelineRef> = holding.into_iter().map(|holder| holder.id).collect();
+        for run in std::mem::replace(&mut self.slot_seen, holding) {
+            if self.slot_seen.contains(&run) {
+                continue;
             }
-        }
-        self.watched_briefs = open;
-        let mut live = Vec::new();
-        for run in std::mem::take(&mut self.watched_runs) {
             match closing_of(mind, &run) {
-                Ok(Some(outcome)) => {
-                    self.noticed.insert(label_of(&run).to_string());
-                    self.ended.push(notice_line(label_of(&run), &outcome, unix_ms(self.organs.clock.now())));
-                }
-                Ok(None) | Err(_) => live.push(run),
+                Ok(Some(outcome)) => self.ended.push(notice_line(label_of(&run), &outcome, now)),
+                Ok(None) | Err(_) => self.slot_seen.push(run),
             }
-        }
-        self.watched_runs = live;
-    }
-
-    /// A run joins the watch once, and never again once noticed.
-    fn watch_run(&mut self, run: PipelineRef) {
-        if !self.noticed.contains(label_of(&run)) && !self.watched_runs.contains(&run) {
-            self.watched_runs.push(run);
         }
     }
 
@@ -1128,6 +1114,8 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
 impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S> {
     /// The first line of a process. A batch an earlier process left refused opens with that refusal and keeps its count.
     fn start_line(&mut self) -> Result<String> {
+        // Before her machine is read: a run this line shows open was in the slot, so its end cannot pass unheard.
+        self.note_ended_runs();
         let batch = std::mem::take(&mut self.start);
         let (note, refusals) = self.progress.refused.map_or((None, 0), |Refused { why, refusals, .. }| (Some(refused_note(why)), refusals));
         let line = self.whole_line(&batch, note.as_deref())?;
@@ -1227,10 +1215,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                     }
                     self.progress.acked = self.answered_through;
                 }
-                if let Some((run, brief)) = started {
-                    self.watched_briefs.push(brief);
-                    self.watch_run(run.clone());
-                    self.progress.self_run = Some(run);
+                if started.is_some() {
+                    self.progress.self_run = started;
                 }
                 self.progress.last_intent = Some(intent);
                 self.progress.answered += 1;
@@ -1488,7 +1474,7 @@ fn decode_reply(text: &str, rooms: &[String], people: &[String], open: &[String]
 
 /// The brief becomes a follow-up of the Persona turn's run, and a Self run
 /// claims it. A Self run already live is her Self run: the follow-up waits in
-/// the queue for it. Answers that run and the brief.
+/// the queue for it. Answers that run.
 fn start_self_run(
     organs: &Organs,
     control: &impl ControlSource,
@@ -1497,7 +1483,7 @@ fn start_self_run(
     batch: &str,
     ask: &StartSelfRun,
     taken: Option<PipelineRef>,
-) -> Result<Result<(PipelineRef, PipelineRef), Failure>> {
+) -> Result<Result<PipelineRef, Failure>> {
     if !campaigns_in_force(organs.mind)?.iter().any(|(slug, _)| *slug == ask.campaign) {
         return Ok(Err(Failure::SelfRun));
     }
@@ -1529,9 +1515,9 @@ fn start_self_run(
     }
     let Effective::Released(grant) = read(control, swarm, organs.mind.instance()) else { return Ok(Err(Failure::SelfRun)) };
     let ports = Ports { mind: organs.mind, launcher: organs.launcher, clock: organs.clock, host: organs.host };
-    let request = LaunchRequest { turn: RunTurn::SelfRun, claims: vec![claim.clone()], agent: AGENT.into(), grant };
+    let request = LaunchRequest { turn: RunTurn::SelfRun, claims: vec![claim], agent: AGENT.into(), grant };
     Ok(match open_and_launch(&ports, request)? {
-        LaunchOutcome::Launched { run } | LaunchOutcome::Busy { run } => Ok((run, claim)),
+        LaunchOutcome::Launched { run } | LaunchOutcome::Busy { run } => Ok(run),
         _ => Err(Failure::SelfRun),
     })
 }
@@ -1910,13 +1896,7 @@ fn last_closing(mind: &dyn MindPort, run: &PipelineRef) -> Result<Option<(u32, P
         .max_by_key(|(sequence, ..)| *sequence))
 }
 
-/// The runs that claim this brief, ended or not.
-fn runs_that_claim(mind: &dyn MindPort, brief: &PipelineRef) -> Result<Vec<PipelineRef>> {
-    let takers = Selection { cites: Some(citing(brief, Some("claims"))), ..of_kind(PipelineKind::Run) };
-    Ok(headers(mind, &takers)?.into_iter().map(|run| run.id).collect())
-}
-
-/// The closing in force of a run or a brief; `None` while it stands open.
+/// The closing in force of a run; `None` while it stands open.
 fn closing_of(mind: &dyn MindPort, subject: &PipelineRef) -> Result<Option<ResolutionOutcome>> {
     let one = Selection { keys: Some(vec![subject.id.0.clone()]), ..of_kind(subject.kind) };
     Ok(headers(mind, &one)?.into_iter().find_map(|document| match document.status {

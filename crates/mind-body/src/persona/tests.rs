@@ -106,6 +106,8 @@ struct FakeSession {
     /// Runs when a line's echo is handed out, before its result: where time passes after the
     /// driver has read the clock for the start and a poll falls due while the turn runs.
     after_echo: During,
+    /// Runs when a result is handed out, before the driver reads it and then polls.
+    before_result: During,
     /// The chat's deliveries, which the child watches to know whether anything is left to wait for.
     pending: Deliveries,
     /// The child cannot be started.
@@ -128,6 +130,7 @@ impl Spawner for FakeSession {
             requests: self.requests.clone(),
             during: self.during.clone(),
             after_echo: self.after_echo.clone(),
+            before_result: self.before_result.clone(),
             pending: self.pending.clone(),
             instructions,
             schema: after("--json-schema"),
@@ -146,6 +149,7 @@ struct Replying {
     requests: Rc<RefCell<Vec<Told>>>,
     during: During,
     after_echo: During,
+    before_result: During,
     pending: Deliveries,
     instructions: String,
     schema: String,
@@ -193,6 +197,11 @@ impl Child for Replying {
                 && let Some(after_echo) = &*self.after_echo.borrow()
             {
                 after_echo();
+            }
+            if matches!(&read, Read::Line(line) if line.contains(r#""type":"result""#))
+                && let Some(before_result) = &*self.before_result.borrow()
+            {
+                before_result();
             }
             return read;
         }
@@ -317,6 +326,7 @@ impl Rig {
                 spawns: RefCell::default(),
                 during: Rc::default(),
                 after_echo: Rc::default(),
+                before_result: Rc::default(),
                 pending,
                 refuse: Cell::new(false),
                 linger: Rc::default(),
@@ -3894,63 +3904,36 @@ fn a_tell_reads_nothing_from_her_mind_so_a_change_waits_for_the_next_session() {
     assert_eq!(at_write[1], at_write[0], "the second was written before the first result, and read nothing");
 }
 
-/// Her mind, closing every Self run the moment it is opened and moving the clock past a poll.
-struct Ending<'a> {
-    mind: &'a TestMind,
-    now: Rc<Cell<i64>>,
-}
-
-impl MindPort for Ending<'_> {
-    fn instance(&self) -> &Slug {
-        self.mind.instance()
-    }
-
-    fn query(&self, selection: &cultnet_rs::Selection) -> Result<huginn_mind::PipelineSelectionPage> {
-        self.mind.query(selection)
-    }
-
-    fn query_near(&self, selection: &cultnet_rs::Selection, text: &str, top_k: u32) -> Result<huginn_mind::PipelineSelectionPage> {
-        self.mind.query_near(selection, text, top_k)
-    }
-
-    fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<AdmissionOutcome> {
-        let opened: Vec<String> = documents.iter().filter(|document| matches!(document, PipelineDocument::Run(run) if run.turn == RunTurn::SelfRun)).filter_map(|document| pipeline_key(document).ok()).collect();
-        let outcome = self.mind.admit(agent, session, documents)?;
-        for id in opened {
-            self.mind.committed(vec![close(reference(K::Run, &id), recorded())]);
-            self.now.set(self.now.get() + 6_000);
-        }
-        Ok(outcome)
-    }
-}
-
 fn starting_a_run() -> String {
     reply(&[], json!([]), json!([]), starting(json!(null)))
 }
 
+/// The moment past which the next poll reads the slot again, from wherever the test's clock stands.
+const PAST_THE_SLOT_READ_MS: i64 = (SLOT_READ_EVERY_S as i64 + 1) * 1000;
+
+/// She starts a run and it ends with nothing else going on: the notice is a line of its own, the outcome in words, and her empty reply ends it.
 #[test]
 fn a_self_run_of_hers_ending_reaches_the_live_session_as_one_organ_line_and_an_empty_reply_ends_it() {
     // Replies: start the run, answer the notice with nothing; a third is there for a tell that must not come.
     let rig = Rig::new(vec![operator_says(1, "please start")], &[starting_a_run(), says(&[]), says(&[])]);
-    // A millisecond a read, so the Self run's label is not the Persona run's.
-    rig.clock.step.set(1);
+    // Time passes by itself, a second a read, so a poll comes round with no line to bring it.
+    rig.clock.step.set(1000);
     rig.model.linger.set(true);
     rig.open_the_run();
-    // After the notice's echo the child stops lingering and a poll falls due: a second notice, or a tell with nothing in it, would be a third line.
-    let (now, linger, echoes) = (rig.clock.now.clone(), rig.model.linger.clone(), Cell::new(0));
+    let (linger, echoes) = (rig.model.linger.clone(), Cell::new(0));
     *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
         echoes.set(echoes.get() + 1);
         if echoes.get() == 2 {
             linger.set(false);
-            now.set(now.get() + 6_000);
         }
     }));
-    let ending = Ending { mind: &rig.mind, now: rig.clock.now.clone() };
-    let Outcome::Served { failure, self_run, answered, .. } = rig.start_over(&ending, &config()) else { panic!("served") };
+    // Well after a read has seen her run; a later read finds it gone.
+    let timeline = Timeline { close_after: Some((rig.clock.now.clone(), rig.clock.now.get() + 90_000)), ..Timeline::over(&rig.mind) };
+    let Outcome::Served { failure, self_run, answered, .. } = rig.start_over(&timeline, &config()) else { panic!("served") };
     assert_eq!(failure, None);
     let label = label_of(&self_run.expect("the run she started")).to_string();
     // The start line and the notice alone: the empty reply to the notice began nothing.
-    let lines = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect::<Vec<_>>();
+    let lines = told(&rig);
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert_eq!(answered, 2);
     let notice = &lines[1];
@@ -3960,22 +3943,13 @@ fn a_self_run_of_hers_ending_reaches_the_live_session_as_one_organ_line_and_an_e
     assert_eq!(rig.chat.acked.borrow().as_slice(), &[1]);
 }
 
+/// A run closed before the session began was never in the slot it saw.
 #[test]
-fn a_notice_rides_with_the_messages_that_wait_and_a_run_she_did_not_start_here_never_makes_one() {
-    let rig = Rig::new(vec![operator_says(1, "please start")], &[starting_a_run(), says(&[])]);
-    rig.clock.step.set(0);
+fn a_run_that_ended_before_the_session_makes_no_notice() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[])]);
     self_run_closed_with(&rig, "self-elsewhere", "It landed.");
-    rig.open_the_run();
-    let (deliveries, now, arrived) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(false));
-    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
-        if !arrived.replace(true) {
-            now.set(now.get() + 6_000);
-            deliveries.borrow_mut().push(delivery(2, "operator", "@op:chat", "and then"));
-        }
-    }));
-    assert_eq!(failure_of(rig.start_over(&rig.mind, &config())), None);
-    let second = input_of(&rig, 1);
-    assert!(second.starts_with("message ") && !second.contains("notice "), "{second}");
+    let lines = a_session_then(&rig, vec![]).0;
+    assert!(lines.len() > 1 && all_notices(&lines).is_empty(), "{lines:?}");
 }
 
 #[test]
@@ -4044,23 +4018,41 @@ fn what_she_only_notes_this_session_is_not_an_open_item() {
 /// One thing done to her mind at its next read, as a Self run or the heartbeat would do it.
 enum Elsewhere {
     CloseTheSelfRuns,
-    /// A new run takes the newest brief she gave, and ends.
-    TakeHerBrief(&'static str),
+    /// The heartbeat opens a run in her slot; no line of hers had any part in it.
+    TheHeartbeatLaunches(&'static str),
     /// The live holder hears every open brief from its inbox, answers each with no Run claiming it, and ends. The cell counts what it heard.
     TheHolderAnswersHerBriefs(Rc<Cell<usize>>),
-    /// The watch's reads start or stop failing.
+    /// The slot's reads start or stop failing.
     TheMindAnswers(bool),
+    /// A run's closing reads start or stop failing, the slot's still answering.
+    ClosingsAnswer(bool),
 }
 
-/// Her mind, with what the tests' timelines do to it between her lines, and the reads of a watch, counted in `reads`, that fail while `down`.
-struct Watched<'a> {
+/// Her mind, with what a test's timeline does to it, and the reads of the slot, counted, that fail while `down`.
+struct Timeline<'a> {
     mind: &'a TestMind,
     doing: Rc<RefCell<VecDeque<Elsewhere>>>,
-    down: Rc<Cell<bool>>,
+    down: Cell<bool>,
+    closing_down: Cell<bool>,
     reads: Rc<Cell<u32>>,
+    /// The clock, and the instant past which a read finds her Self runs closed.
+    close_after: Option<(Rc<Cell<i64>>, i64)>,
 }
 
-impl MindPort for Watched<'_> {
+impl<'a> Timeline<'a> {
+    fn over(mind: &'a TestMind) -> Self {
+        Self { mind, doing: Rc::default(), down: Cell::new(false), closing_down: Cell::new(false), reads: Rc::default(), close_after: None }
+    }
+
+    fn close_the_self_runs(&self) -> Result<()> {
+        for run in crate::launch::holders(self.mind, self.mind.instance(), RunTurn::SelfRun)? {
+            self.mind.committed(vec![close(run.id, recorded())]);
+        }
+        Ok(())
+    }
+}
+
+impl MindPort for Timeline<'_> {
     fn instance(&self) -> &Slug {
         self.mind.instance()
     }
@@ -4068,34 +4060,31 @@ impl MindPort for Watched<'_> {
     fn query(&self, selection: &cultnet_rs::Selection) -> Result<huginn_mind::PipelineSelectionPage> {
         while let Some(act) = self.doing.borrow_mut().pop_front() {
             match act {
-                Elsewhere::CloseTheSelfRuns => {
-                    for run in crate::launch::holders(self.mind, self.mind.instance(), RunTurn::SelfRun)? {
-                        self.mind.committed(vec![close(run.id, recorded())]);
-                    }
-                }
-                Elsewhere::TakeHerBrief(label) => {
-                    let brief = reference(K::FollowUp, self.mind.ids(K::FollowUp).last().expect("she gave a brief"));
-                    self.mind.committed(vec![run(label, RunTurn::SelfRun, RunOperator::Mind, &[brief])]);
-                    self.mind.committed(vec![close(run_ref(label), recorded())]);
-                }
+                Elsewhere::CloseTheSelfRuns => self.close_the_self_runs()?,
+                Elsewhere::TheHeartbeatLaunches(label) => self.mind.committed(vec![run(label, RunTurn::SelfRun, RunOperator::Mind, &[])]),
                 Elsewhere::TheMindAnswers(answers) => self.down.set(!answers),
+                Elsewhere::ClosingsAnswer(answers) => self.closing_down.set(!answers),
                 Elsewhere::TheHolderAnswersHerBriefs(heard) => {
                     let briefs = crate::self_run::inbox::derive(self.mind, &std::collections::HashSet::new())?;
                     heard.set(briefs.len());
                     for brief in briefs {
                         self.mind.committed(vec![close(reference(K::FollowUp, &brief.id), recorded())]);
                     }
-                    for run in crate::launch::holders(self.mind, self.mind.instance(), RunTurn::SelfRun)? {
-                        self.mind.committed(vec![close(run.id, recorded())]);
-                    }
+                    self.close_the_self_runs()?;
                 }
             }
         }
-        if selection.keys.is_some() || selection.cites.as_ref().is_some_and(|cites| cites.role.as_deref() == Some("claims")) {
+        if *selection == in_force(any_of(of_kind(K::Run), "root", &[INSTANCE])) {
             self.reads.set(self.reads.get() + 1);
+            if self.close_after.as_ref().is_some_and(|(now, past)| now.get() > *past) {
+                self.close_the_self_runs()?;
+            }
             if self.down.get() {
                 return Err(anyhow!("the mind does not answer"));
             }
+        }
+        if selection.keys.is_some() && self.closing_down.get() {
+            return Err(anyhow!("the mind does not answer"));
         }
         self.mind.query(selection)
     }
@@ -4113,71 +4102,8 @@ fn notices_in(line: &str) -> Vec<&str> {
     line.lines().filter(|line| line.starts_with("notice ")).collect()
 }
 
-/// Her mind stops answering while her run ends: a message told in the outage goes through, and the notice comes when it answers again.
-#[test]
-fn a_mind_that_does_not_answer_costs_no_notice_and_no_message() {
-    let rig = Rig::new(vec![operator_says(1, "please start")], &[starting_a_run(), says(&[]), says(&[]), says(&[])]);
-    rig.clock.step.set(1);
-    rig.model.linger.set(true);
-    rig.open_the_run();
-    let (doing, down): (Rc<RefCell<VecDeque<Elsewhere>>>, Rc<Cell<bool>>) = Default::default();
-    let (now, linger, deliveries, echoes) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0));
-    let (doing_then, down_then) = (doing.clone(), down.clone());
-    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
-        echoes.set(echoes.get() + 1);
-        match echoes.get() {
-            1 => deliveries.borrow_mut().push(operator_says(2, "second")),
-            2 => {
-                doing_then.borrow_mut().push_back(Elsewhere::CloseTheSelfRuns);
-                down_then.set(true);
-                deliveries.borrow_mut().push(operator_says(3, "third"));
-            }
-            3 => down_then.set(false),
-            _ => linger.set(false),
-        }
-        now.set(now.get() + 6_000);
-    }));
-    let watched = Watched { mind: &rig.mind, doing, down, reads: Rc::default() };
-    assert_eq!(failure_of(rig.start_over(&watched, &config())), None);
-    let lines = told(&rig);
-    assert_eq!(lines.len(), 4, "{lines:?}");
-    assert!(lines[2].contains(r#"text="third""#) && notices_in(&lines[2]).is_empty(), "told in the outage, with no notice yet: {}", lines[2]);
-    assert_eq!(notices_in(&lines[3]).len(), 1, "{}", lines[3]);
-}
-
-/// A second start while her run lives is answered Busy: one notice for that run, and one for the run that takes the queued brief when it ends.
-#[test]
-fn a_start_answered_busy_gives_one_notice_for_each_run_that_took_a_brief_of_hers() {
-    let rig = Rig::new(vec![operator_says(1, "please start")], &[starting_a_run(), starting_a_run(), says(&[]), says(&[]), says(&[])]);
-    rig.clock.step.set(1);
-    rig.model.linger.set(true);
-    rig.open_the_run();
-    let doing: Rc<RefCell<VecDeque<Elsewhere>>> = Rc::default();
-    let (now, linger, deliveries, echoes) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0));
-    let doing_then = doing.clone();
-    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
-        echoes.set(echoes.get() + 1);
-        match echoes.get() {
-            1 => deliveries.borrow_mut().push(operator_says(2, "again")),
-            2 => deliveries.borrow_mut().push(operator_says(3, "third")),
-            3 => doing_then.borrow_mut().push_back(Elsewhere::CloseTheSelfRuns),
-            4 => doing_then.borrow_mut().push_back(Elsewhere::TakeHerBrief("self-later")),
-            _ => linger.set(false),
-        }
-        now.set(now.get() + 6_000);
-    }));
-    let watched = Watched { mind: &rig.mind, doing, down: Rc::default(), reads: Rc::default() };
-    let Outcome::Served { failure, self_run, .. } = rig.start_over(&watched, &config()) else { panic!("served") };
-    assert_eq!(failure, None);
-    let first = label_of(&self_run.expect("her run")).to_string();
-    assert_eq!(rig.mind.ids(K::FollowUp).len(), 2, "both briefs");
-    let lines = told(&rig);
-    assert_eq!(lines.len(), 5, "{lines:?}");
-    assert!(lines[..3].iter().all(|line| notices_in(line).is_empty()), "{lines:?}");
-    assert_eq!(notices_in(&lines[3]).len(), 1, "{}", lines[3]);
-    assert!(notices_in(&lines[3])[0].contains(&format!("Your Self run {first} ended")), "{}", lines[3]);
-    assert_eq!(notices_in(&lines[4]).len(), 1, "{}", lines[4]);
-    assert!(notices_in(&lines[4])[0].contains("Your Self run self-later ended"), "{}", lines[4]);
+fn all_notices(lines: &[String]) -> Vec<&str> {
+    lines.iter().flat_map(|line| notices_in(line)).collect()
 }
 
 fn her_run_holds_the_slot(rig: &Rig) {
@@ -4185,183 +4111,216 @@ fn her_run_holds_the_slot(rig: &Rig) {
     rig.launcher.revive(RunTurn::SelfRun);
 }
 
-/// She starts while her run holds the slot, so the start is answered Busy. From the second echo, one act per echo, each with a message so
-/// a line carries what its poll noticed; then one more quiet message. Answers the lines, every read of the watch, and those made
-/// by the echo of the last act's line.
-fn a_start_answered_busy_then(acts: Vec<Elsewhere>) -> (Rig, Vec<String>, Rc<Cell<u32>>, Rc<Cell<u32>>) {
-    let rig = Rig::new(vec![operator_says(1, "please start")], &[starting_a_run(), says(&[]), says(&[]), says(&[]), says(&[]), says(&[]), says(&[])]);
+/// One session on `rig`, whose replies start with the first line's. From the second echo, one act per echo, each past the next slot read
+/// and with a message, so a line carries what that read found; then two more quiet messages. Answers the lines and the run it reported.
+fn a_session_then(rig: &Rig, acts: Vec<Elsewhere>) -> (Vec<String>, Option<PipelineRef>) {
+    rig.model.replies.borrow_mut().extend(std::iter::repeat_n(says(&[]), acts.len() + 4));
     rig.clock.step.set(1);
     rig.model.linger.set(true);
-    her_run_holds_the_slot(&rig);
     rig.open_the_run();
-    let doing: Rc<RefCell<VecDeque<Elsewhere>>> = Rc::default();
-    let (reads, reads_at_last_act): (Rc<Cell<u32>>, Rc<Cell<u32>>) = Default::default();
-    let (now, linger, deliveries, echoes) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0u64));
-    let (doing_then, reads_then, reads_at_last_act_then) = (doing.clone(), reads.clone(), reads_at_last_act.clone());
+    let timeline = Timeline::over(&rig.mind);
+    let (now, linger, deliveries, echoes) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(1u64));
+    let doing_then = timeline.doing.clone();
     let acts = RefCell::new(VecDeque::from(acts));
     let quiet = Cell::new(0);
     *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
         echoes.set(echoes.get() + 1);
-        now.set(now.get() + 6_000);
-        // Her start has answered by the second echo.
-        if echoes.get() == 1 {
-            deliveries.borrow_mut().push(operator_says(2, "and then"));
+        now.set(now.get() + PAST_THE_SLOT_READ_MS);
+        // The first reply has been answered by the second echo.
+        if echoes.get() == 2 {
+            deliveries.borrow_mut().push(operator_says(echoes.get(), "and then"));
             return;
         }
         if let Some(act) = acts.borrow_mut().pop_front() {
             doing_then.borrow_mut().push_back(act);
-            deliveries.borrow_mut().push(operator_says(echoes.get() + 1, "and more"));
+            deliveries.borrow_mut().push(operator_says(echoes.get(), "and more"));
             return;
         }
         quiet.set(quiet.get() + 1);
-        if quiet.get() == 1 {
-            reads_at_last_act_then.set(reads_then.get());
-            deliveries.borrow_mut().push(operator_says(echoes.get() + 1, "still here"));
+        if quiet.get() <= 2 {
+            deliveries.borrow_mut().push(operator_says(echoes.get(), "still here"));
         } else {
             linger.set(false);
         }
     }));
-    let watched = Watched { mind: &rig.mind, doing, down: Rc::default(), reads: reads.clone() };
-    let Outcome::Served { failure, self_run, .. } = rig.start_over(&watched, &config()) else { panic!("served") };
+    let Outcome::Served { failure, self_run, .. } = rig.start_over(&timeline, &config()) else { panic!("served") };
     assert_eq!(failure, None);
-    assert_eq!(self_run.as_ref().map(label_of), Some("self-holder"), "the start was answered Busy");
-    drop(watched);
-    let lines = told(&rig);
-    (rig, lines, reads, reads_at_last_act)
+    (told(rig), self_run)
 }
 
-fn all_notices(lines: &[String]) -> Vec<&str> {
-    lines.iter().flat_map(|line| notices_in(line)).collect()
+/// Exactly one notice in the whole session, on this line, of this run.
+fn assert_one_notice_on(lines: &[String], line: usize, run: &str) {
+    for (index, told) in lines.iter().enumerate() {
+        assert_eq!(notices_in(told).len(), usize::from(index == line), "line {index} of {lines:?}");
+    }
+    assert!(notices_in(&lines[line])[0].contains(&format!("Your Self run {run} ended")), "{}", lines[line]);
 }
 
-/// The live holder hears her brief from its inbox and answers it, and no Run ever claims it: she hears that run end, once, and the watch
-/// then reads nothing more.
+/// A run she did not start and that was live when the session began: the first line calls it open, and she hears it end.
 #[test]
-fn the_live_run_a_start_found_hears_her_brief_and_she_hears_it_end_and_the_watch_stops() {
+fn a_run_live_at_the_session_start_makes_one_notice_when_it_ends() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[])]);
+    her_run_holds_the_slot(&rig);
+    let (lines, _) = a_session_then(&rig, vec![Elsewhere::CloseTheSelfRuns]);
+    assert!(lines[0].contains("self-holder SelfRun: open"), "{}", lines[0]);
+    assert_one_notice_on(&lines, 2, "self-holder");
+}
+
+/// A run the heartbeat launches during her session is hers too.
+#[test]
+fn a_run_the_heartbeat_launched_makes_one_notice_when_it_ends() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[])]);
+    let (lines, _) = a_session_then(&rig, vec![Elsewhere::TheHeartbeatLaunches("self-beat"), Elsewhere::CloseTheSelfRuns]);
+    assert_one_notice_on(&lines, 3, "self-beat");
+}
+
+/// The slot holds one run at a time: the run after it makes its own one notice, and neither comes again.
+#[test]
+fn each_run_that_leaves_the_slot_makes_its_own_one_notice() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[])]);
+    her_run_holds_the_slot(&rig);
+    let (lines, _) = a_session_then(&rig, vec![Elsewhere::CloseTheSelfRuns, Elsewhere::TheHeartbeatLaunches("self-beat"), Elsewhere::CloseTheSelfRuns]);
+    assert_eq!(all_notices(&lines).len(), 2, "{lines:?}");
+    assert!(notices_in(&lines[2])[0].contains("self-holder") && notices_in(&lines[4])[0].contains("self-beat"), "{lines:?}");
+}
+
+/// A run that never left the slot has nothing to tell, however long she talks.
+#[test]
+fn a_run_that_never_leaves_the_slot_makes_no_notice() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[])]);
+    her_run_holds_the_slot(&rig);
+    let (lines, _) = a_session_then(&rig, vec![]);
+    assert!(lines.len() > 2 && all_notices(&lines).is_empty(), "{lines:?}");
+}
+
+/// She starts while her run holds the slot, so the start is answered Busy. The holder hears her brief from `inbox::derive`, answers it with
+/// no Run claiming it and ends: she hears that run end, once.
+#[test]
+fn a_brief_told_to_the_live_holder_is_heard_and_she_hears_the_holder_end_once() {
+    let rig = Rig::new(vec![operator_says(1, "please start")], &[starting_a_run()]);
+    her_run_holds_the_slot(&rig);
     let heard: Rc<Cell<usize>> = Rc::default();
-    let (_rig, lines, reads, reads_at_last_act) = a_start_answered_busy_then(vec![Elsewhere::TheHolderAnswersHerBriefs(heard.clone())]);
+    let (lines, self_run) = a_session_then(&rig, vec![Elsewhere::TheHolderAnswersHerBriefs(heard.clone())]);
+    assert_eq!(self_run.as_ref().map(label_of), Some("self-holder"), "the start was answered Busy");
     assert_eq!(heard.get(), 1, "inbox::derive told the holder her brief");
-    let notices = all_notices(&lines);
-    assert_eq!(notices.len(), 1, "{lines:?}");
-    assert!(notices[0].contains("Your Self run self-holder ended"), "{notices:?}");
-    assert!(reads_at_last_act.get() > 0, "the watch did read");
-    assert_eq!(reads.get(), reads_at_last_act.get(), "brief resolved and run ended: nothing left to read");
+    assert_one_notice_on(&lines, 2, "self-holder");
 }
 
-/// The holder ends leaving her brief open, and a later run takes it: she hears both, each as what it is.
+/// A DM is its own process, so a run live at the public line is live across the rotation: the new process finds it and hears it end.
 #[test]
-fn a_holder_that_ends_with_her_brief_open_and_the_run_that_takes_it_each_make_one_notice() {
-    let (_rig, lines, ..) = a_start_answered_busy_then(vec![Elsewhere::CloseTheSelfRuns, Elsewhere::TakeHerBrief("self-later")]);
-    let notices = all_notices(&lines);
-    assert_eq!(notices.len(), 2, "{lines:?}");
-    assert!(notices[0].contains("self-holder") && notices[1].contains("self-later"), "{notices:?}");
-}
-
-/// A run that ends leaving her brief open is not the brief's last word: the next run to take it makes its own notice.
-#[test]
-fn every_run_that_takes_her_brief_makes_a_notice_not_only_the_first() {
-    let (_rig, lines, ..) = a_start_answered_busy_then(vec![Elsewhere::CloseTheSelfRuns, Elsewhere::TakeHerBrief("self-a"), Elsewhere::TakeHerBrief("self-b")]);
-    let notices = all_notices(&lines);
-    assert_eq!(notices.len(), 3, "{lines:?}");
-    assert!(notices[0].contains("self-holder") && notices[1].contains("self-a") && notices[2].contains("self-b"), "{notices:?}");
-}
-
-/// A failed read of a run that holds no claim of hers keeps it watched: nothing else would ever lead back to it.
-#[test]
-fn a_holder_that_ends_while_the_mind_does_not_answer_is_noticed_when_it_does() {
-    let (_rig, lines, ..) = a_start_answered_busy_then(vec![Elsewhere::TheMindAnswers(false), Elsewhere::CloseTheSelfRuns, Elsewhere::TheMindAnswers(true)]);
-    let notices = all_notices(&lines);
-    assert_eq!(notices.len(), 1, "{lines:?}");
-    assert!(notices[0].contains("self-holder"), "{notices:?}");
-}
-
-/// A failed read of a brief keeps it watched, so a run that takes it in the outage is still found.
-#[test]
-fn a_run_that_takes_her_brief_while_the_mind_does_not_answer_is_noticed_when_it_does() {
-    let (_rig, lines, ..) = a_start_answered_busy_then(vec![Elsewhere::CloseTheSelfRuns, Elsewhere::TheMindAnswers(false), Elsewhere::TakeHerBrief("self-later"), Elsewhere::TheMindAnswers(true)]);
-    let notices = all_notices(&lines);
-    assert_eq!(notices.len(), 2, "{lines:?}");
-    assert!(notices[0].contains("self-holder") && notices[1].contains("self-later"), "{notices:?}");
-}
-
-/// A run that ends leaving her brief open does not end the watch of it.
-#[test]
-fn a_brief_still_open_keeps_its_watch() {
-    let (_rig, _lines, reads, reads_at_last_act) = a_start_answered_busy_then(vec![Elsewhere::CloseTheSelfRuns]);
-    assert!(reads.get() > reads_at_last_act.get(), "the holder ended and her brief stands: a later taker must still be seen");
-}
-
-/// A run that took two briefs of hers ends once.
-#[test]
-fn a_run_that_took_two_briefs_is_noticed_once() {
-    let rig = Rig::new(vec![operator_says(1, "please start")], &[starting_a_run(), starting_a_run(), says(&[]), says(&[])]);
-    rig.clock.step.set(1);
+fn a_run_live_across_a_rotation_makes_one_notice_in_the_process_it_ends_under() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &std::iter::repeat_n(says(&[]), 6).collect::<Vec<_>>());
+    // The yield to the DM falls on a poll with no line to bring it, so time passes by itself.
+    rig.clock.step.set(1000);
     rig.model.linger.set(true);
     her_run_holds_the_slot(&rig);
     rig.open_the_run();
-    let (now, linger, deliveries, echoes) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0));
-    let closes = Rc::new(Cell::new(false));
-    let closes_then = closes.clone();
+    let timeline = Timeline::over(&rig.mind);
+    let (now, linger, deliveries, echoes, doing_then) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0), timeline.doing.clone());
     *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
         echoes.set(echoes.get() + 1);
+        now.set(now.get() + PAST_THE_SLOT_READ_MS);
         match echoes.get() {
-            1 => deliveries.borrow_mut().push(operator_says(2, "again")),
-            2 => deliveries.borrow_mut().push(operator_says(3, "third")),
-            3 => closes_then.set(true),
+            1 => deliveries.borrow_mut().push(direct(2, "!dm:chat", "@op:chat", "a dm")),
+            2 => {
+                doing_then.borrow_mut().push_back(Elsewhere::CloseTheSelfRuns);
+                deliveries.borrow_mut().push(direct(3, "!dm:chat", "@op:chat", "dm again"));
+            }
+            3 => deliveries.borrow_mut().push(direct(4, "!dm:chat", "@op:chat", "and on")),
             _ => linger.set(false),
         }
-        now.set(now.get() + 6_000);
     }));
-    struct TakesBoth<'a>(Watched<'a>, Rc<Cell<bool>>);
-    impl MindPort for TakesBoth<'_> {
-        fn instance(&self) -> &Slug {
-            self.0.instance()
+    assert_eq!(failure_of(rig.start_over(&timeline, &config())), None);
+    let lines = told(&rig);
+    assert!(lines[1].contains("Your latest runs"), "the DM's process opens whole: {lines:?}");
+    assert_one_notice_on(&lines, 2, "self-holder");
+}
+
+/// A failed read of the slot leaves the last seen holder: the notice comes when the mind answers, and a message told in the outage goes through.
+#[test]
+fn a_holder_that_ends_while_the_mind_does_not_answer_is_noticed_when_it_does() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[])]);
+    her_run_holds_the_slot(&rig);
+    let (lines, _) = a_session_then(&rig, vec![Elsewhere::TheMindAnswers(false), Elsewhere::CloseTheSelfRuns, Elsewhere::TheMindAnswers(true)]);
+    assert!(lines[3].contains(r#"text="and more""#), "told in the outage: {lines:?}");
+    assert_one_notice_on(&lines, 4, "self-holder");
+}
+
+/// The slot answers and a closing does not: the run stays last seen, and its closing is read again.
+#[test]
+fn a_closing_that_cannot_be_read_is_read_again_and_noticed_once() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[])]);
+    her_run_holds_the_slot(&rig);
+    let (lines, _) = a_session_then(&rig, vec![Elsewhere::ClosingsAnswer(false), Elsewhere::CloseTheSelfRuns, Elsewhere::ClosingsAnswer(true)]);
+    assert_one_notice_on(&lines, 4, "self-holder");
+}
+
+/// However often chat is polled, the slot is read once at the start and then once in `SLOT_READ_EVERY_S`.
+#[test]
+fn the_slot_is_read_once_an_interval_not_once_a_poll() {
+    let polls = SLOT_READ_EVERY_S / u64::try_from(PERSONA_POLL_S).unwrap();
+    let rig = Rig::new(vec![operator_says(1, "hello")], &std::iter::repeat_n(says(&[]), usize::try_from(polls).unwrap() + 3).collect::<Vec<_>>());
+    rig.clock.step.set(0);
+    rig.model.linger.set(true);
+    rig.open_the_run();
+    let timeline = Timeline::over(&rig.mind);
+    let (now, linger, deliveries, echoes) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0u64));
+    let reads_then = timeline.reads.clone();
+    let reads_seen: Rc<RefCell<Vec<u32>>> = Rc::default();
+    let seen_then = reads_seen.clone();
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        echoes.set(echoes.get() + 1);
+        seen_then.borrow_mut().push(reads_then.get());
+        if echoes.get() <= polls + 1 {
+            now.set(now.get() + PERSONA_POLL_S * 1000);
+            deliveries.borrow_mut().push(operator_says(echoes.get() + 1, "and on"));
+        } else {
+            linger.set(false);
         }
-        fn query(&self, selection: &cultnet_rs::Selection) -> Result<huginn_mind::PipelineSelectionPage> {
-            if self.1.replace(false) {
-                let briefs: Vec<PipelineRef> = self.0.mind.ids(K::FollowUp).iter().map(|id| reference(K::FollowUp, id)).collect();
-                self.0.mind.committed(vec![close(run_ref("self-holder"), recorded())]);
-                self.0.mind.committed(vec![run("self-both", RunTurn::SelfRun, RunOperator::Mind, &briefs), close(run_ref("self-both"), recorded())]);
-            }
-            self.0.query(selection)
-        }
-        fn query_near(&self, selection: &cultnet_rs::Selection, text: &str, top_k: u32) -> Result<huginn_mind::PipelineSelectionPage> {
-            self.0.query_near(selection, text, top_k)
-        }
-        fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<AdmissionOutcome> {
-            self.0.admit(agent, session, documents)
-        }
-    }
-    let mind = TakesBoth(Watched { mind: &rig.mind, doing: Rc::default(), down: Rc::default(), reads: Rc::default() }, closes);
-    assert_eq!(failure_of(rig.start_over(&mind, &config())), None);
-    let notices: Vec<String> = told(&rig).iter().flat_map(|line| notices_in(line).into_iter().map(String::from).collect::<Vec<_>>()).collect();
-    assert_eq!(notices.iter().filter(|notice| notice.contains("self-both")).count(), 1, "{notices:?}");
-    assert_eq!(notices.iter().filter(|notice| notice.contains("self-holder")).count(), 1, "{notices:?}");
-    assert_eq!(notices.len(), 2, "{notices:?}");
+    }));
+    assert_eq!(failure_of(rig.start_over(&timeline, &config())), None);
+    // The reads of that selection a start makes are all behind the first echo.
+    let reads = reads_seen.borrow();
+    let at_start = reads[0];
+    assert_eq!(reads.iter().filter(|&&count| count == at_start).count(), usize::try_from(polls).unwrap(), "no read until the interval is up: {reads:?}");
+    assert_eq!(reads.last(), Some(&(at_start + 1)), "one read when it is up: {reads:?}");
 }
 
 /// A retell tells what ended beside the refused batch.
 #[test]
 fn a_notice_rides_with_a_retell() {
     let refused = reply(&[], json!([keeps("Did", "Noted", &["@nobody:chat"])]), json!([]), json!(null));
-    let rig = Rig::new(vec![operator_says(1, "please start")], &[starting_a_run(), refused, says(&[])]);
-    // The refusal's retell falls due on a poll, so time must pass; the run ends between the refused line's echo and that poll.
-    rig.clock.step.set(1000);
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[]), refused, says(&[])]);
+    rig.clock.step.set(1);
     rig.model.linger.set(true);
+    her_run_holds_the_slot(&rig);
     rig.open_the_run();
-    let doing: Rc<RefCell<VecDeque<Elsewhere>>> = Rc::default();
-    let (linger, deliveries, echoes) = (rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0));
-    let doing_then = doing.clone();
+    let timeline = Timeline::over(&rig.mind);
+    let (now, linger, deliveries, echoes, doing_then) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0), timeline.doing.clone());
+    let spoken = Rc::new(Cell::new(false));
+    let spoken_then = spoken.clone();
     *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
         echoes.set(echoes.get() + 1);
         match echoes.get() {
             1 => deliveries.borrow_mut().push(operator_says(2, "second")),
-            2 => doing_then.borrow_mut().push_back(Elsewhere::CloseTheSelfRuns),
+            2 => spoken_then.set(true),
             _ => linger.set(false),
         }
     }));
-    let watched = Watched { mind: &rig.mind, doing, down: Rc::default(), reads: Rc::default() };
-    assert_eq!(failure_of(rig.start_over(&watched, &config())), None);
+    // The refused result, then one poll: the slot's read finds the run gone and the retell falls due, together.
+    let results = Cell::new(0);
+    let now_then = now.clone();
+    *rig.model.before_result.borrow_mut() = Some(Box::new(move || {
+        results.set(results.get() + 1);
+        if results.get() == 1 {
+            now_then.set(now_then.get() + PERSONA_POLL_S * 1000);
+        }
+        if spoken.replace(false) {
+            doing_then.borrow_mut().push_back(Elsewhere::CloseTheSelfRuns);
+            now_then.set(now_then.get() + PAST_THE_SLOT_READ_MS);
+        }
+    }));
+    assert_eq!(failure_of(rig.start_over(&timeline, &config())), None);
     let lines = told(&rig);
     assert_eq!(lines.len(), 3, "{lines:?}");
     assert!(lines[2].contains(ABOUT_FAULT) && lines[2].contains(r#"text="second""#), "the retell: {}", lines[2]);
@@ -4489,6 +4448,18 @@ fn the_line_bound_counts_the_earlier_lines_a_message_brings() {
     let lines = tell_a_burst((2..=7).map(tailed).collect(), 3);
     assert!(lines.iter().all(|line| line.len() <= LINE_MESSAGES_MAX_BYTES), "{:?}", lines.iter().map(String::len).collect::<Vec<_>>());
     assert_eq!(lines.iter().map(|line| messages_in(line)).collect::<Vec<_>>(), [2, 2, 2]);
+}
+
+/// At a start too: the first line's batch is measured with the room tails it brings, or several full tails would pass the bound together.
+#[test]
+fn the_line_bound_counts_the_earlier_lines_a_message_brings_at_a_start() {
+    let tailed = |seq: u64| {
+        let room = format!("room{seq}");
+        with_context(delivery(seq, &room, "@op:chat", "here"), vec![earlier("@aqua:chat", &format!("{seq} {}", "t".repeat(12_000)))])
+    };
+    let rig = Rig::new((1..=6).map(tailed).collect(), &[says(&[]), says(&[]), says(&[])]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(told(&rig).iter().map(|line| messages_in(line)).collect::<Vec<_>>(), [2, 2, 2]);
 }
 
 /// A small message past one too big for the line waits behind it: the line is a prefix, or the ack would pass the big one unread.
