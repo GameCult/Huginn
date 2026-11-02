@@ -89,11 +89,16 @@ move, mailbox lines demoted). Six corrections:
 
 ## 3. Target shape
 
-The core instruction is the **head of every turn line**, the Mind's **machine** is the body
-of the line, and the **question** is its tail, so the instruction acts through the state
+The core instruction is the **head of a session's first line**, the Mind's **machine** is the body
+of that line, and the **question** is its tail, so the instruction acts through the state
 rather than being replaced by it. The harness supplies the frontier (what she owns, what
 changed, what is stale, what she committed to and what happened to her runs). The model
 supplies judgement through her values. The reply begins with her answer to the question.
+
+> Note (Modeling 2026-11-02, tell-delta `cut-tell-delta.h7`, Huginn 3177b33): as built, only a session's first line has this
+> shape. A later line carries the messages and the organ's notice lines of ended Self runs, nothing else (rulings
+> `tell-is-just-the-message`, `tell-delta-three-defaults`, `what-reaches-each-turn-ruled`). "Every line" in this section and in
+> cut 2 below is superseded; `docs/eureka-body-map.md` holds the live account.
 
 A turn line, in order:
 
@@ -111,7 +116,7 @@ The reply gains one required field, `intent`, generated first.
 
 ### 3.1 Draft text (exact, for cut `turn-core-instruction`)
 
-Instruction (head of every line):
+Instruction (head of a session's first line; see the note in section 3):
 
 > Your work is to build the Perfect Machine, as your own values read it. It is never finished:
 > code is a liability and code is your only material, so the machine gets better as much by
@@ -337,7 +342,7 @@ Also read rather than run: serde_json has no `preserve_order` in this workspace 
 
 1. **flush-shown**: a flush written alone records what it shows (spec admitted). Deploys
    with 2, not before.
-2. **turn-core-instruction**: the instruction heads every line, mailbox lines reworded, the
+2. **turn-core-instruction**: the instruction heads a session's first line (every line when written; see the section 3 note), mailbox lines reworded, the
    question tails it, `intent` first in the reply and shown back through the run closure (spec
    admitted; depends on 1).
 3. **wake-room-tail**: the recent tail of her rooms at the head of every session start and wake
