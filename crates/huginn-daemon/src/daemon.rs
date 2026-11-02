@@ -4,8 +4,9 @@
 
 use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
+use crate::sources::forge::HttpForge;
 use huginn_mind::eureka_pipeline::{PipelineRef, Slug};
-use huginn_mind::wire::{HuginnMindRequest, HuginnMindResponse, IndexStatus};
+use huginn_mind::wire::{ACTIVITY_REPOS_MAX, HuginnMindRequest, HuginnMindResponse, IndexStatus};
 use huginn_mind::{Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery, SourceHits, SourceQuery};
 
 /// Where the index attaches. Called after a batch commits, with the refs the
@@ -121,6 +122,8 @@ pub fn runtime_id(instance: &Slug) -> String {
 pub struct Daemon<S: MindStore, I: IndexSink<S>> {
     mind: Mind<S>,
     index: I,
+    /// The forge a persona's activity read goes to; none, and the read is refused as unavailable.
+    forge: Option<HttpForge>,
 }
 
 impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
@@ -128,11 +131,17 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
     /// store's exclusive lock for the daemon's lifetime, and ruling 15 has it
     /// refuse before any socket exists: the caller opens the mind first.
     pub fn new(mind: Mind<S>, index: I) -> Self {
-        Self { mind, index }
+        Self { mind, index, forge: None }
+    }
+
+    /// Lets the daemon read the forge's activity for the persona it serves. The read is its own and touches no document of the mind.
+    pub fn with_forge(mut self, forge: HttpForge) -> Self {
+        self.forge = Some(forge);
+        self
     }
 
     pub fn with_index<J: IndexSink<S>>(self, index: J) -> Daemon<S, J> {
-        Daemon { mind: self.mind, index }
+        Daemon { mind: self.mind, index, forge: self.forge }
     }
 
     pub fn mind(&self) -> &Mind<S> {
@@ -190,6 +199,20 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
             },
             HuginnMindRequest::Query { selection, semantic: Some(semantic), .. } => {
                 return self.begin_search(selection, semantic);
+            }
+            HuginnMindRequest::StewardedActivity { instance, repos, after } => {
+                let refused = |message: &str| MindRefusal::SelectionInvalid { field: "repos".into(), value: None, message: message.into() };
+                if repos.len() > ACTIVITY_REPOS_MAX {
+                    return Handled::Answered(HuginnMindResponse::Refused(refused("an activity read names at most 64 repos")));
+                }
+                if repos.iter().any(|repo| repo.validate_org_repo().is_err()) {
+                    return Handled::Answered(HuginnMindResponse::Refused(refused("a repo is not an Org/Repo")));
+                }
+                let unavailable = |detail: &str| HuginnMindResponse::Refused(MindRefusal::Unavailable { detail: detail.into() });
+                match &self.forge {
+                    None => unavailable("this daemon has no forge to read"),
+                    Some(forge) => forge.activity(&repos, &instance, after, now).map_or_else(|_| unavailable("the forge could not be read in time"), HuginnMindResponse::Activity),
+                }
             }
             HuginnMindRequest::SearchSources { query, .. } => {
                 if let Err(refusal) = query.check() {
@@ -1047,5 +1070,47 @@ pub(crate) mod tests {
             open_unindexed(root.path(), &slug(OTHER)).err(),
             Some(MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() })
         );
+    }
+
+
+    fn activity_request(repos: &[&str]) -> HuginnMindRequest {
+        HuginnMindRequest::StewardedActivity { instance: slug(INSTANCE), repos: repos.iter().map(|repo| OrgRepo::from(*repo)).collect(), after: Some(1) }
+    }
+
+    /// A daemon without a forge refuses the activity read as unavailable and serves everything else; one that is asked about too many
+    /// repos, or a name outside `Org/Repo`, refuses by field and echoes no value.
+    #[test]
+    fn no_forge_url_answers_unavailable() {
+        let (_root, mut daemon) = seeded();
+        let answer = daemon.handle(activity_request(&["GameCult/Huginn"]), now()).answered();
+        assert!(matches!(answer, HuginnMindResponse::Refused(MindRefusal::Unavailable { .. })), "{answer:?}");
+        assert!(matches!(daemon.handle(HuginnMindRequest::Whoami, now()).answered(), HuginnMindResponse::Whoami(_)));
+
+        let many: Vec<String> = (0..=ACTIVITY_REPOS_MAX).map(|n| format!("GameCult/r{n}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        for (request, canary) in [(activity_request(&many), "r64"), (activity_request(&["not a repo CANARY"]), "CANARY")] {
+            let answer = daemon.handle(request, now()).answered();
+            let HuginnMindResponse::Refused(MindRefusal::SelectionInvalid { field, value, message }) = &answer else { panic!("{answer:?}") };
+            assert_eq!((field.as_str(), value), ("repos", &None));
+            assert!(!message.contains(canary), "{message}");
+        }
+    }
+
+    /// A forge that never answers refuses the read inside the bound, and the mind answers the next request at once: the one thread
+    /// the daemon serves on is not held.
+    #[test]
+    fn a_hung_forge_answers_unavailable_within_its_bound() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let _held = std::thread::spawn(move || listener.incoming().map(|stream| stream.unwrap()).collect::<Vec<_>>());
+        let (_root, daemon) = seeded();
+        let mut daemon = daemon.with_forge(crate::sources::forge::HttpForge::new(&base));
+        let started = std::time::Instant::now();
+        let answer = daemon.handle(activity_request(&["GameCult/Huginn"]), now()).answered();
+        assert!(matches!(answer, HuginnMindResponse::Refused(MindRefusal::Unavailable { .. })), "{answer:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        let started = std::time::Instant::now();
+        assert!(matches!(daemon.handle(HuginnMindRequest::Whoami, now()).answered(), HuginnMindResponse::Whoami(_)));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
     }
 }

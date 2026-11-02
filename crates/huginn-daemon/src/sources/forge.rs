@@ -1,9 +1,13 @@
 //! The forge's catalog over its own loopback API. JSON for the forge is spoken
 //! here and in `index/qdrant.rs`, and nowhere else.
 
-use std::time::Duration;
+use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, Utc};
+use huginn_mind::eureka_pipeline::{OrgRepo, Short, Slug};
+use huginn_mind::{OpenPr, PrAction, RepoActivity, RepoChange, RepoEvent};
 use serde_json::Value;
 
 use super::{Catalog, Forge, SourceRepo};
@@ -93,8 +97,148 @@ impl Forge for HttpForge {
     }
 }
 
+/// The whole of one activity read, from its first call to its last. A call is given what is left of it, so a forge that
+/// answers slowly, and not only one that never answers, cannot hold the daemon's one thread longer than this.
+const ACTIVITY_CALL_TIMEOUT: Duration = Duration::from_secs(2);
+const FIRST_FEED_PAGES: usize = 2;
+const LATER_FEED_PAGES: usize = 4;
+const PR_PAGES: usize = 2;
+const LISTING_PAGES: usize = 20;
+/// How far back a read with no cursor looks.
+const FIRST_WINDOW_MS: i64 = 72 * 3600 * 1000;
+
+impl HttpForge {
+    /// One GET inside the read's budget, anonymous. An error names no address: the forge's answer is the reader's to know about,
+    /// and nothing of it reaches a refusal.
+    fn within(&self, path: &str, deadline: Instant) -> Result<Value> {
+        let left = deadline.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()).context("the activity read ran out of time")?;
+        let mut response = self
+            .agent
+            .get(format!("{}{path}", self.base))
+            .config()
+            .timeout_global(Some(left))
+            .build()
+            .call()
+            .map_err(|_| anyhow::anyhow!("the forge did not answer"))?;
+        ensure!(response.status().as_u16() == 200, "the forge refused a read");
+        let body = response.body_mut().read_to_string().map_err(|_| anyhow::anyhow!("the forge's answer was cut off"))?;
+        serde_json::from_str(&body).map_err(|_| anyhow::anyhow!("the forge's answer is not JSON"))
+    }
+
+    /// What others did in `repos` on the forge, and on a read with no cursor what is open and what the forge cannot show. One read, one
+    /// budget; the first call that fails fails it. Only ids, instants, logins, repo names, numbers and counts leave: a title, a comment
+    /// and a commit message are never read.
+    pub fn activity(&self, repos: &[OrgRepo], instance: &Slug, after: Option<u64>, now: DateTime<Utc>) -> Result<RepoActivity> {
+        let deadline = Instant::now() + ACTIVITY_CALL_TIMEOUT;
+        let (pages, window_start) = match after {
+            Some(_) => (LATER_FEED_PAGES, i64::MIN),
+            None => (FIRST_FEED_PAGES, now.timestamp_millis() - FIRST_WINDOW_MS),
+        };
+        let (mut head, mut events, mut reached) = (0_u64, Vec::new(), false);
+        for page in 1..=pages {
+            let feed = self.within(&format!("/api/v1/orgs/{ORG}/activities/feeds?limit={PAGE}&page={page}"), deadline)?;
+            let entries = feed.as_array().context("the forge's feed is not a list")?;
+            for entry in entries {
+                let Some(id) = entry["id"].as_u64() else { continue };
+                if after.is_some_and(|after| id <= after) || entry["created"].as_str().and_then(instant_ms).is_some_and(|at| at < window_start) {
+                    reached = true;
+                    break;
+                }
+                head = head.max(id);
+                events.extend(event_of(entry, id, repos, instance));
+            }
+            reached |= entries.len() < PAGE;
+            if reached {
+                break;
+            }
+        }
+        // The cursor never moves backwards: a read that saw nothing new keeps the one it was given.
+        head = head.max(after.unwrap_or(0));
+        let (mut open_prs, mut unseen) = (Vec::new(), Vec::new());
+        if after.is_none() {
+            for page in 1..=PR_PAGES {
+                let found = self.within(&format!("/api/v1/repos/issues/search?type=pulls&state=open&owner={ORG}&limit={PAGE}&page={page}"), deadline)?;
+                let found = found.as_array().context("the forge's search is not a list")?;
+                open_prs.extend(found.iter().filter_map(|pr| open_pr_of(pr, repos, instance)));
+                if found.len() < PAGE {
+                    break;
+                }
+            }
+            let mut listed = BTreeSet::new();
+            for page in 1..=LISTING_PAGES {
+                let found = self.within(&format!("/api/v1/orgs/{ORG}/repos?limit={PAGE}&page={page}"), deadline)?;
+                let found = found.as_array().context("the forge's listing is not a list")?;
+                listed.extend(found.iter().filter_map(|repo| repo["full_name"].as_str().map(str::to_ascii_lowercase)));
+                if found.len() < PAGE {
+                    break;
+                }
+            }
+            unseen = repos.iter().filter(|repo| !listed.contains(&repo.identity())).cloned().collect();
+        }
+        Ok(RepoActivity { head, events, more: after.is_some() && !reached, open_prs, unseen })
+    }
+}
+
+fn instant_ms(text: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(text).ok().map(|at| at.timestamp_millis())
+}
+
+fn is_her(login: &str, instance: &Slug) -> bool {
+    login.eq_ignore_ascii_case(&instance.0)
+}
+
+/// The PR numbers: element 0 of a PR op's content, which the forge writes as a two-element list whose second element is the
+/// title or comment and is never read.
+fn pr_number(content: &str) -> Option<u32> {
+    let parsed: Value = serde_json::from_str(content).ok()?;
+    parsed.as_array()?.first()?.as_str()?.parse().ok()
+}
+
+/// One feed entry as an event, or nothing: not hers to see, not a change worth a line, or not parseable.
+fn event_of(entry: &Value, id: u64, repos: &[OrgRepo], instance: &Slug) -> Option<RepoEvent> {
+    let actor = entry["act_user"]["login"].as_str().filter(|actor| !is_her(actor, instance) && actor.len() <= 200)?;
+    let repo = OrgRepo(entry["repo"]["full_name"].as_str()?.to_owned());
+    if !repos.contains(&repo) {
+        return None;
+    }
+    let content = entry["content"].as_str().unwrap_or_default();
+    let action = match entry["op_type"].as_str()? {
+        "commit_repo" => {
+            let on_default = entry["ref_name"].as_str()? == format!("refs/heads/{}", entry["repo"]["default_branch"].as_str()?);
+            let commits = serde_json::from_str::<Value>(content).ok().and_then(|parsed| parsed["Len"].as_u64()).and_then(|len| u32::try_from(len).ok()).unwrap_or(1);
+            return on_default.then(|| RepoEvent { id, at: at_of(entry), repo, actor: Short(actor.to_owned()), change: RepoChange::Pushed { commits } });
+        }
+        "create_pull_request" => PrAction::Opened,
+        "merge_pull_request" => PrAction::Merged,
+        "close_pull_request" => PrAction::Closed,
+        "reopen_pull_request" => PrAction::Reopened,
+        "comment_pull" => PrAction::Commented,
+        "approve_pull_request" => PrAction::Approved,
+        "reject_pull_request" => PrAction::Rejected,
+        "auto_merge_pull_request" => PrAction::AutoMerge,
+        _ => return None,
+    };
+    Some(RepoEvent { id, at: at_of(entry), repo, actor: Short(actor.to_owned()), change: RepoChange::Pr { number: pr_number(content)?, action } })
+}
+
+fn at_of(entry: &Value) -> u64 {
+    entry["created"].as_str().and_then(instant_ms).and_then(|at| u64::try_from(at).ok()).unwrap_or(0)
+}
+
+/// An open PR in one of her repos, or one she opened anywhere.
+fn open_pr_of(pr: &Value, repos: &[OrgRepo], instance: &Slug) -> Option<OpenPr> {
+    let repo = OrgRepo(pr["repository"]["full_name"].as_str()?.to_owned());
+    let author = pr["user"]["login"].as_str().filter(|author| author.len() <= 200)?;
+    if !repos.contains(&repo) && !is_her(author, instance) {
+        return None;
+    }
+    let updated_at = pr["updated_at"].as_str().and_then(instant_ms).and_then(|at| u64::try_from(at).ok()).unwrap_or(0);
+    Some(OpenPr { repo, number: u32::try_from(pr["number"].as_u64()?).ok()?, author: Short(author.to_owned()), updated_at })
+}
+
 #[cfg(test)]
 mod tests {
+    use huginn_mind::{PrAction, RepoChange};
     use serde_json::json;
 
     use super::*;
@@ -174,5 +318,171 @@ mod tests {
 
         let unstated = serve(vec![page_of(0..3)], None);
         assert!(HttpForge::new(&unstated).catalog().unwrap().shortfall.unwrap().contains("X-Total-Count"));
+    }
+
+    /// Answers each request by its path from `routes`; a path it has no answer for is held open and never answered, as a hung forge
+    /// does. Every path asked is recorded in order.
+    fn forge_of(routes: impl Fn(&str) -> Option<String> + Send + 'static) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&asked);
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buffer = [0_u8; 4096];
+                let read = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                let path = request.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                record.lock().unwrap().push(path.clone());
+                match routes(&path) {
+                    Some(body) => {
+                        write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    }
+                    None => held.push(stream),
+                }
+            }
+        });
+        (base, asked)
+    }
+
+    const FEED_SAMPLE: &str = include_str!("../../tests/fixtures/feed.json");
+
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc)
+    }
+
+    fn repos(names: &[&str]) -> Vec<OrgRepo> {
+        names.iter().map(|name| OrgRepo::from(*name)).collect()
+    }
+
+    fn is_feed(path: &str) -> bool {
+        path.contains("/activities/feeds")
+    }
+
+    /// From a sample of the real feed (the forge's own shape, with its commit messages and PR text replaced by canaries): her own login,
+    /// repos outside her set, pushes off the default branch, and every other op are dropped; repos and logins compare without case;
+    /// a push's commits are its `Len` and a PR event's number is element 0; no byte of the canary text leaves the read.
+    #[test]
+    fn activity_keeps_others_default_branch_pushes_and_pr_events() {
+        let (base, _) = forge_of(|path| is_feed(path).then(|| FEED_SAMPLE.to_owned()));
+        let wanted = repos(&["GameCult/Ratatoskr", "gamecult/aquasynth", "GameCult/Huginn"]);
+        let read = HttpForge::new(&base).activity(&wanted, &Slug("EUREKA".into()), Some(1), at("2026-11-02T23:00:00Z")).unwrap();
+        let seen: Vec<(u64, String, String, RepoChange)> = read.events.iter().map(|event| (event.id, event.repo.0.clone(), event.actor.0.clone(), event.change)).collect();
+        let pr = |number, action| RepoChange::Pr { number, action };
+        assert_eq!(
+            seen,
+            [
+                (18690, "GameCult/Ratatoskr".into(), "Nibu".into(), RepoChange::Pushed { commits: 9 }),
+                (18453, "GameCult/Ratatoskr".into(), "void".into(), pr(7, PrAction::Closed)),
+                (18443, "GameCult/Ratatoskr".into(), "void".into(), pr(7, PrAction::Commented)),
+                (18373, "GameCult/Ratatoskr".into(), "nibu".into(), pr(8, PrAction::Opened)),
+                (18293, "GameCult/Ratatoskr".into(), "void".into(), pr(1, PrAction::Merged)),
+            ]
+        );
+        assert_eq!(read.head, 18690);
+        assert_eq!(read.events[0].at, at("2026-11-02T18:40:00Z").timestamp_millis() as u64);
+        assert!(read.open_prs.is_empty() && read.unseen.is_empty() && !read.more, "a cursor asks for neither list");
+        let wire = serde_json::to_string(&read).unwrap();
+        assert!(!wire.contains("CANARY") && !wire.contains("obey") && !wire.contains("Message"), "no forge text leaves the read: {wire}");
+    }
+
+    fn pushes(newest: u64, count: u64, login: &str) -> String {
+        let entries: Vec<Value> = (0..count)
+            .map(|n| {
+                json!({ "id": newest - n * 10, "op_type": "commit_repo", "act_user": { "login": login }, "repo": { "full_name": "GameCult/Huginn", "default_branch": "main" },
+                "ref_name": "refs/heads/main", "content": "{\"Len\":1}", "created": "2026-11-02T20:00:00Z" })
+            })
+            .collect();
+        Value::Array(entries).to_string()
+    }
+
+    /// With a cursor the feed is read page by page down to it and no further; at the cap of four pages it says it stopped, and `head`
+    /// is the newest id seen even when every event was filtered away.
+    #[test]
+    fn activity_after_a_cursor_pages_back_to_it_and_says_when_it_stopped() {
+        let feed = |login: &'static str| {
+            move |path: &str| {
+                let page: u64 = path.split("page=").nth(1)?.parse().ok()?;
+                Some(pushes(2500 - (page - 1) * 500, 50, login))
+            }
+        };
+        let wanted = repos(&["GameCult/Huginn"]);
+        let now = at("2026-11-02T23:00:00Z");
+        let me = Slug("eureka".into());
+
+        let (base, asked) = forge_of(feed("nibu"));
+        let far = HttpForge::new(&base).activity(&wanted, &me, Some(5), now).unwrap();
+        assert!(far.more, "stopped at the cap with the cursor not reached");
+        assert_eq!((far.events.len(), far.head), (200, 2500));
+        assert_eq!(asked.lock().unwrap().len(), 4, "four pages and no more");
+
+        let (base, asked) = forge_of(feed("nibu"));
+        let near = HttpForge::new(&base).activity(&wanted, &me, Some(2300), now).unwrap();
+        assert!(!near.more);
+        assert_eq!((near.events.len(), near.head), (20, 2500), "ids above the cursor only");
+        assert_eq!(asked.lock().unwrap().len(), 1);
+
+        let (base, _) = forge_of(feed("eureka"));
+        let hers = HttpForge::new(&base).activity(&wanted, &me, Some(2300), now).unwrap();
+        assert_eq!((hers.events.len(), hers.head), (0, 2500), "her own pushes are filtered and the cursor still moves");
+
+        let (base, _) = forge_of(feed("nibu"));
+        let quiet = HttpForge::new(&base).activity(&wanted, &me, Some(9999), now).unwrap();
+        assert_eq!((quiet.events.len(), quiet.head), (0, 9999), "the cursor never moves back");
+    }
+
+    /// With no cursor the read also lists the open PRs in her repos and hers anywhere, and the repos the forge's listing does not hold;
+    /// it looks back 72 hours and no further.
+    #[test]
+    fn activity_first_read_lists_prs_and_unseen() {
+        let pr = |number: u32, login: &str, repo: &str| json!({ "number": number, "user": { "login": login }, "repository": { "full_name": repo }, "updated_at": "2026-11-02T17:09:43Z" });
+        let search = Value::Array(vec![pr(8, "nibu", "GameCult/Ratatoskr"), pr(1, "kiko", "GameCult/moonlight-ios"), pr(42, "Eureka", "GameCult/Eureka")]).to_string();
+        let listing = json!([{ "full_name": "GameCult/Ratatoskr" }, { "full_name": "GameCult/Huginn" }]).to_string();
+        let (base, asked) = forge_of(move |path| {
+            if is_feed(path) {
+                Some(FEED_SAMPLE.to_owned())
+            } else if path.contains("/issues/search") {
+                Some(search.clone())
+            } else if path.contains("/orgs/GameCult/repos") {
+                Some(listing.clone())
+            } else {
+                None
+            }
+        });
+        let wanted = repos(&["GameCult/Ratatoskr", "GameCult/Huginn", "GameCult/Ghost"]);
+        let first = HttpForge::new(&base).activity(&wanted, &Slug("eureka".into()), None, at("2026-11-03T12:00:00Z")).unwrap();
+        let prs: Vec<(String, u32, String)> = first.open_prs.iter().map(|pr| (pr.repo.0.clone(), pr.number, pr.author.0.clone())).collect();
+        assert_eq!(prs, [("GameCult/Ratatoskr".to_string(), 8, "nibu".to_string()), ("GameCult/Eureka".to_string(), 42, "Eureka".to_string())]);
+        assert_eq!(first.unseen, repos(&["GameCult/Ghost"]));
+        let window = at("2026-10-31T12:00:00Z").timestamp_millis() as u64;
+        assert!(!first.events.is_empty() && first.events.iter().all(|event| event.at >= window), "inside 72 h: {:?}", first.events);
+        assert!(asked.lock().unwrap().iter().any(|path| path.contains("/issues/search")));
+
+        // A cursor asks for neither list.
+        let before = asked.lock().unwrap().len();
+        HttpForge::new(&base).activity(&wanted, &Slug("eureka".into()), Some(1), at("2026-11-03T12:00:00Z")).unwrap();
+        let after = asked.lock().unwrap().clone();
+        assert!(after[before..].iter().all(|path| is_feed(path)), "only the feed: {after:?}");
+    }
+
+    /// A forge that takes the connection and never answers fails the read inside its bound, and one that answers the feed and then
+    /// stalls fails it too: the bound is on the whole read.
+    #[test]
+    fn a_hung_forge_fails_the_read_within_its_bound() {
+        let (base, _) = forge_of(|_| None);
+        let started = Instant::now();
+        let read = HttpForge::new(&base).activity(&repos(&["GameCult/Huginn"]), &Slug("eureka".into()), None, at("2026-11-02T23:00:00Z"));
+        assert!(read.is_err());
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+
+        let (base, _) = forge_of(|path| is_feed(path).then(|| FEED_SAMPLE.to_owned()));
+        let started = Instant::now();
+        let read = HttpForge::new(&base).activity(&repos(&["GameCult/Huginn"]), &Slug("eureka".into()), None, at("2026-11-02T23:00:00Z"));
+        let error = read.expect_err("the search is never answered");
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        assert!(!format!("{error:#}").contains("127.0.0.1"), "an error names no address");
     }
 }

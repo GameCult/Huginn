@@ -9,7 +9,7 @@
 use anyhow::{Result, anyhow, bail};
 use cultnet_rs::{Incoming, Selection};
 use eureka_pipeline::{
-    Line, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn,
+    Line, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn,
     Slug,
 };
 use eureka_state::hold::{self, Hold};
@@ -17,7 +17,7 @@ use eureka_state::{ClientError, HuginnClient};
 use huginn_mind::{
     Faculty, HuginnMindRequest, HuginnMindResponse, PipelineAdmissionBatch,
     PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts, PipelineProvenance,
-    PipelineSelectionPage, PipelineStatusSummary, SemanticQuery,
+    PipelineSelectionPage, PipelineStatusSummary, RepoActivity, SemanticQuery,
 };
 
 /// The last `CONSECUTIVE` ended runs over an item, all empty, trip its breaker.
@@ -40,6 +40,11 @@ pub trait MindPort {
     /// `query` with a semantic ask, so one call path carries both. A port with no index refuses.
     fn query_near(&self, _selection: &Selection, _text: &str, _top_k: u32) -> Result<PipelineSelectionPage> {
         bail!("this mind port has no semantic index")
+    }
+    /// What others did in `repos` on the forge since the cursor `after`, from the daemon's own forge read (no document of the mind
+    /// is read). A port with no forge refuses; so does a daemon without one, and a forge that does not answer in time.
+    fn stewarded_activity(&self, _repos: &[OrgRepo], _after: Option<u64>) -> Result<RepoActivity> {
+        bail!("this mind port has no forge to read")
     }
     /// Admits `documents` as one batch, attributed to `agent` in `session`.
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome>;
@@ -88,6 +93,15 @@ impl MindPort for HuginnMind<'_> {
 
     fn query_near(&self, selection: &Selection, text: &str, top_k: u32) -> Result<PipelineSelectionPage> {
         self.ask(selection, Some(SemanticQuery { text: Line(text.to_string()), top_k }))
+    }
+
+    fn stewarded_activity(&self, repos: &[OrgRepo], after: Option<u64>) -> Result<RepoActivity> {
+        let request = HuginnMindRequest::StewardedActivity { instance: self.instance().clone(), repos: repos.to_vec(), after };
+        match (self.call)(request).map_err(|error| anyhow!("the mind could not be asked: {}", client_error_code(&error)))? {
+            HuginnMindResponse::Activity(activity) => Ok(activity),
+            HuginnMindResponse::Refused(_) => bail!("the mind refused the activity read"),
+            _ => bail!("the mind answered an activity read with something else"),
+        }
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {

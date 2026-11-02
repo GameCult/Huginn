@@ -116,12 +116,14 @@ pub struct Options {
     /// The CPU host: takes embedding only while no GPU host can.
     pub reserve_ollama_urls: Vec<String>,
     pub embedding_model: String,
+    /// The forge a persona's activity read goes to; absent, that read is refused.
+    pub forge_url: Option<String>,
 }
 
 /// Exactly `--state-root`, `--instance`, `--bind`, `--qdrant-url`,
 /// `--ollama-url` and `--embedding-model`, each required, each once, except
 /// `--ollama-url`, which repeats for each GPU host, and the optional
-/// `--reserve-ollama-url`, which repeats for each CPU host. The URLs are plain
+/// `--reserve-ollama-url`, which repeats for each CPU host, and the optional `--forge-url`, once. The URLs are plain
 /// `http://`: this build carries no TLS.
 pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     let mut args = args;
@@ -130,7 +132,7 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     while let Some(name) = args.next() {
         let name = name.strip_prefix("--").with_context(|| format!("expected --option, got {name:?}"))?;
         ensure!(
-            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model"),
+            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model" | "forge-url"),
             "unsupported Huginn option --{name}"
         );
         let value = args.next().with_context(|| format!("missing value for --{name}"))?;
@@ -165,6 +167,7 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
         },
         reserve_ollama_urls,
         embedding_model,
+        forge_url: values.contains_key("forge-url").then(|| url("forge-url")).transpose()?,
     })
 }
 
@@ -188,7 +191,12 @@ where
     let hub = bind(options.bind, &runtime_id(&options.instance))?;
     let startup_entries = mind.index_entries(None)?;
     let sink = WorkerSink::spawn(embedder, index, &options.instance, mind.genesis_receipt_id()?, startup_entries, backoff);
-    Ok((Daemon::new(mind, sink), hub, schema_registry()?))
+    let daemon = Daemon::new(mind, sink);
+    let daemon = match &options.forge_url {
+        Some(url) => daemon.with_forge(crate::sources::forge::HttpForge::new(url)),
+        None => daemon,
+    };
+    Ok((daemon, hub, schema_registry()?))
 }
 
 /// The bytes one reliable packet carries, and the packets one session may hold
@@ -1365,6 +1373,7 @@ mod tests {
             ollama_urls: vec!["http://127.0.0.1:1".into()],
             reserve_ollama_urls: Vec::new(),
             embedding_model: "a-model".into(),
+            forge_url: None,
         };
         let started = |options: &Options| {
             let (embedder, index) = crate::index::fakes::pair();
@@ -1402,6 +1411,7 @@ mod tests {
                 ollama_urls: vec!["http://10.77.0.4:11434".into()],
                 reserve_ollama_urls: Vec::new(),
                 embedding_model: "qwen3-embedding:0.6b".into(),
+                forge_url: None,
             }
         );
         // Each of the six is required: there is no index-less mode.
@@ -1434,5 +1444,10 @@ mod tests {
         assert_eq!(parsed.ollama_urls, ["http://10.77.0.4:11434", "http://10.77.0.2:11434"]);
         assert_eq!(parsed.reserve_ollama_urls, ["http://127.0.0.1:11434"]);
         assert!(parse_options(args(&[good.to_vec(), vec!["--reserve-ollama-url", "127.0.0.1:11434"]].concat())).is_err());
+        // The forge is optional, once, and plain http like the others.
+        let forged = [good.to_vec(), vec!["--forge-url", "http://127.0.0.1:3310"]].concat();
+        assert_eq!(parse_options(args(&forged)).unwrap().forge_url.as_deref(), Some("http://127.0.0.1:3310"));
+        assert!(parse_options(args(&[good.to_vec(), vec!["--forge-url", "https://127.0.0.1:3310"]].concat())).is_err());
+        assert!(parse_options(args(&[forged.clone(), vec!["--forge-url", "http://127.0.0.1:3311"]].concat())).is_err());
     }
 }
