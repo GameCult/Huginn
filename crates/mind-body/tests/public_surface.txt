@@ -106,8 +106,8 @@ mind_body::heartbeat: struct Organs< 'a >  pub-fields[seats: & 'a [Seat < 'a >],
 mind_body::heartbeat: struct PersonaId # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[slug: Slug, public_name: String, handle: String, matrix_id: String, huginn: SocketAddr]
 mind_body::heartbeat: struct PollTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[at: DateTime < Utc >, tempo_s: u32, instances: Vec < InstanceTrace >, launches: Vec < String >]
 mind_body::heartbeat: struct Seat< 'a >  pub-fields[who: PersonaId, mind: & 'a dyn MindPort, chat: & 'a dyn Chat]
-mind_body::launch: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum StopScope < 'a > { Mind (& 'a Slug) , Swarm , }
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Declined { Admission (MindRefusal) , Conflict , AlreadyAdmitted , StartFailed , GrantForOtherInstance , PersonaRunTakesNoClaims , }
+mind_body::launch: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum StopScope < 'a > { Mind (& 'a Slug) , Swarm , }
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum LaunchOutcome { Launched { run : PipelineRef , } , NotQueued { item : PipelineRef , } , Tripped { run : PipelineRef , question : PipelineRef , } , Busy { run : PipelineRef , } , Refused (Declined) , }
 mind_body::launch: const START_GRACE_S : i64
 mind_body::launch: fn open_and_launch (ports : & Ports , request : LaunchRequest) -> Result < LaunchOutcome >
@@ -170,15 +170,11 @@ mind_body::persona: impl Config: fn from_args_and_env (args : & [String] , looku
 mind_body::persona: impl Conversation
 mind_body::persona: impl FileTrace
 mind_body::persona: impl FileTrace: fn new (path : impl Into < PathBuf >) -> Self
-mind_body::persona: impl GoalBlock
-mind_body::persona: impl GoalEntry
 mind_body::persona: impl HuginnPersona
 mind_body::persona: impl HuginnPersona: fn new (client : HuginnClient) -> Self
 mind_body::persona: impl PersonaState for HuginnPersona
-mind_body::persona: impl Responsibilities
 mind_body::persona: impl Sender
 mind_body::persona: impl Shown
-mind_body::persona: impl Told
 mind_body::persona: impl Trace for FileTrace
 mind_body::persona: impl Trace for Noted < '_ >
 mind_body::persona: impl fmt :: Display for Failure

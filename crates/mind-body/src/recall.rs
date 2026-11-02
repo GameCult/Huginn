@@ -3,9 +3,9 @@
 //! Ruling `eureka-body:ruling:persona-memory-written-not-transcript`: what she
 //! must still know when the conversation is gone is written into her mind as
 //! typed memory, and a later turn reads it back from there. Open asks and open
-//! commitments are not recalled: `persona::render_responsibilities` selects them
-//! on every turn beside her stewardships, because they stay hers until a
-//! resolution closes them. This module owns the cued, ranked remainder
+//! commitments are not recalled: `persona::render_responsibilities` shows them
+//! on every turn beside her stewardships, because they stay in front of her
+//! until a resolution closes them. This module owns the cued, ranked remainder
 //! and nothing else. It reads only her own mind through `MindPort`; it reads no
 //! chat (the lines shown beside a message are conversation, never memory),
 //! keeps no cache between turns, and holds no index: the daemon's index answers
@@ -21,9 +21,7 @@
 //!   On a wake, which has no senders and no words, this is all that runs.
 //!
 //! Each lane has an item limit and a byte budget, so no one signal crowds out
-//! another; a lane that leaves something out says how many. Selection never reads
-//! what the session was told, so a told id cannot push a lane deeper: only
-//! `render` does, printing what the session lacks.
+//! another; a lane that leaves something out says how many.
 
 use std::collections::BTreeMap;
 
@@ -33,7 +31,7 @@ use cultnet_rs::Selection;
 use eureka_pipeline::{MemoryOrigin, MemorySort, PipelineDocument, PipelineKind};
 use huginn_mind::{PipelineDocumentView, PipelinePageItems};
 
-use crate::persona::{Told, quoted};
+use crate::persona::quoted;
 use crate::queue::{MindPort, any_of, in_force, of_kind};
 
 /// What each lane shows, and the bytes of rendered lines it may spend.
@@ -305,36 +303,28 @@ pub(crate) fn select(mind: &dyn MindPort, cue: &Cue) -> Result<Recalled> {
     Ok(Recalled { lanes, search })
 }
 
-/// The section of a session's first line: one heading per lane that shows or left out anything, one line each,
-/// and after a lane that left something out a line saying how many. On a later line, only entries `told` lacks, under
-/// their lanes' headings, and nothing at all when that is nothing, but for a search that could not be asked.
-pub(crate) fn render(recalled: &Recalled, told: &Told) -> String {
-    let first = told.is_empty();
-    let mut out = String::new();
+/// The section of a turn's input: one heading per lane that shows or left out anything, one line each,
+/// and after a lane that left something out a line saying how many.
+pub(crate) fn render(recalled: &Recalled) -> String {
+    let mut out = String::from("What you remember (from your own mind; `huginn view <id>` reads a record):\n");
     for shown in &recalled.lanes {
-        let new: Vec<&Entry> = shown.entries.iter().filter(|entry| told.lacks(&entry.id)).collect();
-        let left_out = if first { shown.left_out } else { 0 };
-        if new.is_empty() && left_out == 0 {
+        if shown.entries.is_empty() && shown.left_out == 0 {
             continue;
         }
         out.push_str(shown.lane.heading());
         out.push('\n');
-        new.iter().for_each(|entry| out.push_str(&entry.line));
-        if left_out > 0 {
-            out.push_str(&format!("({left_out} more not shown.)\n"));
+        shown.entries.iter().for_each(|entry| out.push_str(&entry.line));
+        if shown.left_out > 0 {
+            out.push_str(&format!("({} more not shown.)\n", shown.left_out));
         }
     }
-    if first && out.is_empty() {
+    if recalled.lanes.iter().all(|shown| shown.entries.is_empty() && shown.left_out == 0) {
         out.push_str("- nothing is remembered yet.\n");
     }
     if recalled.search == Search::Unavailable {
         out.push_str("(The search of your memory is unavailable this turn; only what concerns the senders and what weighs most are shown.)\n");
     }
-    match (first, out.is_empty()) {
-        (true, _) => format!("What you remember (from your own mind; `huginn view <id>` reads a record):\n{out}"),
-        (false, true) => out,
-        (false, false) => format!("More you remember:\n{out}"),
-    }
+    out
 }
 
 #[cfg(test)]
