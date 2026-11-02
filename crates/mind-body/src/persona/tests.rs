@@ -4471,6 +4471,14 @@ fn the_line_bound_counts_quoted_bytes() {
     assert_eq!(lines.iter().map(|line| messages_in(line)).collect::<Vec<_>>(), [1, 1, 1]);
 }
 
+/// What waits at a start is measured the same way: two messages of 24 rendered KB do not share a first line.
+#[test]
+fn the_line_bound_counts_quoted_bytes_at_a_start() {
+    let rig = Rig::new((1..=3).map(|seq| delivery(seq, "swarm", "@op:chat", &"\u{1}".repeat(4000))).collect(), &[says(&[]), says(&[]), says(&[])]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(told(&rig).iter().map(|line| messages_in(line)).collect::<Vec<_>>(), [1, 1, 1]);
+}
+
 /// A new room's tail prints with its message, so it counts against the same bound.
 #[test]
 fn the_line_bound_counts_the_earlier_lines_a_message_brings() {
