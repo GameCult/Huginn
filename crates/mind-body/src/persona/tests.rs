@@ -2937,8 +2937,9 @@ fn a_flush_written_alone_opens_with_the_core_instruction_and_one_beside_a_tell_d
     assert_eq!(failure_of(rig.go()), None);
     let flush = told(&rig).into_iter().find(|line| line.contains("This session ends soon")).expect("a flush line");
     assert!(flush.starts_with(&format!("{TURN_INSTRUCTION}\n\nThis session ends soon")), "{flush}");
-    let beside = Rig::new(vec![operator_says(1, "one")], &[says(&[("operator", "a")]), says(&[("operator", "b")]), says(&[])]);
+    let beside = Rig::new(vec![operator_says(1, "one")], &[says(&[("operator", "for one")]), says(&[("operator", "for two")]), says(&[("operator", "for three")])]);
     beside.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap() + 7);
+    on_echoes(&beside, vec![(6_000, Some(operator_says(2, "two")))]);
     on_writes(&beside, vec![(0, None), (6_000, Some(operator_says(3, "three")))]);
     assert_eq!(failure_of(beside.go()), None);
     let joined = told(&beside).into_iter().find(|line| line.contains("This session ends soon") && line.contains(r#"text="three""#)).expect("a flush beside a tell");
