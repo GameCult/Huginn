@@ -2877,20 +2877,23 @@ fn a_tell_reply_keeps_its_memories_when_the_turn_running_as_it_was_written_close
 #[test]
 fn a_flush_may_not_settle_an_item_opened_after_the_session_last_line() {
     let opening = || reply(&[("swarm", "ok")], json!([keeps("Committed", "I integrate the fork", &["@libby:chat"])]), json!([]), json!(null));
-    let learn = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "plan")], &[opening()]);
-    let _ = learn.go();
-    let id = memories(&learn).remove(0).0;
     // The first reply opens the commitment after the first and second lines were written; the flush is written after that reply is admitted.
-    let rig = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "plan")], &[opening(), says(&[("swarm", "two")]), settling(&[], json!([]), &id, "guessed")]);
-    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap() + 7);
-    on_echoes(&rig, vec![(6_000, Some(delivery(2, "swarm", "@libby:chat", "status"))), (2_000, None)]);
-    let _ = rig.go();
+    let session = |flush_reply: &dyn Fn(&str) -> String, id: &str| {
+        let rig = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "plan")], &[opening(), says(&[("swarm", "two")]), flush_reply(id)]);
+        rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap() + 7);
+        on_echoes(&rig, vec![(6_000, Some(delivery(2, "swarm", "@libby:chat", "status"))), (2_000, None)]);
+        let _ = rig.go();
+        rig
+    };
+    // The same session first, with a flush that settles nothing, to learn the commitment's id.
+    let learn = session(&|_| says(&[]), "");
+    let id = memories(&learn).remove(0).0;
+    let rig = session(&|id| settling(&[], json!([]), id, "guessed"), &id);
     assert_eq!(told(&rig).iter().filter(|line| line.contains("This session ends soon")).count(), 1, "{:?}", told(&rig));
     assert_eq!(memories(&rig).iter().map(|(found, _)| found.clone()).collect::<Vec<_>>(), [id.clone()], "the commitment the first reply opened");
     assert_eq!(outcome_of(&rig, &id), None, "the flush named an item no line of the session showed");
     assert_eq!(last_outcome(&rig), "failed: the reply is not a persona reply");
 }
-
 #[test]
 fn a_flush_written_beside_a_tell_leaves_the_tell_to_be_answered_and_acked() {
     let rig = Rig::new(vec![operator_says(1, "one")], &[says(&[("operator", "for one")]), says(&[("operator", "for two")]), says(&[("operator", "for three")])]);
