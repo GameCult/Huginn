@@ -3008,3 +3008,74 @@ fn the_turn_text_keeps_the_operators_rulings_and_none_of_the_mailbox_lines() {
         assert!(text.contains("Speak only if leaving would strand something someone is waiting on."), "{text}");
     }
 }
+
+/// A child the Timed script drives until stdin closes, then gone: what a real `claude` does at close.
+struct Closing(Timed, bool);
+
+impl Child for Closing {
+    fn write_line(&mut self, line: &str) {
+        self.0.write_line(line);
+    }
+
+    fn close_input(&mut self) {
+        self.1 = true;
+    }
+
+    fn next(&mut self, timeout: StdDuration) -> Read {
+        if self.1 { Read::Exited(Some(0)) } else { self.0.next(timeout) }
+    }
+
+    fn stop(&mut self, _how: Stop) -> bool {
+        true
+    }
+}
+
+/// A request of the session's, at `prefix` tokens: what the driver reads the ceiling from.
+fn request_at(id: &str, prefix: u64) -> Read {
+    Read::Line(json!({"type": "assistant", "parent_tool_use_id": null, "message": {"id": id, "role": "assistant", "usage": {"input_tokens": 0, "cache_read_input_tokens": prefix, "cache_creation_input_tokens": 0}}}).to_string())
+}
+
+/// The reply Nibu gave 33 times on 2026-11-02: decodable, with a say, and a memory `about` a bare name no line showed.
+fn reply_about_bare_name() -> serde_json::Value {
+    json!({"intent": "Post the head", "say": [{"room": "operator", "text": "the head is 0ec34ff"}], "remember": [{"sort": "Did", "text": "posted the head", "about": ["void"], "salience_permille": 500}], "settle": [], "start_self_run": null, "urgency_permille": null})
+}
+
+/// One process of that loop, as `journalctl -u mind-persona@nibu` shows it from 13:43:50Z: the batch's line is refused,
+/// its retell goes over the ceiling so the flush is asked before the retell's result comes, and that result and the flush's are refused too.
+fn over_the_ceiling(rig: &Rig, replies: [serde_json::Value; 3]) -> (Closing, Rc<RefCell<Vec<String>>>) {
+    let writes: Rc<RefCell<Vec<String>>> = Rc::default();
+    let [first, retold, flush] = replies;
+    let child = Timed {
+        writes: writes.clone(),
+        script: VecDeque::from([
+            (1, 6_000, echo_line()),
+            (1, 0, result_line(first)),
+            (2, 0, echo_line()),
+            (2, 0, request_at("m-over", CEILING_TOKENS_FOR_TESTS)),
+            (3, 0, result_line(retold)),
+            (3, 0, echo_line()),
+            (3, 0, result_line(flush)),
+        ]),
+        deliveries: rig.chat.deliveries.clone(),
+        arriving: vec![],
+        now: rig.clock.now.clone(),
+        asked: 0,
+    };
+    (Closing(child, false), writes)
+}
+
+const CEILING_TOKENS_FOR_TESTS: u64 = crate::self_run::CEILING_TOKENS;
+
+#[test]
+fn a_batch_refused_across_ceiling_restarts_ends_the_start_at_its_third_refusal() {
+    let rig = Rig::new(vec![operator_says(3, "three"), operator_says(4, "four")], &[]);
+    rig.clock.step.set(0);
+    let bad = || [reply_about_bare_name(), reply_about_bare_name(), reply_about_bare_name()];
+    let (children, writes): (Vec<_>, Vec<_>) = (0..6).map(|_| over_the_ceiling(&rig, bad())).unzip();
+    let (outcome, acked) = carry_children(&rig, children);
+    let processes = writes.iter().filter(|written| !written.borrow().is_empty()).count();
+    assert_eq!(processes, 2, "the first process refuses twice, the second's first refusal is the batch's third");
+    assert!(failure_of(outcome).is_some());
+    assert!(rig.chat.sent.borrow().is_empty() && acked.is_empty(), "nothing was said and nothing passes the ack, so the mouth still holds both messages");
+    assert_eq!(rig.chat.deliveries.borrow().len(), 2);
+}
