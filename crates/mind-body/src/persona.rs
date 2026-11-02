@@ -82,8 +82,8 @@ pub const AGENT: &str = "mind-persona";
 pub const PERSONA_POLL_S: i64 = 5;
 
 /// How often a live session reads who holds her Self run slot, slower than chat's poll. On Eureka's 14.7k-document mind that read
-/// cost 1.4 to 2 s of daemon CPU (2026-11-02): 28-41% of a core at the 5 s poll, 9-14% here. A run shorter than the interval can pass
-/// unseen; over the Minds' 157 Self runs so far, about 10 would at 15 s, 8 at 5 s and 35 at 60 s.
+/// cost 1.4 to 2 s of daemon CPU (2026-11-02): 28-41% of a core at the 5 s poll, 9-14% here. A run she did not start and shorter than the
+/// interval can pass unseen; over the Minds' 157 Self runs so far, about 10 would at 15 s, 8 at 5 s and 35 at 60 s.
 const SLOT_READ_EVERY_S: u64 = 15;
 
 /// The directory of her sandbox inside the unit's state directory.
@@ -1027,7 +1027,7 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     /// What refused results left to be told again.
     retell: Option<Retell>,
     /// Her Self runs last seen holding the slot, each until a read shows it gone and how it closed: whoever started it, her, the
-    /// heartbeat or an earlier process. A failed read leaves this as it stood.
+    /// heartbeat or an earlier process. Her own start joins it unread. A failed read leaves this as it stood.
     slot_seen: Vec<PipelineRef>,
     /// When the slot is next read; 0 reads it at the first chance, the session's first line.
     slot_read_due_ms: u64,
@@ -1082,7 +1082,7 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
     /// A run that was in her Self run slot and has left it becomes one notice. The slot is read at most once in
     /// `SLOT_READ_EVERY_S`, and a run that left has its closing read once. A read that fails keeps what was last seen for the next
     /// read: a mind that does not answer delays a notice and costs her neither the notice nor her chat, which needs no mind.
-    /// A run that opens and ends between two reads is seen by neither and makes no notice; the next first line still shows it.
+    /// A run she did not start that opens and ends between two reads is seen by neither and makes no notice; the next first line still shows it.
     fn note_ended_runs(&mut self) {
         let now = unix_ms(self.organs.clock.now());
         if now < self.slot_read_due_ms {
@@ -1215,8 +1215,12 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                     }
                     self.progress.acked = self.answered_through;
                 }
-                if started.is_some() {
-                    self.progress.self_run = started;
+                if let Some(run) = started {
+                    // The start's answer is a sight of the slot that costs no read, so her own run is heard however short it is.
+                    if !self.slot_seen.contains(&run) {
+                        self.slot_seen.push(run.clone());
+                    }
+                    self.progress.self_run = Some(run);
                 }
                 self.progress.last_intent = Some(intent);
                 self.progress.answered += 1;

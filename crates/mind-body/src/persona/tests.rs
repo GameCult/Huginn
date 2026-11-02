@@ -4156,6 +4156,44 @@ fn assert_one_notice_on(lines: &[String], line: usize, run: &str) {
     assert!(notices_in(&lines[line])[0].contains(&format!("Your Self run {run} ended")), "{}", lines[line]);
 }
 
+/// A run she starts that opens and ends between two reads of the slot, so no read ever holds it: the start's answer is enough, and she hears it.
+#[test]
+fn a_run_she_started_that_ended_between_two_slot_reads_makes_one_notice() {
+    let rig = Rig::new(vec![operator_says(1, "please start")], &[starting_a_run(), says(&[]), says(&[]), says(&[]), says(&[])]);
+    rig.clock.step.set(1);
+    rig.model.linger.set(true);
+    rig.open_the_run();
+    let timeline = Timeline::over(&rig.mind);
+    let (now, linger, deliveries, echoes, doing_then) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0), timeline.doing.clone());
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        echoes.set(echoes.get() + 1);
+        match echoes.get() {
+            // This poll's read comes before her reply opens the run.
+            1 => {
+                now.set(now.get() + PAST_THE_SLOT_READ_MS);
+                deliveries.borrow_mut().push(operator_says(2, "and then"));
+            }
+            // The run closes at the next read's own query, so that read finds it already gone.
+            2 => {
+                now.set(now.get() + PAST_THE_SLOT_READ_MS);
+                doing_then.borrow_mut().push_back(Elsewhere::CloseTheSelfRuns);
+                deliveries.borrow_mut().push(operator_says(3, "and more"));
+            }
+            3 => {
+                now.set(now.get() + PAST_THE_SLOT_READ_MS);
+                deliveries.borrow_mut().push(operator_says(4, "still here"));
+            }
+            _ => linger.set(false),
+        }
+    }));
+    let Outcome::Served { failure, self_run, .. } = rig.start_over(&timeline, &config()) else { panic!("served") };
+    assert_eq!(failure, None);
+    let label = label_of(&self_run.expect("the run she started")).to_string();
+    let lines = told(&rig);
+    assert!(lines.len() > 3, "{lines:?}");
+    assert_one_notice_on(&lines, 2, &label);
+}
+
 /// A run she did not start and that was live when the session began: the first line calls it open, and she hears it end.
 #[test]
 fn a_run_live_at_the_session_start_makes_one_notice_when_it_ends() {
