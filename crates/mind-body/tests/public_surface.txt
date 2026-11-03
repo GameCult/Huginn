@@ -42,7 +42,7 @@ mind_body::chat_rudp: struct RudpChat  pub-fields[]
 mind_body::cli: fn instance_and_endpoint (args : & [String] , env_endpoint : Option < String > , usage : & str) -> Result < (Slug , SocketAddr) >
 mind_body::cli: fn operator_name (sudo_user : Option < String > , user : Option < String >) -> String
 mind_body::cli: fn run (args : & [String] , root : & Path , set_by : & str , now : DateTime < Utc > , out : & mut impl Write , stop_units : & mut dyn FnMut (StopScope < '_ >) -> Result < () > ,) -> Result < () >
-mind_body::connector: fn render_plan (windows : & [PlanQuota] , now_ms : u64) -> String
+mind_body::connector: fn render_plan (windows : & [PlanQuota] , _now_ms : u64) -> String
 mind_body::control: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum HeldReason { BrakeAbsent , BrakeHeld , Undecodable , }
 mind_body::control: # [derive (Debug , PartialEq , Eq)] pub enum Effective { Held { reason : HeldReason } , Released (Grant) , }
 mind_body::control: # [derive (Debug , PartialEq , Eq)] pub enum SwarmEffective { Held (HeldReason) , Released , }
