@@ -2051,8 +2051,8 @@ fn notice_line(run: &str, outcome: &ResolutionOutcome, at_unix_ms: u64) -> Strin
 const REPO_READ_EVERY_S: u64 = 300;
 /// The most of a repo notice's text.
 const REPO_NOTICE_MAX_CHARS: usize = 300;
-/// What a cut notice's tail may take, so the cut still fits.
-const REPO_NOTICE_TAIL_RESERVE: usize = 45;
+/// What a cut notice's tail may take, so the cut still fits: " and 999 more", " and changes beyond what was read" and ".".
+const REPO_NOTICE_TAIL_RESERVE: usize = 47;
 
 /// What each actor did in each repo, as (repo, actor, words), repos and then actors in the order the read gave them.
 fn repo_entries(events: &[RepoEvent]) -> Vec<(String, String, String)> {
