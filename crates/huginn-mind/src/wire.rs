@@ -155,16 +155,16 @@ pub struct OpenPr {
 /// newest feed id the read saw in those repos, whether or not any event
 /// survived the filter, an entry older than the window too: the cursor to ask
 /// `after` next. `capped` names the repos whose feed the read stopped reading at its page limit: their older entries were not read.
-/// `open_prs`, `unseen` and `moved` come only on a read with no `after`.
+/// `open_prs` comes only on a read with no `after`; `unseen` and `moved` come on every read, because a repo can go dark in the middle of a session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RepoActivity {
     pub head: u64,
     pub events: Vec<RepoEvent>,
     pub capped: Vec<OrgRepo>,
     pub open_prs: Vec<OpenPr>,
-    /// Repos asked about that the anonymous read cannot see: the org listing does not hold them, or their feed answered 404 or a redirect.
+    /// Repos asked about that the anonymous read cannot see: their feed answered 404 or a redirect, and on a read with no `after` the org listing does not hold them either. A repo the listing holds whose feed is dark, and a read with an `after` in which every repo is dark, are not told here: they fail the read.
     pub unseen: Vec<OrgRepo>,
-    /// Of those, the ones whose feed answered a redirect that names another repo. The redirect is not followed.
+    /// Of those, the ones whose feed answered a redirect to the forge's own feed route for another repo. The redirect is not followed; a `Location` that is anything else names nothing.
     pub moved: Vec<RepoMoved>,
 }
 
