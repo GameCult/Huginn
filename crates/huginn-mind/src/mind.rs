@@ -317,10 +317,21 @@ impl<S: MindStore> Mind<S> {
 
     /// Rebuilds the envelopes and the image from the store: the one rebuild, run only when a swap
     /// was lost or the store errored, the two signals that the store moved beneath the holder.
+    /// One rule for a look that fails: the holder no longer knows the store, so it holds the fault
+    /// (reads and admission refuse with it) until a restart, exactly as a fold fault is held.
     pub(crate) fn refresh(&mut self) -> Result<(), MindRefusal> {
-        self.envelopes = envelopes_of(self.store.pull_all().map_err(unavailable)?);
-        (self.image, self.persona_receipt) = fold(&self.envelopes, &self.instance);
-        Ok(())
+        match self.store.pull_all().map_err(unavailable) {
+            Ok(raw) => {
+                self.envelopes = envelopes_of(raw);
+                (self.image, self.persona_receipt) = fold(&self.envelopes, &self.instance);
+                Ok(())
+            }
+            Err(fault) => {
+                self.image = Err(fault.clone());
+                self.persona_receipt = Err(fault.clone());
+                Err(fault)
+            }
+        }
     }
 
     /// Folds a commit the compare-and-swap said landed into the held state. If the fold itself
@@ -349,11 +360,9 @@ impl<S: MindStore> Mind<S> {
                 Err(_) => faulted = true,
             }
         }
-        if (faulted || image.advance(&AdmissionFacts::of(receipt), documents).is_err())
-            && let Err(fault) = self.refresh()
-        {
-            self.image = Err(fault.clone());
-            self.persona_receipt = Err(fault);
+        if faulted || image.advance(&AdmissionFacts::of(receipt), documents).is_err() {
+            // A failed look holds its own fault.
+            let _ = self.refresh();
         }
     }
 }

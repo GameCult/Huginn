@@ -257,7 +257,8 @@ pub(crate) fn commit<S: MindStore>(
     let landed = match MindStore::compare_and_swap_batch(mind.store(), expected, replacements) {
         Ok(landed) => landed,
         // Whether the batch landed is unknown, so the holder looks at the store before it answers
-        // anything else; a failed look leaves the next lost swap or restart to heal it.
+        // anything else; a failed look holds the fault (Mind::refresh), so nothing answers or
+        // writes on a stale image.
         Err(error) => {
             let _ = mind.refresh();
             return Err(unavailable(error));

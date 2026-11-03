@@ -234,6 +234,7 @@ fn views_and_status_agree_with_the_oracle_at_every_snapshot() {
     let mind = history_mind();
     let head = mind.image().unwrap().head;
     let every = oracle_ids(&mind, head).unwrap();
+    assert_eq!(every.len(), mind.image().unwrap().rows.len(), "the oracle names every document, or the loop below proves nothing");
     for as_of in 1..=head {
         let reader = Reader::at(&mind, as_of).unwrap();
         for id in &every {
@@ -502,4 +503,266 @@ fn the_admission_index_names_what_receipts_wrote() {
     for row in &image.rows {
         assert!(index.contains(row.kind.type_id(), &row.key));
     }
+}
+
+/// A store whose swap can land then err, be lost, and whose next pull can fail: a look that fails
+/// after a store fault.
+#[derive(Clone)]
+struct FailsTheLook {
+    inner: MemoryStore,
+    land_then_err: Arc<AtomicBool>,
+    lose: Arc<AtomicBool>,
+    pull_err: Arc<AtomicBool>,
+}
+
+impl CacheBackingStore for FailsTheLook {
+    fn pull_all(&self) -> Result<Vec<CultCacheEnvelope>> {
+        if self.pull_err.swap(false, Ordering::SeqCst) {
+            return Err(anyhow!("the look failed"));
+        }
+        self.inner.pull_all()
+    }
+    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+        self.inner.push(entry)
+    }
+    fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+        self.inner.delete(entry)
+    }
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<()> {
+        self.inner.push_all(entries, options)
+    }
+}
+
+impl MindStore for FailsTheLook {
+    fn compare_and_swap_batch(&self, expected: &[CultCacheEnvelope], replacements: Vec<CultCacheEnvelope>) -> Result<bool> {
+        if self.lose.swap(false, Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let landed = self.inner.compare_and_swap_batch(expected, replacements)?;
+        if self.land_then_err.swap(false, Ordering::SeqCst) {
+            return Err(anyhow!("the store failed after landing"));
+        }
+        Ok(landed)
+    }
+}
+
+fn fails_the_look() -> (Mind<FailsTheLook>, FailsTheLook) {
+    let store = FailsTheLook { inner: MemoryStore::new(), land_then_err: Default::default(), lose: Default::default(), pull_err: Default::default() };
+    let mut mind = opened(store.clone(), INSTANCE);
+    seed(&mut mind);
+    (mind, store)
+}
+
+/// One rule for a failed look: the fault is held, reads and admission refuse with it, nothing is
+/// written, and a restart holds what the store holds and admits at the next ordinal.
+fn assert_fault_is_held(mind: &mut Mind<FailsTheLook>, store: &FailsTheLook, landed: &[&str]) {
+    assert!(matches!(mind.image(), Err(MindRefusal::Unavailable { .. })));
+    assert!(matches!(mind.query(&of_kinds(&[K::Question])), Err(MindRefusal::Unavailable { .. })));
+    let rows = store.inner.rows();
+    let next = admit(mind, vec![question_n(50)]);
+    assert!(matches!(next, crate::admission::PipelineAdmissionOutcome::Refused(MindRefusal::Unavailable { .. })), "{next:?}");
+    assert_eq!(store.inner.rows(), rows, "a held fault writes nothing");
+    let mut reopened = opened(store.clone(), INSTANCE);
+    held_equals_fresh(&reopened);
+    assert_eq!(reopened.query(&of_kinds(&[K::Question])).unwrap().matched, landed.len() as u32);
+    committed(admit(&mut reopened, vec![question_n(51)]));
+    held_equals_fresh(&reopened);
+    reopened.read_back().unwrap();
+}
+
+#[test]
+fn a_failed_look_after_a_landed_error_holds_the_fault() {
+    let (mut mind, store) = fails_the_look();
+    store.land_then_err.store(true, Ordering::SeqCst);
+    store.pull_err.store(true, Ordering::SeqCst);
+    let first = admit(&mut mind, vec![question_n(1)]);
+    assert!(matches!(first, crate::admission::PipelineAdmissionOutcome::Refused(MindRefusal::Unavailable { .. })), "{first:?}");
+    assert_fault_is_held(&mut mind, &store, &["Q1"]);
+}
+
+#[test]
+fn a_failed_look_after_a_lost_swap_holds_the_fault() {
+    let (mut mind, store) = fails_the_look();
+    let mut other = opened(store.clone(), INSTANCE);
+    committed(admit(&mut other, vec![question_n(7)]));
+    store.lose.store(true, Ordering::SeqCst);
+    store.pull_err.store(true, Ordering::SeqCst);
+    let lost = admit(&mut mind, vec![question_n(8)]);
+    assert!(matches!(lost, crate::admission::PipelineAdmissionOutcome::Refused(MindRefusal::Unavailable { .. })), "{lost:?}");
+    assert_fault_is_held(&mut mind, &store, &["Q7"]);
+}
+
+// ---- the floor: what a read and a landed commit may cost, counted ----
+
+/// Reads and a landed admission never pull the store: a pull is a decode of the whole mind.
+#[test]
+fn reads_and_landed_admissions_pull_the_store_zero_times() {
+    let mut mind = history_mind();
+    let pulls = mind.store().pull_count();
+    let head = mind.image().unwrap().head;
+    mind.query(&Selection::default()).unwrap();
+    mind.query_at(&of_kinds(&[K::Question]), head / 2).unwrap();
+    mind.view(&r(K::Question, &id("question", "Q1"))).unwrap();
+    let _ = mind.status(crate::wire::IndexStatus::Current);
+    let _ = mind.persona();
+    assert_eq!(mind.store().pull_count(), pulls, "a read pulled the store");
+    committed(admit(&mut mind, vec![question_n(99)]));
+    committed(admit(&mut mind, vec![resolution(r(K::Question, &id("question", "Q99")), withdrawn())]));
+    assert_eq!(mind.store().pull_count(), pulls, "a landed swap pulled the store");
+    held_equals_fresh(&mind);
+}
+
+/// A lost swap and a store error each look at the store exactly once.
+#[test]
+fn a_lost_swap_and_a_store_error_pull_the_store_once_each() {
+    let (mut mind, store) = fails_the_look();
+    let mut other = opened(store.clone(), INSTANCE);
+    committed(admit(&mut other, vec![question_n(7)]));
+    let pulls = store.inner.pull_count();
+    store.lose.store(true, Ordering::SeqCst);
+    admit(&mut mind, vec![question_n(8)]);
+    assert_eq!(store.inner.pull_count(), pulls + 1, "a lost swap looks once");
+    store.land_then_err.store(true, Ordering::SeqCst);
+    admit(&mut mind, vec![question_n(9)]);
+    assert_eq!(store.inner.pull_count(), pulls + 2, "a store error looks once");
+}
+
+/// A history of many questions, one of them the only Soul's, one follow-up citing Q1.
+fn many_rows_mind() -> Mind<MemoryStore> {
+    let mut mind = seeded();
+    for chunk in (1..=40).collect::<Vec<u32>>().chunks(10) {
+        committed(admit(&mut mind, chunk.iter().map(|n| question_n(*n)).collect()));
+    }
+    committed(admit_as(&mut mind, Faculty::Soul, vec![question_n(41)]));
+    committed(admit(&mut mind, vec![follow_up("FU-1", r(K::Question, &id("question", "Q1")))]));
+    mind
+}
+
+/// The universe is the narrowing: a selection that names a key, a rare field value or a cited
+/// target hands the match only its candidates, never the mind.
+#[test]
+fn a_selection_reads_its_candidates_and_not_the_mind() {
+    let mind = many_rows_mind();
+    let image = mind.image().unwrap();
+    let (head, total) = (image.head, image.rows.len());
+    assert!(total > 40);
+    assert_eq!(image.universe(&Selection::default(), head).len(), total, "the unfiltered selection is the whole mind");
+    let keyed = Selection { keys: Some(vec![id("question", "Q3")]), ..Selection::default() };
+    assert_eq!(image.universe(&keyed, head).len(), 1, "keys");
+    let rare = with(of_kinds(&[K::Question]), any_of("faculty", &["Soul"]));
+    assert_eq!(image.universe(&rare, head).len(), 1, "a rare field value");
+    assert_eq!(image.universe(&of_kinds(&[K::Question]), head).len(), 41, "a kind is its own rows");
+    let citation = Citation { target: RecordRef::new(K::Question.type_id(), id("question", "Q1")), role: None };
+    let citers = Selection { cites: Some(citation), ..Selection::default() };
+    let universe = image.universe(&citers, head);
+    assert!(universe.len() <= 3 && !universe.is_empty(), "a hop starts from the target's citers: {}", universe.len());
+    assert!(total > 10 * universe.len());
+    assert!(mind.query(&citers).unwrap().matched >= 1);
+}
+
+// ---- the narrowing lines the oracle corpus must reach ----
+
+/// Both hops with the citer's schema excluding the target's: the target row is handed to the
+/// match only by the line that adds the cites target to a both-hop universe.
+#[test]
+fn both_hops_with_a_schema_excluding_the_target_agree() {
+    let mind = history_mind();
+    let head = mind.image().unwrap().head;
+    let rows = all_rows(&mind, head);
+    let mut edges = BTreeSet::new();
+    for row in &rows {
+        for (role, target, _) in Row::references(row) {
+            edges.insert((row.kind, role, target));
+        }
+    }
+    let (mut pages, mut hits) = (0, 0);
+    for (carrier, role, target) in &edges {
+        let schema = kind_of_id(target).map_or(K::Question.type_id().to_string(), |kind| kind.type_id().to_string());
+        let citation = Citation { target: RecordRef::new(schema, target.clone()), role: Some(role.clone()) };
+        for exists in [true, false] {
+            let incoming = Incoming { role: "subject".into(), exists };
+            let plain = Selection { cites: Some(citation.clone()), cited: Some(incoming.clone()), ..of_kinds(&[*carrier]) };
+            let narrowed = with(Selection { projection: "document".into(), ..plain.clone() }, any_of("in_force", &["true"]));
+            for as_of in [head, head / 2] {
+                for selection in [&plain, &narrowed] {
+                    if let Ok(page) = agree(&mind, selection, as_of) {
+                        pages += 1;
+                        hits += usize::from(page.matched > 0);
+                    }
+                }
+            }
+        }
+    }
+    assert!(pages > 0 && hits > 0, "no both-hop selection with a schema matched anything ({pages} pages)");
+}
+
+/// A resolution withdrawn by another: the Resolution schema excludes the cut spec it cites.
+#[test]
+fn a_both_hop_selection_finds_a_citer_whose_target_the_schema_excludes() {
+    let mind = history_mind();
+    let selection = Selection {
+        cites: Some(Citation { target: RecordRef::new(K::CutSpec.type_id(), id("cut_spec", "cut-10.r1")), role: None }),
+        cited: Some(Incoming { role: "subject".into(), exists: true }),
+        ..of_kinds(&[K::Resolution])
+    };
+    let head = mind.image().unwrap().head;
+    let page = agree(&mind, &selection, head).unwrap();
+    assert_eq!(page.matched, 1, "{page:?}");
+}
+
+fn planted_rows(rows: &mut Vec<CultCacheEnvelope>, ordinal: u64, document: &D) {
+    let cache = schema_cache().unwrap();
+    let envelope = document.prepare(&cache).unwrap();
+    let mut receipt = receipt::candidate(&slug(INSTANCE), provenance(Faculty::Hands), &[], std::slice::from_ref(&envelope), ordinal, now()).unwrap();
+    receipt.receipt_id = receipt.digest().unwrap();
+    rows.push(cache.prepare_entry_named(&receipt.receipt_id, &receipt).unwrap().0);
+    rows.push(envelope);
+}
+
+/// Two closures in force over one subject, the later sequence arriving first. Admission refuses
+/// this; a store that holds it must still answer as the oracle does, closers in key order.
+#[test]
+fn planted_double_closers_keep_key_order() {
+    let q = r(K::Question, &id("question", "Q1"));
+    let mut rows = healthy_rows();
+    planted_rows(&mut rows, 3, &resolution_n(q.clone(), 2, withdrawn()));
+    planted_rows(&mut rows, 4, &resolution_n(q.clone(), 1, withdrawn()));
+    let (mind, _) = faulted_mind(rows);
+    for as_of in 1..=4 {
+        assert_eq!(Reader::at(&mind, as_of).unwrap().view(&q).unwrap(), oracle_view(&mind, &q, as_of).unwrap(), "at {as_of}");
+    }
+}
+
+// ---- Hands' own gaps ----
+
+/// A lost swap names the identities that moved beneath it: a written key already stored, a read
+/// document that changed, and not a read document that is the same.
+#[test]
+fn a_conflict_names_the_identities_that_changed() {
+    let (mut mind, store) = fails_the_look();
+    let mut other = opened(store.clone(), INSTANCE);
+    committed(admit(&mut other, vec![question_n(7)]));
+    store.lose.store(true, Ordering::SeqCst);
+    let outcome = admit(&mut mind, vec![question_n(7)]);
+    let crate::admission::PipelineAdmissionOutcome::Conflict { identities } = outcome else { panic!("{outcome:?}") };
+    assert_eq!(identities, vec![r(K::Question, &id("question", "Q7"))], "the written key that was already stored");
+
+    let cited = |mind: &mut Mind<FailsTheLook>| {
+        let mut spec = cut_spec("1", 1);
+        spec.rulings = vec![s(&id("ruling", "R1"))];
+        admit(mind, vec![D::CutSpec(spec)])
+    };
+    committed(admit(&mut mind, vec![D::Ruling(ruling("R1"))]));
+    store.lose.store(true, Ordering::SeqCst);
+    let outcome = cited(&mut mind);
+    let crate::admission::PipelineAdmissionOutcome::Conflict { identities } = outcome else { panic!("{outcome:?}") };
+    assert!(identities.is_empty(), "a read document that did not change is not named: {identities:?}");
+
+    let mut bent = ruling("R1");
+    bent.ruling = "A ruling that moved beneath the holder.".into();
+    store.inner.plant(prepare(&D::Ruling(bent)));
+    store.lose.store(true, Ordering::SeqCst);
+    let outcome = cited(&mut mind);
+    let crate::admission::PipelineAdmissionOutcome::Conflict { identities } = outcome else { panic!("{outcome:?}") };
+    assert_eq!(identities, vec![r(K::Ruling, &id("ruling", "R1"))], "the read document that changed");
 }
