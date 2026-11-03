@@ -550,6 +550,31 @@ mod tests {
         assert_eq!(seen[1], (selection.clone(), Some(SemanticQuery { text: Line("the fork".into()), top_k: 8 })));
     }
 
+    /// The activity ask goes out as the one `StewardedActivity` request naming her instance, repos and cursor, and the daemon's
+    /// `Activity` answer comes back whole; a refusal, or any other answer, is an error that carries nothing of the refusal.
+    #[test]
+    fn an_activity_read_goes_through_the_port_as_one_request() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let read = RepoActivity { head: 77, events: vec![], more: true, open_prs: vec![], unseen: vec![OrgRepo::from("GameCult/Ghost")] };
+        let answer = std::cell::RefCell::new(HuginnMindResponse::Activity(read.clone()));
+        let port = HuginnMind::over(Slug(INSTANCE.into()), Box::new(|request| {
+            seen.borrow_mut().push(request);
+            Ok(answer.borrow().clone())
+        }));
+        let repos = [OrgRepo::from("GameCult/Huginn")];
+        assert_eq!(port.stewarded_activity(&repos, Some(5)).unwrap(), read);
+        assert_eq!(
+            seen.borrow()[0],
+            HuginnMindRequest::StewardedActivity { instance: Slug(INSTANCE.into()), repos: repos.to_vec(), after: Some(5) }
+        );
+
+        *answer.borrow_mut() = HuginnMindResponse::Refused(huginn_mind::MindRefusal::Unavailable { detail: "canary-forge-detail".into() });
+        let refused = port.stewarded_activity(&repos, None).unwrap_err();
+        assert!(format!("{refused:#}").contains("refused the activity read") && !format!("{refused:#}").contains("canary"), "{refused:#}");
+        *answer.borrow_mut() = HuginnMindResponse::View(None);
+        assert!(format!("{:#}", port.stewarded_activity(&repos, None).unwrap_err()).contains("something else"));
+    }
+
     #[test]
     fn runs_of_another_item_are_not_this_items_runs() {
 
