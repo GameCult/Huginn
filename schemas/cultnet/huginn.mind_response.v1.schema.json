@@ -114,6 +114,18 @@
       ]
     },
     {
+      "type": "object",
+      "properties": {
+        "Activity": {
+          "$ref": "#/$defs/RepoActivity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Activity"
+      ]
+    },
+    {
       "description": "The answer did not fit one send and is being held for the client to\nfetch. Nothing in a mind produces this: the daemon's serve module does,\nin place of an answer, and the answer it stands for is the named\nMessagePack of the `HuginnMindResponse` the mind gave.",
       "type": "object",
       "properties": {
@@ -1814,6 +1826,35 @@
       "required": [
         "pattern",
         "scope"
+      ]
+    },
+    "OpenPr": {
+      "description": "A pull request open on the forge.",
+      "type": "object",
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/Short"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "updated_at": {
+          "description": "Unix milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "author",
+        "updated_at"
       ]
     },
     "OrgRepo": {
@@ -4235,6 +4276,20 @@
         "claims"
       ]
     },
+    "PrAction": {
+      "description": "What a pull-request event did. The words are the forge's op names, nothing\na person wrote.",
+      "type": "string",
+      "enum": [
+        "Opened",
+        "Merged",
+        "Closed",
+        "Reopened",
+        "Commented",
+        "Approved",
+        "Rejected",
+        "AutoMerge"
+      ]
+    },
     "Promise": {
       "description": "A promise a report makes about what it landed. Not a document and not\nresolvable: it is identified by its report's id and its label, as a\n`TargetInvariant` is by its target's. Soul measures every one (ruling\nA), and the rule that every one is measured is admission's.",
       "type": "object",
@@ -4280,6 +4335,162 @@
       "required": [
         "location",
         "why"
+      ]
+    },
+    "RepoActivity": {
+      "description": "The answer to an activity read. `events` are other people's changes only,\nthe asker's own login already dropped, and on a read with no `after` only\nthose of the last 72 hours: the reader filters nothing again. `head` is the\nnewest feed id the read saw in those repos, whether or not any event\nsurvived the filter, an entry older than the window too: the cursor to ask\n`after` next. `capped` names the repos whose feed the read stopped reading at its page limit: their older entries were not read.\n`open_prs` comes only on a read with no `after`; `unseen` and `moved` come on every read, because a repo can go dark in the middle of a session.",
+      "type": "object",
+      "properties": {
+        "capped": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrgRepo"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RepoEvent"
+          }
+        },
+        "head": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "moved": {
+          "description": "Of those, the ones whose feed answered a redirect to the forge's own feed route for another repo. The redirect is not followed; a `Location` that is anything else names nothing.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RepoMoved"
+          }
+        },
+        "open_prs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenPr"
+          }
+        },
+        "unseen": {
+          "description": "Repos asked about that the anonymous read cannot see: their feed answered 404 or a redirect, and on a read with no `after` the org listing does not hold them either. A repo the listing holds whose feed is dark, and a read with an `after` in which every repo is dark, are not told here: they fail the read.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrgRepo"
+          }
+        }
+      },
+      "required": [
+        "head",
+        "events",
+        "capped",
+        "open_prs",
+        "unseen",
+        "moved"
+      ]
+    },
+    "RepoChange": {
+      "description": "What an event was. No field carries text a person wrote: a title, a comment\nor a commit message is another person's word and has no place here.",
+      "oneOf": [
+        {
+          "description": "A push to the repo's default branch of `commits` commits.",
+          "type": "object",
+          "properties": {
+            "Pushed": {
+              "type": "object",
+              "properties": {
+                "commits": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "commits"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Pushed"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Pr": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "$ref": "#/$defs/PrAction"
+                },
+                "number": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "number",
+                "action"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Pr"
+          ]
+        }
+      ]
+    },
+    "RepoEvent": {
+      "description": "One thing someone else did in a repo of the asker's.",
+      "type": "object",
+      "properties": {
+        "actor": {
+          "description": "The forge login that did it.",
+          "$ref": "#/$defs/Short"
+        },
+        "at": {
+          "description": "When it happened, Unix milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "change": {
+          "$ref": "#/$defs/RepoChange"
+        },
+        "id": {
+          "description": "The forge's own monotonic feed id.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        }
+      },
+      "required": [
+        "id",
+        "at",
+        "repo",
+        "actor",
+        "change"
+      ]
+    },
+    "RepoMoved": {
+      "description": "A redirect the forge answered for a repo's feed: it points at `to`.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "to": {
+          "$ref": "#/$defs/OrgRepo"
+        }
+      },
+      "required": [
+        "from",
+        "to"
       ]
     },
     "ReportCommit": {

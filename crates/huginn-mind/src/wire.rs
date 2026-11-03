@@ -6,7 +6,7 @@
 
 use cultcache_rs::DatabaseEntry;
 use cultnet_rs::{CultMeshCdnArtifactManifest, Selection};
-use eureka_pipeline::{Line, PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Short, Slug};
+use eureka_pipeline::{Line, OrgRepo, PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Short, Slug};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,6 +92,87 @@ pub enum HuginnMindRequest {
     /// docs, which no mind holds. The daemon embeds the text and asks the
     /// index it does not write.
     SearchSources { instance: Slug, query: SourceQuery },
+    /// What others did in `repos` on the forge since the `after` cursor: the
+    /// daemon reads the forge and no document of the mind, and answers
+    /// `Refused(Unavailable)` when it has no forge or the forge does not answer
+    /// in time. The repos are the asker's to name (her stewardships); the
+    /// instance's own login is dropped from the answer.
+    StewardedActivity { instance: Slug, repos: Vec<OrgRepo>, after: Option<u64> },
+}
+
+/// The most repos one activity read names.
+pub const ACTIVITY_REPOS_MAX: usize = 64;
+
+/// What a pull-request event did. The words are the forge's op names, nothing
+/// a person wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum PrAction {
+    Opened,
+    Merged,
+    Closed,
+    Reopened,
+    Commented,
+    Approved,
+    Rejected,
+    AutoMerge,
+}
+
+/// What an event was. No field carries text a person wrote: a title, a comment
+/// or a commit message is another person's word and has no place here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum RepoChange {
+    /// A push to the repo's default branch of `commits` commits.
+    Pushed { commits: u32 },
+    Pr { number: u32, action: PrAction },
+}
+
+/// One thing someone else did in a repo of the asker's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepoEvent {
+    /// The forge's own monotonic feed id.
+    pub id: u64,
+    /// When it happened, Unix milliseconds.
+    pub at: u64,
+    pub repo: OrgRepo,
+    /// The forge login that did it.
+    pub actor: Short,
+    pub change: RepoChange,
+}
+
+/// A pull request open on the forge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OpenPr {
+    pub repo: OrgRepo,
+    pub number: u32,
+    pub author: Short,
+    /// Unix milliseconds.
+    pub updated_at: u64,
+}
+
+/// The answer to an activity read. `events` are other people's changes only,
+/// the asker's own login already dropped, and on a read with no `after` only
+/// those of the last 72 hours: the reader filters nothing again. `head` is the
+/// newest feed id the read saw in those repos, whether or not any event
+/// survived the filter, an entry older than the window too: the cursor to ask
+/// `after` next. `capped` names the repos whose feed the read stopped reading at its page limit: their older entries were not read.
+/// `open_prs` comes only on a read with no `after`; `unseen` and `moved` come on every read, because a repo can go dark in the middle of a session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepoActivity {
+    pub head: u64,
+    pub events: Vec<RepoEvent>,
+    pub capped: Vec<OrgRepo>,
+    pub open_prs: Vec<OpenPr>,
+    /// Repos asked about that the anonymous read cannot see: their feed answered 404 or a redirect, and on a read with no `after` the org listing does not hold them either. A repo the listing holds whose feed is dark, and a read with an `after` in which every repo is dark, are not told here: they fail the read.
+    pub unseen: Vec<OrgRepo>,
+    /// Of those, the ones whose feed answered a redirect to the forge's own feed route for another repo. The redirect is not followed; a `Location` that is anything else names nothing.
+    pub moved: Vec<RepoMoved>,
+}
+
+/// A redirect the forge answered for a repo's feed: it points at `to`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepoMoved {
+    pub from: OrgRepo,
+    pub to: OrgRepo,
 }
 
 /// The most hits a source search answers.
@@ -168,6 +249,7 @@ impl HuginnMindRequest {
             Self::PersonaGet { .. } => "persona_get",
             Self::PersonaPut { .. } => "persona_put",
             Self::SearchSources { .. } => "search_sources",
+            Self::StewardedActivity { .. } => "stewarded_activity",
         }
     }
 
@@ -180,7 +262,8 @@ impl HuginnMindRequest {
             | Self::Query { instance, .. }
             | Self::PersonaGet { instance }
             | Self::PersonaPut { instance, .. }
-            | Self::SearchSources { instance, .. } => Some(instance),
+            | Self::SearchSources { instance, .. }
+            | Self::StewardedActivity { instance, .. } => Some(instance),
         }
     }
 }
@@ -198,6 +281,7 @@ pub enum HuginnMindResponse {
     Persona(Option<PersonaStateView>),
     PersonaPut(PersonaPutOutcome),
     Sources(SourceHits),
+    Activity(RepoActivity),
     /// The answer did not fit one send and is being held for the client to
     /// fetch. Nothing in a mind produces this: the daemon's serve module does,
     /// in place of an answer, and the answer it stands for is the named

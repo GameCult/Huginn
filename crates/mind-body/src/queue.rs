@@ -9,7 +9,7 @@
 use anyhow::{Result, anyhow, bail};
 use cultnet_rs::{Incoming, Selection};
 use eureka_pipeline::{
-    Line, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn,
+    Line, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn,
     Slug,
 };
 use eureka_state::hold::{self, Hold};
@@ -17,7 +17,7 @@ use eureka_state::{ClientError, HuginnClient};
 use huginn_mind::{
     Faculty, HuginnMindRequest, HuginnMindResponse, PipelineAdmissionBatch,
     PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts, PipelineProvenance,
-    PipelineSelectionPage, PipelineStatusSummary, SemanticQuery,
+    PipelineSelectionPage, PipelineStatusSummary, RepoActivity, SemanticQuery,
 };
 
 /// The last `CONSECUTIVE` ended runs over an item, all empty, trip its breaker.
@@ -40,6 +40,11 @@ pub trait MindPort {
     /// `query` with a semantic ask, so one call path carries both. A port with no index refuses.
     fn query_near(&self, _selection: &Selection, _text: &str, _top_k: u32) -> Result<PipelineSelectionPage> {
         bail!("this mind port has no semantic index")
+    }
+    /// What others did in `repos` on the forge since the cursor `after`, from the daemon's own forge read (no document of the mind
+    /// is read). A port with no forge refuses; so does a daemon without one, and a forge that does not answer in time.
+    fn stewarded_activity(&self, _repos: &[OrgRepo], _after: Option<u64>) -> Result<RepoActivity> {
+        bail!("this mind port has no forge to read")
     }
     /// Admits `documents` as one batch, attributed to `agent` in `session`.
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome>;
@@ -88,6 +93,15 @@ impl MindPort for HuginnMind<'_> {
 
     fn query_near(&self, selection: &Selection, text: &str, top_k: u32) -> Result<PipelineSelectionPage> {
         self.ask(selection, Some(SemanticQuery { text: Line(text.to_string()), top_k }))
+    }
+
+    fn stewarded_activity(&self, repos: &[OrgRepo], after: Option<u64>) -> Result<RepoActivity> {
+        let request = HuginnMindRequest::StewardedActivity { instance: self.instance().clone(), repos: repos.to_vec(), after };
+        match (self.call)(request).map_err(|error| anyhow!("the mind could not be asked: {}", client_error_code(&error)))? {
+            HuginnMindResponse::Activity(activity) => Ok(activity),
+            HuginnMindResponse::Refused(_) => bail!("the mind refused the activity read"),
+            _ => bail!("the mind answered an activity read with something else"),
+        }
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
@@ -534,6 +548,31 @@ mod tests {
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0], (selection.clone(), None));
         assert_eq!(seen[1], (selection.clone(), Some(SemanticQuery { text: Line("the fork".into()), top_k: 8 })));
+    }
+
+    /// The activity ask goes out as the one `StewardedActivity` request naming her instance, repos and cursor, and the daemon's
+    /// `Activity` answer comes back whole; a refusal, or any other answer, is an error that carries nothing of the refusal.
+    #[test]
+    fn an_activity_read_goes_through_the_port_as_one_request() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let read = RepoActivity { head: 77, events: vec![], capped: vec![OrgRepo::from("GameCult/Huginn")], open_prs: vec![], unseen: vec![OrgRepo::from("GameCult/Ghost")], moved: vec![] };
+        let answer = std::cell::RefCell::new(HuginnMindResponse::Activity(read.clone()));
+        let port = HuginnMind::over(Slug(INSTANCE.into()), Box::new(|request| {
+            seen.borrow_mut().push(request);
+            Ok(answer.borrow().clone())
+        }));
+        let repos = [OrgRepo::from("GameCult/Huginn")];
+        assert_eq!(port.stewarded_activity(&repos, Some(5)).unwrap(), read);
+        assert_eq!(
+            seen.borrow()[0],
+            HuginnMindRequest::StewardedActivity { instance: Slug(INSTANCE.into()), repos: repos.to_vec(), after: Some(5) }
+        );
+
+        *answer.borrow_mut() = HuginnMindResponse::Refused(huginn_mind::MindRefusal::Unavailable { detail: "canary-forge-detail".into() });
+        let refused = port.stewarded_activity(&repos, None).unwrap_err();
+        assert!(format!("{refused:#}").contains("refused the activity read") && !format!("{refused:#}").contains("canary"), "{refused:#}");
+        *answer.borrow_mut() = HuginnMindResponse::View(None);
+        assert!(format!("{:#}", port.stewarded_activity(&repos, None).unwrap_err()).contains("something else"));
     }
 
     #[test]

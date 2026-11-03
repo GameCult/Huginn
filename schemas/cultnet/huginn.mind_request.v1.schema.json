@@ -157,6 +157,42 @@
       "required": [
         "SearchSources"
       ]
+    },
+    {
+      "description": "What others did in `repos` on the forge since the `after` cursor: the\ndaemon reads the forge and no document of the mind, and answers\n`Refused(Unavailable)` when it has no forge or the forge does not answer\nin time. The repos are the asker's to name (her stewardships); the\ninstance's own login is dropped from the answer.",
+      "type": "object",
+      "properties": {
+        "StewardedActivity": {
+          "type": "object",
+          "properties": {
+            "after": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            },
+            "repos": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OrgRepo"
+              }
+            }
+          },
+          "required": [
+            "instance",
+            "repos"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "StewardedActivity"
+      ]
     }
   ],
   "$defs": {
