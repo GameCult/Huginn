@@ -2051,8 +2051,20 @@ fn notice_line(run: &str, outcome: &ResolutionOutcome, at_unix_ms: u64) -> Strin
 const REPO_READ_EVERY_S: u64 = 300;
 /// The most of a repo notice's text.
 const REPO_NOTICE_MAX_CHARS: usize = 300;
-/// What a cut notice's tail may take, so the cut still fits: " and 999 more", " and changes beyond what was read" and ".".
-const REPO_NOTICE_TAIL_RESERVE: usize = 47;
+/// The most of a repo name the notice and the wear section print, so the clause about a capped repo has a bound whatever it is told.
+const NAME_MAX_CHARS: usize = 100;
+
+/// What the read knows when it stopped at a repo's page limit, and no more than that: it read no further back there. Names the first
+/// capped repo, and counts the others.
+fn capped_clause(capped: &[OrgRepo]) -> Option<String> {
+    let first = plain(&capped.first()?.0).chars().take(NAME_MAX_CHARS).collect::<String>();
+    let others = match capped.len() - 1 {
+        0 => String::new(),
+        1 => " and 1 other repo".to_owned(),
+        n => format!(" and {n} other repos"),
+    };
+    Some(format!("the read stopped at its page limit in {first}{others}; older entries there were not read"))
+}
 
 /// What each actor did in each repo, as (repo, actor, words), repos and then actors in the order the read gave them.
 fn repo_entries(events: &[RepoEvent]) -> Vec<(String, String, String)> {
@@ -2111,18 +2123,22 @@ fn pr_action_word(action: PrAction) -> &'static str {
 /// logins only, its text quoted and cut at an entry. Nothing a person wrote on the forge is in the read, so none of it can be here.
 /// `None` when the read found nothing to say.
 fn repo_notice_line(activity: &RepoActivity, at_unix_ms: u64) -> Option<String> {
-    if activity.events.is_empty() && !activity.more {
+    if activity.events.is_empty() && activity.capped.is_empty() {
         return None;
     }
     let entries = repo_entries(&activity.events);
-    let (mut text, mut last_repo, mut shown) = (String::from("Changes in your repos: "), None::<&str>, 0usize);
+    let capped = capped_clause(&activity.capped);
+    let (mut text, mut last_repo, mut shown) = (String::from(if entries.is_empty() { "Your repos' feeds: " } else { "Changes in your repos: " }), None::<&str>, 0usize);
+    // What follows the entries, at its worst for any count: " and N more" with as many digits as there are entries, the full stop,
+    // and the capped clause as its own sentence. The bound is on the text, not on a count the tail happens to need.
+    let tail_room = format!(" and {} more", "9".repeat(entries.len().to_string().len())).chars().count() + 1 + capped.as_ref().map_or(0, |clause| clause.chars().count() + 3);
     for (repo, _, what) in &entries {
         let piece = if last_repo == Some(repo.as_str()) {
             format!(", {what}")
         } else {
             format!("{}{repo}: {what}", if last_repo.is_some() { "; " } else { "" })
         };
-        if text.chars().count() + piece.chars().count() > REPO_NOTICE_MAX_CHARS - REPO_NOTICE_TAIL_RESERVE {
+        if text.chars().count() + piece.chars().count() + tail_room > REPO_NOTICE_MAX_CHARS {
             break;
         }
         text.push_str(&piece);
@@ -2133,11 +2149,20 @@ fn repo_notice_line(activity: &RepoActivity, at_unix_ms: u64) -> Option<String> 
     if left > 0 {
         text.push_str(&format!(" and {left} more"));
     }
-    if activity.more {
-        text.push_str(if entries.is_empty() { "more than the read reached" } else { " and changes beyond what was read" });
+    if !entries.is_empty() {
+        text.push('.');
     }
-    text.push('.');
-    Some(format!("notice role=organ at={} text={}\n", at_text(at_unix_ms), quoted(&text)))
+    if let Some(clause) = capped {
+        if !entries.is_empty() {
+            text.push(' ');
+        }
+        let mut letters = clause.chars();
+        text.extend(letters.next().map(|first| first.to_ascii_uppercase()));
+        text.push_str(letters.as_str());
+        text.push('.');
+    }
+    Some(format!("notice role=organ at={} text={}
+", at_text(at_unix_ms), quoted(&text)))
 }
 
 /// The most the wear section may take of a first line.
@@ -2148,10 +2173,11 @@ const WEAR_MAX_BYTES: usize = 1536;
 enum WearFact {
     /// The forge read failed: the other repo facts are absent, not zero.
     Missing,
-    /// The read stopped short of the window: others' changes older than what it reached are not shown.
-    Beyond,
+    /// The read stopped at a repo's page limit: the older entries there were not read.
+    Capped(String),
     Awaiting { repo: String, number: u32, author: String, at: u64 },
-    Unseen { repo: String },
+    /// A repo the anonymous read cannot see, and the repo the forge's redirect names for it when it names one.
+    Unseen { repo: String, redirect: Option<String> },
     Changed { repo: String, words: String, at: u64 },
     Yours { repo: String, number: u32, at: u64 },
 }
@@ -2160,7 +2186,7 @@ impl WearFact {
     /// The priority order a full section drops from the end of.
     fn rank(&self) -> u8 {
         match self {
-            Self::Missing | Self::Beyond => 0,
+            Self::Missing | Self::Capped(_) => 0,
             Self::Awaiting { .. } => 1,
             Self::Unseen { .. } => 2,
             Self::Changed { .. } => 3,
@@ -2188,7 +2214,10 @@ fn wear_facts(activity: &RepoActivity, repos: &[OrgRepo], instance: &Slug, now_m
             facts.push(WearFact::Awaiting { repo, number: pr.number, author: plain(&pr.author.0), at: pr.updated_at });
         }
     }
-    facts.extend(activity.unseen.iter().map(|repo| WearFact::Unseen { repo: plain(&repo.0) }));
+    facts.extend(activity.unseen.iter().map(|repo| WearFact::Unseen {
+        repo: plain(&repo.0),
+        redirect: activity.moved.iter().find(|moved| &moved.from == repo).map(|moved| plain(&moved.to.0)),
+    }));
     // The read's events are others' changes of the last three days: the daemon's forge read is the one place that window and her own
     // login are decided (`RepoActivity`), so nothing is filtered again here.
     let recent: Vec<RepoEvent> = activity
@@ -2200,9 +2229,7 @@ fn wear_facts(activity: &RepoActivity, repos: &[OrgRepo], instance: &Slug, now_m
         let at = recent.iter().filter(|event| event.repo.0 == repo && event.actor.0 == actor).map(|event| event.at).max().unwrap_or(0);
         facts.push(WearFact::Changed { repo, words, at });
     }
-    if activity.more {
-        facts.push(WearFact::Beyond);
-    }
+    facts.extend(capped_clause(&activity.capped).map(WearFact::Capped));
     facts
 }
 
@@ -2225,9 +2252,10 @@ fn render_wear(now_ms: u64, facts: &[WearFact]) -> String {
         .iter()
         .map(|fact| match fact {
             WearFact::Missing => "- repo facts are missing: the read did not answer.\n".to_owned(),
-            WearFact::Beyond => "- more changes by others lie further back than the read went and are not shown.\n".to_owned(),
+            WearFact::Capped(clause) => format!("- {clause}.\n"),
             WearFact::Awaiting { repo, number, author, at } => format!("- PR awaiting you: {repo}#{number} by {author} {}\n", age_text(now_ms, *at)),
-            WearFact::Unseen { repo } => format!("- a repo the forge read cannot see: {repo}\n"),
+            WearFact::Unseen { repo, redirect: None } => format!("- a repo the forge read cannot see: {repo}\n"),
+            WearFact::Unseen { repo, redirect: Some(to) } => format!("- a repo the forge read cannot see: {repo} (the forge redirects it to {to})\n"),
             WearFact::Changed { repo, words, at } => format!("- changed by others: {repo}: {words} {}\n", age_text(now_ms, *at)),
             WearFact::Yours { repo, number, at } => format!("- your open PR: {repo}#{number} {}\n", age_text(now_ms, *at)),
         })

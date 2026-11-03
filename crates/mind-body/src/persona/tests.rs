@@ -15,6 +15,7 @@ use std::time::Duration as StdDuration;
 
 use eureka_pipeline::{MemoryOrigin, PipelineDocument, PipelineKind as K, PipelineMemory, ResolutionOutcome, RunOperator, RunTurn, Short, Slug};
 use huginn_mind::PipelineAdmissionOutcome as AdmissionOutcome;
+use huginn_mind::RepoMoved;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -4582,13 +4583,13 @@ impl MindPort for Forged<'_> {
                 Ok(activity)
             }
             Some(None) => Err(anyhow!("the forge could not be read")),
-            None => Ok(RepoActivity { head: self.head.get(), events: vec![], more: false, open_prs: vec![], unseen: vec![] }),
+            None => Ok(RepoActivity { head: self.head.get(), events: vec![], capped: vec![], open_prs: vec![], unseen: vec![], moved: vec![] }),
         }
     }
 }
 
 fn activity(head: u64, events: Vec<RepoEvent>) -> Option<RepoActivity> {
-    Some(RepoActivity { head, events, more: false, open_prs: vec![], unseen: vec![] })
+    Some(RepoActivity { head, events, capped: vec![], open_prs: vec![], unseen: vec![], moved: vec![] })
 }
 
 fn event(id: u64, repo: &str, actor: &str, change: RepoChange) -> RepoEvent {
@@ -4651,13 +4652,13 @@ fn a_repo_change_reaches_a_live_session_as_one_notice() {
 fn a_burst_is_one_line() {
     let rig = stewarding_rig(3);
     let burst: Vec<RepoEvent> = (0..50).map(|n| event(1000 - n, "GameCult/Huginn", &format!("contributor-{n}"), RepoChange::Pushed { commits: 2 })).collect();
-    let forged = Forged::over(&rig.mind, vec![activity(100, vec![]), Some(RepoActivity { more: true, ..activity(1000, burst).unwrap() })]);
+    let forged = Forged::over(&rig.mind, vec![activity(100, vec![]), Some(RepoActivity { capped: vec![OrgRepo::from("GameCult/Huginn")], ..activity(1000, burst).unwrap() })]);
     let lines = live_session(&rig, &forged, PAST_THE_REPO_READ_MS, false, 2);
     let notices = all_notices(&lines);
     assert_eq!(notices.len(), 1, "{lines:?}");
     let text = text_of(notices[0]);
     assert!(text.chars().count() <= REPO_NOTICE_MAX_CHARS, "{} chars: {text}", text.chars().count());
-    assert!(text.contains(" more") && text.contains("beyond what was read") && text.starts_with("Changes in your repos: GameCult/Huginn: 2 commits pushed by contributor-0"), "{text}");
+    assert!(text.contains(" more") && text.ends_with("The read stopped at its page limit in GameCult/Huginn; older entries there were not read.") && text.starts_with("Changes in your repos: GameCult/Huginn: 2 commits pushed by contributor-0"), "{text}");
 }
 
 /// Polling every few seconds for a stretch shorter than the interval asks the forge nothing past the first line's read.
@@ -4710,9 +4711,10 @@ fn a_first_line_shows_wear_after_her_responsibilities() {
     let read = RepoActivity {
         head: 100,
         events: vec![RepoEvent { at: now - 5 * 3_600_000, ..event(100, "GameCult/Huginn", "nibu", RepoChange::Pushed { commits: 9 }) }],
-        more: false,
+        capped: vec![],
         open_prs: vec![pr(8, "nibu", 5), pr(9, Slug(INSTANCE.into()).0.as_str(), 50)],
         unseen: vec!["GameCult/Ghost".into()],
+        moved: vec![],
     };
     let forged = Forged::over(&rig.mind, vec![Some(read)]);
     live_session(&rig, &forged, 1000, false, 1);
@@ -4736,21 +4738,22 @@ fn a_read_that_stopped_short_says_so_on_the_first_line_and_in_a_notice() {
     let read = RepoActivity {
         head: 100,
         events: vec![RepoEvent { at: now - 5 * 24 * 3_600_000, ..event(100, "GameCult/Huginn", "nibu", RepoChange::Pushed { commits: 2 }) }],
-        more: true,
+        capped: vec![OrgRepo::from("GameCult/Huginn")],
         open_prs: vec![],
         unseen: vec![],
+        moved: vec![],
     };
     let forged = Forged::over(&rig.mind, vec![Some(read)]);
     live_session(&rig, &forged, 1000, false, 1);
     let input = input_of(&rig, 0);
     let wear = input.split_once("Where your machine shows wear, with ages (facts, not orders):\n").expect("the section").1.split("\n\n").next().unwrap();
     assert!(wear.contains("changed by others: GameCult/Huginn: 2 commits pushed by nibu (5 d)"), "{wear}");
-    assert!(wear.contains("further back than the read went"), "{wear}");
+    assert!(wear.contains("- the read stopped at its page limit in GameCult/Huginn; older entries there were not read."), "{wear}");
 
-    let nothing_seen = RepoActivity { head: 9, events: vec![], more: true, open_prs: vec![], unseen: vec![] };
+    let nothing_seen = RepoActivity { head: 9, events: vec![], capped: vec![OrgRepo::from("GameCult/Huginn")], open_prs: vec![], unseen: vec![], moved: vec![] };
     let notice = repo_notice_line(&nothing_seen, 1_700_000_000_000).expect("a truncated read is told");
-    assert!(text_of(&notice).contains("more than the read reached"), "{notice}");
-    assert!(repo_notice_line(&RepoActivity { more: false, ..nothing_seen }, 1_700_000_000_000).is_none());
+    assert_eq!(text_of(&notice), "Your repos' feeds: The read stopped at its page limit in GameCult/Huginn; older entries there were not read.");
+    assert!(repo_notice_line(&RepoActivity { capped: vec![], ..nothing_seen }, 1_700_000_000_000).is_none());
 }
 
 /// The repos the forge is asked about are her stewardships in force and nothing else: a Mind with none asks about none (and so
@@ -4790,9 +4793,10 @@ fn forge_text_cannot_enter_an_organ_line() {
     let read = RepoActivity {
         head: 9,
         events: vec![event(9, "GameCult/Huginn", hostile, RepoChange::Pushed { commits: 2 })],
-        more: false,
+        capped: vec![],
         open_prs: vec![huginn_mind::OpenPr { repo: "GameCult/Huginn".into(), number: 1, author: Short(hostile.into()), updated_at: 1_700_000_000_000 }],
         unseen: vec![],
+        moved: vec![],
     };
     let line = repo_notice_line(&read, 1_700_000_000_000).unwrap();
     assert_eq!(line.lines().count(), 1, "{line}");
@@ -4808,9 +4812,10 @@ fn forge_text_cannot_enter_an_organ_line() {
     let read = RepoActivity {
         head: 9,
         events: vec![event(9, name, "nibu", RepoChange::Pushed { commits: 2 })],
-        more: false,
+        capped: vec![],
         open_prs: vec![huginn_mind::OpenPr { repo: name.into(), number: 1, author: Short(INSTANCE.into()), updated_at: 1_700_000_000_000 }],
         unseen: vec![name.into()],
+        moved: vec![],
     };
     let wear = render_wear(1_700_000_000_000, &wear_facts(&read, &["GameCult/Huginn".into()], &instance, 1_700_000_000_000));
     assert!(wear.lines().all(|line| line.starts_with("- ") || line.starts_with("Where your machine")), "{wear}");
@@ -4828,16 +4833,63 @@ fn a_cut_notice_never_passes_its_bound_at_any_entry_length() {
         for len in 1..=80 {
             for commits in [1_u32, 2, 9, 10, 99, 100, 12345] {
                 let burst: Vec<RepoEvent> = (0..events).map(|n| event(1000 - n, "GameCult/Huginn", &format!("{}{n}", "x".repeat(len)), RepoChange::Pushed { commits })).collect();
-                let read = RepoActivity { head: 1000, events: burst, more: true, open_prs: vec![], unseen: vec![] };
+                let read = RepoActivity { head: 1000, events: burst, capped: vec![OrgRepo::from("GameCult/Huginn")], open_prs: vec![], unseen: vec![], moved: vec![] };
                 let text = text_of(&repo_notice_line(&read, 1_700_000_000_000).unwrap());
                 let chars = text.chars().count();
                 assert!(chars <= REPO_NOTICE_MAX_CHARS, "{chars} chars with {events} events of {len} and {commits} commits: {text}");
-                assert!(text.contains(" more") && text.ends_with("beyond what was read."), "a cut says what it left out: {text}");
+                assert!(text.contains(" more") && text.ends_with("The read stopped at its page limit in GameCult/Huginn; older entries there were not read."), "a cut says what it left out: {text}");
                 widest = widest.max(chars);
             }
         }
     }
-    assert!(widest + 2 >= REPO_NOTICE_MAX_CHARS, "the sweep reaches the edge it guards: widest {widest}");
+    assert!(widest + 4 >= REPO_NOTICE_MAX_CHARS, "the sweep reaches the edge it guards: widest {widest}");
+}
+
+/// The bound holds at a thousand leftover entries and past it, where the count itself is four digits: the promise is "never over 300
+/// chars", not "to 999".
+#[test]
+fn a_cut_notice_holds_its_bound_with_a_four_digit_count_left() {
+    for events in [1_000_u64, 1100, 12_000] {
+        for len in [1_usize, 40, 80] {
+            let burst: Vec<RepoEvent> = (0..events).map(|n| event(100_000 - n, "GameCult/Huginn", &format!("{}{n}", "x".repeat(len)), RepoChange::Pushed { commits: 1 })).collect();
+            let read = RepoActivity { head: 100_000, events: burst, capped: vec![], open_prs: vec![], unseen: vec![], moved: vec![] };
+            let text = text_of(&repo_notice_line(&read, 1_700_000_000_000).unwrap());
+            let left: usize = text.split(" and ").last().unwrap().split(' ').next().unwrap().parse().expect("the notice counts what it left out");
+            assert!(left >= 900, "{left} left of {events}: {text}");
+            assert!(text.chars().count() <= REPO_NOTICE_MAX_CHARS, "{} chars with {events} events of {len}: {text}", text.chars().count());
+        }
+    }
+}
+
+/// A notice that cut and also stopped at the page limit in many repos with long names is still within the bound, and names only what
+/// the read knows.
+#[test]
+fn the_capped_clause_claims_only_what_the_read_knows_and_stays_in_the_bound() {
+    let long = "r".repeat(200);
+    let capped: Vec<OrgRepo> = (0..30).map(|n| OrgRepo(format!("GameCult/{long}{n}"))).collect();
+    let burst: Vec<RepoEvent> = (0..60).map(|n| event(1000 - n, "GameCult/Huginn", &format!("contributor-{n}"), RepoChange::Pushed { commits: 2 })).collect();
+    let read = RepoActivity { head: 1000, events: burst, capped, open_prs: vec![], unseen: vec![], moved: vec![] };
+    let text = text_of(&repo_notice_line(&read, 1_700_000_000_000).unwrap());
+    assert!(text.chars().count() <= REPO_NOTICE_MAX_CHARS, "{} chars: {text}", text.chars().count());
+    assert!(text.ends_with("and 29 other repos; older entries there were not read."), "{text}");
+    assert!(!text.contains("further back") && !text.contains("beyond"), "it claims nothing about what it did not read: {text}");
+}
+
+/// A repo the forge redirects is told with where the redirect points, and one that is only dark is told without.
+#[test]
+fn a_redirected_unseen_repo_is_told_with_where_the_forge_points() {
+    let moved = RepoMoved { from: OrgRepo::from("GameCult/cinny"), to: OrgRepo::from("GameCult/Ratatoskr") };
+    let facts = wear_facts(
+        &RepoActivity { head: 1, events: vec![], capped: vec![], open_prs: vec![], unseen: vec![OrgRepo::from("GameCult/cinny"), OrgRepo::from("GameCult/gamecult-ops")], moved: vec![moved] },
+        &[],
+        &Slug("void".into()),
+        0,
+    );
+    let wear = render_wear(0, &facts);
+    assert!(wear.contains("- a repo the forge read cannot see: GameCult/cinny (the forge redirects it to GameCult/Ratatoskr)
+"), "{wear}");
+    assert!(wear.contains("- a repo the forge read cannot see: GameCult/gamecult-ops
+"), "{wear}");
 }
 
 /// The polls after the first interval are still one read per interval: over 750 s of polls at 5 s the forge is asked at the start
@@ -4861,9 +4913,10 @@ fn each_changed_line_has_the_age_of_its_own_actor_and_repo() {
     let read = RepoActivity {
         head: 4,
         events: vec![push(4, "GameCult/Huginn", "void", 1), push(3, "GameCult/Huginn", "nibu", 60), push(2, "GameCult/Ratatoskr", "nibu", 30)],
-        more: false,
+        capped: vec![],
         open_prs: vec![],
         unseen: vec![],
+        moved: vec![],
     };
     let wear = render_wear(now, &wear_facts(&read, &["GameCult/Huginn".into(), "GameCult/Ratatoskr".into()], &Slug(INSTANCE.into()), now));
     assert!(wear.contains("- changed by others: GameCult/Huginn: 1 commit pushed by void (1 h)\n"), "{wear}");

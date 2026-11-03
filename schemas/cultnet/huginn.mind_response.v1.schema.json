@@ -4338,9 +4338,15 @@
       ]
     },
     "RepoActivity": {
-      "description": "The answer to an activity read. `events` are other people's changes only,\nthe asker's own login already dropped, and on a read with no `after` only\nthose of the last 72 hours: the reader filters nothing again. `head` is the\nnewest feed id the read saw in those repos, whether or not any event\nsurvived the filter, an entry older than the window too: the cursor to ask\n`after` next. `more` says some repo's feed had more to give past the page\ncap, before it reached `after` (or the window start on a read with no\n`after`). `open_prs` and `unseen` come only on a read with no `after`.",
+      "description": "The answer to an activity read. `events` are other people's changes only,\nthe asker's own login already dropped, and on a read with no `after` only\nthose of the last 72 hours: the reader filters nothing again. `head` is the\nnewest feed id the read saw in those repos, whether or not any event\nsurvived the filter, an entry older than the window too: the cursor to ask\n`after` next. `capped` names the repos whose feed the read stopped reading at its page limit: their older entries were not read.\n`open_prs`, `unseen` and `moved` come only on a read with no `after`.",
       "type": "object",
       "properties": {
+        "capped": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrgRepo"
+          }
+        },
         "events": {
           "type": "array",
           "items": {
@@ -4352,8 +4358,12 @@
           "format": "uint64",
           "minimum": 0
         },
-        "more": {
-          "type": "boolean"
+        "moved": {
+          "description": "Of those, the ones whose feed answered a redirect that names another repo. The redirect is not followed.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RepoMoved"
+          }
         },
         "open_prs": {
           "type": "array",
@@ -4362,7 +4372,7 @@
           }
         },
         "unseen": {
-          "description": "Repos asked about that the anonymous org listing does not hold.",
+          "description": "Repos asked about that the anonymous read cannot see: the org listing does not hold them, or their feed answered 404 or a redirect.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/OrgRepo"
@@ -4372,9 +4382,10 @@
       "required": [
         "head",
         "events",
-        "more",
+        "capped",
         "open_prs",
-        "unseen"
+        "unseen",
+        "moved"
       ]
     },
     "RepoChange": {
@@ -4464,6 +4475,22 @@
         "repo",
         "actor",
         "change"
+      ]
+    },
+    "RepoMoved": {
+      "description": "A redirect the forge answered for a repo's feed: it points at `to`.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "to": {
+          "$ref": "#/$defs/OrgRepo"
+        }
+      },
+      "required": [
+        "from",
+        "to"
       ]
     },
     "ReportCommit": {

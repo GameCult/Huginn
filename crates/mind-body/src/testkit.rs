@@ -204,7 +204,7 @@ impl MindPort for TestMind {
 
     /// A forge with nothing new in it: the daemon with a healthy forge and a quiet org.
     fn stewarded_activity(&self, _repos: &[huginn_mind::eureka_pipeline::OrgRepo], after: Option<u64>) -> Result<huginn_mind::RepoActivity> {
-        Ok(huginn_mind::RepoActivity { head: after.unwrap_or(0), events: vec![], more: false, open_prs: vec![], unseen: vec![] })
+        Ok(huginn_mind::RepoActivity { head: after.unwrap_or(0), events: vec![], capped: vec![], open_prs: vec![], unseen: vec![], moved: vec![] })
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {

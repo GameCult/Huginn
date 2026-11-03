@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use huginn_mind::eureka_pipeline::{OrgRepo, Short, Slug};
-use huginn_mind::{OpenPr, PrAction, RepoActivity, RepoChange, RepoEvent};
+use huginn_mind::{OpenPr, PrAction, RepoActivity, RepoChange, RepoEvent, RepoMoved};
 use serde_json::Value;
 
 use super::{Catalog, Forge, SourceRepo};
@@ -100,42 +100,66 @@ impl Forge for HttpForge {
 /// The whole of one activity read, from its first call to its last. A call is given what is left of it, so a forge that
 /// answers slowly, and not only one that never answers, cannot hold the daemon's one thread longer than this.
 const ACTIVITY_CALL_TIMEOUT: Duration = Duration::from_secs(2);
-/// How many pages of one repo's feed a read takes: 200 entries, of anyone. A repo with more inside the read's reach sets `more`.
+/// How many pages of one repo's feed a read takes: 200 entries, of anyone. A repo with more inside the read's reach is named in `capped`.
 const REPO_FEED_PAGES: usize = 4;
 /// How far back a read with no cursor looks.
 const FIRST_WINDOW_MS: i64 = 72 * 3600 * 1000;
 
 impl HttpForge {
-    /// One GET inside the read's budget, anonymous. An error names no address: the forge's answer is the reader's to know about,
-    /// and nothing of it reaches a refusal.
-    fn within(&self, path: &str, deadline: Instant) -> Result<Value> {
+    /// One GET inside the read's budget, anonymous, and no redirect followed: a redirect names a path on the public address, which the
+    /// loopback does not serve. An error names no address: the forge's answer is the reader's to know about, and nothing of it reaches
+    /// a refusal.
+    fn answer(&self, path: &str, deadline: Instant) -> Result<ureq::http::Response<ureq::Body>> {
         let left = deadline.checked_duration_since(Instant::now()).filter(|left| !left.is_zero()).context("the activity read ran out of time")?;
-        let mut response = self
-            .agent
+        self.agent
             .get(format!("{}{path}", self.base))
             .config()
+            .max_redirects(0)
+            .max_redirects_will_error(false)
             .timeout_global(Some(left))
             .build()
             .call()
-            .map_err(|_| anyhow::anyhow!("the forge did not answer"))?;
-        ensure!(response.status().as_u16() == 200, "the forge refused a read");
-        let body = response.body_mut().read_to_string().map_err(|_| anyhow::anyhow!("the forge's answer was cut off"))?;
-        serde_json::from_str(&body).map_err(|_| anyhow::anyhow!("the forge's answer is not JSON"))
+            .map_err(|_| anyhow::anyhow!("the forge did not answer"))
+    }
+
+    /// A GET that must answer 200 with JSON, or the read fails.
+    fn within(&self, path: &str, deadline: Instant) -> Result<Value> {
+        json_of(self.answer(path, deadline)?)?.context("the forge refused a read")
+    }
+
+    /// One page of one repo's feed. A repo the anonymous read cannot reach answers 404 (private) or a redirect (renamed): that is a fact
+    /// about the repo, `Dark`, and the read goes on. Any other refusal fails the read.
+    fn feed(&self, repo: &OrgRepo, page: usize, deadline: Instant) -> Result<Feed> {
+        let response = self.answer(&format!("/api/v1/repos/{}/activities/feeds?limit={PAGE}&page={page}", repo.0), deadline)?;
+        let status = response.status().as_u16();
+        if status == 404 || (300..400).contains(&status) {
+            let to = response.headers().get("location").and_then(|location| location.to_str().ok()).and_then(redirect_target).filter(|to| !to.0.eq_ignore_ascii_case(&repo.0));
+            return Ok(Feed::Dark(to));
+        }
+        Ok(Feed::Entries(json_of(response)?.context("the forge refused a read")?))
     }
 
     /// What others did in `repos` on the forge, and on a read with no cursor what is open and what the forge cannot show. Each repo's
     /// own feed is read, newest first, down to the cursor, or on a read with no cursor down to 72 hours ago, so other repos' traffic
-    /// cannot crowd hers out. `more` is set when a repo's feed had more to give past the page cap. One read, one budget; the first
-    /// call that fails, or that the budget cannot reach, fails the read whole: an answer is complete or says `more`, never a silent
+    /// cannot crowd hers out. `capped` names a repo whose feed the read stopped at the page cap. A repo whose feed answers 404 or a redirect (private, renamed) is a fact about that repo, never a failure of the read: it is `unseen`, and a redirect that names a repo is `moved` and is not followed. A network failure or the budget still fails the read whole. One read, one budget; the first
+    /// call that fails, or that the budget cannot reach, fails the read whole: an answer is complete or names `capped`, never a silent
     /// part. Only ids, instants, logins, repo names, numbers and counts leave: a title, a comment and a commit message are never read.
     pub fn activity(&self, repos: &[OrgRepo], instance: &Slug, after: Option<u64>, now: DateTime<Utc>) -> Result<RepoActivity> {
         let deadline = Instant::now() + ACTIVITY_CALL_TIMEOUT;
         let window_start = if after.is_some() { i64::MIN } else { now.timestamp_millis() - FIRST_WINDOW_MS };
-        let (mut head, mut events, mut more) = (0_u64, Vec::new(), false);
+        let (mut head, mut events, mut capped, mut dark, mut moved) = (0_u64, Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for repo in repos {
             let mut reached = false;
             for page in 1..=REPO_FEED_PAGES {
-                let feed = self.within(&format!("/api/v1/repos/{}/activities/feeds?limit={PAGE}&page={page}", repo.0), deadline)?;
+                let feed = match self.feed(repo, page, deadline)? {
+                    Feed::Entries(feed) => feed,
+                    Feed::Dark(to) => {
+                        dark.push(repo.clone());
+                        moved.extend(to.map(|to| RepoMoved { from: repo.clone(), to }));
+                        reached = true;
+                        break;
+                    }
+                };
                 let entries = feed.as_array().context("the forge's feed is not a list")?;
                 for entry in entries {
                     let Some(id) = entry["id"].as_u64() else { continue };
@@ -152,12 +176,15 @@ impl HttpForge {
                     break;
                 }
             }
-            more |= !reached;
+            if !reached {
+                capped.push(repo.clone());
+            }
         }
         events.sort_by(|a, b| b.id.cmp(&a.id));
         // The cursor never moves backwards: a read that saw nothing new keeps the one it was given.
         head = head.max(after.unwrap_or(0));
         let (mut open_prs, mut unseen) = (Vec::new(), Vec::new());
+        let moved = if after.is_none() { moved } else { Vec::new() };
         if after.is_none() {
             // The open PRs and the org listing are paged to the short page, never to a cap: the budget ends a read that runs long, and
             // ends it whole, so each list is complete or the read fails. A cap would say "nothing else is open" past it, falsely.
@@ -178,10 +205,34 @@ impl HttpForge {
                     break;
                 }
             }
-            unseen = repos.iter().filter(|repo| !listed.contains(&repo.identity())).cloned().collect();
+            unseen = repos.iter().filter(|repo| !listed.contains(&repo.identity()) || dark.contains(repo)).cloned().collect();
         }
-        Ok(RepoActivity { head, events, more, open_prs, unseen })
+        Ok(RepoActivity { head, events, capped, open_prs, unseen, moved })
     }
+}
+
+/// What one page of a repo's feed answered.
+enum Feed {
+    Entries(Value),
+    /// 404 or a redirect; the repo the redirect names, when it names one.
+    Dark(Option<OrgRepo>),
+}
+
+/// The body of a response as JSON when it answered 200, else `None`.
+fn json_of(mut response: ureq::http::Response<ureq::Body>) -> Result<Option<Value>> {
+    if response.status().as_u16() != 200 {
+        return Ok(None);
+    }
+    let body = response.body_mut().read_to_string().map_err(|_| anyhow::anyhow!("the forge's answer was cut off"))?;
+    serde_json::from_str(&body).map(Some).map_err(|_| anyhow::anyhow!("the forge's answer is not JSON"))
+}
+
+/// The repo a redirect's `Location` names: the two segments after `/repos/`, owner and name, wherever the path sits and whatever follows.
+fn redirect_target(location: &str) -> Option<OrgRepo> {
+    let rest = location.split_once("/repos/")?.1.split(['?', '#']).next()?;
+    let mut segments = rest.split('/');
+    let (owner, name) = (segments.next().filter(|owner| !owner.is_empty())?, segments.next().filter(|name| !name.is_empty())?);
+    Some(OrgRepo(format!("{owner}/{name}")))
 }
 
 fn instant_ms(text: &str) -> Option<i64> {
@@ -243,7 +294,7 @@ fn open_pr_of(pr: &Value, repos: &[OrgRepo], instance: &Slug) -> Option<OpenPr> 
 
 #[cfg(test)]
 mod tests {
-    use huginn_mind::{PrAction, RepoChange};
+    use huginn_mind::{PrAction, RepoChange, RepoMoved};
     use serde_json::json;
 
     use super::*;
@@ -325,9 +376,34 @@ mod tests {
         assert!(HttpForge::new(&unstated).catalog().unwrap().shortfall.unwrap().contains("X-Total-Count"));
     }
 
+    /// What a fake forge answers: a status, the `Location` header when there is one, and a body.
+    struct Reply {
+        status: u16,
+        location: Option<String>,
+        body: String,
+    }
+
+    impl From<String> for Reply {
+        fn from(body: String) -> Self {
+            Self { status: 200, location: None, body }
+        }
+    }
+
+    impl Reply {
+        /// What the live forge answers an anonymous reader for a private repo.
+        fn not_found() -> Self {
+            Self { status: 404, location: None, body: json!({ "message": "The target couldn't be found." }).to_string() }
+        }
+
+        /// What the live forge answers for a renamed repo: a 301 to its public address, `/forge` prefix and all.
+        fn moved_to(location: &str) -> Self {
+            Self { status: 301, location: Some(location.to_owned()), body: String::new() }
+        }
+    }
+
     /// Answers each request by its path from `routes`; a path it has no answer for is held open and never answered, as a hung forge
     /// does. Every path asked is recorded in order.
-    fn forge_of(routes: impl Fn(&str) -> Option<String> + Send + 'static) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    fn forge_of<R: Into<Reply>>(routes: impl Fn(&str) -> Option<R> + Send + 'static) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -342,9 +418,10 @@ mod tests {
                 let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
                 let path = request.split_whitespace().nth(1).unwrap_or_default().to_owned();
                 record.lock().unwrap().push(path.clone());
-                match routes(&path) {
-                    Some(body) => {
-                        write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+                match routes(&path).map(Into::into) {
+                    Some(Reply { status, location, body }) => {
+                        let location = location.map(|location| format!("location: {location}\r\n")).unwrap_or_default();
+                        write!(stream, "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{location}content-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
                     }
                     None => held.push(stream),
                 }
@@ -419,7 +496,7 @@ mod tests {
             ]
         );
         assert_eq!(read.events[0].at, at("2026-11-02T18:40:00Z").timestamp_millis() as u64);
-        assert!(read.open_prs.is_empty() && read.unseen.is_empty() && !read.more, "a cursor asks for neither list");
+        assert!(read.open_prs.is_empty() && read.unseen.is_empty() && read.capped.is_empty() && read.moved.is_empty(), "a cursor asks for neither list");
         let wire = serde_json::to_string(&read).unwrap();
         assert!(!wire.contains("CANARY") && !wire.contains("obey") && !wire.contains("Message"), "no forge text leaves the read: {wire}");
         let asked = asked.lock().unwrap().clone();
@@ -452,13 +529,13 @@ mod tests {
 
         let (base, asked) = forge_of(feed("nibu"));
         let far = HttpForge::new(&base).activity(&wanted, &me, Some(5), now).unwrap();
-        assert!(far.more, "stopped at the cap with the cursor not reached");
+        assert!(far.capped == repos(&["GameCult/Huginn"]), "stopped at the cap with the cursor not reached");
         assert_eq!((far.events.len(), far.head), (200, 2500));
         assert_eq!(asked.lock().unwrap().len(), 4, "four pages and no more");
 
         let (base, asked) = forge_of(feed("nibu"));
         let near = HttpForge::new(&base).activity(&wanted, &me, Some(2300), now).unwrap();
-        assert!(!near.more);
+        assert!(near.capped.is_empty());
         assert_eq!((near.events.len(), near.head), (20, 2500), "ids above the cursor only");
         assert_eq!(asked.lock().unwrap().len(), 1);
 
@@ -481,7 +558,7 @@ mod tests {
         let (base, asked) = forge_of(move |path| if path.contains("/orgs/GameCult/activities") { Some(busy.clone()) } else { repo_feed(&hers, path).or_else(|| Some("[]".into())) });
         let read = HttpForge::new(&base).activity(&repos(&["GameCult/Ratatoskr"]), &me(), None, at(NOW)).unwrap();
         assert_eq!(read.events.iter().map(|event| event.id).collect::<Vec<_>>(), [300]);
-        assert!(!read.more);
+        assert!(read.capped.is_empty());
         assert!(asked.lock().unwrap().iter().all(|path| !path.contains("/orgs/GameCult/activities")));
     }
 
@@ -498,32 +575,32 @@ mod tests {
         let wanted = repos(&["GameCult/Huginn"]);
         let (base, _) = forge_of(move |path| if is_feed(path) { repo_feed(&entries, path) } else { Some("[]".into()) });
         let busy = HttpForge::new(&base).activity(&wanted, &me(), None, at(NOW)).unwrap();
-        assert_eq!((busy.events.iter().map(|event| event.id).collect::<Vec<_>>(), busy.head, busy.more), (vec![300, 200], 300, false));
+        assert_eq!((busy.events.iter().map(|event| event.id).collect::<Vec<_>>(), busy.head, busy.capped.len()), (vec![300, 200], 300, 0));
 
         let quiet_entries = vec![push_at(50, "GameCult/Huginn", "Nibu", 100), push_at(40, "GameCult/Huginn", "Nibu", 120)];
         let (base, _) = forge_of(move |path| if is_feed(path) { repo_feed(&quiet_entries, path) } else { Some("[]".into()) });
         let forge = HttpForge::new(&base);
         let first = forge.activity(&wanted, &me(), None, at(NOW)).unwrap();
-        assert_eq!((first.events.len(), first.head, first.more), (0, 50, false), "nothing in the window, and a cursor all the same");
+        assert_eq!((first.events.len(), first.head, first.capped.len()), (0, 50, 0), "nothing in the window, and a cursor all the same");
         let next = forge.activity(&wanted, &me(), Some(first.head), at(NOW)).unwrap();
         assert_eq!((next.events.len(), next.head), (0, 50), "the history is not told as news");
     }
 
     /// A feed of exactly one full page goes on to the next page, and a short page ends it; a repo whose feed runs past the page cap
-    /// says `more` instead of ending quietly.
+    /// is named in `capped` instead of ending quietly.
     #[test]
     fn a_full_feed_page_asks_for_the_next_and_a_repo_past_the_cap_says_more() {
         let wanted = repos(&["GameCult/Huginn"]);
         let entries: Vec<Value> = (0..53).map(|n| push_at(1000 - n, "GameCult/Huginn", "Nibu", 5)).collect();
         let (base, asked) = forge_of(move |path| if is_feed(path) { repo_feed(&entries, path) } else { Some("[]".into()) });
         let read = HttpForge::new(&base).activity(&wanted, &me(), None, at(NOW)).unwrap();
-        assert_eq!((read.events.len(), read.more), (53, false));
+        assert_eq!((read.events.len(), read.capped.len()), (53, 0));
         assert_eq!(asked.lock().unwrap().iter().filter(|path| is_feed(path)).count(), 2, "page 2 was asked, page 3 was not");
 
         let entries: Vec<Value> = (0..400).map(|n| push_at(5000 - n, "GameCult/Huginn", "Nibu", 5)).collect();
         let (base, asked) = forge_of(move |path| if is_feed(path) { repo_feed(&entries, path) } else { Some("[]".into()) });
         let read = HttpForge::new(&base).activity(&wanted, &me(), None, at(NOW)).unwrap();
-        assert_eq!((read.events.len(), read.more), (REPO_FEED_PAGES * PAGE, true), "200 read and the rest disclosed");
+        assert_eq!((read.events.len(), read.capped), (REPO_FEED_PAGES * PAGE, repos(&["GameCult/Huginn"])), "200 read and the rest disclosed");
         assert_eq!(asked.lock().unwrap().iter().filter(|path| is_feed(path)).count(), REPO_FEED_PAGES);
     }
 
@@ -540,12 +617,14 @@ mod tests {
         let listing = vec![Value::Array(names[..PAGE].to_vec()).to_string(), Value::Array(names[PAGE..].to_vec()).to_string()];
         let sample = sample();
         let (base, asked) = forge_of(move |path| {
-            if is_feed(path) {
-                repo_feed(&sample, path)
+            if is_feed(path) && path.contains("/GameCult/Ghost/") {
+                Some(Reply::not_found())
+            } else if is_feed(path) {
+                repo_feed(&sample, path).map(Reply::from)
             } else if path.contains("/issues/search") {
-                search.get(page_number(path)? - 1).cloned()
+                search.get(page_number(path)? - 1).cloned().map(Reply::from)
             } else if path.contains("/orgs/GameCult/repos") {
-                listing.get(page_number(path)? - 1).cloned()
+                listing.get(page_number(path)? - 1).cloned().map(Reply::from)
             } else {
                 None
             }
@@ -593,6 +672,64 @@ mod tests {
         assert_eq!(asked.lock().unwrap().iter().filter(|path| path.contains("/issues/search")).count(), 4, "to the short page");
     }
 
+    /// The forge as it answers an anonymous reader: public repos give their feed (`[]` when quiet), a private repo answers 404, a
+    /// renamed repo answers 301 to a path under `/forge` that this loopback does not serve (asking it gives 404).
+    fn live_forge(entries: Vec<Value>, public: &'static [&'static str], listing: String) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        forge_of(move |path| {
+            if path.starts_with("/forge/") {
+                return Some(Reply::not_found());
+            }
+            if is_feed(path) {
+                let repo = path.strip_prefix("/api/v1/repos/")?.split("/activities").next()?;
+                if repo.eq_ignore_ascii_case("GameCult/cinny") {
+                    return Some(Reply::moved_to(&format!("/forge/api/v1/repos/GameCult/Ratatoskr/activities/feeds?limit={PAGE}&page=1")));
+                }
+                return if public.iter().any(|name| name.eq_ignore_ascii_case(repo)) { repo_feed(&entries, path).map(Reply::from) } else { Some(Reply::not_found()) };
+            }
+            if path.contains("/issues/search") {
+                return Some("[]".to_owned().into());
+            }
+            path.contains("/orgs/GameCult/repos").then(|| listing.clone().into())
+        })
+    }
+
+    /// A repo the anonymous read cannot reach is a fact about that repo, not the end of the read: a private repo (404) and a renamed one
+    /// (301, whose target is not followed) are `unseen` and the others still read, on a first read and on a later one; the redirect's
+    /// target is told; a network failure still fails the read whole.
+    #[test]
+    fn a_repo_the_anonymous_read_cannot_reach_is_unseen_and_the_others_still_read() {
+        let entries = vec![push_at(300, "GameCult/Huginn", "Nibu", 10), push_at(200, "GameCult/Ratatoskr", "void", 11)];
+        let listing = json!([{ "full_name": "GameCult/Huginn" }, { "full_name": "GameCult/Ratatoskr" }]).to_string();
+        let (base, asked) = live_forge(entries, &["GameCult/Huginn", "GameCult/Ratatoskr"], listing);
+        let wanted = repos(&["GameCult/gamecult-ops", "GameCult/Huginn", "GameCult/cinny", "GameCult/Ratatoskr"]);
+        let forge = HttpForge::new(&base);
+
+        let first = forge.activity(&wanted, &me(), None, at(NOW)).unwrap();
+        assert_eq!(first.events.iter().map(|event| event.id).collect::<Vec<_>>(), [300, 200], "the readable repos were read");
+        assert_eq!(first.unseen, repos(&["GameCult/gamecult-ops", "GameCult/cinny"]));
+        assert_eq!(first.moved, [RepoMoved { from: "GameCult/cinny".into(), to: "GameCult/Ratatoskr".into() }]);
+        assert!(first.capped.is_empty());
+        assert!(asked.lock().unwrap().iter().all(|path| !path.starts_with("/forge/")), "a redirect is not followed: {:?}", asked.lock().unwrap());
+
+        let later = forge.activity(&wanted, &me(), Some(250), at(NOW)).unwrap();
+        assert_eq!((later.events.iter().map(|event| event.id).collect::<Vec<_>>(), later.head), (vec![300], 300), "a later read goes on past the dark repos");
+        assert!(later.unseen.is_empty() && later.moved.is_empty(), "a cursor asks for neither list");
+
+        let (base, _) = forge_of(|_| None::<String>);
+        assert!(HttpForge::new(&base).activity(&wanted, &me(), None, at(NOW)).is_err(), "no answer at all still fails the read");
+        let (base, _) = forge_of(|path| is_feed(path).then(|| Reply { status: 500, location: None, body: String::new() }));
+        assert!(HttpForge::new(&base).activity(&wanted, &me(), None, at(NOW)).is_err(), "a server error is not a fact about a repo");
+    }
+
+    /// A redirect names its repo in its path wherever that sits, and a redirect that names none tells nothing.
+    #[test]
+    fn a_redirect_names_its_repo_only_when_it_does() {
+        let target = |text: &str| redirect_target(text).map(|repo| repo.0);
+        assert_eq!(target("/forge/api/v1/repos/GameCult/Ratatoskr"), Some("GameCult/Ratatoskr".into()));
+        assert_eq!(target("https://eureka.gamecult.org/forge/api/v1/repos/GameCult/Ratatoskr/activities/feeds?limit=50&page=1"), Some("GameCult/Ratatoskr".into()));
+        assert_eq!((target("/user/login"), target("/forge/api/v1/repos/GameCult"), target("/api/v1/repos//x")), (None, None, None));
+    }
+
     /// Every PR op the forge writes becomes its event with the number in element 0, and no other op does; the forge's source writes
     /// all eight the same way, though only four have been seen in its live feed.
     #[test]
@@ -625,7 +762,7 @@ mod tests {
     /// stalls fails it too: the bound is on the whole read.
     #[test]
     fn a_hung_forge_fails_the_read_within_its_bound() {
-        let (base, _) = forge_of(|_| None);
+        let (base, _) = forge_of(|_| None::<String>);
         let started = Instant::now();
         let read = HttpForge::new(&base).activity(&repos(&["GameCult/Huginn"]), &me(), None, at("2026-11-02T23:00:00Z"));
         assert!(read.is_err());

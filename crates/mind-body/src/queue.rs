@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn an_activity_read_goes_through_the_port_as_one_request() {
         let seen = std::cell::RefCell::new(Vec::new());
-        let read = RepoActivity { head: 77, events: vec![], more: true, open_prs: vec![], unseen: vec![OrgRepo::from("GameCult/Ghost")] };
+        let read = RepoActivity { head: 77, events: vec![], capped: vec![OrgRepo::from("GameCult/Huginn")], open_prs: vec![], unseen: vec![OrgRepo::from("GameCult/Ghost")], moved: vec![] };
         let answer = std::cell::RefCell::new(HuginnMindResponse::Activity(read.clone()));
         let port = HuginnMind::over(Slug(INSTANCE.into()), Box::new(|request| {
             seen.borrow_mut().push(request);

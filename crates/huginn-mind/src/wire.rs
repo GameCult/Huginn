@@ -154,17 +154,25 @@ pub struct OpenPr {
 /// those of the last 72 hours: the reader filters nothing again. `head` is the
 /// newest feed id the read saw in those repos, whether or not any event
 /// survived the filter, an entry older than the window too: the cursor to ask
-/// `after` next. `more` says some repo's feed had more to give past the page
-/// cap, before it reached `after` (or the window start on a read with no
-/// `after`). `open_prs` and `unseen` come only on a read with no `after`.
+/// `after` next. `capped` names the repos whose feed the read stopped reading at its page limit: their older entries were not read.
+/// `open_prs`, `unseen` and `moved` come only on a read with no `after`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RepoActivity {
     pub head: u64,
     pub events: Vec<RepoEvent>,
-    pub more: bool,
+    pub capped: Vec<OrgRepo>,
     pub open_prs: Vec<OpenPr>,
-    /// Repos asked about that the anonymous org listing does not hold.
+    /// Repos asked about that the anonymous read cannot see: the org listing does not hold them, or their feed answered 404 or a redirect.
     pub unseen: Vec<OrgRepo>,
+    /// Of those, the ones whose feed answered a redirect that names another repo. The redirect is not followed.
+    pub moved: Vec<RepoMoved>,
+}
+
+/// A redirect the forge answered for a repo's feed: it points at `to`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepoMoved {
+    pub from: OrgRepo,
+    pub to: OrgRepo,
 }
 
 /// The most hits a source search answers.
