@@ -357,7 +357,7 @@ fn the_start_message_is_the_first_thing_written_and_names_the_skill_the_instance
     let ran = go(vec![Out(result_line())]);
     assert!(matches!(&ran.events[0], Event::Wrote(_)), "the start precedes the first read: {:?}", ran.events[0]);
     let written = ran.written();
-    for needle in ["Plan usage: five_hour 42.3% allowed, resets at unix ms 1793307000000", "about 90% of the weekly allowance", "nothing enforces it"] {
+    for needle in ["Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z", "about 90% of the weekly allowance", "nothing enforces it"] {
         assert!(written[0].contains(needle), "the lease grant plan windows reach the child: {needle}: {}", written[0]);
     }
     for needle in ["Use the eureka skill.", "yggdrasil", "yggdrasil:run:selfrun-a", AGENT] {

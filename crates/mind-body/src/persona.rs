@@ -652,10 +652,10 @@ impl fmt::Display for Failure {
             Self::Doctrine => f.write_str("a configured doctrine file could not be read"),
             Self::DoctrineTooLarge => f.write_str("the doctrine files exceed the size bound"),
             Self::Lease => f.write_str("the credential lease was refused or unavailable"),
-            Self::Session => f.write_str("her session could not be started or ended without answering"),
+            Self::Session => f.write_str("your session could not be started or ended without answering"),
             Self::Undecodable => f.write_str("the reply is not a persona reply"),
             Self::OutOfBounds(field) => f.write_str(field),
-            Self::RoomNotAllowed => f.write_str("the reply speaks outside her rooms"),
+            Self::RoomNotAllowed => f.write_str("the reply speaks outside your rooms"),
             Self::Send => f.write_str("a send was refused or failed"),
             Self::SelfRun => f.write_str("the Self run could not be started"),
             Self::Memory => f.write_str("the turn's memories, settles or pulse could not be admitted"),
@@ -1595,7 +1595,7 @@ fn close_run(organs: &Organs, run: &PipelineRef, answered: u32, last_intent: Opt
         subject: run.clone(),
         sequence: next_sequence(organs.mind, run)?,
         outcome: ResolutionOutcome::Recorded { reason: reason.as_str().into() },
-        rationale: last_intent.map_or_else(|| "The Persona unit's start ended.".to_string(), |intent| format!("Her last intent: {intent}")).as_str().into(),
+        rationale: last_intent.map_or_else(|| "The Persona unit's start ended.".to_string(), |intent| format!("Your last intent: {intent}")).as_str().into(),
         resolved_on: date(organs.clock.now()),
     };
     match organs.mind.admit(AGENT, label_of(run), vec![PipelineDocument::Resolution(resolution)])? {
@@ -1944,7 +1944,7 @@ fn recent_runs(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<String>> {
     for run in runs {
         let PipelineFacts::Run { label, turn, .. } = &run.facts else { continue };
         let last = last_closing(mind, &run.id)?;
-        let mut line = format!("{} {turn:?}: {}", label.0, last.as_ref().map_or_else(|| "open".to_string(), |(.., outcome)| format!("{outcome:?}")));
+        let mut line = format!("{} {turn:?}: {}", label.0, last.as_ref().map_or_else(|| "still open".to_string(), |(.., outcome)| outcome_words(outcome)));
         if let Some((_, id, _)) = &last {
             let one = Selection { keys: Some(vec![id.id.0.clone()]), projection: "document".into(), ..Selection::default() };
             let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
@@ -2045,17 +2045,22 @@ fn message_line(config: &Config, label: &str, room: &str, sender: &str, display:
 /// The most of a run's outcome a notice carries.
 const NOTICE_OUTCOME_MAX: usize = 200;
 
-/// The organ's own line about her work: `role=organ` and no sender, text quoted and cut, so nothing a run wrote can pass for a
-/// message or write a field.
-fn notice_line(run: &str, outcome: &ResolutionOutcome, at_unix_ms: u64) -> String {
-    let words = match outcome {
+/// A closing in plain words: the reason of a Recorded one, and for the others what they point at.
+fn outcome_words(outcome: &ResolutionOutcome) -> String {
+    match outcome {
         ResolutionOutcome::Recorded { reason } => reason.0.clone(),
         ResolutionOutcome::Withdrawn { reason } => format!("withdrawn: {}", reason.0),
         ResolutionOutcome::Superseded { by } => format!("superseded by {}", by.iter().map(|by| by.id.0.as_str()).collect::<Vec<_>>().join(", ")),
         ResolutionOutcome::Answered { by } => format!("answered by {}", by.id.0),
         ResolutionOutcome::Fixed { commit, .. } => format!("fixed by {}", commit.0),
         ResolutionOutcome::Deferred { to } => format!("deferred to {}", to.id.0),
-    };
+    }
+}
+
+/// The organ's own line about her work: `role=organ` and no sender, text quoted and cut, so nothing a run wrote can pass for a
+/// message or write a field.
+fn notice_line(run: &str, outcome: &ResolutionOutcome, at_unix_ms: u64) -> String {
+    let words = outcome_words(outcome);
     let outcome: String = words.chars().take(NOTICE_OUTCOME_MAX).collect();
     format!("notice role=organ at={} text={}\n", at_text(at_unix_ms), quoted(&format!("Your Self run {run} ended: {outcome}")))
 }
