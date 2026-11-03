@@ -5750,6 +5750,42 @@ fn a_stale_refusal_is_her_next_input_and_costs_no_refusal() {
 }
 
 #[test]
+fn a_second_revision_waits_for_the_first_and_her_final_answer_spends_it() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (ask, second, newest) = (delivery(1, "swarm", "@op:chat", "who owns the stairs?"), delivery(2, "swarm", "@op:chat", "and the cellar?"), delivery(3, "swarm", "@aqua:chat", "the stairs are mine"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &second);
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap();
+        inbox.echoed();
+        arrives(&rig, &newest);
+        inbox.result(&reply_result(&says(&[("swarm", "the stairs are mine")])), true, false).unwrap();
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap();
+        assert!(inbox.written.as_ref().is_some_and(|written| written.revision), "a revision line is in flight");
+        inbox.result(&reply_result(&says(&[("swarm", "the cellar too")])), true, false).unwrap();
+        inbox.poll().unwrap();
+        assert!(inbox.revision.as_ref().is_some_and(|revision| revision.ready), "its interrupters have reached the organ");
+        assert!(!inbox.revision_ready(), "a second note is not told while the first revision line is in flight");
+        inbox.echoed();
+        assert!(!inbox.revision_ready(), "nor once it is echoed and unanswered");
+        inbox.result(&reply_result(&says(&[("swarm", "then the stairs, final")])), true, false).unwrap();
+        assert!(inbox.revision.is_none(), "her final answer lands after she took in every line: no note that a send was not sent follows it");
+        assert!(rig.chat.acked.borrow().last().is_some_and(|last| *last >= 2), "the revision batch is acked with her final answer");
+    });
+}
+
+#[test]
+fn a_stale_note_tells_her_to_drop_what_someone_has_already_said() {
+    let note = stale_note(&Revision { rooms: vec!["swarm".into()], ..Revision::default() });
+    assert!(note.contains("Send it, change it, or drop it; your answer goes out as you give it. If someone has already said it, drop it; saying nothing costs nothing."), "{note}");
+}
+
+#[test]
 fn eight_stale_refusals_in_a_row_in_different_batches_never_end_the_session() {
     let rig = Rig::new(vec![], &[]);
     rig.clock.step.set(0);

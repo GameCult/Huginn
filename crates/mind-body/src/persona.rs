@@ -35,7 +35,8 @@
 //! third in a row ends the session. Any other failure sends nothing further, acks nothing and
 //! ends the start; the run is closed Recorded with the failure, so the breaker and the next wake
 //! see it. Nothing is acked that was not answered, and a repeat of a send carries the same
-//! request id, so a start that dies between a send and its ack repeats no message.
+//! request id, so a start that dies between a send and its ack does not repeat it; an answer to a revision line carries a new id,
+//! so it can repeat a send.
 //!
 //! Each send names what her input held of its room (ruling `eureka-body:ruling:send-refused-if-room-moved`):
 //! the newest message of that room a line the CLI took in showed her. The mouth decides whether the room moved;
@@ -1239,6 +1240,11 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         Ok(self.write(batch, line, refusals))
     }
 
+    /// A revision is told once its interrupters have reached the organ and no revision line is in flight: her answer to that line is final and may have said all, so a second note would be told after it landed.
+    fn revision_ready(&self) -> bool {
+        self.revision.as_ref().is_some_and(|revision| revision.ready) && !self.echoed_revision && !self.written.as_ref().is_some_and(|written| written.revision)
+    }
+
     fn poll_every_s(&self) -> i64 {
         PERSONA_POLL_S
     }
@@ -1260,7 +1266,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
             revision.polls += 1;
             revision.ready |= revision.polls >= REVISION_POLLS || revision.awaiting.iter().all(|id| pending.iter().any(|delivery| delivery.event_id == *id));
         }
-        let revision_ready = self.revision.as_ref().is_some_and(|revision| revision.ready);
+        let revision_ready = self.revision_ready();
         let Some(oldest) = pending.first() else { return Ok(Polled { pending: self.retell.is_some() || revision_ready || !self.notices.is_empty(), yield_now: false }) };
         if Conversation::of(oldest) != self.conversation {
             return Ok(Polled { pending: false, yield_now: true });
@@ -1280,7 +1286,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
 
     fn tell(&mut self) -> Result<String> {
         let notices = std::mem::take(&mut self.notices).concat();
-        if self.revision.as_ref().is_some_and(|revision| revision.ready)
+        if self.revision_ready()
             && let Some(revision) = self.revision.take()
         {
             // Her refused words are not repeated: she has them. The messages that interrupted her are the line.
@@ -1363,7 +1369,9 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 // failed (a batch's third refusal leaves no retell to hold the ack back). Deliveries are
                 // told in seq order, so while one is unanswered below an answered seq, everything
                 // answered lies above it and nothing is acked; the ack follows its answer.
-                self.answered_through = self.answered_through.max(batch.iter().map(|delivery| delivery.seq).max().unwrap_or(0));
+                // Her final answer lands after she took in every line, so a revision still waiting is answered by it and its note, that a send was not sent, would be false.
+                let spent = if final_reply { self.revision.take().map(|revision| revision.batch) } else { None };
+                self.answered_through = self.answered_through.max(batch.iter().chain(spent.iter().flatten()).map(|delivery| delivery.seq).max().unwrap_or(0));
                 if self.progress.refused.is_some_and(|refused| batch.iter().any(|delivery| delivery.seq == refused.lowest)) {
                     self.progress.refused = None;
                 }
@@ -1456,7 +1464,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
 fn stale_note(revision: &Revision) -> String {
     let rooms = revision.rooms.join(", ");
     let sent = if revision.sent.is_empty() { String::new() } else { format!(" Already sent: {}.", revision.sent.join(", ")) };
-    format!("Your message to {rooms} was not sent: newer messages reached that room first, below. Send it, change it, or drop it; your answer goes out as you give it.{sent} Nothing else in that reply was kept: repeat any remember, settle or start_self_run you still want.")
+    format!("Your message to {rooms} was not sent: newer messages reached that room first, below. Send it, change it, or drop it; your answer goes out as you give it. If someone has already said it, drop it; saying nothing costs nothing.{sent} Nothing else in that reply was kept: repeat any remember, settle or start_self_run you still want.")
 }
 
 /// What a refused batch's next line opens with: which field to correct, and that the refused reply did nothing.
