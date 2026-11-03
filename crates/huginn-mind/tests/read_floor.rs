@@ -168,5 +168,5 @@ fn read_floor() {
         println!("FLOOR read {:<28} {:>10.1} us", name, took.as_secs_f64() * 1e6);
     }
     println!("FLOOR admit_ms={:.0} ({})", admit.as_secs_f64() * 1e3, if matches!(outcome, huginn_mind::PipelineAdmissionOutcome::Committed { .. }) { "committed".to_string() } else { format!("{outcome:?}") });
-    println!("FLOOR read_back_ms={:.0} ({:?})", read_back_time.as_secs_f64() * 1e3, read_back.map(|count| count));
+    println!("FLOOR read_back_ms={:.0} ({:?})", read_back_time.as_secs_f64() * 1e3, read_back);
 }
