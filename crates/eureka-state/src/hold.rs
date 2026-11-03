@@ -44,6 +44,10 @@ pub fn citing(target: &PipelineRef, role: Option<&str>) -> Citation {
     }
 }
 
+/// Severities that block a cut: the one answer to what counts as blocking, read by `huginn findings --blocking` and by a Mind's
+/// first line.
+pub const BLOCKING: [&str; 2] = ["Blocker", "High"];
+
 pub fn of_kind(kind: PipelineKind) -> Selection {
     Selection {
         schemas: Some(vec![kind.type_id().to_string()]),
