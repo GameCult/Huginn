@@ -508,9 +508,12 @@ impl<S: MindStore> Mind<S> {
     /// read path `view` uses; every pipeline write a receipt names is stored,
     /// and every stored document has its receipt. Returns how many documents
     /// it read back; an empty store is a fault. The held image is first set beside a
-    /// fresh fold of the store and must equal it, so every upgrade proves the held
-    /// state against the store. One pass over the mind, O(N). Admits nothing. A fault
-    /// names the document's key and what failed, never its content.
+    /// fresh fold of the store and must equal it. That clause proves the holder's advance
+    /// only for a mind that has committed since it opened; on the just-opened mind the
+    /// upgrade reads, both sides are one fold of the same bytes, so a wrong fold passes
+    /// it. What the gate proves today is the per-document read-back below. One pass over
+    /// the mind, O(N). Admits nothing. A fault names the document's key and what failed,
+    /// never its content.
     pub fn read_back(&self) -> Result<usize, MindRefusal> {
         self.read_back_through(|reader, id| reader.view(id))
     }
@@ -2030,6 +2033,29 @@ mod tests {
         assert_eq!((ids(&page), page.matched, page.next), (vec![shelf.r4.clone()], plain_matched(&shelf.mind, &standing(Selection::default())), None), "the limit keeps the best, not the earliest");
         let page = rank_all(&shelf.mind, &standing(Selection::default()), &asking(1), &by_ordinal).page;
         assert_eq!((ids(&page), page.matched), (vec![shelf.r4.clone()], plain_matched(&shelf.mind, &standing(Selection::default()))), "top_k bounds the page too");
+    }
+
+    /// Three equal scores in every arrival order rank by ordinal alone, so a lookup that gives
+    /// every hit the same row (or the wrong one) is seen.
+    #[test]
+    fn equal_scores_rank_by_each_documents_own_ordinal_in_any_arrival_order() {
+        let shelf = shelf();
+        let image = shelf.mind.image().unwrap();
+        let named = [(K::Question, shelf.q2.clone()), (K::Ruling, shelf.r4.clone()), (K::Resolution, shelf.withdrawn_resolution.clone())];
+        let ordinal = |(kind, key): &(K, String)| image.row(image.id_of(*kind, key).unwrap()).ordinal;
+        let mut expected: Vec<(K, String)> = named.to_vec();
+        expected.sort_by_key(ordinal);
+        assert!(ordinal(&expected[0]) < ordinal(&expected[1]) && ordinal(&expected[1]) < ordinal(&expected[2]), "the fixture's ordinals are distinct");
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let hits: Vec<_> = order.iter().map(|at| hit(named[*at].0, &named[*at].1, 0.5)).collect();
+            let page = rank_all(&shelf.mind, &Selection::default(), &asking(10), &hits).page;
+            assert_eq!(ids(&page), expected.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>(), "arrival order {order:?}");
+            // The cut is where the tie-break decides: the page keeps the earliest ordinals.
+            let keys: Vec<String> = expected.iter().map(|(_, key)| key.clone()).collect();
+            let limited = Selection { limit: Some(1), ..Selection::default() };
+            assert_eq!(ids(&rank_all(&shelf.mind, &limited, &asking(10), &hits).page), keys[..1].to_vec(), "limit 1, arrival order {order:?}");
+            assert_eq!(ids(&rank_all(&shelf.mind, &Selection::default(), &asking(2), &hits).page), keys[..2].to_vec(), "top_k 2, arrival order {order:?}");
+        }
     }
 
     /// Membership is the selection's alone: a kind, a key allowlist and a
