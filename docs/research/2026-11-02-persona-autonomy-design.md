@@ -280,7 +280,7 @@ design touches.
 | `intent` (reply field) | the turn's trace row `<run>-<turn>`; the last of a start goes into that run's closing resolution `<run>` sequence n | written once per answered result; the start's last one rides the run closure; never edited | she writes it; the organ only records and displays it; nothing reads it to decide |
 | Committed / Asked memories (the "ledger") | `<instance>:memory:<run>-t<turn>-m<i>` (existing) | open until a resolution settles them (done, declined, wrong) or a Self run takes them on (Deferred) | she does, by `settle` / `for_item`; the organ admits |
 | Idea memories ("curiosities") | same key grammar | recalled by salience and recency; no lifecycle beyond memory's | she does |
-| Wear facts (later cut: stale items, PRs waiting, specs with no report) | not persisted; derived at render from records' admission times and the forge index | recomputed every turn; disappear when the record moves | the organ derives; Huginn's index owns the repo facts (`stewarded-activity-from-huginn`) |
+| Wear facts (repo lines landed with `repo-activity`; record lines are cut `wear-facts`: specs with no report, open Soul findings, quiet campaigns) | not persisted; derived on a session's first line from the daemon's forge read and from records' admission times | recomputed every first line; disappear when the record moves | the organ derives; the forge owns repo facts and the daemon reads it (`stewarded-activity-from-huginn`); her own mind's records own the rest |
 | Persona state `agencyPressure` | `persona_state.v0` field, ids per pressure | edited only by her and her Self through `persona_put`; static since 2026-10-31 [F 4] | hers (`identity-write-all-visible`); harness writes nothing there (`pressure-home-ruled`: pressures are derived at render each turn) |
 | Persona state `candidateActions` | `persona_state.v0` field | empty for all eight; nothing writes or reads it | dead today; follow-up `candidate-actions-dead-field` |
 | Flush `Shown` | in-memory per process, `Written` of the flush line | set at the flush write, consumed by the result that answers it | the write that produced the line (section 6) |
@@ -340,27 +340,30 @@ Also read rather than run: serde_json has no `preserve_order` in this workspace 
 
 ## 9. Cut sequence
 
-1. **flush-shown**: a flush written alone records what it shows (spec admitted). Deploys
-   with 2, not before.
-2. **turn-core-instruction**: the instruction heads a session's first line (every line when written; see the section 3 note), mailbox lines reworded, the
-   question tails it, `intent` first in the reply and shown back through the run closure (spec
-   admitted; depends on 1).
-3. **wake-room-tail**: the recent tail of her rooms at the head of every session start and wake
+Landed: **flush-shown** and **turn-core-instruction** (87ff30e), then **repo-activity** (545d631,
+which is the `stewarded-activity` of earlier revisions): the forge owns repo facts; the daemon
+reads it and answers `StewardedActivity`; a Mind hears of changes on her first line and by one
+organ notice on change.
+
+Still to come, in order:
+
+1. **wear-facts**: what her own mind holds about what she stewards, with ages, on her first line
+   inside the one wear bound: specs with no report, open Soul findings, campaigns with open work
+   gone quiet (`pressures-from-stewardship-state`; derived at render per `pressure-home-ruled`;
+   spec `cut-wear-facts.r2`).
+2. **wake-room-tail**: the recent tail of her rooms at the head of every session start and wake
    (ruled; needs an Imagination pass on its owner, Bifrost serving vs the organ reading Matrix,
    per follow-up `wake-room-tail`).
-4. **stewarded-activity**: Huginn serves recent changes and open PRs of her stewarded repos;
-   rendered under "Your machine" (ruled `stewarded-activity-from-huginn`; Imagination pass).
-5. **persona-doctrine-paragraph** then **persona-doctrine-set**: persona.md's Persona-turn
+3. **persona-doctrine-paragraph** then **persona-doctrine-set**: persona.md's Persona-turn
    paragraph (Eureka), then the installer's doctrine list drops CLAUDE.md and gamecult.md and
-   pins the skill commit carrying the paragraph (gamecult-ops). Ruled; independent of 1 and 2.
-6. **wear-facts**: pressures derived at render from her stewardship state (stale campaign,
-   spec with no report, PR awaiting her review, open findings), with ages
-   (`pressures-from-stewardship-state`; render-each-turn per `pressure-home-ruled`; waits on 4).
-7. **stewardship memories**: each Mind's Self writes her own memories of what she stewards
+   pins the skill commit carrying the paragraph (gamecult-ops). Ruled; independent of the others;
+   the body map records a doctrine pin at 5a294ed, so check what remains before cutting.
+4. **stewardship memories**: each Mind's Self writes her own memories of what she stewards
    (`stewardship-as-body` cut 2; Self runs, not code).
-8. **body-line**: her release, its deploy time and her tools, derived from the unit's install,
-   so a change to her body is visible as recent (after 2).
-9. **persona-card-compact**: render persona state as a compact card instead of 26-29 KB of
+5. **body-line**: her release, its deploy time and her tools, derived from the unit's install,
+   so a change to her body is visible as recent.
+6. **persona-card-compact**: render persona state as a compact card instead of 26-29 KB of
    pretty JSON (`persona-instructions-size-bound`).
+
 No speech-nudge cut: the operator ruled facts-only. The last-spoke-per-room fact belongs to
-cut 3, which reads it from the room tail.
+**wake-room-tail**, which reads it from the room tail.
