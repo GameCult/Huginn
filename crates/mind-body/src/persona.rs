@@ -2203,7 +2203,7 @@ enum WearFact {
     Yours { repo: String, number: u32, at: u64 },
     /// Specs in force with no report, on repos she stewards: each spec's record id and the revision's admission, oldest first.
     SpecsOnYours(Vec<(String, u64)>),
-    /// The same on repos she does not steward: how many in each campaign (largest first), and the oldest spec's record id and admission.
+    /// The same on repos she does not steward: how many in each campaign (by count, largest first), and the oldest spec's record id and admission.
     SpecsElsewhere { by_campaign: Vec<(String, usize)>, oldest: (String, u64) },
     /// Open Soul findings in her mind, by campaign of her slice, blocking first, then largest.
     SoulFindings(Vec<FindingRow>),
@@ -2211,15 +2211,15 @@ enum WearFact {
     QuietCampaigns(Vec<(String, u64)>),
 }
 
-/// One campaign's open Soul findings in her mind: how many, how many block, the oldest admission, and the oldest blocking finding's
-/// record id and admission when one blocks.
+/// One campaign's open Soul findings in her mind: how many, how many block, the oldest admission, and the most severe blocking
+/// finding's record id and admission (the oldest among equals) when one blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FindingRow {
     campaign: String,
     open: usize,
     blocking: usize,
     oldest: u64,
-    oldest_blocking: Option<(String, u64)>,
+    worst_blocking: Option<(String, u64)>,
 }
 
 impl WearFact {
@@ -2336,23 +2336,26 @@ fn unreported_specs(mind: &dyn MindPort) -> Result<Vec<UnreportedSpec>> {
     Ok(specs)
 }
 
-/// The Soul findings in force under the roots of her slice, counted by campaign, largest first, from every page.
+/// The Soul findings in force under the roots of her slice, counted by campaign, from every page, blocking campaigns first and then the largest.
 fn open_soul_findings(mind: &dyn MindPort, slice: &[(String, u64)]) -> Result<Vec<FindingRow>> {
     let roots: Vec<&str> = slice.iter().map(|(root, _)| root.as_str()).collect();
     let selection = any_of(any_of(in_force(of_kind(PipelineKind::Finding)), "faculty", &["Soul"]), "root", &roots);
     let mut rows: BTreeMap<String, FindingRow> = BTreeMap::new();
+    // Each row's held worst blocking finding's severity, as an index into BLOCKING (0 the worst).
+    let mut held_rank: BTreeMap<String, usize> = BTreeMap::new();
     for found in headers(mind, &selection)? {
         let PipelineFacts::Finding { severity, .. } = &found.facts else { continue };
         let at = instant_ms(&found.admission.admitted_at).ok_or_else(|| anyhow!("a finding's admission has no instant"))?;
         let campaign = root_label(&found.id);
-        let row = rows.entry(campaign.clone()).or_insert(FindingRow { campaign, open: 0, blocking: 0, oldest: at, oldest_blocking: None });
+        let row = rows.entry(campaign.clone()).or_insert(FindingRow { campaign, open: 0, blocking: 0, oldest: at, worst_blocking: None });
         row.open += 1;
         row.oldest = row.oldest.min(at);
-        if BLOCKING.contains(&format!("{severity:?}").as_str()) {
+        if let Some(rank) = BLOCKING.iter().position(|name| *name == format!("{severity:?}")) {
             row.blocking += 1;
-            let id = plain_id(&found.id.id.0);
-            if row.oldest_blocking.as_ref().is_none_or(|(held, held_at)| (at, &id) < (*held_at, held)) {
-                row.oldest_blocking = Some((id, at));
+            // The page is in admission order, so the first read at the top severity is the oldest at it.
+            if held_rank.get(&row.campaign).is_none_or(|held| rank < *held) {
+                held_rank.insert(row.campaign.clone(), rank);
+                row.worst_blocking = Some((plain_id(&found.id.id.0), at));
             }
         }
     }
@@ -2377,7 +2380,7 @@ fn record_wear_facts(mind: &dyn MindPort, repos: &[OrgRepo], open_roots: &[Strin
     let mut facts = Vec::new();
     let missing = |what: &str| WearFact::RecordsMissing(what.to_owned());
     if slice.is_none() {
-        facts.push(missing("the campaigns on your repos could not be read, so open Soul findings and quiet campaigns are absent"));
+        facts.push(missing("the campaigns of your repos could not be read, so open Soul findings and quiet campaigns are absent"));
     }
     if specs.is_none() {
         facts.push(missing("specs with no report could not be read, so they and quiet campaigns are absent"));
@@ -2468,8 +2471,8 @@ fn render_wear(now_ms: u64, facts: &[WearFact]) -> String {
             WearFact::SoulFindings(rows) => {
                 let named = rows
                     .iter()
-                    .map(|row| match &row.oldest_blocking {
-                        Some((id, at)) => format!("{} {}, {} blocking, oldest blocking {id} {}", row.campaign, row.open, row.blocking, age_text(now_ms, *at)),
+                    .map(|row| match &row.worst_blocking {
+                        Some((id, at)) => format!("{} {}, {} blocking, worst {id} {}", row.campaign, row.open, row.blocking, age_text(now_ms, *at)),
                         None => format!("{} {}, {} blocking, oldest {}", row.campaign, row.open, row.blocking, age_text(now_ms, row.oldest)),
                     })
                     .collect();
