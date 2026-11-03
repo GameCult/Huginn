@@ -8,7 +8,7 @@
 //! the next canned reply, and it ends when the canned replies are spent.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration as StdDuration;
@@ -20,7 +20,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
-use crate::chat_client::{ChatSendReceipt, ContextLine};
+use crate::chat_client::{ChatSendReceipt, ContextLine, Refusal};
 use crate::control::{ControlWriter, FileSource, SwarmWriter};
 use crate::lease_client::{LeaseRefusalKind, TokenFd};
 use crate::self_run::{Child, Read, Stop};
@@ -43,6 +43,15 @@ impl Clock for Ticking {
     }
 }
 
+/// A message in a room of the fake homeserver, as the mouth reads the head of a room.
+#[derive(Clone)]
+struct RoomEvent {
+    room: String,
+    event_id: String,
+    sender: String,
+    at_unix_ms: u64,
+}
+
 struct FakeChat {
     log: Log,
     deliveries: Deliveries,
@@ -54,6 +63,43 @@ struct FakeChat {
     receipt: Cell<u8>,
     /// Runs after each delivered send, where the world changes between turns.
     on_send: RefCell<Option<Box<dyn Fn()>>>,
+    /// The rooms of the fake homeserver, oldest first. A send with a basis is answered as the mouth answers it: refused
+    /// `RoomMoved` with the ids of the other senders' messages after what the basis names, or sent.
+    room_log: RefCell<Vec<RoomEvent>>,
+    /// What landed, by request id, as Matrix keys a transaction: a repeated id returns the old event and writes nothing.
+    landed: RefCell<BTreeMap<String, (String, String)>>,
+    /// Who the fake mouth's sends are from; her own lines never move a room for her.
+    speaker: RefCell<String>,
+    /// Acks are recorded and the deliveries stay, where several sessions share one pending.
+    keep_on_ack: Cell<bool>,
+}
+
+impl FakeChat {
+    /// The mouth's `newerThan`: from the newest event back, stopping at the one the basis saw; where it saw none, at its floor;
+    /// where it saw one the room does not hold, the whole room counts. Her own lines never move a room.
+    fn newer_than(&self, room: &str, basis: &SendBasis) -> Vec<String> {
+        let log = self.room_log.borrow();
+        let mut newer = Vec::new();
+        for event in log.iter().rev().filter(|event| event.room == room) {
+            let reached = match &basis.seen_event_id {
+                Some(seen) => &event.event_id == seen,
+                None => event.at_unix_ms <= basis.since_unix_ms,
+            };
+            if reached {
+                break;
+            }
+            if event.sender != *self.speaker.borrow() {
+                newer.push(event.event_id.clone());
+            }
+        }
+        newer.reverse();
+        newer
+    }
+
+    /// Another sender's message reaches a room.
+    fn room_hears(&self, room: &str, event_id: &str, at_unix_ms: u64) {
+        self.room_log.borrow_mut().push(RoomEvent { room: room.into(), event_id: event_id.into(), sender: "@other:chat".into(), at_unix_ms });
+    }
 }
 
 impl Chat for FakeChat {
@@ -71,18 +117,34 @@ impl Chat for FakeChat {
         if let Some(on_send) = &*self.on_send.borrow() {
             on_send();
         }
+        let newer = match (&request.basis, self.receipt.get()) {
+            (Some(basis), 0) => self.newer_than(&request.room_alias, basis),
+            _ => Vec::new(),
+        };
+        if !newer.is_empty() {
+            return Ok(ChatSendReceipt { request_id: request.request_id.clone(), event_id: None, refusal: Some(Refusal::RoomMoved), newer });
+        }
         let (event_id, refusal) = match self.receipt.get() {
-            0 => (Some("$e".to_string()), None),
-            1 => (None, Some("Brake".to_string())),
+            0 => {
+                let mut landed = self.landed.borrow_mut();
+                let (event_id, _) = landed.entry(request.request_id.clone()).or_insert_with(|| {
+                    self.room_log.borrow_mut().push(RoomEvent { room: request.room_alias.clone(), event_id: format!("$sent-{}", request.request_id), sender: self.speaker.borrow().clone(), at_unix_ms: 0 });
+                    (format!("$sent-{}", request.request_id), request.text.clone())
+                });
+                (Some(event_id.clone()), None)
+            }
+            1 => (None, Some(Refusal::Brake)),
             _ => (None, None),
         };
-        Ok(ChatSendReceipt { request_id: request.request_id.clone(), event_id, refusal })
+        Ok(ChatSendReceipt { request_id: request.request_id.clone(), event_id, refusal, newer: Vec::new() })
     }
 
     fn ack(&self, through_seq: u64) -> Result<()> {
         self.log.borrow_mut().push("ack".into());
         self.acked.borrow_mut().push(through_seq);
-        self.deliveries.borrow_mut().retain(|delivery| delivery.seq > through_seq);
+        if !self.keep_on_ack.get() {
+            self.deliveries.borrow_mut().retain(|delivery| delivery.seq > through_seq);
+        }
         Ok(())
     }
 }
@@ -278,12 +340,20 @@ fn config() -> Config {
     }
 }
 
+/// A delivery whose event the stagger tells her at once, whatever the clock does: the first of `$e<seq>`, `$e<seq>-1`... where she
+/// ranks first among the Minds. The tests that are about the stagger name their events.
 fn delivery(seq: u64, room: &str, sender: &str, text: &str) -> ChatDelivery {
+    let ranked_first = |event_id: &str| stagger_ms(&config(), &ChatDelivery { event_id: event_id.into(), ..delivery_of(seq, room, sender, text, event_id) }) == 0;
+    let event_id = (0..).map(|n| if n == 0 { format!("$e{seq}") } else { format!("$e{seq}-{n}") }).find(|id| ranked_first(id)).unwrap();
+    delivery_of(seq, room, sender, text, &event_id)
+}
+
+fn delivery_of(seq: u64, room: &str, sender: &str, text: &str, event_id: &str) -> ChatDelivery {
     ChatDelivery {
         seq,
         room_alias: room.into(),
         room_id: format!("!{room}:chat"),
-        event_id: format!("$e{seq}"),
+        event_id: event_id.into(),
         sender: sender.into(),
         sender_display: sender.trim_start_matches('@').split(':').next().unwrap_or_default().to_string(),
         text: text.into(),
@@ -319,6 +389,10 @@ impl Rig {
                 fail_send_from: Cell::new(None),
                 receipt: Cell::new(0),
                 on_send: RefCell::new(None),
+                room_log: RefCell::default(),
+                landed: RefCell::default(),
+                speaker: RefCell::new("@eureka:chat".into()),
+                keep_on_ack: Cell::new(false),
             },
             model: FakeSession {
                 log: log.clone(),
@@ -1773,7 +1847,7 @@ fn where_and_from_whom_she_learned_a_memory_comes_from_the_batch_and_no_model_fi
     assert_eq!(failure_of(rig.go()), None);
     let (_, memory) = memories(&rig).remove(0);
     assert_eq!(memory.origin, MemoryOrigin::Room { rooms: "swarm, usage".into(), heard_from: vec!["@aqua:chat".into(), "@libby:chat".into()] });
-    assert_eq!(memory.sources, vec![Short("$e1".into()), Short("$e2".into())]);
+    assert_eq!(memory.sources, vec![Short(delivery(1, "swarm", "@aqua:chat", "hello").event_id), Short(delivery(2, "usage", "@libby:chat", "hi").event_id)]);
     // A direct message: the room id and the others who spoke in it, and its own event ids only.
     let dm = Rig::new(vec![direct(1, "dm", "@aqua:chat", "psst")], &[reply(&[], json!([keeps("Learned", "a secret", &["@aqua:chat"])]), json!([]), json!(null))]);
     assert_eq!(failure_of(dm.go_with(&config())), None);
@@ -5575,4 +5649,467 @@ fn an_undated_record_makes_its_read_missing() {
         assert!(!facts.iter().any(|fact| matches!(fact, WearFact::QuietCampaigns(_))), "{spoiled}: {facts:?}");
         assert_eq!(facts.len(), 2, "{spoiled}: the missing line and the other read's facts: {facts:?}");
     }
+}
+
+// The send gate: a stale send is her next input, and a message that does not address her waits her rank.
+
+impl Rig {
+    fn organs<'a>(&'a self, sandbox: &'a Path, scratch: &'a Path) -> Organs<'a> {
+        Organs {
+            mind: &self.mind,
+            launcher: &self.launcher,
+            clock: &self.clock,
+            host: "yggdrasil-host",
+            chat: &self.chat,
+            persona: &self.persona,
+            trace: &self.trace,
+            tempo: None,
+            lender: &self.lender,
+            spawner: &self.model,
+            run_cap_s: self.cap.get(),
+            sandbox,
+            scratch,
+        }
+    }
+
+    fn the_run(&self) -> PipelineRef {
+        if holders(&self.mind, self.mind.instance(), RunTurn::PersonaTurn).unwrap().is_empty() {
+            self.open_the_run();
+        }
+        holders(&self.mind, self.mind.instance(), RunTurn::PersonaTurn).unwrap().remove(0).id
+    }
+}
+
+/// One process's inbox over `first`, driven by hand: the order of a line's echo and a result is the test's.
+fn with_inbox<R>(rig: &Rig, config: &Config, first: Vec<ChatDelivery>, f: impl FnOnce(&mut PersonaInbox<'_, FileSource, FileSource>) -> R) -> R {
+    let (sandbox, scratch) = (rig.sandbox(), rig.scratch());
+    let organs = rig.organs(&sandbox, &scratch);
+    let (control, swarm, run) = (FileSource::new(rig.store()), FileSource::new(rig.swarm_store()), rig.the_run());
+    let mut progress = Progress::default();
+    let started_ms = unix_ms(rig.clock.now());
+    let mut inbox = PersonaInbox::new(&organs, &control, &swarm, config, &run, &mut progress, first, started_ms, String::new());
+    f(&mut inbox)
+}
+
+fn reply_result(reply: &str) -> String {
+    json!({"type": "result", "subtype": "success", "is_error": false, "structured_output": serde_json::from_str::<serde_json::Value>(reply).unwrap()}).to_string()
+}
+
+fn hear(rig: &Rig, delivery: &ChatDelivery) {
+    rig.chat.room_hears(&delivery.room_alias, &delivery.event_id, delivery.at_unix_ms);
+}
+
+/// A message reaches the room and, a moment later, the organ's pending.
+fn arrives(rig: &Rig, delivery: &ChatDelivery) {
+    hear(rig, delivery);
+    rig.chat.deliveries.borrow_mut().push(delivery.clone());
+}
+
+fn trace_outcomes(rig: &Rig) -> Vec<String> {
+    rig.trace.0.borrow().iter().map(|trace| trace.outcome.clone()).collect()
+}
+
+#[test]
+fn a_stale_refusal_is_her_next_input_and_costs_no_refusal() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (ask, answer) = (delivery(1, "swarm", "@op:chat", "who owns the stairs?"), delivery(2, "swarm", "@libby:chat", "the stairs are mine"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &answer);
+        assert_eq!(inbox.result(&reply_result(&says(&[("swarm", "I own the stairs")])), true, false).unwrap(), (true, false));
+
+        let basis = rig.chat.sent.borrow()[0].basis.clone();
+        assert_eq!(basis, Some(SendBasis { seen_event_id: Some(ask.event_id.clone()), since_unix_ms: inbox.started_ms }));
+        assert!(inbox.progress.refused.is_none() && inbox.progress.failure.is_none() && inbox.retell.is_none(), "a stale send is not a refused result");
+        assert_eq!((inbox.progress.answered, inbox.progress.turn), (0, 1));
+        assert!(rig.chat.acked.borrow().is_empty(), "nothing is acked until the revision answers");
+        assert_eq!(trace_outcomes(&rig), ["stale: swarm"]);
+
+        assert!(inbox.poll().unwrap().pending, "the interrupting message has reached the organ");
+        let expected = inbox.tell_line(std::slice::from_ref(&answer), None, "").input;
+        let line = inbox.tell().unwrap();
+        assert!(line.starts_with("Your message to swarm was not sent: newer messages reached that room first, below. Send it, change it, or drop it; your answer goes out as you give it."), "{line}");
+        assert!(line.contains("Nothing else in that reply was kept: repeat any remember, settle or start_self_run you still want."));
+        assert!(!line.contains("Already sent"), "{line}");
+        assert!(!line.contains("I own the stairs"), "her refused words are not repeated: {line}");
+        assert!(line.ends_with(&expected), "the interrupting message is told as any message is, its envelope bare: {line}");
+
+        inbox.echoed();
+        arrives(&rig, &delivery(3, "swarm", "@aqua:chat", "and I the railing"));
+        inbox.result(&reply_result(&says(&[("swarm", "then the cellar is mine")])), true, false).unwrap();
+        let sent = rig.chat.sent.borrow().clone();
+        assert_eq!(sent[1].basis, None, "one revision, then her choice stands, though the room moved again");
+        assert!(sent[1].request_id.contains("-r1-"), "{}", sent[1].request_id);
+        assert!(rig.chat.landed.borrow().values().any(|(_, text)| text == "then the cellar is mine"));
+        assert_eq!((inbox.progress.answered, inbox.progress.failure), (1, None));
+        assert_eq!(rig.chat.acked.borrow().as_slice(), &[2], "the batch is acked once the revision is answered");
+    });
+}
+
+#[test]
+fn a_second_revision_waits_for_the_first_and_her_final_answer_spends_it() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (ask, second, newest) = (delivery(1, "swarm", "@op:chat", "who owns the stairs?"), delivery(2, "swarm", "@op:chat", "and the cellar?"), delivery(3, "swarm", "@aqua:chat", "the stairs are mine"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &second);
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap();
+        inbox.echoed();
+        arrives(&rig, &newest);
+        inbox.result(&reply_result(&says(&[("swarm", "the stairs are mine")])), true, false).unwrap();
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap();
+        assert!(inbox.written.as_ref().is_some_and(|written| written.revision), "a revision line is in flight");
+        inbox.result(&reply_result(&says(&[("swarm", "the cellar too")])), true, false).unwrap();
+        inbox.poll().unwrap();
+        assert!(inbox.revision.as_ref().is_some_and(|revision| revision.ready), "its interrupters have reached the organ");
+        assert!(!inbox.revision_ready(), "a second note is not told while the first revision line is in flight");
+        inbox.echoed();
+        assert!(!inbox.revision_ready(), "nor once it is echoed and unanswered");
+        inbox.result(&reply_result(&says(&[("swarm", "then the stairs, final")])), true, false).unwrap();
+        assert!(inbox.revision.is_none(), "her final answer lands after she took in every line: no note that a send was not sent follows it");
+        assert!(rig.chat.acked.borrow().last().is_some_and(|last| *last >= 2), "the revision batch is acked with her final answer");
+    });
+}
+
+#[test]
+fn a_stale_note_tells_her_to_drop_what_someone_has_already_said() {
+    let note = stale_note(&Revision { rooms: vec!["swarm".into()], ..Revision::default() });
+    assert!(note.contains("Send it, change it, or drop it; your answer goes out as you give it. If someone has already said it, drop it; saying nothing costs nothing."), "{note}");
+}
+
+#[test]
+fn eight_stale_refusals_in_a_row_in_different_batches_never_end_the_session() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    with_inbox(&rig, &config(), vec![], |inbox| {
+        for round in 0..8u64 {
+            arrives(&rig, &delivery(round * 10 + 1, "swarm", "@op:chat", &format!("question {round}")));
+            assert!(inbox.poll().unwrap().pending);
+            inbox.tell().unwrap();
+            inbox.echoed();
+            arrives(&rig, &delivery(round * 10 + 2, "swarm", "@libby:chat", &format!("answer {round}")));
+            inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
+            assert!(inbox.poll().unwrap().pending);
+            inbox.tell().unwrap();
+            inbox.echoed();
+            inbox.result(&reply_result(&says(&[("swarm", "revised")])), true, false).unwrap();
+            assert_eq!((inbox.progress.failure, inbox.progress.refused.is_none()), (None, true), "round {round}");
+        }
+        assert_eq!((inbox.progress.answered, inbox.progress.turn), (8, 16));
+    });
+    assert_eq!(trace_outcomes(&rig).iter().filter(|outcome| outcome.starts_with("stale:")).count(), 8);
+}
+
+#[test]
+fn a_result_answering_a_line_in_flight_is_not_the_revision() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (ask, answer) = (delivery(1, "swarm", "@op:chat", "question"), delivery(2, "swarm", "@libby:chat", "answer"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &answer);
+        inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap();
+        // The revision line is written; a result for the line before it arrives first, its echo not yet.
+        inbox.result(&reply_result(&says(&[("usage", "an aside")])), true, false).unwrap();
+        assert!(rig.chat.sent.borrow()[1].basis.is_some(), "only the echo of the revision line makes a reply final");
+        inbox.echoed();
+        inbox.result(&reply_result(&says(&[("swarm", "revised")])), true, false).unwrap();
+        assert_eq!(rig.chat.sent.borrow()[2].basis, None);
+    });
+}
+
+#[test]
+fn held_comes_from_echoes_not_writes() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (first, second) = (delivery(1, "swarm", "@op:chat", "one"), delivery(3, "swarm", "@op:chat", "two"));
+    arrives(&rig, &first);
+    with_inbox(&rig, &config(), vec![first.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &second);
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap(); // written, never echoed: she has not seen it
+        inbox.result(&reply_result(&says(&[("swarm", "hi")])), true, false).unwrap();
+        let basis = rig.chat.sent.borrow()[0].basis.clone().unwrap();
+        assert_eq!(basis.seen_event_id, Some(first.event_id.clone()), "a line written and not echoed is not in the basis");
+    });
+}
+
+#[test]
+fn a_flush_reply_is_final_even_when_the_room_moved() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let ask = delivery(1, "swarm", "@op:chat", "question");
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &delivery(2, "swarm", "@libby:chat", "answer"));
+        inbox.flush_text(Why::Idle);
+        inbox.echoed();
+        inbox.result(&reply_result(&says(&[("swarm", "last words")])), true, false).unwrap();
+        assert_eq!(rig.chat.sent.borrow()[0].basis, None);
+        assert!(inbox.revision.is_none() && inbox.progress.answered == 1, "the flush has no next turn to revise in");
+    });
+}
+
+#[test]
+fn a_stale_say_leaves_earlier_says_standing_and_a_revision_never_reuses_a_landed_id() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let ask = delivery(1, "swarm", "@op:chat", "question");
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        // The room moved, but the message has not reached the organ's pending: the ear is late.
+        rig.chat.room_hears("swarm", "$ghost", 0);
+        let memory = reply(&[("usage", "an aside"), ("swarm", "refused words")], json!([keeps("Learned", "a thing", &[])]), json!([]), json!(null));
+        inbox.result(&reply_result(&memory), true, false).unwrap();
+        assert_eq!(rig.chat.sent.borrow().len(), 2);
+        assert!(memories(&rig).is_empty(), "nothing after the stale say is done: no memory");
+        assert_eq!(trace_outcomes(&rig), ["stale: swarm"]);
+        let traced = rig.trace.0.borrow()[0].outputs.iter().map(|item| item.text.clone()).collect::<Vec<_>>();
+        assert!(traced.contains(&"not sent: refused words".to_string()), "{traced:?}");
+
+        assert!(!inbox.poll().unwrap().pending, "the awaited message has not arrived");
+        assert!(inbox.poll().unwrap().pending, "a silent ear delays her two polls at most and never strands her");
+        let line = inbox.tell().unwrap();
+        assert!(line.contains("Already sent: usage."), "{line}");
+        inbox.echoed();
+        inbox.result(&reply_result(&says(&[("swarm", "new words")])), true, false).unwrap();
+        let sent = rig.chat.sent.borrow().clone();
+        assert_ne!(sent[2].request_id, sent[1].request_id);
+        assert!(sent.iter().take(2).all(|request| request.request_id != sent[2].request_id));
+        let landed = rig.chat.landed.borrow();
+        assert!(landed.values().any(|(_, text)| text == "new words") && landed.values().any(|(_, text)| text == "an aside"), "{landed:?}");
+    });
+}
+
+#[test]
+fn a_process_that_ends_with_a_revision_waiting_leaves_the_batch_unacked() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (ask, answer) = (delivery(1, "swarm", "@op:chat", "question"), delivery(2, "swarm", "@libby:chat", "answer"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &answer);
+        inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
+        assert!(inbox.revision.is_some());
+    });
+    assert!(rig.chat.acked.borrow().is_empty());
+    let next = next_batch(&config(), rig.chat.pending(0).unwrap(), 0);
+    assert_eq!(next.len(), 2);
+    with_inbox(&rig, &config(), next, |inbox| {
+        let line = inbox.start_line().unwrap();
+        assert!(line.contains("question") && line.contains("answer") && !line.contains("was not sent"), "{line}");
+    });
+}
+
+#[test]
+fn an_undecodable_revision_stays_final() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (ask, answer) = (delivery(1, "swarm", "@op:chat", "question"), delivery(2, "swarm", "@libby:chat", "answer"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &answer);
+        inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap();
+        inbox.echoed();
+        inbox.result(&json!({"type": "result", "is_error": false, "structured_output": {"nonsense": 1}}).to_string(), true, false).unwrap();
+        assert_eq!(inbox.progress.refused.map(|refused| refused.refusals), Some(1), "an undecodable reply is a refusal, as ever");
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap();
+        inbox.echoed();
+        inbox.result(&reply_result(&says(&[("swarm", "second try")])), true, false).unwrap();
+        assert_eq!(rig.chat.sent.borrow().last().unwrap().basis, None);
+    });
+}
+
+#[test]
+fn eight_sessions_one_operator_question() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    rig.chat.keep_on_ack.set(true);
+    let (sandbox, scratch) = (rig.sandbox(), rig.scratch());
+    let organs = rig.organs(&sandbox, &scratch);
+    let (control, swarm, run) = (FileSource::new(rig.store()), FileSource::new(rig.swarm_store()), rig.the_run());
+    let ids: Vec<String> = (0..8).map(|index| format!("@mind{index}:chat")).collect();
+    let configs: Vec<Config> = ids.iter().map(|id| Config { own_sender: id.clone(), minds: ids.clone(), ..config() }).collect();
+    let mut progresses: Vec<Progress> = (0..8).map(|_| Progress::default()).collect();
+    let question = delivery_of(1, "swarm", "@op:chat", "which of us takes the cellar?", "$question");
+    arrives(&rig, &question);
+    let mut inboxes: Vec<PersonaInbox<'_, FileSource, FileSource>> = progresses
+        .iter_mut()
+        .zip(&configs)
+        .map(|(progress, config)| PersonaInbox::new(&organs, &control, &swarm, config, &run, progress, vec![question.clone()], 0, String::new()))
+        .collect();
+    for inbox in &mut inboxes {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+    }
+    // Every Mind answers the same question at once; the homeserver takes the first and refuses the rest.
+    for (index, inbox) in inboxes.iter_mut().enumerate() {
+        *rig.chat.speaker.borrow_mut() = ids[index].clone();
+        inbox.result(&reply_result(&says(&[("swarm", &format!("mind {index} answers"))])), true, false).unwrap();
+        if index == 0 {
+            let landed = rig.chat.landed.borrow().values().next().unwrap().0.clone();
+            arrives(&rig, &delivery_of(2, "swarm", &ids[0], "mind 0 answers", &landed));
+        }
+    }
+    assert_eq!((rig.chat.sent.borrow().len(), rig.chat.landed.borrow().len()), (8, 1), "one message went out in the first round");
+    // The seven who were refused read it and drop their own.
+    for (index, inbox) in inboxes.iter_mut().enumerate().skip(1) {
+        *rig.chat.speaker.borrow_mut() = ids[index].clone();
+        assert!(inbox.poll().unwrap().pending, "mind {index}");
+        assert!(inbox.tell().unwrap().contains("mind 0 answers"));
+        inbox.echoed();
+        inbox.result(&reply_result(&says(&[])), true, false).unwrap();
+    }
+    assert_eq!(rig.chat.sent.borrow().len(), 8, "no revision was sent: each dropped");
+    assert_eq!(inboxes.iter().map(|inbox| inbox.progress.turn).sum::<u32>(), 15, "eight first-round results and seven revision turns");
+    assert!(inboxes.iter().all(|inbox| inbox.progress.failure.is_none() && inbox.progress.refused.is_none()));
+}
+
+fn three_minds(own: &str) -> Config {
+    Config { own_sender: own.into(), minds: ["@eureka:chat", "@libby:chat", "@aqua:chat"].map(String::from).to_vec(), ..config() }
+}
+
+/// An unaddressed swarm message whose event ranks `eureka` at `rank` of three.
+fn unaddressed_at_rank(seq: u64, rank: u64, text: &str) -> ChatDelivery {
+    (0..).map(|n| delivery_of(seq, "swarm", "@op:chat", text, &format!("$r{seq}-{n}"))).find(|candidate| stagger_ms(&three_minds("@eureka:chat"), candidate) == rank * STAGGER_STEP_S * 1000).unwrap()
+}
+
+#[test]
+fn an_addressed_message_is_told_at_once_and_an_unaddressed_one_waits_her_rank() {
+    let config = three_minds("@eureka:chat");
+    let plain = unaddressed_at_rank(1, 2, "who takes the cellar?");
+    let addressed = ChatDelivery { mentions: vec!["@eureka:chat".into()], ..plain.clone() };
+    let in_dm = ChatDelivery { is_direct: true, ..plain.clone() };
+    assert_eq!(STAGGER_STEP_S, 8, "the step is the calibration the ruling names");
+    for (name, message, wait_ms) in [("addressed", addressed, 0), ("direct", in_dm, 0), ("unaddressed", plain, 16_000)] {
+        let rig = Rig::new(vec![], &[]);
+        rig.clock.step.set(0);
+        let t0 = rig.clock.now.get();
+        arrives(&rig, &message);
+        with_inbox(&rig, &config, vec![message.clone()], |inbox| {
+            if wait_ms > 0 {
+                for waited in [0, 8_000, 15_999] {
+                    rig.clock.now.set(t0 + waited);
+                    assert!(!inbox.poll().unwrap().pending, "{name}: told after {waited} ms of {wait_ms}");
+                }
+            }
+            rig.clock.now.set(t0 + wait_ms);
+            assert!(inbox.poll().unwrap().pending, "{name}");
+            let expected = inbox.tell_line(std::slice::from_ref(&message), None, "").input;
+            assert_eq!(inbox.tell().unwrap(), expected, "{name}: the tell is the message and its envelope, unchanged by the wait");
+        });
+    }
+}
+
+#[test]
+fn the_wait_is_bounded_under_a_stream_of_messages() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let config = three_minds("@eureka:chat");
+    let t0 = rig.clock.now.get();
+    arrives(&rig, &unaddressed_at_rank(1, 2, "the first"));
+    with_inbox(&rig, &config, vec![], |inbox| {
+        let mut told_at = None;
+        for second in 0..=40i64 {
+            rig.clock.now.set(t0 + second * 1000);
+            if second > 0 && second % 3 == 0 {
+                arrives(&rig, &unaddressed_at_rank(u64::try_from(second).unwrap() + 1, 2, &format!("more {second}")));
+            }
+            if inbox.poll().unwrap().pending {
+                told_at = Some(second);
+                break;
+            }
+        }
+        assert_eq!(told_at, Some(16), "the first message's clock is its own: newer messages do not move it");
+        let line = inbox.tell().unwrap();
+        assert!(line.contains("the first") && line.contains("more 15"), "{line}");
+    });
+}
+
+#[test]
+fn the_stagger_ranks_the_minds_by_a_hash_of_mind_and_event_so_nobody_is_always_last() {
+    let minds = ["@eureka:chat", "@libby:chat", "@aqua:chat"];
+    let mut last = BTreeSet::new();
+    let mut first = BTreeSet::new();
+    for n in 0..64 {
+        let event = delivery_of(1, "swarm", "@op:chat", "q", &format!("$event{n}"));
+        let mut ranks: Vec<u64> = minds.iter().map(|mind| stagger_ms(&three_minds(mind), &event) / (STAGGER_STEP_S * 1000)).collect();
+        for (mind, rank) in minds.iter().zip(&ranks) {
+            if *rank == 2 {
+                last.insert(*mind);
+            }
+            if *rank == 0 {
+                first.insert(*mind);
+            }
+        }
+        ranks.sort_unstable();
+        assert_eq!(ranks, [0, 1, 2], "event {n}: one Mind at each rank");
+    }
+    assert_eq!((last.len(), first.len()), (3, 3), "over many events each Mind is first and each is last");
+}
+
+#[test]
+fn naming_several_minds_does_not_make_a_chorus_and_the_unnamed_follow_the_named() {
+    let minds = ["@eureka:chat", "@libby:chat", "@aqua:chat"];
+    let step = STAGGER_STEP_S * 1000;
+    let mut named_first = BTreeSet::new();
+    for n in 0..64 {
+        let tagged_two = ChatDelivery { mentions: vec!["@eureka:chat".into(), "@libby:chat".into()], ..delivery_of(1, "swarm", "@op:chat", "q", &format!("$event{n}")) };
+        let waits: Vec<u64> = minds.iter().map(|mind| stagger_ms(&three_minds(mind), &tagged_two)).collect();
+        assert_ne!(waits[0], waits[1], "event {n}: two named Minds never share a rank");
+        assert_eq!(waits[0].min(waits[1]), 0, "event {n}: the first named Mind hears at once");
+        assert_eq!(waits[0].max(waits[1]), step, "event {n}: the second one step later");
+        assert_eq!(waits[2], 2 * step, "event {n}: the unnamed Mind comes after every named one");
+        named_first.insert(if waits[0] == 0 { 0 } else { 1 });
+        let tagged_one = ChatDelivery { mentions: vec!["@aqua:chat".into()], ..tagged_two };
+        assert_eq!(stagger_ms(&three_minds("@aqua:chat"), &tagged_one), 0, "event {n}: a message naming one Mind reaches her at once");
+        assert!(minds[..2].iter().all(|mind| stagger_ms(&three_minds(mind), &tagged_one) >= step), "event {n}");
+    }
+    assert_eq!(named_first.len(), 2, "which named Mind goes first differs per event");
+}
+
+#[test]
+fn a_flush_written_beside_a_revision_line_still_makes_the_reply_final() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (ask, answer) = (delivery(1, "swarm", "@op:chat", "question"), delivery(2, "swarm", "@libby:chat", "answer"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &answer);
+        inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap();
+        inbox.flush_text(Why::Idle);
+        inbox.echoed();
+        inbox.result(&reply_result(&says(&[("swarm", "revised")])), true, false).unwrap();
+        assert_eq!(rig.chat.sent.borrow()[1].basis, None);
+        assert!(rig.chat.sent.borrow()[1].request_id.contains("-r1-"));
+    });
 }

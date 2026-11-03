@@ -4,8 +4,8 @@
 //! The mouth is Bifrost's chat ear and mouth (cut `persona-mouth`). Five CultNet document kinds cross
 //! it, each a positional MessagePack tuple (fields in declaration order, `rmp_serde::to_vec`; the mouth refuses maps): the pending request and its answer, the
 //! ack, and the send request with its receipt. Their field order is the mouth's, pinned
-//! by its golden fixtures (`tests/fixtures/persona-chat-v1/`, Bifrost
-//! `eureka-body/persona-mouth` ab2bdc6) in both directions. `chat_rudp::RudpChat` is
+//! by its golden fixtures (`tests/fixtures/persona-chat-v1/` for the pending, ack and refusal kinds, `persona-chat-v2/` for the send
+//! and its receipt) in both directions. `chat_rudp::RudpChat` is
 //! the RUDP transport that carries them; `Chat` is its seam, and `encode` and
 //! `decode` are its codec. Room aliases are the mouth's
 //! full aliases (`#operator:gamecult.org`), which the caller's `--rooms` carries.
@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub const PENDING_REQUEST: &str = "gamecult.persona.chat_pending_request.v1";
 pub const PENDING: &str = "gamecult.persona.chat_pending.v1";
 pub const ACK: &str = "gamecult.persona.chat_ack.v1";
-pub const SEND_REQUEST: &str = "gamecult.persona.chat_send_request.v1";
-pub const SEND_RECEIPT: &str = "gamecult.persona.chat_send_receipt.v1";
+pub const SEND_REQUEST: &str = "gamecult.persona.chat_send_request.v2";
+pub const SEND_RECEIPT: &str = "gamecult.persona.chat_send_receipt.v2";
 pub const REFUSAL: &str = "gamecult.persona.chat_refusal.v1";
 
 /// One earlier line of a room, delivered with a message for its context.
@@ -78,6 +78,8 @@ pub enum Refusal {
     EmptyText,
     SendFailed,
     UnknownPersona,
+    /// A send with a basis found the room had moved past it: the receipt names what moved it.
+    RoomMoved,
 }
 
 impl Refusal {
@@ -90,6 +92,7 @@ impl Refusal {
             Self::EmptyText => "EmptyText",
             Self::SendFailed => "SendFailed",
             Self::UnknownPersona => "UnknownPersona",
+            Self::RoomMoved => "RoomMoved",
         }
     }
 }
@@ -103,7 +106,7 @@ impl Serialize for Refusal {
 impl<'de> Deserialize<'de> for Refusal {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let name = String::deserialize(deserializer)?;
-        [Self::Brake, Self::PersonaMismatch, Self::UnknownRoom, Self::EmptyText, Self::SendFailed, Self::UnknownPersona]
+        [Self::Brake, Self::PersonaMismatch, Self::UnknownRoom, Self::EmptyText, Self::SendFailed, Self::UnknownPersona, Self::RoomMoved]
             .into_iter()
             .find(|refusal| refusal.name() == name)
             .ok_or_else(|| serde::de::Error::custom("the mouth named a refusal this side does not know"))
@@ -118,22 +121,34 @@ pub struct ChatRefusal {
     pub refusal: Refusal,
 }
 
+/// What a send's author had seen of its room: the newest event of the room her input held (none when it held
+/// none), and when her process began. The mouth refuses the send if another sender's message reached the room
+/// after that event, or after that time where there is none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendBasis {
+    pub seen_event_id: Option<String>,
+    pub since_unix_ms: u64,
+}
+
 /// A send. `request_id` is the mouth's transaction id, so a repeat of the same
-/// id is the same send.
+/// id is the same send. No `basis` is her choice standing: the mouth checks nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatSendRequest {
     pub request_id: String,
     pub persona: String,
     pub room_alias: String,
     pub text: String,
+    pub basis: Option<SendBasis>,
 }
 
-/// The mouth's answer to a send: the event it made, or why it did not.
+/// The mouth's answer to a send: the event it made, or why it did not. `newer` names the events that moved the
+/// room, oldest first, exactly when the refusal is `RoomMoved`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatSendReceipt {
     pub request_id: String,
     pub event_id: Option<String>,
-    pub refusal: Option<String>,
+    pub refusal: Option<Refusal>,
+    pub newer: Vec<String>,
 }
 
 /// A document as the mouth reads it: a positional tuple.
