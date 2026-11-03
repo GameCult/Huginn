@@ -37,6 +37,16 @@
 //! see it. Nothing is acked that was not answered, and a repeat of a send carries the same
 //! request id, so a start that dies between a send and its ack repeats no message.
 //!
+//! Each send names what her input held of its room (ruling `eureka-body:ruling:send-refused-if-room-moved`):
+//! the newest message of that room a line the CLI took in showed her. The mouth decides whether the room moved;
+//! the organ owns only what her input held and whether a reply is her final answer. A send the mouth refuses as
+//! `RoomMoved` stops that reply at once (the says before it stand, nothing after it is done) and is not a
+//! refused result: she is handed the messages that interrupted her as her next input, once they have reached
+//! the organ, to send, change or drop. Her answer to that line is final: it goes out unchecked, as does the reply
+//! to a flush, which has no next turn to revise in. A message reaches a live session after her rank among the Minds for that message (the Minds it names first), at one
+//! step per rank
+//! (ruling `eureka-body:ruling:unaddressed-tell-stagger-ruled`), so the Minds read each other before they answer.
+//!
 //! The reply is decoded, never scanned: text that is not one `PersonaReply` is a refused
 //! result. Chat, persona state and trace are ports; the chat transport is `chat_rudp::RudpChat`,
 //! wired by the binary. Inside her sandbox her session has a shell and the web (`--tools`);
@@ -66,7 +76,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::chat_client::{Chat, ChatDelivery, ChatSendRequest, ContextLine};
+use crate::chat_client::{Chat, ChatDelivery, ChatSendRequest, ContextLine, Refusal, SendBasis};
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
 use crate::heartbeat::{PollTrace, TempoView};
@@ -96,6 +106,13 @@ const REFUSALS_PER_BATCH: u32 = 3;
 /// The most bytes of `earlier` text, as rendered into the line (JSON-quoted), one line carries for one room: the room's tail, newest kept. Each delivery brings its own
 /// context, so a batch repeats a room's tail per message; `earlier_shown` owns this bound because a line's size decides how soon the session hits its ceiling.
 const EARLIER_MAX_BYTES_PER_ROOM: usize = 16 * 1024;
+/// A live session is told a message this many seconds per rank, her rank among the Minds being a stable hash of the Mind and the
+/// event, the Minds the message names first: the first Mind by that order is told at once, the next after one step. The step is
+/// calibration, about the time a Mind takes to answer (7 to 13 s observed on 2026-11-03).
+const STAGGER_STEP_S: u64 = 8;
+/// Polls a revision waits for the interrupting messages to reach the organ's pending before it is told without them (at most
+/// `REVISION_POLLS * PERSONA_POLL_S` seconds).
+const REVISION_POLLS: u32 = 2;
 /// The environment variables the unit's `persona.env` sets for the persona flags.
 pub const ENV_ROOMS: &str = "MIND_PERSONA_ROOMS";
 pub const ENV_OPERATOR: &str = "MIND_PERSONA_OPERATOR";
@@ -701,6 +718,9 @@ enum Step {
     Answered(Option<PipelineRef>, String, Vec<String>),
     /// The reply could not be decoded: it is told back to her, and sends and acks nothing.
     Refused(Failure),
+    /// The mouth refused a send because the room moved past what her input held: the room, the rooms sent before it in the
+    /// reply, and the events that moved it. Nothing after the send was done.
+    Stale { room: String, sent: Vec<String>, newer: Vec<String> },
     /// The start cannot go on; the intent her decoded reply stated still closes the run beside the failure.
     Failed(Failure, String),
 }
@@ -863,35 +883,7 @@ fn one_process(
         progress.failure = Some(Failure::Session);
         return Ok(());
     };
-    let conversation = first.first().map_or(Conversation::Public, Conversation::of);
-    let mut inbox = PersonaInbox {
-        organs,
-        control,
-        swarm,
-        config,
-        run,
-        progress,
-        rooms,
-        conversation,
-        plan: render_plan(lease.plan_quota(), started_ms),
-        started_ms,
-        told: BTreeSet::new(),
-        start: first,
-        waiting: Vec::new(),
-        told_through: 0,
-        answered_through: 0,
-        written: None,
-        echoed: Vec::new(),
-        echoed_refusals: 0,
-        seen: Shown::default(),
-        retell: None,
-        slot_seen: Vec::new(),
-        slot_read_due_ms: 0,
-        notices: Vec::new(),
-        repos: Vec::new(),
-        repo_head: None,
-        repo_read_due_ms: 0,
-    };
+    let mut inbox = PersonaInbox::new(organs, control, swarm, config, run, progress, first, started_ms, render_plan(lease.plan_quota(), started_ms));
     drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout())?;
     Ok(())
 }
@@ -975,6 +967,8 @@ struct Written {
     batch: Vec<ChatDelivery>,
     shown: Shown,
     refusals: u32,
+    /// The line is a revision (or the retell of one): the reply to it is her final answer.
+    revision: bool,
 }
 
 /// Every refused batch not yet told again, merged into one, with the refusal to tell and the most
@@ -983,6 +977,21 @@ struct Retell {
     batch: Vec<ChatDelivery>,
     why: Failure,
     refusals: u32,
+    /// An undecodable revision stays a revision: its answer is final.
+    revision: bool,
+}
+
+/// A reply stopped by a send the mouth refused as `RoomMoved`, waiting to be handed back to her as her next input: the
+/// deliveries it answered, where it stopped and what it had sent, and the events that moved the room, which the line waits to
+/// have reached the organ.
+#[derive(Default)]
+struct Revision {
+    batch: Vec<ChatDelivery>,
+    rooms: Vec<String>,
+    sent: Vec<String>,
+    awaiting: Vec<String>,
+    polls: u32,
+    ready: bool,
 }
 
 /// A rendered line: its text, what it lets a reply name, and the lines it tells.
@@ -1030,6 +1039,18 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     seen: Shown,
     /// What refused results left to be told again.
     retell: Option<Retell>,
+    /// What each room's newest message was among the lines the CLI took in this process: the seq and the event. Filled by `echoed` only:
+    /// a line written and not echoed she has not seen.
+    held: BTreeMap<String, (u64, String)>,
+    /// The reply a stale send stopped, until it is told back.
+    revision: Option<Revision>,
+    /// A revision line, or a flush, was echoed since the last result: that result is her final answer, sent without a basis.
+    echoed_revision: bool,
+    echoed_flush: bool,
+    /// The next line written carries a flush.
+    flush_asked: bool,
+    /// When each untold delivery was first seen by a poll: its stagger runs from there and nothing later moves it.
+    first_seen: BTreeMap<u64, u64>,
     /// Her Self runs last seen holding the slot, each until a read shows it gone and how it closed: whoever started it, her, the
     /// heartbeat or an earlier process. Her own start joins it unread. A failed read leaves this as it stood.
     slot_seen: Vec<PipelineRef>,
@@ -1045,7 +1066,48 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     repo_read_due_ms: u64,
 }
 
-impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
+impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
+    /// One process's session inbox over its first batch. The caller has read the gate and started the child.
+    #[allow(clippy::too_many_arguments, reason = "one process's state is these few things, and a struct for them would be a second owner")]
+    fn new(organs: &'a Organs<'a>, control: &'a C, swarm: &'a S, config: &'a Config, run: &'a PipelineRef, progress: &'a mut Progress, first: Vec<ChatDelivery>, started_ms: u64, plan: String) -> Self {
+        let rooms = reply_rooms(config, &first);
+        let conversation = first.first().map_or(Conversation::Public, Conversation::of);
+        Self {
+            organs,
+            control,
+            swarm,
+            config,
+            run,
+            progress,
+            rooms,
+            conversation,
+            plan,
+            started_ms,
+            told: BTreeSet::new(),
+            start: first,
+            waiting: Vec::new(),
+            told_through: 0,
+            answered_through: 0,
+            written: None,
+            echoed: Vec::new(),
+            echoed_refusals: 0,
+            seen: Shown::default(),
+            retell: None,
+            held: BTreeMap::new(),
+            revision: None,
+            echoed_revision: false,
+            echoed_flush: false,
+            flush_asked: false,
+            first_seen: BTreeMap::new(),
+            slot_seen: Vec::new(),
+            slot_read_due_ms: 0,
+            notices: Vec::new(),
+            repos: Vec::new(),
+            repo_head: None,
+            repo_read_due_ms: 0,
+        }
+    }
+
     /// The `earlier` lines a batch brings now.
     fn earlier<'d>(&self, deliveries: &'d [ChatDelivery]) -> Vec<Vec<&'d ContextLine>> {
         earlier_shown(deliveries, &self.told, &self.config.own_sender, self.started_ms)
@@ -1088,7 +1150,7 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
             self.told_through = self.told_through.max(through);
         }
         self.told.extend(told);
-        self.written = Some(Written { batch, shown, refusals });
+        self.written = Some(Written { batch, shown, refusals, revision: false });
         input
     }
 
@@ -1194,20 +1256,53 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         self.note_repo_changes();
         let mut pending = self.organs.chat.pending(self.progress.acked)?;
         pending.sort_by_key(|delivery| delivery.seq);
-        let Some(oldest) = pending.first() else { return Ok(Polled { pending: self.retell.is_some() || !self.notices.is_empty(), yield_now: false }) };
+        if let Some(revision) = &mut self.revision {
+            revision.polls += 1;
+            revision.ready |= revision.polls >= REVISION_POLLS || revision.awaiting.iter().all(|id| pending.iter().any(|delivery| delivery.event_id == *id));
+        }
+        let revision_ready = self.revision.as_ref().is_some_and(|revision| revision.ready);
+        let Some(oldest) = pending.first() else { return Ok(Polled { pending: self.retell.is_some() || revision_ready || !self.notices.is_empty(), yield_now: false }) };
         if Conversation::of(oldest) != self.conversation {
             return Ok(Polled { pending: false, yield_now: true });
         }
-        let untold = pending.into_iter().filter(|delivery| delivery.seq > self.told_through).take_while(|delivery| Conversation::of(delivery) == self.conversation).collect();
-        self.waiting = one_line_of(untold, |batch| message_lines(self.config, batch, &self.earlier(batch)).len());
-        Ok(Polled { pending: !self.waiting.is_empty() || self.retell.is_some() || !self.notices.is_empty(), yield_now: false })
+        let untold: Vec<ChatDelivery> = pending.into_iter().filter(|delivery| delivery.seq > self.told_through).take_while(|delivery| Conversation::of(delivery) == self.conversation).collect();
+        // A delivery's stagger runs from the poll that first saw it, so a stream of newer messages moves nobody's clock. The line
+        // is told once any delivery in it is due, whole: she is never shown a message and kept from the ones before it.
+        let now = unix_ms(self.organs.clock.now());
+        self.first_seen.retain(|seq, _| *seq > self.told_through);
+        for delivery in &untold {
+            self.first_seen.entry(delivery.seq).or_insert(now);
+        }
+        let due = revision_ready || untold.iter().any(|delivery| now >= self.first_seen[&delivery.seq] + stagger_ms(self.config, delivery));
+        self.waiting = if due { one_line_of(untold, |batch| message_lines(self.config, batch, &self.earlier(batch)).len()) } else { Vec::new() };
+        Ok(Polled { pending: !self.waiting.is_empty() || self.retell.is_some() || revision_ready || !self.notices.is_empty(), yield_now: false })
     }
 
     fn tell(&mut self) -> Result<String> {
         let notices = std::mem::take(&mut self.notices).concat();
-        if let Some(Retell { batch, why, refusals }) = self.retell.take() {
+        if self.revision.as_ref().is_some_and(|revision| revision.ready)
+            && let Some(revision) = self.revision.take()
+        {
+            // Her refused words are not repeated: she has them. The messages that interrupted her are the line.
+            let waiting = std::mem::take(&mut self.waiting);
+            let line = self.tell_line(&waiting, Some(&stale_note(&revision)), &notices);
+            let mut batch = revision.batch;
+            batch.extend(waiting);
+            batch.sort_by_key(|delivery| delivery.seq);
+            batch.dedup_by_key(|delivery| delivery.seq);
+            let input = self.write(batch, line, 0);
+            if let Some(written) = &mut self.written {
+                written.revision = true;
+            }
+            return Ok(input);
+        }
+        if let Some(Retell { batch, why, refusals, revision }) = self.retell.take() {
             let line = self.tell_line(&batch, Some(&refused_note(why)), &notices);
-            return Ok(self.write(batch, line, refusals));
+            let input = self.write(batch, line, refusals);
+            if let Some(written) = &mut self.written {
+                written.revision = revision;
+            }
+            return Ok(input);
         }
         let batch = std::mem::take(&mut self.waiting);
         let line = self.tell_line(&batch, None, &notices);
@@ -1216,16 +1311,24 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
 
     fn flush_text(&mut self, why: Why) -> String {
         if self.written.is_none() {
-            self.written = Some(Written { batch: Vec::new(), shown: Shown::default(), refusals: 0 });
+            self.written = Some(Written { batch: Vec::new(), shown: Shown::default(), refusals: 0, revision: false });
         }
+        self.flush_asked = true;
         format!("{TURN_REMINDER}\n\n{}", flush_ask(why))
     }
 
     fn echoed(&mut self) {
-        if let Some(Written { batch, shown, refusals }) = self.written.take() {
+        if let Some(Written { batch, shown, refusals, revision }) = self.written.take() {
             self.echoed_refusals = self.echoed_refusals.max(refusals);
+            for delivery in &batch {
+                if self.held.get(&delivery.room_alias).is_none_or(|(seq, _)| *seq < delivery.seq) {
+                    self.held.insert(delivery.room_alias.clone(), (delivery.seq, delivery.event_id.clone()));
+                }
+            }
             self.echoed.extend(batch);
             self.seen.add(shown);
+            self.echoed_revision |= revision;
+            self.echoed_flush |= std::mem::take(&mut self.flush_asked);
         }
     }
 
@@ -1236,6 +1339,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
     fn result(&mut self, line: &str, ok: bool, blocked: bool) -> Result<(bool, bool)> {
         let batch = std::mem::take(&mut self.echoed);
         let refused_before = std::mem::take(&mut self.echoed_refusals);
+        let revised = std::mem::take(&mut self.echoed_revision);
+        let final_reply = revised | std::mem::take(&mut self.echoed_flush);
         if blocked || !ok {
             self.progress.failure.get_or_insert(Failure::Session);
             return Ok((false, true));
@@ -1243,7 +1348,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         let turn = self.progress.turn;
         self.progress.turn += 1;
         let step = match structured_output(line) {
-            Some(text) => act(self, &batch, turn, &text)?,
+            Some(text) => act(self, &batch, turn, &text, Finality { final_reply, revised })?,
             None => {
                 self.record_refusal(&batch, turn)?;
                 Step::Refused(Failure::Undecodable)
@@ -1262,7 +1367,14 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 if self.progress.refused.is_some_and(|refused| batch.iter().any(|delivery| delivery.seq == refused.lowest)) {
                     self.progress.refused = None;
                 }
-                let unanswered = self.retell.iter().flat_map(|retell| &retell.batch).chain(self.written.iter().flat_map(|written| &written.batch)).map(|delivery| delivery.seq).min();
+                let unanswered = self
+                    .retell
+                    .iter()
+                    .flat_map(|retell| &retell.batch)
+                    .chain(self.written.iter().flat_map(|written| &written.batch))
+                    .chain(self.revision.iter().flat_map(|revision| &revision.batch))
+                    .map(|delivery| delivery.seq)
+                    .min();
                 let past_unanswered = unanswered.is_some_and(|lowest| lowest <= self.answered_through);
                 if !past_unanswered && self.progress.failure.is_none() && self.answered_through > self.progress.acked {
                     if self.organs.chat.ack(self.answered_through).is_err() {
@@ -1282,6 +1394,30 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 self.progress.answered += 1;
                 Ok((true, false))
             }
+            Step::Stale { room, sent, newer } => {
+                // Not a refused result: no count, no ack, nothing for the retell. The reply answered nothing; its deliveries wait for the revision's answer.
+                let mut revision = self.revision.take().unwrap_or_default();
+                revision.batch.extend(batch);
+                revision.batch.sort_by_key(|delivery| delivery.seq);
+                revision.batch.dedup_by_key(|delivery| delivery.seq);
+                if !revision.rooms.contains(&room) {
+                    revision.rooms.push(room);
+                }
+                for sent in sent {
+                    if !revision.sent.contains(&sent) {
+                        revision.sent.push(sent);
+                    }
+                }
+                for id in newer {
+                    if !revision.awaiting.contains(&id) {
+                        revision.awaiting.push(id);
+                    }
+                }
+                revision.polls = 0;
+                revision.ready = false;
+                self.revision = Some(revision);
+                Ok((true, false))
+            }
             Step::Refused(why) => {
                 let refusals = refused_before + 1;
                 if refusals >= REFUSALS_PER_BATCH {
@@ -1290,8 +1426,10 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 }
                 let mut merged = batch;
                 let mut most = refusals;
+                let mut revision = revised;
                 if let Some(waiting) = self.retell.take() {
                     most = most.max(waiting.refusals);
+                    revision |= waiting.revision;
                     merged.extend(waiting.batch);
                 }
                 merged.sort_by_key(|delivery| delivery.seq);
@@ -1301,7 +1439,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 self.progress.refused = merged
                     .first()
                     .map(|first| Refused { lowest: held.map_or(first.seq, |held| held.lowest.min(first.seq)), why, refusals: held.map_or(most, |held| held.refusals.max(most)) });
-                self.retell = Some(Retell { batch: merged, why, refusals: most });
+                self.retell = Some(Retell { batch: merged, why, refusals: most, revision });
                 Ok((true, false))
             }
             Step::Failed(why, intent) => {
@@ -1311,6 +1449,14 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
             }
         }
     }
+}
+
+/// What a stale send's revision line opens with. Her refused words are not in it: she has them. Everything else in the reply was
+/// dropped with it.
+fn stale_note(revision: &Revision) -> String {
+    let rooms = revision.rooms.join(", ");
+    let sent = if revision.sent.is_empty() { String::new() } else { format!(" Already sent: {}.", revision.sent.join(", ")) };
+    format!("Your message to {rooms} was not sent: newer messages reached that room first, below. Send it, change it, or drop it; your answer goes out as you give it.{sent} Nothing else in that reply was kept: repeat any remember, settle or start_self_run you still want.")
 }
 
 /// What a refused batch's next line opens with: which field to correct, and that the refused reply did nothing.
@@ -1331,10 +1477,19 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
     }
 }
 
+/// Whether a reply is her final answer, which goes out with no basis, and whether it answers a revision line, which gives its
+/// sends their own request ids: the mouth's transaction id is idempotent, so a revised say that reused an id of the same batch
+/// would return the old event and lose her new words.
+#[derive(Clone, Copy)]
+struct Finality {
+    final_reply: bool,
+    revised: bool,
+}
+
 /// What one result does in the world: decode, say, remember, settle, start a Self run, and trace.
 /// It acks nothing: the caller acks after it, once, from what is still unanswered. `batch` is what
 /// the result answers.
-fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch: &[ChatDelivery], turn: u32, text: &str) -> Result<Step> {
+fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch: &[ChatDelivery], turn: u32, text: &str, finality: Finality) -> Result<Step> {
     let (organs, config, run) = (inbox.organs, inbox.config, inbox.run);
     let instance = organs.mind.instance().clone();
     let (control, swarm) = (inbox.control, inbox.swarm);
@@ -1384,11 +1539,22 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
             return Ok(Step::Failed(Failure::Held(reason), reply.intent));
         }
         let text = say.text.clone();
-        let sent = ChatSendRequest { request_id: format!("{batch_id}-{index}"), persona: instance.0.clone(), room_alias: say.room.clone(), text: text.clone() };
-        let delivered = organs.chat.send(&sent).is_ok_and(|receipt| receipt.refusal.is_none() && receipt.event_id.is_some());
-        if !delivered {
-            organs.trace.record(&record(outputs, "failed: send".into()))?;
-            return Ok(Step::Failed(Failure::Send, reply.intent));
+        let request_id = if finality.revised { format!("{batch_id}-r{turn}-{index}") } else { format!("{batch_id}-{index}") };
+        let basis = (!finality.final_reply).then(|| SendBasis { seen_event_id: inbox.held.get(&say.room).map(|(_, event)| event.clone()), since_unix_ms: inbox.started_ms });
+        let sent = ChatSendRequest { request_id, persona: instance.0.clone(), room_alias: say.room.clone(), text: text.clone(), basis };
+        match organs.chat.send(&sent) {
+            Ok(receipt) if receipt.refusal.is_none() && receipt.event_id.is_some() => {}
+            Ok(receipt) if receipt.refusal == Some(Refusal::RoomMoved) && !finality.final_reply => {
+                for unsent in &reply.say[index..] {
+                    outputs.push(TraceItem { provenance: "her own".into(), room: unsent.room.clone(), text: format!("not sent: {}", unsent.text) });
+                }
+                organs.trace.record(&record(outputs, format!("stale: {}", say.room)))?;
+                return Ok(Step::Stale { room: say.room.clone(), sent: reply.say[..index].iter().map(|sent| sent.room.clone()).collect(), newer: receipt.newer });
+            }
+            _ => {
+                organs.trace.record(&record(outputs, "failed: send".into()))?;
+                return Ok(Step::Failed(Failure::Send, reply.intent));
+            }
         }
         outputs.push(TraceItem { provenance: "her own".into(), room: say.room.clone(), text });
     }
@@ -1421,6 +1587,38 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
     organs.trace.record(&record(outputs, "answered".into()))?;
     let opened = reply.remember.iter().zip(&memories).filter(|(remember, _)| matches!(remember.sort, MemorySort::Asked | MemorySort::Committed)).filter_map(|(_, memory)| pipeline_key(memory).ok()).collect();
     Ok(Step::Answered(started, reply.intent, opened))
+}
+
+/// How long after a poll first sees `delivery` a live session is told it: none in a direct message, otherwise her rank times the
+/// step. The Minds the message names rank first, by a hash of the Mind and the event, and the rest follow them, ranked the same
+/// way: the first named Mind hears at once, the others one step apart, so tagging several does not make a chorus. A rank is the
+/// number of Minds in her set whose hash sorts before hers, from the message and the configured Minds alone (the sender, who will
+/// not be told its own message, is not counted), so every session computes the same order with no word between them and nobody
+/// is always last.
+fn stagger_ms(config: &Config, delivery: &ChatDelivery) -> u64 {
+    if delivery.is_direct {
+        return 0;
+    }
+    let mut minds: Vec<&str> = config.minds.iter().map(String::as_str).chain([config.own_sender.as_str()]).filter(|mind| *mind != delivery.sender).collect();
+    minds.sort_unstable();
+    minds.dedup();
+    let named = |mind: &str| delivery.mentions.iter().any(|mention| mention == mind);
+    let (named_minds, others): (Vec<&str>, Vec<&str>) = minds.into_iter().partition(|mind| named(mind));
+    let (set, before) = if named(&config.own_sender) { (&named_minds, 0) } else { (&others, named_minds.len()) };
+    let mine = (stagger_hash(&config.own_sender, &delivery.event_id), config.own_sender.as_str());
+    let rank = before + set.iter().filter(|mind| (stagger_hash(mind, &delivery.event_id), **mind) < mine).count();
+    rank as u64 * STAGGER_STEP_S * 1000
+}
+
+/// FNV-1a over the Mind, a separator and the event, then murmur3's finalizer so a Mind's order against another changes from event to
+/// event (FNV alone leaves it nearly fixed by the Minds' names): fixed by this definition, so every Mind's process computes the same order.
+fn stagger_hash(mind: &str, event_id: &str) -> u64 {
+    let mut hash = mind.bytes().chain(std::iter::once(0xff)).chain(event_id.bytes()).fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^ (hash >> 33)
 }
 
 /// The oldest deliveries that share a conversation: the public rooms together, or one direct

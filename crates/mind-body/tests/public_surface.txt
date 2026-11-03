@@ -10,7 +10,7 @@ mind_body: mod persona
 mind_body: mod queue
 mind_body: mod self_run
 mind_body: mod tempo
-mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Refusal { Brake , PersonaMismatch , UnknownRoom , EmptyText , SendFailed , UnknownPersona , }
+mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Refusal { Brake , PersonaMismatch , UnknownRoom , EmptyText , SendFailed , UnknownPersona , RoomMoved , }
 mind_body::chat_client: const ACK : & str
 mind_body::chat_client: const PENDING : & str
 mind_body::chat_client: const PENDING_REQUEST : & str
@@ -29,9 +29,10 @@ mind_body::chat_client: struct ChatDelivery # [derive (Clone , Debug , PartialEq
 mind_body::chat_client: struct ChatPending # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, deliveries: Vec < ChatDelivery >]
 mind_body::chat_client: struct ChatPendingRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, after_seq: u64]
 mind_body::chat_client: struct ChatRefusal # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, refusal: Refusal]
-mind_body::chat_client: struct ChatSendReceipt # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, event_id: Option < String >, refusal: Option < String >]
-mind_body::chat_client: struct ChatSendRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, persona: String, room_alias: String, text: String]
+mind_body::chat_client: struct ChatSendReceipt # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, event_id: Option < String >, refusal: Option < Refusal >, newer: Vec < String >]
+mind_body::chat_client: struct ChatSendRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, persona: String, room_alias: String, text: String, basis: Option < SendBasis >]
 mind_body::chat_client: struct ContextLine # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[sender: String, text: String, at_unix_ms: u64]
+mind_body::chat_client: struct SendBasis # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seen_event_id: Option < String >, since_unix_ms: u64]
 mind_body::chat_rudp: fn connection_id (key_file_text : & str) -> u32
 mind_body::chat_rudp: impl Chat for RudpChat
 mind_body::chat_rudp: impl Drop for RudpChat
@@ -106,8 +107,8 @@ mind_body::heartbeat: struct Organs< 'a >  pub-fields[seats: & 'a [Seat < 'a >],
 mind_body::heartbeat: struct PersonaId # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[slug: Slug, public_name: String, handle: String, matrix_id: String, huginn: SocketAddr]
 mind_body::heartbeat: struct PollTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[at: DateTime < Utc >, tempo_s: u32, instances: Vec < InstanceTrace >, launches: Vec < String >]
 mind_body::heartbeat: struct Seat< 'a >  pub-fields[who: PersonaId, mind: & 'a dyn MindPort, chat: & 'a dyn Chat]
-mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Declined { Admission (MindRefusal) , Conflict , AlreadyAdmitted , StartFailed , GrantForOtherInstance , PersonaRunTakesNoClaims , }
 mind_body::launch: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum StopScope < 'a > { Mind (& 'a Slug) , Swarm , }
+mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Declined { Admission (MindRefusal) , Conflict , AlreadyAdmitted , StartFailed , GrantForOtherInstance , PersonaRunTakesNoClaims , }
 mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum LaunchOutcome { Launched { run : PipelineRef , } , NotQueued { item : PipelineRef , } , Tripped { run : PipelineRef , question : PipelineRef , } , Busy { run : PipelineRef , } , Refused (Declined) , }
 mind_body::launch: const START_GRACE_S : i64
 mind_body::launch: fn open_and_launch (ports : & Ports , request : LaunchRequest) -> Result < LaunchOutcome >
@@ -180,6 +181,7 @@ mind_body::persona: impl Trace for Noted < '_ >
 mind_body::persona: impl WearFact
 mind_body::persona: impl fmt :: Display for Failure
 mind_body::persona: impl fmt :: Display for Outcome
+mind_body::persona: impl< 'a , C : ControlSource , S : ControlSource > PersonaInbox < 'a , C , S >
 mind_body::persona: impl< C : ControlSource , S : ControlSource > PersonaInbox < '_ , C , S >
 mind_body::persona: impl< C : ControlSource , S : ControlSource > SessionInbox for PersonaInbox < '_ , C , S >
 mind_body::persona: pub trait PersonaState { fn instructions (& self) -> Result < String > ; }

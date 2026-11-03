@@ -19,8 +19,8 @@ use mind_body::chat_rudp::{RudpChat, connection_id};
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
 const PENDING_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending.v1.msgpack");
 const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
-const SEND_RECEIPT_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_send_receipt.v1.msgpack");
-const SEND_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_send_request.v1.msgpack");
+const SEND_RECEIPT_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.sent.msgpack");
+const SEND_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.nil-basis.msgpack");
 
 const KEY: &str = "connection-key-for-test";
 const TAG: &str = "cultnet.transport.rudp.v0";
@@ -143,6 +143,6 @@ fn a_request_the_mouth_does_not_answer_ends_in_an_error_not_a_hang() {
     let mouth = mouth(KEY);
     let chat = client(&mouth, KEY, "someone-else", Duration::from_millis(600));
     assert!(chat.pending(0).is_err(), "the mouth answers only its own Persona");
-    let sent = ChatSendRequest { request_id: "r".into(), persona: "someone-else".into(), room_alias: "#a:b".into(), text: "x".into() };
+    let sent = ChatSendRequest { request_id: "r".into(), persona: "someone-else".into(), room_alias: "#a:b".into(), text: "x".into(), basis: None };
     assert!(chat.send(&sent).is_err());
 }
