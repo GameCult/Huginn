@@ -258,7 +258,6 @@ fn redirect_target(base: &str, location: &str) -> Option<OrgRepo> {
     repo.validate_org_repo().ok()?;
     Some(repo)
 }
-}
 
 fn instant_ms(text: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(text).ok().map(|at| at.timestamp_millis())
