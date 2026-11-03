@@ -791,7 +791,7 @@ impl<S: MindStore> Mind<S> {
                 let role = CitationRole::from_name(&edge.role).ok_or_else(|| MindRefusal::Unavailable {
                     detail: format!("the evaluator returned an edge in role {:?}, which is not a citation role", edge.role),
                 })?;
-                typed.push(PipelineEdge { from: ref_of(&edge.from), role, to: ref_of(&edge.to) });
+                typed.push(PipelineEdge { from: ref_of(edge.from), role, to: ref_of(edge.to) });
             }
             Some(typed)
         } else {

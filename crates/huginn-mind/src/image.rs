@@ -102,10 +102,10 @@ impl Image {
         let receipts = receipts.clone()?;
         let index = AdmissionIndex::build(&receipts)?;
         for (type_id, keyed) in envelopes {
-            if kind_of_type(type_id).is_some() {
-                if let Some(key) = keyed.keys().find(|key| !index.contains(type_id, key)) {
-                    return Err(integrity(type_id, key, "has no commit receipt"));
-                }
+            if kind_of_type(type_id).is_some()
+                && let Some(key) = keyed.keys().find(|key| !index.contains(type_id, key))
+            {
+                return Err(integrity(type_id, key, "has no commit receipt"));
             }
         }
         let mut ordered: Vec<&HuginnCommitReceipt> = receipts.iter().collect();

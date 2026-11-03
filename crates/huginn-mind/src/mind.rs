@@ -330,10 +330,10 @@ impl<S: MindStore> Mind<S> {
         for envelope in writes.iter().chain(std::iter::once(&receipt_envelope)) {
             self.envelopes.entry(envelope.r#type.clone()).or_default().insert(envelope.key.clone(), envelope.clone());
         }
-        if receipt.writes.iter().any(|write| write.document_type == HuginnPersonaEntry::TYPE && write.document_key == self.instance.0) {
-            if let Ok(held) = &mut self.persona_receipt {
-                *held = Some(receipt.receipt_id.clone());
-            }
+        if receipt.writes.iter().any(|write| write.document_type == HuginnPersonaEntry::TYPE && write.document_key == self.instance.0)
+            && let Ok(held) = &mut self.persona_receipt
+        {
+            *held = Some(receipt.receipt_id.clone());
         }
         let Ok(image) = &mut self.image else { return };
         let mut documents = Vec::new();
@@ -349,11 +349,11 @@ impl<S: MindStore> Mind<S> {
                 Err(_) => faulted = true,
             }
         }
-        if faulted || image.advance(&AdmissionFacts::of(receipt), documents).is_err() {
-            if let Err(fault) = self.refresh() {
-                self.image = Err(fault.clone());
-                self.persona_receipt = Err(fault);
-            }
+        if (faulted || image.advance(&AdmissionFacts::of(receipt), documents).is_err())
+            && let Err(fault) = self.refresh()
+        {
+            self.image = Err(fault.clone());
+            self.persona_receipt = Err(fault);
         }
     }
 }
