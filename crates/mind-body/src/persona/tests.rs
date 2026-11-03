@@ -4875,6 +4875,23 @@ fn the_capped_clause_claims_only_what_the_read_knows_and_stays_in_the_bound() {
     assert!(!text.contains("further back") && !text.contains("beyond"), "it claims nothing about what it did not read: {text}");
 }
 
+/// A repo that stays dark is told once, on the first line, and not again at every later read: a later read that holds nothing but the
+/// dark repos makes no notice, and one that holds a change makes a notice that does not mention them.
+#[test]
+fn a_repo_that_stays_dark_makes_no_notice_on_later_reads() {
+    let dark = |events| RepoActivity {
+        head: 9,
+        events,
+        capped: vec![],
+        open_prs: vec![],
+        unseen: vec![OrgRepo::from("GameCult/cinny"), OrgRepo::from("GameCult/gamecult-ops")],
+        moved: vec![RepoMoved { from: OrgRepo::from("GameCult/cinny"), to: OrgRepo::from("GameCult/Ratatoskr") }],
+    };
+    assert_eq!(repo_notice_line(&dark(vec![]), 0), None);
+    let line = repo_notice_line(&dark(vec![event(9, "GameCult/Huginn", "nibu", RepoChange::Pushed { commits: 1 })]), 0).expect("a change is news");
+    assert!(!line.contains("cinny") && !line.contains("Ratatoskr") && !line.contains("gamecult-ops"), "{line}");
+}
+
 /// A repo the forge redirects is told with where the redirect points, and one that is only dark is told without.
 #[test]
 fn a_redirected_unseen_repo_is_told_with_where_the_forge_points() {
