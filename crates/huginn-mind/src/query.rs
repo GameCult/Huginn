@@ -771,7 +771,7 @@ impl<S: MindStore> Mind<S> {
 
     /// The projection of an evaluation: a header or a whole view per row, and
     /// the typed edges a hop traversed.
-    fn page(
+    pub(crate) fn page(
         selection: &Selection,
         evaluation: Evaluation<SelectionRow>,
         as_of: u64,

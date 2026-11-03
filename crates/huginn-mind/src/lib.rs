@@ -32,6 +32,8 @@ pub mod index;
 pub mod mind;
 pub mod persona;
 mod rows;
+#[cfg(any(test, feature = "test-support"))]
+pub mod oracle;
 pub mod query;
 pub mod receipt;
 pub mod refusal;
