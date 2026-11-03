@@ -4693,7 +4693,7 @@ fn a_failed_first_read_does_not_fail_the_session() {
     let passed = vec![event(60, "GameCult/Huginn", "nibu", RepoChange::Pushed { commits: 4 })];
     let forged = Forged::over(&rig.mind, vec![None, activity(70, passed), activity(80, vec![event(80, "GameCult/Huginn", "void", RepoChange::Pushed { commits: 1 })])]);
     let lines = live_session(&rig, &forged, PAST_THE_REPO_READ_MS, true, 4);
-    assert!(lines[0].contains("Where your machine shows wear") && lines[0].contains("- repo facts are missing"), "{}", lines[0]);
+    assert!(lines[0].contains("Where your machine shows wear") && lines[0].contains("- repo facts are missing: the read did not answer."), "no claim about the forge: {}", lines[0]);
     assert_eq!(forged.asked.borrow()[..3], [None, None, Some(70)]);
     let notices = all_notices(&lines);
     assert_eq!(notices.len(), 1, "the read that took the cursor told nothing: {lines:?}");
@@ -4724,6 +4724,33 @@ fn a_first_line_shows_wear_after_her_responsibilities() {
         "- PR awaiting you: GameCult/Huginn#8 by nibu (5 h)\n- a repo the forge read cannot see: GameCult/Ghost\n- changed by others: GameCult/Huginn: 9 commits pushed by nibu (5 h)\n- your open PR: GameCult/Huginn#9 (2 d)"
     );
     assert!(input.find("What you are responsible for").unwrap() < input.find("Where your machine shows wear").unwrap());
+}
+
+/// A read that stopped short is never silent: the first line says changes lie further back than it went, and still shows what it did
+/// reach (the organ takes the daemon's events as given, the window and her own login being the forge read's to decide); a later read
+/// that stopped short says so even when it found nothing of anyone's.
+#[test]
+fn a_read_that_stopped_short_says_so_on_the_first_line_and_in_a_notice() {
+    let rig = stewarding_rig(2);
+    let now = unix_ms(at(0));
+    let read = RepoActivity {
+        head: 100,
+        events: vec![RepoEvent { at: now - 5 * 24 * 3_600_000, ..event(100, "GameCult/Huginn", "nibu", RepoChange::Pushed { commits: 2 }) }],
+        more: true,
+        open_prs: vec![],
+        unseen: vec![],
+    };
+    let forged = Forged::over(&rig.mind, vec![Some(read)]);
+    live_session(&rig, &forged, 1000, false, 1);
+    let input = input_of(&rig, 0);
+    let wear = input.split_once("Where your machine shows wear, with ages (facts, not orders):\n").expect("the section").1.split("\n\n").next().unwrap();
+    assert!(wear.contains("changed by others: GameCult/Huginn: 2 commits pushed by nibu (5 d)"), "{wear}");
+    assert!(wear.contains("further back than the read went"), "{wear}");
+
+    let nothing_seen = RepoActivity { head: 9, events: vec![], more: true, open_prs: vec![], unseen: vec![] };
+    let notice = repo_notice_line(&nothing_seen, 1_700_000_000_000).expect("a truncated read is told");
+    assert!(text_of(&notice).contains("more than the read reached"), "{notice}");
+    assert!(repo_notice_line(&RepoActivity { more: false, ..nothing_seen }, 1_700_000_000_000).is_none());
 }
 
 /// The repos the forge is asked about are her stewardships in force and nothing else: a Mind with none asks about none (and so

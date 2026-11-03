@@ -2111,7 +2111,7 @@ fn pr_action_word(action: PrAction) -> &'static str {
 /// logins only, its text quoted and cut at an entry. Nothing a person wrote on the forge is in the read, so none of it can be here.
 /// `None` when the read found nothing to say.
 fn repo_notice_line(activity: &RepoActivity, at_unix_ms: u64) -> Option<String> {
-    if activity.events.is_empty() {
+    if activity.events.is_empty() && !activity.more {
         return None;
     }
     let entries = repo_entries(&activity.events);
@@ -2134,7 +2134,7 @@ fn repo_notice_line(activity: &RepoActivity, at_unix_ms: u64) -> Option<String> 
         text.push_str(&format!(" and {left} more"));
     }
     if activity.more {
-        text.push_str(" and changes beyond what was read");
+        text.push_str(if entries.is_empty() { "more than the read reached" } else { " and changes beyond what was read" });
     }
     text.push('.');
     Some(format!("notice role=organ at={} text={}\n", at_text(at_unix_ms), quoted(&text)))
@@ -2142,14 +2142,14 @@ fn repo_notice_line(activity: &RepoActivity, at_unix_ms: u64) -> Option<String> 
 
 /// The most the wear section may take of a first line.
 const WEAR_MAX_BYTES: usize = 1536;
-/// How far back others' changes still count as wear.
-const WEAR_CHANGED_DAYS: u64 = 3;
 
 /// A fact about her machine from the forge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum WearFact {
     /// The forge read failed: the other repo facts are absent, not zero.
     Missing,
+    /// The read stopped short of the window: others' changes older than what it reached are not shown.
+    Beyond,
     Awaiting { repo: String, number: u32, author: String, at: u64 },
     Unseen { repo: String },
     Changed { repo: String, words: String, at: u64 },
@@ -2160,7 +2160,7 @@ impl WearFact {
     /// The priority order a full section drops from the end of.
     fn rank(&self) -> u8 {
         match self {
-            Self::Missing => 0,
+            Self::Missing | Self::Beyond => 0,
             Self::Awaiting { .. } => 1,
             Self::Unseen { .. } => 2,
             Self::Changed { .. } => 3,
@@ -2189,16 +2189,19 @@ fn wear_facts(activity: &RepoActivity, repos: &[OrgRepo], instance: &Slug, now_m
         }
     }
     facts.extend(activity.unseen.iter().map(|repo| WearFact::Unseen { repo: plain(&repo.0) }));
-    let since = now_ms.saturating_sub(WEAR_CHANGED_DAYS * 24 * 3600 * 1000);
+    // The read's events are others' changes of the last three days: the daemon's forge read is the one place that window and her own
+    // login are decided (`RepoActivity`), so nothing is filtered again here.
     let recent: Vec<RepoEvent> = activity
         .events
         .iter()
-        .filter(|event| event.at >= since && !hers(&event.actor.0))
         .map(|event| RepoEvent { repo: OrgRepo(plain(&event.repo.0)), actor: Short(plain(&event.actor.0)), ..event.clone() })
         .collect();
     for (repo, actor, words) in repo_entries(&recent) {
         let at = recent.iter().filter(|event| event.repo.0 == repo && event.actor.0 == actor).map(|event| event.at).max().unwrap_or(0);
         facts.push(WearFact::Changed { repo, words, at });
+    }
+    if activity.more {
+        facts.push(WearFact::Beyond);
     }
     facts
 }
@@ -2221,7 +2224,8 @@ fn render_wear(now_ms: u64, facts: &[WearFact]) -> String {
     let lines: Vec<String> = ordered
         .iter()
         .map(|fact| match fact {
-            WearFact::Missing => "- repo facts are missing: the forge could not be read.\n".to_owned(),
+            WearFact::Missing => "- repo facts are missing: the read did not answer.\n".to_owned(),
+            WearFact::Beyond => "- more changes by others lie further back than the read went and are not shown.\n".to_owned(),
             WearFact::Awaiting { repo, number, author, at } => format!("- PR awaiting you: {repo}#{number} by {author} {}\n", age_text(now_ms, *at)),
             WearFact::Unseen { repo } => format!("- a repo the forge read cannot see: {repo}\n"),
             WearFact::Changed { repo, words, at } => format!("- changed by others: {repo}: {words} {}\n", age_text(now_ms, *at)),
