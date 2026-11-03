@@ -102,8 +102,6 @@ impl Forge for HttpForge {
 const ACTIVITY_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 /// How many pages of one repo's feed a read takes: 200 entries, of anyone. A repo with more inside the read's reach sets `more`.
 const REPO_FEED_PAGES: usize = 4;
-const PR_PAGES: usize = 2;
-const LISTING_PAGES: usize = 20;
 /// How far back a read with no cursor looks.
 const FIRST_WINDOW_MS: i64 = 72 * 3600 * 1000;
 
@@ -161,7 +159,9 @@ impl HttpForge {
         head = head.max(after.unwrap_or(0));
         let (mut open_prs, mut unseen) = (Vec::new(), Vec::new());
         if after.is_none() {
-            for page in 1..=PR_PAGES {
+            // The open PRs and the org listing are paged to the short page, never to a cap: the budget ends a read that runs long, and
+            // ends it whole, so each list is complete or the read fails. A cap would say "nothing else is open" past it, falsely.
+            for page in 1.. {
                 let found = self.within(&format!("/api/v1/repos/issues/search?type=pulls&state=open&owner={ORG}&limit={PAGE}&page={page}"), deadline)?;
                 let found = found.as_array().context("the forge's search is not a list")?;
                 open_prs.extend(found.iter().filter_map(|pr| open_pr_of(pr, repos, instance)));
@@ -170,7 +170,7 @@ impl HttpForge {
                 }
             }
             let mut listed = BTreeSet::new();
-            for page in 1..=LISTING_PAGES {
+            for page in 1.. {
                 let found = self.within(&format!("/api/v1/orgs/{ORG}/repos?limit={PAGE}&page={page}"), deadline)?;
                 let found = found.as_array().context("the forge's listing is not a list")?;
                 listed.extend(found.iter().filter_map(|repo| repo["full_name"].as_str().map(str::to_ascii_lowercase)));
@@ -566,6 +566,31 @@ mod tests {
         HttpForge::new(&base).activity(&wanted, &me(), Some(1), at(NOW)).unwrap();
         let after = asked.lock().unwrap().clone();
         assert!(after[before..].iter().all(|path| is_feed(path)), "only the feeds: {after:?}");
+    }
+
+    /// More open PRs than two pages hold are all found: the search is paged to its short page, so a PR of hers on page 3 is read and
+    /// the read never answers a list it cut short.
+    #[test]
+    fn open_prs_past_two_pages_are_all_read() {
+        let pr = |number: u32, repo: &str| json!({ "number": number, "user": { "login": "kiko" }, "repository": { "full_name": repo }, "updated_at": "2026-11-02T17:09:43Z" });
+        let full = |from: u32| Value::Array((0..PAGE as u32).map(|n| pr(from + n, "GameCult/Elsewhere")).collect()).to_string();
+        let mut third: Vec<Value> = (0..PAGE as u32).map(|n| pr(300 + n, "GameCult/Elsewhere")).collect();
+        third[PAGE - 1] = pr(7, "GameCult/Huginn");
+        let search = vec![full(100), full(200), Value::Array(third).to_string(), "[]".to_owned()];
+        let (base, asked) = forge_of(move |path| {
+            if is_feed(path) {
+                Some("[]".to_owned())
+            } else if path.contains("/issues/search") {
+                search.get(page_number(path)? - 1).cloned()
+            } else if path.contains("/orgs/GameCult/repos") {
+                Some(json!([{ "full_name": "GameCult/Huginn" }]).to_string())
+            } else {
+                None
+            }
+        });
+        let read = HttpForge::new(&base).activity(&repos(&["GameCult/Huginn"]), &me(), None, at(NOW)).unwrap();
+        assert_eq!(read.open_prs.iter().map(|pr| pr.number).collect::<Vec<_>>(), [7], "page 3 was read");
+        assert_eq!(asked.lock().unwrap().iter().filter(|path| path.contains("/issues/search")).count(), 4, "to the short page");
     }
 
     /// Every PR op the forge writes becomes its event with the number in element 0, and no other op does; the forge's source writes
