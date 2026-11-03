@@ -357,7 +357,7 @@ fn the_start_message_is_the_first_thing_written_and_names_the_skill_the_instance
     let ran = go(vec![Out(result_line())]);
     assert!(matches!(&ran.events[0], Event::Wrote(_)), "the start precedes the first read: {:?}", ran.events[0]);
     let written = ran.written();
-    for needle in ["Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z", "about 90% of the weekly allowance", "nothing enforces it"] {
+    for needle in ["Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z (in 20d 7h), read 0s ago", "about 90% of the weekly allowance", "nothing enforces it"] {
         assert!(written[0].contains(needle), "the lease grant plan windows reach the child: {needle}: {}", written[0]);
     }
     for needle in ["Use the eureka skill.", "yggdrasil", "yggdrasil:run:selfrun-a", AGENT] {
@@ -1216,7 +1216,7 @@ fn the_start_message_carries_the_claimed_follow_ups_item_and_id_verbatim() {
     let mind = claiming(std::slice::from_ref(&claim), vec![brief]);
     let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
     let first = &ran.written()[0];
-    assert!(first.starts_with(&start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_000_000)), "{first}");
+    assert!(first.starts_with(&start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], at_start().timestamp_millis() as u64)), "{first}");
     for needle in ["Fix the thing.\nThen report \u{e9}.", claim.id.0.as_str(), "Use the eureka skill."] {
         assert!(first.contains(needle), "{needle}: {first}");
     }
@@ -1278,7 +1278,7 @@ fn a_mind_query_failure_on_a_claim_fails_the_run_with_the_cause_and_starts_no_ch
 #[test]
 fn a_run_without_claims_gets_the_identity_lines_alone() {
     let ran = go(vec![Out(result_line())]);
-    assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_000_000));
+    assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], at_start().timestamp_millis() as u64));
 }
 
 // ---- the live session -----------------------------------------------------

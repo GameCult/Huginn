@@ -836,7 +836,8 @@ fn her_latest_runs_and_how_they_ended_are_in_her_input() {
     rig.mind.committed(vec![close(run_ref("old-one"), recorded())]);
     rig.go();
     let input = rig.model.requests.borrow()[0].input.clone();
-    assert!(input.contains("old-one PersonaTurn: Recorded"), "{input}");
+    assert!(input.contains("old-one PersonaTurn: finished
+"), "{input}");
 }
 
 #[test]
@@ -1551,7 +1552,8 @@ fn a_self_runs_result_over_a_reasons_line_reaches_her_next_turn_whole() {
     self_run_closed_with(&rig, "self-long", &result);
     rig.go();
     let input = rig.model.requests.borrow()[0].input.clone();
-    assert!(input.contains("self-long SelfRun: Recorded"), "{input}");
+    assert!(input.contains("self-long SelfRun: finished
+    line of my report"), "{input}");
     assert!(input.contains("    THE END OF MY REPORT"), "{input}");
     assert_eq!(input.matches("    line of my report").count(), 150);
 }
@@ -3509,7 +3511,7 @@ Near what was said:
 - (2026-10-09, in #swarm, Did): "Closed the old bridge"
 
 
-Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z (in 3h 20m), read 0s ago. The swarm aims to have used about 90% of the weekly allowance at reset; nothing enforces it; you and the other Minds set the tempo.
+Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z (in 20d 7h), read 0s ago. The swarm aims to have used about 90% of the weekly allowance at reset; nothing enforces it; you and the other Minds set the tempo.
 
 Tempo: not yet read. The swarm beat is the lower median of the votes cast: a Mind with no standing vote abstains and is not counted, and with no vote cast the beat is 900 s. A vote only needs changing when conditions change; leave it standing otherwise. You vote with tempo_vote_beat_s (60 to 86400 seconds per beat; omit the key to leave your standing vote as it is, and send null to withdraw it and abstain) and declare your own urgency with urgency_permille (0 to 1000, null for none); an urgency lasts until your next turn, so use it as etiquette, not as a habit.
 
@@ -3536,7 +3538,7 @@ What you remember (from your own mind; `huginn view <id>` reads a record):
 - nothing is remembered yet.
 
 
-Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z (in 3h 20m), read 0s ago. The swarm aims to have used about 90% of the weekly allowance at reset; nothing enforces it; you and the other Minds set the tempo.
+Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z (in 20d 7h), read 0s ago. The swarm aims to have used about 90% of the weekly allowance at reset; nothing enforces it; you and the other Minds set the tempo.
 
 Tempo: not yet read. The swarm beat is the lower median of the votes cast: a Mind with no standing vote abstains and is not counted, and with no vote cast the beat is 900 s. A vote only needs changing when conditions change; leave it standing otherwise. You vote with tempo_vote_beat_s (60 to 86400 seconds per beat; omit the key to leave your standing vote as it is, and send null to withdraw it and abstain) and declare your own urgency with urgency_permille (0 to 1000, null for none); an urgency lasts until your next turn, so use it as etiquette, not as a habit.
 
