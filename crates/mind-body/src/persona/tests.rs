@@ -5379,3 +5379,43 @@ fn wear_reads_only_on_a_first_line() {
     let long = wear_reads(true, 25, true);
     assert_eq!((long.0, long.1, long.2), (roots, specs, findings), "polls and tells read nothing more");
 }
+
+/// A record whose admission is no instant makes its read missing, never age 0: the roots read, the specs read and the findings read
+/// each, with the others' facts still printed.
+#[test]
+fn an_undated_record_makes_its_read_missing() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![unreported_spec(CAMPAIGN, "open", REPO)]);
+    mind.committed(chain(CAMPAIGN, "f", REPO));
+    soul(&mind, vec![soul_finding(CAMPAIGN, "f", "one", eureka_pipeline::FindingSeverity::Low)]);
+    for (spoiled, missing) in [
+        ("roots", "campaigns on your repos could not be read"),
+        (K::CutSpec.type_id(), "specs with no report could not be read"),
+        (K::Finding.type_id(), "open Soul findings could not be read"),
+    ] {
+        let port = crate::queue::HuginnMind::over(
+            mind.instance().clone(),
+            Box::new(|request| {
+                let asked = match &request {
+                    huginn_mind::HuginnMindRequest::Query { selection, .. } => selection.schemas.as_ref().and_then(|schemas| schemas.first().cloned()),
+                    _ => None,
+                };
+                let mut answer = mind.answer(request);
+                match &mut answer {
+                    huginn_mind::HuginnMindResponse::RootsTouched(roots) if spoiled == "roots" => roots.iter_mut().for_each(|root| root.admitted_at = "yesterday".into()),
+                    huginn_mind::HuginnMindResponse::Query(page) if asked.as_deref() == Some(spoiled) => {
+                        if let huginn_mind::PipelinePageItems::Headers(found) = &mut page.items {
+                            found.iter_mut().for_each(|header| header.admission.admitted_at = "yesterday".into());
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(answer)
+            }),
+        );
+        let facts = record_wear_facts(&port, &hers(), &[], t(0));
+        assert!(facts.iter().any(|fact| matches!(fact, WearFact::RecordsMissing(what) if what.contains(missing))), "{spoiled}: {facts:?}");
+        assert!(!facts.iter().any(|fact| matches!(fact, WearFact::QuietCampaigns(_))), "{spoiled}: {facts:?}");
+        assert_eq!(facts.len(), 2, "{spoiled}: the missing line and the other read's facts: {facts:?}");
+    }
+}
