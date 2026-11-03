@@ -2201,23 +2201,25 @@ enum WearFact {
     Unseen { repo: String, redirect: Option<String> },
     Changed { repo: String, words: String, at: u64 },
     Yours { repo: String, number: u32, at: u64 },
-    /// Specs in force with no report, on repos she stewards: `<campaign>/<cut>.r<n>` and the revision's admission, oldest first.
+    /// Specs in force with no report, on repos she stewards: each spec's record id and the revision's admission, oldest first.
     SpecsOnYours(Vec<(String, u64)>),
-    /// The same on repos she does not steward: how many, and the oldest admission.
-    SpecsElsewhere { count: usize, oldest: u64 },
-    /// Open Soul findings in her mind, by campaign of her slice, largest first.
+    /// The same on repos she does not steward: how many in each campaign (largest first), and the oldest spec's record id and admission.
+    SpecsElsewhere { by_campaign: Vec<(String, usize)>, oldest: (String, u64) },
+    /// Open Soul findings in her mind, by campaign of her slice, blocking first, then largest.
     SoulFindings(Vec<FindingRow>),
     /// Campaigns of her slice with open work and no admission in her mind for `STALE_AFTER_DAYS`, by newest admission, oldest first.
     QuietCampaigns(Vec<(String, u64)>),
 }
 
-/// One campaign's open Soul findings in her mind: how many, how many block, and the oldest admission.
+/// One campaign's open Soul findings in her mind: how many, how many block, the oldest admission, and the oldest blocking finding's
+/// record id and admission when one blocks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FindingRow {
     campaign: String,
     open: usize,
     blocking: usize,
     oldest: u64,
+    oldest_blocking: Option<(String, u64)>,
 }
 
 impl WearFact {
@@ -2241,6 +2243,12 @@ impl WearFact {
 /// name, so it cannot carry a line break or a field into the section.
 fn plain(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/') { c } else { '?' }).collect()
+}
+
+/// A record id as plain tokens: each `:`-separated part goes through `plain`, so an id read from a record cannot carry a line break
+/// or a field into the section.
+fn plain_id(id: &str) -> String {
+    id.split(':').map(plain).collect::<Vec<_>>().join(":")
 }
 
 /// The facts a first read gives about her repos, in no order (the renderer orders them): PRs waiting on her, repos the forge cannot
@@ -2286,9 +2294,9 @@ fn listed(entries: Vec<String>, sep: &str, more: impl Fn(usize, usize) -> String
     text
 }
 
-/// A spec in force with no report: its campaign and cut as one label, its repo, and the revision's admission.
+/// A spec in force with no report: its record id, its campaign, its repo, and the revision's admission.
 struct UnreportedSpec {
-    label: String,
+    id: String,
     campaign: String,
     repo: String,
     at: u64,
@@ -2320,10 +2328,10 @@ fn unreported_specs(mind: &dyn MindPort) -> Result<Vec<UnreportedSpec>> {
     let selection = Selection { cited: Some(Incoming { role: "cut_spec".into(), exists: false }), ..in_force(of_kind(PipelineKind::CutSpec)) };
     let mut specs = Vec::new();
     for found in headers(mind, &selection)? {
-        let PipelineFacts::CutSpec { cut, revision, repo, .. } = &found.facts else { continue };
+        let PipelineFacts::CutSpec { repo, .. } = &found.facts else { continue };
         let at = instant_ms(&found.admission.admitted_at).ok_or_else(|| anyhow!("a spec's admission has no instant"))?;
         let campaign = root_label(&found.id);
-        specs.push(UnreportedSpec { label: format!("{campaign}/{}.r{revision}", plain(&cut.0)), campaign, repo: repo.identity(), at });
+        specs.push(UnreportedSpec { id: plain_id(&found.id.id.0), campaign, repo: repo.identity(), at });
     }
     Ok(specs)
 }
@@ -2337,13 +2345,19 @@ fn open_soul_findings(mind: &dyn MindPort, slice: &[(String, u64)]) -> Result<Ve
         let PipelineFacts::Finding { severity, .. } = &found.facts else { continue };
         let at = instant_ms(&found.admission.admitted_at).ok_or_else(|| anyhow!("a finding's admission has no instant"))?;
         let campaign = root_label(&found.id);
-        let row = rows.entry(campaign.clone()).or_insert(FindingRow { campaign, open: 0, blocking: 0, oldest: at });
+        let row = rows.entry(campaign.clone()).or_insert(FindingRow { campaign, open: 0, blocking: 0, oldest: at, oldest_blocking: None });
         row.open += 1;
-        row.blocking += usize::from(BLOCKING.contains(&format!("{severity:?}").as_str()));
         row.oldest = row.oldest.min(at);
+        if BLOCKING.contains(&format!("{severity:?}").as_str()) {
+            row.blocking += 1;
+            let id = plain_id(&found.id.id.0);
+            if row.oldest_blocking.as_ref().is_none_or(|(held, held_at)| (at, &id) < (*held_at, held)) {
+                row.oldest_blocking = Some((id, at));
+            }
+        }
     }
     let mut rows: Vec<FindingRow> = rows.into_values().collect();
-    rows.sort_by(|a, b| b.open.cmp(&a.open).then_with(|| a.campaign.cmp(&b.campaign)));
+    rows.sort_by(|a, b| b.blocking.cmp(&a.blocking).then_with(|| b.open.cmp(&a.open)).then_with(|| a.campaign.cmp(&b.campaign)));
     Ok(rows)
 }
 
@@ -2375,10 +2389,16 @@ fn record_wear_facts(mind: &dyn MindPort, repos: &[OrgRepo], open_roots: &[Strin
         let (mut mine, elsewhere): (Vec<&UnreportedSpec>, Vec<&UnreportedSpec>) = specs.iter().partition(|spec| hers.contains(&spec.repo));
         mine.sort_by_key(|spec| spec.at);
         if !mine.is_empty() {
-            facts.push(WearFact::SpecsOnYours(mine.iter().map(|spec| (spec.label.clone(), spec.at)).collect()));
+            facts.push(WearFact::SpecsOnYours(mine.iter().map(|spec| (spec.id.clone(), spec.at)).collect()));
         }
-        if let Some(oldest) = elsewhere.iter().map(|spec| spec.at).min() {
-            facts.push(WearFact::SpecsElsewhere { count: elsewhere.len(), oldest });
+        if let Some(oldest) = elsewhere.iter().min_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id))) {
+            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+            for spec in &elsewhere {
+                *counts.entry(spec.campaign.as_str()).or_default() += 1;
+            }
+            let mut by_campaign: Vec<(String, usize)> = counts.into_iter().map(|(campaign, count)| (campaign.to_owned(), count)).collect();
+            by_campaign.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            facts.push(WearFact::SpecsElsewhere { by_campaign, oldest: (oldest.id.clone(), oldest.at) });
         }
     }
     if let Some(rows) = findings.as_ref().filter(|rows| !rows.is_empty()) {
@@ -2432,21 +2452,37 @@ fn render_wear(now_ms: u64, facts: &[WearFact]) -> String {
                 let named = specs.iter().map(|(label, at)| format!("{label} {}", age_text(now_ms, *at))).collect();
                 format!("- specs with no report in your mind, on your repos: {}\n", listed(named, ", ", |left, _| format!("+{left} more")))
             }
-            WearFact::SpecsElsewhere { count, oldest } => {
-                format!("- specs with no report in your mind, on repos you do not steward: {count}, oldest {}\n", age_text(now_ms, *oldest))
+            WearFact::SpecsElsewhere { by_campaign, oldest: (oldest_id, oldest_at) } => {
+                let count: usize = by_campaign.iter().map(|(_, count)| count).sum();
+                let named = by_campaign.iter().map(|(campaign, count)| format!("{campaign} {count}")).collect();
+                let more = |left: usize, from: usize| {
+                    let held: usize = by_campaign[from..].iter().map(|(_, count)| count).sum();
+                    format!("+{held} more in {left} {}", if left == 1 { "campaign" } else { "campaigns" })
+                };
+                format!(
+                    "- specs with no report in your mind, on repos you do not steward: {count} ({}), oldest {oldest_id} {}\n",
+                    listed(named, ", ", more),
+                    age_text(now_ms, *oldest_at)
+                )
             }
             WearFact::SoulFindings(rows) => {
-                let named = rows.iter().map(|row| format!("{} {}, {} blocking, oldest {}", row.campaign, row.open, row.blocking, age_text(now_ms, row.oldest))).collect();
+                let named = rows
+                    .iter()
+                    .map(|row| match &row.oldest_blocking {
+                        Some((id, at)) => format!("{} {}, {} blocking, oldest blocking {id} {}", row.campaign, row.open, row.blocking, age_text(now_ms, *at)),
+                        None => format!("{} {}, {} blocking, oldest {}", row.campaign, row.open, row.blocking, age_text(now_ms, row.oldest)),
+                    })
+                    .collect();
                 let more = |left: usize, from: usize| {
-                    let held: usize = rows[from..].iter().map(|row| row.open).sum();
-                    format!("+{held} more in {left} {}", if left == 1 { "campaign" } else { "campaigns" })
+                    let (held, blocking) = rows[from..].iter().fold((0, 0), |(held, blocking), row| (held + row.open, blocking + row.blocking));
+                    format!("+{held} more, {blocking} blocking, in {left} {}", if left == 1 { "campaign" } else { "campaigns" })
                 };
                 format!("- open Soul findings in your mind: {}\n", listed(named, "; ", more))
             }
             WearFact::QuietCampaigns(quiet) => {
                 let named = quiet.iter().map(|(campaign, at)| format!("{campaign} {}", age_text(now_ms, *at))).collect();
                 format!(
-                    "- campaigns on your repos with open work and no admission in your mind for {STALE_AFTER_DAYS} d or more: {}\n",
+                    "- campaigns that touch your repos with open work and no admission in your mind for {STALE_AFTER_DAYS} d or more: {}\n",
                     listed(named, ", ", |left, _| format!("+{left} more"))
                 )
             }

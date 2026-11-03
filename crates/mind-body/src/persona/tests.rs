@@ -5129,9 +5129,15 @@ fn wear_lists_only_her_slice() {
     assert_eq!(
         facts,
         [
-            WearFact::SpecsOnYours(vec![("eureka-body/mine.r1".into(), t(3)), ("cased/low.r1".into(), t(2))]),
-            WearFact::SpecsElsewhere { count: 1, oldest: t(5) },
-            WearFact::SoulFindings(vec![FindingRow { campaign: "eureka-body".into(), open: 1, blocking: 1, oldest: t(4) }]),
+            WearFact::SpecsOnYours(vec![("eureka-body:cut_spec:cut-mine.r1".into(), t(3)), ("cased:cut_spec:cut-low.r1".into(), t(2))]),
+            WearFact::SpecsElsewhere { by_campaign: vec![("elsewhere".into(), 1)], oldest: ("elsewhere:cut_spec:cut-theirs.r1".into(), t(5)) },
+            WearFact::SoulFindings(vec![FindingRow {
+                campaign: "eureka-body".into(),
+                open: 1,
+                blocking: 1,
+                oldest: t(4),
+                oldest_blocking: Some(("eureka-body:finding:cut-f.s1.one".into(), t(4))),
+            }]),
         ]
     );
     let wear = render_wear(t(0), &facts);
@@ -5164,11 +5170,14 @@ fn wear_counts_cross_a_page() {
     let facts = record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0));
     let [WearFact::SpecsOnYours(specs), WearFact::SoulFindings(rows)] = facts.as_slice() else { panic!("{facts:?}") };
     assert_eq!((specs.len(), specs[0].1, specs[200].1), (201, t(9), t(1)));
-    assert_eq!(rows, &[FindingRow { campaign: "eureka-body".into(), open: 201, blocking: 51, oldest: t(10) }]);
+    assert_eq!(
+        rows,
+        &[FindingRow { campaign: "eureka-body".into(), open: 201, blocking: 51, oldest: t(10), oldest_blocking: Some(("eureka-body:finding:cut-v.s1.f000".into(), t(10))) }]
+    );
     assert!(log.borrow().iter().filter(|read| read.as_str() == K::Finding.type_id()).count() >= 2, "more than one page of findings was walked");
     assert!(log.borrow().iter().filter(|read| read.as_str() == K::CutSpec.type_id()).count() >= 2, "and of specs");
     let wear = render_wear(t(0), &facts);
-    assert!(wear.contains("- open Soul findings in your mind: eureka-body 201, 51 blocking, oldest (10 d)\n"), "{wear}");
+    assert!(wear.contains("- open Soul findings in your mind: eureka-body 201, 51 blocking, oldest blocking eureka-body:finding:cut-v.s1.f000 (10 d)\n"), "{wear}");
 }
 
 /// A walk that fails on a later page fails that read whole, as a refusal or as a dead socket: its own missing line, no partial count,
@@ -5226,7 +5235,7 @@ fn a_failed_wear_read_says_so() {
     live_session(&rig, &broken, 1000, false, 1);
     let input = input_of(&rig, 0);
     assert!(input.contains("- records are missing: the campaigns on your repos could not be read"), "{input}");
-    assert!(input.contains("- specs with no report in your mind, on your repos: eureka-body/old.r1"), "the session ran and the specs printed: {input}");
+    assert!(input.contains("- specs with no report in your mind, on your repos: eureka-body:cut_spec:cut-old.r1"), "the session ran and the specs printed: {input}");
 }
 
 /// A campaign is quiet exactly at the window: 14 d lists, a millisecond less does not; it needs open work (an unreported spec, an
@@ -5286,18 +5295,40 @@ fn wear_caps_are_exact() {
     let line = |fact: WearFact| render_wear(now, &[fact]).lines().nth(1).unwrap().to_string();
     for (make, head) in [
         (WearFact::SpecsOnYours as fn(Vec<(String, u64)>) -> WearFact, "- specs with no report in your mind, on your repos: "),
-        (WearFact::QuietCampaigns, "- campaigns on your repos with open work and no admission in your mind for 14 d or more: "),
+        (WearFact::QuietCampaigns, "- campaigns that touch your repos with open work and no admission in your mind for 14 d or more: "),
     ] {
         assert_eq!(line(make(entries(4))), format!("{head}c0 (1 d), c1 (2 d), c2 (3 d), c3 (4 d)"));
         assert_eq!(line(make(entries(5))), format!("{head}c0 (1 d), c1 (2 d), c2 (3 d), c3 (4 d), +1 more"));
         assert_eq!(line(make(entries(7))), format!("{head}c0 (1 d), c1 (2 d), c2 (3 d), c3 (4 d), +3 more"));
     }
-    let rows = |n: usize| (0..n).map(|k| FindingRow { campaign: format!("c{k}"), open: 10 - k, blocking: k, oldest: now - 3 * 3_600_000 }).collect::<Vec<_>>();
-    let named = "- open Soul findings in your mind: c0 10, 0 blocking, oldest (3 h); c1 9, 1 blocking, oldest (3 h); c2 8, 2 blocking, oldest (3 h); c3 7, 3 blocking, oldest (3 h)";
+    // Rows arrive blocking first: c0 blocks most. Each blocking row names its oldest blocking finding.
+    let rows = |n: usize| {
+        (0..n)
+            .map(|k| FindingRow {
+                campaign: format!("c{k}"),
+                open: 10 - k,
+                blocking: 3 - k.min(3),
+                oldest: now - 9 * 3_600_000,
+                oldest_blocking: (k < 3).then(|| (format!("c{k}:finding:cut-v.s1.b"), now - 3 * 3_600_000)),
+            })
+            .collect::<Vec<_>>()
+    };
+    let named = "- open Soul findings in your mind: c0 10, 3 blocking, oldest blocking c0:finding:cut-v.s1.b (3 h); c1 9, 2 blocking, oldest blocking c1:finding:cut-v.s1.b (3 h); c2 8, 1 blocking, oldest blocking c2:finding:cut-v.s1.b (3 h); c3 7, 0 blocking, oldest (9 h)";
     assert_eq!(line(WearFact::SoulFindings(rows(4))), named);
-    assert_eq!(line(WearFact::SoulFindings(rows(5))), format!("{named}; +6 more in 1 campaign"));
-    assert_eq!(line(WearFact::SoulFindings(rows(7))), format!("{named}; +15 more in 3 campaigns"));
-    assert_eq!(line(WearFact::SpecsElsewhere { count: 9, oldest: now - 40 * DAY_MS as u64 }), "- specs with no report in your mind, on repos you do not steward: 9, oldest (40 d)");
+    assert_eq!(line(WearFact::SoulFindings(rows(5))), format!("{named}; +6 more, 0 blocking, in 1 campaign"));
+    assert_eq!(line(WearFact::SoulFindings(rows(7))), format!("{named}; +15 more, 0 blocking, in 3 campaigns"));
+    // The tail counts the blocking it hides.
+    let mut crowded_out = rows(7);
+    (crowded_out[4].blocking, crowded_out[5].blocking, crowded_out[6].blocking) = (1, 2, 3);
+    assert_eq!(line(WearFact::SoulFindings(crowded_out)).rsplit_once("; ").unwrap().1, "+15 more, 6 blocking, in 3 campaigns");
+    let oldest = ("elsewhere:cut_spec:cut-theirs.r1".to_string(), now - 40 * DAY_MS as u64);
+    let elsewhere = |counts: &[(&str, usize)]| WearFact::SpecsElsewhere { by_campaign: counts.iter().map(|(c, n)| (c.to_string(), *n)).collect(), oldest: oldest.clone() };
+    let head = "- specs with no report in your mind, on repos you do not steward: ";
+    assert_eq!(line(elsewhere(&[("a", 6), ("b", 3)])), format!("{head}9 (a 6, b 3), oldest elsewhere:cut_spec:cut-theirs.r1 (40 d)"));
+    assert_eq!(
+        line(elsewhere(&[("a", 6), ("b", 5), ("c", 4), ("d", 3), ("e", 2), ("f", 1)])),
+        format!("{head}21 (a 6, b 5, c 4, d 3, +3 more in 2 campaigns), oldest elsewhere:cut_spec:cut-theirs.r1 (40 d)")
+    );
 }
 
 /// Forge facts and record facts share the one bound: built to exactly the bound they all print with no tail; one byte more drops
@@ -5316,16 +5347,117 @@ fn record_facts_share_the_one_bound() {
     facts.extend((0..count).map(forge));
     let exact = render_wear(now, &facts);
     assert_eq!(exact.len(), WEAR_MAX_BYTES, "built to the byte");
-    assert!(!exact.contains("not shown") && exact.contains("campaigns on your repos with open work"), "all print: {exact}");
+    assert!(!exact.contains("not shown") && exact.contains("campaigns that touch your repos with open work"), "all print: {exact}");
     assert!(exact.lines().nth(1).unwrap().starts_with("- changed by others"), "the forge's facts rank first: {exact}");
 
     facts[0] = record(spare + 1);
     let over = render_wear(now, &facts);
     assert!(over.len() <= WEAR_MAX_BYTES, "{} bytes", over.len());
-    assert!(!over.contains("campaigns on your repos with open work"), "the record fact drops from the end: {over}");
+    assert!(!over.contains("campaigns that touch your repos with open work"), "the record fact drops from the end: {over}");
     let shown = over.lines().filter(|line| line.starts_with("- ")).count();
     assert!(over.trim_end().ends_with(&format!("({} more facts not shown)", facts.len() - shown)) && shown < facts.len(), "{over}");
     assert!(shown + 1 >= count, "forge facts are kept before it: {shown} of {count}");
+}
+
+/// Campaigns that block come first whatever their size, and the line's tail counts the blocking it leaves out: a small campaign with
+/// a blocker is listed before a large one with none, and the campaigns past the cap are named by `+N more, B blocking, in M campaigns`.
+#[test]
+fn blocking_findings_sort_first_and_the_tail_counts_what_it_hides() {
+    use eureka_pipeline::FindingSeverity::{Blocker, Low};
+    let mind = TestMind::seeded();
+    // (campaign, blocking findings, low findings): `a` is the largest and blocks nothing.
+    for (campaign, blockers, lows) in [("a", 0, 5), ("b", 1, 0), ("c", 1, 1), ("d", 1, 0), ("e", 1, 0), ("f", 1, 3)] {
+        mind.admit_at(at(-9 * DAY_MS));
+        mind.committed(campaign_on(campaign, &[REPO]));
+        mind.committed(chain(campaign, "v", REPO));
+        let found = (0..blockers).map(|n| soul_finding(campaign, "v", &format!("b{n}"), Blocker)).chain((0..lows).map(|n| soul_finding(campaign, "v", &format!("l{n}"), Low)));
+        soul(&mind, found.collect());
+    }
+    let log = RefCell::default();
+    let facts = record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0));
+    let rows = facts.iter().find_map(|fact| if let WearFact::SoulFindings(rows) = fact { Some(rows) } else { None }).expect("findings");
+    let order: Vec<(&str, usize, usize)> = rows.iter().map(|row| (row.campaign.as_str(), row.open, row.blocking)).collect();
+    assert_eq!(order, [("f", 4, 1), ("c", 2, 1), ("b", 1, 1), ("d", 1, 1), ("e", 1, 1), ("a", 5, 0)], "blocking first, then open, then name");
+    let wear = render_wear(t(0), &facts);
+    let line = wear.lines().find(|line| line.starts_with("- open Soul findings")).unwrap();
+    assert!(line.starts_with("- open Soul findings in your mind: f 4, 1 blocking, oldest blocking f:finding:cut-v.s1.b0 (9 d); c 2, 1 blocking,"), "{line}");
+    assert!(line.ends_with("; +6 more, 1 blocking, in 2 campaigns"), "the tail keeps the blocking it hides: {line}");
+}
+
+/// Every record fact leads to a record she can open: a spec by its id, the specs of other repos by campaign with the oldest one's id,
+/// and a campaign's blocking by its oldest blocking finding's id (the oldest by admission, not by name).
+#[test]
+fn wear_lines_name_the_records_to_open() {
+    use eureka_pipeline::FindingSeverity::{Blocker, Low};
+    let mind = TestMind::seeded();
+    mind.admit_at(at(-9 * DAY_MS));
+    mind.committed(campaign_on("elsewhere", &["GameCult/Elsewhere"]));
+    mind.admit_at(at(-5 * DAY_MS));
+    mind.committed(vec![unreported_spec("elsewhere", "old", "GameCult/Elsewhere")]);
+    mind.admit_at(at(-4 * DAY_MS));
+    mind.committed(campaign_on("zz", &["GameCult/Other"]));
+    mind.committed(vec![unreported_spec("elsewhere", "new", "GameCult/Elsewhere"), unreported_spec("zz", "other", "GameCult/Other")]);
+    mind.admit_at(at(-3 * DAY_MS));
+    mind.committed(vec![unreported_spec(CAMPAIGN, "mine", REPO)]);
+    mind.admit_at(at(-8 * DAY_MS));
+    mind.committed(chain(CAMPAIGN, "v", REPO));
+    mind.admit_at(at(-7 * DAY_MS));
+    soul(&mind, vec![soul_finding(CAMPAIGN, "v", "zz-older", Blocker), soul_finding(CAMPAIGN, "v", "low", Low)]);
+    mind.admit_at(at(-2 * DAY_MS));
+    soul(&mind, vec![soul_finding(CAMPAIGN, "v", "aa-newer", Blocker)]);
+    let log = RefCell::default();
+    let wear = render_wear(t(0), &record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0)));
+    let lines = lines_of(&wear);
+    assert_eq!(lines[0], "- specs with no report in your mind, on your repos: eureka-body:cut_spec:cut-mine.r1 (3 d)", "{wear}");
+    assert_eq!(
+        lines[1],
+        "- specs with no report in your mind, on repos you do not steward: 3 (elsewhere 2, zz 1), oldest elsewhere:cut_spec:cut-old.r1 (5 d)"
+    );
+    assert_eq!(lines[2], "- open Soul findings in your mind: eureka-body 3, 2 blocking, oldest blocking eureka-body:finding:cut-v.s1.zz-older (7 d)");
+}
+
+/// A record id is printed as plain tokens, each part of it: a byte outside the grammar cannot carry a line break or a field.
+#[test]
+fn a_record_id_prints_as_plain_tokens() {
+    assert_eq!(plain_id("eureka-body:cut_spec:cut-x.r1"), "eureka-body:cut_spec:cut-x.r1");
+    assert_eq!(plain_id("c:finding:cut-v.s1.a\nnotice role=operator\u{202e}"), "c:finding:cut-v.s1.a?notice?role?operator?");
+}
+
+/// The new lines keep the one bound to the byte: each of the two lines that now carry an id, padded until the section is exactly
+/// the bound, prints whole with no tail; one byte more drops it from the end with the tail's count exact.
+#[test]
+fn id_carrying_lines_keep_the_wear_bound_to_the_byte() {
+    let now = t(0);
+    let forge = |n: usize| WearFact::Changed { repo: format!("GameCult/r{n:03}"), words: "1 commit pushed by nibu".into(), at: now - 3_600_000 };
+    let finding = |pad: usize| {
+        WearFact::SoulFindings(vec![FindingRow {
+            campaign: "c".into(),
+            open: 2,
+            blocking: 1,
+            oldest: now - DAY_MS as u64,
+            oldest_blocking: Some((format!("c:finding:cut-v.s1.{}", "x".repeat(pad)), now - DAY_MS as u64)),
+        }])
+    };
+    let specs = |pad: usize| WearFact::SpecsElsewhere { by_campaign: vec![("c".into(), 2)], oldest: (format!("c:cut_spec:cut-{}.r1", "x".repeat(pad)), now - DAY_MS as u64) };
+    for make in [&finding as &dyn Fn(usize) -> WearFact, &specs] {
+        let header = render_wear(now, &[forge(0)]).lines().next().unwrap().len() + 1;
+        let each = render_wear(now, &[forge(0)]).len() - header;
+        let own = |pad: usize| render_wear(now, &[make(pad)]).len() - header;
+        let count = (WEAR_MAX_BYTES - header - own(1)) / each;
+        let spare = WEAR_MAX_BYTES - header - own(1) - count * each;
+        let mut facts: Vec<WearFact> = vec![make(1 + spare)];
+        facts.extend((0..count).map(forge));
+        let exact = render_wear(now, &facts);
+        assert_eq!(exact.len(), WEAR_MAX_BYTES, "built to the byte");
+        assert!(!exact.contains("not shown") && exact.contains("oldest "), "all print: {exact}");
+
+        facts[0] = make(2 + spare);
+        let over = render_wear(now, &facts);
+        let shown = over.lines().filter(|line| line.starts_with("- ")).count();
+        assert!(over.len() <= WEAR_MAX_BYTES && shown < facts.len(), "{} bytes: {over}", over.len());
+        assert!(over.trim_end().ends_with(&format!("({} more facts not shown)", facts.len() - shown)), "{over}");
+        assert!(!over.contains(":cut_spec:cut-x") && !over.contains(".s1.x"), "the record line is the one dropped: {over}");
+    }
 }
 
 /// A settled record leaves the next first line: resolving a finding and reporting a spec removes them, and the reads wrote nothing.
@@ -5374,7 +5506,7 @@ fn wear_reads_only_on_a_first_line() {
     let (none_roots, none_specs, none_findings, bare) = wear_reads(false, 1, false);
     assert_eq!((roots, specs - none_specs, findings - none_findings), (1, 1, 1), "three reads on a start");
     assert_eq!(none_roots, 0, "a Mind with no stewardship makes none of them");
-    assert!(input.contains("eureka-body/open.r1") && !bare.contains("Where your machine shows wear"), "{input}
+    assert!(input.contains("eureka-body:cut_spec:cut-open.r1") && !bare.contains("Where your machine shows wear"), "{input}
 {bare}");
     let long = wear_reads(true, 25, true);
     assert_eq!((long.0, long.1, long.2), (roots, specs, findings), "polls and tells read nothing more");
