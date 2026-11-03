@@ -478,7 +478,7 @@ mod tests {
         let busy: Vec<Value> = (0..500).map(|n| push_at(10_000 - n, "GameCult/Eureka", "eureka", 1)).collect();
         let busy = Value::Array(busy).to_string();
         let hers = vec![push_at(300, "GameCult/Ratatoskr", "Nibu", 60)];
-        let (base, asked) = forge_of(move |path| if path.contains("/orgs/") { Some(busy.clone()) } else { repo_feed(&hers, path).or_else(|| Some("[]".into())) });
+        let (base, asked) = forge_of(move |path| if path.contains("/orgs/GameCult/activities") { Some(busy.clone()) } else { repo_feed(&hers, path).or_else(|| Some("[]".into())) });
         let read = HttpForge::new(&base).activity(&repos(&["GameCult/Ratatoskr"]), &me(), None, at(NOW)).unwrap();
         assert_eq!(read.events.iter().map(|event| event.id).collect::<Vec<_>>(), [300]);
         assert!(!read.more);
