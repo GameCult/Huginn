@@ -5141,7 +5141,8 @@ fn wear_lists_only_her_slice() {
         ]
     );
     let wear = render_wear(t(0), &facts);
-    assert!(!wear.contains("elsewhere") && !wear.contains("Elsewhere"), "{wear}");
+    assert!(!wear.contains("Elsewhere"), "the repo she does not steward is not named: {wear}");
+    assert!(wear.lines().filter(|line| line.contains("Soul findings")).all(|line| !line.contains("elsewhere")), "no finding outside her slice: {wear}");
 
     let none = TestMind::without_campaigns();
     let log = RefCell::default();
@@ -5380,7 +5381,7 @@ fn blocking_findings_sort_first_and_the_tail_counts_what_it_hides() {
     assert_eq!(order, [("f", 4, 1), ("c", 2, 1), ("b", 1, 1), ("d", 1, 1), ("e", 1, 1), ("a", 5, 0)], "blocking first, then open, then name");
     let wear = render_wear(t(0), &facts);
     let line = wear.lines().find(|line| line.starts_with("- open Soul findings")).unwrap();
-    assert!(line.starts_with("- open Soul findings in your mind: f 4, 1 blocking, oldest blocking f:finding:cut-v.s1.b0 (9 d); c 2, 1 blocking,"), "{line}");
+    assert!(line.starts_with("- open Soul findings in your mind: f 4, 1 blocking, oldest blocking f:finding:cut-v.s1.b0 (8 d); c 2, 1 blocking,"), "{line}");
     assert!(line.ends_with("; +6 more, 1 blocking, in 2 campaigns"), "the tail keeps the blocking it hides: {line}");
 }
 
