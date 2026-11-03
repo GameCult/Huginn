@@ -2161,8 +2161,7 @@ fn repo_notice_line(activity: &RepoActivity, at_unix_ms: u64) -> Option<String> 
         text.push_str(letters.as_str());
         text.push('.');
     }
-    Some(format!("notice role=organ at={} text={}
-", at_text(at_unix_ms), quoted(&text)))
+    Some(format!("notice role=organ at={} text={}\n", at_text(at_unix_ms), quoted(&text)))
 }
 
 /// The most the wear section may take of a first line.

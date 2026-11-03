@@ -4886,10 +4886,8 @@ fn a_redirected_unseen_repo_is_told_with_where_the_forge_points() {
         0,
     );
     let wear = render_wear(0, &facts);
-    assert!(wear.contains("- a repo the forge read cannot see: GameCult/cinny (the forge redirects it to GameCult/Ratatoskr)
-"), "{wear}");
-    assert!(wear.contains("- a repo the forge read cannot see: GameCult/gamecult-ops
-"), "{wear}");
+    assert!(wear.contains("- a repo the forge read cannot see: GameCult/cinny (the forge redirects it to GameCult/Ratatoskr)\n"), "{wear}");
+    assert!(wear.contains("- a repo the forge read cannot see: GameCult/gamecult-ops\n"), "{wear}");
 }
 
 /// The polls after the first interval are still one read per interval: over 750 s of polls at 5 s the forge is asked at the start

@@ -589,7 +589,7 @@ mod tests {
     /// A feed of exactly one full page goes on to the next page, and a short page ends it; a repo whose feed runs past the page cap
     /// is named in `capped` instead of ending quietly.
     #[test]
-    fn a_full_feed_page_asks_for_the_next_and_a_repo_past_the_cap_says_more() {
+    fn a_full_feed_page_asks_for_the_next_and_a_repo_past_the_cap_is_named() {
         let wanted = repos(&["GameCult/Huginn"]);
         let entries: Vec<Value> = (0..53).map(|n| push_at(1000 - n, "GameCult/Huginn", "Nibu", 5)).collect();
         let (base, asked) = forge_of(move |path| if is_feed(path) { repo_feed(&entries, path) } else { Some("[]".into()) });
