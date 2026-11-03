@@ -69,6 +69,7 @@ mod tests {
         let reset = 1_793_307_000_000;
         assert!(render_plan(&[window(Some(10), reset, reset - 5000)], reset - 5000).contains("(in 5s), read 0s ago"));
         assert!(render_plan(&[window(Some(10), reset, reset - 720_000)], reset - 600_000).contains("(in 10m), read 2m ago"));
+        assert!(render_plan(&[window(Some(10), reset, reset)], reset).contains("(already past), read 0s ago"), "a reset at this very moment is past");
         assert!(render_plan(&[window(Some(10), reset, reset)], reset + 1000).contains("(already past), read 1s ago"));
         assert!(render_plan(&[window(None, reset, reset)], reset - 12_000_000).contains("five_hour expired, resets at 2026-10-29T20:50:00Z (in 3h 20m)"));
     }
