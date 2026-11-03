@@ -1240,11 +1240,6 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         Ok(self.write(batch, line, refusals))
     }
 
-    /// A revision is told once its interrupters have reached the organ and no revision line is in flight: her answer to that line is final and may have said all, so a second note would be told after it landed.
-    fn revision_ready(&self) -> bool {
-        self.revision.as_ref().is_some_and(|revision| revision.ready) && !self.echoed_revision && !self.written.as_ref().is_some_and(|written| written.revision)
-    }
-
     fn poll_every_s(&self) -> i64 {
         PERSONA_POLL_S
     }
@@ -1479,6 +1474,11 @@ fn structured_output(line: &str) -> Option<String> {
 }
 
 impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
+    /// A revision is told once its interrupters have reached the organ and no revision line is in flight: her answer to that line is final and may have said all, so a second note would be told after it landed.
+    fn revision_ready(&self) -> bool {
+        self.revision.as_ref().is_some_and(|revision| revision.ready) && !self.echoed_revision && !self.written.as_ref().is_some_and(|written| written.revision)
+    }
+
     /// The trace of a result that gave nothing to decode.
     fn record_refusal(&self, batch: &[ChatDelivery], turn: u32) -> Result<()> {
         self.organs.trace.record(&TurnTrace { run: label_of(self.run).into(), turn, at: self.organs.clock.now(), inputs: trace_inputs(self.config, batch), outputs: vec![], outcome: format!("failed: {}", Failure::Undecodable) })
