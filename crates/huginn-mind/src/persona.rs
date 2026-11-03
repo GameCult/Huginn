@@ -611,6 +611,31 @@ mod tests {
     /// Status answers in the door's own terms: a stored persona the door
     /// cannot read is `Unreadable`, not the `Absent` of a mind with none, while
     /// `PersonaGet` answers `Unavailable` for the same bytes.
+    /// The persona's receipt is the newest put that wrote it, advanced with each put and the same
+    /// after a restart.
+    #[test]
+    fn the_persona_receipt_is_the_newest_put_held_and_after_a_restart() {
+        let store = MemoryStore::new();
+        let mut mind = seeded_over(&store);
+        committed(put(&mut mind, persona(INSTANCE, T1), None));
+        let first = mind.persona().unwrap().unwrap().receipt_id;
+        committed(put(&mut mind, persona(INSTANCE, T2), Some(T1)));
+        let second = mind.persona().unwrap().unwrap().receipt_id;
+        assert_ne!(first, second);
+        let newest = mind
+            .receipts()
+            .unwrap()
+            .into_iter()
+            .filter(|receipt| receipt.writes.iter().any(|write| write.document_type == HuginnPersonaEntry::TYPE))
+            .max_by_key(|receipt| receipt.ordinal)
+            .unwrap()
+            .receipt_id;
+        assert_eq!(second, newest);
+        let reopened = Mind::open_with(store, &slug(INSTANCE)).unwrap();
+        assert_eq!(reopened.persona().unwrap().unwrap().receipt_id, second);
+        assert_eq!(reopened.persona_receipt, mind.persona_receipt);
+    }
+
     #[test]
     fn status_says_unreadable_where_the_door_says_unavailable() {
         let yggdrasil = slug(INSTANCE);

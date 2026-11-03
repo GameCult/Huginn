@@ -1,9 +1,12 @@
 //! The read side of a mind: a document with the facts of its admission and
 //! its status, and one typed selection over them.
 //!
-//! Nothing here is stored. Status is derived per call through the same
-//! `docs::Docs` the admission rules use, so a withdrawn resolution reopens its
-//! subject for a reader exactly when it reopens it for a rule. The facts come
+//! Nothing derived here is stored in a document. The rows come from the mind's
+//! held `image::Image`, a fold of the receipts; status is derived through the
+//! same `docs::Docs` the admission rules use, at the head when the image was
+//! advanced and at an old snapshot when a reader asks, so a withdrawn
+//! resolution reopens its subject for a reader exactly when it reopens it for
+//! a rule. The facts come
 //! from the commit receipts, from their `writes` and from nothing else: a
 //! document's `admitted_at` is the `now` its batch was admitted at
 //! (`committed_at`), never the store's `stored_at` stamp. A pipeline document
@@ -13,7 +16,8 @@
 //! `query` is CultNet's selection over rows this crate supplies (`rows.rs`).
 //! The substrate owns the filter, the order, the hop, the cursor and the
 //! paging; this module owns the snapshot (`Reader::at`: every derivation runs
-//! over the documents admitted at or before the page's `asOf`), the
+//! over the documents admitted at or before the page's `asOf`, and the image
+//! only narrows which of its rows the substrate is handed), the
 //! projection to a header or a whole view, and the typing of the edges.
 //!
 //! `rank` is the semantic read: the daemon's index supplies candidate ids and
@@ -503,8 +507,9 @@ impl<S: MindStore> Mind<S> {
     /// stored key, type and payload bytes, and views back unchanged through the
     /// read path `view` uses; every pipeline write a receipt names is stored,
     /// and every stored document has its receipt. Returns how many documents
-    /// it read back; an empty store is a fault. One `Reader` serves every view,
-    /// because `Reader::at` is the expensive build. Admits nothing. A fault
+    /// it read back; an empty store is a fault. The held image is first set beside a
+    /// fresh fold of the store and must equal it, so every upgrade proves the held
+    /// state against the store. One pass over the mind, O(N). Admits nothing. A fault
     /// names the document's key and what failed, never its content.
     pub fn read_back(&self) -> Result<usize, MindRefusal> {
         self.read_back_through(|reader, id| reader.view(id))

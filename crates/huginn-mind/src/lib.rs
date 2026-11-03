@@ -10,9 +10,10 @@
 //! cross-document rule, every derived write, and the replay check, in one
 //! ordered path that `admit`, the daemon's sink and the hand-off all share.
 //!
-//! The read side derives status, joins the receipts and answers one typed
-//! selection (CultNet's, over rows this crate supplies) through the same
-//! `docs` the rules use; nothing is stored for it.
+//! The read side answers one typed selection (CultNet's, over rows this crate
+//! supplies) from the mind's held image: a fold of the receipts, held by `Mind`,
+//! advanced per commit, rebuilt on restart and on a lost swap. Status is derived
+//! through the same `docs` the rules use; nothing is stored for it.
 //!
 //! The wire vocabulary and its operation envelope (`envelope`) are here too,
 //! so the daemon and the client share one set

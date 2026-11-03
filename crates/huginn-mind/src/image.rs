@@ -276,7 +276,8 @@ impl Image {
         if hop && !self.edges_in_target {
             return (0..self.rows.len() as u32).collect();
         }
-        let base = self.base_candidates(selection, as_of);
+        let hop_only_cites = selection.cites.is_some() && selection.cited.is_none();
+        let base = if hop_only_cites { BTreeSet::new() } else { self.base_candidates(selection, as_of) };
         let mut ids: BTreeSet<u32> = BTreeSet::new();
         let citers_of = |key: &str, role: Option<&str>| -> Vec<u32> {
             self.citers
@@ -291,8 +292,9 @@ impl Image {
             (None, None) => ids = base,
             (Some(cites), None) => {
                 let key = cites.target.record_key.as_str();
-                let citing: BTreeSet<u32> = citers_of(key, cites.role.as_deref()).into_iter().collect();
-                ids.extend(base.intersection(&citing));
+                // A row that passes the hop cites the target, so the citers are the superset; the kinds,
+                // keys and fields only the substrate decides.
+                ids.extend(citers_of(key, cites.role.as_deref()));
                 ids.extend(self.any_kind(key));
             }
             (cites, Some(cited)) => {

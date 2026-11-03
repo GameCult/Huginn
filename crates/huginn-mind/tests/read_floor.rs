@@ -6,7 +6,7 @@
 //! copied to a temp dir and never opened in place. `FLOOR_SCALE` (default 1)
 //! grows the copy with synthetic history to that multiple of its documents;
 //! `FLOOR_ROOTS` is `spread` (each hundred units under its own root) or
-//! `same` (one root grows). `FLOOR_INSTANCE` defaults to `eureka`.
+//! `same` (one root grows). `FLOOR_INSTANCE` defaults to `eureka`; `FLOOR_SAMPLES` (default 7) is how many times each read is timed, for a base too slow to sample 7 times.
 //!
 //! cargo test --release -p huginn-mind --features test-support --test read_floor -- --ignored --nocapture
 #![cfg(feature = "test-support")]
@@ -47,8 +47,9 @@ fn median(mut samples: Vec<Duration>) -> Duration {
 }
 
 fn time<T>(mut read: impl FnMut() -> T) -> Duration {
+    let samples: usize = env("FLOOR_SAMPLES", "7").parse().unwrap();
     median(
-        (0..7)
+        (0..samples)
             .map(|_| {
                 let started = Instant::now();
                 std::hint::black_box(read());
