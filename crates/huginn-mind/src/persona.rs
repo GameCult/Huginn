@@ -19,7 +19,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use eureka_pipeline::Slug;
+
 use crate::mind::Mind;
+use crate::receipt::HuginnCommitReceipt;
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
 
@@ -124,6 +127,15 @@ pub(crate) fn updated_at(value: &Value) -> Option<&str> {
     value.get("updatedAt").and_then(Value::as_str)
 }
 
+/// The receipt that wrote the persona's stored bytes: the newest receipt whose writes name it.
+pub(crate) fn persona_receipt_of(receipts: &[HuginnCommitReceipt], instance: &Slug) -> Option<String> {
+    receipts
+        .iter()
+        .filter(|receipt| receipt.writes.iter().any(|write| write.document_type == HuginnPersonaEntry::TYPE && write.document_key == instance.0))
+        .max_by_key(|receipt| receipt.ordinal)
+        .map(|receipt| receipt.receipt_id.clone())
+}
+
 impl<S: MindStore> Mind<S> {
     /// This mind's persona envelope, if one is stored.
     pub(crate) fn persona_envelope(&self) -> Option<&CultCacheEnvelope> {
@@ -146,14 +158,7 @@ impl<S: MindStore> Mind<S> {
         let value = decode(envelope)?;
         let integrity = |detail: &str| MindRefusal::Unavailable { detail: detail.into() };
         let updated_at = updated_at(&value).ok_or_else(|| integrity("the stored persona has no updatedAt"))?.to_string();
-        let identity = (envelope.r#type.as_str(), envelope.key.as_str());
-        let receipt_id = self
-            .receipts()?
-            .into_iter()
-            .filter(|receipt| receipt.writes.iter().any(|write| write.identity() == identity))
-            .max_by_key(|receipt| receipt.ordinal)
-            .ok_or_else(|| integrity("the stored persona has no receipt"))?
-            .receipt_id;
+        let receipt_id = self.persona_receipt.clone()?.ok_or_else(|| integrity("the stored persona has no receipt"))?;
         Ok(Some(PersonaStateView { value, updated_at, receipt_id }))
     }
 }
@@ -585,7 +590,7 @@ mod tests {
         let mut with_one = base();
         with_one.push(entry(INSTANCE, persona(INSTANCE, T1)));
         let mind = Mind::open_with(planted(with_one.clone()), &yggdrasil).unwrap();
-        assert_eq!(mind.envelopes().len(), 3);
+        assert_eq!(mind.envelopes().count(), 3);
         assert_eq!(persona_in_status(&mind), crate::wire::PersonaStatus::Unreadable);
         assert!(mind.persona().is_err());
 

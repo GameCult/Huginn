@@ -17,7 +17,7 @@ use eureka_pipeline::{
     RulingAuthority, RunOperator, RunTurn, Slug,
 };
 
-use crate::docs::{CitationRole, Held, kind_of_id, kind_of_type};
+use crate::docs::{CitationRole, kind_of_id, kind_of_type};
 use crate::query::PipelineDocumentView;
 use crate::refusal::MindRefusal;
 
@@ -68,8 +68,14 @@ const MEMORY_ORIGINS: [&str; 4] = ["Room", "Direct", "Wake", "SelfRun"];
 /// The one value a presence alias answers with; a row without it answers nothing.
 const PRESENT: [&str; 1] = ["true"];
 
+/// The aliases whose values follow a row's status. Every other alias's values are
+/// fixed when the row is written, so the held image may narrow by them at any
+/// snapshot and by these only at the head. A test pins that no other alias
+/// changes across a status change.
+pub(crate) const STATUS_ALIASES: [Alias; 2] = [Alias::InForce, Alias::Ran];
+
 impl Alias {
-    const ALL: [Alias; 19] = [
+    pub(crate) const ALL: [Alias; 19] = [
         Self::Root,
         Self::InForce,
         Self::Faculty,
@@ -91,7 +97,7 @@ impl Alias {
         Self::MemoryOrigin,
     ];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Root => "root",
             Self::InForce => "in_force",
@@ -115,7 +121,7 @@ impl Alias {
         }
     }
 
-    fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|alias| alias.name() == name)
     }
 
@@ -193,11 +199,11 @@ fn outcome_name(outcome: &ResolutionOutcome) -> &'static str {
 
 /// One document as the evaluator sees it: its identity, its ordinal, what it
 /// answers for each alias, its citation edges, and the view a page projects.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SelectionRow {
     pub(crate) kind: PipelineKind,
     pub(crate) key: String,
-    ordinal: u64,
+    pub(crate) ordinal: u64,
     values: BTreeMap<&'static str, Vec<String>>,
     refs: Vec<(CitationRole, PipelineRef)>,
     pub(crate) view: PipelineDocumentView,
@@ -205,24 +211,28 @@ pub(crate) struct SelectionRow {
 
 impl SelectionRow {
     /// `base` is the first non-resolution the document reaches through its
-    /// subjects: the row a resolution's `repo` and `cut` are read from.
+    /// subjects: the row a resolution's `repo` and `cut` are read from; `None`
+    /// is a document that is its own base. The row is the only decoded copy of
+    /// its document: it lives in `view`.
     pub(crate) fn new(
-        held: &Held,
-        base: &Held,
+        kind: PipelineKind,
+        key: &str,
+        base: Option<(&str, &PipelineDocument)>,
         view: PipelineDocumentView,
         refs: Vec<(CitationRole, PipelineRef)>,
     ) -> Self {
         use PipelineDocument as D;
+        let (base_key, base_document) = base.unwrap_or((key, &view.document));
         let mut values: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
         let mut put = |alias: Alias, found: Vec<String>| {
             values.insert(alias.name(), found);
         };
-        put(Alias::Root, vec![root_and_local(&held.key).0.to_string()]);
+        put(Alias::Root, vec![root_and_local(key).0.to_string()]);
         put(Alias::InForce, vec![matches!(view.status, crate::query::PipelineStatus::InForce).to_string()]);
         put(Alias::Faculty, vec![format!("{:?}", view.admission.provenance.faculty)]);
         put(
             Alias::Repo,
-            match &base.document {
+            match base_document {
                 D::Campaign(campaign) => campaign.repos.iter().map(OrgRepo::identity).collect(),
                 D::CutSpec(spec) => vec![spec.repo.identity()],
                 D::CutReport(report) => vec![report.repo.identity()],
@@ -236,7 +246,7 @@ impl SelectionRow {
         );
         put(
             Alias::Cut,
-            root_and_local(&base.key)
+            root_and_local(base_key)
                 .1
                 .strip_prefix("cut-")
                 .and_then(|rest| rest.split_once('.'))
@@ -244,7 +254,7 @@ impl SelectionRow {
                 .into_iter()
                 .collect(),
         );
-        match &held.document {
+        match &view.document {
             D::Finding(finding) => {
                 put(Alias::Severity, vec![format!("{:?}", finding.severity)]);
                 put(Alias::Confidence, vec![format!("{:?}", finding.confidence)]);
@@ -277,7 +287,12 @@ impl SelectionRow {
             }
             _ => {}
         }
-        Self { kind: held.kind, key: held.key.clone(), ordinal: view.admission.ordinal, values, refs, view }
+        Self { kind, key: key.to_string(), ordinal: view.admission.ordinal, values, refs, view }
+    }
+
+    /// Each alias this row answers, with its values: what the held image indexes.
+    pub(crate) fn alias_values(&self) -> impl Iterator<Item = (&'static str, &[String])> {
+        self.values.iter().map(|(alias, values)| (*alias, values.as_slice()))
     }
 }
 

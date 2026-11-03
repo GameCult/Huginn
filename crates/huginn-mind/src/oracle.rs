@@ -18,7 +18,7 @@ use eureka_pipeline::{
     Line, Para, Short, Slug, StructuralDelta, pipeline_key,
 };
 
-use crate::docs::{Held, citations, kind_of_type};
+use crate::docs::{citations, kind_of_type};
 use crate::mind::{Mind, schema_cache};
 use crate::persona::HuginnPersonaEntry;
 use crate::query::{AdmissionFacts, PipelineDocumentView, PipelineSelectionPage, PipelineStatus};
@@ -139,9 +139,7 @@ fn base<'a>(visible: &[&'a Doc], doc: &'a Doc) -> &'a Doc {
 
 fn row_of(visible: &[&Doc], doc: &Doc) -> SelectionRow {
     let base = base(visible, doc);
-    let held = Held { kind: doc.kind, key: doc.key.clone(), document: doc.document.clone() };
-    let base = Held { kind: base.kind, key: base.key.clone(), document: base.document.clone() };
-    SelectionRow::new(&held, &base, view_of(visible, doc), citations(&doc.document))
+    SelectionRow::new(doc.kind, &doc.key, Some((&base.key, &base.document)), view_of(visible, doc), citations(&doc.document))
 }
 
 /// The page a selection earns at `as_of`, derived from the store alone.
@@ -151,6 +149,7 @@ pub fn oracle_page<S: MindStore>(mind: &Mind<S>, selection: &Selection, as_of: u
     let fresh = Fresh::pull(mind)?;
     let visible = fresh.visible(as_of);
     let rows: Vec<SelectionRow> = visible.iter().map(|doc| row_of(&visible, doc)).collect();
+    let rows: Vec<&SelectionRow> = rows.iter().collect();
     let evaluation = select(&Vocabulary, &rows, &selection, as_of, mind.cursor_key())?;
     Mind::<S>::page(&selection, evaluation, as_of, None)
 }
@@ -283,7 +282,7 @@ pub fn synth_history<S: MindStore>(store: &S, instance: &Slug, factor: u32, spre
     let now = Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0).unwrap();
     let mut pending: Vec<Vec<CultCacheEnvelope>> = Vec::new();
     let mut written = 0;
-    let mut flush = |groups: &mut Vec<Vec<CultCacheEnvelope>>, ordinal: &mut u64| -> Result<(), MindRefusal> {
+    let flush = |groups: &mut Vec<Vec<CultCacheEnvelope>>, ordinal: &mut u64| -> Result<(), MindRefusal> {
         if groups.is_empty() {
             return Ok(());
         }

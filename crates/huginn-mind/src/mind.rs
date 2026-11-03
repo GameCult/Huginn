@@ -9,13 +9,16 @@
 //! every gate before it attaches, so a refused store is never read into an
 //! image.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, OwnedRedbMessagePackBackingStore};
 use cultnet_rs::CursorKey;
 use eureka_pipeline::{PIPELINE_SCHEMA_EPOCH, PipelineDocument, PipelineKind, Slug, register_pipeline_document_types};
 
-use crate::persona::HuginnPersonaEntry;
+use crate::image::Image;
+use crate::persona::{HuginnPersonaEntry, persona_receipt_of};
+use crate::query::AdmissionFacts;
 use crate::receipt::HuginnCommitReceipt;
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
@@ -91,15 +94,53 @@ fn is_known_type(type_id: &str) -> bool {
         || PipelineKind::ALL.iter().any(|kind| kind.type_id() == type_id)
 }
 
-/// One instance's mind: the declared instance, the store, the registered
-/// cache attached to it, and the image (the store's envelopes as last pulled,
-/// in identity order). The image is a cache of the store and is re-pulled
-/// after every commit; nothing writes it directly.
+/// The store's envelopes by type and key: the bytes as stored, in identity order.
+pub(crate) type Envelopes = BTreeMap<String, BTreeMap<String, CultCacheEnvelope>>;
+
+fn envelopes_of(raw: Vec<CultCacheEnvelope>) -> Envelopes {
+    let mut envelopes = Envelopes::new();
+    for envelope in raw {
+        envelopes.entry(envelope.r#type.clone()).or_default().insert(envelope.key.clone(), envelope);
+    }
+    envelopes
+}
+
+/// Every commit receipt in the envelopes, in receipt-id order.
+pub(crate) fn decode_receipts(envelopes: &Envelopes) -> Result<Vec<HuginnCommitReceipt>, MindRefusal> {
+    envelopes
+        .get(HuginnCommitReceipt::TYPE)
+        .into_iter()
+        .flat_map(|keyed| keyed.values())
+        .map(|envelope| {
+            rmp_serde::from_slice::<HuginnCommitReceipt>(&envelope.payload).map_err(|error| MindRefusal::Unavailable {
+                detail: format!("receipt {} does not decode: {error}", envelope.key),
+            })
+        })
+        .collect()
+}
+
+/// The one fold: the image and the persona's receipt, both read out of the receipts. A fault is
+/// held, not raised, so a faulted store still opens and every read answers the fault.
+fn fold(envelopes: &Envelopes, instance: &Slug) -> (Result<Image, MindRefusal>, Result<Option<String>, MindRefusal>) {
+    let receipts = decode_receipts(envelopes);
+    let persona = receipts.as_ref().map(|receipts| persona_receipt_of(receipts, instance)).map_err(Clone::clone);
+    (Image::build(envelopes, &receipts), persona)
+}
+
+/// One instance's mind: the declared instance, the store, the registry of
+/// the nineteen schemas, the store's envelopes as last pulled, and the image
+/// folded from them. The envelopes are the store's bytes and the image is a
+/// pure fold of the receipts among them: both advance with each commit and
+/// are rebuilt from the store on a lost swap, a store error and a restart.
+/// A cache of the store, never its authority; only `Mind::advance` and
+/// `refresh` write them.
 pub struct Mind<S: MindStore> {
     instance: Slug,
     store: S,
     cache: CultCache,
-    image: Vec<CultCacheEnvelope>,
+    pub(crate) envelopes: Envelopes,
+    image: Result<Image, MindRefusal>,
+    pub(crate) persona_receipt: Result<Option<String>, MindRefusal>,
     /// Mints and verifies this process's selection cursors. Never stored: a
     /// cursor does not survive a reopen, which the substrate accepts.
     cursor_key: CursorKey,
@@ -186,8 +227,10 @@ impl<S: MindStore> Mind<S> {
         refuse_foreign_epoch(&raw)?;
         refuse_foreign_types(&raw)?;
         refuse_foreign_identity(&raw, instance)?;
-        let (cache, image) = attach(store.clone())?;
-        Ok(Self { instance: instance.clone(), store, cache, image, cursor_key: CursorKey::random() })
+        let cache = schema_cache()?;
+        let envelopes = envelopes_of(raw);
+        let (image, persona_receipt) = fold(&envelopes, instance);
+        Ok(Self { instance: instance.clone(), store, cache, envelopes, image, persona_receipt, cursor_key: CursorKey::random() })
     }
 
     pub fn instance(&self) -> &Slug {
@@ -209,10 +252,20 @@ impl<S: MindStore> Mind<S> {
         Ok(())
     }
 
-    /// The image: every envelope the store held at the last pull, in
-    /// identity order. Cut 10's snapshot source reads this.
-    pub fn envelopes(&self) -> &[CultCacheEnvelope] {
-        &self.image
+    /// Every envelope the store held at the last pull, in identity order.
+    pub fn envelopes(&self) -> impl Iterator<Item = &CultCacheEnvelope> {
+        self.envelopes.values().flat_map(|keyed| keyed.values())
+    }
+
+    /// The held image, or the fault the store holds: the same answer at any snapshot.
+    pub(crate) fn image(&self) -> Result<&Image, MindRefusal> {
+        self.image.as_ref().map_err(Clone::clone)
+    }
+
+    /// The image folded from a fresh pull of the store: what a restart would hold.
+    pub(crate) fn fresh_image(&self) -> Result<Image, MindRefusal> {
+        let envelopes = envelopes_of(self.store.pull_all().map_err(unavailable)?);
+        fold(&envelopes, &self.instance).0
     }
 
     pub(crate) fn cursor_key(&self) -> &CursorKey {
@@ -220,7 +273,7 @@ impl<S: MindStore> Mind<S> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.image.is_empty()
+        self.envelopes.values().all(BTreeMap::is_empty)
     }
 
     /// The stored bytes of one document, by kind and id.
@@ -237,15 +290,7 @@ impl<S: MindStore> Mind<S> {
 
     /// Every commit receipt in the image, in receipt-id order.
     pub(crate) fn receipts(&self) -> Result<Vec<HuginnCommitReceipt>, MindRefusal> {
-        self.image
-            .iter()
-            .filter(|envelope| envelope.r#type == HuginnCommitReceipt::TYPE)
-            .map(|envelope| {
-                rmp_serde::from_slice::<HuginnCommitReceipt>(&envelope.payload).map_err(|error| {
-                    MindRefusal::Unavailable { detail: format!("receipt {} does not decode: {error}", envelope.key) }
-                })
-            })
-            .collect()
+        decode_receipts(&self.envelopes)
     }
 
     /// The mind's own identity: the receipt id of its first admission
@@ -259,7 +304,7 @@ impl<S: MindStore> Mind<S> {
     }
 
     pub(crate) fn raw_envelope(&self, type_id: &str, key: &str) -> Option<&CultCacheEnvelope> {
-        self.image.iter().find(|envelope| envelope.r#type == type_id && envelope.key == key)
+        self.envelopes.get(type_id)?.get(key)
     }
 
     pub(crate) fn cache(&self) -> &CultCache {
@@ -270,11 +315,46 @@ impl<S: MindStore> Mind<S> {
         &self.store
     }
 
-    /// Re-pulls the image from the store through the attached cache.
+    /// Rebuilds the envelopes and the image from the store: the one rebuild, run only when a swap
+    /// was lost or the store errored, the two signals that the store moved beneath the holder.
     pub(crate) fn refresh(&mut self) -> Result<(), MindRefusal> {
-        self.cache.pull_all_backing_stores().map_err(unavailable)?;
-        self.image = snapshot(&self.cache);
+        self.envelopes = envelopes_of(self.store.pull_all().map_err(unavailable)?);
+        (self.image, self.persona_receipt) = fold(&self.envelopes, &self.instance);
         Ok(())
+    }
+
+    /// Folds a commit the compare-and-swap said landed into the held state. If the fold itself
+    /// faults on bytes that already landed, the state is rebuilt from the store, so the fault held
+    /// is exactly what a reopen would hold, and the commit stays committed.
+    pub(crate) fn advance(&mut self, receipt: &HuginnCommitReceipt, receipt_envelope: CultCacheEnvelope, writes: &[CultCacheEnvelope]) {
+        for envelope in writes.iter().chain(std::iter::once(&receipt_envelope)) {
+            self.envelopes.entry(envelope.r#type.clone()).or_default().insert(envelope.key.clone(), envelope.clone());
+        }
+        if receipt.writes.iter().any(|write| write.document_type == HuginnPersonaEntry::TYPE && write.document_key == self.instance.0) {
+            if let Ok(held) = &mut self.persona_receipt {
+                *held = Some(receipt.receipt_id.clone());
+            }
+        }
+        let Ok(image) = &mut self.image else { return };
+        let mut documents = Vec::new();
+        let mut faulted = false;
+        for write in &receipt.writes {
+            let Some(kind) = PipelineKind::ALL.iter().copied().find(|kind| kind.type_id() == write.document_type) else { continue };
+            let Some(envelope) = writes.iter().find(|envelope| envelope.r#type == write.document_type && envelope.key == write.document_key) else {
+                faulted = true;
+                break;
+            };
+            match PipelineDocument::decode(envelope) {
+                Ok(document) => documents.push((kind, write.document_key.clone(), document)),
+                Err(_) => faulted = true,
+            }
+        }
+        if faulted || image.advance(&AdmissionFacts::of(receipt), documents).is_err() {
+            if let Err(fault) = self.refresh() {
+                self.image = Err(fault.clone());
+                self.persona_receipt = Err(fault);
+            }
+        }
     }
 }
 
@@ -341,22 +421,6 @@ fn refuse_foreign_identity(raw: &[CultCacheEnvelope], instance: &Slug) -> Result
         return Err(MindRefusal::ForeignInstance { declared: instance.0.clone(), mind: stored.instance.0 });
     }
     Ok(())
-}
-
-/// Step 5: the registered cache, the store as its one generic home, and the
-/// image pulled through it.
-fn attach<S: MindStore>(store: S) -> Result<(CultCache, Vec<CultCacheEnvelope>), MindRefusal> {
-    let mut cache = schema_cache()?;
-    cache.add_generic_backing_store(store).map_err(unavailable)?;
-    cache.pull_all_backing_stores().map_err(unavailable)?;
-    let image = snapshot(&cache);
-    Ok((cache, image))
-}
-
-fn snapshot(cache: &CultCache) -> Vec<CultCacheEnvelope> {
-    let mut image = cache.snapshot_envelopes();
-    image.sort_by(|left, right| (&left.r#type, &left.key).cmp(&(&right.r#type, &right.key)));
-    image
 }
 
 #[cfg(test)]
@@ -464,11 +528,11 @@ mod tests {
                 Some(MindRefusal::ForeignEpoch { found: "2 records".into(), expected: PIPELINE_SCHEMA_EPOCH.into() })
             );
         }
-        // A store that passes every gate attaches, which is the second pull.
+        // A store that passes every gate is read once: the pull the gates ran on is the one the image folds.
         let store = planted(vec![epoch(), prepare(&instance(INSTANCE))]);
         let mind = Mind::open_with(store.clone(), &yggdrasil).unwrap();
-        assert_eq!(store.pull_count(), 2);
-        assert_eq!(mind.envelopes().len(), 2);
+        assert_eq!(store.pull_count(), 1);
+        assert_eq!(mind.envelopes().count(), 2);
         assert!(!mind.is_empty());
         let empty = MemoryStore::new();
         assert!(Mind::open_with(empty, &yggdrasil).unwrap().is_empty());
@@ -559,7 +623,7 @@ mod tests {
         let store = OwnedRedbMessagePackBackingStore::new(&moved).unwrap();
         let mind = Mind::open_with(store, &slug(INSTANCE)).unwrap();
         assert_eq!(mind.instance(), &slug(INSTANCE));
-        assert_eq!(mind.envelopes().len(), 2);
+        assert_eq!(mind.envelopes().count(), 2);
     }
 
     /// One check, one owner: the value admission refuses a foreign instance

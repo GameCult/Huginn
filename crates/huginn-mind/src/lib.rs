@@ -27,6 +27,7 @@
 
 pub mod admission;
 mod docs;
+mod image;
 pub mod envelope;
 pub mod index;
 pub mod mind;
@@ -42,6 +43,9 @@ pub mod wire;
 
 #[cfg(test)]
 pub(crate) mod fixtures;
+
+#[cfg(test)]
+mod read_tests;
 
 pub use docs::CitationRole;
 pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};

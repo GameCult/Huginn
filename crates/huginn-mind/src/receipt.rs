@@ -190,26 +190,13 @@ pub(crate) fn candidate(
     Ok(receipt)
 }
 
-/// This mind's admission order: `N`, the count of receipts, when their
-/// ordinals are exactly `{1..=N}`. Every reader of the ordinal asks here,
-/// never by counting receipts itself: admission takes `head(self)? + 1` for
-/// the next one, and `AdmissionIndex::build` (`query.rs`) calls it too, so
-/// `query` and `view` carry the same density check rather than trusting a
-/// stored ordinal unchecked. `Mind::receipts` is `pub(crate)`, so this crate
-/// is the only place raw ordinals can be read at all; that keeps this the
-/// one door, rather than something a doc comment merely asks callers to
-/// respect. `ordinal` stays display-only on the read side until RS-3 makes
-/// it the order. A chain that is not dense refuses rather than guessing, on
-/// both sides alike.
+/// This mind's admission order: `N`, the count of receipts, when their ordinals are exactly
+/// `{1..=N}`, read from the held image, which checked the chain once when it was built and
+/// extends it by one with each commit. Every reader of the ordinal asks here, never by counting
+/// receipts itself: admission takes `head(self)? + 1` for the next one. A chain that is not dense
+/// is a held fault that refuses on both sides alike.
 pub(crate) fn head<S: MindStore>(mind: &Mind<S>) -> Result<u64, MindRefusal> {
-    let mut ordinals = mind.receipts()?.into_iter().map(|receipt| receipt.ordinal).collect::<Vec<_>>();
-    ordinals.sort_unstable();
-    let n = ordinals.len() as u64;
-    if ordinals.into_iter().eq(1..=n) {
-        Ok(n)
-    } else {
-        Err(MindRefusal::Unavailable { detail: "receipt ordinals are not 1..=N: found a duplicate or a gap".into() })
-    }
+    Ok(mind.image()?.head)
 }
 
 /// The versions of a set of envelopes in identity order, so the digest does
@@ -265,24 +252,33 @@ pub(crate) fn commit<S: MindStore>(
             .filter(|read| !writes.iter().any(|write| write.r#type == read.r#type && write.key == read.key))
             .cloned(),
     );
-    replacements.push(receipt_envelope);
+    replacements.push(receipt_envelope.clone());
     let expected: &[CultCacheEnvelope] = &strong_reads;
-    let landed = MindStore::compare_and_swap_batch(mind.store(), expected, replacements).map_err(unavailable)?;
-    mind.refresh()?;
-    if !landed {
-        let changed = strong_reads
-            .iter()
-            .filter(|read| mind.raw_envelope(&read.r#type, &read.key) != Some(read))
-            .chain(writes.iter().filter(|write| mind.raw_envelope(&write.r#type, &write.key).is_some()));
-        let identities = changed
-            .filter_map(|envelope| {
-                let kind = PipelineKind::ALL.iter().find(|kind| kind.type_id() == envelope.r#type)?;
-                Some(PipelineRef { kind: *kind, id: Short(envelope.key.clone()) })
-            })
-            .collect();
-        return Ok(CommitOutcome::Conflict(identities));
+    let landed = match MindStore::compare_and_swap_batch(mind.store(), expected, replacements) {
+        Ok(landed) => landed,
+        // Whether the batch landed is unknown, so the holder looks at the store before it answers
+        // anything else; a failed look leaves the next lost swap or restart to heal it.
+        Err(error) => {
+            let _ = mind.refresh();
+            return Err(unavailable(error));
+        }
+    };
+    if landed {
+        mind.advance(&receipt, receipt_envelope, &writes);
+        return Ok(CommitOutcome::Committed(receipt));
     }
-    Ok(CommitOutcome::Committed(receipt))
+    mind.refresh()?;
+    let changed = strong_reads
+        .iter()
+        .filter(|read| mind.raw_envelope(&read.r#type, &read.key) != Some(read))
+        .chain(writes.iter().filter(|write| mind.raw_envelope(&write.r#type, &write.key).is_some()));
+    let identities = changed
+        .filter_map(|envelope| {
+            let kind = PipelineKind::ALL.iter().find(|kind| kind.type_id() == envelope.r#type)?;
+            Some(PipelineRef { kind: *kind, id: Short(envelope.key.clone()) })
+        })
+        .collect();
+    Ok(CommitOutcome::Conflict(identities))
 }
 
 fn unique_identities(versions: &[DocumentVersion]) -> bool {
