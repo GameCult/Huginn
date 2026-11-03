@@ -13,6 +13,7 @@ use eureka_pipeline::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::image::Image;
 use crate::refusal::MindRefusal;
 
 /// A batch document after A3 and A5: decoded, keyed, and its envelope.
@@ -23,16 +24,12 @@ pub(crate) struct Staged {
     pub(crate) envelope: CultCacheEnvelope,
 }
 
-/// An image document, decoded.
-pub(crate) struct Held {
-    pub(crate) kind: PipelineKind,
-    pub(crate) key: String,
-    pub(crate) document: PipelineDocument,
-}
-
-/// The image and the batch, the two places a rule may look.
-pub(crate) struct Docs {
-    pub(crate) image: Vec<Held>,
+/// The held image at one snapshot and the batch, the two places a rule or a view
+/// may look. The one door of visibility: a document is there when its writing
+/// receipt's ordinal is at or before `as_of`. Admission runs at the head.
+pub(crate) struct Docs<'i> {
+    image: &'i Image,
+    as_of: u64,
     pub(crate) batch: Vec<Staged>,
 }
 
@@ -40,17 +37,13 @@ pub(crate) fn kind_of_type(type_id: &str) -> Option<PipelineKind> {
     PipelineKind::ALL.iter().copied().find(|kind| kind.type_id() == type_id)
 }
 
-impl Docs {
-    pub(crate) fn from_image(envelopes: &[CultCacheEnvelope]) -> Result<Self, MindRefusal> {
-        let mut image = Vec::new();
-        for envelope in envelopes {
-            let Some(kind) = kind_of_type(&envelope.r#type) else { continue };
-            let document = PipelineDocument::decode(envelope).map_err(|refusal| MindRefusal::Unavailable {
-                detail: format!("stored document {} does not decode: {refusal}", envelope.key),
-            })?;
-            image.push(Held { kind, key: envelope.key.clone(), document });
-        }
-        Ok(Self { image, batch: Vec::new() })
+impl<'i> Docs<'i> {
+    pub(crate) fn at(image: &'i Image, as_of: u64) -> Self {
+        Self { image, as_of, batch: Vec::new() }
+    }
+
+    fn visible(&self, id: u32) -> bool {
+        self.image.row(id).ordinal <= self.as_of
     }
 
     /// A4: one identity, once.
@@ -67,7 +60,7 @@ impl Docs {
     }
 
     pub(crate) fn in_image(&self, kind: PipelineKind, id: &str) -> Option<&PipelineDocument> {
-        self.image.iter().find(|held| held.kind == kind && held.key == id).map(|held| &held.document)
+        self.image.id_of(kind, id).filter(|row| self.visible(*row)).map(|row| &self.image.row(row).view.document)
     }
 
     pub(crate) fn find(&self, kind: PipelineKind, id: &str) -> Option<&PipelineDocument> {
@@ -76,15 +69,12 @@ impl Docs {
 
     pub(crate) fn of_kind(&self, kind: PipelineKind) -> impl Iterator<Item = (&str, &PipelineDocument)> {
         let batch = self.batch.iter().filter(move |staged| staged.kind == kind).map(|staged| (staged.key.as_str(), &staged.document));
-        let image = self.image.iter().filter(move |held| held.kind == kind).map(|held| (held.key.as_str(), &held.document));
+        let image = self
+            .image
+            .of_kind(kind)
+            .filter(move |(_, row)| self.visible(*row))
+            .map(move |(key, row)| (key, &self.image.row(row).view.document));
         batch.chain(image)
-    }
-
-    pub(crate) fn resolutions(&self) -> impl Iterator<Item = (&str, &PipelineResolution)> {
-        self.of_kind(PipelineKind::Resolution).filter_map(|(key, document)| match document {
-            PipelineDocument::Resolution(resolution) => Some((key, resolution)),
-            _ => None,
-        })
     }
 
     pub(crate) fn stewardships(&self) -> impl Iterator<Item = (&str, &PipelineStewardship)> {
@@ -97,7 +87,25 @@ impl Docs {
     /// Every resolution of one subject, in image and batch: the scope a
     /// subject's sequence counts in.
     pub(crate) fn resolutions_of(&self, subject: &PipelineRef) -> impl Iterator<Item = (&str, &PipelineResolution)> {
-        self.resolutions().filter(move |(_, resolution)| resolution.subject == *subject)
+        self.resolutions_naming(subject.kind, &subject.id.0)
+    }
+
+    /// The resolutions naming one document: the batch's first, then the held ones visible at
+    /// `as_of` in resolution-key order, the order a closing resolution is found in.
+    fn resolutions_naming(&self, kind: PipelineKind, id: &str) -> impl Iterator<Item = (&str, &PipelineResolution)> {
+        let batch = self.batch.iter().filter_map(move |staged| match &staged.document {
+            PipelineDocument::Resolution(resolution) if resolution.subject.kind == kind && resolution.subject.id.0 == id => {
+                Some((staged.key.as_str(), resolution))
+            }
+            _ => None,
+        });
+        let held = self.image.closers_of(kind, id).filter(move |(_, row)| self.visible(*row)).filter_map(move |(key, row)| {
+            match &self.image.row(row).view.document {
+                PipelineDocument::Resolution(resolution) => Some((key, resolution)),
+                _ => None,
+            }
+        });
+        batch.chain(held)
     }
 
     /// Every assignment of one repo to one mind, in image and batch, in force
@@ -128,8 +136,8 @@ impl Docs {
         subject: &PipelineRef,
         derived: impl Fn(&ResolutionOutcome) -> bool,
     ) -> u32 {
-        self.resolutions()
-            .find(|(_, resolution)| resolution.subject == *subject && derived(&resolution.outcome))
+        self.resolutions_of(subject)
+            .find(|(_, resolution)| derived(&resolution.outcome))
             .map_or_else(|| self.latest_resolution(subject, None) + 1, |(_, resolution)| resolution.sequence)
     }
 
@@ -174,12 +182,7 @@ impl Docs {
         id: &str,
         own: impl Fn(&PipelineResolution) -> bool,
     ) -> Option<(&str, &PipelineResolution)> {
-        self.resolutions().find(|&(key, resolution)| {
-            resolution.subject.kind == kind
-                && resolution.subject.id.0 == id
-                && !own(resolution)
-                && self.in_force(PipelineKind::Resolution, key)
-        })
+        self.resolutions_naming(kind, id).find(|&(key, resolution)| !own(resolution) && self.in_force(PipelineKind::Resolution, key))
     }
 
     /// The repos a campaign's cuts may name: the repo set of the highest-revision
@@ -292,10 +295,8 @@ impl Docs {
         hand_off_key
             .and_then(|hand_off| {
                 candidates.iter().find(|(key, _)| {
-                    self.resolutions().any(|(_, resolution)| {
-                        resolution.subject.kind == PipelineKind::Stewardship
-                            && resolution.subject.id.0 == *key
-                            && matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == hand_off)
+                    self.resolutions_naming(PipelineKind::Stewardship, key).any(|(_, resolution)| {
+                        matches!(&resolution.outcome, ResolutionOutcome::Withdrawn { reason } if reason.0 == hand_off)
                     })
                 })
             })
@@ -560,10 +561,6 @@ mod tests {
     use PipelineDocument as D;
     use PipelineKind as K;
 
-    fn held(kind: K, key: String, document: D) -> Held {
-        Held { kind, key, document }
-    }
-
     fn named(campaign: &str, revision: u32, repos: &[&str]) -> (String, D) {
         let D::Target(mut target) = target(revision, &[INVARIANT]) else { panic!("a target") };
         target.campaign = campaign.into();
@@ -588,15 +585,13 @@ mod tests {
         let (closed_key, closed) = named(CAMPAIGN, 2, &["GameCult/Closed"]);
         let (foreign_key, foreign) = named("other-campaign", 3, &["GameCult/Foreign"]);
         let closing = resolution(r(K::Target, &closed_key), superseded(&[r(K::Target, &in_force_key)]));
-        let docs = Docs {
-            image: vec![
-                held(K::Target, in_force_key, in_force),
-                held(K::Target, closed_key, closed),
-                held(K::Target, foreign_key, foreign),
-                held(K::Resolution, id("resolution", "target.r2.n1"), closing),
-            ],
-            batch: Vec::new(),
-        };
+        let image = Image::of_documents(vec![
+            (K::Target, in_force_key, in_force),
+            (K::Target, closed_key, closed),
+            (K::Target, foreign_key, foreign),
+            (K::Resolution, id("resolution", "target.r2.n1"), closing),
+        ]);
+        let docs = Docs::at(&image, image.head);
         assert_eq!(docs.repos_in_force(&this), [repo(REPO), repo(OTHER_REPO)], "neither the closed higher revision nor another campaign's higher target decides");
     }
 }

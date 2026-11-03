@@ -124,7 +124,8 @@ impl<S: MindStore> Mind<S> {
             return Err(MindRefusal::BatchSize { actual: envelopes.len() as u32 });
         }
         let mind = self.instance().clone();
-        let mut docs = Docs::from_image(self.envelopes())?;
+        let image = self.image()?;
+        let mut docs = Docs::at(image, image.head);
         // A3, A5, then A4 on push.
         for envelope in envelopes {
             docs.push(stage(envelope, &mind)?)?;
@@ -366,7 +367,7 @@ fn references(staged: &Staged, mind: &Slug) -> Result<Vec<Reference>, MindRefusa
 
 /// A7: every referent is in the batch or the image; the image ones are the
 /// receipt's strong reads.
-fn resolve(docs: &Docs, staged: &Staged, mind: &Slug, strong: &mut BTreeSet<(String, String)>) -> Result<(), MindRefusal> {
+fn resolve(docs: &Docs<'_>, staged: &Staged, mind: &Slug, strong: &mut BTreeSet<(String, String)>) -> Result<(), MindRefusal> {
     for reference in references(staged, mind)? {
         if docs.in_batch(reference.kind, &reference.id).is_some() {
             continue;
@@ -389,7 +390,7 @@ fn resolve(docs: &Docs, staged: &Staged, mind: &Slug, strong: &mut BTreeSet<(Str
 /// the stewardship withdrawal on its source side and the stewardship
 /// assignment on its receiving side. One the batch already carries is not
 /// derived again.
-fn derive(docs: &Docs, mind: &Slug) -> Vec<PipelineDocument> {
+fn derive(docs: &Docs<'_>, mind: &Slug) -> Vec<PipelineDocument> {
     use PipelineDocument as D;
     use PipelineKind as K;
     let mut derived = Vec::new();
@@ -444,7 +445,7 @@ fn derive(docs: &Docs, mind: &Slug) -> Vec<PipelineDocument> {
 }
 
 /// A8: the per-kind rules.
-fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
+fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
     use PipelineDocument as D;
     use PipelineKind as K;
     let key = staged.key.as_str();
@@ -629,7 +630,7 @@ fn check(docs: &Docs, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
 /// The one rule for a run opening or reinstated by withdrawing its close: every
 /// claim in force (a replay of an admitted run owes none) and held by no other
 /// live run, then at most one live run of hers per instance and turn.
-fn run_rule(docs: &Docs, run_key: &str, run: &PipelineRun, replay: bool) -> Result<(), MindRefusal> {
+fn run_rule(docs: &Docs<'_>, run_key: &str, run: &PipelineRun, replay: bool) -> Result<(), MindRefusal> {
     for claim in &run.claims {
         if !replay && !docs.in_force(claim.kind, &claim.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: claim.kind, id: claim.id.0.clone() });
@@ -647,7 +648,7 @@ fn run_rule(docs: &Docs, run_key: &str, run: &PipelineRun, replay: bool) -> Resu
 /// Revision 1 stands alone; revision N needs a resolution in the batch that
 /// supersedes revision N-1 by this document. The predecessor's key is the
 /// leaf's, from the same document one revision back.
-fn revision_rule(docs: &Docs, kind: PipelineKind, key: &str, revision: u32, predecessor: &PipelineDocument) -> Result<(), MindRefusal> {
+fn revision_rule(docs: &Docs<'_>, kind: PipelineKind, key: &str, revision: u32, predecessor: &PipelineDocument) -> Result<(), MindRefusal> {
     if revision == 1 {
         return Ok(());
     }
@@ -731,7 +732,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
 /// every referent in force, and the two
 /// coherence rules (an `Answered` ruling answers this question; a cut spec is
 /// superseded within its cut).
-fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), MindRefusal> {
+fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(), MindRefusal> {
     use PipelineDocument as D;
     use PipelineKind as K;
     let subject_kind = resolution.subject.kind;
@@ -830,7 +831,7 @@ fn resolution_rule(docs: &Docs, resolution: &PipelineResolution) -> Result<(), M
 /// A10: a write whose identity the image already holds. Every kind answers
 /// the same way now that a resolution key carries a sequence: the identity is
 /// taken. Whether a subject is closed is A8's question, not this one's.
-fn refuse_collisions(docs: &Docs) -> Result<(), MindRefusal> {
+fn refuse_collisions(docs: &Docs<'_>) -> Result<(), MindRefusal> {
     for staged in &docs.batch {
         if docs.in_image(staged.kind, &staged.key).is_some() {
             return Err(MindRefusal::IdentityCollision { kind: staged.kind, id: staged.key.clone() });
@@ -1070,8 +1071,8 @@ mod tests {
         let key = format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1");
         assert!(yggdrasil.envelope(K::Stewardship, &key).is_some());
         assert!(thought_cage.envelope(K::Stewardship, &key).is_none());
-        assert_eq!(yggdrasil.envelopes().len(), 4);
-        assert_eq!(thought_cage.envelopes().len(), 3);
+        assert_eq!(yggdrasil.envelopes().count(), 4);
+        assert_eq!(thought_cage.envelopes().count(), 3);
     }
 
     #[test]
@@ -1577,7 +1578,7 @@ mod tests {
             refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())])),
             MindRefusal::AlreadyStewarded { repo: REPO.into() }
         );
-        let docs = Docs::from_image(mind.envelopes()).unwrap();
+        let docs = docs_of(&mind);
         let in_force = docs.stewardships_of(&slug(INSTANCE), &repo(REPO), None).iter().map(|(key, _)| *key).collect::<Vec<_>>();
         assert_eq!(in_force, vec![again.as_str()], "one assignment stands, and it is the later one");
     }
@@ -1599,8 +1600,9 @@ mod tests {
         assert!(!docs_of(&mind).in_force(K::Target, &id("target", "r1")));
     }
 
-    fn docs_of<S: MindStore>(mind: &Mind<S>) -> Docs {
-        Docs::from_image(mind.envelopes()).unwrap()
+    fn docs_of<S: MindStore>(mind: &Mind<S>) -> Docs<'_> {
+        let image = mind.image().unwrap();
+        Docs::at(image, image.head)
     }
 
     /// The withdrawal a hand-off derives is a record of its subject like any

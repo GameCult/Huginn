@@ -370,15 +370,9 @@ impl<S: MindStore> Mind<S> {
     /// `whoami`, derived from the image every time it is asked, and from the
     /// index status the caller holds: the mind stores neither.
     pub fn status(&self, index: IndexStatus) -> MindStatus {
-        let mut documents = 0_u32;
-        let mut receipts = 0_u32;
-        for envelope in self.envelopes() {
-            if envelope.r#type == HuginnCommitReceipt::TYPE {
-                receipts += 1;
-            } else if PipelineKind::ALL.iter().any(|kind| kind.type_id() == envelope.r#type) {
-                documents += 1;
-            }
-        }
+        let count = |type_id: &str| self.envelopes.get(type_id).map_or(0, |keyed| keyed.len() as u32);
+        let receipts = count(HuginnCommitReceipt::TYPE);
+        let documents = PipelineKind::ALL.iter().map(|kind| count(kind.type_id())).sum();
         MindStatus {
             instance: self.instance().clone(),
             schema_epoch: PIPELINE_SCHEMA_EPOCH.to_string(),

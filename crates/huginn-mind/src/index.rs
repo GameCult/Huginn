@@ -10,9 +10,7 @@
 use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef};
 use sha2::{Digest, Sha256};
 
-use crate::docs::Docs;
 use crate::mind::Mind;
-use crate::query::AdmissionIndex;
 use crate::refusal::MindRefusal;
 use crate::rows::root_and_local;
 use crate::store::MindStore;
@@ -114,32 +112,31 @@ impl<S: MindStore> Mind<S> {
     /// document the mind does not hold is a refusal, not a silent omission: a
     /// caller names what a commit just landed.
     pub fn index_entries(&self, only: Option<&[PipelineRef]>) -> Result<Vec<IndexEntry>, MindRefusal> {
-        let documents: Vec<(PipelineKind, String, PipelineDocument)> = match only {
+        let image = self.image()?;
+        let held: Vec<(PipelineKind, &str, &PipelineDocument, u64)> = match only {
             Some(refs) => {
                 let mut held = Vec::with_capacity(refs.len());
                 for reference in refs {
                     reference.validate_ref()?;
-                    let document = self.get(reference.kind, &reference.id.0)?.ok_or_else(|| {
+                    let row = image.id_of(reference.kind, &reference.id.0).map(|id| image.row(id)).ok_or_else(|| {
                         MindRefusal::Unavailable { detail: format!("index: {} is not held", reference.id.0) }
                     })?;
-                    held.push((reference.kind, reference.id.0.clone(), document));
+                    held.push((reference.kind, row.key.as_str(), &row.view.document, row.ordinal));
                 }
                 held
             }
-            None => Docs::from_image(self.envelopes())?
-                .image
-                .into_iter()
-                .map(|held| (held.kind, held.key, held.document))
-                .collect(),
+            None => {
+                let mut held: Vec<_> = image.rows.iter().map(|row| (row.kind, row.key.as_str(), &row.view.document, row.ordinal)).collect();
+                held.sort_by(|left, right| (left.0.type_id(), left.1).cmp(&(right.0.type_id(), right.1)));
+                held
+            }
         };
-        let facts = AdmissionIndex::build(self)?;
         let mut entries = Vec::new();
-        for (kind, key, document) in documents {
-            let Some(text) = index_text(&document) else { continue };
-            let ordinal = facts.ordinal_of(kind, &key)?;
+        for (kind, key, document, ordinal) in held {
+            let Some(text) = index_text(document) else { continue };
             entries.push(IndexEntry {
-                root: root_and_local(&key).0.to_string(),
-                id: PipelineRef { kind, id: key.as_str().into() },
+                root: root_and_local(key).0.to_string(),
+                id: PipelineRef { kind, id: key.into() },
                 text_sha256: sha256_hex(&text),
                 text,
                 ordinal,
