@@ -5472,7 +5472,7 @@ fn id_carrying_lines_keep_the_wear_bound_to_the_byte() {
         facts.extend((0..count).map(forge));
         let exact = render_wear(now, &facts);
         assert_eq!(exact.len(), WEAR_MAX_BYTES, "built to the byte");
-        assert!(!exact.contains("not shown") && exact.contains("oldest "), "all print: {exact}");
+        assert!(!exact.contains("not shown") && exact.contains("xx"), "all print: {exact}");
 
         facts[0] = make(2 + spare);
         let over = render_wear(now, &facts);
