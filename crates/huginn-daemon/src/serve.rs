@@ -899,6 +899,7 @@ mod tests {
                     let of_specs = |extra: Selection| Selection { schemas: Some(vec![K::Question.type_id().into()]), ..extra };
                     let in_force = FieldPredicate { index: "in_force".into(), op: "any_of".into(), values: Some(vec!["true".into()]), number: None };
                     let mut recorded: Vec<(Selection, huginn_mind::PipelineSelectionPage)> = Vec::new();
+                    let mut status_walk = of_specs(Selection { fields: Some(vec![in_force.clone()]), limit: Some(1), projection: "document".into(), ..Selection::default() });
                     let mut head = 0;
                     let mut round = 0;
                     while !done.load(Ordering::Relaxed) || round < 3 {
@@ -924,6 +925,14 @@ mod tests {
                                 None => break,
                             }
                         }
+                        // A status walk: its cursor pins the snapshot it began at while the writer
+                        // closes and reopens the questions, so a page is read at an old snapshot
+                        // through the status filter and the document, which only the row's
+                        // status_changed can answer.
+                        let page = query(&mut client, &status_walk);
+                        let next = page.next.clone();
+                        recorded.push((status_walk.clone(), page));
+                        status_walk.cursor = next;
                         let hop = Selection { cited: Some(cultnet_rs::Incoming { role: "subject".into(), exists: true }), ..Selection::default() };
                         let page = query(&mut client, &hop);
                         recorded.push((hop, page));
