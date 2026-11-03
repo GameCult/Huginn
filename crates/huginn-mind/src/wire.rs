@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::admission::{PipelineAdmissionBatch, PipelineAdmissionOutcome};
 use crate::mind::Mind;
 use crate::persona::{PersonaPutOutcome, PersonaStateView};
-use crate::query::{PipelineDocumentView, PipelineSelectionPage, SemanticQuery};
+use crate::query::{PipelineDocumentView, PipelineSelectionPage, RootTouched, SemanticQuery};
 use crate::receipt::{HuginnCommitReceipt, PipelineProvenance};
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
@@ -98,6 +98,9 @@ pub enum HuginnMindRequest {
     /// in time. The repos are the asker's to name (her stewardships); the
     /// instance's own login is dropped from the answer.
     StewardedActivity { instance: Slug, repos: Vec<OrgRepo>, after: Option<u64> },
+    /// Every root the mind holds a document under, with its newest admission and a campaign's repos in force: the mind's own
+    /// records, one pass at the head.
+    RootsTouched { instance: Slug },
 }
 
 /// The most repos one activity read names.
@@ -250,6 +253,7 @@ impl HuginnMindRequest {
             Self::PersonaPut { .. } => "persona_put",
             Self::SearchSources { .. } => "search_sources",
             Self::StewardedActivity { .. } => "stewarded_activity",
+            Self::RootsTouched { .. } => "roots_touched",
         }
     }
 
@@ -263,7 +267,8 @@ impl HuginnMindRequest {
             | Self::PersonaGet { instance }
             | Self::PersonaPut { instance, .. }
             | Self::SearchSources { instance, .. }
-            | Self::StewardedActivity { instance, .. } => Some(instance),
+            | Self::StewardedActivity { instance, .. }
+            | Self::RootsTouched { instance } => Some(instance),
         }
     }
 }
@@ -282,6 +287,7 @@ pub enum HuginnMindResponse {
     PersonaPut(PersonaPutOutcome),
     Sources(SourceHits),
     Activity(RepoActivity),
+    RootsTouched(Vec<RootTouched>),
     /// The answer did not fit one send and is being held for the client to
     /// fetch. Nothing in a mind produces this: the daemon's serve module does,
     /// in place of an answer, and the answer it stands for is the named
@@ -417,6 +423,7 @@ mod tests {
                 instance: slug(INSTANCE),
                 query: SourceQuery { text: Line("reconcile".into()), top_k: 5, repo: Some(Short("Huginn".into())) },
             },
+            HuginnMindRequest::RootsTouched { instance: slug(INSTANCE) },
         ]
     }
 
@@ -466,6 +473,7 @@ mod tests {
                     text: "x".into(),
                 }],
             }),
+            HuginnMindResponse::RootsTouched(seeded().roots_touched().unwrap()),
             HuginnMindResponse::Deferred(DeferredAnswer {
                 manifest: cultnet_rs::pack_content("huginn.mind_response", "package", "", "", "", b"body", 4)
                     .unwrap()
@@ -480,7 +488,7 @@ mod tests {
     #[test]
     fn the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response() {
         let names: Vec<&str> = requests().iter().map(|request| request.operation()).collect();
-        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources"]);
+        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources", "roots_touched"]);
         for request in requests() {
             let declared = request.instance().is_none();
             assert_eq!(declared, matches!(request, HuginnMindRequest::Whoami), "{request:?}");

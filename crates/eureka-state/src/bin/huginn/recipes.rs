@@ -5,6 +5,7 @@
 //! reads through `eureka_state::hold`, the decider the heartbeat's gate reads.
 
 use clap::{Args, Subcommand};
+use eureka_state::hold::BLOCKING;
 use huginn_mind::SemanticQuery;
 use huginn_mind::eureka_pipeline::{Line, PipelineKind};
 use serde_json::{Value, json};
@@ -16,8 +17,6 @@ use crate::trouble::Trouble;
 const GAP_HOME: &str = "eureka-substrate";
 /// How many neighbours `precedent` asks the index for.
 const PRECEDENT_TOP_K: u32 = 10;
-/// Severities that block a cut.
-const BLOCKING: [&str; 2] = ["Blocker", "High"];
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct Paging {

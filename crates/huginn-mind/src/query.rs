@@ -28,7 +28,7 @@ use cultnet_rs::{
 };
 use eureka_pipeline::{
     ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MemoryOrigin, MemorySort, OrgRepo,
-    PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha,
+    PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha,
     Short, Slug, Title, pipeline_key,
 };
 use schemars::JsonSchema;
@@ -39,7 +39,7 @@ use crate::mind::{Mind, schema_cache};
 use crate::persona::HuginnPersonaEntry;
 use crate::receipt::{self, PipelineProvenance};
 use crate::refusal::MindRefusal;
-use crate::rows::{SelectionRow, Vocabulary, refuse_values};
+use crate::rows::{SelectionRow, Vocabulary, refuse_values, root_and_local};
 use crate::store::MindStore;
 
 /// What admission recorded about a document when it landed: the receipt that
@@ -383,6 +383,23 @@ fn integrity(type_id: &str, key: &str, fault: &str) -> MindRefusal {
     MindRefusal::Unavailable { detail: format!("document {type_id}/{key} {fault}") }
 }
 
+/// A root of the mind and the newest admission under it. `repos` is the repo set in force of a root that is an in-force campaign,
+/// and empty for any other root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RootTouched {
+    pub root: Slug,
+    pub admitted_at: String,
+    #[schemars(range(min = 1))]
+    pub ordinal: u64,
+    pub repos: Vec<OrgRepo>,
+}
+
+impl RootTouched {
+    fn of(root: &str, facts: &AdmissionFacts, repos: &[OrgRepo]) -> Self {
+        Self { root: Slug(root.to_string()), admitted_at: facts.admitted_at.clone(), ordinal: facts.ordinal, repos: repos.to_vec() }
+    }
+}
+
 /// One read call's working set: the image as of one snapshot and the facts it
 /// was built from. Built once per call and thrown away with it; nothing here
 /// outlives the answer.
@@ -453,6 +470,31 @@ impl Reader {
             current = subject;
         }
         current
+    }
+
+    fn roots_touched(&self) -> Vec<RootTouched> {
+        let mut newest: BTreeMap<&str, &AdmissionFacts> = BTreeMap::new();
+        for ((type_id, key), facts) in &self.facts.0 {
+            if kind_of_type(type_id).is_none() {
+                continue;
+            }
+            let root = root_and_local(key).0;
+            if newest.get(root).is_none_or(|seen| seen.ordinal < facts.ordinal) {
+                newest.insert(root, facts);
+            }
+        }
+        let docs = &self.docs;
+        let campaigns: BTreeMap<&str, &PipelineCampaign> = docs
+            .of_kind(PipelineKind::Campaign)
+            .filter_map(|(key, document)| match document {
+                PipelineDocument::Campaign(campaign) if docs.in_force(PipelineKind::Campaign, key) => Some((campaign.slug.0.as_str(), campaign)),
+                _ => None,
+            })
+            .collect();
+        newest
+            .into_iter()
+            .map(|(root, facts)| RootTouched::of(root, facts, campaigns.get(root).map_or(&[][..], |campaign| docs.repos_in_force(campaign))))
+            .collect()
     }
 
     fn rows(&self) -> Result<Vec<SelectionRow>, MindRefusal> {
@@ -561,6 +603,14 @@ impl<S: MindStore> Mind<S> {
         let rows = Reader::at(self, as_of)?.rows()?;
         let evaluation = select(&Vocabulary, &rows, &selection, as_of, self.cursor_key())?;
         Self::page(&selection, evaluation, as_of, None)
+    }
+
+    /// Every root this mind holds a document under, with its newest admission and, for a root that is an in-force
+    /// campaign, the repos in force (`Docs::repos_in_force`, never the campaign row's opening set). A resolution's
+    /// key carries its subject's root, so a later resolution is a touch of that root. One pass at the head, no rows.
+    pub fn roots_touched(&self) -> Result<Vec<RootTouched>, MindRefusal> {
+        let head = receipt::head(self)?;
+        Ok(Reader::at(self, head)?.roots_touched())
     }
 
     /// What a semantic query must satisfy before anything is embedded: the
@@ -2520,5 +2570,111 @@ mod tests {
         let mind = Mind::open(std::path::Path::new(&root), &Slug("eureka".into())).unwrap();
         let count = mind.read_back().unwrap();
         println!("read back {count} stored documents in {:?}", started.elapsed());
+    }
+
+    fn at_hour(hour: u32) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 9, 16, 12 + hour, 0, 0).unwrap()
+    }
+
+    fn touched(mind: &Mind<MemoryStore>) -> BTreeMap<String, RootTouched> {
+        mind.roots_touched().unwrap().into_iter().map(|root| (root.root.0.clone(), root)).collect()
+    }
+
+    /// A target revision naming `repos`, and the supersession of its predecessor.
+    fn repo_revision(campaign: &str, revision: u32, repos: &[&str]) -> Vec<D> {
+        let D::Target(mut named) = target(revision, &[INVARIANT]) else { panic!("a target") };
+        named.campaign = campaign.into();
+        named.repos = repos.iter().map(|name| repo(name)).collect();
+        let key = |n: u32| format!("{campaign}:target:r{n}");
+        let mut batch = vec![D::Target(named)];
+        if revision > 1 {
+            batch.push(resolution(r(K::Target, &key(revision - 1)), superseded(&[r(K::Target, &key(revision))])));
+        }
+        batch
+    }
+
+    /// Each root answers its newest admission: a later document counts, and so does a later resolution of an older one; an
+    /// instance's root is listed with no repos; a root is listed once, in the order of its name.
+    #[test]
+    fn roots_touched_is_the_newest_admission_per_root() {
+        let mut mind = seeded();
+        let first = touched(&mind);
+        assert_eq!(first.keys().map(String::as_str).collect::<Vec<_>>(), [CAMPAIGN, INSTANCE]);
+        assert_eq!((first[CAMPAIGN].admitted_at.as_str(), first[INSTANCE].admitted_at.as_str()), ("2026-09-16T12:00:00Z", "2026-09-16T12:00:00Z"));
+        assert!(first[INSTANCE].repos.is_empty(), "an instance root is no campaign");
+
+        let D::Campaign(mut other) = campaign(&["GameCult/Third"]) else { panic!("a campaign") };
+        other.slug = "other-campaign".into();
+        committed(admit_at(&mut mind, vec![D::Campaign(other)], at_hour(1)));
+        committed(admit_at(&mut mind, vec![question_n(1)], at_hour(2)));
+        let second = touched(&mind);
+        assert_eq!(second.keys().map(String::as_str).collect::<Vec<_>>(), [CAMPAIGN, "other-campaign", INSTANCE]);
+        assert_eq!(second["other-campaign"].admitted_at, "2026-09-16T13:00:00Z");
+        assert_eq!(second[CAMPAIGN].admitted_at, "2026-09-16T14:00:00Z", "a later document touches its root");
+        assert_eq!(second[INSTANCE].admitted_at, "2026-09-16T12:00:00Z", "and no other root");
+        assert!(second[INSTANCE].ordinal < second["other-campaign"].ordinal && second["other-campaign"].ordinal < second[CAMPAIGN].ordinal, "{second:?}");
+
+        committed(admit_at(&mut mind, vec![resolution(r(K::Question, &id("question", "Q1")), withdrawn())], at_hour(5)));
+        let third = touched(&mind);
+        assert_eq!(third[CAMPAIGN].admitted_at, "2026-09-16T17:00:00Z", "a later resolution is a touch of its subject's root");
+        assert!(third[CAMPAIGN].ordinal > second[CAMPAIGN].ordinal);
+        assert_eq!(third["other-campaign"], second["other-campaign"]);
+    }
+
+    /// A campaign answers the repos in force, not the opening set: the target that changes the set decides, a closed target does
+    /// not, another campaign's target does not; a campaign closed answers none.
+    #[test]
+    fn roots_touched_repos_are_the_ones_in_force() {
+        let mut mind = seeded();
+        assert_eq!(touched(&mind)[CAMPAIGN].repos, [repo(REPO)], "no target names repos: the opening set");
+
+        committed(admit(&mut mind, repo_revision(CAMPAIGN, 2, &[REPO, OTHER_REPO])));
+        assert_eq!(touched(&mind)[CAMPAIGN].repos, [repo(REPO), repo(OTHER_REPO)], "a target that changes the set decides");
+
+        let D::Campaign(mut other) = campaign(&[REPO]) else { panic!("a campaign") };
+        other.slug = "other-campaign".into();
+        let mut batch = vec![D::Campaign(other)];
+        batch.extend(repo_revision("other-campaign", 1, &["GameCult/Third"]));
+        committed(admit(&mut mind, batch));
+        let both = touched(&mind);
+        assert_eq!(both["other-campaign"].repos, [repo("GameCult/Third")]);
+        assert_eq!(both[CAMPAIGN].repos, [repo(REPO), repo(OTHER_REPO)], "another campaign's higher target decides nothing here");
+
+        committed(admit(&mut mind, repo_revision(CAMPAIGN, 3, &[OTHER_REPO])));
+        assert_eq!(touched(&mind)[CAMPAIGN].repos, [repo(OTHER_REPO)], "neither the opening set nor the closed revision decides");
+    }
+
+    /// A campaign with a resolution in force answers no repos, and one beside it that is open keeps its own. Admission has no row to
+    /// close a campaign, so the image is built by hand.
+    #[test]
+    fn a_closed_campaign_answers_no_repos() {
+        let held = |kind: K, key: String, document: D| Held { kind, key, document };
+        let (open_key, closed_key, closing_key) = ("open:campaign:open".to_string(), "closed:campaign:closed".to_string(), "closed:resolution:campaign.n1".to_string());
+        let named = |slug: &str, repo_name: &str| {
+            let D::Campaign(mut c) = campaign(&[repo_name]) else { panic!("a campaign") };
+            c.slug = slug.into();
+            D::Campaign(c)
+        };
+        let image = vec![
+            held(K::Campaign, open_key.clone(), named("open", REPO)),
+            held(K::Campaign, closed_key.clone(), named("closed", OTHER_REPO)),
+            held(K::Resolution, closing_key.clone(), resolution(r(K::Campaign, &closed_key), withdrawn())),
+        ];
+        let landed = |ordinal: u64| AdmissionFacts {
+            receipt_id: format!("receipt-{ordinal}"),
+            admitted_at: "2026-09-16T12:00:00Z".into(),
+            provenance: provenance(Faculty::Hands),
+            ordinal,
+        };
+        let facts = AdmissionIndex(BTreeMap::from([
+            ((K::Campaign.type_id().to_string(), open_key), landed(1)),
+            ((K::Campaign.type_id().to_string(), closed_key), landed(2)),
+            ((K::Resolution.type_id().to_string(), closing_key), landed(3)),
+        ]));
+        let roots = Reader { docs: Docs { image, batch: Vec::new() }, facts }.roots_touched();
+        let by_root: BTreeMap<&str, &RootTouched> = roots.iter().map(|root| (root.root.0.as_str(), root)).collect();
+        assert_eq!(by_root["open"].repos, [repo(REPO)]);
+        assert!(by_root["closed"].repos.is_empty(), "{roots:?}");
+        assert_eq!(by_root["closed"].ordinal, 3, "the closure is a touch of the campaign it closes");
     }
 }

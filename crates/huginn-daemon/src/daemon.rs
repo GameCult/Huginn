@@ -200,6 +200,10 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
             HuginnMindRequest::Query { selection, semantic: Some(semantic), .. } => {
                 return self.begin_search(selection, semantic);
             }
+            HuginnMindRequest::RootsTouched { .. } => match self.mind.roots_touched() {
+                Ok(roots) => HuginnMindResponse::RootsTouched(roots),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
             HuginnMindRequest::StewardedActivity { instance, repos, after } => {
                 let refused = |message: &str| MindRefusal::SelectionInvalid { field: "repos".into(), value: None, message: message.into() };
                 if repos.len() > ACTIVITY_REPOS_MAX {
@@ -1072,6 +1076,32 @@ pub(crate) mod tests {
         );
     }
 
+
+    /// A roots read through the daemon's handle answers from the mind it serves: the campaign with its repos in force and the
+    /// instance's own root with none; a request naming another instance is refused at the door, as every read is, before the mind
+    /// is asked.
+    #[test]
+    fn roots_touched_answers_on_the_wire() {
+        let (_root, mut daemon) = seeded_wide();
+        let HuginnMindResponse::RootsTouched(roots) = daemon.handle(HuginnMindRequest::RootsTouched { instance: slug(INSTANCE) }, now()).answered() else {
+            panic!("a roots read answers the roots");
+        };
+        let by_root = |name: &str| roots.iter().find(|root| root.root.0 == name).unwrap_or_else(|| panic!("{name} in {roots:?}"));
+        assert_eq!(by_root(CAMPAIGN).repos, [OrgRepo(REPO.into())]);
+        assert!(by_root(INSTANCE).repos.is_empty());
+        assert_eq!(roots.len(), 2, "{roots:?}");
+
+        let bytes = rmp_serde::to_vec_named(&HuginnMindResponse::RootsTouched(roots.clone())).unwrap();
+        assert_eq!(rmp_serde::from_slice::<HuginnMindResponse>(&bytes).unwrap(), HuginnMindResponse::RootsTouched(roots));
+
+        for declared in [OTHER, NEAR, PREFIXED, CASED] {
+            assert_eq!(
+                daemon.handle(HuginnMindRequest::RootsTouched { instance: slug(declared) }, now()).answered(),
+                HuginnMindResponse::Refused(MindRefusal::ForeignInstance { declared: declared.into(), mind: INSTANCE.into() }),
+                "{declared}"
+            );
+        }
+    }
 
     fn activity_request(repos: &[&str]) -> HuginnMindRequest {
         HuginnMindRequest::StewardedActivity { instance: slug(INSTANCE), repos: repos.iter().map(|repo| OrgRepo::from(*repo)).collect(), after: Some(1) }

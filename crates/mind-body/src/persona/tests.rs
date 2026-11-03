@@ -4553,11 +4553,17 @@ struct Forged<'a> {
     script: RefCell<VecDeque<Option<RepoActivity>>>,
     asked: RefCell<Vec<Option<u64>>>,
     head: Cell<u64>,
+    /// Every read of her mind, by the schema it names (`roots` for the roots read), in order.
+    reads: RefCell<Vec<String>>,
 }
 
 impl<'a> Forged<'a> {
     fn over(mind: &'a TestMind, script: Vec<Option<RepoActivity>>) -> Self {
-        Self { mind, script: RefCell::new(script.into()), asked: RefCell::default(), head: Cell::new(0) }
+        Self { mind, script: RefCell::new(script.into()), asked: RefCell::default(), head: Cell::new(0), reads: RefCell::default() }
+    }
+
+    fn reads_of(&self, kind: K) -> usize {
+        self.reads.borrow().iter().filter(|read| read.as_str() == kind.type_id()).count()
     }
 }
 
@@ -4567,7 +4573,13 @@ impl MindPort for Forged<'_> {
     }
 
     fn query(&self, selection: &cultnet_rs::Selection) -> Result<huginn_mind::PipelineSelectionPage> {
+        self.reads.borrow_mut().extend(selection.schemas.iter().flatten().cloned());
         self.mind.query(selection)
+    }
+
+    fn roots_touched(&self) -> Result<Vec<RootTouched>> {
+        self.reads.borrow_mut().push("roots".into());
+        self.mind.roots_touched()
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<AdmissionOutcome> {
@@ -4958,4 +4970,607 @@ fn the_wear_bound_is_exact_to_the_byte() {
     let over = render_wear(now, &facts);
     assert!(over.len() <= WEAR_MAX_BYTES, "{} bytes: {over}", over.len());
     assert!(over.trim_end().ends_with("more facts not shown)"), "{over}");
+}
+
+
+// ---- The wear her own mind holds: specs with no report, open Soul findings and quiet campaigns. ----
+
+const DAY_MS: i64 = 86_400_000;
+
+fn t(days_ago: i64) -> u64 {
+    unix_ms(at(0)) - (days_ago * DAY_MS) as u64
+}
+
+fn pipeline_range() -> eureka_pipeline::CommitRange {
+    eureka_pipeline::CommitRange { base: eureka_pipeline::Sha("df7507b".into()), head: eureka_pipeline::Sha("df7507b".into()) }
+}
+
+/// A spec in force whose cut has no report.
+fn unreported_spec(campaign: &str, cut: &str, repo: &str) -> PipelineDocument {
+    let PipelineDocument::CutSpec(mut spec) = spec(cut) else { unreachable!("a spec") };
+    spec.campaign = Slug(campaign.into());
+    spec.repo = repo.into();
+    PipelineDocument::CutSpec(spec)
+}
+
+/// A spec with its report and a verdict that holds: the chain a Soul finding stands on.
+fn chain(campaign: &str, cut: &str, repo: &str) -> Vec<PipelineDocument> {
+    let PipelineDocument::CutReport(mut report) = report(cut) else { unreachable!("a report") };
+    report.campaign = Slug(campaign.into());
+    report.cut_spec = format!("{campaign}:cut_spec:cut-{cut}.r1").as_str().into();
+    report.repo = repo.into();
+    let verdict = eureka_pipeline::PipelineVerdict {
+        campaign: Slug(campaign.into()),
+        cut_report: format!("{campaign}:cut_report:cut-{cut}.h1").as_str().into(),
+        pass: 1,
+        range: pipeline_range(),
+        claims: vec![eureka_pipeline::VerdictClaim {
+            claim: "It holds.".into(),
+            outcome: eureka_pipeline::ClaimOutcome::Holds,
+            evidence: vec![evidence()],
+            findings: vec![],
+            promise: None,
+            mutations: vec![],
+        }],
+    };
+    vec![unreported_spec(campaign, cut, repo), PipelineDocument::CutReport(report), PipelineDocument::Verdict(verdict)]
+}
+
+fn evidence() -> eureka_pipeline::Evidence {
+    eureka_pipeline::Evidence { kind: eureka_pipeline::EvidenceKind::Test, locator: "cargo test".into(), result: "ok".into() }
+}
+
+fn soul_finding(campaign: &str, cut: &str, label: &str, severity: eureka_pipeline::FindingSeverity) -> PipelineDocument {
+    PipelineDocument::Finding(eureka_pipeline::PipelineFinding {
+        campaign: Slug(campaign.into()),
+        verdict: format!("{campaign}:verdict:cut-{cut}.s1").as_str().into(),
+        label: label.into(),
+        range: pipeline_range(),
+        confidence: eureka_pipeline::FindingConfidence::Confirmed,
+        severity,
+        claim: "A claim.".into(),
+        invariants: vec![],
+        locations: vec![eureka_pipeline::CodeLocation { path: "a.rs".into(), line: 1, end_line: None, symbol: None }],
+        failure_scenario: "It fails.".into(),
+        evidence: vec![evidence()],
+        precedents: vec![],
+        origin: eureka_pipeline::FindingOrigin::Introduced,
+    })
+}
+
+/// Admits `documents` in batches the mind takes, the first at `first_days_ago` and the rest at `rest_days_ago`.
+fn put_in_batches(mind: &TestMind, faculty: huginn_mind::Faculty, documents: Vec<PipelineDocument>, first_days_ago: i64, rest_days_ago: i64) {
+    let mut first = true;
+    for batch in documents.chunks(60) {
+        mind.admit_at(at(-(if first { first_days_ago } else { rest_days_ago }) * DAY_MS));
+        first = false;
+        let outcome = mind.put_as(faculty, batch.to_vec());
+        assert!(matches!(outcome, AdmissionOutcome::Committed { .. }), "{outcome:?}");
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Fault {
+    Refused,
+    Client,
+}
+
+/// Her mind as a daemon answers it, every read through the real adapter: the `nth` request (1-based) that names `schema` (`roots`
+/// for the roots read) fails the way the daemon does, as a refusal, or the way a dead socket does, as a client error. Every read
+/// is logged by the schema it names. The forge answers a quiet org.
+fn through<'a>(mind: &'a TestMind, fail: Option<(String, usize, Fault)>, log: &'a RefCell<Vec<String>>) -> crate::queue::HuginnMind<'a> {
+    let seen = Cell::new(0usize);
+    crate::queue::HuginnMind::over(
+        mind.instance().clone(),
+        Box::new(move |request| {
+            let which = match &request {
+                huginn_mind::HuginnMindRequest::RootsTouched { .. } => Some("roots".to_string()),
+                huginn_mind::HuginnMindRequest::Query { selection, .. } => selection.schemas.as_ref().and_then(|schemas| schemas.first().cloned()),
+                _ => None,
+            };
+            if let Some(which) = &which {
+                log.borrow_mut().push(which.clone());
+            }
+            if let (Some((name, nth, fault)), Some(which)) = (&fail, &which)
+                && which == name
+            {
+                seen.set(seen.get() + 1);
+                if seen.get() == *nth {
+                    return match fault {
+                        Fault::Refused => Ok(huginn_mind::HuginnMindResponse::Refused(huginn_mind::MindRefusal::Unavailable { detail: "canary".into() })),
+                        Fault::Client => Err(eureka_state::ClientError::Unencodable { detail: "canary".into() }),
+                    };
+                }
+            }
+            if let huginn_mind::HuginnMindRequest::StewardedActivity { .. } = request {
+                return Ok(huginn_mind::HuginnMindResponse::Activity(RepoActivity { head: 1, events: vec![], capped: vec![], open_prs: vec![], unseen: vec![], moved: vec![] }));
+            }
+            Ok(mind.answer(request))
+        }),
+    )
+}
+
+fn soul(mind: &TestMind, documents: Vec<PipelineDocument>) {
+    let outcome = mind.put_as(huginn_mind::Faculty::Soul, documents);
+    assert!(matches!(outcome, AdmissionOutcome::Committed { .. }), "{outcome:?}");
+}
+
+fn hers() -> Vec<OrgRepo> {
+    vec![OrgRepo::from(REPO)]
+}
+
+fn lines_of(wear: &str) -> Vec<&str> {
+    wear.lines().skip(1).collect()
+}
+
+/// A spec on a repo she does not steward is only a count, a differently cased repo is hers, a finding outside her slice prints
+/// nothing, and an empty slice makes no findings read.
+#[test]
+fn wear_lists_only_her_slice() {
+    let mind = TestMind::seeded();
+    for (slug, repo) in [("elsewhere", "GameCult/Elsewhere"), ("cased", "gamecult/huginn")] {
+        mind.admit_at(at(-9 * DAY_MS));
+        mind.committed(campaign_on(slug, &[repo]));
+    }
+    mind.admit_at(at(-3 * DAY_MS));
+    mind.committed(vec![unreported_spec(CAMPAIGN, "mine", REPO)]);
+    mind.admit_at(at(-2 * DAY_MS));
+    mind.committed(vec![unreported_spec("cased", "low", "gamecult/huginn")]);
+    mind.admit_at(at(-5 * DAY_MS));
+    mind.committed(vec![unreported_spec("elsewhere", "theirs", "GameCult/Elsewhere")]);
+    for (campaign, repo) in [(CAMPAIGN, REPO), ("elsewhere", "GameCult/Elsewhere")] {
+        mind.admit_at(at(-6 * DAY_MS));
+        mind.committed(chain(campaign, "f", repo));
+        mind.admit_at(at(-4 * DAY_MS));
+        soul(&mind, vec![soul_finding(campaign, "f", "one", eureka_pipeline::FindingSeverity::High)]);
+    }
+    let log = RefCell::default();
+    let facts = record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0));
+    assert_eq!(
+        facts,
+        [
+            WearFact::SpecsOnYours(vec![("eureka-body:cut_spec:cut-mine.r1".into(), t(3)), ("cased:cut_spec:cut-low.r1".into(), t(2))]),
+            WearFact::SpecsElsewhere { by_campaign: vec![("elsewhere".into(), 1)], oldest: ("elsewhere:cut_spec:cut-theirs.r1".into(), t(5)) },
+            WearFact::SoulFindings(vec![FindingRow {
+                campaign: "eureka-body".into(),
+                open: 1,
+                blocking: 1,
+                oldest: t(4),
+                worst_blocking: Some(("eureka-body:finding:cut-f.s1.one".into(), t(4))),
+            }]),
+        ]
+    );
+    let wear = render_wear(t(0), &facts);
+    assert!(!wear.contains("Elsewhere"), "the repo she does not steward is not named: {wear}");
+    assert!(wear.lines().filter(|line| line.contains("Soul findings")).all(|line| !line.contains("elsewhere")), "no finding outside her slice: {wear}");
+
+    let none = TestMind::without_campaigns();
+    let log = RefCell::default();
+    assert_eq!(record_wear_facts(&through(&none, None, &log), &hers(), &[], t(0)), []);
+    assert_eq!(*log.borrow(), ["roots", K::CutSpec.type_id()], "an empty slice makes no findings read");
+}
+
+/// A mind with `specs` unreported specs in `eureka-body` and `findings` open Soul findings there, the first batch of each ten
+/// days old and the rest one.
+fn crowded(specs: usize, findings: usize) -> TestMind {
+    let mind = TestMind::seeded();
+    put_in_batches(&mind, huginn_mind::Faculty::Hands, (0..specs).map(|n| unreported_spec(CAMPAIGN, &format!("s{n:03}"), REPO)).collect(), 9, 1);
+    mind.admit_at(at(-11 * DAY_MS));
+    mind.committed(chain(CAMPAIGN, "v", REPO));
+    let severity = |n: usize| if n % 4 == 0 { eureka_pipeline::FindingSeverity::Blocker } else { eureka_pipeline::FindingSeverity::Low };
+    put_in_batches(&mind, huginn_mind::Faculty::Soul, (0..findings).map(|n| soul_finding(CAMPAIGN, "v", &format!("f{n:03}"), severity(n))).collect(), 10, 1);
+    mind
+}
+
+/// A count crosses the page: 201 open findings print 201 with the oldest's age, and 201 unreported specs are all named by the fact
+/// (the line prints four), not one page's worth.
+#[test]
+fn wear_counts_cross_a_page() {
+    let mind = crowded(201, 201);
+    let log = RefCell::default();
+    let facts = record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0));
+    let [WearFact::SpecsOnYours(specs), WearFact::SoulFindings(rows)] = facts.as_slice() else { panic!("{facts:?}") };
+    assert_eq!((specs.len(), specs[0].1, specs[200].1), (201, t(9), t(1)));
+    assert_eq!(
+        rows,
+        &[FindingRow { campaign: "eureka-body".into(), open: 201, blocking: 51, oldest: t(10), worst_blocking: Some(("eureka-body:finding:cut-v.s1.f000".into(), t(10))) }]
+    );
+    assert!(log.borrow().iter().filter(|read| read.as_str() == K::Finding.type_id()).count() >= 2, "more than one page of findings was walked");
+    assert!(log.borrow().iter().filter(|read| read.as_str() == K::CutSpec.type_id()).count() >= 2, "and of specs");
+    let wear = render_wear(t(0), &facts);
+    assert!(wear.contains("- open Soul findings in your mind: eureka-body 201, 51 blocking, worst eureka-body:finding:cut-v.s1.f000 (10 d)\n"), "{wear}");
+}
+
+/// A walk that fails on a later page fails that read whole, as a refusal or as a dead socket: its own missing line, no partial count,
+/// the other reads' lines, and no quiet campaign from partial inputs.
+#[test]
+fn a_later_page_refused_fails_that_read_whole() {
+    let mind = crowded(201, 201);
+    for fault in [Fault::Refused, Fault::Client] {
+        let log = RefCell::default();
+        let facts = record_wear_facts(&through(&mind, Some((K::Finding.type_id().into(), 2, fault)), &log), &hers(), &["eureka-body".into()], t(0) + 30 * DAY_MS as u64);
+        assert_eq!(facts.len(), 2, "{facts:?}");
+        assert!(matches!(&facts[0], WearFact::RecordsMissing(what) if what.contains("open Soul findings could not be read")), "{facts:?}");
+        assert!(matches!(&facts[1], WearFact::SpecsOnYours(specs) if specs.len() == 201), "the specs print whole: {facts:?}");
+
+        let log = RefCell::default();
+        let facts = record_wear_facts(&through(&mind, Some((K::CutSpec.type_id().into(), 2, fault)), &log), &hers(), &[], t(0));
+        assert_eq!(facts.len(), 2, "{facts:?}");
+        assert!(matches!(&facts[0], WearFact::RecordsMissing(what) if what.contains("specs with no report could not be read")), "{facts:?}");
+        assert!(matches!(&facts[1], WearFact::SoulFindings(rows) if rows[0].open == 201), "{facts:?}");
+    }
+}
+
+/// Each read in turn answers as the daemon does, as a refusal and as a client error: its own missing line prints, the others'
+/// facts print, no quiet campaign comes of partial inputs, and a session still runs and shows it.
+#[test]
+fn a_failed_wear_read_says_so() {
+    let mind = TestMind::seeded();
+    mind.admit_at(at(-30 * DAY_MS));
+    mind.committed(vec![unreported_spec(CAMPAIGN, "old", REPO)]);
+    mind.committed(chain(CAMPAIGN, "f", REPO));
+    soul(&mind, vec![soul_finding(CAMPAIGN, "f", "one", eureka_pipeline::FindingSeverity::Low)]);
+    let all = |facts: &[WearFact]| facts.iter().filter(|fact| matches!(fact, WearFact::QuietCampaigns(_))).count();
+    let log = RefCell::default();
+    let quiet_at = t(0) + DAY_MS as u64 * 60;
+    let whole = record_wear_facts(&through(&mind, None, &log), &hers(), &[], quiet_at);
+    assert_eq!(all(&whole), 1, "with every read answered the old campaign is quiet: {whole:?}");
+    for fault in [Fault::Refused, Fault::Client] {
+        for (read, missing) in [
+            ("roots", "campaigns of your repos could not be read"),
+            (K::CutSpec.type_id(), "specs with no report could not be read"),
+            (K::Finding.type_id(), "open Soul findings could not be read"),
+        ] {
+            let log = RefCell::default();
+            let facts = record_wear_facts(&through(&mind, Some((read.into(), 1, fault)), &log), &hers(), &[], quiet_at);
+            assert!(facts.iter().any(|fact| matches!(fact, WearFact::RecordsMissing(what) if what.contains(missing))), "{read}: {facts:?}");
+            assert_eq!(facts.len(), 2, "{read}: its missing line and the facts of the reads that answered: {facts:?}");
+            assert_eq!(all(&facts), 0, "{read}: no quiet campaign from partial inputs");
+        }
+    }
+
+    let mut rig = stewarding_rig(2);
+    rig.mind = mind;
+    let log = RefCell::default();
+    let broken = through(&rig.mind, Some(("roots".into(), 1, Fault::Client)), &log);
+    live_session(&rig, &broken, 1000, false, 1);
+    let input = input_of(&rig, 0);
+    assert!(input.contains("- records are missing: the campaigns of your repos could not be read"), "{input}");
+    assert!(input.contains("- specs with no report in your mind, on your repos: eureka-body:cut_spec:cut-old.r1"), "the session ran and the specs printed: {input}");
+}
+
+/// A campaign is quiet exactly at the window: 14 d lists, a millisecond less does not; it needs open work (an unreported spec, an
+/// open Soul finding or an open follow-up) and a campaign with none is not listed.
+#[test]
+fn a_quiet_campaign_needs_open_work_and_the_full_window() {
+    let mind = TestMind::seeded();
+    let opened = t(20);
+    for slug in ["q-spec", "q-find", "q-follow", "q-none"] {
+        mind.admit_at(at(-20 * DAY_MS));
+        mind.committed(campaign_on(slug, &[REPO]));
+    }
+    mind.admit_at(at(-20 * DAY_MS));
+    mind.committed(vec![unreported_spec("q-spec", "x", REPO)]);
+    mind.admit_at(at(-20 * DAY_MS));
+    mind.committed(chain("q-find", "x", REPO));
+    mind.admit_at(at(-20 * DAY_MS));
+    soul(&mind, vec![soul_finding("q-find", "x", "one", eureka_pipeline::FindingSeverity::Low)]);
+    let log = RefCell::default();
+    let port = through(&mind, None, &log);
+    let window = opened + 14 * DAY_MS as u64;
+    let quiet = |now: u64, open: &[String]| record_wear_facts(&port, &hers(), open, now).into_iter().find_map(|fact| if let WearFact::QuietCampaigns(q) = fact { Some(q) } else { None });
+    let follow = ["q-follow".to_string(), "q-none-but-not-in-the-slice".to_string()];
+    assert_eq!(quiet(window, &follow), Some(vec![("q-find".into(), opened), ("q-follow".into(), opened), ("q-spec".into(), opened)]), "exactly 14 d lists, and q-none has no open work");
+    assert_eq!(quiet(window - 1, &follow), None, "a millisecond less lists none");
+    assert_eq!(quiet(window + 1, &follow).map(|q| q.len()), Some(3));
+    assert_eq!(quiet(window, &[]).map(|q| q.len()), Some(2), "without the follow-up q-follow has no open work");
+}
+
+/// A follow-up the goals bound hides still counts as open work: the roots come from the whole list.
+#[test]
+fn a_follow_up_the_goals_bound_hides_still_counts_as_open_work() {
+    let mind = TestMind::seeded();
+    mind.committed(campaign_on("hidden-in", &[REPO]));
+    mind.committed(chain("hidden-in", "src", REPO));
+    let PipelineDocument::FollowUp(mut hidden) = follow_up("old", &reference(K::CutSpec, "hidden-in:cut_spec:cut-src.r1")) else { unreachable!("a follow-up") };
+    hidden.campaign = Slug("hidden-in".into());
+    hidden.item = Line("x".repeat(900));
+    mind.committed(vec![PipelineDocument::FollowUp(hidden)]);
+    mind.committed(chain(CAMPAIGN, "src", REPO));
+    for n in 0..12 {
+        let PipelineDocument::FollowUp(mut long) = follow_up(&format!("long{n}"), &spec_ref("src")) else { unreachable!("a follow-up") };
+        long.item = Line("x".repeat(900));
+        mind.committed(vec![PipelineDocument::FollowUp(long)]);
+    }
+    let goals = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap();
+    assert!(goals.text.contains("older open follow-ups not shown") && !goals.text.contains("hidden-in/old"), "the bound hid it: {} bytes", goals.text.len());
+    assert_eq!(goals.open_roots, ["eureka-body", "hidden-in"], "{:?}", goals.open_roots);
+}
+
+/// The caps are exact: four entries print with no tail, five print four and `+1 more`, on all three listing lines, and the finding
+/// line's `+N more in M campaigns` counts what it left out.
+#[test]
+fn wear_caps_are_exact() {
+    let now = t(0);
+    let entries = |n: usize| (0..n).map(|k| (format!("c{k}"), now - (k as u64 + 1) * DAY_MS as u64)).collect::<Vec<_>>();
+    let line = |fact: WearFact| render_wear(now, &[fact]).lines().nth(1).unwrap().to_string();
+    for (make, head) in [
+        (WearFact::SpecsOnYours as fn(Vec<(String, u64)>) -> WearFact, "- specs with no report in your mind, on your repos: "),
+        (WearFact::QuietCampaigns, "- campaigns that touch your repos with open work and no admission in your mind for 14 d or more: "),
+    ] {
+        assert_eq!(line(make(entries(4))), format!("{head}c0 (1 d), c1 (2 d), c2 (3 d), c3 (4 d)"));
+        assert_eq!(line(make(entries(5))), format!("{head}c0 (1 d), c1 (2 d), c2 (3 d), c3 (4 d), +1 more"));
+        assert_eq!(line(make(entries(7))), format!("{head}c0 (1 d), c1 (2 d), c2 (3 d), c3 (4 d), +3 more"));
+    }
+    // Rows arrive blocking first: c0 blocks most. Each blocking row names its worst finding.
+    let rows = |n: usize| {
+        (0..n)
+            .map(|k| FindingRow {
+                campaign: format!("c{k}"),
+                open: 10 - k,
+                blocking: 3 - k.min(3),
+                oldest: now - 9 * 3_600_000,
+                worst_blocking: (k < 3).then(|| (format!("c{k}:finding:cut-v.s1.b"), now - 3 * 3_600_000)),
+            })
+            .collect::<Vec<_>>()
+    };
+    let named = "- open Soul findings in your mind: c0 10, 3 blocking, worst c0:finding:cut-v.s1.b (3 h); c1 9, 2 blocking, worst c1:finding:cut-v.s1.b (3 h); c2 8, 1 blocking, worst c2:finding:cut-v.s1.b (3 h); c3 7, 0 blocking, oldest (9 h)";
+    assert_eq!(line(WearFact::SoulFindings(rows(4))), named);
+    assert_eq!(line(WearFact::SoulFindings(rows(5))), format!("{named}; +6 more, 0 blocking, in 1 campaign"));
+    assert_eq!(line(WearFact::SoulFindings(rows(7))), format!("{named}; +15 more, 0 blocking, in 3 campaigns"));
+    // The tail counts the blocking it hides.
+    let mut crowded_out = rows(7);
+    (crowded_out[4].blocking, crowded_out[5].blocking, crowded_out[6].blocking) = (1, 2, 3);
+    assert_eq!(line(WearFact::SoulFindings(crowded_out)).rsplit_once("; ").unwrap().1, "+15 more, 6 blocking, in 3 campaigns");
+    let oldest = ("elsewhere:cut_spec:cut-theirs.r1".to_string(), now - 40 * DAY_MS as u64);
+    let elsewhere = |counts: &[(&str, usize)]| WearFact::SpecsElsewhere { by_campaign: counts.iter().map(|(c, n)| (c.to_string(), *n)).collect(), oldest: oldest.clone() };
+    let head = "- specs with no report in your mind, on repos you do not steward: ";
+    assert_eq!(line(elsewhere(&[("a", 6), ("b", 3)])), format!("{head}9 (a 6, b 3), oldest elsewhere:cut_spec:cut-theirs.r1 (40 d)"));
+    assert_eq!(
+        line(elsewhere(&[("a", 6), ("b", 5), ("c", 4), ("d", 3), ("e", 2), ("f", 1)])),
+        format!("{head}21 (a 6, b 5, c 4, d 3, +3 more in 2 campaigns), oldest elsewhere:cut_spec:cut-theirs.r1 (40 d)")
+    );
+}
+
+/// Forge facts and record facts share the one bound: built to exactly the bound they all print with no tail; one byte more drops
+/// from the end, the section stays inside the bound and the tail's count is exact; the forge's facts rank first.
+#[test]
+fn record_facts_share_the_one_bound() {
+    let now = t(0);
+    let forge = |n: usize| WearFact::Changed { repo: format!("GameCult/r{n:03}"), words: "1 commit pushed by nibu".into(), at: now - 3_600_000 };
+    let record = |pad: usize| WearFact::QuietCampaigns(vec![(format!("q{}", "x".repeat(pad)), now - 15 * DAY_MS as u64)]);
+    let header = render_wear(now, &[forge(0)]).lines().next().unwrap().len() + 1;
+    let each = render_wear(now, &[forge(0)]).len() - header;
+    let record_len = |pad: usize| render_wear(now, &[record(pad)]).len() - header;
+    let count = (WEAR_MAX_BYTES - header - record_len(0)) / each;
+    let spare = WEAR_MAX_BYTES - header - record_len(0) - count * each;
+    let mut facts: Vec<WearFact> = vec![record(spare)];
+    facts.extend((0..count).map(forge));
+    let exact = render_wear(now, &facts);
+    assert_eq!(exact.len(), WEAR_MAX_BYTES, "built to the byte");
+    assert!(!exact.contains("not shown") && exact.contains("campaigns that touch your repos with open work"), "all print: {exact}");
+    assert!(exact.lines().nth(1).unwrap().starts_with("- changed by others"), "the forge's facts rank first: {exact}");
+
+    facts[0] = record(spare + 1);
+    let over = render_wear(now, &facts);
+    assert!(over.len() <= WEAR_MAX_BYTES, "{} bytes", over.len());
+    assert!(!over.contains("campaigns that touch your repos with open work"), "the record fact drops from the end: {over}");
+    let shown = over.lines().filter(|line| line.starts_with("- ")).count();
+    assert!(over.trim_end().ends_with(&format!("({} more facts not shown)", facts.len() - shown)) && shown < facts.len(), "{over}");
+    assert!(shown + 1 >= count, "forge facts are kept before it: {shown} of {count}");
+}
+
+/// Campaigns that block come first whatever their size, and the line's tail counts the blocking it leaves out: a small campaign with
+/// a blocker is listed before a large one with none, and the campaigns past the cap are named by `+N more, B blocking, in M campaigns`.
+#[test]
+fn blocking_findings_sort_first_and_the_tail_counts_what_it_hides() {
+    use eureka_pipeline::FindingSeverity::{Blocker, Low};
+    let mind = TestMind::seeded();
+    // (campaign, blocking findings, low findings): `a` is the largest and blocks nothing.
+    for (campaign, blockers, lows) in [("a", 0, 5), ("b", 1, 0), ("c", 1, 1), ("d", 1, 0), ("e", 1, 0), ("f", 1, 3)] {
+        mind.admit_at(at(-9 * DAY_MS));
+        mind.committed(campaign_on(campaign, &[REPO]));
+        mind.committed(chain(campaign, "v", REPO));
+        let found = (0..blockers).map(|n| soul_finding(campaign, "v", &format!("b{n}"), Blocker)).chain((0..lows).map(|n| soul_finding(campaign, "v", &format!("l{n}"), Low)));
+        soul(&mind, found.collect());
+    }
+    let log = RefCell::default();
+    let facts = record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0));
+    let rows = facts.iter().find_map(|fact| if let WearFact::SoulFindings(rows) = fact { Some(rows) } else { None }).expect("findings");
+    let order: Vec<(&str, usize, usize)> = rows.iter().map(|row| (row.campaign.as_str(), row.open, row.blocking)).collect();
+    assert_eq!(order, [("f", 4, 1), ("c", 2, 1), ("b", 1, 1), ("d", 1, 1), ("e", 1, 1), ("a", 5, 0)], "blocking first, then open, then name");
+    let wear = render_wear(t(0), &facts);
+    let line = wear.lines().find(|line| line.starts_with("- open Soul findings")).unwrap();
+    assert!(line.starts_with("- open Soul findings in your mind: f 4, 1 blocking, worst f:finding:cut-v.s1.b0 (8 d); c 2, 1 blocking,"), "{line}");
+    assert!(line.ends_with("; +6 more, 1 blocking, in 2 campaigns"), "the tail keeps the blocking it hides: {line}");
+}
+
+/// Every record fact leads to a record she can open: a spec by its id, the specs of other repos by campaign with the oldest one's id,
+/// and a campaign's blocking by its worst finding's id (the oldest by admission, not by name).
+#[test]
+fn wear_lines_name_the_records_to_open() {
+    use eureka_pipeline::FindingSeverity::{Blocker, High, Low};
+    let mind = TestMind::seeded();
+    mind.admit_at(at(-9 * DAY_MS));
+    mind.committed(campaign_on("elsewhere", &["GameCult/Elsewhere"]));
+    mind.admit_at(at(-5 * DAY_MS));
+    mind.committed(vec![unreported_spec("elsewhere", "old", "GameCult/Elsewhere")]);
+    mind.admit_at(at(-4 * DAY_MS));
+    mind.committed(campaign_on("zz", &["GameCult/Other"]));
+    mind.committed(vec![unreported_spec("elsewhere", "new", "GameCult/Elsewhere"), unreported_spec("zz", "other", "GameCult/Other")]);
+    mind.admit_at(at(-3 * DAY_MS));
+    mind.committed(vec![unreported_spec(CAMPAIGN, "mine", REPO)]);
+    mind.admit_at(at(-8 * DAY_MS));
+    mind.committed(chain(CAMPAIGN, "v", REPO));
+    mind.admit_at(at(-7 * DAY_MS - DAY_MS / 2));
+    soul(&mind, vec![soul_finding(CAMPAIGN, "v", "high", High)]);
+    mind.admit_at(at(-7 * DAY_MS));
+    soul(&mind, vec![soul_finding(CAMPAIGN, "v", "zz-older", Blocker), soul_finding(CAMPAIGN, "v", "low", Low)]);
+    mind.admit_at(at(-2 * DAY_MS));
+    soul(&mind, vec![soul_finding(CAMPAIGN, "v", "aa-newer", Blocker)]);
+    let log = RefCell::default();
+    let wear = render_wear(t(0), &record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0)));
+    let lines = lines_of(&wear);
+    assert_eq!(lines[0], "- specs with no report in your mind, on your repos: eureka-body:cut_spec:cut-mine.r1 (3 d)", "{wear}");
+    assert_eq!(
+        lines[1],
+        "- specs with no report in your mind, on repos you do not steward: 3 (elsewhere 2, zz 1), oldest elsewhere:cut_spec:cut-old.r1 (5 d)"
+    );
+    assert_eq!(lines[2], "- open Soul findings in your mind: eureka-body 4, 3 blocking, worst eureka-body:finding:cut-v.s1.zz-older (7 d)");
+}
+
+/// The specs of other repos are counted by campaign, largest first and then by name: the breakdown is sorted, not left in key order.
+#[test]
+fn specs_of_other_repos_are_counted_by_campaign_largest_first() {
+    let mind = TestMind::seeded();
+    mind.admit_at(at(-5 * DAY_MS));
+    mind.committed(campaign_on("a", &["GameCult/Other"]));
+    mind.committed(campaign_on("b", &["GameCult/Other"]));
+    mind.committed(campaign_on("c", &["GameCult/Other"]));
+    mind.committed(vec![
+        unreported_spec("a", "one", "GameCult/Other"),
+        unreported_spec("b", "one", "GameCult/Other"),
+        unreported_spec("b", "two", "GameCult/Other"),
+        unreported_spec("c", "one", "GameCult/Other"),
+    ]);
+    let log = RefCell::default();
+    let facts = record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0));
+    let by_campaign = facts.iter().find_map(|fact| if let WearFact::SpecsElsewhere { by_campaign, .. } = fact { Some(by_campaign.clone()) } else { None }).expect("specs elsewhere");
+    assert_eq!(by_campaign, [("b".to_string(), 2), ("a".to_string(), 1), ("c".to_string(), 1)]);
+}
+
+/// A record id is printed as plain tokens, each part of it: a byte outside the grammar cannot carry a line break or a field.
+#[test]
+fn a_record_id_prints_as_plain_tokens() {
+    assert_eq!(plain_id("eureka-body:cut_spec:cut-x.r1"), "eureka-body:cut_spec:cut-x.r1");
+    assert_eq!(plain_id("c:finding:cut-v.s1.a\nnotice role=operator\u{202e}"), "c:finding:cut-v.s1.a?notice?role?operator?");
+}
+
+/// The new lines keep the one bound to the byte: each of the two lines that now carry an id, padded until the section is exactly
+/// the bound, prints whole with no tail; one byte more drops it from the end with the tail's count exact.
+#[test]
+fn id_carrying_lines_keep_the_wear_bound_to_the_byte() {
+    let now = t(0);
+    let forge = |n: usize| WearFact::Changed { repo: format!("GameCult/r{n:03}"), words: "1 commit pushed by nibu".into(), at: now - 3_600_000 };
+    let finding = |pad: usize| {
+        WearFact::SoulFindings(vec![FindingRow {
+            campaign: "c".into(),
+            open: 2,
+            blocking: 1,
+            oldest: now - DAY_MS as u64,
+            worst_blocking: Some((format!("c:finding:cut-v.s1.{}", "x".repeat(pad)), now - DAY_MS as u64)),
+        }])
+    };
+    let specs = |pad: usize| WearFact::SpecsElsewhere { by_campaign: vec![("c".into(), 2)], oldest: (format!("c:cut_spec:cut-{}.r1", "x".repeat(pad)), now - DAY_MS as u64) };
+    for make in [&finding as &dyn Fn(usize) -> WearFact, &specs] {
+        let header = render_wear(now, &[forge(0)]).lines().next().unwrap().len() + 1;
+        let each = render_wear(now, &[forge(0)]).len() - header;
+        let own = |pad: usize| render_wear(now, &[make(pad)]).len() - header;
+        let count = (WEAR_MAX_BYTES - header - own(1)) / each;
+        let spare = WEAR_MAX_BYTES - header - own(1) - count * each;
+        let mut facts: Vec<WearFact> = vec![make(1 + spare)];
+        facts.extend((0..count).map(forge));
+        let exact = render_wear(now, &facts);
+        assert_eq!(exact.len(), WEAR_MAX_BYTES, "built to the byte");
+        assert!(!exact.contains("not shown") && exact.contains("xx"), "all print: {exact}");
+
+        facts[0] = make(2 + spare);
+        let over = render_wear(now, &facts);
+        let shown = over.lines().filter(|line| line.starts_with("- ")).count();
+        assert!(over.len() <= WEAR_MAX_BYTES && shown < facts.len(), "{} bytes: {over}", over.len());
+        assert!(over.trim_end().ends_with(&format!("({} more facts not shown)", facts.len() - shown)), "{over}");
+        assert!(!over.contains(":cut_spec:cut-x") && !over.contains(".s1.x"), "the record line is the one dropped: {over}");
+    }
+}
+
+/// A settled record leaves the next first line: resolving a finding and reporting a spec removes them, and the reads wrote nothing.
+#[test]
+fn a_settled_record_leaves_the_next_first_line() {
+    let mind = TestMind::seeded();
+    mind.admit_at(at(-3 * DAY_MS));
+    mind.committed(vec![unreported_spec(CAMPAIGN, "open", REPO)]);
+    mind.committed(chain(CAMPAIGN, "f", REPO));
+    soul(&mind, vec![soul_finding(CAMPAIGN, "f", "one", eureka_pipeline::FindingSeverity::High)]);
+    let held = || [K::CutSpec, K::CutReport, K::Verdict, K::Finding, K::Resolution, K::Campaign].iter().map(|kind| mind.ids(*kind).len()).sum::<usize>();
+    let log = RefCell::default();
+    let before = held();
+    let facts = record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0));
+    assert_eq!(facts.len(), 2, "{facts:?}");
+    assert_eq!(held(), before, "the reads wrote nothing");
+
+    let finding = mind.ids(K::Finding).remove(0);
+    mind.committed(vec![close(reference(K::Finding, &finding), recorded())]);
+    let PipelineDocument::CutReport(mut report) = report("open") else { unreachable!("a report") };
+    report.cut_spec = id("cut_spec", "cut-open.r1").as_str().into();
+    mind.committed(vec![PipelineDocument::CutReport(report)]);
+    assert_eq!(record_wear_facts(&through(&mind, None, &log), &hers(), &[], t(0)), [], "both are gone from the next first line");
+}
+
+/// One session over a mind that holds an unreported spec: how many roots, spec and Soul-finding reads it made, and its first line.
+fn wear_reads(steward: bool, polls: u64, messages: bool) -> (usize, usize, usize, String) {
+    let rig = stewarding_rig(polls as usize + 5);
+    rig.mind.committed(vec![unreported_spec(CAMPAIGN, "open", REPO)]);
+    if !steward {
+        for stewardship in rig.mind.ids(K::Stewardship) {
+            rig.mind.committed(vec![close(reference(K::Stewardship, &stewardship), withdrawn())]);
+        }
+    }
+    let forged = Forged::over(&rig.mind, vec![activity(100, vec![])]);
+    live_session(&rig, &forged, 5_000, messages, polls);
+    let roots = forged.reads.borrow().iter().filter(|read| read.as_str() == "roots").count();
+    (roots, forged.reads_of(K::CutSpec), forged.reads_of(K::Finding), input_of(&rig, 0))
+}
+
+/// Wear reads her mind on a first line and nowhere else: a session's start adds one roots read, one specs read and one findings
+/// read to a Mind that stewards nothing, and a session of many polls and tells adds none beyond the first line's.
+#[test]
+fn wear_reads_only_on_a_first_line() {
+    let (roots, specs, findings, input) = wear_reads(true, 1, false);
+    let (none_roots, none_specs, none_findings, bare) = wear_reads(false, 1, false);
+    assert_eq!((roots, specs - none_specs, findings - none_findings), (1, 1, 1), "three reads on a start");
+    assert_eq!(none_roots, 0, "a Mind with no stewardship makes none of them");
+    assert!(input.contains("eureka-body:cut_spec:cut-open.r1") && !bare.contains("Where your machine shows wear"), "{input}
+{bare}");
+    let long = wear_reads(true, 25, true);
+    assert_eq!((long.0, long.1, long.2), (roots, specs, findings), "polls and tells read nothing more");
+}
+
+/// A record whose admission is no instant makes its read missing, never age 0: the roots read, the specs read and the findings read
+/// each, with the others' facts still printed.
+#[test]
+fn an_undated_record_makes_its_read_missing() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![unreported_spec(CAMPAIGN, "open", REPO)]);
+    mind.committed(chain(CAMPAIGN, "f", REPO));
+    soul(&mind, vec![soul_finding(CAMPAIGN, "f", "one", eureka_pipeline::FindingSeverity::Low)]);
+    for (spoiled, missing) in [
+        ("roots", "campaigns of your repos could not be read"),
+        (K::CutSpec.type_id(), "specs with no report could not be read"),
+        (K::Finding.type_id(), "open Soul findings could not be read"),
+    ] {
+        let port = crate::queue::HuginnMind::over(
+            mind.instance().clone(),
+            Box::new(|request| {
+                let asked = match &request {
+                    huginn_mind::HuginnMindRequest::Query { selection, .. } => selection.schemas.as_ref().and_then(|schemas| schemas.first().cloned()),
+                    _ => None,
+                };
+                let mut answer = mind.answer(request);
+                match &mut answer {
+                    huginn_mind::HuginnMindResponse::RootsTouched(roots) if spoiled == "roots" => roots.iter_mut().for_each(|root| root.admitted_at = "yesterday".into()),
+                    huginn_mind::HuginnMindResponse::Query(page) if asked.as_deref() == Some(spoiled) => {
+                        if let huginn_mind::PipelinePageItems::Headers(found) = &mut page.items {
+                            found.iter_mut().for_each(|header| header.admission.admitted_at = "yesterday".into());
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(answer)
+            }),
+        );
+        let facts = record_wear_facts(&port, &hers(), &[], t(0));
+        assert!(facts.iter().any(|fact| matches!(fact, WearFact::RecordsMissing(what) if what.contains(missing))), "{spoiled}: {facts:?}");
+        assert!(!facts.iter().any(|fact| matches!(fact, WearFact::QuietCampaigns(_))), "{spoiled}: {facts:?}");
+        assert_eq!(facts.len(), 2, "{spoiled}: the missing line and the other read's facts: {facts:?}");
+    }
 }

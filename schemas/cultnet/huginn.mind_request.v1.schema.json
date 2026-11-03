@@ -193,6 +193,27 @@
       "required": [
         "StewardedActivity"
       ]
+    },
+    {
+      "description": "Every root the mind holds a document under, with its newest admission and a campaign's repos in force: the mind's own\nrecords, one pass at the head.",
+      "type": "object",
+      "properties": {
+        "RootsTouched": {
+          "type": "object",
+          "properties": {
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            }
+          },
+          "required": [
+            "instance"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "RootsTouched"
+      ]
     }
   ],
   "$defs": {

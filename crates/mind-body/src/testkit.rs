@@ -135,10 +135,15 @@ impl TestMind {
 
     /// Admits as Hands, one second after the last admission.
     pub(crate) fn put(&self, documents: Vec<PipelineDocument>) -> PipelineAdmissionOutcome {
+        self.put_as(Faculty::Hands, documents)
+    }
+
+    /// Admits as `faculty`, one second after the last admission.
+    pub(crate) fn put_as(&self, faculty: Faculty, documents: Vec<PipelineDocument>) -> PipelineAdmissionOutcome {
         self.now.set(self.now.get() + Duration::seconds(1));
         let batch = PipelineAdmissionBatch {
             instance: self.instance.clone(),
-            provenance: PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into() },
+            provenance: PipelineProvenance { faculty, agent: "test".into(), session: "test".into(), tool: "test".into() },
             documents,
         };
         self.mind.borrow_mut().admit(batch, self.now.get())
@@ -157,6 +162,10 @@ impl TestMind {
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
             HuginnMindRequest::Admit(batch) => HuginnMindResponse::Admit(self.mind.borrow_mut().admit(batch, self.now.get())),
+            HuginnMindRequest::RootsTouched { .. } => match self.mind.borrow().roots_touched() {
+                Ok(roots) => HuginnMindResponse::RootsTouched(roots),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
             other => panic!("the tests ask nothing else: {other:?}"),
         }
     }
@@ -205,6 +214,11 @@ impl MindPort for TestMind {
     /// A forge with nothing new in it: the daemon with a healthy forge and a quiet org.
     fn stewarded_activity(&self, _repos: &[huginn_mind::eureka_pipeline::OrgRepo], after: Option<u64>) -> Result<huginn_mind::RepoActivity> {
         Ok(huginn_mind::RepoActivity { head: after.unwrap_or(0), events: vec![], capped: vec![], open_prs: vec![], unseen: vec![], moved: vec![] })
+    }
+
+    /// The roots of this mind as it holds them: the daemon's answer from the same mind, never a stub.
+    fn roots_touched(&self) -> Result<Vec<huginn_mind::RootTouched>> {
+        self.mind.borrow().roots_touched().map_err(|_| anyhow!("refused"))
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
@@ -293,6 +307,15 @@ pub(crate) fn campaign_named(slug: &str, title: &str) -> PipelineDocument {
         working_branch: "main".into(),
         target_doc: doc_ref(),
     })
+}
+
+/// A campaign opened on `repos`, with its first target and the one invariant.
+pub(crate) fn campaign_on(slug: &str, repos: &[&str]) -> Vec<PipelineDocument> {
+    let PipelineDocument::Campaign(mut opened) = campaign_named(slug, slug) else { unreachable!("a campaign") };
+    opened.repos = repos.iter().map(|repo| (*repo).into()).collect();
+    let PipelineDocument::Target(mut first) = target() else { unreachable!("a target") };
+    first.campaign = Slug(slug.into());
+    vec![PipelineDocument::Campaign(opened), PipelineDocument::Target(first)]
 }
 
 fn target() -> PipelineDocument {
