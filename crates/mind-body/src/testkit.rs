@@ -135,10 +135,15 @@ impl TestMind {
 
     /// Admits as Hands, one second after the last admission.
     pub(crate) fn put(&self, documents: Vec<PipelineDocument>) -> PipelineAdmissionOutcome {
+        self.put_as(Faculty::Hands, documents)
+    }
+
+    /// Admits as `faculty`, one second after the last admission.
+    pub(crate) fn put_as(&self, faculty: Faculty, documents: Vec<PipelineDocument>) -> PipelineAdmissionOutcome {
         self.now.set(self.now.get() + Duration::seconds(1));
         let batch = PipelineAdmissionBatch {
             instance: self.instance.clone(),
-            provenance: PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into() },
+            provenance: PipelineProvenance { faculty, agent: "test".into(), session: "test".into(), tool: "test".into() },
             documents,
         };
         self.mind.borrow_mut().admit(batch, self.now.get())
@@ -302,6 +307,15 @@ pub(crate) fn campaign_named(slug: &str, title: &str) -> PipelineDocument {
         working_branch: "main".into(),
         target_doc: doc_ref(),
     })
+}
+
+/// A campaign opened on `repos`, with its first target and the one invariant.
+pub(crate) fn campaign_on(slug: &str, repos: &[&str]) -> Vec<PipelineDocument> {
+    let PipelineDocument::Campaign(mut opened) = campaign_named(slug, slug) else { unreachable!("a campaign") };
+    opened.repos = repos.iter().map(|repo| (*repo).into()).collect();
+    let PipelineDocument::Target(mut first) = target() else { unreachable!("a target") };
+    first.campaign = Slug(slug.into());
+    vec![PipelineDocument::Campaign(opened), PipelineDocument::Target(first)]
 }
 
 fn target() -> PipelineDocument {

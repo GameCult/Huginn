@@ -54,13 +54,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
-use cultnet_rs::Selection;
+use cultnet_rs::{Incoming, Selection};
 use eureka_pipeline::{
     Date, Label, Line, MemoryOrigin, MemorySort, OrgRepo, PipelineDocument, PipelineFollowUp, PipelineKind, PipelineMemory, PipelinePulse, PipelineRef, PipelineResolution, ResolutionOutcome, RunOperator, RunTurn, SALIENCE_MAX_PERMILLE, Short, Slug,
     TEMPO_VOTE_MAX_S, TEMPO_VOTE_MIN_S, URGENCY_MAX_PERMILLE, pipeline_key,
 };
 use eureka_state::HuginnClient;
-use huginn_mind::{HuginnMindResponse, PipelineAdmissionOutcome, PipelineFacts, PipelinePageItems, PipelineStatusSummary, PrAction, RepoActivity, RepoChange, RepoEvent};
+use eureka_state::hold::BLOCKING;
+use huginn_mind::{HuginnMindResponse, PipelineAdmissionOutcome, PipelineFacts, PipelinePageItems, PipelineStatusSummary, PrAction, RepoActivity, RepoChange, RepoEvent, RootTouched};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -1059,7 +1060,8 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
         let names = sender_names(deliveries);
         let goals = render_responsibilities(organs.mind, &instance, &names)?;
         self.repos = goals.repos.clone();
-        let wear = self.first_repo_read();
+        let (wear_at, wear_facts) = self.first_repo_read(&goals.open_roots);
+        let wear = render_wear(wear_at, &wear_facts);
         let senders = other_senders(self.config, deliveries);
         let cue = recall::Cue { senders, texts: deliveries.iter().rev().map(|delivery| delivery.text.as_str()).collect(), names: names.clone(), listed: &goals.listed, now: organs.clock.now() };
         let recalled = recall::select(organs.mind, &cue)?;
@@ -1114,17 +1116,19 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
         }
     }
 
-    /// The first line's read of the forge for her stewarded repos: what is open, what the forge cannot show, what others changed in the
-    /// last three days, as the wear section, and the cursor the later reads continue from. A read that fails leaves the cursor unset,
-    /// puts one line in the section saying repo facts are missing, and never fails the session; a Mind with no repos asks nothing.
-    fn first_repo_read(&mut self) -> String {
+    /// The first line's reads for her stewarded repos, as the wear section's facts and the instant they were read at: what is open,
+    /// what the forge cannot show, what others changed in the last three days, the cursor the later reads continue from, then what
+    /// her own mind holds of her machine (`record_wear_facts`). A read that fails leaves the cursor unset, puts one line in the
+    /// section saying repo facts are missing, and never fails the session; a Mind with no repos asks nothing, of the forge or of her
+    /// mind.
+    fn first_repo_read(&mut self, open_roots: &[String]) -> (u64, Vec<WearFact>) {
         if self.repos.is_empty() {
-            return String::new();
+            return (0, Vec::new());
         }
         let organs = self.organs;
         let now = unix_ms(organs.clock.now());
         self.repo_read_due_ms = now + REPO_READ_EVERY_S * 1000;
-        let facts = match organs.mind.stewarded_activity(&self.repos, None) {
+        let mut facts = match organs.mind.stewarded_activity(&self.repos, None) {
             Ok(activity) => {
                 self.repo_head = Some(activity.head);
                 wear_facts(&activity, &self.repos, organs.mind.instance(), now)
@@ -1134,7 +1138,8 @@ impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
                 vec![WearFact::Missing]
             }
         };
-        render_wear(now, &facts)
+        facts.extend(record_wear_facts(organs.mind, &self.repos, open_roots, now));
+        (now, facts)
     }
 
     /// Her stewarded repos changed by someone else become one notice, at most once in `REPO_READ_EVERY_S`. A read that fails keeps the cursor
@@ -1851,6 +1856,14 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, names: &BTreeMa
     let open = Selection { descending: true, ..in_force(of_kind(PipelineKind::FollowUp)) };
     let follow_ups = headers(mind, &open)?;
     let mut dropped = 0;
+    // Every open follow-up counts as open work for its campaign, whether or not the bound below lets its line show.
+    let mut open_roots: Vec<String> = Vec::new();
+    for follow_up in &follow_ups {
+        let campaign = follow_up.id.id.0.split_once(":follow_up:").map_or("", |(campaign, _)| campaign);
+        if !campaign.is_empty() && !open_roots.iter().any(|root| root == campaign) {
+            open_roots.push(campaign.to_owned());
+        }
+    }
     if !follow_ups.is_empty() {
         out.push_str("Open follow-ups, newest first:\n");
     }
@@ -1901,7 +1914,7 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, names: &BTreeMa
     if dropped_rulings > 0 {
         out.push_str(&format!("({dropped_rulings} more cited rulings not shown.)\n"));
     }
-    Ok(Responsibilities { text: out, listed, open: open_ids, people: open_people, repos })
+    Ok(Responsibilities { text: out, listed, open: open_ids, people: open_people, repos, open_roots })
 }
 
 /// The responsibilities section, and the ids of the follow-ups and rulings it lists, which recall
@@ -1915,6 +1928,8 @@ struct Responsibilities {
     people: Vec<String>,
     /// Her stewardships in force, by repo: the only map from her mind to the repos the forge is asked about.
     repos: Vec<OrgRepo>,
+    /// The campaigns that hold a follow-up in force in her mind, whether or not the bound showed its line.
+    open_roots: Vec<String>,
 }
 
 /// Her latest runs with how each ended, one entry each, newest first. A Self
@@ -2166,6 +2181,11 @@ fn repo_notice_line(activity: &RepoActivity, at_unix_ms: u64) -> Option<String> 
 
 /// The most the wear section may take of a first line.
 const WEAR_MAX_BYTES: usize = 1536;
+/// A campaign of hers whose newest admission in her mind is this old or older, and which holds an unreported spec, an open Soul
+/// finding or an open follow-up, is listed as quiet. It decides only what is listed: nothing gates or scores on it.
+const STALE_AFTER_DAYS: u64 = 14;
+/// The most entries one listing wear fact names; the rest are counted.
+const WEAR_LIST_MAX: usize = 4;
 
 /// A fact about her machine from the forge.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2174,22 +2194,45 @@ enum WearFact {
     Missing,
     /// The read stopped at a repo's page limit: the older entries there were not read.
     Capped(String),
+    /// A read of her own mind did not answer; `what` says which facts that leaves absent, not zero.
+    RecordsMissing(String),
     Awaiting { repo: String, number: u32, author: String, at: u64 },
     /// A repo the anonymous read cannot see, and the repo the forge's redirect names for it when it names one.
     Unseen { repo: String, redirect: Option<String> },
     Changed { repo: String, words: String, at: u64 },
     Yours { repo: String, number: u32, at: u64 },
+    /// Specs in force with no report, on repos she stewards: `<campaign>/<cut>.r<n>` and the revision's admission, oldest first.
+    SpecsOnYours(Vec<(String, u64)>),
+    /// The same on repos she does not steward: how many, and the oldest admission.
+    SpecsElsewhere { count: usize, oldest: u64 },
+    /// Open Soul findings in her mind, by campaign of her slice, largest first.
+    SoulFindings(Vec<FindingRow>),
+    /// Campaigns of her slice with open work and no admission in her mind for `STALE_AFTER_DAYS`, by newest admission, oldest first.
+    QuietCampaigns(Vec<(String, u64)>),
+}
+
+/// One campaign's open Soul findings in her mind: how many, how many block, and the oldest admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FindingRow {
+    campaign: String,
+    open: usize,
+    blocking: usize,
+    oldest: u64,
 }
 
 impl WearFact {
     /// The priority order a full section drops from the end of.
     fn rank(&self) -> u8 {
         match self {
-            Self::Missing | Self::Capped(_) => 0,
+            Self::Missing | Self::RecordsMissing(_) | Self::Capped(_) => 0,
             Self::Awaiting { .. } => 1,
             Self::Unseen { .. } => 2,
             Self::Changed { .. } => 3,
             Self::Yours { .. } => 4,
+            Self::SpecsOnYours(_) => 5,
+            Self::SpecsElsewhere { .. } => 6,
+            Self::SoulFindings(_) => 7,
+            Self::QuietCampaigns(_) => 8,
         }
     }
 }
@@ -2232,6 +2275,133 @@ fn wear_facts(activity: &RepoActivity, repos: &[OrgRepo], instance: &Slug, now_m
     facts
 }
 
+/// The first `WEAR_LIST_MAX` entries joined by `sep`, then what `more` says of the rest, given how many are left and where they begin.
+fn listed(entries: Vec<String>, sep: &str, more: impl Fn(usize, usize) -> String) -> String {
+    let left = entries.len().saturating_sub(WEAR_LIST_MAX);
+    let mut text = entries.into_iter().take(WEAR_LIST_MAX).collect::<Vec<_>>().join(sep);
+    if left > 0 {
+        text.push_str(sep);
+        text.push_str(&more(left, WEAR_LIST_MAX));
+    }
+    text
+}
+
+/// A spec in force with no report: its campaign and cut as one label, its repo, and the revision's admission.
+struct UnreportedSpec {
+    label: String,
+    campaign: String,
+    repo: String,
+    at: u64,
+}
+
+/// An instant of the mind's own records, in unix milliseconds; none when it is not one, so a record that cannot be dated makes its
+/// read missing and never age 0.
+fn instant_ms(text: &str) -> Option<u64> {
+    u64::try_from(DateTime::parse_from_rfc3339(text).ok()?.timestamp_millis()).ok()
+}
+
+/// The campaign (the root of the id) a record of her mind sits under, as a plain token.
+fn root_label(id: &PipelineRef) -> String {
+    plain(id.id.0.split(':').next().unwrap_or(""))
+}
+
+/// Her slice: the roots whose repos in force meet hers (compared by identity, the forge's spelling being case-blind), each with its
+/// newest admission. None when one cannot be dated.
+fn slice_of(roots: &[RootTouched], hers: &[String]) -> Option<Vec<(String, u64)>> {
+    roots
+        .iter()
+        .filter(|root| root.repos.iter().any(|repo| hers.contains(&repo.identity())))
+        .map(|root| Some((root.root.0.clone(), instant_ms(&root.admitted_at)?)))
+        .collect()
+}
+
+/// Every spec in force whose cut has no report, from every page.
+fn unreported_specs(mind: &dyn MindPort) -> Result<Vec<UnreportedSpec>> {
+    let selection = Selection { cited: Some(Incoming { role: "cut_spec".into(), exists: false }), ..in_force(of_kind(PipelineKind::CutSpec)) };
+    let mut specs = Vec::new();
+    for found in headers(mind, &selection)? {
+        let PipelineFacts::CutSpec { cut, revision, repo, .. } = &found.facts else { continue };
+        let at = instant_ms(&found.admission.admitted_at).ok_or_else(|| anyhow!("a spec's admission has no instant"))?;
+        let campaign = root_label(&found.id);
+        specs.push(UnreportedSpec { label: format!("{campaign}/{}.r{revision}", plain(&cut.0)), campaign, repo: repo.identity(), at });
+    }
+    Ok(specs)
+}
+
+/// The Soul findings in force under the roots of her slice, counted by campaign, largest first, from every page.
+fn open_soul_findings(mind: &dyn MindPort, slice: &[(String, u64)]) -> Result<Vec<FindingRow>> {
+    let roots: Vec<&str> = slice.iter().map(|(root, _)| root.as_str()).collect();
+    let selection = any_of(any_of(in_force(of_kind(PipelineKind::Finding)), "faculty", &["Soul"]), "root", &roots);
+    let mut rows: BTreeMap<String, FindingRow> = BTreeMap::new();
+    for found in headers(mind, &selection)? {
+        let PipelineFacts::Finding { severity, .. } = &found.facts else { continue };
+        let at = instant_ms(&found.admission.admitted_at).ok_or_else(|| anyhow!("a finding's admission has no instant"))?;
+        let campaign = root_label(&found.id);
+        let row = rows.entry(campaign.clone()).or_insert(FindingRow { campaign, open: 0, blocking: 0, oldest: at });
+        row.open += 1;
+        row.blocking += usize::from(BLOCKING.contains(&format!("{severity:?}").as_str()));
+        row.oldest = row.oldest.min(at);
+    }
+    let mut rows: Vec<FindingRow> = rows.into_values().collect();
+    rows.sort_by(|a, b| b.open.cmp(&a.open).then_with(|| a.campaign.cmp(&b.campaign)));
+    Ok(rows)
+}
+
+/// The facts her own mind holds about her machine, derived at the first line and written nowhere: her unreported specs (those on
+/// her repos named, the rest counted), the open Soul findings of her slice, and the campaigns of her slice that have gone quiet.
+/// Each read walks every page. A read that fails says so in a fact of its own, and so does every fact that needed it; a quiet
+/// campaign is listed only when all three reads answered.
+fn record_wear_facts(mind: &dyn MindPort, repos: &[OrgRepo], open_roots: &[String], now_ms: u64) -> Vec<WearFact> {
+    let hers: Vec<String> = repos.iter().map(OrgRepo::identity).collect();
+    let slice = mind.roots_touched().ok().and_then(|roots| slice_of(&roots, &hers));
+    let specs = unreported_specs(mind).ok();
+    let findings = match &slice {
+        None => None,
+        Some(slice) if slice.is_empty() => Some(Vec::new()),
+        Some(slice) => open_soul_findings(mind, slice).ok(),
+    };
+    let mut facts = Vec::new();
+    let missing = |what: &str| WearFact::RecordsMissing(what.to_owned());
+    if slice.is_none() {
+        facts.push(missing("the campaigns on your repos could not be read, so open Soul findings and quiet campaigns are absent"));
+    }
+    if specs.is_none() {
+        facts.push(missing("specs with no report could not be read, so they and quiet campaigns are absent"));
+    }
+    if slice.is_some() && findings.is_none() {
+        facts.push(missing("open Soul findings could not be read, so they and quiet campaigns are absent"));
+    }
+    if let Some(specs) = &specs {
+        let (mut mine, elsewhere): (Vec<&UnreportedSpec>, Vec<&UnreportedSpec>) = specs.iter().partition(|spec| hers.contains(&spec.repo));
+        mine.sort_by_key(|spec| spec.at);
+        if !mine.is_empty() {
+            facts.push(WearFact::SpecsOnYours(mine.iter().map(|spec| (spec.label.clone(), spec.at)).collect()));
+        }
+        if let Some(oldest) = elsewhere.iter().map(|spec| spec.at).min() {
+            facts.push(WearFact::SpecsElsewhere { count: elsewhere.len(), oldest });
+        }
+    }
+    if let Some(rows) = findings.as_ref().filter(|rows| !rows.is_empty()) {
+        facts.push(WearFact::SoulFindings(rows.clone()));
+    }
+    if let (Some(slice), Some(specs), Some(findings)) = (&slice, &specs, &findings) {
+        let mut quiet: Vec<(String, u64)> = slice
+            .iter()
+            .filter(|(root, newest)| {
+                let campaign = plain(root);
+                let open = specs.iter().any(|spec| spec.campaign == campaign) || findings.iter().any(|row| row.campaign == campaign) || open_roots.contains(root);
+                open && now_ms.saturating_sub(*newest) >= STALE_AFTER_DAYS * 86_400_000
+            })
+            .map(|(root, newest)| (plain(root), *newest))
+            .collect();
+        quiet.sort_by_key(|(_, newest)| *newest);
+        if !quiet.is_empty() {
+            facts.push(WearFact::QuietCampaigns(quiet));
+        }
+    }
+    facts
+}
+
 /// `(N h)` under a day, `(N d)` from a day on.
 fn age_text(now_ms: u64, at_ms: u64) -> String {
     let hours = now_ms.saturating_sub(at_ms) / 3_600_000;
@@ -2257,6 +2427,29 @@ fn render_wear(now_ms: u64, facts: &[WearFact]) -> String {
             WearFact::Unseen { repo, redirect: Some(to) } => format!("- a repo the forge read cannot see: {repo} (the forge redirects it to {to})\n"),
             WearFact::Changed { repo, words, at } => format!("- changed by others: {repo}: {words} {}\n", age_text(now_ms, *at)),
             WearFact::Yours { repo, number, at } => format!("- your open PR: {repo}#{number} {}\n", age_text(now_ms, *at)),
+            WearFact::RecordsMissing(what) => format!("- records are missing: {what}.\n"),
+            WearFact::SpecsOnYours(specs) => {
+                let named = specs.iter().map(|(label, at)| format!("{label} {}", age_text(now_ms, *at))).collect();
+                format!("- specs with no report in your mind, on your repos: {}\n", listed(named, ", ", |left, _| format!("+{left} more")))
+            }
+            WearFact::SpecsElsewhere { count, oldest } => {
+                format!("- specs with no report in your mind, on repos you do not steward: {count}, oldest {}\n", age_text(now_ms, *oldest))
+            }
+            WearFact::SoulFindings(rows) => {
+                let named = rows.iter().map(|row| format!("{} {}, {} blocking, oldest {}", row.campaign, row.open, row.blocking, age_text(now_ms, row.oldest))).collect();
+                let more = |left: usize, from: usize| {
+                    let held: usize = rows[from..].iter().map(|row| row.open).sum();
+                    format!("+{held} more in {left} {}", if left == 1 { "campaign" } else { "campaigns" })
+                };
+                format!("- open Soul findings in your mind: {}\n", listed(named, "; ", more))
+            }
+            WearFact::QuietCampaigns(quiet) => {
+                let named = quiet.iter().map(|(campaign, at)| format!("{campaign} {}", age_text(now_ms, *at))).collect();
+                format!(
+                    "- campaigns on your repos with open work and no admission in your mind for {STALE_AFTER_DAYS} d or more: {}\n",
+                    listed(named, ", ", |left, _| format!("+{left} more"))
+                )
+            }
         })
         .collect();
     // The tail line is "(N more facts not shown)"; keep room for it whenever a fact is dropped.
