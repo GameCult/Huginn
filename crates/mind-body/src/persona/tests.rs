@@ -6056,3 +6056,24 @@ fn naming_several_minds_does_not_make_a_chorus_and_the_unnamed_follow_the_named(
     }
     assert_eq!(named_first.len(), 2, "which named Mind goes first differs per event");
 }
+
+#[test]
+fn a_flush_written_beside_a_revision_line_still_makes_the_reply_final() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (ask, answer) = (delivery(1, "swarm", "@op:chat", "question"), delivery(2, "swarm", "@libby:chat", "answer"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &answer);
+        inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell().unwrap();
+        inbox.flush_text(Why::Idle);
+        inbox.echoed();
+        inbox.result(&reply_result(&says(&[("swarm", "revised")])), true, false).unwrap();
+        assert_eq!(rig.chat.sent.borrow()[1].basis, None);
+        assert!(rig.chat.sent.borrow()[1].request_id.contains("-r1-"));
+    });
+}
