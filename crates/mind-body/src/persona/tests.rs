@@ -5264,6 +5264,7 @@ fn a_follow_up_the_goals_bound_hides_still_counts_as_open_work() {
     mind.committed(chain("hidden-in", "src", REPO));
     let PipelineDocument::FollowUp(mut hidden) = follow_up("old", &reference(K::CutSpec, "hidden-in:cut_spec:cut-src.r1")) else { unreachable!("a follow-up") };
     hidden.campaign = Slug("hidden-in".into());
+    hidden.item = Line("x".repeat(900));
     mind.committed(vec![PipelineDocument::FollowUp(hidden)]);
     mind.committed(chain(CAMPAIGN, "src", REPO));
     for n in 0..12 {
@@ -5272,7 +5273,7 @@ fn a_follow_up_the_goals_bound_hides_still_counts_as_open_work() {
         mind.committed(vec![PipelineDocument::FollowUp(long)]);
     }
     let goals = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap();
-    assert!(goals.text.contains("older open follow-ups not shown") && !goals.text.contains("hidden-in/old"), "the bound hid it: {}", goals.text);
+    assert!(goals.text.contains("older open follow-ups not shown") && !goals.text.contains("hidden-in/old"), "the bound hid it: {} bytes", goals.text.len());
     assert_eq!(goals.open_roots, ["eureka-body", "hidden-in"], "{:?}", goals.open_roots);
 }
 
