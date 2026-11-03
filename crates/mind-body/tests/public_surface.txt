@@ -210,7 +210,7 @@ mind_body::queue: impl HuginnMind < 'static >
 mind_body::queue: impl HuginnMind < 'static >: fn new (client : HuginnClient) -> Self
 mind_body::queue: impl MindPort for HuginnMind < '_ >
 mind_body::queue: impl< 'a > HuginnMind < 'a >
-mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query (& self , selection : & Selection) -> Result < PipelineSelectionPage > ; fn query_near (& self , _selection : & Selection , _text : & str , _top_k : u32) -> Result < PipelineSelectionPage > { bail ! ("this mind port has no semantic index") } fn stewarded_activity (& self , _repos : & [OrgRepo] , _after : Option < u64 >) -> Result < RepoActivity > { bail ! ("this mind port has no forge to read") } fn admit (& self , agent : & str , session : & str , documents : Vec < PipelineDocument >) -> Result < PipelineAdmissionOutcome > ; }
+mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query (& self , selection : & Selection) -> Result < PipelineSelectionPage > ; fn query_near (& self , _selection : & Selection , _text : & str , _top_k : u32) -> Result < PipelineSelectionPage > { bail ! ("this mind port has no semantic index") } fn stewarded_activity (& self , _repos : & [OrgRepo] , _after : Option < u64 >) -> Result < RepoActivity > { bail ! ("this mind port has no forge to read") } fn roots_touched (& self) -> Result < Vec < RootTouched > > { bail ! ("this mind port has no roots to read") } fn admit (& self , agent : & str , session : & str , documents : Vec < PipelineDocument >) -> Result < PipelineAdmissionOutcome > ; }
 mind_body::queue: struct Held # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[]
 mind_body::queue: struct HuginnMind< 'a >  pub-fields[]
 mind_body::recall: impl Lane

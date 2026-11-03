@@ -157,6 +157,10 @@ impl TestMind {
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
             HuginnMindRequest::Admit(batch) => HuginnMindResponse::Admit(self.mind.borrow_mut().admit(batch, self.now.get())),
+            HuginnMindRequest::RootsTouched { .. } => match self.mind.borrow().roots_touched() {
+                Ok(roots) => HuginnMindResponse::RootsTouched(roots),
+                Err(refusal) => HuginnMindResponse::Refused(refusal),
+            },
             other => panic!("the tests ask nothing else: {other:?}"),
         }
     }
@@ -205,6 +209,11 @@ impl MindPort for TestMind {
     /// A forge with nothing new in it: the daemon with a healthy forge and a quiet org.
     fn stewarded_activity(&self, _repos: &[huginn_mind::eureka_pipeline::OrgRepo], after: Option<u64>) -> Result<huginn_mind::RepoActivity> {
         Ok(huginn_mind::RepoActivity { head: after.unwrap_or(0), events: vec![], capped: vec![], open_prs: vec![], unseen: vec![], moved: vec![] })
+    }
+
+    /// The roots of this mind as it holds them: the daemon's answer from the same mind, never a stub.
+    fn roots_touched(&self) -> Result<Vec<huginn_mind::RootTouched>> {
+        self.mind.borrow().roots_touched().map_err(|_| anyhow!("refused"))
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
