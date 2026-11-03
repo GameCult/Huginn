@@ -1086,6 +1086,11 @@ pub(crate) mod tests {
         assert!(matches!(answer, HuginnMindResponse::Refused(MindRefusal::Unavailable { .. })), "{answer:?}");
         assert!(matches!(daemon.handle(HuginnMindRequest::Whoami, now()).answered(), HuginnMindResponse::Whoami(_)));
 
+        let exactly: Vec<String> = (0..ACTIVITY_REPOS_MAX).map(|n| format!("GameCult/r{n}")).collect();
+        let exactly: Vec<&str> = exactly.iter().map(String::as_str).collect();
+        let answer = daemon.handle(activity_request(&exactly), now()).answered();
+        assert!(matches!(answer, HuginnMindResponse::Refused(MindRefusal::Unavailable { .. })), "64 repos are within the cap and reach the (absent) forge: {answer:?}");
+
         let many: Vec<String> = (0..=ACTIVITY_REPOS_MAX).map(|n| format!("GameCult/r{n}")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
         for (request, canary) in [(activity_request(&many), "r64"), (activity_request(&["not a repo CANARY"]), "CANARY")] {

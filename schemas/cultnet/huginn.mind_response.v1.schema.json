@@ -4338,7 +4338,7 @@
       ]
     },
     "RepoActivity": {
-      "description": "The answer to an activity read. `head` is the newest feed id the read saw,\nwhether or not any event survived the filter: the cursor to ask `after`\nnext. `more` says the read stopped at its page cap before reaching `after`.\n`open_prs` and `unseen` come only on a read with no `after`.",
+      "description": "The answer to an activity read. `events` are other people's changes only,\nthe asker's own login already dropped, and on a read with no `after` only\nthose of the last 72 hours: the reader filters nothing again. `head` is the\nnewest feed id the read saw in those repos, whether or not any event\nsurvived the filter, an entry older than the window too: the cursor to ask\n`after` next. `more` says some repo's feed had more to give past the page\ncap, before it reached `after` (or the window start on a read with no\n`after`). `open_prs` and `unseen` come only on a read with no `after`.",
       "type": "object",
       "properties": {
         "events": {

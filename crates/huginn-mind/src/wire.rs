@@ -149,10 +149,14 @@ pub struct OpenPr {
     pub updated_at: u64,
 }
 
-/// The answer to an activity read. `head` is the newest feed id the read saw,
-/// whether or not any event survived the filter: the cursor to ask `after`
-/// next. `more` says the read stopped at its page cap before reaching `after`.
-/// `open_prs` and `unseen` come only on a read with no `after`.
+/// The answer to an activity read. `events` are other people's changes only,
+/// the asker's own login already dropped, and on a read with no `after` only
+/// those of the last 72 hours: the reader filters nothing again. `head` is the
+/// newest feed id the read saw in those repos, whether or not any event
+/// survived the filter, an entry older than the window too: the cursor to ask
+/// `after` next. `more` says some repo's feed had more to give past the page
+/// cap, before it reached `after` (or the window start on a read with no
+/// `after`). `open_prs` and `unseen` come only on a read with no `after`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RepoActivity {
     pub head: u64,

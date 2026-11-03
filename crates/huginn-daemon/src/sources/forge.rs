@@ -100,8 +100,8 @@ impl Forge for HttpForge {
 /// The whole of one activity read, from its first call to its last. A call is given what is left of it, so a forge that
 /// answers slowly, and not only one that never answers, cannot hold the daemon's one thread longer than this.
 const ACTIVITY_CALL_TIMEOUT: Duration = Duration::from_secs(2);
-const FIRST_FEED_PAGES: usize = 2;
-const LATER_FEED_PAGES: usize = 4;
+/// How many pages of one repo's feed a read takes: 200 entries, of anyone. A repo with more inside the read's reach sets `more`.
+const REPO_FEED_PAGES: usize = 4;
 const PR_PAGES: usize = 2;
 const LISTING_PAGES: usize = 20;
 /// How far back a read with no cursor looks.
@@ -125,33 +125,38 @@ impl HttpForge {
         serde_json::from_str(&body).map_err(|_| anyhow::anyhow!("the forge's answer is not JSON"))
     }
 
-    /// What others did in `repos` on the forge, and on a read with no cursor what is open and what the forge cannot show. One read, one
-    /// budget; the first call that fails fails it. Only ids, instants, logins, repo names, numbers and counts leave: a title, a comment
-    /// and a commit message are never read.
+    /// What others did in `repos` on the forge, and on a read with no cursor what is open and what the forge cannot show. Each repo's
+    /// own feed is read, newest first, down to the cursor, or on a read with no cursor down to 72 hours ago, so other repos' traffic
+    /// cannot crowd hers out. `more` is set when a repo's feed had more to give past the page cap. One read, one budget; the first
+    /// call that fails, or that the budget cannot reach, fails the read whole: an answer is complete or says `more`, never a silent
+    /// part. Only ids, instants, logins, repo names, numbers and counts leave: a title, a comment and a commit message are never read.
     pub fn activity(&self, repos: &[OrgRepo], instance: &Slug, after: Option<u64>, now: DateTime<Utc>) -> Result<RepoActivity> {
         let deadline = Instant::now() + ACTIVITY_CALL_TIMEOUT;
-        let (pages, window_start) = match after {
-            Some(_) => (LATER_FEED_PAGES, i64::MIN),
-            None => (FIRST_FEED_PAGES, now.timestamp_millis() - FIRST_WINDOW_MS),
-        };
-        let (mut head, mut events, mut reached) = (0_u64, Vec::new(), false);
-        for page in 1..=pages {
-            let feed = self.within(&format!("/api/v1/orgs/{ORG}/activities/feeds?limit={PAGE}&page={page}"), deadline)?;
-            let entries = feed.as_array().context("the forge's feed is not a list")?;
-            for entry in entries {
-                let Some(id) = entry["id"].as_u64() else { continue };
-                if after.is_some_and(|after| id <= after) || entry["created"].as_str().and_then(instant_ms).is_some_and(|at| at < window_start) {
-                    reached = true;
+        let window_start = if after.is_some() { i64::MIN } else { now.timestamp_millis() - FIRST_WINDOW_MS };
+        let (mut head, mut events, mut more) = (0_u64, Vec::new(), false);
+        for repo in repos {
+            let mut reached = false;
+            for page in 1..=REPO_FEED_PAGES {
+                let feed = self.within(&format!("/api/v1/repos/{}/activities/feeds?limit={PAGE}&page={page}", repo.0), deadline)?;
+                let entries = feed.as_array().context("the forge's feed is not a list")?;
+                for entry in entries {
+                    let Some(id) = entry["id"].as_u64() else { continue };
+                    // The cursor takes every id seen, one past the window too: a quiet forge must not leave it at 0.
+                    head = head.max(id);
+                    if after.is_some_and(|after| id <= after) || entry["created"].as_str().and_then(instant_ms).is_some_and(|at| at < window_start) {
+                        reached = true;
+                        break;
+                    }
+                    events.extend(event_of(entry, id, repos, instance));
+                }
+                reached |= entries.len() < PAGE;
+                if reached {
                     break;
                 }
-                head = head.max(id);
-                events.extend(event_of(entry, id, repos, instance));
             }
-            reached |= entries.len() < PAGE;
-            if reached {
-                break;
-            }
+            more |= !reached;
         }
+        events.sort_by(|a, b| b.id.cmp(&a.id));
         // The cursor never moves backwards: a read that saw nothing new keeps the one it was given.
         head = head.max(after.unwrap_or(0));
         let (mut open_prs, mut unseen) = (Vec::new(), Vec::new());
@@ -175,7 +180,7 @@ impl HttpForge {
             }
             unseen = repos.iter().filter(|repo| !listed.contains(&repo.identity())).cloned().collect();
         }
-        Ok(RepoActivity { head, events, more: after.is_some() && !reached, open_prs, unseen })
+        Ok(RepoActivity { head, events, more, open_prs, unseen })
     }
 }
 
@@ -350,6 +355,8 @@ mod tests {
 
     const FEED_SAMPLE: &str = include_str!("../../tests/fixtures/feed.json");
 
+    const NOW: &str = "2026-11-03T12:00:00Z";
+
     fn at(text: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc)
     }
@@ -358,18 +365,47 @@ mod tests {
         names.iter().map(|name| OrgRepo::from(*name)).collect()
     }
 
+    fn me() -> Slug {
+        Slug("eureka".into())
+    }
+
     fn is_feed(path: &str) -> bool {
         path.contains("/activities/feeds")
     }
 
-    /// From a sample of the real feed (the forge's own shape, with its commit messages and PR text replaced by canaries): her own login,
-    /// repos outside her set, pushes off the default branch, and every other op are dropped; repos and logins compare without case;
-    /// a push's commits are its `Len` and a PR event's number is element 0; no byte of the canary text leaves the read.
+    fn page_number(path: &str) -> Option<usize> {
+        path.split("page=").nth(1)?.split('&').next()?.parse().ok()
+    }
+
+    /// A repo's own feed as the forge serves it: the entries that name the repo in the path, in the order given, the page the path asks.
+    fn repo_feed(entries: &[Value], path: &str) -> Option<String> {
+        let repo = path.strip_prefix("/api/v1/repos/")?.split("/activities").next()?;
+        let page = page_number(path)?;
+        let mine = entries.iter().filter(|entry| entry["repo"]["full_name"].as_str().is_some_and(|name| name.eq_ignore_ascii_case(repo)));
+        Some(Value::Array(mine.skip((page - 1) * PAGE).take(PAGE).cloned().collect()).to_string())
+    }
+
+    fn sample() -> Vec<Value> {
+        serde_json::from_str(FEED_SAMPLE).unwrap()
+    }
+
+    /// A default-branch push by `login`, `hours` before `NOW`.
+    fn push_at(id: u64, repo: &str, login: &str, hours: i64) -> Value {
+        let created = (at(NOW) - chrono::Duration::hours(hours)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        json!({ "id": id, "op_type": "commit_repo", "act_user": { "login": login }, "repo": { "full_name": repo, "default_branch": "main" },
+            "ref_name": "refs/heads/main", "content": "{\"Len\":1}", "created": created })
+    }
+
+    /// From a sample of the real feed (the forge's own shape, with its commit messages and PR text replaced by canaries), served as each
+    /// repo's own feed: her own login, repos outside her set, pushes off the default branch, and every other op are dropped; repos and
+    /// logins compare without case; a push's commits are its `Len` and a PR event's number is element 0; no byte of the canary text
+    /// leaves the read; only her repos' feeds are asked.
     #[test]
     fn activity_keeps_others_default_branch_pushes_and_pr_events() {
-        let (base, _) = forge_of(|path| is_feed(path).then(|| FEED_SAMPLE.to_owned()));
-        let wanted = repos(&["GameCult/Ratatoskr", "gamecult/aquasynth", "GameCult/Huginn"]);
-        let read = HttpForge::new(&base).activity(&wanted, &Slug("EUREKA".into()), Some(1), at("2026-11-02T23:00:00Z")).unwrap();
+        let entries = sample();
+        let (base, asked) = forge_of(move |path| repo_feed(&entries, path));
+        let names = ["GameCult/Ratatoskr", "gamecult/aquasynth", "GameCult/Huginn"];
+        let read = HttpForge::new(&base).activity(&repos(&names), &Slug("EUREKA".into()), Some(1), at("2026-11-02T23:00:00Z")).unwrap();
         let seen: Vec<(u64, String, String, RepoChange)> = read.events.iter().map(|event| (event.id, event.repo.0.clone(), event.actor.0.clone(), event.change)).collect();
         let pr = |number, action| RepoChange::Pr { number, action };
         assert_eq!(
@@ -382,11 +418,12 @@ mod tests {
                 (18293, "GameCult/Ratatoskr".into(), "void".into(), pr(1, PrAction::Merged)),
             ]
         );
-        assert_eq!(read.head, 18690);
         assert_eq!(read.events[0].at, at("2026-11-02T18:40:00Z").timestamp_millis() as u64);
         assert!(read.open_prs.is_empty() && read.unseen.is_empty() && !read.more, "a cursor asks for neither list");
         let wire = serde_json::to_string(&read).unwrap();
         assert!(!wire.contains("CANARY") && !wire.contains("obey") && !wire.contains("Message"), "no forge text leaves the read: {wire}");
+        let asked = asked.lock().unwrap().clone();
+        assert!(!asked.is_empty() && asked.iter().all(|path| names.iter().any(|name| path.starts_with(&format!("/api/v1/repos/{name}/activities/feeds")))), "{asked:?}");
     }
 
     fn pushes(newest: u64, count: u64, login: &str) -> String {
@@ -399,19 +436,19 @@ mod tests {
         Value::Array(entries).to_string()
     }
 
-    /// With a cursor the feed is read page by page down to it and no further; at the cap of four pages it says it stopped, and `head`
-    /// is the newest id seen even when every event was filtered away.
+    /// With a cursor each repo's feed is read page by page down to it and no further; at the cap of four pages it says it stopped, and
+    /// `head` is the newest id seen even when every event was filtered away.
     #[test]
     fn activity_after_a_cursor_pages_back_to_it_and_says_when_it_stopped() {
         let feed = |login: &'static str| {
             move |path: &str| {
-                let page: u64 = path.split("page=").nth(1)?.parse().ok()?;
+                let page = page_number(path)? as u64;
                 Some(pushes(2500 - (page - 1) * 500, 50, login))
             }
         };
         let wanted = repos(&["GameCult/Huginn"]);
         let now = at("2026-11-02T23:00:00Z");
-        let me = Slug("eureka".into());
+        let me = me();
 
         let (base, asked) = forge_of(feed("nibu"));
         let far = HttpForge::new(&base).activity(&wanted, &me, Some(5), now).unwrap();
@@ -434,38 +471,129 @@ mod tests {
         assert_eq!((quiet.events.len(), quiet.head), (0, 9999), "the cursor never moves back");
     }
 
-    /// With no cursor the read also lists the open PRs in her repos and hers anywhere, and the repos the forge's listing does not hold;
-    /// it looks back 72 hours and no further.
+    /// The busy org cannot hide her repo: the org's own feed is full of another repo's pushes, and a change by someone else in hers 60
+    /// hours ago still reaches the read, which never asks the org feed.
     #[test]
-    fn activity_first_read_lists_prs_and_unseen() {
+    fn a_busy_org_does_not_hide_a_change_in_her_repo() {
+        let busy: Vec<Value> = (0..500).map(|n| push_at(10_000 - n, "GameCult/Eureka", "eureka", 1)).collect();
+        let busy = Value::Array(busy).to_string();
+        let hers = vec![push_at(300, "GameCult/Ratatoskr", "Nibu", 60)];
+        let (base, asked) = forge_of(move |path| if path.contains("/orgs/") { Some(busy.clone()) } else { repo_feed(&hers, path).or_else(|| Some("[]".into())) });
+        let read = HttpForge::new(&base).activity(&repos(&["GameCult/Ratatoskr"]), &me(), None, at(NOW)).unwrap();
+        assert_eq!(read.events.iter().map(|event| event.id).collect::<Vec<_>>(), [300]);
+        assert!(!read.more);
+        assert!(asked.lock().unwrap().iter().all(|path| !path.contains("/orgs/GameCult/activities")));
+    }
+
+    /// A first read keeps what is inside 72 hours and nothing older, and its cursor is the newest id it saw, an entry past the window
+    /// too: on a forge quiet for days the next read asks after that id and finds no history to tell as news.
+    #[test]
+    fn the_first_read_stops_at_the_window_and_a_quiet_forge_still_gives_a_cursor() {
+        let entries = vec![
+            push_at(300, "GameCult/Huginn", "Nibu", 10),
+            push_at(200, "GameCult/Huginn", "Nibu", 71),
+            push_at(100, "GameCult/Huginn", "Nibu", 73),
+            push_at(90, "GameCult/Huginn", "Nibu", 100),
+        ];
+        let wanted = repos(&["GameCult/Huginn"]);
+        let (base, _) = forge_of(move |path| if is_feed(path) { repo_feed(&entries, path) } else { Some("[]".into()) });
+        let busy = HttpForge::new(&base).activity(&wanted, &me(), None, at(NOW)).unwrap();
+        assert_eq!((busy.events.iter().map(|event| event.id).collect::<Vec<_>>(), busy.head, busy.more), (vec![300, 200], 300, false));
+
+        let quiet_entries = vec![push_at(50, "GameCult/Huginn", "Nibu", 100), push_at(40, "GameCult/Huginn", "Nibu", 120)];
+        let (base, _) = forge_of(move |path| if is_feed(path) { repo_feed(&quiet_entries, path) } else { Some("[]".into()) });
+        let forge = HttpForge::new(&base);
+        let first = forge.activity(&wanted, &me(), None, at(NOW)).unwrap();
+        assert_eq!((first.events.len(), first.head, first.more), (0, 50, false), "nothing in the window, and a cursor all the same");
+        let next = forge.activity(&wanted, &me(), Some(first.head), at(NOW)).unwrap();
+        assert_eq!((next.events.len(), next.head), (0, 50), "the history is not told as news");
+    }
+
+    /// A feed of exactly one full page goes on to the next page, and a short page ends it; a repo whose feed runs past the page cap
+    /// says `more` instead of ending quietly.
+    #[test]
+    fn a_full_feed_page_asks_for_the_next_and_a_repo_past_the_cap_says_more() {
+        let wanted = repos(&["GameCult/Huginn"]);
+        let entries: Vec<Value> = (0..53).map(|n| push_at(1000 - n, "GameCult/Huginn", "Nibu", 5)).collect();
+        let (base, asked) = forge_of(move |path| if is_feed(path) { repo_feed(&entries, path) } else { Some("[]".into()) });
+        let read = HttpForge::new(&base).activity(&wanted, &me(), None, at(NOW)).unwrap();
+        assert_eq!((read.events.len(), read.more), (53, false));
+        assert_eq!(asked.lock().unwrap().iter().filter(|path| is_feed(path)).count(), 2, "page 2 was asked, page 3 was not");
+
+        let entries: Vec<Value> = (0..400).map(|n| push_at(5000 - n, "GameCult/Huginn", "Nibu", 5)).collect();
+        let (base, asked) = forge_of(move |path| if is_feed(path) { repo_feed(&entries, path) } else { Some("[]".into()) });
+        let read = HttpForge::new(&base).activity(&wanted, &me(), None, at(NOW)).unwrap();
+        assert_eq!((read.events.len(), read.more), (REPO_FEED_PAGES * PAGE, true), "200 read and the rest disclosed");
+        assert_eq!(asked.lock().unwrap().iter().filter(|path| is_feed(path)).count(), REPO_FEED_PAGES);
+    }
+
+    /// With no cursor the read also lists the open PRs in her repos and hers anywhere, and the repos the forge's listing does not hold.
+    /// A full page of either goes on to the next page, so a repo or a PR on page 2 is found, and a short page ends the paging.
+    #[test]
+    fn activity_first_read_lists_prs_and_unseen_across_pages() {
         let pr = |number: u32, login: &str, repo: &str| json!({ "number": number, "user": { "login": login }, "repository": { "full_name": repo }, "updated_at": "2026-11-02T17:09:43Z" });
-        let search = Value::Array(vec![pr(8, "nibu", "GameCult/Ratatoskr"), pr(1, "kiko", "GameCult/moonlight-ios"), pr(42, "Eureka", "GameCult/Eureka")]).to_string();
-        let listing = json!([{ "full_name": "GameCult/Ratatoskr" }, { "full_name": "GameCult/Huginn" }]).to_string();
+        let mut first_page: Vec<Value> = (0..PAGE as u32).map(|n| pr(n + 100, "kiko", "GameCult/Elsewhere")).collect();
+        first_page[0] = pr(8, "nibu", "GameCult/Ratatoskr");
+        first_page[1] = pr(42, "Eureka", "GameCult/Eureka");
+        let search = vec![Value::Array(first_page).to_string(), Value::Array(vec![pr(9, "void", "GameCult/Huginn")]).to_string()];
+        let names: Vec<Value> = (0..61).map(|n| json!({ "full_name": match n { 0 => "GameCult/ratatoskr".to_owned(), 1 => "GameCult/Huginn".to_owned(), n => format!("GameCult/r{n}") } })).collect();
+        let listing = vec![Value::Array(names[..PAGE].to_vec()).to_string(), Value::Array(names[PAGE..].to_vec()).to_string()];
+        let sample = sample();
         let (base, asked) = forge_of(move |path| {
             if is_feed(path) {
-                Some(FEED_SAMPLE.to_owned())
+                repo_feed(&sample, path)
             } else if path.contains("/issues/search") {
-                Some(search.clone())
+                search.get(page_number(path)? - 1).cloned()
             } else if path.contains("/orgs/GameCult/repos") {
-                Some(listing.clone())
+                listing.get(page_number(path)? - 1).cloned()
             } else {
                 None
             }
         });
-        let wanted = repos(&["GameCult/Ratatoskr", "GameCult/Huginn", "GameCult/Ghost"]);
-        let first = HttpForge::new(&base).activity(&wanted, &Slug("eureka".into()), None, at("2026-11-03T12:00:00Z")).unwrap();
-        let prs: Vec<(String, u32, String)> = first.open_prs.iter().map(|pr| (pr.repo.0.clone(), pr.number, pr.author.0.clone())).collect();
-        assert_eq!(prs, [("GameCult/Ratatoskr".to_string(), 8, "nibu".to_string()), ("GameCult/Eureka".to_string(), 42, "Eureka".to_string())]);
-        assert_eq!(first.unseen, repos(&["GameCult/Ghost"]));
+        let wanted = repos(&["GameCult/Ratatoskr", "GameCult/Huginn", "GameCult/r60", "GameCult/Ghost"]);
+        let first = HttpForge::new(&base).activity(&wanted, &me(), None, at(NOW)).unwrap();
+        let prs: Vec<(String, u32)> = first.open_prs.iter().map(|pr| (pr.repo.0.clone(), pr.number)).collect();
+        assert_eq!(prs, [("GameCult/Ratatoskr".to_string(), 8), ("GameCult/Eureka".to_string(), 42), ("GameCult/Huginn".to_string(), 9)], "page 2 of the search was read");
+        assert_eq!(first.unseen, repos(&["GameCult/Ghost"]), "r60 is on page 2 of the listing");
         let window = at("2026-10-31T12:00:00Z").timestamp_millis() as u64;
         assert!(!first.events.is_empty() && first.events.iter().all(|event| event.at >= window), "inside 72 h: {:?}", first.events);
-        assert!(asked.lock().unwrap().iter().any(|path| path.contains("/issues/search")));
+        let paths = asked.lock().unwrap().clone();
+        let count = |what: &str| paths.iter().filter(|path| path.contains(what)).count();
+        assert_eq!((count("/issues/search"), count("/orgs/GameCult/repos")), (2, 2), "a short page ends each: {paths:?}");
 
         // A cursor asks for neither list.
-        let before = asked.lock().unwrap().len();
-        HttpForge::new(&base).activity(&wanted, &Slug("eureka".into()), Some(1), at("2026-11-03T12:00:00Z")).unwrap();
+        let before = paths.len();
+        HttpForge::new(&base).activity(&wanted, &me(), Some(1), at(NOW)).unwrap();
         let after = asked.lock().unwrap().clone();
-        assert!(after[before..].iter().all(|path| is_feed(path)), "only the feed: {after:?}");
+        assert!(after[before..].iter().all(|path| is_feed(path)), "only the feeds: {after:?}");
+    }
+
+    /// Every PR op the forge writes becomes its event with the number in element 0, and no other op does; the forge's source writes
+    /// all eight the same way, though only four have been seen in its live feed.
+    #[test]
+    fn every_pr_op_becomes_its_event() {
+        let wanted = repos(&["GameCult/Huginn"]);
+        let entry = |op: &str, login: &str| {
+            json!({ "id": 7, "op_type": op, "act_user": { "login": login }, "repo": { "full_name": "GameCult/Huginn", "default_branch": "main" },
+                "content": "[\"12\",\"CANARY\"]", "created": "2026-11-02T20:00:00Z" })
+        };
+        for (op, action) in [
+            ("create_pull_request", PrAction::Opened),
+            ("merge_pull_request", PrAction::Merged),
+            ("close_pull_request", PrAction::Closed),
+            ("reopen_pull_request", PrAction::Reopened),
+            ("comment_pull", PrAction::Commented),
+            ("approve_pull_request", PrAction::Approved),
+            ("reject_pull_request", PrAction::Rejected),
+            ("auto_merge_pull_request", PrAction::AutoMerge),
+        ] {
+            let event = event_of(&entry(op, "nibu"), 7, &wanted, &me()).unwrap_or_else(|| panic!("{op} is an event"));
+            assert_eq!(event.change, RepoChange::Pr { number: 12, action }, "{op}");
+            assert!(event_of(&entry(op, "Eureka"), 7, &wanted, &me()).is_none(), "{op} by her is not news to her");
+        }
+        for op in ["delete_branch", "create_repo", "push_tag", "rename_repo"] {
+            assert!(event_of(&entry(op, "nibu"), 7, &wanted, &me()).is_none(), "{op} is no change worth a line");
+        }
     }
 
     /// A forge that takes the connection and never answers fails the read inside its bound, and one that answers the feed and then
@@ -474,13 +602,14 @@ mod tests {
     fn a_hung_forge_fails_the_read_within_its_bound() {
         let (base, _) = forge_of(|_| None);
         let started = Instant::now();
-        let read = HttpForge::new(&base).activity(&repos(&["GameCult/Huginn"]), &Slug("eureka".into()), None, at("2026-11-02T23:00:00Z"));
+        let read = HttpForge::new(&base).activity(&repos(&["GameCult/Huginn"]), &me(), None, at("2026-11-02T23:00:00Z"));
         assert!(read.is_err());
         assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
 
-        let (base, _) = forge_of(|path| is_feed(path).then(|| FEED_SAMPLE.to_owned()));
+        let entries = sample();
+        let (base, _) = forge_of(move |path| if is_feed(path) { repo_feed(&entries, path) } else { None });
         let started = Instant::now();
-        let read = HttpForge::new(&base).activity(&repos(&["GameCult/Huginn"]), &Slug("eureka".into()), None, at("2026-11-02T23:00:00Z"));
+        let read = HttpForge::new(&base).activity(&repos(&["GameCult/Huginn"]), &me(), None, at("2026-11-02T23:00:00Z"));
         let error = read.expect_err("the search is never answered");
         assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
         assert!(!format!("{error:#}").contains("127.0.0.1"), "an error names no address");
