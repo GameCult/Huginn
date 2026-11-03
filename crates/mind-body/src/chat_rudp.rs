@@ -95,7 +95,21 @@ impl RudpChat {
     /// Puts one document and, when `answer` names a kind and record key, waits for
     /// the document the mouth answers it with. Documents of other kinds or keys
     /// (a late receipt of an earlier send) are skipped.
+    ///
+    /// A failed exchange drops the link: a restarted mouth silently ignores packets from a sender it has not connected, so a held link
+    /// would time out on every call after it. The next call opens a fresh one. Nothing is repeated on it: the caller's request id is
+    /// what makes a repeat of a send the same send.
     fn exchange<T: Serialize>(&self, kind: &str, record_key: &str, document: &T, answer: Option<(&[&str], &str)>) -> Result<Option<(String, Vec<u8>)>> {
+        let result = self.exchange_on_link(kind, record_key, document, answer);
+        if result.is_err()
+            && let Some(mut link) = self.link.borrow_mut().take()
+        {
+            let _ = link.transport.disconnect(Vec::new());
+        }
+        result
+    }
+
+    fn exchange_on_link<T: Serialize>(&self, kind: &str, record_key: &str, document: &T, answer: Option<(&[&str], &str)>) -> Result<Option<(String, Vec<u8>)>> {
         let mut slot = self.link.borrow_mut();
         if slot.is_none() {
             *slot = Some(self.open()?);

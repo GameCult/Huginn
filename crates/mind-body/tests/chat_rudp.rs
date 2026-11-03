@@ -62,7 +62,12 @@ fn answer(kind: &str, record_key: &str, payload: &[u8]) -> CultNetMessage {
 
 /// The mouth of the Persona `eureka`, whose connection id derives from `key`.
 fn mouth(key: &str) -> Mouth {
-    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    mouth_at(key, "127.0.0.1:0")
+}
+
+/// The same mouth on a chosen address: a restart binds the address the old one held.
+fn mouth_at(key: &str, bind: &str) -> Mouth {
+    let socket = UdpSocket::bind(bind).unwrap();
     socket.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
     let address = socket.local_addr().unwrap();
     let mut server = CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::server("mouth-test", socket, connection_id(key))).unwrap();
@@ -145,4 +150,30 @@ fn a_request_the_mouth_does_not_answer_ends_in_an_error_not_a_hang() {
     assert!(chat.pending(0).is_err(), "the mouth answers only its own Persona");
     let sent = ChatSendRequest { request_id: "r".into(), persona: "someone-else".into(), room_alias: "#a:b".into(), text: "x".into(), basis: None };
     assert!(chat.send(&sent).is_err());
+}
+
+#[test]
+fn a_client_recovers_from_a_restarted_mouth_on_its_next_call() {
+    let first = mouth(KEY);
+    let address = first.address;
+    let chat = client(&first, KEY, "eureka", Duration::from_millis(1500));
+    assert!(chat.pending(0).is_ok());
+    drop(first);
+    let second = mouth_at(KEY, &address.to_string());
+    assert!(chat.pending(0).is_err(), "the restarted mouth ignores a link it never saw: the call times out");
+    assert_eq!(chat.pending(0).unwrap(), chat_client::decode::<ChatPending>(PENDING_BYTES).unwrap().deliveries, "the next call opens a fresh link");
+    assert_eq!(chat.pending(0).unwrap().len(), 1, "and keeps it");
+    let reads = second.seen.lock().unwrap().iter().filter(|(kind, _)| kind == PENDING_REQUEST).count();
+    assert_eq!(reads, 2, "the restarted mouth read the two requests that reached it on a fresh link");
+}
+
+#[test]
+fn a_send_that_timed_out_is_not_repeated_by_the_client() {
+    let mouth = mouth(KEY);
+    let chat = client(&mouth, KEY, "someone-else", Duration::from_millis(600));
+    let sent = ChatSendRequest { request_id: "r-1".into(), persona: "someone-else".into(), room_alias: "#a:b".into(), text: "x".into(), basis: None };
+    assert!(chat.send(&sent).is_err());
+    chat.ack(1).unwrap();
+    let sends: Vec<_> = mouth.seen.lock().unwrap().iter().filter(|(kind, _)| kind == SEND_REQUEST).map(|(_, payload)| chat_client::decode::<ChatSendRequest>(payload).unwrap().request_id).collect();
+    assert_eq!(sends, ["r-1"], "the send reached the mouth once; a repeat is the caller's, under the same request id");
 }
