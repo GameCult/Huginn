@@ -357,7 +357,7 @@ fn the_start_message_is_the_first_thing_written_and_names_the_skill_the_instance
     let ran = go(vec![Out(result_line())]);
     assert!(matches!(&ran.events[0], Event::Wrote(_)), "the start precedes the first read: {:?}", ran.events[0]);
     let written = ran.written();
-    for needle in ["Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z (in 20d 7h), read 0s ago", "about 90% of the weekly allowance", "nothing enforces it"] {
+    for needle in ["Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z (in 20d 7h), read at 2026-10-29T20:33Z", "about 90% of the weekly allowance", "nothing enforces it"] {
         assert!(written[0].contains(needle), "the lease grant plan windows reach the child: {needle}: {}", written[0]);
     }
     for needle in ["Use the eureka skill.", "yggdrasil", "yggdrasil:run:selfrun-a", AGENT] {
@@ -1376,6 +1376,8 @@ fn a_brief_derived_while_a_turn_runs_is_written_at_once_counted_at_its_echo_and_
     assert_eq!(told.len(), 1, "{:?}", ran.written());
     assert!(told[0].contains(&brief_ref("b1").id.0) && told[0].contains("Survey the noise functions."), "{}", told[0]);
     assert!(told[0].contains("resolve follow-up") && told[0].contains("Recorded"), "she is told how to close it: {}", told[0]);
+    // The plan line is restated under every brief for the run's life, so it names the instant of the reading, never an age that stops being true.
+    assert!(told[0].contains("read at 2026-10-29T20:33Z") && !told[0].contains(" ago"), "{}", told[0]);
     assert_eq!(ran.written().len(), 2, "the start message and one tell: {:?}", ran.written());
     assert!(ran.out.contains("decision Write { tells: true, flush: None } prefix 10 ttl_s 0 idle_s working inbox true written 2 consumed 1\n"), "{}", ran.out);
     assert_eq!(ran.count(&Event::InputClosed), 0);
