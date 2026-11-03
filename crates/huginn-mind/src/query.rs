@@ -2058,6 +2058,21 @@ mod tests {
         }
     }
 
+    /// Past the candidate cut the tie-break decides who is kept: equal scores arriving in reverse
+    /// keep the earliest ordinals, which a lookup that gives every hit one row does not.
+    #[test]
+    fn equal_scores_past_the_cut_keep_the_earliest_ordinals() {
+        let mut mind = seeded();
+        let total = LIMIT_MAX + 3;
+        for n in 1..=total {
+            committed(admit(&mut mind, vec![question_n(n)]));
+        }
+        let key = |n: u32| id("question", &format!("Q{n}"));
+        let hits: Vec<_> = (1..=total).rev().map(|n| hit(K::Question, &key(n), 0.5)).collect();
+        let page = rank_all(&mind, &Selection::default(), &asking(LIMIT_MAX), &hits).page;
+        assert_eq!(ids(&page), (1..=LIMIT_MAX).map(key).collect::<Vec<_>>());
+    }
+
     /// Membership is the selection's alone: a kind, a key allowlist and a
     /// citation predicate each cut the candidates exactly as they cut a plain
     /// query, and the citation predicate sees the whole mind, not only the
