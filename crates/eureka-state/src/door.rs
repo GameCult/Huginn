@@ -210,6 +210,7 @@ mod tests {
         // A given value that itself says ", expected " is still not echoed past the last one.
         assert_eq!(schema_words("invalid type: string \"x, expected CANARY\", expected a map"), "wrong type, expected a map");
         // A custom message may quote anything; none of it is passed on.
+        assert_eq!(schema_words("CANARY, expected a slug"), "a value the schema refuses");
         assert_eq!(schema_words("CANARY is not a slug"), "a value the schema refuses");
         assert_eq!(schema_words("unknown variant `CANARY`"), "a value the schema refuses");
     }
