@@ -196,4 +196,21 @@ mod tests {
         let input = json!({ "n": null, "s": "", "l": [], "o": {}, "zero": 0, "no": false });
         assert_eq!(paths(&input, &json!({})), vec!["d.no".to_string(), "d.zero".to_string()]);
     }
+
+    #[test]
+    fn schema_words_keep_the_schema_and_drop_the_given_value() {
+        assert_eq!(schema_words("missing field `claim`"), "missing field `claim`");
+        assert_eq!(
+            schema_words("unknown variant `CANARY`, expected one of `a`, `b`"),
+            "unknown variant, expected one of `a`, `b`"
+        );
+        assert_eq!(schema_words("invalid type: string \"CANARY\", expected a sequence"), "wrong type, expected a sequence");
+        assert_eq!(schema_words("invalid value: integer `9`, expected u8"), "wrong value, expected u8");
+        assert_eq!(schema_words("invalid length 3, expected a tuple of size 2"), "wrong value, expected a tuple of size 2");
+        // A given value that itself says ", expected " is still not echoed past the last one.
+        assert_eq!(schema_words("invalid type: string \"x, expected CANARY\", expected a map"), "wrong type, expected a map");
+        // A custom message may quote anything; none of it is passed on.
+        assert_eq!(schema_words("CANARY is not a slug"), "a value the schema refuses");
+        assert_eq!(schema_words("unknown variant `CANARY`"), "a value the schema refuses");
+    }
 }
