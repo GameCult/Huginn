@@ -2950,6 +2950,39 @@ fn a_run_of_hers_beneath_chat_started_runs_holds_the_ask() {
     assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION), "an older wake-started run today still holds the ask");
 }
 
+fn chat_started_runs_today(rig: &Rig, count: u32) {
+    for n in 0..count {
+        self_run_claiming(rig, &format!("self-chat-{n:03}"), &format!("chat-s{n}-{n}"));
+    }
+}
+
+#[test]
+fn a_read_full_of_chat_started_runs_today_holds_the_ask_since_an_older_run_may_be_hers() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    chat_started_runs_today(&rig, SELF_RUNS_READ);
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION));
+}
+
+#[test]
+fn a_full_read_that_reaches_an_older_day_has_seen_every_run_today() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    self_runs_admitted_in_order(&rig, &[("self-0-old".into(), "2026-10-08")]);
+    chat_started_runs_today(&rig, SELF_RUNS_READ - 1);
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_ASK));
+}
+
+#[test]
+fn the_newest_runs_are_read_not_the_oldest() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    let old: Vec<(String, &str)> = (0..SELF_RUNS_READ + 5).map(|n| (format!("self-old-{n:03}"), "2026-10-08")).collect();
+    self_runs_admitted_in_order(&rig, &old);
+    self_runs_admitted_in_order(&rig, &[("self-new".into(), "2026-10-09")]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION));
+}
+
 #[test]
 fn only_chat_started_runs_today_leave_the_ask() {
     let rig = Rig::new(vec![], &[says(&[])]);
