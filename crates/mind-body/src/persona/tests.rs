@@ -2848,7 +2848,7 @@ fn a_traffic_line_ends_with_the_traffic_question_after_the_messages() {
     let messages: Vec<usize> = line.match_indices("\nmessage ").map(|(at, _)| at).collect();
     assert!(!messages.is_empty() && messages.iter().all(|at| header < *at && *at < question), "{line}");
     assert!(line.trim_end().ends_with(TRAFFIC_QUESTION), "{line}");
-    assert!(TRAFFIC_QUESTION.contains("does anything here change what you are going after,"), "the traffic question asks whether anything changes her move");
+    assert!(TRAFFIC_QUESTION.contains("Does anything here change what you are going after, or show you how your body could be improved?"), "the traffic question asks whether anything changes her aim or shows how her body could improve");
     assert!(MESSAGES_HEADER.contains("only role=operator is the operator") && MESSAGES_HEADER.contains("only to_you=true names you"));
     assert!(!line.contains("No new messages"), "{line}");
 }
