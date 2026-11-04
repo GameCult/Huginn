@@ -2017,9 +2017,9 @@ mod tests {
         let source_bad = |source: ResearchSource, field: &str| {
             bad(validated(&|research| research.sources = vec![source.clone()]), &format!("research.sources[0].{field}"));
         };
-        source_bad(ResearchSource::Repo { repo: repo(), at: DocRef { path: s(" "), start_line: 1, end_line: 2, commit: sha() } }, "at.path");
-        source_bad(ResearchSource::Repo { repo: repo(), at: DocRef { path: s("a.rs"), start_line: 5, end_line: 4, commit: sha() } }, "at.end_line");
-        assert_eq!(validated(&|research| research.sources = vec![ResearchSource::Repo { repo: repo(), at: DocRef { path: s("a.rs"), start_line: 5, end_line: 5, commit: sha() } }]), Ok(()));
+        source_bad(ResearchSource::Repo { repo: OrgRepo("GameCult/Huginn".into()), at: DocRef { path: s(" "), start_line: 1, end_line: 2, commit: sha() } }, "at.path");
+        source_bad(ResearchSource::Repo { repo: OrgRepo("GameCult/Huginn".into()), at: DocRef { path: s("a.rs"), start_line: 5, end_line: 4, commit: sha() } }, "at.end_line");
+        assert_eq!(validated(&|research| research.sources = vec![ResearchSource::Repo { repo: OrgRepo("GameCult/Huginn".into()), at: DocRef { path: s("a.rs"), start_line: 5, end_line: 5, commit: sha() } }]), Ok(()));
         source_bad(ResearchSource::Web { url: " ".into(), work: s("w"), retrieved_on: date() }, "url");
         source_bad(ResearchSource::Web { url: "https://x.test/".into(), work: s(""), retrieved_on: date() }, "work");
         source_bad(ResearchSource::Observed { evidence: Evidence { kind: EvidenceKind::Probe, locator: " ".into(), result: "found".into() } }, "evidence.locator");
