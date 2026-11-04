@@ -2878,6 +2878,7 @@ fn self_runs_admitted_in_order(rig: &Rig, runs: &[(String, &str)]) {
             held.started_on = Date((*day).into());
         }
         rig.mind.committed(vec![started]);
+        rig.mind.committed(vec![close(run_ref(label), recorded())]);
     }
 }
 
@@ -2935,6 +2936,7 @@ impl MindPort for LosesSelfRuns<'_> {
 #[test]
 fn a_mind_that_cannot_answer_the_started_today_read_holds_the_brake() {
     let rig = Rig::new(vec![], &[says(&[])]);
+    rig.open_the_run();
     let losing = LosesSelfRuns(&rig.mind);
     assert_eq!(failure_of(rig.start_over(&losing, &config())), None);
     assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION));
@@ -3737,7 +3739,7 @@ Tempo: not yet read. The swarm beat is the lower median of the votes cast: a Min
 Rooms you may speak in: swarm, usage, operator.
 People you may name in a memory's about: @op:chat, @libby:chat.
 
-No new messages. The leads above are some of what is relevant to your stewardship; `huginn` holds more. Explore your body and consult your Imagination: what does not exist yet in what you steward, that someone outside would come to use and that you would be excited to build this week? Not a cleanup. Choose one and start it: a Self run with its brief at the idea's full size, not its smallest slice. If something above matters more, do that instead and say why in `intent`. Put what you are going after in `intent` first.
+No new messages. The leads above are some of what is relevant to your stewardship; `huginn` holds more. Explore your body and consult your Imagination: what does not exist yet in what you steward, that someone outside would come to use and that you would be excited to build this week? Not a cleanup. Choose one and start it: a Self run with its brief at the idea's full size, not its smallest slice. If something above matters more, do that instead and say why in `intent`. Put what you are going after in `intent` first. Silence in chat costs nothing.
 "###;
 
 /// Each echo delivers the next of `arriving` and lets a poll fall due while the turn runs, so each is told as its own line of one process.
