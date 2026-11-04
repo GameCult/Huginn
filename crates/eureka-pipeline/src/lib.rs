@@ -632,7 +632,8 @@ fn memory_is_well_formed(memory: &PipelineMemory, at: &str) -> Result<(), Pipeli
 }
 
 /// A research note states a claim and stands on at least one source that
-/// names something: a Web source its address and work, an Observed one its
+/// names something: a Repo source a file and a range that does not end before
+/// it starts, a Web source its address and work, an Observed one its
 /// locator and result, a Document one a note other than this one. A claim
 /// with no source is not research. An inferred note names what it inferred
 /// from in those sources. Two notes citing each other cannot be seen from one
@@ -648,6 +649,8 @@ fn research_is_well_formed(research: &PipelineResearch, at: &str) -> Result<(), 
     let blank = |text: &str| text.trim().is_empty();
     for (index, source) in research.sources.iter().enumerate() {
         let (field, empty) = match source {
+            ResearchSource::Repo { at, .. } if blank(&at.path.0) => ("at.path", "a repo source pinning no file"),
+            ResearchSource::Repo { at, .. } if at.end_line < at.start_line => ("at.end_line", "a repo source whose range ends before it starts"),
             ResearchSource::Web { url, .. } if blank(&url.0) => ("url", "a web source with no address"),
             ResearchSource::Web { work, .. } if blank(&work.0) => ("work", "a web source naming no work"),
             ResearchSource::Observed { evidence } if blank(&evidence.locator.0) => ("evidence.locator", "an observation naming nothing observed"),
@@ -2014,6 +2017,9 @@ mod tests {
         let source_bad = |source: ResearchSource, field: &str| {
             bad(validated(&|research| research.sources = vec![source.clone()]), &format!("research.sources[0].{field}"));
         };
+        source_bad(ResearchSource::Repo { repo: repo(), at: DocRef { path: s(" "), start_line: 1, end_line: 2, commit: sha() } }, "at.path");
+        source_bad(ResearchSource::Repo { repo: repo(), at: DocRef { path: s("a.rs"), start_line: 5, end_line: 4, commit: sha() } }, "at.end_line");
+        assert_eq!(validated(&|research| research.sources = vec![ResearchSource::Repo { repo: repo(), at: DocRef { path: s("a.rs"), start_line: 5, end_line: 5, commit: sha() } }]), Ok(()));
         source_bad(ResearchSource::Web { url: " ".into(), work: s("w"), retrieved_on: date() }, "url");
         source_bad(ResearchSource::Web { url: "https://x.test/".into(), work: s(""), retrieved_on: date() }, "work");
         source_bad(ResearchSource::Observed { evidence: Evidence { kind: EvidenceKind::Probe, locator: " ".into(), result: "found".into() } }, "evidence.locator");
