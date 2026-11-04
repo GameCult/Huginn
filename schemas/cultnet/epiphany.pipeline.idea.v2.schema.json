@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "Date": {
+      "description": "A calendar date, `YYYY-MM-DD`.",
+      "maxLength": 10,
+      "type": "string"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Para": {
+      "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
+      "maxLength": 4000,
+      "type": "string"
+    },
+    "PipelineKind": {
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff",
+        "Run",
+        "Pulse",
+        "Memory",
+        "Research",
+        "Idea"
+      ],
+      "type": "string"
+    },
+    "PipelineRef": {
+      "description": "A reference to another document. The id is parsed as a full pipeline id of\nthe declared `kind`, so the kind and the id's kind segment cannot disagree.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Title": {
+      "description": "A title: 1 to 200 UTF-8 bytes, enforced by admission; JSON Schema\nlength counts characters. Holds at least one alphanumeric character,\nno control character, and no bidi control character (`U+061C`,\n`U+200E`, `U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`).",
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.idea.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One thing that could be, including options rejected and ideas no cut\nuses yet. `rests_on` is what it stands on (a reader selects the ideas\nresting on a stale note with `cites`); `toward` is the fork, ruling or\nfollow-up it was made for, and empty is legal. It stores no status:\ntaken up is its Deferred resolution, rejected its Recorded one.\nCampaign-rooted: `<campaign>:idea:<pass>.<label>`.",
+  "properties": {
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "idea": {
+      "$ref": "#/$defs/Para"
+    },
+    "label": {
+      "$ref": "#/$defs/Label"
+    },
+    "pass": {
+      "$ref": "#/$defs/Label"
+    },
+    "proposed_on": {
+      "$ref": "#/$defs/Date"
+    },
+    "rests_on": {
+      "items": {
+        "$ref": "#/$defs/PipelineRef"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "title": {
+      "$ref": "#/$defs/Title"
+    },
+    "toward": {
+      "items": {
+        "$ref": "#/$defs/PipelineRef"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "tradeoffs": {
+      "$ref": "#/$defs/Para"
+    }
+  },
+  "required": [
+    "campaign",
+    "pass",
+    "label",
+    "title",
+    "idea",
+    "tradeoffs",
+    "rests_on",
+    "toward",
+    "proposed_on"
+  ],
+  "title": "PipelineIdea",
+  "type": "object"
+}

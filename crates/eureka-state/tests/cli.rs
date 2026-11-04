@@ -784,11 +784,24 @@ fn the_recipes_send_exactly_the_pages_selections() {
             vec!["gaps"],
             json!({ "schemas": [schema("follow_up")], "fields": [root(&["eureka-substrate"]), in_force] }),
         ),
+        (vec!["known", "the words"], json!({ "schemas": [schema("research"), schema("idea")] })),
+        (
+            vec!["pass", c, "p1"],
+            json!({
+                "schemas": [schema("research"), schema("idea")],
+                "fields": [root(&[c]), { "index": "pass", "op": "any_of", "values": ["p1"] }],
+            }),
+        ),
+        (vec!["ideas", c], json!({ "schemas": [schema("idea")], "fields": [root(&[c]), in_force] })),
     ];
     for (args, literal) in cases {
         let (selection, semantic) = sent(&args);
         assert_eq!(selection, page_literal(literal), "{args:?}");
-        let expected = (args[0] == "precedent").then(|| ("the question in plain words".to_string(), 10));
+        let expected = match args[0] {
+            "precedent" => Some(("the question in plain words".to_string(), 10)),
+            "known" => Some(("the words".to_string(), 10)),
+            _ => None,
+        };
         assert_eq!(semantic, expected, "{args:?}");
     }
 }
@@ -1109,11 +1122,12 @@ fn schema_prints_the_published_files() {
     let names = run(&[], &["schema"], None);
     assert_eq!(names.code, 0);
     let names: Vec<&str> = names.out.lines().collect();
-    assert_eq!(names.len(), 17, "{names:?}");
+    assert_eq!(names.len(), 19, "{names:?}");
     assert_eq!(names[0], "campaign");
     assert_eq!(names[14], "pulse");
     assert_eq!(names[15], "memory");
-    assert_eq!(names[16], "selection");
+    assert_eq!((names[16], names[17]), ("research", "idea"));
+    assert_eq!(names[18], "selection");
     for kind in PipelineKind::ALL {
         assert!(names.contains(&kind.name()), "{}", kind.name());
     }
@@ -1159,7 +1173,7 @@ fn help_is_the_schema_surface() {
 fn every_recipe_has_help() {
     for recipe in [
         "campaigns", "target", "rulings", "open", "findings", "unreported", "blocked", "unjudged", "history", "cut", "ledger",
-        "precedent", "gaps",
+        "precedent", "gaps", "known", "pass", "ideas",
     ] {
         let ran = run(&[], &[recipe, "--help"], None);
         assert_eq!(ran.code, 0, "{recipe}");

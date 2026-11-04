@@ -631,6 +631,46 @@ fn memory_is_well_formed(memory: &PipelineMemory, at: &str) -> Result<(), Pipeli
     Ok(())
 }
 
+/// A research note states a claim and stands on at least one source that
+/// names something: a Repo source a file and a range that does not end before
+/// it starts, a Web source its address and work, an Observed one its
+/// locator and result, a Document one a note other than this one. A claim
+/// with no source is not research. An inferred note names what it inferred
+/// from in those sources. Two notes citing each other cannot be seen from one
+/// document; that refusal would need the image, so it is not made here.
+fn research_is_well_formed(research: &PipelineResearch, at: &str) -> Result<(), PipelineRefusal> {
+    if research.claim.0.trim().is_empty() {
+        return Err(format_error(&format!("{at}.claim"), "an empty claim"));
+    }
+    if research.sources.is_empty() {
+        return Err(format_error(&format!("{at}.sources"), "a research note that names no source"));
+    }
+    let own_key = format!("{}:research:{}.{}", research.campaign.0, research.pass.0, research.label.0);
+    let blank = |text: &str| text.trim().is_empty();
+    for (index, source) in research.sources.iter().enumerate() {
+        let (field, empty) = match source {
+            ResearchSource::Repo { at, .. } if blank(&at.path.0) => ("at.path", "a repo source pinning no file"),
+            ResearchSource::Repo { at, .. } if at.end_line < at.start_line => ("at.end_line", "a repo source whose range ends before it starts"),
+            ResearchSource::Web { url, .. } if blank(&url.0) => ("url", "a web source with no address"),
+            ResearchSource::Web { work, .. } if blank(&work.0) => ("work", "a web source naming no work"),
+            ResearchSource::Observed { evidence } if blank(&evidence.locator.0) => ("evidence.locator", "an observation naming nothing observed"),
+            ResearchSource::Observed { evidence } if blank(&evidence.result.0) => ("evidence.result", "an observation with no result"),
+            ResearchSource::Document { reference } if reference.kind == PipelineKind::Research && reference.id.0 == own_key => ("reference", "a note that is its own source"),
+            _ => continue,
+        };
+        return Err(format_error(&format!("{at}.sources[{index}].{field}"), empty));
+    }
+    Ok(())
+}
+
+/// An idea says something. It may serve no fork and rest on nothing.
+fn idea_is_well_formed(idea: &PipelineIdea, at: &str) -> Result<(), PipelineRefusal> {
+    if idea.idea.0.trim().is_empty() {
+        return Err(format_error(&format!("{at}.idea"), "an empty idea"));
+    }
+    Ok(())
+}
+
 unit_enums! {
     EvidenceKind { Command, Test, Mutation, Probe, SourceRead, Capture }
     ClaimOutcome { Holds, Falsified, Unproven }
@@ -793,6 +833,28 @@ value_types! {
         instance: Slug, label: Label, sort: MemorySort, text: Line, about: Vec<Short>[8], origin: MemoryOrigin,
         sources: Vec<Short>[8], salience_permille: u16, consolidates: Vec<PipelineRef>[16],
     } => memory_is_well_formed
+    /// One claim a pass found, with the sources it stands on, grouped by `pass`.
+    /// What is so, never what to do: a recommendation is an idea. `inferred`
+    /// marks a claim read from its sources rather than seen in them. It stores
+    /// no status: whether a note is current, superseded or wrong is its
+    /// resolutions'. `serves` names the question, cut or campaign document it
+    /// was gathered for. The pass's method and what it did not search is its
+    /// first note, labelled `scope`. Campaign-rooted:
+    /// `<campaign>:research:<pass>.<label>`.
+    pub struct PipelineResearch {
+        campaign: Slug, pass: Label, label: Label, claim: Line, detail: Para, inferred: bool,
+        sources: Vec<ResearchSource>[16], serves: Vec<PipelineRef>[8], observed_on: Date,
+    } => research_is_well_formed
+    /// One thing that could be, including options rejected and ideas no cut
+    /// uses yet. `rests_on` is what it stands on (a reader selects the ideas
+    /// resting on a stale note with `cites`); `toward` is the fork, ruling or
+    /// follow-up it was made for, and empty is legal. It stores no status:
+    /// taken up is its Deferred resolution, rejected its Recorded one.
+    /// Campaign-rooted: `<campaign>:idea:<pass>.<label>`.
+    pub struct PipelineIdea {
+        campaign: Slug, pass: Label, label: Label, title: Title, idea: Para, tradeoffs: Para,
+        rests_on: Vec<PipelineRef>[16], toward: Vec<PipelineRef>[8], proposed_on: Date,
+    } => idea_is_well_formed
 }
 
 /// A reference to another document. The id is parsed as a full pipeline id of
@@ -872,6 +934,39 @@ impl Bounded for MemoryOrigin {
     }
 }
 
+/// Where a research claim comes from. A `Repo` pin and a `Web` page are
+/// outside the document set; an `Observed` result reuses a finding's evidence;
+/// a `Document` is the one source that is a citation edge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ResearchSource {
+    /// A pinned file range in a repo.
+    Repo { repo: OrgRepo, at: DocRef },
+    /// A page read on the web: its address, the work it belongs to, and when.
+    Web { url: Line, work: Short, retrieved_on: Date },
+    /// A command, probe, read or capture the pass ran itself.
+    Observed { evidence: Evidence },
+    /// Another document in the mind.
+    Document { reference: PipelineRef },
+}
+
+impl Bounded for ResearchSource {
+    fn validate(&self, field: &str) -> Result<(), PipelineRefusal> {
+        match self {
+            Self::Repo { repo, at } => {
+                repo.validate(&format!("{field}.repo"))?;
+                at.validate(&format!("{field}.at"))
+            }
+            Self::Web { url, work, retrieved_on } => {
+                url.validate(&format!("{field}.url"))?;
+                work.validate(&format!("{field}.work"))?;
+                retrieved_on.validate(&format!("{field}.retrieved_on"))
+            }
+            Self::Observed { evidence } => evidence.validate(&format!("{field}.evidence")),
+            Self::Document { reference } => reference.validate(&format!("{field}.reference")),
+        }
+    }
+}
+
 /// How a subject was resolved. Every referent is a parsed `PipelineRef`, so a
 /// resolution names its records by ids of the kinds they declare, validated
 /// where every other referent is; a `Fixed` commit is a `Sha` whose referent
@@ -936,7 +1031,7 @@ macro_rules! pipeline_kinds {
         /// because a value is a named map of its own and an internal tag would
         /// have to be merged into it; the tag stays beside the value instead.
         /// This is not a published schema: `schemas/cultnet` publishes the
-        /// sixteen per-kind value documents, and the envelope is the wire's
+        /// eighteen per-kind value documents, and the envelope is the wire's
         /// shape, not a document's.
         #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -1059,6 +1154,10 @@ pipeline_kinds! {
         "epiphany.pipeline.pulse.v2", "EpiphanyPipelinePulseDocument";
     Memory(PipelineMemory) => EpiphanyPipelineMemoryDocument, "memory",
         "epiphany.pipeline.memory.v2", "EpiphanyPipelineMemoryDocument";
+    Research(PipelineResearch) => EpiphanyPipelineResearchDocument, "research",
+        "epiphany.pipeline.research.v2", "EpiphanyPipelineResearchDocument";
+    Idea(PipelineIdea) => EpiphanyPipelineIdeaDocument, "idea",
+        "epiphany.pipeline.idea.v2", "EpiphanyPipelineIdeaDocument";
 }
 
 /// Parses a full document id: the grammar read backwards. A key and an id are
@@ -1256,6 +1355,8 @@ pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefus
         D::Run(value) => ("run.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Pulse(value) => ("pulse.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Memory(value) => ("memory.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
+        D::Research(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.pass.0, &value.label.0])?),
+        D::Idea(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.pass.0, &value.label.0])?),
         D::Target(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&format!("r{}", value.revision)])?),
         D::Question(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Ruling(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
@@ -1509,6 +1610,24 @@ mod tests {
                 text: "I take the background shaders; Libby holds the sounds.".into(), about: vec![s("@libby:chat")],
                 origin: MemoryOrigin::Room { rooms: s("swarm"), heard_from: vec![s("@libby:chat")] }, sources: vec![s("$e1")], salience_permille: 700, consolidates: vec![],
             }), format!("{INSTANCE}:memory:2026-10-31t041200-t0-m0")),
+            (D::Research(PipelineResearch {
+                campaign: slug(CAMPAIGN), pass: l("p1"), label: l("scope"),
+                claim: "The embed limit is 4096 tokens with silent truncation.".into(),
+                detail: "Read from the daemon's index module and probed live.".into(), inferred: false,
+                sources: vec![
+                    ResearchSource::Repo { repo: repo(), at: DocRef { path: s("crates/huginn-daemon/src/index/mod.rs"), start_line: 50, end_line: 56, commit: sha() } },
+                    ResearchSource::Web { url: "https://zettelkasten.de/atomicity/".into(), work: s("Zettelkasten atomicity"), retrieved_on: date() },
+                    ResearchSource::Observed { evidence: evidence() },
+                    ResearchSource::Document { reference: PipelineRef { kind: PipelineKind::Ruling, id: id("ruling", "R8") } },
+                ],
+                serves: vec![PipelineRef { kind: PipelineKind::Question, id: id("question", "Q1") }], observed_on: date(),
+            }), format!("{CAMPAIGN}:research:p1.scope")),
+            (D::Idea(PipelineIdea {
+                campaign: slug(CAMPAIGN), pass: l("p1"), label: l("i1"), title: t("One note per claim"),
+                idea: "Keep a pass as many small notes.".into(), tradeoffs: "More documents to list.".into(),
+                rests_on: vec![PipelineRef { kind: PipelineKind::Research, id: id("research", "p1.scope") }],
+                toward: vec![PipelineRef { kind: PipelineKind::Question, id: id("question", "Q1") }], proposed_on: date(),
+            }), format!("{CAMPAIGN}:idea:p1.i1")),
         ]
     }
 
@@ -1868,6 +1987,70 @@ mod tests {
         assert!(matches!(validated(&|memory| memory.about = vec![s("@a:chat"); 9]), Err(PipelineRefusal::FieldBound { limit: 8, .. })));
         assert!(matches!(validated(&|memory| memory.sources = vec![s("$e"); 9]), Err(PipelineRefusal::FieldBound { limit: 8, .. })));
         assert!(matches!(validated(&|memory| memory.text = Line("x".repeat(1001))), Err(PipelineRefusal::FieldBound { limit: 1000, .. })));
+    }
+
+    fn research_sample() -> PipelineResearch {
+        let PipelineDocument::Research(research) = samples().remove(16).0 else { unreachable!() };
+        research
+    }
+
+    fn idea_sample() -> PipelineIdea {
+        let PipelineDocument::Idea(idea) = samples().remove(17).0 else { unreachable!() };
+        idea
+    }
+
+    /// A research note has a claim and at least one source; each source is bounded.
+    #[test]
+    fn research_needs_a_source_and_a_claim() {
+        let validated = |change: &dyn Fn(&mut PipelineResearch)| {
+            let mut research = research_sample();
+            change(&mut research);
+            PipelineDocument::Research(research).validate()
+        };
+        assert_eq!(validated(&|_| {}), Ok(()));
+        let bad = |result: Result<(), PipelineRefusal>, field: &str| {
+            assert!(matches!(&result, Err(PipelineRefusal::InvalidFormat { field: found, .. }) if found == field), "{field}: {result:?}");
+        };
+        bad(validated(&|research| research.sources = vec![]), "research.sources");
+        bad(validated(&|research| research.claim = "  ".into()), "research.claim");
+        bad(validated(&|research| research.claim = "".into()), "research.claim");
+        let source_bad = |source: ResearchSource, field: &str| {
+            bad(validated(&|research| research.sources = vec![source.clone()]), &format!("research.sources[0].{field}"));
+        };
+        source_bad(ResearchSource::Repo { repo: OrgRepo("GameCult/Huginn".into()), at: DocRef { path: s(" "), start_line: 1, end_line: 2, commit: sha() } }, "at.path");
+        source_bad(ResearchSource::Repo { repo: OrgRepo("GameCult/Huginn".into()), at: DocRef { path: s("a.rs"), start_line: 5, end_line: 4, commit: sha() } }, "at.end_line");
+        assert_eq!(validated(&|research| research.sources = vec![ResearchSource::Repo { repo: OrgRepo("GameCult/Huginn".into()), at: DocRef { path: s("a.rs"), start_line: 5, end_line: 5, commit: sha() } }]), Ok(()));
+        source_bad(ResearchSource::Web { url: " ".into(), work: s("w"), retrieved_on: date() }, "url");
+        source_bad(ResearchSource::Web { url: "https://x.test/".into(), work: s(""), retrieved_on: date() }, "work");
+        source_bad(ResearchSource::Observed { evidence: Evidence { kind: EvidenceKind::Probe, locator: " ".into(), result: "found".into() } }, "evidence.locator");
+        source_bad(ResearchSource::Observed { evidence: Evidence { kind: EvidenceKind::Probe, locator: "ran it".into(), result: "".into() } }, "evidence.result");
+        let own = research_sample();
+        let cites = |label: &str| PipelineRef { kind: PipelineKind::Research, id: Short(format!("{}:research:{}.{label}", own.campaign.0, own.pass.0)) };
+        source_bad(ResearchSource::Document { reference: cites(&own.label.0) }, "reference");
+        assert_eq!(validated(&|research| research.sources = vec![ResearchSource::Document { reference: cites("another") }]), Ok(()));
+        assert_eq!(validated(&|research| research.inferred = true), Ok(()));
+        assert!(matches!(validated(&|research| research.sources = vec![research_sample().sources.remove(2); 17]), Err(PipelineRefusal::FieldBound { limit: 16, .. })));
+        assert!(validated(&|research| research.sources = vec![ResearchSource::Web { url: Line("x".repeat(1001)), work: s("w"), retrieved_on: date() }]).is_err());
+    }
+
+    /// A blank idea is refused; an idea that serves and rests on nothing is admitted.
+    #[test]
+    fn idea_needs_text_and_may_serve_nothing() {
+        let validated = |change: &dyn Fn(&mut PipelineIdea)| {
+            let mut idea = idea_sample();
+            change(&mut idea);
+            PipelineDocument::Idea(idea).validate()
+        };
+        assert_eq!(validated(&|idea| (idea.rests_on, idea.toward) = (vec![], vec![])), Ok(()));
+        assert!(matches!(validated(&|idea| idea.idea = " ".into()), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "idea.idea"));
+    }
+
+    /// Both are keyed under their campaign by pass and label.
+    #[test]
+    fn research_and_idea_are_keyed_by_pass_and_label() -> Result<()> {
+        assert_eq!(pipeline_key(&PipelineDocument::Research(research_sample()))?, format!("{CAMPAIGN}:research:p1.scope"));
+        assert_eq!(pipeline_key(&PipelineDocument::Idea(idea_sample()))?, format!("{CAMPAIGN}:idea:p1.i1"));
+        Ok(())
     }
 
     /// A memory's origin is bounded field by field, and a private one names whom she heard it from.
@@ -3457,11 +3640,11 @@ mod tests {
         };
         let document_schema = serde_json::to_value(schemars::schema_for!(PipelineDocument))?;
         let variants = document_schema["oneOf"].as_array().expect("the document schema is a oneOf");
-        assert_eq!(PipelineKind::ALL.len(), 16, "sixteen kinds");
+        assert_eq!(PipelineKind::ALL.len(), 18, "eighteen kinds");
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
-            "the document schema lists exactly the sixteen kinds, by name"
+            "the document schema lists exactly the eighteen kinds, by name"
         );
 
         let refusal_schema = serde_json::to_value(schemars::schema_for!(PipelineRefusal))?;

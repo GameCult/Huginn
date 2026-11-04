@@ -8,7 +8,7 @@
 use cultcache_rs::CultCacheEnvelope;
 use eureka_pipeline::{
     Label, OrgRepo, PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
-    RunOperator, Short, Slug,
+    ResearchSource, RunOperator, Short, Slug,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -321,7 +321,7 @@ pub(crate) enum Lineage<'a> {
     /// A memory: the instance whose mind holds it, so a consolidating memory
     /// replaces only her own.
     Memories(&'a Slug),
-    /// A ruling or a follow-up: operator directions and re-homed work cut
+    /// A ruling, a follow-up, a research note or an idea: operator directions and re-homed work cut
     /// across campaigns.
     Global,
 }
@@ -333,7 +333,7 @@ pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
         D::CutSpec(spec) => Some(Lineage::Cut(&spec.campaign, &spec.cut)),
         D::Stewardship(stewardship) => Some(Lineage::Assignment(&stewardship.instance, &stewardship.repo)),
         D::Memory(memory) => Some(Lineage::Memories(&memory.instance)),
-        D::Ruling(_) | D::FollowUp(_) => Some(Lineage::Global),
+        D::Ruling(_) | D::FollowUp(_) | D::Research(_) | D::Idea(_) => Some(Lineage::Global),
         D::Campaign(_)
         | D::Question(_)
         | D::CutReport(_)
@@ -388,10 +388,14 @@ pub enum CitationRole {
     Documents,
     Claims,
     Consolidates,
+    Serves,
+    Sources,
+    RestsOn,
+    Toward,
 }
 
 impl CitationRole {
-    pub const ALL: [CitationRole; 17] = [
+    pub const ALL: [CitationRole; 21] = [
         Self::RaisedIn,
         Self::Answers,
         Self::Rulings,
@@ -409,6 +413,10 @@ impl CitationRole {
         Self::Documents,
         Self::Claims,
         Self::Consolidates,
+        Self::Serves,
+        Self::Sources,
+        Self::RestsOn,
+        Self::Toward,
     ];
 
     /// The wire spelling, equal to the referring field's name.
@@ -431,6 +439,10 @@ impl CitationRole {
             Self::Documents => "documents",
             Self::Claims => "claims",
             Self::Consolidates => "consolidates",
+            Self::Serves => "serves",
+            Self::Sources => "sources",
+            Self::RestsOn => "rests_on",
+            Self::Toward => "toward",
         }
     }
 
@@ -453,6 +465,8 @@ impl CitationRole {
             Self::Documents => K::HandOff,
             Self::Claims => K::Run,
             Self::Consolidates => K::Memory,
+            Self::Serves | Self::Sources => K::Research,
+            Self::RestsOn | Self::Toward => K::Idea,
         }
     }
 
@@ -476,7 +490,11 @@ impl CitationRole {
             | Self::SupersededBy
             | Self::ResolvedBy
             | Self::DeferredTo
-            | Self::Documents => PipelineKind::ALL.to_vec(),
+            | Self::Documents
+            | Self::Serves
+            | Self::Sources
+            | Self::RestsOn
+            | Self::Toward => PipelineKind::ALL.to_vec(),
         }
     }
 }
@@ -549,6 +567,17 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
         ),
         D::Run(run) => edges.extend(run.claims.iter().map(|to| (R::Claims, to.clone()))),
         D::Memory(memory) => edges.extend(memory.consolidates.iter().map(|to| (R::Consolidates, to.clone()))),
+        D::Research(research) => {
+            edges.extend(research.serves.iter().map(|to| (R::Serves, to.clone())));
+            edges.extend(research.sources.iter().filter_map(|source| match source {
+                ResearchSource::Document { reference } => Some((R::Sources, reference.clone())),
+                _ => None,
+            }));
+        }
+        D::Idea(idea) => {
+            edges.extend(idea.rests_on.iter().map(|to| (R::RestsOn, to.clone())));
+            edges.extend(idea.toward.iter().map(|to| (R::Toward, to.clone())));
+        }
         D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) | D::Pulse(_) => {}
     }
     edges

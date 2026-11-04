@@ -17,6 +17,8 @@ use crate::trouble::Trouble;
 const GAP_HOME: &str = "eureka-substrate";
 /// How many neighbours `precedent` asks the index for.
 const PRECEDENT_TOP_K: u32 = 10;
+/// How many neighbours `known` asks the index for.
+const KNOWN_TOP_K: u32 = 10;
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct Paging {
@@ -107,6 +109,26 @@ pub enum Recipe {
     },
     /// The substrate's known gaps.
     Gaps(Paging),
+    /// Research and ideas nearest some words, in every campaign, closed ones included.
+    Known {
+        text: String,
+        #[command(flatten)]
+        page: Paging,
+    },
+    /// One pass's research and ideas, whole, in no promised order (a pass spanning batches is grouped by batch).
+    Pass {
+        campaign: String,
+        pass: String,
+        #[command(flatten)]
+        page: Paging,
+    },
+    /// Ideas in force.
+    Ideas {
+        #[arg(required = true)]
+        campaigns: Vec<String>,
+        #[command(flatten)]
+        page: Paging,
+    },
 }
 
 /// What a recipe asks the mind: the selection, the semantic part when it has
@@ -140,6 +162,9 @@ impl Recipe {
                 (precedent(&campaign), Some(SemanticQuery { text: Line(text), top_k: PRECEDENT_TOP_K }), page)
             }
             Self::Gaps(page) => (gaps(), None, page),
+            Self::Known { text, page } => (known(), Some(SemanticQuery { text: Line(text), top_k: KNOWN_TOP_K }), page),
+            Self::Pass { campaign, pass, page } => (pass_of(&campaign, &pass), None, page),
+            Self::Ideas { campaigns, page } => (ideas(&campaigns), None, page),
         };
         Ok(Ask { selection, semantic, page })
     }
@@ -248,6 +273,21 @@ fn precedent(campaign: &str) -> Value {
     })
 }
 
+fn known() -> Value {
+    json!({ "schemas": [schema(PipelineKind::Research), schema(PipelineKind::Idea)] })
+}
+
+fn pass_of(campaign: &str, pass: &str) -> Value {
+    json!({
+        "schemas": [schema(PipelineKind::Research), schema(PipelineKind::Idea)],
+        "fields": [root(&[campaign.to_string()]), { "index": "pass", "op": "any_of", "values": [pass] }],
+    })
+}
+
+fn ideas(campaigns: &[String]) -> Value {
+    json!({ "schemas": [schema(PipelineKind::Idea)], "fields": [root(campaigns), in_force()] })
+}
+
 fn gaps() -> Value {
     json!({
         "schemas": [schema(PipelineKind::FollowUp)],
@@ -279,6 +319,8 @@ pub fn help() -> Vec<(&'static str, String)> {
         "{}\nsemantic: {{ \"text\": \"<text>\", \"top_k\": {PRECEDENT_TOP_K} }}",
         selection(precedent(&c()))
     );
+    let known_help = format!("{}
+semantic: {{ \"text\": \"<text>\", \"top_k\": {KNOWN_TOP_K} }}", selection(known()));
     vec![
         ("campaigns", selection(campaigns())),
         ("target", selection(target(&c()))),
@@ -293,5 +335,8 @@ pub fn help() -> Vec<(&'static str, String)> {
         ("ledger", selection(ledger(&c()))),
         ("precedent", precedent_help),
         ("gaps", selection(gaps())),
+        ("known", known_help),
+        ("pass", selection(pass_of(&c(), "<pass>"))),
+        ("ideas", selection(ideas(&[c()]))),
     ]
 }

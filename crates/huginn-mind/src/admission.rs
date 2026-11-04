@@ -623,7 +623,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusa
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
             run_rule(docs, key, run, replay)
         }
-        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Memory(_) => Ok(()),
+        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => Ok(()),
     }
 }
 
@@ -722,6 +722,11 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Memory, O::Deferred { to }) => to.kind == K::FollowUp,
         (K::Memory, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::Memory, O::Superseded { by }) => all(by, K::Memory),
+        (K::Research, O::Superseded { by }) => all(by, K::Research),
+        (K::Research, O::Recorded { .. } | O::Withdrawn { .. }) => true,
+        (K::Idea, O::Deferred { to }) => matches!(to.kind, K::Question | K::CutSpec | K::FollowUp | K::Ruling),
+        (K::Idea, O::Superseded { by }) => all(by, K::Idea),
+        (K::Idea, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::Resolution, O::Withdrawn { .. }) => true,
         _ => false,
     }
@@ -2543,6 +2548,176 @@ mod tests {
             MindRefusal::MissingReference { kind: K::Memory, id: elsewhere }
         );
         committed(admit(&mut mind, vec![consolidating(r(K::Memory, &memory_key("m1")))]));
+    }
+
+    fn research_key(pass: &str, label: &str) -> String {
+        format!("{CAMPAIGN}:research:{pass}.{label}")
+    }
+
+    fn idea_key(pass: &str, label: &str) -> String {
+        format!("{CAMPAIGN}:idea:{pass}.{label}")
+    }
+
+    /// Research is superseded by research, recorded or withdrawn; an idea is deferred to a
+    /// question, cut spec, follow-up or ruling, superseded by an idea, recorded or withdrawn.
+    /// Their neighbours are refused.
+    #[test]
+    fn research_and_idea_resolution_matrix() {
+        let incompatible = |kind: K, outcome: &str| MindRefusal::IncompatibleResolution { subject_kind: kind, outcome: outcome.into() };
+        let open = || {
+            let mut mind = with_specs();
+            committed(admit(&mut mind, vec![
+                D::Ruling(ruling("R1")),
+                follow_up("FU", r(K::CutSpec, &id("cut_spec", "cut-1.r1"))),
+                research("p", "a", "One fact."),
+                research("p", "b", "A later fact."),
+                idea("p", "i1", "One way."),
+                idea("p", "i2", "Another way."),
+                question_n(1),
+                run("w", &[spec_ref("1")]),
+            ]));
+            mind
+        };
+        let note = || r(K::Research, &research_key("p", "a"));
+        let way = || r(K::Idea, &idea_key("p", "i1"));
+        let spec = || r(K::CutSpec, &id("cut_spec", "cut-1.r1"));
+        let ruling_ref = || r(K::Ruling, &id("ruling", "R1"));
+        for outcome in [superseded(&[r(K::Research, &research_key("p", "b"))]), recorded_outcome(), withdrawn()] {
+            committed(admit(&mut open(), vec![resolution(note(), outcome)]));
+        }
+        for outcome in [
+            ResolutionOutcome::Deferred { to: spec() },
+            ResolutionOutcome::Deferred { to: ruling_ref() },
+            ResolutionOutcome::Deferred { to: r(K::Question, &id("question", "Q1")) },
+            ResolutionOutcome::Deferred { to: r(K::FollowUp, &id("follow_up", "FU")) },
+            superseded(&[r(K::Idea, &idea_key("p", "i2"))]),
+            recorded_outcome(),
+            withdrawn(),
+        ] {
+            committed(admit(&mut open(), vec![resolution(way(), outcome)]));
+        }
+        let refused_note = [
+            (ResolutionOutcome::Deferred { to: spec() }, "Deferred"),
+            (superseded(&[r(K::Idea, &idea_key("p", "i2"))]), "Superseded"),
+            (ResolutionOutcome::Answered { by: ruling_ref() }, "Answered"),
+            (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
+        ];
+        for (outcome, name) in refused_note {
+            assert_eq!(refusal(admit(&mut open(), vec![resolution(note(), outcome)])), incompatible(K::Research, name), "{name}");
+        }
+        let held_run = || r(K::Run, &run_key("w"));
+        let refused_idea = [
+            (ResolutionOutcome::Answered { by: ruling_ref() }, "Answered"),
+            (superseded(&[spec()]), "Superseded"),
+            (ResolutionOutcome::Deferred { to: held_run() }, "Deferred"),
+            (ResolutionOutcome::Deferred { to: r(K::Research, &research_key("p", "b")) }, "Deferred"),
+            (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
+        ];
+        for (outcome, name) in refused_idea {
+            assert_eq!(refusal(admit(&mut open(), vec![resolution(way(), outcome)])), incompatible(K::Idea, name), "{name}");
+        }
+    }
+
+    fn recorded_outcome() -> ResolutionOutcome {
+        ResolutionOutcome::Recorded { reason: "why".into() }
+    }
+
+    /// A rejected option lands with its Recorded resolution in one batch, and an idea that
+    /// serves nothing and rests on nothing is admitted.
+    #[test]
+    fn a_rejected_option_lands_with_its_resolution_in_one_batch() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![
+            idea("p", "no", "A road not taken."),
+            resolution(r(K::Idea, &idea_key("p", "no")), recorded_outcome()),
+        ]));
+        assert!(!docs_of(&mind).in_force(K::Idea, &idea_key("p", "no")));
+    }
+
+    /// Research supersedes across campaigns (Lineage::Global); the
+    /// note stays open until its closure lands.
+    #[test]
+    fn a_later_pass_in_another_campaign_supersedes_research() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![research("p", "a", "Old fact.")]));
+        let mut batch = rival_revision(1);
+        let D::Research(mut later) = research("q", "a", "New fact.") else { panic!("research") };
+        later.campaign = RIVAL.into();
+        batch.push(D::Research(later));
+        batch.push(resolution(
+            r(K::Research, &research_key("p", "a")),
+            superseded(&[r(K::Research, &format!("{RIVAL}:research:q.a"))]),
+        ));
+        committed(admit(&mut mind, batch));
+        assert!(!docs_of(&mind).in_force(K::Research, &research_key("p", "a")));
+        assert!(docs_of(&mind).in_force(K::Research, &format!("{RIVAL}:research:q.a")));
+    }
+
+    /// A withdrawn closure reopens the note: Recorded closes it, withdrawing that record puts it back in force.
+    #[test]
+    fn withdrawing_a_notes_resolution_reopens_it() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![research("p", "a", "A fact."), idea("p", "i", "A way.")]));
+        for (kind, key) in [(K::Research, research_key("p", "a")), (K::Idea, idea_key("p", "i"))] {
+            let (_, landed) = committed(admit(&mut mind, vec![resolution(r(kind, &key), recorded_outcome())]));
+            assert!(!docs_of(&mind).in_force(kind, &key), "{kind:?} is closed");
+            let closure = landed.into_iter().find(|write| write.kind == K::Resolution).expect("the resolution landed");
+            committed(admit(&mut mind, vec![resolution(r(K::Resolution, &closure.id.0), withdrawn())]));
+            assert!(docs_of(&mind).in_force(kind, &key), "{kind:?} is open again");
+        }
+    }
+
+    /// A question may be raised in a research note, and only in one the mind holds.
+    #[test]
+    fn question_raised_in_a_research_note() {
+        let mut mind = seeded();
+        let D::Question(mut raised) = question("Q1", &["A", "B"], "A") else { panic!("question") };
+        raised.raised_in = Some(r(K::Research, &research_key("p", "a")));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Question(raised.clone())])),
+            MindRefusal::MissingReference { kind: K::Research, id: research_key("p", "a") }
+        );
+        committed(admit(&mut mind, vec![research("p", "a", "A fact.")]));
+        committed(admit(&mut mind, vec![D::Question(raised)]));
+        assert!(docs_of(&mind).in_force(K::Question, &id("question", "Q1")));
+    }
+
+    /// Every referent of a research note and an idea must be held; a pass.label beyond the key's
+    /// local bound is refused whole.
+    #[test]
+    fn research_and_idea_name_held_referents_and_keep_their_key_in_bound() {
+        let mut mind = with_specs();
+        let missing = id("question", "Q404");
+        let D::Research(mut serving) = research("p", "a", "A fact.") else { panic!("research") };
+        serving.serves = vec![r(K::Question, &missing)];
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Research(serving)])),
+            MindRefusal::MissingReference { kind: K::Question, id: missing.clone() }
+        );
+        let D::Idea(mut resting) = idea("p", "i", "A way.") else { panic!("idea") };
+        resting.rests_on = vec![r(K::Research, &research_key("p", "gone"))];
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Idea(resting)])),
+            MindRefusal::MissingReference { kind: K::Research, id: research_key("p", "gone") }
+        );
+        let D::Research(mut document) = research("p", "a", "A fact.") else { panic!("research") };
+        document.sources = vec![eureka_pipeline::ResearchSource::Document { reference: r(K::Question, &missing) }];
+        // A Document source is held to its referent, as an edge.
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Research(document)])),
+            MindRefusal::MissingReference { kind: K::Question, id: missing }
+        );
+        let long = "x".repeat(40);
+        assert!(matches!(
+            refusal(admit(&mut mind, vec![research(&long, &"y".repeat(30), "Too long a key.")])),
+            MindRefusal::Document(_)
+        ));
+        assert!(docs_of(&mind).find(K::Research, &research_key("p", "a")).is_none(), "a refused batch commits nothing");
+        committed(admit(&mut mind, vec![idea("p", "i", "Rests on nothing."), research("p", "a", "A fact.")]));
+        let D::Idea(mut resting) = idea("p", "j", "Rests on a note.") else { panic!("idea") };
+        resting.rests_on = vec![r(K::Research, &research_key("p", "a"))];
+        resting.toward = vec![r(K::Idea, &idea_key("p", "i"))];
+        committed(admit(&mut mind, vec![D::Idea(resting)]));
     }
 
     /// A run ends: Recorded or Withdrawn, and no other outcome.

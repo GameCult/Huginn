@@ -1,0 +1,294 @@
+{
+  "$defs": {
+    "Date": {
+      "description": "A calendar date, `YYYY-MM-DD`.",
+      "maxLength": 10,
+      "type": "string"
+    },
+    "DocRef": {
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/Sha"
+        },
+        "end_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "$ref": "#/$defs/Short"
+        },
+        "start_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "start_line",
+        "end_line",
+        "commit"
+      ],
+      "type": "object"
+    },
+    "Evidence": {
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/EvidenceKind"
+        },
+        "locator": {
+          "$ref": "#/$defs/Line"
+        },
+        "result": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "kind",
+        "locator",
+        "result"
+      ],
+      "type": "object"
+    },
+    "EvidenceKind": {
+      "enum": [
+        "Command",
+        "Test",
+        "Mutation",
+        "Probe",
+        "SourceRead",
+        "Capture"
+      ],
+      "type": "string"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "OrgRepo": {
+      "description": "A GitHub repository as `Org/Repo`, at most 140 UTF-8 bytes (39 + 1 +\n100). The owner is 1 to 39 `[A-Za-z0-9-]` bytes with no leading or\ntrailing hyphen; the repo is 1 to 100 `[A-Za-z0-9._-]` bytes, is never\n`.` or `..`, and does not end in `.git`, ASCII-case-insensitively.\nIdentity is case-insensitive: `GameCult/Epiphany` and `gamecult/epiphany`\nare the same repository.",
+      "maxLength": 140,
+      "type": "string"
+    },
+    "Para": {
+      "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
+      "maxLength": 4000,
+      "type": "string"
+    },
+    "PipelineKind": {
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff",
+        "Run",
+        "Pulse",
+        "Memory",
+        "Research",
+        "Idea"
+      ],
+      "type": "string"
+    },
+    "PipelineRef": {
+      "description": "A reference to another document. The id is parsed as a full pipeline id of\nthe declared `kind`, so the kind and the id's kind segment cannot disagree.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ResearchSource": {
+      "description": "Where a research claim comes from. A `Repo` pin and a `Web` page are\noutside the document set; an `Observed` result reuses a finding's evidence;\na `Document` is the one source that is a citation edge.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A pinned file range in a repo.",
+          "properties": {
+            "Repo": {
+              "properties": {
+                "at": {
+                  "$ref": "#/$defs/DocRef"
+                },
+                "repo": {
+                  "$ref": "#/$defs/OrgRepo"
+                }
+              },
+              "required": [
+                "repo",
+                "at"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Repo"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A page read on the web: its address, the work it belongs to, and when.",
+          "properties": {
+            "Web": {
+              "properties": {
+                "retrieved_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "url": {
+                  "$ref": "#/$defs/Line"
+                },
+                "work": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "url",
+                "work",
+                "retrieved_on"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Web"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A command, probe, read or capture the pass ran itself.",
+          "properties": {
+            "Observed": {
+              "properties": {
+                "evidence": {
+                  "$ref": "#/$defs/Evidence"
+                }
+              },
+              "required": [
+                "evidence"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Observed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Another document in the mind.",
+          "properties": {
+            "Document": {
+              "properties": {
+                "reference": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "reference"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Document"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Sha": {
+      "description": "A git commit id: 7-40 lowercase hex characters.",
+      "maxLength": 40,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.research.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One claim a pass found, with the sources it stands on, grouped by `pass`.\nWhat is so, never what to do: a recommendation is an idea. `inferred`\nmarks a claim read from its sources rather than seen in them. It stores\nno status: whether a note is current, superseded or wrong is its\nresolutions'. `serves` names the question, cut or campaign document it\nwas gathered for. The pass's method and what it did not search is its\nfirst note, labelled `scope`. Campaign-rooted:\n`<campaign>:research:<pass>.<label>`.",
+  "properties": {
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "claim": {
+      "$ref": "#/$defs/Line"
+    },
+    "detail": {
+      "$ref": "#/$defs/Para"
+    },
+    "inferred": {
+      "type": "boolean"
+    },
+    "label": {
+      "$ref": "#/$defs/Label"
+    },
+    "observed_on": {
+      "$ref": "#/$defs/Date"
+    },
+    "pass": {
+      "$ref": "#/$defs/Label"
+    },
+    "serves": {
+      "items": {
+        "$ref": "#/$defs/PipelineRef"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/ResearchSource"
+      },
+      "maxItems": 16,
+      "type": "array"
+    }
+  },
+  "required": [
+    "campaign",
+    "pass",
+    "label",
+    "claim",
+    "detail",
+    "inferred",
+    "sources",
+    "serves",
+    "observed_on"
+  ],
+  "title": "PipelineResearch",
+  "type": "object"
+}

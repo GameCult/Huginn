@@ -37,7 +37,9 @@
         "HandOff",
         "Run",
         "Pulse",
-        "Memory"
+        "Memory",
+        "Research",
+        "Idea"
       ],
       "type": "string"
     },
