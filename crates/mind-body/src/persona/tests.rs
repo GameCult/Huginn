@@ -2935,6 +2935,7 @@ fn self_run_claiming(rig: &Rig, label: &str, follow_up_label: &str) {
     rig.mind.committed(vec![follow_up(follow_up_label, &source)]);
     let id = rig.mind.ids(K::FollowUp).into_iter().find(|id| id.ends_with(follow_up_label)).expect("the follow-up");
     rig.mind.committed(vec![run(label, RunTurn::SelfRun, RunOperator::Mind, &[reference(K::FollowUp, &id)])]);
+    rig.mind.committed(vec![close(run_ref(label), recorded())]);
 }
 
 #[test]
