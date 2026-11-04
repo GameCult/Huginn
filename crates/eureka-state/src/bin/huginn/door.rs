@@ -59,3 +59,4 @@ mod tests {
         assert!(kind_of("two:segments").is_err());
         assert!(kind_of("campaign").is_err());
     }
+}
