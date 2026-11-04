@@ -2846,6 +2846,7 @@ fn a_wake_with_no_self_run_today_ends_with_the_ask() {
     let line = &told(&rig)[0];
     assert!(line.trim_end().ends_with(WAKE_ASK) && !line.contains(WAKE_QUESTION), "{line}");
     assert!(WAKE_ASK.contains("what does not exist yet in what you steward") && WAKE_ASK.contains("say why in `intent`"));
+    assert!(WAKE_ASK.ends_with("Put what you are going after in `intent` first. Silence in chat costs nothing."), "{WAKE_ASK}");
     assert!(!line.contains("Messages follow"), "{line}");
 }
 
@@ -2866,6 +2867,76 @@ fn a_self_run_that_failed_to_start_today_still_holds_the_brake() {
     rig.mind.committed(vec![run("self-failed", RunTurn::SelfRun, RunOperator::Mind, &[])]);
     rig.mind.committed(vec![close(run_ref("self-failed"), ResolutionOutcome::Withdrawn { reason: "the start failed".into() })]);
     assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION));
+}
+
+/// Hands her Self runs to the mind in order, each admitted after the one before, with the day each started on.
+fn self_runs_admitted_in_order(rig: &Rig, runs: &[(String, &str)]) {
+    for (label, day) in runs {
+        let mut started = run(label, RunTurn::SelfRun, RunOperator::Mind, &[]);
+        if let PipelineDocument::Run(held) = &mut started {
+            held.started_on = Date((*day).into());
+        }
+        rig.mind.committed(vec![started]);
+    }
+}
+
+#[test]
+fn more_self_runs_started_today_than_the_read_holds_still_hold_the_brake() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    let runs: Vec<(String, &str)> = (0..RECENT_RUNS + 3).map(|n| (format!("self-{n}"), "2026-10-09")).collect();
+    self_runs_admitted_in_order(&rig, &runs);
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION));
+}
+
+#[test]
+fn the_newest_self_run_holds_the_brake_beneath_a_full_read_of_older_days() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    let mut runs: Vec<(String, &str)> = (0..RECENT_RUNS + 2).map(|n| (format!("self-old-{n}"), "2026-10-08")).collect();
+    runs.push(("self-new".into(), "2026-10-09"));
+    self_runs_admitted_in_order(&rig, &runs);
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION), "an oldest-first read would see only the older days");
+}
+
+#[test]
+fn a_self_run_today_that_is_not_hers_does_not_hold_the_brake() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    rig.mind.committed(vec![run("self-operator", RunTurn::SelfRun, RunOperator::Operator, &[])]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_ASK));
+}
+
+/// Answers every read but the one for her Self runs.
+struct LosesSelfRuns<'a>(&'a TestMind);
+
+impl MindPort for LosesSelfRuns<'_> {
+    fn instance(&self) -> &Slug {
+        self.0.instance()
+    }
+
+    fn query(&self, selection: &cultnet_rs::Selection) -> Result<huginn_mind::PipelineSelectionPage> {
+        if selection.fields.iter().flatten().any(|field| field.index == "turn") {
+            bail!("the mind lost the read");
+        }
+        self.0.query(selection)
+    }
+
+    fn query_near(&self, selection: &cultnet_rs::Selection, text: &str, top_k: u32) -> Result<huginn_mind::PipelineSelectionPage> {
+        self.0.query_near(selection, text, top_k)
+    }
+
+    fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<AdmissionOutcome> {
+        self.0.admit(agent, session, documents)
+    }
+}
+
+#[test]
+fn a_mind_that_cannot_answer_the_started_today_read_holds_the_brake() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    let losing = LosesSelfRuns(&rig.mind);
+    assert_eq!(failure_of(rig.start_over(&losing, &config())), None);
     assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION));
 }
 

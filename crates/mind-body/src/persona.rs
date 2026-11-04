@@ -2169,8 +2169,9 @@ fn recent_runs(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-/// Whether she has started a Self run today (UTC), one that failed to start included. Her newest few Self runs are read;
-/// a day holds fewer than `RECENT_RUNS` of them.
+/// Whether she has started a Self run today (UTC), one that failed to start included. Her newest `RECENT_RUNS` Self runs
+/// are read, newest first, so a day holding more of them than that still shows today's first: the answer rests on the
+/// read's order, not on the day's count.
 fn started_self_today(mind: &dyn MindPort, instance: &Slug, now: DateTime<Utc>) -> Result<bool> {
     let turn = format!("{:?}", RunTurn::SelfRun);
     let operator = format!("{:?}", RunOperator::Mind);
@@ -2749,7 +2750,7 @@ const MESSAGES_HEADER: &str = "Messages come one per line, on this line or later
 const WAKE_QUESTION: &str = "No new messages. The leads above are some of what is relevant to your stewardship; `huginn` holds more. Explore your body and consult your Imagination for how it could be improved, then act on what you find: the work itself with your tools, a Self run, a settle, a memory, or a say. Put what you are going after in `intent` first. Silence in chat costs nothing. If what matters most waits on someone else's decision, name it and spend this turn on what you can still do toward it. Do not ask again someone you have already asked. When nothing more can be done, say so in `intent` and take the next thing.";
 /// Last text of a line with deliveries, after the messages.
 /// The wake of a day on which she has started no Self run: it asks for the work that does not exist yet.
-const WAKE_ASK: &str = "No new messages. The leads above are some of what is relevant to your stewardship; `huginn` holds more. Explore your body and consult your Imagination: what does not exist yet in what you steward, that someone outside would come to use and that you would be excited to build this week? Not a cleanup. Choose one and start it: a Self run with its brief at the idea's full size, not its smallest slice. If something above matters more, do that instead and say why in `intent`. Put what you are going after in `intent` first.";
+const WAKE_ASK: &str = "No new messages. The leads above are some of what is relevant to your stewardship; `huginn` holds more. Explore your body and consult your Imagination: what does not exist yet in what you steward, that someone outside would come to use and that you would be excited to build this week? Not a cleanup. Choose one and start it: a Self run with its brief at the idea's full size, not its smallest slice. If something above matters more, do that instead and say why in `intent`. Put what you are going after in `intent` first. Silence in chat costs nothing.";
 
 const TRAFFIC_QUESTION: &str = "Answer what needs you. The leads above are some of what is relevant to your stewardship; `huginn` holds more. Does anything here change what you are going after, or show you how your body could be improved? Put that in `intent` first.";
 
