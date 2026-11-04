@@ -115,7 +115,7 @@ pub enum Recipe {
         #[command(flatten)]
         page: Paging,
     },
-    /// One pass's research and ideas, whole, in key order.
+    /// One pass's research and ideas, whole, in no promised order (a pass spanning batches is grouped by batch).
     Pass {
         campaign: String,
         pass: String,
