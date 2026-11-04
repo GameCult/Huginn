@@ -631,15 +631,31 @@ fn memory_is_well_formed(memory: &PipelineMemory, at: &str) -> Result<(), Pipeli
     Ok(())
 }
 
-/// A research note states a claim and stands on at least one source: a claim
+/// A research note states a claim and stands on at least one source that
+/// names something: a Web source its address and work, an Observed one its
+/// locator and result, a Document one a note other than this one. A claim
 /// with no source is not research. An inferred note names what it inferred
-/// from in those sources.
+/// from in those sources. Two notes citing each other cannot be seen from one
+/// document; that refusal would need the image, so it is not made here.
 fn research_is_well_formed(research: &PipelineResearch, at: &str) -> Result<(), PipelineRefusal> {
     if research.claim.0.trim().is_empty() {
         return Err(format_error(&format!("{at}.claim"), "an empty claim"));
     }
     if research.sources.is_empty() {
         return Err(format_error(&format!("{at}.sources"), "a research note that names no source"));
+    }
+    let own_key = format!("{}:research:{}.{}", research.campaign.0, research.pass.0, research.label.0);
+    let blank = |text: &str| text.trim().is_empty();
+    for (index, source) in research.sources.iter().enumerate() {
+        let (field, empty) = match source {
+            ResearchSource::Web { url, .. } if blank(&url.0) => ("url", "a web source with no address"),
+            ResearchSource::Web { work, .. } if blank(&work.0) => ("work", "a web source naming no work"),
+            ResearchSource::Observed { evidence } if blank(&evidence.locator.0) => ("evidence.locator", "an observation naming nothing observed"),
+            ResearchSource::Observed { evidence } if blank(&evidence.result.0) => ("evidence.result", "an observation with no result"),
+            ResearchSource::Document { reference } if reference.kind == PipelineKind::Research && reference.id.0 == own_key => ("reference", "a note that is its own source"),
+            _ => continue,
+        };
+        return Err(format_error(&format!("{at}.sources[{index}].{field}"), empty));
     }
     Ok(())
 }
@@ -1995,6 +2011,17 @@ mod tests {
         bad(validated(&|research| research.sources = vec![]), "research.sources");
         bad(validated(&|research| research.claim = "  ".into()), "research.claim");
         bad(validated(&|research| research.claim = "".into()), "research.claim");
+        let source_bad = |source: ResearchSource, field: &str| {
+            bad(validated(&|research| research.sources = vec![source.clone()]), &format!("research.sources[0].{field}"));
+        };
+        source_bad(ResearchSource::Web { url: " ".into(), work: s("w"), retrieved_on: date() }, "url");
+        source_bad(ResearchSource::Web { url: "https://x.test/".into(), work: s(""), retrieved_on: date() }, "work");
+        source_bad(ResearchSource::Observed { evidence: Evidence { kind: EvidenceKind::Probe, locator: " ".into(), result: "found".into() } }, "evidence.locator");
+        source_bad(ResearchSource::Observed { evidence: Evidence { kind: EvidenceKind::Probe, locator: "ran it".into(), result: "".into() } }, "evidence.result");
+        let own = research_sample();
+        let cites = |label: &str| PipelineRef { kind: PipelineKind::Research, id: Short(format!("{}:research:{}.{label}", own.campaign.0, own.pass.0)) };
+        source_bad(ResearchSource::Document { reference: cites(&own.label.0) }, "reference");
+        assert_eq!(validated(&|research| research.sources = vec![ResearchSource::Document { reference: cites("another") }]), Ok(()));
         assert_eq!(validated(&|research| research.inferred = true), Ok(()));
         assert!(matches!(validated(&|research| research.sources = vec![research_sample().sources.remove(2); 17]), Err(PipelineRefusal::FieldBound { limit: 16, .. })));
         assert!(validated(&|research| research.sources = vec![ResearchSource::Web { url: Line("x".repeat(1001)), work: s("w"), retrieved_on: date() }]).is_err());
@@ -3611,7 +3638,7 @@ mod tests {
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
-            "the document schema lists exactly the sixteen kinds, by name"
+            "the document schema lists exactly the eighteen kinds, by name"
         );
 
         let refusal_schema = serde_json::to_value(schemars::schema_for!(PipelineRefusal))?;
