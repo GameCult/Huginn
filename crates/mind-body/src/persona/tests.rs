@@ -2931,6 +2931,7 @@ fn self_run_claiming(rig: &Rig, label: &str, follow_up_label: &str) {
     let source = run_ref("persona-source");
     if rig.mind.view(K::Run, &source.id.0).is_none() {
         rig.mind.committed(vec![run("persona-source", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+        rig.mind.committed(vec![close(source.clone(), recorded())]);
     }
     rig.mind.committed(vec![follow_up(follow_up_label, &source)]);
     let id = rig.mind.ids(K::FollowUp).into_iter().find(|id| id.ends_with(follow_up_label)).expect("the follow-up");
