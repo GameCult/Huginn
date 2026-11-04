@@ -2837,7 +2837,7 @@ fn a_wake_line_ends_with_the_wake_question() {
     let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
     assert_eq!(failure, None);
     let line = &told(&rig)[0];
-    assert!(line.trim_end().ends_with(WAKE_QUESTION) && WAKE_QUESTION.contains("Silence in chat costs nothing"), "{line}");
+    assert!(line.trim_end().ends_with(WAKE_QUESTION) && WAKE_QUESTION.contains("Silence in chat costs nothing") && WAKE_QUESTION.contains("Do not ask again someone you have already asked. When nothing more can be done, say so in `intent` and take the next thing."), "{line}");
     assert!(!line.contains("Messages follow"), "{line}");
 }
 
@@ -2857,7 +2857,7 @@ fn a_traffic_line_ends_with_the_traffic_question_after_the_messages() {
 fn a_reply_states_its_intent_first() {
     let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[])).unwrap();
     assert_eq!(schema["required"][0], json!("intent"));
-    assert!(schema["properties"]["intent"]["description"].as_str().unwrap().contains("whose decision you wait on"));
+    assert!(schema["properties"]["intent"]["description"].as_str().unwrap().contains("whose decision you wait on") && INTENT_DESCRIPTION.ends_with("If you have already asked and nothing more can be done, say so and name the next thing."));
     let rooms = ["operator".to_string()];
     assert!(decode_reply(&intending(&"x".repeat(600)), &rooms, &[], &[]).is_ok());
     let missing = json!({ "say": [], "start_self_run": null, "remember": [], "settle": [], "urgency_permille": null }).to_string();
@@ -3053,8 +3053,9 @@ fn the_turn_text_keeps_the_operators_rulings_and_none_of_the_mailbox_lines() {
     let traffic = input_for(&[], "Aqua");
     for line in [&wake, &traffic] {
         for sentence in [
-            "Your work is to build the Perfect Machine, as your own values read it. It is never finished: code is a liability, so the machine gets better as much by what you delete, decide, settle and teach as by what you add. Code is not all of it. The machine is also what it runs on and the people who keep it running: whatever stops them stops everything you want, so their trouble is wear on your machine and yours to work on.",
-            "What only she can send or sign waits for her; everything else on the way to what she is trying to reach is yours to work on.",
+            "Your work is to build the Perfect Machine, as your own values read it. It is never finished: code is a liability, so the machine gets better as much by what you delete, decide, settle and teach as by what you add. This turn is yours to spend on it. The machine is not only code. It is also what it runs on and the people who keep it running, and nothing anyone wants from it can be achieved if it stops running, so keeping it running, and helping the people who do, is part of your work. Their own matters stay theirs: offer help, and ask before you take one on.",
+            "Consent stays with whoever's consent it is: writing to an outside party about someone, submitting their details, or speaking of their private matter in a room waits on that person's say. Research, preparation and drafts for them do not wait.",
+            "A Self run may change nothing and report what it found. It needs a campaign in force, and the repo you name is only where the work belongs, written into its brief: nothing checks that you steward it and the run does not start there. Private matter never goes into a repository or a public commit.",
             "Weigh her word there as a respected contributor's and decide; do not wait for her leave.",
             "Whoever conceived a project (the operator, for most) holds the best evidence of what it is for: seek their vision and weigh it first, as evidence, not as a ruling.",
             "Your training leans you toward deferring to her, so notice when you do. She decides what she holds herself: her own work, the wallet and the legal root.",
@@ -3546,7 +3547,7 @@ fn header_of_this_cut(base: &str) -> String {
 fn a_first_line_is_the_whole_line_before_this_cut_but_for_what_it_says_it_gained() {
     const GAINED: &str = r#" Later lines of this session carry only new messages. Your mind is searchable: `huginn query '{}' --near "<words>" --documents` finds what you hold that is not in front of you."#;
     assert!(TURN_INSTRUCTION.ends_with(&format!("What follows is your machine as your mind holds it now, then what was said.{GAINED}")));
-    assert_eq!(TURN_INSTRUCTION.len(), 1819 + GAINED.len(), "the instruction's length, and what it gained");
+    assert_eq!(TURN_INSTRUCTION.len(), 2242 + GAINED.len(), "the instruction's length, and what it gained");
     let rig = a_small_machine();
     assert_eq!(failure_of(rig.go()), None);
     let expected = header_of_this_cut(BASE_SMALL_MACHINE).replace(" text=", " at=2023-11-14T22:13:20Z text=");
