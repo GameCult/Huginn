@@ -473,7 +473,7 @@ mod tests {
 
     /// Each role is declared by the one kind whose field carries it, and its
     /// targets are the kinds that field is typed to, "any" spelled as all
-    /// sixteen.
+    /// eighteen.
     #[test]
     fn each_kind_declares_the_roles_it_carries_and_their_targets() {
         let table: [(K, &[&str]); 18] = [

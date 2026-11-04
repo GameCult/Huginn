@@ -2573,6 +2573,8 @@ mod tests {
                 research("p", "b", "A later fact."),
                 idea("p", "i1", "One way."),
                 idea("p", "i2", "Another way."),
+                question_n(1),
+                run("w", &[spec_ref("1")]),
             ]));
             mind
         };
@@ -2586,6 +2588,7 @@ mod tests {
         for outcome in [
             ResolutionOutcome::Deferred { to: spec() },
             ResolutionOutcome::Deferred { to: ruling_ref() },
+            ResolutionOutcome::Deferred { to: r(K::Question, &id("question", "Q1")) },
             ResolutionOutcome::Deferred { to: r(K::FollowUp, &id("follow_up", "FU")) },
             superseded(&[r(K::Idea, &idea_key("p", "i2"))]),
             recorded_outcome(),
@@ -2602,11 +2605,12 @@ mod tests {
         for (outcome, name) in refused_note {
             assert_eq!(refusal(admit(&mut open(), vec![resolution(note(), outcome)])), incompatible(K::Research, name), "{name}");
         }
-        let run_ref = r(K::Research, &research_key("p", "b"));
+        let held_run = || r(K::Run, &run_key("w"));
         let refused_idea = [
             (ResolutionOutcome::Answered { by: ruling_ref() }, "Answered"),
             (superseded(&[spec()]), "Superseded"),
-            (ResolutionOutcome::Deferred { to: run_ref }, "Deferred"),
+            (ResolutionOutcome::Deferred { to: held_run() }, "Deferred"),
+            (ResolutionOutcome::Deferred { to: r(K::Research, &research_key("p", "b")) }, "Deferred"),
             (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
         ];
         for (outcome, name) in refused_idea {
@@ -2630,8 +2634,8 @@ mod tests {
         assert!(!docs_of(&mind).in_force(K::Idea, &idea_key("p", "no")));
     }
 
-    /// Research and ideas supersede across campaigns (Lineage::Global), and withdrawing the
-    /// resolution reopens the note.
+    /// Research supersedes across campaigns (Lineage::Global); the
+    /// note stays open until its closure lands.
     #[test]
     fn a_later_pass_in_another_campaign_supersedes_research() {
         let mut mind = seeded();
@@ -2647,6 +2651,35 @@ mod tests {
         committed(admit(&mut mind, batch));
         assert!(!docs_of(&mind).in_force(K::Research, &research_key("p", "a")));
         assert!(docs_of(&mind).in_force(K::Research, &format!("{RIVAL}:research:q.a")));
+    }
+
+    /// A withdrawn closure reopens the note: Recorded closes it, withdrawing that record puts it back in force.
+    #[test]
+    fn withdrawing_a_notes_resolution_reopens_it() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![research("p", "a", "A fact."), idea("p", "i", "A way.")]));
+        for (kind, key) in [(K::Research, research_key("p", "a")), (K::Idea, idea_key("p", "i"))] {
+            let (_, landed) = committed(admit(&mut mind, vec![resolution(r(kind, &key), recorded_outcome())]));
+            assert!(!docs_of(&mind).in_force(kind, &key), "{kind:?} is closed");
+            let closure = landed.into_iter().find(|write| write.kind == K::Resolution).expect("the resolution landed");
+            committed(admit(&mut mind, vec![resolution(r(K::Resolution, &closure.id.0), withdrawn())]));
+            assert!(docs_of(&mind).in_force(kind, &key), "{kind:?} is open again");
+        }
+    }
+
+    /// A question may be raised in a research note, and only in one the mind holds.
+    #[test]
+    fn question_raised_in_a_research_note() {
+        let mut mind = seeded();
+        let D::Question(mut raised) = question("Q1", &["A", "B"], "A") else { panic!("question") };
+        raised.raised_in = Some(r(K::Research, &research_key("p", "a")));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Question(raised.clone())])),
+            MindRefusal::MissingReference { kind: K::Research, id: research_key("p", "a") }
+        );
+        committed(admit(&mut mind, vec![research("p", "a", "A fact.")]));
+        committed(admit(&mut mind, vec![D::Question(raised)]));
+        assert!(docs_of(&mind).in_force(K::Question, &id("question", "Q1")));
     }
 
     /// Every referent of a research note and an idea must be held; a pass.label beyond the key's

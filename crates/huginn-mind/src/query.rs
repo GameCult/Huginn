@@ -1404,6 +1404,27 @@ mod tests {
         assert!(invalid("fields[0].values", "1.2")(&refused(&mind, &with(Selection::default(), any_of("cut", &["1.2"])))));
     }
 
+    /// The `pass` alias answers a pass's research and its ideas, and nothing of another pass.
+    #[test]
+    fn the_pass_alias_selects_a_passs_research_and_ideas() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![
+            research("alpha", "scope", "A fact."),
+            idea("alpha", "way", "A way."),
+            research("beta", "scope", "Another fact."),
+            idea("beta", "way", "Another way."),
+            question_n(1),
+        ]));
+        let in_pass = |pass: &str| {
+            let mut found = ids(&mind.query(&with(Selection::default(), any_of("pass", &[pass]))).unwrap());
+            found.sort();
+            found
+        };
+        assert_eq!(in_pass("alpha"), vec![id("idea", "alpha.way"), id("research", "alpha.scope")]);
+        assert_eq!(in_pass("beta"), vec![id("idea", "beta.way"), id("research", "beta.scope")]);
+        assert!(in_pass("gamma").is_empty(), "a pass nothing was admitted under matches nothing");
+    }
+
     #[test]
     fn enum_values_are_the_variant_names() {
         let mind = worked();
