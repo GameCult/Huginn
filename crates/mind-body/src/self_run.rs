@@ -158,7 +158,7 @@ pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota
 }
 
 /// The task section of the start message: one section per claim, in claim
-/// order. A claimed follow-up gives its id, campaign and `item` verbatim,
+/// order. A claimed follow-up gives its id, campaign, repo and `item` verbatim,
 /// because the brief lives in the claim and a run that cannot reach its mind
 /// would never see its job; a claimed cut spec is named as the task, to be read
 /// with `huginn view`; a claim the mind does not hold, or of another kind, is
@@ -175,8 +175,8 @@ fn task_section(mind: &dyn MindPort, claims: &[PipelineRef]) -> Result<String> {
             Some(PipelineDocument::FollowUp(follow_up)) => {
                 task.push_str(&format!("
 
-Task, claimed follow-up `{id}` (campaign `{}`):
-{}", follow_up.campaign.0, follow_up.item.0));
+Task, claimed follow-up `{id}` (campaign `{}`, repo `{}`):
+{}", follow_up.campaign.0, follow_up.repo.0, follow_up.item.0));
             }
             Some(PipelineDocument::CutSpec(spec)) => {
                 task.push_str(&format!("

@@ -1685,6 +1685,7 @@ fn a_brief_the_run_claims_is_in_the_task_once_and_not_again_under_also_open() {
     let ran = carry_with(&Seen::of(&mind), vec![Out(echo())], Some(0), false);
     let start = &ran.written()[0];
     assert_eq!(start.matches("claimed follow-up").count(), 1, "{start}");
+    assert!(start.contains(", repo `"), "the claimed task names the repo the work belongs to: {start}");
     assert!(start.contains("Do the claimed thing.") && !start.contains("Also open for you"), "{start}");
 }
 
