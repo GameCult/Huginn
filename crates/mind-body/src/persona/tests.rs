@@ -2901,6 +2901,106 @@ fn the_newest_self_run_holds_the_brake_beneath_a_full_read_of_older_days() {
     assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION), "an oldest-first read would see only the older days");
 }
 
+fn starts_a_self_run() -> String {
+    json!({ "intent": "Work it", "say": [], "start_self_run": { "brief": "Work", "repo": REPO, "campaign": CAMPAIGN, "for_item": null }, "remember": [], "settle": [], "urgency_permille": null }).to_string()
+}
+
+/// A rig whose first session starts a Self run, from a chat message or from a quiet wake, then a quiet wake that is told.
+fn wake_after_a_self_run_started_from(deliveries: Vec<ChatDelivery>) -> String {
+    let rig = Rig::new(deliveries, &[starts_a_self_run(), says(&[])]);
+    let Outcome::Served { self_run, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((failure, self_run.is_some()), (None, true));
+    assert_eq!(failure_of(rig.go()), None);
+    told(&rig).last().cloned().expect("a wake was told")
+}
+
+#[test]
+fn a_self_run_started_from_chat_does_not_hold_the_ask() {
+    let line = wake_after_a_self_run_started_from(vec![operator_says(1, "please start")]);
+    assert!(line.trim_end().ends_with(WAKE_ASK), "{line}");
+}
+
+#[test]
+fn a_self_run_started_from_a_quiet_wake_holds_the_ask() {
+    let line = wake_after_a_self_run_started_from(vec![]);
+    assert!(line.trim_end().ends_with(WAKE_QUESTION), "{line}");
+}
+
+/// A Self run of hers claiming a follow-up of the given label, both admitted.
+fn self_run_claiming(rig: &Rig, label: &str, follow_up_label: &str) {
+    let source = run_ref("persona-source");
+    if rig.mind.view(K::Run, &source.id.0).is_none() {
+        rig.mind.committed(vec![run("persona-source", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+        rig.mind.committed(vec![close(source.clone(), recorded())]);
+    }
+    rig.mind.committed(vec![follow_up(follow_up_label, &source)]);
+    let id = rig.mind.ids(K::FollowUp).into_iter().find(|id| id.ends_with(follow_up_label)).expect("the follow-up");
+    rig.mind.committed(vec![run(label, RunTurn::SelfRun, RunOperator::Mind, &[reference(K::FollowUp, &id)])]);
+    rig.mind.committed(vec![close(run_ref(label), recorded())]);
+}
+
+#[test]
+fn a_run_of_hers_beneath_chat_started_runs_holds_the_ask() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    self_run_claiming(&rig, "self-a-wake", "chat-mind-20261104T000000000Z-t1");
+    for n in 0..RECENT_RUNS + 2 {
+        self_run_claiming(&rig, &format!("self-b-chat-{n}"), &format!("chat-s{n}-{n}"));
+    }
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION), "an older wake-started run today still holds the ask");
+}
+
+fn chat_started_runs_today(rig: &Rig, count: u32) {
+    for n in 0..count {
+        self_run_claiming(rig, &format!("self-chat-{n:03}"), &format!("chat-s{n}-{n}"));
+    }
+}
+
+#[test]
+fn a_read_full_of_chat_started_runs_today_holds_the_ask_since_an_older_run_may_be_hers() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    chat_started_runs_today(&rig, SELF_RUNS_READ);
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION));
+}
+
+#[test]
+fn a_full_read_that_reaches_an_older_day_has_seen_every_run_today() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    self_runs_admitted_in_order(&rig, &[("self-0-old".into(), "2026-10-08")]);
+    chat_started_runs_today(&rig, SELF_RUNS_READ - 1);
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_ASK));
+}
+
+#[test]
+fn the_newest_runs_are_read_not_the_oldest() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    let old: Vec<(String, &str)> = (0..SELF_RUNS_READ + 5).map(|n| (format!("self-old-{n:03}"), "2026-10-08")).collect();
+    self_runs_admitted_in_order(&rig, &old);
+    self_runs_admitted_in_order(&rig, &[("self-new".into(), "2026-10-09")]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION));
+}
+
+#[test]
+fn only_chat_started_runs_today_leave_the_ask() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    self_run_claiming(&rig, "self-chat", "chat-s12-14");
+    assert_eq!(failure_of(rig.go()), None);
+    assert!(told(&rig)[0].trim_end().ends_with(WAKE_ASK));
+}
+
+#[test]
+fn a_claim_is_chat_started_only_when_the_batch_is_delivery_sequences() {
+    let claim = |id: &str| PipelineRef { kind: K::FollowUp, id: id.into() };
+    assert!(is_chat_started_claim(&claim("cm:follow_up:chat-s1-1")));
+    assert!(is_chat_started_claim(&claim("cm:follow_up:chat-s1650-1651")));
+    for other in ["cm:follow_up:chat-mind-20261104T1Z-t1", "cm:follow_up:chat-s-1", "cm:follow_up:chat-s1-", "cm:follow_up:chat-s1-x", "cm:follow_up:chat-s1", "cm:follow_up:brief-s1-1", ""] {
+        assert!(!is_chat_started_claim(&claim(other)), "{other}");
+    }
+}
+
 #[test]
 fn a_self_run_today_that_is_not_hers_does_not_hold_the_brake() {
     let rig = Rig::new(vec![], &[says(&[])]);
