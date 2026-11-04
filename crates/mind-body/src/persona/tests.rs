@@ -700,7 +700,7 @@ fn another_conversation_yields_at_idle_and_its_text_never_enters_the_public_proc
     assert_eq!(rig.lender.asked.borrow().len(), 3);
     let told: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
     assert!(told[0].contains("public-one") && !told[0].contains("secret-dm") && !told[0].contains("public-three"));
-    assert!(told[1].contains("secret-dm") && !told[1].contains("public"), "the second process's first line holds only the DM");
+    assert!(told[1].contains("secret-dm") && !told[1].contains("public-"), "the second process's first line holds only the DM");
     assert!(told[2].contains("public-three"));
     assert_eq!(*rig.chat.acked.borrow(), vec![1, 2, 3]);
 }
@@ -3621,7 +3621,7 @@ Tempo: not yet read. The swarm beat is the lower median of the votes cast: a Min
 Rooms you may speak in: swarm, usage, operator.
 People you may name in a memory's about: @op:chat, @libby:chat.
 
-No new messages. Where is your machine least perfect right now, by your values, and what will you do about it this turn? Put that in `intent` first, then do it: the work itself with your tools, a Self run, a settle, a memory, or a say. Silence in chat costs nothing. If what matters most waits on someone else, name it, spend this turn on what you can still do toward it, and only then on the next thing.
+No new messages. Where is your machine least perfect right now, by your values, and what will you do about it this turn? Put that in `intent` first, then do it: the work itself with your tools, a Self run, a settle, a memory, or a say. Silence in chat costs nothing. If what matters most waits on someone else's decision, name it and spend this turn on what you can still do toward it. Do not ask again someone you have already asked. When nothing more can be done, say so in `intent` and take the next thing.
 "###;
 
 /// Each echo delivers the next of `arriving` and lets a poll fall due while the turn runs, so each is told as its own line of one process.
