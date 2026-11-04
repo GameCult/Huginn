@@ -32,11 +32,17 @@ impl Refusal {
 /// A batch: a JSON array of `{kind, value}` documents, or one such object.
 pub fn documents(text: &str) -> Result<Vec<PipelineDocument>, Refusal> {
     let value = parse(text)?;
-    let (items, typed): (&[Value], Vec<PipelineDocument>) = match &value {
-        Value::Array(items) => (items.as_slice(), objects(items).and_then(|()| from_text(text, "documents"))?),
-        Value::Object(_) => (std::slice::from_ref(&value), vec![from_text(text, "documents[0]")?]),
+    let items: &[Value] = match &value {
+        Value::Array(items) => items,
+        Value::Object(_) => std::slice::from_ref(&value),
         _ => return Err(Refusal::invalid("the documents must be a JSON array of {kind, value} objects")),
     };
+    objects(items)?;
+    let typed = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| decode(item, &format!("documents[{index}]")))
+        .collect::<Result<Vec<PipelineDocument>, Refusal>>()?;
     let kept = reserialise(&typed, "documents")?;
     let mut lost = Vec::new();
     for (index, (given, held)) in items.iter().zip(&kept).enumerate() {
@@ -51,7 +57,7 @@ pub fn selection(text: &str) -> Result<Selection, Refusal> {
     if !value.is_object() {
         return Err(Refusal::invalid("selection must be a JSON object"));
     }
-    let typed: Selection = from_text(text, "selection")?;
+    let typed: Selection = decode(&value, "selection")?;
     let kept = reserialise(std::slice::from_ref(&typed), "selection")?;
     let mut lost = Vec::new();
     dropped(&value, &kept[0], "selection", &mut lost);
@@ -88,10 +94,32 @@ fn objects(items: &[Value]) -> Result<(), Refusal> {
     }
 }
 
-/// The typed value of the text, decoded from the text itself so the failure
-/// has a real line and column.
-fn from_text<T: DeserializeOwned>(text: &str, at: &str) -> Result<T, Refusal> {
-    serde_json::from_str(text).map_err(|error| Refusal::invalid(format!("{at} does not decode: {}", place(&error))))
+/// The typed value of an input, or the path of the field that does not fit and
+/// what is wrong with it. Serde's own messages quote the given value, so only
+/// the schema's words are kept: a field name, the allowed variants, the
+/// expected type.
+fn decode<T: DeserializeOwned>(input: &Value, at: &str) -> Result<T, Refusal> {
+    serde_path_to_error::deserialize(input).map_err(|error| {
+        let path = error.path().to_string();
+        let place = if path == "." { at.to_string() } else { format!("{at}.{path}") };
+        Refusal::invalid(format!("{place}: {}", schema_words(&error.into_inner().to_string())))
+    })
+}
+
+/// What a serde message says about the schema, without the value it was given.
+fn schema_words(message: &str) -> String {
+    if message.starts_with("missing field `") {
+        return message.to_string();
+    }
+    let expected = message.rfind(", expected ").map(|at| &message[at + ", expected ".len()..]);
+    match (message, expected) {
+        (m, Some(expected)) if m.starts_with("unknown variant") => format!("unknown variant, expected {expected}"),
+        (m, Some(expected)) if m.starts_with("invalid type") => format!("wrong type, expected {expected}"),
+        (m, Some(expected)) if m.starts_with("invalid value") || m.starts_with("invalid length") => {
+            format!("wrong value, expected {expected}")
+        }
+        _ => "a value the schema refuses".to_string(),
+    }
 }
 
 /// What the typed values hold, as the JSON items to compare with the input.

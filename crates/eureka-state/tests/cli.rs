@@ -30,6 +30,14 @@ use tempfile::TempDir;
 mod common;
 use common::*;
 
+/// A well-formed research note, as a document.
+fn research_json() -> Value {
+    json!({ "kind": "research", "value": {
+        "campaign": "eureka-state", "pass": "p", "label": "a", "claim": "A fact.", "detail": "",
+        "inferred": false, "sources": [{ "Observed": { "evidence": { "kind": "Test", "locator": "cargo test", "result": "ok" } } }],
+        "serves": [], "observed_on": "2026-11-04" } })
+}
+
 struct Run {
     code: i32,
     out: String,
@@ -413,7 +421,7 @@ fn a_falsy_unknown_value_is_still_a_loss() {
 fn a_document_that_does_not_decode_is_invalid_input() {
     let dir = tempfile::tempdir().unwrap();
     let cases = [
-        (json!([{ "kind": "nonsense", "value": {} }]), "documents does not decode"),
+        (json!([{ "kind": "nonsense", "value": {} }]), "documents[0]: unknown variant, expected"),
         (json!("text"), "JSON array"),
         (json!([[]]), "documents[0] must be a JSON object"),
         (json!([]), "1 to 64"),
@@ -444,19 +452,29 @@ fn a_document_that_does_not_decode_never_echoes_its_values() {
     let unknown_kind = json!({ "kind": "CANARY-KIND", "value": {} });
     let mut unknown_variant = serde_json::to_value(ruling(None)).unwrap();
     unknown_variant["value"]["authority"] = json!("CANARY-VARIANT");
-    for (n, document) in [string_for_number, long_string_for_list, unknown_kind, unknown_variant].into_iter().enumerate() {
-        let file = write(&dir, &format!("canary{n}.json"), &json!([document]));
+    let mut second_missing_claim = research_json();
+    second_missing_claim["value"].as_object_mut().unwrap().remove("claim");
+    let cases = [
+        (vec![string_for_number], "documents[0].value.attempt: wrong type, expected"),
+        (vec![long_string_for_list], "documents[0].value.repos: wrong type, expected"),
+        (vec![unknown_kind], "documents[0]: unknown variant, expected"),
+        (vec![unknown_variant], "documents[0].value.authority: unknown variant, expected"),
+        (vec![campaign_json(), second_missing_claim], "documents[1].value: missing field `claim`"),
+    ];
+    for (n, (documents, expected)) in cases.into_iter().enumerate() {
+        let file = write(&dir, &format!("canary{n}.json"), &json!(documents));
         let ran = at(closed_port(), &admit_args(&file), None);
         assert_eq!(ran.code, 2, "case {n}: {}", ran.err);
-        assert!(ran.err.starts_with("InvalidInput: documents does not decode: "), "case {n}: {}", ran.err);
-        assert!(ran.err.contains(" at line 1 column "), "case {n}: {}", ran.err);
+        assert!(ran.err.starts_with("InvalidInput: "), "case {n}: {}", ran.err);
+        assert!(ran.err.contains(expected), "case {n} wants {expected}: {}", ran.err);
+        assert!(!ran.err.contains(" at line "), "no position in JSON the client never saw: {}", ran.err);
         assert!(!ran.err.contains("CANARY") && !ran.out.contains("CANARY"), "case {n}: {}", ran.err);
-        assert!(ran.err.len() < 300, "stderr is bounded whatever the input: {} bytes", ran.err.len());
+        assert!(ran.err.len() < 600, "stderr is bounded whatever the input: {} bytes", ran.err.len());
     }
     let ran = at(closed_port(), &["query", r#"{"limit": "CANARY-LIMIT"}"#], None);
     assert_eq!(ran.code, 2);
-    assert!(ran.err.starts_with("InvalidInput: selection does not decode: "), "{}", ran.err);
-    assert!(!ran.err.contains("CANARY") && ran.err.len() < 300, "{}", ran.err);
+    assert!(ran.err.starts_with("InvalidInput: selection.limit: wrong type, expected"), "{}", ran.err);
+    assert!(!ran.err.contains("CANARY") && ran.err.len() < 600, "{}", ran.err);
     let ran = at(closed_port(), &admit_args("-"), Some(r#"[{"kind": "campaign", "value": CANARY-SYNTAX}]"#));
     assert_eq!(ran.code, 2);
     assert!(ran.err.starts_with("InvalidInput: not JSON: syntax at line 1 column "), "{}", ran.err);

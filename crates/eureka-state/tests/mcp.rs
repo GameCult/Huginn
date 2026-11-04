@@ -652,3 +652,40 @@ fn admit_refuses_keys_the_schema_does_not_know_and_stores_nothing() {
     assert!(!error, "{admitted}");
     assert!(admitted.get("Committed").is_some(), "{admitted}");
 }
+
+/// A document that does not decode is refused naming the path of the field to
+/// fix, with the batch index, and never a value of the input or a position in
+/// JSON the client did not send. Nothing is stored.
+#[test]
+fn admit_names_the_path_of_a_field_that_does_not_decode_and_never_a_value() {
+    let (root, daemon) = mind(vec![vec![stewardship()]]);
+    let server = serve(root, daemon);
+    let mut mcp = Mcp::at(INSTANCE, server.addr);
+    let research = json!({ "kind": "research", "value": {
+        "campaign": CAMPAIGN, "pass": "p", "label": "a", "claim": "A fact.", "detail": "",
+        "inferred": false, "sources": [{ "Observed": { "evidence": { "kind": "Test", "locator": "cargo test", "result": "ok" } } }],
+        "serves": [], "observed_on": "2026-11-04" } });
+    let mut missing_claim = research.clone();
+    missing_claim["value"].as_object_mut().unwrap().remove("claim");
+    let mut wrong_type = research.clone();
+    wrong_type["value"]["sources"][0]["Observed"]["evidence"]["locator"] = json!(["CANARY-TYPE"]);
+    let mut wrong_variant = research.clone();
+    wrong_variant["value"]["sources"][0]["Observed"]["evidence"]["kind"] = json!("CANARY-VARIANT");
+    let unknown_kind = json!({ "kind": "CANARY-KIND", "value": {} });
+    let cases = [
+        (missing_claim, "documents[1].value: missing field `claim`"),
+        (wrong_type, "documents[1].value.sources[0].Observed.evidence.locator: wrong type, expected"),
+        (wrong_variant, "documents[1].value.sources[0].Observed.evidence.kind: unknown variant, expected"),
+        (unknown_kind, "documents[1]: unknown variant, expected"),
+    ];
+    for (document, expected) in cases {
+        let (error, refused) = mcp.call("admit", faculty_args(vec![campaign_json(), document]));
+        assert!(error, "{refused}");
+        assert_eq!(refused["error"], json!("InvalidInput"), "{refused}");
+        let detail = refused["detail"].as_str().unwrap();
+        assert!(detail.contains(expected), "wants {expected}: {detail}");
+        assert!(!detail.contains(" at line ") && !detail.contains("CANARY"), "{detail}");
+    }
+    let (_, whoami) = mcp.call("whoami", json!({}));
+    assert_eq!(whoami["status"]["receipts"], json!(2), "nothing stored: {whoami}");
+}
