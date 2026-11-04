@@ -59,6 +59,8 @@ pub(crate) enum Alias {
     /// A memory's origin kind: `Room`, `Direct`, `Wake` or `SelfRun`. Named `memory_origin` because
     /// `origin` already selects a finding's origin.
     MemoryOrigin,
+    /// A research note's or an idea's `pass` label: a pass lists whole by root and pass.
+    Pass,
 }
 
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
@@ -75,7 +77,7 @@ const PRESENT: [&str; 1] = ["true"];
 pub(crate) const STATUS_ALIASES: [Alias; 2] = [Alias::InForce, Alias::Ran];
 
 impl Alias {
-    pub(crate) const ALL: [Alias; 19] = [
+    pub(crate) const ALL: [Alias; 20] = [
         Self::Root,
         Self::InForce,
         Self::Faculty,
@@ -95,6 +97,7 @@ impl Alias {
         Self::Sort,
         Self::About,
         Self::MemoryOrigin,
+        Self::Pass,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -118,6 +121,7 @@ impl Alias {
             Self::Sort => "sort",
             Self::About => "about",
             Self::MemoryOrigin => "memory_origin",
+            Self::Pass => "pass",
         }
     }
 
@@ -140,6 +144,7 @@ impl Alias {
             Self::Turn | Self::OperatedBy | Self::Ran => kind == K::Run,
             Self::Voted | Self::Urged => kind == K::Pulse,
             Self::Sort | Self::About | Self::MemoryOrigin => kind == K::Memory,
+            Self::Pass => matches!(kind, K::Research | K::Idea),
         }
     }
 
@@ -159,7 +164,7 @@ impl Alias {
             Self::Ran | Self::Voted | Self::Urged => Some(&PRESENT),
             Self::Sort => Some(MemorySort::NAMES),
             Self::MemoryOrigin => Some(&MEMORY_ORIGINS),
-            Self::Root | Self::Repo | Self::Cut | Self::About => None,
+            Self::Root | Self::Repo | Self::Cut | Self::About | Self::Pass => None,
         }
     }
 
@@ -169,7 +174,7 @@ impl Alias {
         match self {
             Self::Root => Slug(value.into()).validate_slug().is_ok(),
             Self::Repo => OrgRepo(value.into()).validate_org_repo().is_ok(),
-            Self::Cut => Label(value.into()).validate_label().is_ok(),
+            Self::Cut | Self::Pass => Label(value.into()).validate_label().is_ok(),
             Self::About => !value.is_empty() && value.len() <= 200,
             closed => closed.closed().is_some_and(|set| set.contains(&value)),
         }
@@ -239,7 +244,7 @@ impl SelectionRow {
                 D::FollowUp(follow_up) => vec![follow_up.repo.identity()],
                 D::Stewardship(stewardship) => vec![stewardship.repo.identity()],
                 D::HandOff(hand_off) => vec![hand_off.repo.identity()],
-                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Memory(_) => {
+                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => {
                     Vec::new()
                 }
             },
@@ -285,6 +290,8 @@ impl SelectionRow {
                     MemoryOrigin::SelfRun { .. } => "SelfRun",
                 }.to_string()]);
             }
+            D::Research(research) => put(Alias::Pass, vec![research.pass.0.clone()]),
+            D::Idea(idea) => put(Alias::Pass, vec![idea.pass.0.clone()]),
             _ => {}
         }
         Self { kind, key: key.to_string(), ordinal: view.admission.ordinal, values, refs, view }
@@ -322,7 +329,7 @@ impl Row for SelectionRow {
     }
 }
 
-/// The organ's closed lists: sixteen schemas, nineteen aliases, seventeen roles.
+/// The organ's closed lists: eighteen schemas, twenty aliases, twenty-one roles.
 /// A schema's name is its id, so the substrate's alias matching resolves
 /// nothing beyond exact ids.
 pub(crate) struct Vocabulary;
@@ -368,7 +375,7 @@ fn invalid(field: impl Into<String>, value: &str, message: impl Into<String>) ->
 /// because `OrgRepo` identity is case-insensitive.
 ///
 /// Refuses, naming the field the client sent: a `schemas` entry that is not
-/// one of the sixteen ids; a `keys` entry that is not a full id whose kind
+/// one of the eighteen ids; a `keys` entry that is not a full id whose kind
 /// segment reads and passes the leaf's ref grammar; an `any_of` value outside
 /// its alias's domain; and a `cites.target` whose key fails the ref grammar
 /// for its schema's kind (V24's rule, at this door). Whether the target
@@ -435,7 +442,7 @@ mod tests {
     /// refused at the substrate's door.
     #[test]
     fn each_kind_declares_exactly_its_aliases_and_none_is_numeric() {
-        let table: [(K, &[&str]); 16] = [
+        let table: [(K, &[&str]); 18] = [
             (K::Campaign, &["repo"]),
             (K::Target, &[]),
             (K::Question, &[]),
@@ -452,6 +459,8 @@ mod tests {
             (K::Run, &["turn", "operated_by", "ran"]),
             (K::Pulse, &["voted", "urged"]),
             (K::Memory, &["sort", "about", "memory_origin"]),
+            (K::Research, &["pass"]),
+            (K::Idea, &["pass"]),
         ];
         for (kind, extra) in table {
             let want = [&["root", "in_force", "faculty"][..], extra].concat();
@@ -467,7 +476,7 @@ mod tests {
     /// sixteen.
     #[test]
     fn each_kind_declares_the_roles_it_carries_and_their_targets() {
-        let table: [(K, &[&str]); 16] = [
+        let table: [(K, &[&str]); 18] = [
             (K::Campaign, &[]),
             (K::Target, &[]),
             (K::Question, &["raised_in"]),
@@ -484,13 +493,15 @@ mod tests {
             (K::Run, &["claims"]),
             (K::Pulse, &[]),
             (K::Memory, &["consolidates"]),
+            (K::Research, &["serves", "sources"]),
+            (K::Idea, &["rests_on", "toward"]),
         ];
         for (kind, roles) in table {
             assert_eq!(sorted(Vocabulary.declared_roles(kind.type_id())), strings(roles), "{kind:?}");
         }
         assert_eq!(Vocabulary.target_leaves("answers"), vec![K::Question.type_id().to_string()]);
         assert_eq!(Vocabulary.target_leaves("rulings"), vec![K::Ruling.type_id().to_string()]);
-        assert_eq!(Vocabulary.target_leaves("subject").len(), 16);
+        assert_eq!(Vocabulary.target_leaves("subject").len(), 18);
         assert_eq!(
             sorted(Vocabulary.target_leaves("claims")),
             sorted([K::CutSpec, K::Finding, K::FollowUp].iter().map(|kind| kind.type_id().to_string()).collect())

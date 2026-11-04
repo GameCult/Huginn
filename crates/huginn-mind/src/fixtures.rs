@@ -369,6 +369,36 @@ pub(crate) fn memory(label: &str, sort: MemorySort, text: &str, about: &[&str]) 
     })
 }
 
+/// One research note of pass `pass`: a claim standing on one observed source, serving nothing.
+pub(crate) fn research(pass: &str, label: &str, claim: &str) -> PipelineDocument {
+    PipelineDocument::Research(eureka_pipeline::PipelineResearch {
+        campaign: slug(CAMPAIGN),
+        pass: l(pass),
+        label: l(label),
+        claim: claim.into(),
+        detail: "".into(),
+        inferred: false,
+        sources: vec![eureka_pipeline::ResearchSource::Observed { evidence: evidence() }],
+        serves: vec![],
+        observed_on: date(),
+    })
+}
+
+/// One idea of pass `pass`, resting on nothing and made for no fork.
+pub(crate) fn idea(pass: &str, label: &str, text: &str) -> PipelineDocument {
+    PipelineDocument::Idea(eureka_pipeline::PipelineIdea {
+        campaign: slug(CAMPAIGN),
+        pass: l(pass),
+        label: l(label),
+        title: eureka_pipeline::Title(label.into()),
+        idea: text.into(),
+        tradeoffs: "".into(),
+        rests_on: vec![],
+        toward: vec![],
+        proposed_on: date(),
+    })
+}
+
 pub(crate) fn provenance(faculty: Faculty) -> PipelineProvenance {
     PipelineProvenance { faculty, agent: s("claude"), session: s("session-1"), tool: s("admit") }
 }

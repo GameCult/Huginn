@@ -85,6 +85,22 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
         D::Resolution(resolution) => lines.push(&resolution.rationale.0),
         D::HandOff(hand_off) => lines.push(&hand_off.reason.0),
         D::Memory(memory) => lines.push(&memory.text.0),
+        D::Research(research) => {
+            lines.push(&research.claim.0);
+            lines.push(&research.detail.0);
+            for source in &research.sources {
+                match source {
+                    eureka_pipeline::ResearchSource::Web { work, .. } => lines.push(&work.0),
+                    eureka_pipeline::ResearchSource::Observed { evidence } => lines.push(&evidence.result.0),
+                    eureka_pipeline::ResearchSource::Repo { .. } | eureka_pipeline::ResearchSource::Document { .. } => {}
+                }
+            }
+        }
+        D::Idea(idea) => {
+            lines.push(&idea.title.0);
+            lines.push(&idea.idea.0);
+            lines.push(&idea.tradeoffs.0);
+        }
         D::Instance(_) | D::Stewardship(_) | D::Run(_) | D::Pulse(_) => {}
     }
     lines.retain(|line| !line.is_empty());
@@ -203,6 +219,30 @@ mod tests {
         let (_, writes) = committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
         let hand_off_key = writes.iter().find(|write| write.kind == K::HandOff).unwrap().id.0.clone();
         (mind, hand_off_key)
+    }
+
+    /// Research is indexed by claim, detail, each Web source's work and each Observed result;
+    /// an idea by title, idea and tradeoffs. Neither moved the text version.
+    #[test]
+    fn index_text_of_research_and_idea() {
+        let D::Research(mut note) = research("p", "a", "The limit is 4096.") else { unreachable!() };
+        note.detail = "Read from the module.".into();
+        note.sources = vec![
+            eureka_pipeline::ResearchSource::Web { url: "https://example.org".into(), work: s("A paper"), retrieved_on: date() },
+            eureka_pipeline::ResearchSource::Observed { evidence: evidence() },
+            eureka_pipeline::ResearchSource::Document { reference: r(K::Question, &id("question", "Q1")) },
+        ];
+        let observed = evidence().result.0;
+        assert_eq!(index_text(&D::Research(note)).unwrap(), format!("The limit is 4096.
+Read from the module.
+A paper
+{observed}"));
+        let D::Idea(mut way) = idea("p", "i", "Keep notes small.") else { unreachable!() };
+        way.tradeoffs = "More documents.".into();
+        assert_eq!(index_text(&D::Idea(way)).unwrap(), "i
+Keep notes small.
+More documents.");
+        assert_eq!(INDEX_TEXT_VERSION, 1);
     }
 
     fn texts(mind: &Mind<MemoryStore>) -> BTreeMap<String, String> {

@@ -189,6 +189,28 @@
       "path": "epiphany.pipeline.memory.v2.schema.json"
     },
     {
+      "schemaId": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.research.v2.schema.json",
+      "kind": "document_payload",
+      "wireContracts": [
+        "cultnet.schema.v0"
+      ],
+      "schemaVersion": "epiphany.pipeline.research.v2",
+      "documentType": "epiphany.pipeline.research.v2",
+      "title": "Epiphany Pipeline Research v2",
+      "path": "epiphany.pipeline.research.v2.schema.json"
+    },
+    {
+      "schemaId": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.idea.v2.schema.json",
+      "kind": "document_payload",
+      "wireContracts": [
+        "cultnet.schema.v0"
+      ],
+      "schemaVersion": "epiphany.pipeline.idea.v2",
+      "documentType": "epiphany.pipeline.idea.v2",
+      "title": "Epiphany Pipeline Idea v2",
+      "path": "epiphany.pipeline.idea.v2.schema.json"
+    },
+    {
       "schemaId": "huginn.mind_request.v1",
       "kind": "wire_message",
       "wireContracts": [

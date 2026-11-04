@@ -1021,7 +1021,7 @@
       ]
     },
     "PipelineDocument": {
-      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\nsixteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
+      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\neighteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
       "oneOf": [
         {
           "type": "object",
@@ -1278,6 +1278,38 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineResearch"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "idea"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineIdea"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -1435,6 +1467,58 @@
         "handed_on"
       ]
     },
+    "PipelineIdea": {
+      "description": "One thing that could be, including options rejected and ideas no cut\nuses yet. `rests_on` is what it stands on (a reader selects the ideas\nresting on a stale note with `cites`); `toward` is the fork, ruling or\nfollow-up it was made for, and empty is legal. It stores no status:\ntaken up is its Deferred resolution, rejected its Recorded one.\nCampaign-rooted: `<campaign>:idea:<pass>.<label>`.",
+      "type": "object",
+      "properties": {
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "idea": {
+          "$ref": "#/$defs/Para"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "pass": {
+          "$ref": "#/$defs/Label"
+        },
+        "proposed_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "rests_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 16
+        },
+        "title": {
+          "$ref": "#/$defs/Title"
+        },
+        "toward": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 8
+        },
+        "tradeoffs": {
+          "$ref": "#/$defs/Para"
+        }
+      },
+      "required": [
+        "campaign",
+        "pass",
+        "label",
+        "title",
+        "idea",
+        "tradeoffs",
+        "rests_on",
+        "toward",
+        "proposed_on"
+      ]
+    },
     "PipelineInstance": {
       "description": "A mind's identity document. A store is canonical to exactly one\ninstance, and this says which; identity lives in the state, not in a\npath.",
       "type": "object",
@@ -1477,7 +1561,9 @@
         "HandOff",
         "Run",
         "Pulse",
-        "Memory"
+        "Memory",
+        "Research",
+        "Idea"
       ]
     },
     "PipelineMemory": {
@@ -1674,6 +1760,58 @@
       "required": [
         "kind",
         "id"
+      ]
+    },
+    "PipelineResearch": {
+      "description": "One claim a pass found, with the sources it stands on, grouped by `pass`.\nWhat is so, never what to do: a recommendation is an idea. `inferred`\nmarks a claim read from its sources rather than seen in them. It stores\nno status: whether a note is current, superseded or wrong is its\nresolutions'. `serves` names the question, cut or campaign document it\nwas gathered for. The pass's method and what it did not search is its\nfirst note, labelled `scope`. Campaign-rooted:\n`<campaign>:research:<pass>.<label>`.",
+      "type": "object",
+      "properties": {
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "claim": {
+          "$ref": "#/$defs/Line"
+        },
+        "detail": {
+          "$ref": "#/$defs/Para"
+        },
+        "inferred": {
+          "type": "boolean"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "observed_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "pass": {
+          "$ref": "#/$defs/Label"
+        },
+        "serves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 8
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResearchSource"
+          },
+          "maxItems": 16
+        }
+      },
+      "required": [
+        "campaign",
+        "pass",
+        "label",
+        "claim",
+        "detail",
+        "inferred",
+        "sources",
+        "serves",
+        "observed_on"
       ]
     },
     "PipelineResolution": {
@@ -2007,6 +2145,107 @@
         "sha",
         "subject",
         "builds"
+      ]
+    },
+    "ResearchSource": {
+      "description": "Where a research claim comes from. A `Repo` pin and a `Web` page are\noutside the document set; an `Observed` result reuses a finding's evidence;\na `Document` is the one source that is a citation edge.",
+      "oneOf": [
+        {
+          "description": "A pinned file range in a repo.",
+          "type": "object",
+          "properties": {
+            "Repo": {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "$ref": "#/$defs/DocRef"
+                },
+                "repo": {
+                  "$ref": "#/$defs/OrgRepo"
+                }
+              },
+              "required": [
+                "repo",
+                "at"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Repo"
+          ]
+        },
+        {
+          "description": "A page read on the web: its address, the work it belongs to, and when.",
+          "type": "object",
+          "properties": {
+            "Web": {
+              "type": "object",
+              "properties": {
+                "retrieved_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "url": {
+                  "$ref": "#/$defs/Line"
+                },
+                "work": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "url",
+                "work",
+                "retrieved_on"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Web"
+          ]
+        },
+        {
+          "description": "A command, probe, read or capture the pass ran itself.",
+          "type": "object",
+          "properties": {
+            "Observed": {
+              "type": "object",
+              "properties": {
+                "evidence": {
+                  "$ref": "#/$defs/Evidence"
+                }
+              },
+              "required": [
+                "evidence"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Observed"
+          ]
+        },
+        {
+          "description": "Another document in the mind.",
+          "type": "object",
+          "properties": {
+            "Document": {
+              "type": "object",
+              "properties": {
+                "reference": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "reference"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Document"
+          ]
+        }
       ]
     },
     "ResolutionOutcome": {

@@ -148,6 +148,8 @@ pub enum PipelineFacts {
     Run { label: Label, operated_by: RunOperator, turn: RunTurn, started_on: Date, claims: Vec<PipelineRef> },
     Pulse { label: Label, tempo_vote_beat_s: Option<u32>, #[serde(default)] tempo_vote_withdrawn: bool, urgency_permille: Option<u16> },
     Memory { label: Label, sort: MemorySort, about: Vec<Short>, origin: MemoryOrigin, salience_permille: u16 },
+    Research { pass: Label, label: Label, claim: Line, inferred: bool, observed_on: Date },
+    Idea { pass: Label, label: Label, title: Title, proposed_on: Date },
 }
 
 impl PipelineFacts {
@@ -258,6 +260,19 @@ impl PipelineFacts {
                 about: value.about.clone(),
                 origin: value.origin.clone(),
                 salience_permille: value.salience_permille,
+            },
+            D::Research(value) => Self::Research {
+                pass: value.pass.clone(),
+                label: value.label.clone(),
+                claim: value.claim.clone(),
+                inferred: value.inferred,
+                observed_on: value.observed_on.clone(),
+            },
+            D::Idea(value) => Self::Idea {
+                pass: value.pass.clone(),
+                label: value.label.clone(),
+                title: value.title.clone(),
+                proposed_on: value.proposed_on.clone(),
             },
         }
     }
@@ -1705,6 +1720,17 @@ mod tests {
         let D::Memory(mut consolidating) = memory("m2", MemorySort::Idea, "two", &[]) else { unreachable!() };
         consolidating.consolidates = vec![r(K::Memory, &older)];
         committed(admit(&mut mind, vec![D::Memory(consolidating)]));
+        let (note, way) = (id("research", "p.a"), id("idea", "p.i"));
+        let D::Research(mut note_document) = research("p", "a", "A fact.") else { unreachable!() };
+        note_document.serves = vec![r(K::Question, &q1)];
+        note_document.sources = vec![
+            eureka_pipeline::ResearchSource::Document { reference: r(K::Finding, &f1) },
+            eureka_pipeline::ResearchSource::Repo { repo: OrgRepo(REPO.into()), at: eureka_pipeline::DocRef { path: s("a.rs"), start_line: 1, end_line: 2, commit: sha() } },
+        ];
+        let D::Idea(mut way_document) = idea("p", "i", "A way.") else { unreachable!() };
+        way_document.rests_on = vec![r(K::Research, &note)];
+        way_document.toward = vec![r(K::Question, &q1)];
+        committed(admit(&mut mind, vec![D::Research(note_document), D::Idea(way_document)]));
 
         let (n1, f1_closed, f2_closed) = (
             id("resolution", "question.Q1.n1"),
@@ -1739,8 +1765,12 @@ mod tests {
             (CitationRole::Claims, &run_id, &spec_r2),
             (CitationRole::Claims, &run_id, &fu),
             (CitationRole::Consolidates, &newer, &older),
+            (CitationRole::Serves, &note, &q1),
+            (CitationRole::Sources, &note, &f1),
+            (CitationRole::RestsOn, &way, &note),
+            (CitationRole::Toward, &way, &q1),
         ];
-        assert_eq!(CitationRole::ALL.len(), 17);
+        assert_eq!(CitationRole::ALL.len(), 21);
         for role in CitationRole::ALL {
             let selection =
                 Selection { cited: Some(Incoming { role: role.name().into(), exists: true }), ..Selection::default() };

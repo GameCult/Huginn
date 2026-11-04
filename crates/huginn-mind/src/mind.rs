@@ -75,8 +75,8 @@ fn require_grammatical_slug(field: &str, declared: &Slug) -> Result<(), MindRefu
     })
 }
 
-/// A cache that knows the nineteen types a mind's store may hold: the leaf's
-/// sixteen through its registrar, the epoch record, the commit receipt and
+/// A cache that knows the twenty-one types a mind's store may hold: the leaf's
+/// eighteen through its registrar, the epoch record, the commit receipt and
 /// the persona entry. It is the cache every envelope is prepared against.
 pub(crate) fn schema_cache() -> Result<CultCache, MindRefusal> {
     let mut cache = CultCache::new();
@@ -128,7 +128,7 @@ fn fold(envelopes: &Envelopes, instance: &Slug) -> (Result<Image, MindRefusal>, 
 }
 
 /// One instance's mind: the declared instance, the store, the registry of
-/// the nineteen schemas, the store's envelopes as last pulled, and the image
+/// the twenty-one schemas, the store's envelopes as last pulled, and the image
 /// folded from them. The envelopes are the store's bytes and the image is a
 /// pure fold of the receipts among them: both advance with each commit and
 /// are rebuilt from the store on a lost swap, a store error and a restart.
@@ -212,7 +212,7 @@ impl<S: MindStore> Mind<S> {
 
     /// Fail-closed, in this order, nothing attached until every step passes:
     /// pull the raw envelopes; if anything is stored, exactly one epoch
-    /// record at the current epoch; every type is one of the nineteen; and
+    /// record at the current epoch; every type is one of the twenty-one; and
     /// exactly one `instance` document naming the declared instance; then
     /// register, attach and pull. The epoch gate runs first so a store
     /// written at a foreign epoch is refused as `ForeignEpoch`, never as
