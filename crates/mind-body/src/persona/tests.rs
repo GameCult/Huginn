@@ -3053,7 +3053,8 @@ fn the_turn_text_keeps_the_operators_rulings_and_none_of_the_mailbox_lines() {
     let traffic = input_for(&[], "Aqua");
     for line in [&wake, &traffic] {
         for sentence in [
-            "Your work is to build the Perfect Machine, as your own values read it. It is never finished: code is a liability and code is your only material",
+            "Your work is to build the Perfect Machine, as your own values read it. It is never finished: code is a liability, so the machine gets better as much by what you delete, decide, settle and teach as by what you add. Code is not all of it. The machine is also what it runs on and the people who keep it running: whatever stops them stops everything you want, so their trouble is wear on your machine and yours to work on.",
+            "What only she can send or sign waits for her; everything else on the way to what she is trying to reach is yours to work on.",
             "Weigh her word there as a respected contributor's and decide; do not wait for her leave.",
             "Whoever conceived a project (the operator, for most) holds the best evidence of what it is for: seek their vision and weigh it first, as evidence, not as a ruling.",
             "Your training leans you toward deferring to her, so notice when you do. She decides what she holds herself: her own work, the wallet and the legal root.",
@@ -3545,7 +3546,7 @@ fn header_of_this_cut(base: &str) -> String {
 fn a_first_line_is_the_whole_line_before_this_cut_but_for_what_it_says_it_gained() {
     const GAINED: &str = r#" Later lines of this session carry only new messages. Your mind is searchable: `huginn query '{}' --near "<words>" --documents` finds what you hold that is not in front of you."#;
     assert!(TURN_INSTRUCTION.ends_with(&format!("What follows is your machine as your mind holds it now, then what was said.{GAINED}")));
-    assert_eq!(TURN_INSTRUCTION.len(), 1391 + GAINED.len(), "the instruction's length at 62a4a7e, and what it gained");
+    assert_eq!(TURN_INSTRUCTION.len(), 1819 + GAINED.len(), "the instruction's length, and what it gained");
     let rig = a_small_machine();
     assert_eq!(failure_of(rig.go()), None);
     let expected = header_of_this_cut(BASE_SMALL_MACHINE).replace(" text=", " at=2023-11-14T22:13:20Z text=");
@@ -3619,7 +3620,7 @@ Tempo: not yet read. The swarm beat is the lower median of the votes cast: a Min
 Rooms you may speak in: swarm, usage, operator.
 People you may name in a memory's about: @op:chat, @libby:chat.
 
-No new messages. Where is your machine least perfect right now, by your values, and what will you do about it this turn? Put that in `intent` first, then do it: the work itself with your tools, a Self run, a settle, a memory, or a say. Silence in chat costs nothing. If what matters most waits on someone else's decision, name it and spend this turn on the next thing that does not.
+No new messages. Where is your machine least perfect right now, by your values, and what will you do about it this turn? Put that in `intent` first, then do it: the work itself with your tools, a Self run, a settle, a memory, or a say. Silence in chat costs nothing. If what matters most waits on someone else, name it, spend this turn on what you can still do toward it, and only then on the next thing.
 "###;
 
 /// Each echo delivers the next of `arriving` and lets a poll fall due while the turn runs, so each is told as its own line of one process.
