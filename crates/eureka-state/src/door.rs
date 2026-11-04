@@ -8,8 +8,6 @@
 //! Both consumers, the `huginn` CLI and the MCP server, admit through this
 //! door and no other.
 
-use std::fmt;
-
 use cultnet_rs::Selection;
 use huginn_mind::eureka_pipeline::PipelineDocument;
 use serde::Serialize;
@@ -28,13 +26,6 @@ pub enum Refusal {
 impl Refusal {
     fn invalid(detail: impl Into<String>) -> Self {
         Self::Invalid(detail.into())
-    }
-}
-
-impl fmt::Display for Refusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (Self::Invalid(detail) | Self::Internal(detail)) = self;
-        f.write_str(detail)
     }
 }
 
