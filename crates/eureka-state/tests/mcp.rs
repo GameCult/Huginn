@@ -607,3 +607,48 @@ fn admit_carries_the_leaf_key_refusal_with_its_field_and_value() {
     let (_, whoami) = mcp.call("whoami", json!({}));
     assert_eq!(whoami["status"]["receipts"], json!(2), "only the seed is committed: {whoami}");
 }
+
+/// A research note is the record the operator asked to lose nothing of. The
+/// MCP door is the strict one: keys the schema does not know are refused by
+/// path, as a typed `InvalidInput`, and nothing is stored; the same note
+/// without them is committed.
+#[test]
+fn admit_refuses_keys_the_schema_does_not_know_and_stores_nothing() {
+    use huginn_mind::eureka_pipeline::{Evidence, EvidenceKind, Label, PipelineResearch, ResearchSource};
+
+    let (root, daemon) = mind(vec![vec![stewardship()]]);
+    let server = serve(root, daemon);
+    let mut mcp = Mcp::at(INSTANCE, server.addr);
+    let note = PipelineDocument::Research(PipelineResearch {
+        campaign: slug(CAMPAIGN),
+        pass: Label("p".into()),
+        label: Label("a".into()),
+        claim: "A fact.".into(),
+        detail: "".into(),
+        inferred: false,
+        sources: vec![ResearchSource::Observed {
+            evidence: Evidence { kind: EvidenceKind::Test, locator: "cargo test".into(), result: "ok".into() },
+        }],
+        serves: vec![],
+        observed_on: Date("2026-11-04".into()),
+    });
+    let clean = serde_json::to_value(&note).unwrap();
+    let mut extra = clean.clone();
+    for key in ["recommendation", "status", "faculty"] {
+        extra["value"][key] = json!("CANARY-ONLY-IN-VALUES");
+    }
+    let (error, refused) = mcp.call("admit", faculty_args(vec![extra]));
+    assert!(error, "{refused}");
+    assert_eq!(refused["error"], json!("InvalidInput"), "{refused}");
+    let detail = refused["detail"].as_str().unwrap();
+    for key in ["recommendation", "status", "faculty"] {
+        assert!(detail.contains(&format!("documents[0].value.{key}")), "{detail}");
+    }
+    assert!(!detail.contains("CANARY"), "paths only, never values: {detail}");
+    let (_, whoami) = mcp.call("whoami", json!({}));
+    assert_eq!(whoami["status"]["receipts"], json!(2), "nothing stored: {whoami}");
+
+    let (error, admitted) = mcp.call("admit", faculty_args(vec![campaign_json(), clean]));
+    assert!(!error, "{admitted}");
+    assert!(admitted.get("Committed").is_some(), "{admitted}");
+}

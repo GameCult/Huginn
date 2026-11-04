@@ -8,6 +8,7 @@
 use std::fmt;
 
 use eureka_state::ClientError;
+use eureka_state::door::Refusal;
 
 #[derive(Debug)]
 pub enum Trouble {
@@ -74,6 +75,15 @@ impl From<ClientError> for Trouble {
             ClientError::Rejected { endpoint, code, detail } => Self::Rejected(format!("rudp://{endpoint}: {code}: {detail}")),
             ClientError::TooLarge { bytes, limit } => Self::TooLarge { bytes, limit },
             ClientError::Unencodable { detail } => Self::Unencodable(detail),
+        }
+    }
+}
+
+impl From<Refusal> for Trouble {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Invalid(detail) => Self::InvalidInput(detail),
+            Refusal::Internal(detail) => Self::Internal(detail),
         }
     }
 }

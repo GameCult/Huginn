@@ -30,6 +30,7 @@ use huginn_mind::eureka_pipeline::Slug;
 use huginn_mind::{HuginnMindRequest, HuginnMindResponse, MAX_DEFERRED_BODY_BYTES, PipelineProvenance};
 use serde_json::Value;
 
+pub mod door;
 pub mod hold;
 
 /// The correlation key of the one request a session carries.
