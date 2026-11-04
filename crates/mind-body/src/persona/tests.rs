@@ -2929,7 +2929,7 @@ fn a_self_run_started_from_a_quiet_wake_holds_the_ask() {
 /// A Self run of hers claiming a follow-up of the given label, both admitted.
 fn self_run_claiming(rig: &Rig, label: &str, follow_up_label: &str) {
     let source = run_ref("persona-source");
-    if rig.mind.view(K::Run, "persona-source").is_none() {
+    if rig.mind.view(K::Run, &source.id.0).is_none() {
         rig.mind.committed(vec![run("persona-source", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
     }
     rig.mind.committed(vec![follow_up(follow_up_label, &source)]);
