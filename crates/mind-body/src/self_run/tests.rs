@@ -1220,7 +1220,12 @@ fn the_start_message_carries_the_claimed_follow_ups_item_and_id_verbatim() {
     for needle in ["Fix the thing.\nThen report \u{e9}.", claim.id.0.as_str(), "Use the eureka skill."] {
         assert!(first.contains(needle), "{needle}: {first}");
     }
-    assert!(first.contains(&format!("(campaign `{}`)", follow_up_campaign())), "{first}");
+    assert!(first.contains(&format!("(campaign `{}`, repo `{}`)", follow_up_campaign(), follow_up_repo())), "{first}");
+}
+
+fn follow_up_repo() -> String {
+    let PipelineDocument::FollowUp(document) = follow_up("c", &spec_ref("x")) else { unreachable!() };
+    document.repo.0
 }
 
 fn follow_up_campaign() -> String {

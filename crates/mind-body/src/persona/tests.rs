@@ -3547,7 +3547,7 @@ fn header_of_this_cut(base: &str) -> String {
 fn a_first_line_is_the_whole_line_before_this_cut_but_for_what_it_says_it_gained() {
     const GAINED: &str = r#" Later lines of this session carry only new messages. Your mind is searchable: `huginn query '{}' --near "<words>" --documents` finds what you hold that is not in front of you."#;
     assert!(TURN_INSTRUCTION.ends_with(&format!("What follows is your machine as your mind holds it now, then what was said.{GAINED}")));
-    assert_eq!(TURN_INSTRUCTION.len(), 2242 + GAINED.len(), "the instruction's length, and what it gained");
+    assert_eq!(TURN_INSTRUCTION.len(), 2382 + GAINED.len(), "the instruction's length, and what it gained");
     let rig = a_small_machine();
     assert_eq!(failure_of(rig.go()), None);
     let expected = header_of_this_cut(BASE_SMALL_MACHINE).replace(" text=", " at=2023-11-14T22:13:20Z text=");
