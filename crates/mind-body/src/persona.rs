@@ -132,6 +132,8 @@ pub const ENV_DOCTRINE: &str = "MIND_PERSONA_DOCTRINE";
 pub const DOCTRINE_MAX_BYTES: usize = 96 * 1024;
 /// How many of her latest runs a turn's input lists.
 const RECENT_RUNS: u32 = 5;
+/// How many of her newest Self runs the started-today read takes: the query's page bound.
+const SELF_RUNS_READ: u32 = 200;
 /// The most bytes the responsibilities section of a turn's input carries (stewardships always whole).
 const GOALS_MAX_BYTES: usize = 6 * 1024;
 /// The room kept inside that bound for the rulings the shown items cite.
@@ -2169,17 +2171,39 @@ fn recent_runs(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-/// Whether she has started a Self run today (UTC), one that failed to start included. Her newest `RECENT_RUNS` Self runs
-/// are read, newest first, so a day holding more of them than that still shows today's first: the answer rests on the
-/// read's order, not on the day's count.
+/// Whether the Mind has started a Self run of her own today (UTC), one that failed to start included. A run that came from
+/// something said in chat does not count: it claims a follow-up `start_self_run` labelled by the batch of deliveries that
+/// prompted it (ruling `eureka-body:ruling:unasked-work-brake-ruled`). Her newest `SELF_RUNS_READ` Self runs are read, newest
+/// first, so the answer rests on the read's order; a read full of today's chat-started runs cannot show whether an older
+/// one is hers, so it answers yes and the wake question holds.
 fn started_self_today(mind: &dyn MindPort, instance: &Slug, now: DateTime<Utc>) -> Result<bool> {
     let turn = format!("{:?}", RunTurn::SelfRun);
     let operator = format!("{:?}", RunOperator::Mind);
     let runs = any_of(any_of(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]), "turn", &[&turn]), "operated_by", &[&operator]);
-    let selection = Selection { descending: true, limit: Some(RECENT_RUNS), ..runs };
+    let selection = Selection { descending: true, limit: Some(SELF_RUNS_READ), ..runs };
     let PipelinePageItems::Headers(runs) = mind.query(&selection)?.items else { bail!("the mind answered documents to a header selection") };
     let today = date(now);
-    Ok(runs.iter().any(|run| matches!(&run.facts, PipelineFacts::Run { started_on, .. } if *started_on == today)))
+    let full = runs.len() >= SELF_RUNS_READ as usize;
+    let mut reached_older_day = false;
+    for run in &runs {
+        let PipelineFacts::Run { started_on, claims, .. } = &run.facts else { continue };
+        if *started_on != today {
+            reached_older_day = true;
+            continue;
+        }
+        if !claims.iter().any(is_chat_started_claim) {
+            return Ok(true);
+        }
+    }
+    Ok(full && !reached_older_day)
+}
+
+/// Whether a claim is the follow-up of a Self run started from chat: `start_self_run` labels it `chat-` and the batch's
+/// `s<first>-<last>` delivery sequences. A wake has no deliveries, so its batch is named by the Persona run, never `s<digits>`.
+fn is_chat_started_claim(claim: &PipelineRef) -> bool {
+    let label = claim.id.0.rsplit(':').next().unwrap_or_default();
+    let Some(sequences) = label.strip_prefix("chat-s") else { return false };
+    matches!(sequences.split_once('-'), Some((first, last)) if !first.is_empty() && !last.is_empty() && first.bytes().chain(last.bytes()).all(|b| b.is_ascii_digit()))
 }
 
 /// A run's latest resolution, if it has one: its sequence, id and outcome. A run with none is open.
