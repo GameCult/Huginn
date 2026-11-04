@@ -2926,17 +2926,23 @@ fn a_self_run_started_from_a_quiet_wake_holds_the_ask() {
     assert!(line.trim_end().ends_with(WAKE_QUESTION), "{line}");
 }
 
-fn self_run_claiming(rig: &Rig, label: &str, claim: &str) {
-    let claims = [PipelineRef { kind: K::FollowUp, id: claim.into() }];
-    rig.mind.committed(vec![run(label, RunTurn::SelfRun, RunOperator::Mind, &claims)]);
+/// A Self run of hers claiming a follow-up of the given label, both admitted.
+fn self_run_claiming(rig: &Rig, label: &str, follow_up_label: &str) {
+    let source = run_ref("persona-source");
+    if rig.mind.view(K::Run, "persona-source").is_none() {
+        rig.mind.committed(vec![run("persona-source", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    }
+    rig.mind.committed(vec![follow_up(follow_up_label, &source)]);
+    let id = rig.mind.ids(K::FollowUp).into_iter().find(|id| id.ends_with(follow_up_label)).expect("the follow-up");
+    rig.mind.committed(vec![run(label, RunTurn::SelfRun, RunOperator::Mind, &[reference(K::FollowUp, &id)])]);
 }
 
 #[test]
 fn a_run_of_hers_beneath_chat_started_runs_holds_the_ask() {
     let rig = Rig::new(vec![], &[says(&[])]);
-    self_run_claiming(&rig, "self-a-wake", "cm:follow_up:chat-mind-20261104T000000000Z-t1");
+    self_run_claiming(&rig, "self-a-wake", "chat-mind-20261104T000000000Z-t1");
     for n in 0..RECENT_RUNS + 2 {
-        self_run_claiming(&rig, &format!("self-b-chat-{n}"), &format!("cm:follow_up:chat-s{n}-{n}"));
+        self_run_claiming(&rig, &format!("self-b-chat-{n}"), &format!("chat-s{n}-{n}"));
     }
     assert_eq!(failure_of(rig.go()), None);
     assert!(told(&rig)[0].trim_end().ends_with(WAKE_QUESTION), "an older wake-started run today still holds the ask");
@@ -2945,7 +2951,7 @@ fn a_run_of_hers_beneath_chat_started_runs_holds_the_ask() {
 #[test]
 fn only_chat_started_runs_today_leave_the_ask() {
     let rig = Rig::new(vec![], &[says(&[])]);
-    self_run_claiming(&rig, "self-chat", "cm:follow_up:chat-s12-14");
+    self_run_claiming(&rig, "self-chat", "chat-s12-14");
     assert_eq!(failure_of(rig.go()), None);
     assert!(told(&rig)[0].trim_end().ends_with(WAKE_ASK));
 }
