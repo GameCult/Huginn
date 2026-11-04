@@ -421,7 +421,7 @@ fn a_falsy_unknown_value_is_still_a_loss() {
 fn a_document_that_does_not_decode_is_invalid_input() {
     let dir = tempfile::tempdir().unwrap();
     let cases = [
-        (json!([{ "kind": "nonsense", "value": {} }]), "documents[0]: unknown variant, expected"),
+        (json!([{ "kind": "nonsense", "value": {} }]), "documents[0].kind: unknown variant, expected"),
         (json!("text"), "JSON array"),
         (json!([[]]), "documents[0] must be a JSON object"),
         (json!([]), "1 to 64"),
@@ -457,7 +457,7 @@ fn a_document_that_does_not_decode_never_echoes_its_values() {
     let cases = [
         (vec![string_for_number], "documents[0].value.attempt: wrong type, expected"),
         (vec![long_string_for_list], "documents[0].value.repos: wrong type, expected"),
-        (vec![unknown_kind], "documents[0]: unknown variant, expected"),
+        (vec![unknown_kind], "documents[0].kind: unknown variant, expected"),
         (vec![unknown_variant], "documents[0].value.authority: unknown variant, expected"),
         (vec![campaign_json(), second_missing_claim], "documents[1].value: missing field `claim`"),
     ];

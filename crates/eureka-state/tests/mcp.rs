@@ -676,7 +676,7 @@ fn admit_names_the_path_of_a_field_that_does_not_decode_and_never_a_value() {
         (missing_claim, "documents[1].value: missing field `claim`"),
         (wrong_type, "documents[1].value.sources[0].Observed.evidence.locator: wrong type, expected"),
         (wrong_variant, "documents[1].value.sources[0].Observed.evidence.kind: unknown variant, expected"),
-        (unknown_kind, "documents[1]: unknown variant, expected"),
+        (unknown_kind, "documents[1].kind: unknown variant, expected"),
     ];
     for (document, expected) in cases {
         let (error, refused) = mcp.call("admit", faculty_args(vec![campaign_json(), document]));
