@@ -177,5 +177,4 @@ mod tests {
         let input = json!({ "n": null, "s": "", "l": [], "o": {}, "zero": 0, "no": false });
         assert_eq!(paths(&input, &json!({})), vec!["d.no".to_string(), "d.zero".to_string()]);
     }
-
 }
