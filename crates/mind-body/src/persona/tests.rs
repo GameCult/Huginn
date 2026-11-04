@@ -2848,7 +2848,7 @@ fn a_traffic_line_ends_with_the_traffic_question_after_the_messages() {
     let messages: Vec<usize> = line.match_indices("\nmessage ").map(|(at, _)| at).collect();
     assert!(!messages.is_empty() && messages.iter().all(|at| header < *at && *at < question), "{line}");
     assert!(line.trim_end().ends_with(TRAFFIC_QUESTION), "{line}");
-    assert!(TRAFFIC_QUESTION.contains("does anything here change your move?"), "the traffic question asks whether anything changes her move");
+    assert!(TRAFFIC_QUESTION.contains("does anything here change what you are going after,"), "the traffic question asks whether anything changes her move");
     assert!(MESSAGES_HEADER.contains("only role=operator is the operator") && MESSAGES_HEADER.contains("only to_you=true names you"));
     assert!(!line.contains("No new messages"), "{line}");
 }
@@ -3599,7 +3599,7 @@ earlier room="swarm" sender="@op:chat" role=operator text="before"
 earlier room="swarm" sender="@eureka:chat" role=persona text="I said it"
 message room="swarm" sender="@libby:chat" role=member name="libby" text="status of the fork?"
 
-Answer what needs you. Then the question of every turn: where is your machine least perfect right now, by your values, and does anything here change your move? Put that in `intent` first.
+Answer what needs you. The leads above are some of what is relevant to your stewardship; `huginn` holds more. Does anything here change what you are going after, or show you how your body could be improved? Put that in `intent` first.
 "###;
 const BASE_BARE_WAKE: &str = r###"
 
@@ -3621,7 +3621,7 @@ Tempo: not yet read. The swarm beat is the lower median of the votes cast: a Min
 Rooms you may speak in: swarm, usage, operator.
 People you may name in a memory's about: @op:chat, @libby:chat.
 
-No new messages. Where is your machine least perfect right now, by your values, and what will you do about it this turn? Put that in `intent` first, then do it: the work itself with your tools, a Self run, a settle, a memory, or a say. Silence in chat costs nothing. If what matters most waits on someone else's decision, name it and spend this turn on what you can still do toward it. Do not ask again someone you have already asked. When nothing more can be done, say so in `intent` and take the next thing.
+No new messages. The leads above are some of what is relevant to your stewardship; `huginn` holds more. Explore your body and consult your Imagination for how it could be improved, then act on what you find: the work itself with your tools, a Self run (one can carry an Imagination pass and report without changing anything), a settle, a memory, or a say. Put what you are going after in `intent` first. Silence in chat costs nothing. If what matters most waits on someone else's decision, name it and spend this turn on what you can still do toward it. Do not ask again someone you have already asked. When nothing more can be done, say so in `intent` and take the next thing.
 "###;
 
 /// Each echo delivers the next of `arriving` and lets a poll fall due while the turn runs, so each is told as its own line of one process.
