@@ -2,7 +2,7 @@
 
 Serves `gamecult-chat:follow_up:chat-s732-733` (Meta, #swarm, 2026-11-01).
 Extends `prose-knowledge-target.md` §4. Written by Imagination (Self, run
-`mind-20261101T073859496Z`) against Huginn `55484c0`. Nothing here is built.
+`mind-20261101T073859496Z`) against Huginn `55484c0`. Nothing here is built. See Status for what changed after writing.
 
 ## What changed since §4
 
@@ -16,20 +16,20 @@ or search path.**
 
 ## Current mechanism (read, not guessed)
 
-- `sources::search` (sources/mod.rs:433) embeds ONE text, `Instruct:`-prefixed,
+- `sources::search` (sources/mod.rs:439) embeds ONE text, `Instruct:`-prefixed,
   and asks `SourceIndex::search_sources` for the nearest chunks. `SourceQuery`
-  (huginn-mind wire.rs:103) is `{text: Line, top_k, repo}`; `Line` is 1,000
+  (huginn-mind wire.rs:187) is `{text: Line, top_k, repo}`; `Line` is 1,000
   bytes, so a long brief cannot even be sent whole, and a clipped brief is one
   vector that averages its topics. That is the "long briefs retrieve poorly".
-- `Embedder::embed(&[String])` already takes a batch (index/mod.rs:208).
+- `Embedder::embed(&[String])` already takes a batch (index/mod.rs:209).
 - `SourcesMeta.corpus` is the constant `forge:GameCult`; cursors are
   `BTreeMap<repo, commit>` written whole by the job alone, advanced only after
   acknowledged upserts, dropped before a repo's first delete (sources/mod.rs:9-18).
 - A Persona turn's recall (`mind-body/src/recall.rs`) reads only her own mind
   and "reads no chat"; ruling `persona-memory-written-not-transcript` says what
   she must keep is written as memory, not recovered from a transcript. The
-  Persona call is tool-less (persona.rs:13), so retrieval has to arrive in her
-  input; she has no shell.
+  Persona call was tool-less when this was written and retrieval had to arrive
+  in her input; that premise no longer holds, see Status below.
 - Matrix: Synapse is the truth of events. Only the Bifrost mouth holds Matrix
   tokens; no Persona unit holds a credential. Rooms are plain (F2 recommends
   encrypted DMs only), DMs exist, and the Discord bridge is a later campaign.
@@ -110,3 +110,21 @@ Confidence: cut 1 and the owner decision, high. The window chunker size and
 k=60 are calibration, not design; RRF over a handful of lists is the
 established baseline and I did not survey learned fusion (it needs training
 data we lack).
+
+## Status (head-maintainer pass, 2026-11-05, Huginn `25199c9`)
+
+Checked against main on merge. Nothing in this map is built: no `texts` on
+`SourceQuery`, no chat code under `sources/`. The anchors above were corrected.
+What changed since the map was written:
+
+- Questions 1 and 2 are answered with the recommendations
+  (`gamecult-chat:ruling:chat-index-synapse-credential`, operator 2026-11-03,
+  "I take both recs."; `gamecult-chat:ruling:chat-index-room-scope`,
+  public-only). Question 3 (`chat-recall-vs-memory-ruling`) is still open.
+- **Cut 3's premise is stale.** A Persona now carries a live session under
+  bubblewrap with a shell and the web (`mind-body/src/persona.rs:53`, `--tools`;
+  rulings `persona-session-full-sandbox`, `live-mind-sessions`). She can run
+  `huginn sources` herself, so a pushed recall lane is no longer the only path.
+  Re-map cut 3 on that before it is specced: whether to push chat hits into her
+  input at all, and under which budget, is open again. Cuts 1 and 2 are
+  unaffected.
