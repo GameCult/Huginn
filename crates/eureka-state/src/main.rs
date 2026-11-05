@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cultnet_rs::Selection;
+use eureka_state::door::{self, Refusal};
 use eureka_state::{ClientError, HuginnClient};
 use huginn_mind::eureka_pipeline::{PipelineDocument, PipelineRef, Short, Slug};
 use huginn_mind::{
@@ -70,7 +71,9 @@ struct AdmitInput {
     /// sharing one mind stay tellable apart.
     session: Short,
     /// The documents to admit as one batch. The mind admits them whole or refuses them.
-    documents: Vec<PipelineDocument>,
+    /// Decoded by the text door, which refuses a key the schema does not know.
+    #[schemars(with = "Vec<PipelineDocument>")]
+    documents: Value,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -108,6 +111,8 @@ enum Trouble {
     Misconfigured(String),
     Client(ClientError),
     Internal(String),
+    /// Input the schema does not describe, refused by the text door before any call.
+    Invalid(String),
 }
 
 impl Trouble {
@@ -125,6 +130,7 @@ impl Trouble {
             }
             Self::Client(ClientError::Unencodable { detail }) => json!({ "error": "Unencodable", "detail": detail }),
             Self::Internal(detail) => json!({ "error": "Internal", "detail": detail }),
+            Self::Invalid(detail) => json!({ "error": "InvalidInput", "detail": detail }),
         }
     }
 }
@@ -260,6 +266,11 @@ impl EurekaState {
         description = "Admit one batch of pipeline documents into the mind, whole or not at all. Returns the outcome: committed with a receipt, already admitted, conflict, or a typed refusal. The instance is this server's configuration; do not pass one."
     )]
     async fn admit(&self, Parameters(input): Parameters<AdmitInput>) -> CallToolResult {
+        let documents = match door::documents(&input.documents.to_string()) {
+            Ok(documents) => documents,
+            Err(Refusal::Invalid(detail)) => return Self::replied(Err(Trouble::Invalid(detail))),
+            Err(Refusal::Internal(detail)) => return Self::replied(Err(Trouble::Internal(detail))),
+        };
         self.answer(move |instance| {
             HuginnMindRequest::Admit(PipelineAdmissionBatch {
                 instance,
@@ -269,7 +280,7 @@ impl EurekaState {
                     session: input.session,
                     tool: Short(TOOL.into()),
                 },
-                documents: input.documents,
+                documents,
             })
         })
         .await

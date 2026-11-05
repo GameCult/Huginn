@@ -1,111 +1,27 @@
-//! The Persona organ's model transport: ModelConnector's kit client.
-//!
-//! `KitConnector` is the `Connector` port over `model_connector::ConnectorClient`,
-//! the wire-v4 client of the connector daemon (CultNet operation frames,
-//! AES-GCM sealed, one request per connection). A turn is one tool-less
-//! `ProviderRequest` for the instance as caller, its output constrained to the
-//! turn's schema, and its answer the assistant text of a `Completed` result; a
-//! refusal, a failure or a stop other than the end of the turn is an error. The
-//! readout is the kit's usage readout (`gamecult.model.usage_readout.v1`): the
-//! subscription plan's own windows as the connector last saw them, asked as this
-//! client's own caller. The connector meters nothing in dollars.
-//!
-//! The connector reads its connection key as the file's text without the
-//! trailing line break; the same rule applies here (`key`). The endpoint is the
-//! connector's loopback TCP listener, `host:port` or `tcp://host:port`.
+//! The plan windows as one line for a Mind: the one rendering both organs put in front of their
+//! sessions, from the windows a credential lease granted (`lease_client`).
 
-use std::net::SocketAddr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use chrono::{DateTime, SecondsFormat, Utc};
+use model_connector::PlanQuota;
 
-use anyhow::{Result, anyhow, bail};
-use model_connector::{
-    ConnectorClient, InputItem, PlanQuota, ProviderRequest, StopReason, TransportDisposition, TransportEventPayload, TransportInvocation, TransportOutcome,
-    provider_request_sha256,
-};
-
-use crate::persona::{Connector, TurnRequest, UsageReadout};
-
-/// The largest frame either side of a connection may carry.
-const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
-/// How long a connection waits for the connector: a turn runs a model.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
-/// How long an invocation may wait to be admitted.
-const EXPIRES_IN_MS: u64 = 60_000;
-/// The longest answer one turn may ask for.
-pub const MAX_OUTPUT_TOKENS: u32 = 4096;
-
-/// The connection key as the connector reads it: the file's text without its
-/// trailing line break.
-pub fn key(key_file_text: &str) -> String {
-    key_file_text.trim_end_matches(['\r', '\n']).to_string()
+/// When a window resets: the UTC time alone. An instant is true when read again hours later; "in 4d 11h"
+/// or "already past" is not.
+fn resets(at_unix_ms: u64) -> String {
+    let at = i64::try_from(at_unix_ms).ok().and_then(DateTime::<Utc>::from_timestamp_millis).map_or_else(|| at_unix_ms.to_string(), |at| at.to_rfc3339_opts(SecondsFormat::Secs, true));
+    format!("resets at {at}")
 }
 
-/// The connector's address from its configured endpoint: `host:port` or
-/// `tcp://host:port`, an IP literal. A `rudp://` endpoint is refused: the
-/// connector speaks framed TCP.
-pub fn endpoint(text: &str) -> Result<SocketAddr> {
-    text.strip_prefix("tcp://").unwrap_or(text).parse::<SocketAddr>().map_err(|_| anyhow!("the connector endpoint is not <ip>:<port> or tcp://<ip>:<port>"))
-}
-
-/// `Connector` over the kit's client.
-pub struct KitConnector {
-    client: ConnectorClient,
-    model: String,
-    caller: String,
-}
-
-impl KitConnector {
-    /// `key_text` is the connection key file's text (`key` is applied here);
-    /// `caller` is the caller id the key belongs to: the asker of every call.
-    pub fn new(endpoint: SocketAddr, key_text: &str, model: impl Into<String>, caller: impl Into<String>) -> Result<Self> {
-        let client = ConnectorClient::new(endpoint, key(key_text), MAX_FRAME_BYTES, Some(RESPONSE_TIMEOUT)).map_err(|_| anyhow!("the connector client could not be configured"))?;
-        Ok(Self { client, model: model.into(), caller: caller.into() })
-    }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
-}
-
-impl Connector for KitConnector {
-    fn turn(&self, request: &TurnRequest) -> Result<String> {
-        let mut provider = ProviderRequest::new(request.request_id.as_str(), request.caller.as_str(), self.model.as_str(), request.instructions.as_str(), MAX_OUTPUT_TOKENS);
-        provider.input = vec![InputItem::UserText { text: request.input.clone() }];
-        provider.output_schema_json = Some(request.output_schema_json.clone());
-        // The caller has no provider-native form of its request: the native digest is the request's own.
-        let digest = provider_request_sha256(&provider).map_err(|_| anyhow!("the connector request does not digest"))?;
-        let invocation = TransportInvocation::new(request.caller.as_str(), now_ms() + EXPIRES_IN_MS, digest, provider)
-            .map_err(|_| anyhow!("the connector invocation is not valid"))?;
-        let result = self.client.execute(&invocation).map_err(|error| anyhow!("the connector call failed: {error}"))?;
-        match result.disposition {
-            TransportDisposition::Refused(reason) => bail!("the connector refused the call: {reason:?}"),
-            TransportDisposition::Transported { events, receipt } => {
-                match &receipt.outcome {
-                    TransportOutcome::Completed { stop_reason: StopReason::EndTurn, .. } => {}
-                    TransportOutcome::Completed { stop_reason, .. } => bail!("the connector stopped the turn early: {stop_reason:?}"),
-                    TransportOutcome::Failed { kind, .. } => bail!("the connector's provider failed: {kind:?}"),
-                }
-                let mut text = String::new();
-                for event in events {
-                    if let TransportEventPayload::TextDelta { text: piece } = event.payload {
-                        text.push_str(&piece);
-                    }
-                }
-                Ok(text)
-            }
-        }
-    }
-
-    fn usage_readout(&self) -> Result<UsageReadout> {
-        self.client.usage_readout(&self.caller).map_err(|error| anyhow!("the usage readout failed: {error}"))
-    }
+/// The minute a reading was taken, as a UTC time. An instant, not an age: the line stays true when
+/// it is read again hours later in a session that cannot refresh it.
+fn read_at(at_unix_ms: u64) -> String {
+    i64::try_from(at_unix_ms).ok().and_then(DateTime::<Utc>::from_timestamp_millis).map_or_else(|| at_unix_ms.to_string(), |at| at.format("%Y-%m-%dT%H:%MZ").to_string())
 }
 
 /// The plan windows as one line for a Mind: each window's percent used, its
-/// status, when it resets and how old the reading is. Rendered from the readout
+/// status, when it resets and the minute the reading was taken. Rendered from the readout
 /// and nothing else, so no number in it is ever a paraphrase; the guidance that
 /// follows it states the swarm's aim and that nothing enforces it.
-pub fn render_plan(windows: &[PlanQuota], now_ms: u64) -> String {
+pub fn render_plan(windows: &[PlanQuota], _now_ms: u64) -> String {
     let guidance = "The swarm aims to have used about 90% of the weekly allowance at reset; nothing enforces it; you and the other Minds set the tempo.";
     if windows.is_empty() {
         return format!("Plan usage: unobserved. {guidance}");
@@ -114,16 +30,48 @@ pub fn render_plan(windows: &[PlanQuota], now_ms: u64) -> String {
         .iter()
         .map(|plan| match plan.utilization_permille {
             Some(permille) => format!(
-                "{} {}.{}% {}, resets at unix ms {}, read {}s ago",
+                "{} {}.{}% {}, {}, read at {}",
                 plan.window,
                 permille / 10,
                 permille % 10,
                 plan.status,
-                plan.resets_at_unix_ms,
-                now_ms.saturating_sub(plan.observed_at_unix_ms) / 1000
+                resets(plan.resets_at_unix_ms),
+                read_at(plan.observed_at_unix_ms)
             ),
-            None => format!("{} expired, resets at unix ms {}", plan.window, plan.resets_at_unix_ms),
+            None => format!("{} expired, {}", plan.window, resets(plan.resets_at_unix_ms)),
         })
         .collect();
     format!("Plan usage: {}. {guidance}", rendered.join("; "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(permille: Option<u32>, resets_at_unix_ms: u64, observed_at_unix_ms: u64) -> PlanQuota {
+        PlanQuota { window: "five_hour".into(), utilization_permille: permille, resets_at_unix_ms, status: "allowed".into(), observed_at_unix_ms }
+    }
+
+    #[test]
+    fn a_window_reads_as_a_time_not_unix_milliseconds() {
+        let now = 1_793_307_000_000 - (4 * 86_400 + 11 * 3600 + 30 * 60) * 1000;
+        let line = render_plan(&[window(Some(423), 1_793_307_000_000, now - 385_639_000)], now);
+        assert!(line.starts_with("Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z, read at 2026-10-20T22:12Z. "), "{line}");
+        assert!(!line.contains("unix ms"), "{line}");
+    }
+
+    #[test]
+fn the_reset_is_an_instant_whatever_the_moment_of_rendering() {        let reset = 1_793_307_000_000;        let at = |now| render_plan(&[window(Some(10), reset, reset - 5000)], now);        let before = at(reset - 5000);        assert!(before.contains("resets at 2026-10-29T20:50:00Z, read at 2026-10-29T20:49Z"), "{before}");        for now in [reset - 12_000_000, reset, reset + 1000] {            assert_eq!(at(now), before, "the line does not depend on when it is rendered");        }        assert!(!before.contains("(in ") && !before.contains("already past"), "{before}");        assert_eq!(render_plan(&[window(None, reset, reset)], reset - 12_000_000).split(". ").next().unwrap(), "Plan usage: five_hour expired, resets at 2026-10-29T20:50:00Z");    }
+    #[test]
+    fn the_reading_is_dated_by_the_minute_it_was_taken_and_the_line_does_not_age() {
+        let reset = 1_793_307_000_000;
+        let taken = 1_793_306_999_000; // 20:49:59Z: the minute is cut, not rounded
+        let first = render_plan(&[window(Some(10), reset, taken)], taken);
+        assert!(first.contains(", read at 2026-10-29T20:49Z. "), "{first}");
+        let hours_later = render_plan(&[window(Some(10), reset, taken)], taken + 3 * 3_600_000);
+        assert!(hours_later.contains(", read at 2026-10-29T20:49Z. "), "{hours_later}");
+        assert!(!first.contains(" ago") && !hours_later.contains(" ago"), "{first} {hours_later}");
+        assert!(render_plan(&[window(Some(10), reset, 0)], reset).contains(", read at 1970-01-01T00:00Z. "));
+        assert!(render_plan(&[window(Some(10), reset, u64::MAX)], reset).contains(&format!(", read at {}. ", u64::MAX)), "an instant out of range is printed as the number it is");
+    }
 }

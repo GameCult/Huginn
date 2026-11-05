@@ -1,8 +1,11 @@
 //! The campaign progress view as named subcommands. Each recipe is exactly the
 //! selection `references/campaign-state.md` gives (Eureka 278b881, "Recipes"),
 //! built per call and never cached. Each one's `--help` prints its selection.
+//! The one exception is `blocked`, which asks what a question holds and so
+//! reads through `eureka_state::hold`, the decider the heartbeat's gate reads.
 
 use clap::{Args, Subcommand};
+use eureka_state::hold::BLOCKING;
 use huginn_mind::SemanticQuery;
 use huginn_mind::eureka_pipeline::{Line, PipelineKind};
 use serde_json::{Value, json};
@@ -14,8 +17,8 @@ use crate::trouble::Trouble;
 const GAP_HOME: &str = "eureka-substrate";
 /// How many neighbours `precedent` asks the index for.
 const PRECEDENT_TOP_K: u32 = 10;
-/// Severities that block a cut.
-const BLOCKING: [&str; 2] = ["Blocker", "High"];
+/// How many neighbours `known` asks the index for.
+const KNOWN_TOP_K: u32 = 10;
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct Paging {
@@ -66,7 +69,7 @@ pub enum Recipe {
         #[command(flatten)]
         page: Paging,
     },
-    /// Open questions raised in a spec: the spec waits on the operator.
+    /// Questions that hold a spec, answered-retire ones included: the spec waits on the operator.
     Blocked {
         spec_id: String,
         #[command(flatten)]
@@ -106,6 +109,26 @@ pub enum Recipe {
     },
     /// The substrate's known gaps.
     Gaps(Paging),
+    /// Research and ideas nearest some words, in every campaign, closed ones included.
+    Known {
+        text: String,
+        #[command(flatten)]
+        page: Paging,
+    },
+    /// One pass's research and ideas, whole, in no promised order (a pass spanning batches is grouped by batch).
+    Pass {
+        campaign: String,
+        pass: String,
+        #[command(flatten)]
+        page: Paging,
+    },
+    /// Ideas in force.
+    Ideas {
+        #[arg(required = true)]
+        campaigns: Vec<String>,
+        #[command(flatten)]
+        page: Paging,
+    },
 }
 
 /// What a recipe asks the mind: the selection, the semantic part when it has
@@ -125,7 +148,12 @@ impl Recipe {
             Self::Open { campaigns, page } => (open(&campaigns), None, page),
             Self::Findings { campaign, blocking, page } => (findings(&campaign, blocking), None, page),
             Self::Unreported { campaign, page } => (unreported(&campaign), None, page),
-            Self::Blocked { spec_id, page } => (blocked(&spec_id), None, page),
+            // Several selections, not one: `main` answers it through `eureka_state::hold`.
+            Self::Blocked { .. } => {
+                return Err(Trouble::Internal(
+                    "blocked is answered by the hold, not by one selection".into(),
+                ));
+            }
             Self::Unjudged { campaign, page } => (unjudged(&campaign), None, page),
             Self::History { id, page } => (history(door::kind_of(&id)?.type_id(), &id), None, page),
             Self::Cut { campaign, label, page } => (cut(&campaign, &label), None, page),
@@ -134,6 +162,9 @@ impl Recipe {
                 (precedent(&campaign), Some(SemanticQuery { text: Line(text), top_k: PRECEDENT_TOP_K }), page)
             }
             Self::Gaps(page) => (gaps(), None, page),
+            Self::Known { text, page } => (known(), Some(SemanticQuery { text: Line(text), top_k: KNOWN_TOP_K }), page),
+            Self::Pass { campaign, pass, page } => (pass_of(&campaign, &pass), None, page),
+            Self::Ideas { campaigns, page } => (ideas(&campaigns), None, page),
         };
         Ok(Ask { selection, semantic, page })
     }
@@ -198,14 +229,6 @@ fn unreported(campaign: &str) -> Value {
     })
 }
 
-fn blocked(spec_id: &str) -> Value {
-    json!({
-        "schemas": [schema(PipelineKind::Question)],
-        "fields": [in_force()],
-        "cites": { "target": { "schemaId": schema(PipelineKind::CutSpec), "recordKey": spec_id }, "role": "raised_in" },
-    })
-}
-
 fn unjudged(campaign: &str) -> Value {
     json!({
         "schemas": [schema(PipelineKind::CutReport)],
@@ -250,11 +273,38 @@ fn precedent(campaign: &str) -> Value {
     })
 }
 
+fn known() -> Value {
+    json!({ "schemas": [schema(PipelineKind::Research), schema(PipelineKind::Idea)] })
+}
+
+fn pass_of(campaign: &str, pass: &str) -> Value {
+    json!({
+        "schemas": [schema(PipelineKind::Research), schema(PipelineKind::Idea)],
+        "fields": [root(&[campaign.to_string()]), { "index": "pass", "op": "any_of", "values": [pass] }],
+    })
+}
+
+fn ideas(campaigns: &[String]) -> Value {
+    json!({ "schemas": [schema(PipelineKind::Idea)], "fields": [root(campaigns), in_force()] })
+}
+
 fn gaps() -> Value {
     json!({
         "schemas": [schema(PipelineKind::FollowUp)],
         "fields": [root(&[GAP_HOME.to_string()]), in_force()],
     })
+}
+
+/// `blocked` is not one selection: it reads the in-force questions and, for each,
+/// what it holds, by `eureka_state::hold`, the decider the heartbeat's gate reads.
+fn blocked_help() -> String {
+    let questions = json!({ "schemas": [schema(PipelineKind::Question)], "fields": [in_force()] });
+    format!(
+        "selection (first of several):
+{}
+A question holds the item it is raised in, or every claim of the run it is raised in;          one answered `retire` keeps holding the claims still in force. The recipe prints the questions that hold <id>.",
+        serde_json::to_string_pretty(&questions).unwrap_or_default()
+    )
 }
 
 /// Each recipe's `--help` addendum: its selection with placeholders in the
@@ -269,6 +319,8 @@ pub fn help() -> Vec<(&'static str, String)> {
         "{}\nsemantic: {{ \"text\": \"<text>\", \"top_k\": {PRECEDENT_TOP_K} }}",
         selection(precedent(&c()))
     );
+    let known_help = format!("{}
+semantic: {{ \"text\": \"<text>\", \"top_k\": {KNOWN_TOP_K} }}", selection(known()));
     vec![
         ("campaigns", selection(campaigns())),
         ("target", selection(target(&c()))),
@@ -276,12 +328,15 @@ pub fn help() -> Vec<(&'static str, String)> {
         ("open", selection(open(&[c()]))),
         ("findings", findings_help),
         ("unreported", selection(unreported(&c()))),
-        ("blocked", selection(blocked("<id>"))),
+        ("blocked", blocked_help()),
         ("unjudged", selection(unjudged(&c()))),
         ("history", selection(history("epiphany.pipeline.<kind>.v2", "<id>"))),
         ("cut", selection(cut(&c(), "<label>"))),
         ("ledger", selection(ledger(&c()))),
         ("precedent", precedent_help),
         ("gaps", selection(gaps())),
+        ("known", known_help),
+        ("pass", selection(pass_of(&c(), "<pass>"))),
+        ("ideas", selection(ideas(&[c()]))),
     ]
 }

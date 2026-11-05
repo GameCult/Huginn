@@ -10,9 +10,7 @@
 use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef};
 use sha2::{Digest, Sha256};
 
-use crate::docs::Docs;
 use crate::mind::Mind;
-use crate::query::AdmissionIndex;
 use crate::refusal::MindRefusal;
 use crate::rows::root_and_local;
 use crate::store::MindStore;
@@ -87,6 +85,22 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
         D::Resolution(resolution) => lines.push(&resolution.rationale.0),
         D::HandOff(hand_off) => lines.push(&hand_off.reason.0),
         D::Memory(memory) => lines.push(&memory.text.0),
+        D::Research(research) => {
+            lines.push(&research.claim.0);
+            lines.push(&research.detail.0);
+            for source in &research.sources {
+                match source {
+                    eureka_pipeline::ResearchSource::Web { work, .. } => lines.push(&work.0),
+                    eureka_pipeline::ResearchSource::Observed { evidence } => lines.push(&evidence.result.0),
+                    eureka_pipeline::ResearchSource::Repo { .. } | eureka_pipeline::ResearchSource::Document { .. } => {}
+                }
+            }
+        }
+        D::Idea(idea) => {
+            lines.push(&idea.title.0);
+            lines.push(&idea.idea.0);
+            lines.push(&idea.tradeoffs.0);
+        }
         D::Instance(_) | D::Stewardship(_) | D::Run(_) | D::Pulse(_) => {}
     }
     lines.retain(|line| !line.is_empty());
@@ -114,32 +128,31 @@ impl<S: MindStore> Mind<S> {
     /// document the mind does not hold is a refusal, not a silent omission: a
     /// caller names what a commit just landed.
     pub fn index_entries(&self, only: Option<&[PipelineRef]>) -> Result<Vec<IndexEntry>, MindRefusal> {
-        let documents: Vec<(PipelineKind, String, PipelineDocument)> = match only {
+        let image = self.image()?;
+        let held: Vec<(PipelineKind, &str, &PipelineDocument, u64)> = match only {
             Some(refs) => {
                 let mut held = Vec::with_capacity(refs.len());
                 for reference in refs {
                     reference.validate_ref()?;
-                    let document = self.get(reference.kind, &reference.id.0)?.ok_or_else(|| {
+                    let row = image.id_of(reference.kind, &reference.id.0).map(|id| image.row(id)).ok_or_else(|| {
                         MindRefusal::Unavailable { detail: format!("index: {} is not held", reference.id.0) }
                     })?;
-                    held.push((reference.kind, reference.id.0.clone(), document));
+                    held.push((reference.kind, row.key.as_str(), &row.view.document, row.ordinal));
                 }
                 held
             }
-            None => Docs::from_image(self.envelopes())?
-                .image
-                .into_iter()
-                .map(|held| (held.kind, held.key, held.document))
-                .collect(),
+            None => {
+                let mut held: Vec<_> = image.rows.iter().map(|row| (row.kind, row.key.as_str(), &row.view.document, row.ordinal)).collect();
+                held.sort_by(|left, right| (left.0.type_id(), left.1).cmp(&(right.0.type_id(), right.1)));
+                held
+            }
         };
-        let facts = AdmissionIndex::build(self)?;
         let mut entries = Vec::new();
-        for (kind, key, document) in documents {
-            let Some(text) = index_text(&document) else { continue };
-            let ordinal = facts.ordinal_of(kind, &key)?;
+        for (kind, key, document, ordinal) in held {
+            let Some(text) = index_text(document) else { continue };
             entries.push(IndexEntry {
-                root: root_and_local(&key).0.to_string(),
-                id: PipelineRef { kind, id: key.as_str().into() },
+                root: root_and_local(key).0.to_string(),
+                id: PipelineRef { kind, id: key.into() },
                 text_sha256: sha256_hex(&text),
                 text,
                 ordinal,
@@ -206,6 +219,30 @@ mod tests {
         let (_, writes) = committed(admit(&mut mind, vec![hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[])]));
         let hand_off_key = writes.iter().find(|write| write.kind == K::HandOff).unwrap().id.0.clone();
         (mind, hand_off_key)
+    }
+
+    /// Research is indexed by claim, detail, each Web source's work and each Observed result;
+    /// an idea by title, idea and tradeoffs. Neither moved the text version.
+    #[test]
+    fn index_text_of_research_and_idea() {
+        let D::Research(mut note) = research("p", "a", "The limit is 4096.") else { unreachable!() };
+        note.detail = "Read from the module.".into();
+        note.sources = vec![
+            eureka_pipeline::ResearchSource::Web { url: "https://example.org".into(), work: s("A paper"), retrieved_on: date() },
+            eureka_pipeline::ResearchSource::Observed { evidence: evidence() },
+            eureka_pipeline::ResearchSource::Document { reference: r(K::Question, &id("question", "Q1")) },
+        ];
+        let observed = evidence().result.0;
+        assert_eq!(index_text(&D::Research(note)).unwrap(), format!("The limit is 4096.
+Read from the module.
+A paper
+{observed}"));
+        let D::Idea(mut way) = idea("p", "i", "Keep notes small.") else { unreachable!() };
+        way.tradeoffs = "More documents.".into();
+        assert_eq!(index_text(&D::Idea(way)).unwrap(), "i
+Keep notes small.
+More documents.");
+        assert_eq!(INDEX_TEXT_VERSION, 1);
     }
 
     fn texts(mind: &Mind<MemoryStore>) -> BTreeMap<String, String> {

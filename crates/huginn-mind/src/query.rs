@@ -1,9 +1,12 @@
 //! The read side of a mind: a document with the facts of its admission and
 //! its status, and one typed selection over them.
 //!
-//! Nothing here is stored. Status is derived per call through the same
-//! `docs::Docs` the admission rules use, so a withdrawn resolution reopens its
-//! subject for a reader exactly when it reopens it for a rule. The facts come
+//! Nothing derived here is stored in a document. The rows come from the mind's
+//! held `image::Image`, a fold of the receipts; status is derived through the
+//! same `docs::Docs` the admission rules use, at the head when the image was
+//! advanced and at an old snapshot when a reader asks, so a withdrawn
+//! resolution reopens its subject for a reader exactly when it reopens it for
+//! a rule. The facts come
 //! from the commit receipts, from their `writes` and from nothing else: a
 //! document's `admitted_at` is the `now` its batch was admitted at
 //! (`committed_at`), never the store's `stored_at` stamp. A pipeline document
@@ -13,31 +16,33 @@
 //! `query` is CultNet's selection over rows this crate supplies (`rows.rs`).
 //! The substrate owns the filter, the order, the hop, the cursor and the
 //! paging; this module owns the snapshot (`Reader::at`: every derivation runs
-//! over the documents admitted at or before the page's `asOf`), the
+//! over the documents admitted at or before the page's `asOf`, and the image
+//! only narrows which of its rows the substrate is handed), the
 //! projection to a header or a whole view, and the typing of the edges.
 //!
 //! `rank` is the semantic read: the daemon's index supplies candidate ids and
 //! scores, and this module joins them back through the mind and lets the
 //! selection decide. No clock, no store handle, no network.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cultcache_rs::DatabaseEntry;
 use cultnet_rs::{
-    Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, Row, Selection, select, validate,
+    Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, Selection, select, validate,
 };
 use eureka_pipeline::{
     ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MemoryOrigin, MemorySort, OrgRepo,
-    PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha,
+    PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha,
     Short, Slug, Title, pipeline_key,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::docs::{CitationRole, Docs, Held, citations, kind_of_type};
+use crate::docs::{CitationRole, Docs, kind_of_type};
+use crate::image::{Image, status_of};
 use crate::mind::{Mind, schema_cache};
 use crate::persona::HuginnPersonaEntry;
-use crate::receipt::{self, PipelineProvenance};
+use crate::receipt::{HuginnCommitReceipt, PipelineProvenance};
 use crate::refusal::MindRefusal;
 use crate::rows::{SelectionRow, Vocabulary, refuse_values};
 use crate::store::MindStore;
@@ -143,6 +148,8 @@ pub enum PipelineFacts {
     Run { label: Label, operated_by: RunOperator, turn: RunTurn, started_on: Date, claims: Vec<PipelineRef> },
     Pulse { label: Label, tempo_vote_beat_s: Option<u32>, #[serde(default)] tempo_vote_withdrawn: bool, urgency_permille: Option<u16> },
     Memory { label: Label, sort: MemorySort, about: Vec<Short>, origin: MemoryOrigin, salience_permille: u16 },
+    Research { pass: Label, label: Label, claim: Line, inferred: bool, observed_on: Date },
+    Idea { pass: Label, label: Label, title: Title, proposed_on: Date },
 }
 
 impl PipelineFacts {
@@ -254,6 +261,19 @@ impl PipelineFacts {
                 origin: value.origin.clone(),
                 salience_permille: value.salience_permille,
             },
+            D::Research(value) => Self::Research {
+                pass: value.pass.clone(),
+                label: value.label.clone(),
+                claim: value.claim.clone(),
+                inferred: value.inferred,
+                observed_on: value.observed_on.clone(),
+            },
+            D::Idea(value) => Self::Idea {
+                pass: value.pass.clone(),
+                label: value.label.clone(),
+                title: value.title.clone(),
+                proposed_on: value.proposed_on.clone(),
+            },
         }
     }
 }
@@ -325,57 +345,51 @@ pub struct Ranked {
     pub dropped: Vec<PipelineRef>,
 }
 
-/// The admission facts of every stored document, built once per read call from
-/// the receipts. `writes` only: a document a later batch cited as a strong read
-/// keeps the receipt that wrote it. A10 admits one write per pipeline identity,
-/// so two receipts naming one pipeline document is an integrity fault, not a
-/// choice to make. The persona document is the one identity replaced by design
-/// (`put_persona` is a compare-and-swap on `updatedAt`) and is not a pipeline
-/// document: it has no admission facts here, and `Mind::persona` reads its own
-/// receipt.
-pub(crate) struct AdmissionIndex(BTreeMap<(String, String), AdmissionFacts>);
+impl AdmissionFacts {
+    /// What a receipt records about every document it wrote.
+    pub(crate) fn of(receipt: &HuginnCommitReceipt) -> Self {
+        Self {
+            receipt_id: receipt.receipt_id.clone(),
+            admitted_at: receipt.committed_at.clone(),
+            provenance: receipt.provenance.clone(),
+            ordinal: receipt.ordinal,
+        }
+    }
+}
+
+/// The identities the receipts wrote, checked once per build. A chain that is not exactly
+/// `{1..=N}` refuses before a single ordinal is trusted. `writes` only: a document a later batch
+/// cited as a strong read keeps the receipt that wrote it. A10 admits one write per pipeline
+/// identity, so two receipts naming one pipeline document is an integrity fault, not a choice to
+/// make. The persona document is the one identity replaced by design (`put_persona` is a
+/// compare-and-swap on `updatedAt`) and is not a pipeline document: it has no admission facts
+/// here, and the mind holds its receipt apart.
+pub(crate) struct AdmissionIndex(HashSet<(String, String)>);
 
 impl AdmissionIndex {
-    pub(crate) fn build<S: MindStore>(mind: &Mind<S>) -> Result<Self, MindRefusal> {
-        // Every reader of the ordinal asks the same density check admission
-        // does, through `head`: a chain that is not exactly `{1..=N}` refuses
-        // here before a single ordinal is copied out, not only when admission
-        // happens to be the caller.
-        receipt::head(mind)?;
-        let mut facts = BTreeMap::new();
-        for receipt in mind.receipts()? {
+    pub(crate) fn build(receipts: &[HuginnCommitReceipt]) -> Result<Self, MindRefusal> {
+        let mut ordinals = receipts.iter().map(|receipt| receipt.ordinal).collect::<Vec<_>>();
+        ordinals.sort_unstable();
+        if !ordinals.iter().copied().eq(1..=ordinals.len() as u64) {
+            return Err(MindRefusal::Unavailable { detail: "receipt ordinals are not 1..=N: found a duplicate or a gap".into() });
+        }
+        let mut identities = HashSet::new();
+        for receipt in receipts {
             for write in receipt.writes.iter().filter(|write| write.document_type != HuginnPersonaEntry::TYPE) {
-                let identity = (write.document_type.clone(), write.document_key.clone());
-                let landed = AdmissionFacts {
-                    receipt_id: receipt.receipt_id.clone(),
-                    admitted_at: receipt.committed_at.clone(),
-                    provenance: receipt.provenance.clone(),
-                    ordinal: receipt.ordinal,
-                };
-                if facts.insert(identity, landed).is_some() {
+                if !identities.insert((write.document_type.clone(), write.document_key.clone())) {
                     return Err(integrity(&write.document_type, &write.document_key, "is written by two receipts"));
                 }
             }
         }
-        Ok(Self(facts))
+        Ok(Self(identities))
     }
 
-    fn of(&self, held: &Held) -> Result<AdmissionFacts, MindRefusal> {
-        self.facts_of(held.kind, &held.key)
+    pub(crate) fn contains(&self, type_id: &str, key: &str) -> bool {
+        self.0.contains(&(type_id.to_string(), key.to_string()))
     }
 
-    fn facts_of(&self, kind: PipelineKind, key: &str) -> Result<AdmissionFacts, MindRefusal> {
-        let type_id = kind.type_id();
-        self.0
-            .get(&(type_id.to_string(), key.to_string()))
-            .cloned()
-            .ok_or_else(|| integrity(type_id, key, "has no commit receipt"))
-    }
-
-    /// The ordinal of the receipt that wrote a document: the projection's
-    /// position for it.
-    pub(crate) fn ordinal_of(&self, kind: PipelineKind, key: &str) -> Result<u64, MindRefusal> {
-        self.facts_of(kind, key).map(|facts| facts.ordinal)
+    pub(crate) fn identities(&self) -> impl Iterator<Item = &(String, String)> {
+        self.0.iter()
     }
 }
 
@@ -383,85 +397,103 @@ fn integrity(type_id: &str, key: &str, fault: &str) -> MindRefusal {
     MindRefusal::Unavailable { detail: format!("document {type_id}/{key} {fault}") }
 }
 
-/// One read call's working set: the image as of one snapshot and the facts it
-/// was built from. Built once per call and thrown away with it; nothing here
-/// outlives the answer.
-struct Reader {
-    docs: Docs,
-    facts: AdmissionIndex,
+/// A root of the mind and the newest admission under it. `repos` is the repo set in force of a root that is an in-force campaign,
+/// and empty for any other root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RootTouched {
+    pub root: Slug,
+    pub admitted_at: String,
+    #[schemars(range(min = 1))]
+    pub ordinal: u64,
+    pub repos: Vec<OrgRepo>,
 }
 
-impl Reader {
-    /// The mind as it stood when receipt `as_of` landed: the documents whose
-    /// writing receipt has `ordinal <= as_of`, and every derivation (in
-    /// force, the closing resolution, `base`, citations) over that image
-    /// alone. The facts are built over all receipts, and every held document
-    /// must have its receipt whatever `as_of` is, so an orphan or a double
-    /// write refuses at any snapshot.
-    fn at<S: MindStore>(mind: &Mind<S>, as_of: u64) -> Result<Self, MindRefusal> {
-        let mut docs = Docs::from_image(mind.envelopes())?;
-        let facts = AdmissionIndex::build(mind)?;
-        let mut visible = Vec::with_capacity(docs.image.len());
-        for held in docs.image {
-            if facts.of(&held)?.ordinal <= as_of {
-                visible.push(held);
-            }
-        }
-        docs.image = visible;
-        Ok(Self { docs, facts })
+impl RootTouched {
+    fn of(root: &str, facts: &AdmissionFacts, repos: &[OrgRepo]) -> Self {
+        Self { root: Slug(root.to_string()), admitted_at: facts.admitted_at.clone(), ordinal: facts.ordinal, repos: repos.to_vec() }
+    }
+}
+
+/// One read call's view of the held image at one snapshot. Nothing is decoded or built here: a row
+/// is the image's own, unless its status changed after `as_of`, in which case it is rebuilt once
+/// with the status the closing resolutions give at `as_of`.
+pub(crate) struct Reader<'i> {
+    docs: Docs<'i>,
+    image: &'i Image,
+    as_of: u64,
+    patched: HashMap<u32, SelectionRow>,
+}
+
+impl<'i> Reader<'i> {
+    /// The mind as it stood when receipt `as_of` landed. The held fault, if the store has one, is
+    /// answered at any snapshot.
+    pub(crate) fn at<S: MindStore>(mind: &'i Mind<S>, as_of: u64) -> Result<Self, MindRefusal> {
+        let image = mind.image()?;
+        Ok(Self { docs: Docs::at(image, as_of), image, as_of, patched: HashMap::new() })
     }
 
-    fn held(&self, kind: PipelineKind, key: &str) -> Option<&Held> {
-        self.docs.image.iter().find(|held| held.kind == kind && held.key == key)
+    fn status_at(&self, id: u32) -> PipelineStatus {
+        let row = self.image.row(id);
+        status_of(self.docs.closing_resolution(row.kind, &row.key))
+    }
+
+    /// Whether the row exists at `as_of`; when it does, its snapshot row is ready for `row`.
+    pub(crate) fn prepare(&mut self, id: u32) -> bool {
+        if self.image.row(id).ordinal > self.as_of {
+            return false;
+        }
+        if self.image.status_changed[id as usize] > self.as_of && !self.patched.contains_key(&id) {
+            let row = self.image.make_row(id, self.status_at(id));
+            self.patched.insert(id, row);
+        }
+        true
+    }
+
+    /// A prepared row.
+    pub(crate) fn row(&self, id: u32) -> &SelectionRow {
+        if self.image.status_changed[id as usize] > self.as_of { &self.patched[&id] } else { self.image.row(id) }
+    }
+
+    /// The rows a selection can match at this snapshot: a superset the substrate then decides over.
+    pub(crate) fn universe(&mut self, selection: &Selection) -> Vec<u32> {
+        let ids = self.image.universe(selection, self.as_of);
+        ids.into_iter().filter(|id| self.prepare(*id)).collect()
+    }
+
+    pub(crate) fn rows(&self, ids: &[u32]) -> Vec<&SelectionRow> {
+        ids.iter().map(|id| self.row(*id)).collect()
     }
 
     /// The lookup `Mind::view` answers through, so a caller holding one `Reader`
     /// views many documents from one snapshot.
-    fn view(&self, id: &PipelineRef) -> Result<Option<PipelineDocumentView>, MindRefusal> {
-        self.held(id.kind, &id.id.0).map(|held| self.view_of(held)).transpose()
+    pub(crate) fn id_of(&self, kind: PipelineKind, key: &str) -> Option<u32> {
+        self.image.id_of(kind, key)
     }
 
-    fn view_of(&self, held: &Held) -> Result<PipelineDocumentView, MindRefusal> {
-        let admission = self.facts.of(held)?;
-        let status = match self.docs.closing_resolution(held.kind, &held.key) {
-            Some((key, record)) => PipelineStatus::Resolved {
-                resolution: PipelineRef { kind: PipelineKind::Resolution, id: Short(key.to_string()) },
-                record: record.clone(),
-            },
-            None => PipelineStatus::InForce,
-        };
-        Ok(PipelineDocumentView {
-            id: PipelineRef { kind: held.kind, id: Short(held.key.clone()) },
-            document: held.document.clone(),
-            admission,
-            status,
-        })
-    }
-
-    /// The document `repo` and `cut` are read through: a resolution's
-    /// subject, and its subject's subject when that is a resolution too (the
-    /// Q19 cap stops the chain at two). A7 puts every subject in the image,
-    /// and a resolution key is strictly longer than the id it resolves, so
-    /// this walks down and stops. Anything that is not a resolution is its
-    /// own base.
-    fn base<'b>(&'b self, held: &'b Held) -> &'b Held {
-        let mut current = held;
-        while let PipelineDocument::Resolution(resolution) = &current.document {
-            let Some(subject) = self.held(resolution.subject.kind, &resolution.subject.id.0) else {
-                return current;
-            };
-            current = subject;
+    pub(crate) fn view(&self, id: &PipelineRef) -> Result<Option<PipelineDocumentView>, MindRefusal> {
+        let Some(row) = self.image.id_of(id.kind, &id.id.0) else { return Ok(None) };
+        let held = self.image.row(row);
+        if held.ordinal > self.as_of {
+            return Ok(None);
         }
-        current
+        if self.image.status_changed[row as usize] <= self.as_of {
+            return Ok(Some(held.view.clone()));
+        }
+        Ok(Some(self.image.make_row(row, self.status_at(row)).view))
     }
 
-    fn rows(&self) -> Result<Vec<SelectionRow>, MindRefusal> {
-        self.docs
-            .image
-            .iter()
-            .map(|held| {
-                Ok(SelectionRow::new(held, self.base(held), self.view_of(held)?, citations(&held.document)))
+    fn roots_touched(&self) -> Vec<RootTouched> {
+        let docs = &self.docs;
+        let campaigns: BTreeMap<&str, &PipelineCampaign> = docs
+            .of_kind(PipelineKind::Campaign)
+            .filter_map(|(key, document)| match document {
+                PipelineDocument::Campaign(campaign) if docs.in_force(PipelineKind::Campaign, key) => Some((campaign.slug.0.as_str(), campaign)),
+                _ => None,
             })
+            .collect();
+        self.image
+            .roots()
+            .map(|(root, newest)| RootTouched::of(root, &newest.view.admission, campaigns.get(root).map_or(&[][..], |campaign| docs.repos_in_force(campaign))))
             .collect()
     }
 }
@@ -482,7 +514,7 @@ impl<S: MindStore> Mind<S> {
     /// vocabulary for one rule.
     pub fn view(&self, id: &PipelineRef) -> Result<Option<PipelineDocumentView>, MindRefusal> {
         id.validate_ref()?;
-        Reader::at(self, receipt::head(self)?)?.view(id)
+        Reader::at(self, self.image()?.head)?.view(id)
     }
 
     /// The upgrade gate (ruling readback-gate-and-materialized-image): every
@@ -490,21 +522,29 @@ impl<S: MindStore> Mind<S> {
     /// stored key, type and payload bytes, and views back unchanged through the
     /// read path `view` uses; every pipeline write a receipt names is stored,
     /// and every stored document has its receipt. Returns how many documents
-    /// it read back; an empty store is a fault. One `Reader` serves every view,
-    /// because `Reader::at` is the expensive build. Admits nothing. A fault
-    /// names the document's key and what failed, never its content.
+    /// it read back; an empty store is a fault. The held image is first set beside a
+    /// fresh fold of the store and must equal it. That clause proves the holder's advance
+    /// only for a mind that has committed since it opened; on the just-opened mind the
+    /// upgrade reads, both sides are one fold of the same bytes, so a wrong fold passes
+    /// it. What the gate proves today is the per-document read-back below. One pass over
+    /// the mind, O(N). Admits nothing. A fault names the document's key and what failed,
+    /// never its content.
     pub fn read_back(&self) -> Result<usize, MindRefusal> {
-        self.read_back_through(Reader::view)
+        self.read_back_through(|reader, id| reader.view(id))
     }
 
     /// The gate's one body; `lookup` is the read path under test, which tests
     /// replace with a lying one to prove the view comparison refuses.
     fn read_back_through(
         &self,
-        lookup: impl Fn(&Reader, &PipelineRef) -> Result<Option<PipelineDocumentView>, MindRefusal>,
+        lookup: impl Fn(&Reader<'_>, &PipelineRef) -> Result<Option<PipelineDocumentView>, MindRefusal>,
     ) -> Result<usize, MindRefusal> {
         let cache = schema_cache()?;
-        let reader = Reader::at(self, receipt::head(self)?)?;
+        let image = self.image()?;
+        if *image != self.fresh_image()? {
+            return Err(MindRefusal::Unavailable { detail: "the held image differs from a fresh fold".into() });
+        }
+        let reader = Reader::at(self, image.head)?;
         let mut count = 0;
         for envelope in self.envelopes() {
             let Some(kind) = kind_of_type(&envelope.r#type) else { continue };
@@ -524,10 +564,14 @@ impl<S: MindStore> Mind<S> {
             }
             count += 1;
         }
-        for (type_id, key) in reader.facts.0.keys() {
-            if kind_of_type(type_id).is_some() && self.raw_envelope(type_id, key).is_none() {
-                return Err(integrity(type_id, key, "is named by a receipt but not stored"));
-            }
+        let receipted = AdmissionIndex::build(&self.receipts()?)?;
+        let mut missing: Vec<&(String, String)> = receipted
+            .identities()
+            .filter(|(type_id, key)| kind_of_type(type_id).is_some() && self.raw_envelope(type_id, key).is_none())
+            .collect();
+        missing.sort();
+        if let Some((type_id, key)) = missing.first() {
+            return Err(integrity(type_id, key, "is named by a receipt but not stored"));
         }
         if count == 0 {
             return Err(MindRefusal::Unavailable { detail: "the store holds no pipeline document".into() });
@@ -545,7 +589,7 @@ impl<S: MindStore> Mind<S> {
     pub fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage, MindRefusal> {
         validate(selection, &Vocabulary).map_err(cultnet_rs::SelectionRefusal::Invalid)?;
         let selection = refuse_values(selection)?;
-        let head = receipt::head(self)?;
+        let head = self.image()?.head;
         let as_of = match selection.cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
             Some(cursor) => {
                 let as_of = Cursor::parse(cursor)?.as_of;
@@ -558,9 +602,31 @@ impl<S: MindStore> Mind<S> {
             }
             None => head,
         };
-        let rows = Reader::at(self, as_of)?.rows()?;
-        let evaluation = select(&Vocabulary, &rows, &selection, as_of, self.cursor_key())?;
-        Self::page(&selection, evaluation, as_of, None)
+        self.select_at(&selection, as_of)
+    }
+
+    #[cfg(test)]
+    /// The doors `query` passes, then the one body at a snapshot the caller names: the entry the
+    /// oracle tests set against the oracle at every `as_of`.
+    pub(crate) fn query_at(&self, selection: &Selection, as_of: u64) -> Result<PipelineSelectionPage, MindRefusal> {
+        validate(selection, &Vocabulary).map_err(cultnet_rs::SelectionRefusal::Invalid)?;
+        let selection = refuse_values(selection)?;
+        self.select_at(&selection, as_of)
+    }
+
+    fn select_at(&self, selection: &Selection, as_of: u64) -> Result<PipelineSelectionPage, MindRefusal> {
+        let mut reader = Reader::at(self, as_of)?;
+        let ids = reader.universe(selection);
+        let rows = reader.rows(&ids);
+        let evaluation = select(&Vocabulary, &rows, selection, as_of, self.cursor_key())?;
+        Self::page(selection, evaluation, as_of, None)
+    }
+
+    /// Every root this mind holds a document under, with its newest admission and, for a root that is an in-force
+    /// campaign, the repos in force (`Docs::repos_in_force`, never the campaign row's opening set). A resolution's
+    /// key carries its subject's root, so a later resolution is a touch of that root. One pass at the head, no rows.
+    pub fn roots_touched(&self) -> Result<Vec<RootTouched>, MindRefusal> {
+        Ok(Reader::at(self, self.image()?.head)?.roots_touched())
     }
 
     /// What a semantic query must satisfy before anything is embedded: the
@@ -605,8 +671,8 @@ impl<S: MindStore> Mind<S> {
     /// ids this returns.
     pub fn members(&self, selection: &Selection, semantic: &SemanticQuery) -> Result<Members, MindRefusal> {
         let selection = Self::semantic_selection(selection, semantic)?;
-        let head = receipt::head(self)?;
-        let rows = Reader::at(self, head)?.rows()?;
+        let head = self.image()?.head;
+        let mut reader = Reader::at(self, head)?;
         // The walk is built here, field by field, from the caller's filters
         // alone and never spread from the caller's selection: the page size
         // is ours (the caller's `limit` shapes an answer, not the walk's cost:
@@ -625,9 +691,11 @@ impl<S: MindStore> Mind<S> {
         let mut ids = Vec::new();
         let mut pages = 0;
         loop {
+            let universe = reader.universe(&walk);
+            let rows = reader.rows(&universe);
             let evaluation = select(&Vocabulary, &rows, &walk, head, self.cursor_key())?;
             pages += 1;
-            ids.extend(evaluation.rows.iter().map(ref_of));
+            ids.extend(evaluation.rows.iter().map(|row| ref_of(row)));
             match evaluation.next_cursor {
                 Some(next) => walk.cursor = Some(next),
                 None => return Ok(Members { as_of: head, ids, pages }),
@@ -663,18 +731,19 @@ impl<S: MindStore> Mind<S> {
     ) -> Result<Ranked, MindRefusal> {
         let selection = Self::semantic_selection(selection, semantic)?;
         let as_of = members.as_of;
-        let rows = Reader::at(self, as_of)?.rows()?;
-
-        let held: BTreeMap<(PipelineKind, &str), i64> =
-            rows.iter().map(|row| ((row.kind, row.key.as_str()), row.ordinal())).collect();
+        let mut reader = Reader::at(self, as_of)?;
         let member: BTreeSet<(PipelineKind, &str)> =
             members.ids.iter().map(|id| (id.kind, id.id.0.as_str())).collect();
         let mut candidates: Vec<(&str, f32, i64)> = Vec::new();
         let mut dropped = Vec::new();
         for (hit, score) in hits {
             let id = (hit.kind, hit.id.0.as_str());
-            match held.get(&id) {
-                Some(&ordinal) if member.contains(&id) => candidates.push((id.1, *score, ordinal)),
+            let ordinal = match reader.id_of(hit.kind, id.1) {
+                Some(row) if reader.prepare(row) => Some(reader.row(row).ordinal as i64),
+                _ => None,
+            };
+            match ordinal {
+                Some(ordinal) if member.contains(&id) => candidates.push((id.1, *score, ordinal)),
                 _ => dropped.push(hit.clone()),
             }
         }
@@ -694,16 +763,18 @@ impl<S: MindStore> Mind<S> {
             Evaluation { rows: Vec::new(), matched: 0, edges: Vec::new(), next_cursor: None }
         } else {
             let narrowed = Selection { keys: Some(keys), limit: Some(LIMIT_MAX), ..selection.clone() };
+            let ids = reader.universe(&narrowed);
+            let rows = reader.rows(&ids);
             select(&Vocabulary, &rows, &narrowed, as_of, self.cursor_key())?
         };
         let score = |row: &SelectionRow| scores.get(row.key.as_str()).copied().unwrap_or(f32::NEG_INFINITY);
-        evaluation.rows.sort_by(|a, b| score(b).total_cmp(&score(a)).then(a.ordinal().cmp(&b.ordinal())));
+        evaluation.rows.sort_by(|a, b| score(b).total_cmp(&score(a)).then(a.ordinal.cmp(&b.ordinal)));
         evaluation.rows.truncate(limit);
         evaluation.next_cursor = None;
-        let row_scores: Vec<f32> = evaluation.rows.iter().map(score).collect();
+        let row_scores: Vec<f32> = evaluation.rows.iter().map(|row| score(row)).collect();
         let position =
             |kind: PipelineKind, key: &str| evaluation.rows.iter().position(|row| row.kind == kind && row.key == key);
-        let mut kept: Vec<(usize, EdgeMatch<SelectionRow>)> = std::mem::take(&mut evaluation.edges)
+        let mut kept: Vec<(usize, EdgeMatch<&SelectionRow>)> = std::mem::take(&mut evaluation.edges)
             .into_iter()
             .filter_map(|edge| {
                 let owner = match edge.anchor {
@@ -721,9 +792,9 @@ impl<S: MindStore> Mind<S> {
 
     /// The projection of an evaluation: a header or a whole view per row, and
     /// the typed edges a hop traversed.
-    fn page(
+    pub(crate) fn page(
         selection: &Selection,
-        evaluation: Evaluation<SelectionRow>,
+        evaluation: Evaluation<&SelectionRow>,
         as_of: u64,
         scores: Option<Vec<f32>>,
     ) -> Result<PipelineSelectionPage, MindRefusal> {
@@ -738,7 +809,7 @@ impl<S: MindStore> Mind<S> {
                 let role = CitationRole::from_name(&edge.role).ok_or_else(|| MindRefusal::Unavailable {
                     detail: format!("the evaluator returned an edge in role {:?}, which is not a citation role", edge.role),
                 })?;
-                typed.push(PipelineEdge { from: ref_of(&edge.from), role, to: ref_of(&edge.to) });
+                typed.push(PipelineEdge { from: ref_of(edge.from), role, to: ref_of(edge.to) });
             }
             Some(typed)
         } else {
@@ -752,8 +823,15 @@ impl<S: MindStore> Mind<S> {
 mod tests {
     use super::*;
     use crate::fixtures::*;
-    use crate::receipt::Faculty;
+    use crate::receipt::{self, Faculty};
     use cultnet_rs::{Citation, FieldPredicate, Incoming, RecordRef};
+
+    /// Every row the mind holds at `as_of`, as the substrate is handed them.
+    fn all_rows(mind: &Mind<MemoryStore>, as_of: u64) -> Vec<SelectionRow> {
+        let mut reader = Reader::at(mind, as_of).unwrap();
+        let ids = reader.universe(&Selection::default());
+        reader.rows(&ids).into_iter().cloned().collect()
+    }
     use crate::store::test_stores::MemoryStore;
     use chrono::{TimeZone, Utc};
     use eureka_pipeline::{
@@ -1289,7 +1367,7 @@ mod tests {
         committed(admit(&mut mind, vec![question_n(1), question_n(2)]));
         let selection = of_kinds(&[K::Question]);
         let head = 2;
-        let rows = Reader::at(&mind, head).unwrap().rows().unwrap();
+        let rows = all_rows(&mind, head);
         let at = |as_of: u64| Selection {
             cursor: Some(Cursor::mint(as_of, &rows[0], &selection, mind.cursor_key())),
             ..selection.clone()
@@ -1326,6 +1404,27 @@ mod tests {
         assert!(invalid("fields[0].values", "1.2")(&refused(&mind, &with(Selection::default(), any_of("cut", &["1.2"])))));
     }
 
+    /// The `pass` alias answers a pass's research and its ideas, and nothing of another pass.
+    #[test]
+    fn the_pass_alias_selects_a_passs_research_and_ideas() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![
+            research("alpha", "scope", "A fact."),
+            idea("alpha", "way", "A way."),
+            research("beta", "scope", "Another fact."),
+            idea("beta", "way", "Another way."),
+            question_n(1),
+        ]));
+        let in_pass = |pass: &str| {
+            let mut found = ids(&mind.query(&with(Selection::default(), any_of("pass", &[pass]))).unwrap());
+            found.sort();
+            found
+        };
+        assert_eq!(in_pass("alpha"), vec![id("idea", "alpha.way"), id("research", "alpha.scope")]);
+        assert_eq!(in_pass("beta"), vec![id("idea", "beta.way"), id("research", "beta.scope")]);
+        assert!(in_pass("gamma").is_empty(), "a pass nothing was admitted under matches nothing");
+    }
+
     #[test]
     fn enum_values_are_the_variant_names() {
         let mind = worked();
@@ -1343,7 +1442,7 @@ mod tests {
     #[test]
     fn every_emitted_closed_value_passes_the_door() {
         let mind = worked();
-        let rows = Reader::at(&mind, 100).unwrap().rows().unwrap();
+        let rows = all_rows(&mind, 100);
         for row in &rows {
             for alias in ["root", "in_force", "faculty", "repo", "cut", "severity", "confidence", "origin", "authority", "claim_outcome", "outcome"] {
                 for value in cultnet_rs::Row::values(row, alias) {
@@ -1642,6 +1741,17 @@ mod tests {
         let D::Memory(mut consolidating) = memory("m2", MemorySort::Idea, "two", &[]) else { unreachable!() };
         consolidating.consolidates = vec![r(K::Memory, &older)];
         committed(admit(&mut mind, vec![D::Memory(consolidating)]));
+        let (note, way) = (id("research", "p.a"), id("idea", "p.i"));
+        let D::Research(mut note_document) = research("p", "a", "A fact.") else { unreachable!() };
+        note_document.serves = vec![r(K::Question, &q1)];
+        note_document.sources = vec![
+            eureka_pipeline::ResearchSource::Document { reference: r(K::Finding, &f1) },
+            eureka_pipeline::ResearchSource::Repo { repo: OrgRepo(REPO.into()), at: eureka_pipeline::DocRef { path: s("a.rs"), start_line: 1, end_line: 2, commit: sha() } },
+        ];
+        let D::Idea(mut way_document) = idea("p", "i", "A way.") else { unreachable!() };
+        way_document.rests_on = vec![r(K::Research, &note)];
+        way_document.toward = vec![r(K::Question, &q1)];
+        committed(admit(&mut mind, vec![D::Research(note_document), D::Idea(way_document)]));
 
         let (n1, f1_closed, f2_closed) = (
             id("resolution", "question.Q1.n1"),
@@ -1676,8 +1786,12 @@ mod tests {
             (CitationRole::Claims, &run_id, &spec_r2),
             (CitationRole::Claims, &run_id, &fu),
             (CitationRole::Consolidates, &newer, &older),
+            (CitationRole::Serves, &note, &q1),
+            (CitationRole::Sources, &note, &f1),
+            (CitationRole::RestsOn, &way, &note),
+            (CitationRole::Toward, &way, &q1),
         ];
-        assert_eq!(CitationRole::ALL.len(), 17);
+        assert_eq!(CitationRole::ALL.len(), 21);
         for role in CitationRole::ALL {
             let selection =
                 Selection { cited: Some(Incoming { role: role.name().into(), exists: true }), ..Selection::default() };
@@ -1970,6 +2084,44 @@ mod tests {
         assert_eq!((ids(&page), page.matched, page.next), (vec![shelf.r4.clone()], plain_matched(&shelf.mind, &standing(Selection::default())), None), "the limit keeps the best, not the earliest");
         let page = rank_all(&shelf.mind, &standing(Selection::default()), &asking(1), &by_ordinal).page;
         assert_eq!((ids(&page), page.matched), (vec![shelf.r4.clone()], plain_matched(&shelf.mind, &standing(Selection::default()))), "top_k bounds the page too");
+    }
+
+    /// Three equal scores in every arrival order rank by ordinal alone, so a lookup that gives
+    /// every hit the same row (or the wrong one) is seen.
+    #[test]
+    fn equal_scores_rank_by_each_documents_own_ordinal_in_any_arrival_order() {
+        let shelf = shelf();
+        let image = shelf.mind.image().unwrap();
+        let named = [(K::Question, shelf.q2.clone()), (K::Ruling, shelf.r4.clone()), (K::Resolution, shelf.withdrawn_resolution.clone())];
+        let ordinal = |(kind, key): &(K, String)| image.row(image.id_of(*kind, key).unwrap()).ordinal;
+        let mut expected: Vec<(K, String)> = named.to_vec();
+        expected.sort_by_key(ordinal);
+        assert!(ordinal(&expected[0]) < ordinal(&expected[1]) && ordinal(&expected[1]) < ordinal(&expected[2]), "the fixture's ordinals are distinct");
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let hits: Vec<_> = order.iter().map(|at| hit(named[*at].0, &named[*at].1, 0.5)).collect();
+            let page = rank_all(&shelf.mind, &Selection::default(), &asking(10), &hits).page;
+            assert_eq!(ids(&page), expected.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>(), "arrival order {order:?}");
+            // The cut is where the tie-break decides: the page keeps the earliest ordinals.
+            let keys: Vec<String> = expected.iter().map(|(_, key)| key.clone()).collect();
+            let limited = Selection { limit: Some(1), ..Selection::default() };
+            assert_eq!(ids(&rank_all(&shelf.mind, &limited, &asking(10), &hits).page), keys[..1].to_vec(), "limit 1, arrival order {order:?}");
+            assert_eq!(ids(&rank_all(&shelf.mind, &Selection::default(), &asking(2), &hits).page), keys[..2].to_vec(), "top_k 2, arrival order {order:?}");
+        }
+    }
+
+    /// Past the candidate cut the tie-break decides who is kept: equal scores arriving in reverse
+    /// keep the earliest ordinals, which a lookup that gives every hit one row does not.
+    #[test]
+    fn equal_scores_past_the_cut_keep_the_earliest_ordinals() {
+        let mut mind = seeded();
+        let total = LIMIT_MAX + 3;
+        for n in 1..=total {
+            committed(admit(&mut mind, vec![question_n(n)]));
+        }
+        let key = |n: u32| id("question", &format!("Q{n}"));
+        let hits: Vec<_> = (1..=total).rev().map(|n| hit(K::Question, &key(n), 0.5)).collect();
+        let page = rank_all(&mind, &Selection::default(), &asking(LIMIT_MAX), &hits).page;
+        assert_eq!(ids(&page), (1..=LIMIT_MAX).map(key).collect::<Vec<_>>());
     }
 
     /// Membership is the selection's alone: a kind, a key allowlist and a
@@ -2483,8 +2635,8 @@ mod tests {
         let absent = mind(gate_rows()).read_back_through(|_, _| Ok(None));
         assert!(matches!(&absent, Err(MindRefusal::Unavailable { detail }) if detail.contains("does not view back")), "{absent:?}");
         let other = mind(gate_rows()).read_back_through(|reader, id| {
-            let first = reader.docs.image.iter().find(|held| held.kind == id.kind).unwrap();
-            reader.view_of(first).map(Some)
+            let (first, _) = reader.image.of_kind(id.kind).next().unwrap();
+            reader.view(&PipelineRef { kind: id.kind, id: Short(first.to_string()) })
         });
         assert!(matches!(&other, Err(MindRefusal::Unavailable { detail }) if detail.contains("does not view back")), "{other:?}");
     }
@@ -2520,5 +2672,99 @@ mod tests {
         let mind = Mind::open(std::path::Path::new(&root), &Slug("eureka".into())).unwrap();
         let count = mind.read_back().unwrap();
         println!("read back {count} stored documents in {:?}", started.elapsed());
+    }
+
+    fn at_hour(hour: u32) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 9, 16, 12 + hour, 0, 0).unwrap()
+    }
+
+    fn touched(mind: &Mind<MemoryStore>) -> BTreeMap<String, RootTouched> {
+        mind.roots_touched().unwrap().into_iter().map(|root| (root.root.0.clone(), root)).collect()
+    }
+
+    /// A target revision naming `repos`, and the supersession of its predecessor.
+    fn repo_revision(campaign: &str, revision: u32, repos: &[&str]) -> Vec<D> {
+        let D::Target(mut named) = target(revision, &[INVARIANT]) else { panic!("a target") };
+        named.campaign = campaign.into();
+        named.repos = repos.iter().map(|name| repo(name)).collect();
+        let key = |n: u32| format!("{campaign}:target:r{n}");
+        let mut batch = vec![D::Target(named)];
+        if revision > 1 {
+            batch.push(resolution(r(K::Target, &key(revision - 1)), superseded(&[r(K::Target, &key(revision))])));
+        }
+        batch
+    }
+
+    /// Each root answers its newest admission: a later document counts, and so does a later resolution of an older one; an
+    /// instance's root is listed with no repos; a root is listed once, in the order of its name.
+    #[test]
+    fn roots_touched_is_the_newest_admission_per_root() {
+        let mut mind = seeded();
+        let first = touched(&mind);
+        assert_eq!(first.keys().map(String::as_str).collect::<Vec<_>>(), [CAMPAIGN, INSTANCE]);
+        assert_eq!((first[CAMPAIGN].admitted_at.as_str(), first[INSTANCE].admitted_at.as_str()), ("2026-09-16T12:00:00Z", "2026-09-16T12:00:00Z"));
+        assert!(first[INSTANCE].repos.is_empty(), "an instance root is no campaign");
+
+        let D::Campaign(mut other) = campaign(&["GameCult/Third"]) else { panic!("a campaign") };
+        other.slug = "other-campaign".into();
+        committed(admit_at(&mut mind, vec![D::Campaign(other)], at_hour(1)));
+        committed(admit_at(&mut mind, vec![question_n(1)], at_hour(2)));
+        let second = touched(&mind);
+        assert_eq!(second.keys().map(String::as_str).collect::<Vec<_>>(), [CAMPAIGN, "other-campaign", INSTANCE]);
+        assert_eq!(second["other-campaign"].admitted_at, "2026-09-16T13:00:00Z");
+        assert_eq!(second[CAMPAIGN].admitted_at, "2026-09-16T14:00:00Z", "a later document touches its root");
+        assert_eq!(second[INSTANCE].admitted_at, "2026-09-16T12:00:00Z", "and no other root");
+        assert!(second[INSTANCE].ordinal < second["other-campaign"].ordinal && second["other-campaign"].ordinal < second[CAMPAIGN].ordinal, "{second:?}");
+
+        committed(admit_at(&mut mind, vec![resolution(r(K::Question, &id("question", "Q1")), withdrawn())], at_hour(5)));
+        let third = touched(&mind);
+        assert_eq!(third[CAMPAIGN].admitted_at, "2026-09-16T17:00:00Z", "a later resolution is a touch of its subject's root");
+        assert!(third[CAMPAIGN].ordinal > second[CAMPAIGN].ordinal);
+        assert_eq!(third["other-campaign"], second["other-campaign"]);
+    }
+
+    /// A campaign answers the repos in force, not the opening set: the target that changes the set decides, a closed target does
+    /// not, another campaign's target does not; a campaign closed answers none.
+    #[test]
+    fn roots_touched_repos_are_the_ones_in_force() {
+        let mut mind = seeded();
+        assert_eq!(touched(&mind)[CAMPAIGN].repos, [repo(REPO)], "no target names repos: the opening set");
+
+        committed(admit(&mut mind, repo_revision(CAMPAIGN, 2, &[REPO, OTHER_REPO])));
+        assert_eq!(touched(&mind)[CAMPAIGN].repos, [repo(REPO), repo(OTHER_REPO)], "a target that changes the set decides");
+
+        let D::Campaign(mut other) = campaign(&[REPO]) else { panic!("a campaign") };
+        other.slug = "other-campaign".into();
+        let mut batch = vec![D::Campaign(other)];
+        batch.extend(repo_revision("other-campaign", 1, &["GameCult/Third"]));
+        committed(admit(&mut mind, batch));
+        let both = touched(&mind);
+        assert_eq!(both["other-campaign"].repos, [repo("GameCult/Third")]);
+        assert_eq!(both[CAMPAIGN].repos, [repo(REPO), repo(OTHER_REPO)], "another campaign's higher target decides nothing here");
+
+        committed(admit(&mut mind, repo_revision(CAMPAIGN, 3, &[OTHER_REPO])));
+        assert_eq!(touched(&mind)[CAMPAIGN].repos, [repo(OTHER_REPO)], "neither the opening set nor the closed revision decides");
+    }
+
+    /// A campaign with a resolution in force answers no repos, and one beside it that is open keeps its own. Admission has no row to
+    /// close a campaign, so the image is built by hand.
+    #[test]
+    fn a_closed_campaign_answers_no_repos() {
+        let (open_key, closed_key, closing_key) = ("open:campaign:open".to_string(), "closed:campaign:closed".to_string(), "closed:resolution:campaign.n1".to_string());
+        let named = |slug: &str, repo_name: &str| {
+            let D::Campaign(mut c) = campaign(&[repo_name]) else { panic!("a campaign") };
+            c.slug = slug.into();
+            D::Campaign(c)
+        };
+        let image = Image::of_documents(vec![
+            (K::Campaign, open_key.clone(), named("open", REPO)),
+            (K::Campaign, closed_key.clone(), named("closed", OTHER_REPO)),
+            (K::Resolution, closing_key.clone(), resolution(r(K::Campaign, &closed_key), withdrawn())),
+        ]);
+        let roots = Reader { docs: Docs::at(&image, image.head), image: &image, as_of: image.head, patched: HashMap::new() }.roots_touched();
+        let by_root: BTreeMap<&str, &RootTouched> = roots.iter().map(|root| (root.root.0.as_str(), root)).collect();
+        assert_eq!(by_root["open"].repos, [repo(REPO)]);
+        assert!(by_root["closed"].repos.is_empty(), "{roots:?}");
+        assert_eq!(by_root["closed"].ordinal, 3, "the closure is a touch of the campaign it closes");
     }
 }

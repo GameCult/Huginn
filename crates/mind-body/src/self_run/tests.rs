@@ -15,8 +15,7 @@ use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
 use super::*;
 use cultnet_rs::Selection;
 use huginn_mind::PipelinePageItems;
-use crate::lease_client::{Lease, LeaseRefused, token_holding};
-use model_connector::PlanQuota;
+use crate::lease_client::token_holding;
 use crate::testkit::*;
 
 /// A cap no constant of the library equals, so that a request of it came from the argument.
@@ -79,210 +78,7 @@ fn self_run(label: &str, budget: &str) -> PipelineDocument {
     PipelineDocument::Run(document)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Event {
-    Wrote(String),
-    InputClosed,
-    /// A signal was attempted, delivered or not.
-    Stopped(Stop),
-    Asked(StdDuration),
-    /// The connector was asked for a lease and answered one.
-    Lent,
-    /// A child was started.
-    Spawned,
-    /// The lease was dropped, which ends it: nothing is settled.
-    Abandoned,
-}
-
-#[derive(Clone)]
-enum Step {
-    Line(String),
-    /// Time passes with no output: the clock moves and the read times out.
-    Idle(i64),
-    /// The clock moves, then this line arrives.
-    After(i64, String),
-    /// The child is reaped with this code; its stream stays open.
-    Exit(Option<i32>),
-    /// Its stdout ends; the child is not reaped yet.
-    Eof,
-    /// The clock moves, this runs (the mind changes, a tool call's hook fires), and the read times out.
-    Do(i64, Rc<dyn Fn()>),
-}
-
 use Step::{After, Eof, Exit, Idle, Line as Out};
-
-struct Scripted {
-    steps: VecDeque<Step>,
-    log: Rc<RefCell<Vec<Event>>>,
-    clock: Rc<Fixed>,
-    code: Option<i32>,
-    /// The weakest signal that ends it; weaker ones are ignored.
-    dies_on: Option<Stop>,
-    /// Signals that cannot be delivered (no `kill` program, say).
-    refuses: Vec<Stop>,
-    /// When the steps run out it neither exits nor closes its stream: time just passes.
-    hangs: bool,
-    exited: bool,
-    eof: bool,
-    /// How many times it was asked: a loop that never ends is a failure, not a hang.
-    asked: u32,
-}
-
-impl Child for Scripted {
-    fn write_line(&mut self, line: &str) {
-        self.log.borrow_mut().push(Event::Wrote(line.to_string()));
-    }
-
-    fn close_input(&mut self) {
-        self.log.borrow_mut().push(Event::InputClosed);
-    }
-
-    fn next(&mut self, timeout: StdDuration) -> Read {
-        self.log.borrow_mut().push(Event::Asked(timeout));
-        self.asked += 1;
-        assert!(self.asked < 500, "the loop never ended");
-        match self.steps.pop_front() {
-            Some(Step::Line(line)) => Read::Line(line),
-            Some(Step::Idle(seconds)) => {
-                self.clock.0.set(self.clock.0.get() + ChronoDuration::seconds(seconds));
-                Read::Timeout
-            }
-            Some(Step::After(seconds, line)) => {
-                self.clock.0.set(self.clock.0.get() + ChronoDuration::seconds(seconds));
-                Read::Line(line)
-            }
-            Some(Step::Exit(code)) => {
-                self.exited = true;
-                Read::Exited(code)
-            }
-            Some(Step::Do(seconds, act)) => {
-                self.clock.0.set(self.clock.0.get() + ChronoDuration::seconds(seconds));
-                act();
-                Read::Timeout
-            }
-            Some(Step::Eof) => {
-                self.eof = true;
-                Read::Eof
-            }
-            // The stream is over: the child is reaped, then its stdout ends.
-            None if self.hangs => {
-                self.clock.0.set(self.clock.0.get() + ChronoDuration::seconds(timeout.as_secs() as i64));
-                Read::Timeout
-            }
-            None if !self.exited => {
-                self.exited = true;
-                Read::Exited(self.code)
-            }
-            None if !self.eof => {
-                self.eof = true;
-                Read::Eof
-            }
-            None => panic!("the loop kept waiting on a child that ended"),
-        }
-    }
-
-    fn stop(&mut self, how: Stop) -> bool {
-        self.log.borrow_mut().push(Event::Stopped(how));
-        if self.refuses.contains(&how) {
-            return false;
-        }
-        if self.dies_on.is_some_and(|weakest| how >= weakest) {
-            self.steps.clear();
-            self.hangs = false;
-        }
-        true
-    }
-}
-
-struct Fake {
-    child: RefCell<Option<Scripted>>,
-    spawns: RefCell<Vec<Vec<String>>>,
-    refuse: bool,
-}
-
-impl Fake {
-    fn with(child: Option<Scripted>, refuse: bool) -> Self {
-        Self { child: RefCell::new(child), spawns: RefCell::new(Vec::new()), refuse }
-    }
-}
-
-impl Spawner for Fake {
-    fn spawn(&self, args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
-        self.spawns.borrow_mut().push(args.to_vec());
-        if self.refuse {
-            return Err(anyhow!("refused"));
-        }
-        let child = self.child.borrow_mut().take().expect("spawned twice");
-        child.log.borrow_mut().push(Event::Spawned);
-        Ok(Box::new(child))
-    }
-}
-
-/// What the connector answers.
-#[derive(Clone, Copy)]
-enum Answer {
-    Grant,
-    Refuse(LeaseRefusalKind),
-    Unreachable,
-}
-
-/// The connector, as the actuator asks it: it logs into the child's log, so the
-/// order of lend, spawn, the child's end and settle is one sequence.
-struct FakeLender {
-    log: Rc<RefCell<Vec<Event>>>,
-    asked: RefCell<Vec<LeaseRequest>>,
-    answer: Answer,
-}
-
-impl FakeLender {
-    fn new(answer: Answer) -> Self {
-        Self::logging(Rc::new(RefCell::new(Vec::new())), answer)
-    }
-
-    fn logging(log: Rc<RefCell<Vec<Event>>>, answer: Answer) -> Self {
-        Self { log, asked: RefCell::new(Vec::new()), answer }
-    }
-}
-
-impl Lender for FakeLender {
-    fn lend(&self, request: &LeaseRequest) -> Result<Lent> {
-        self.asked.borrow_mut().push(request.clone());
-        match self.answer {
-            Answer::Grant => {
-                self.log.borrow_mut().push(Event::Lent);
-                Ok(Lent::Granted(Box::new(FakeLease { log: self.log.clone(), token: token_holding("tok-canary"), plan: vec![plan_window()] })))
-            }
-            Answer::Refuse(kind) => Ok(Lent::Refused(LeaseRefused { kind, detail: "detail-canary".into() })),
-            Answer::Unreachable => Err(anyhow!("down")),
-        }
-    }
-}
-
-fn plan_window() -> PlanQuota {
-    PlanQuota { window: "five_hour".into(), utilization_permille: Some(423), resets_at_unix_ms: 1_793_307_000_000, status: "allowed".into(), observed_at_unix_ms: 1_793_306_000_000 }
-}
-
-struct FakeLease {
-    log: Rc<RefCell<Vec<Event>>>,
-    token: TokenFd,
-    plan: Vec<PlanQuota>,
-}
-
-impl Lease for FakeLease {
-    fn token(&self) -> &TokenFd {
-        &self.token
-    }
-
-    fn plan_quota(&self) -> &[PlanQuota] {
-        &self.plan
-    }
-}
-
-impl Drop for FakeLease {
-    fn drop(&mut self) {
-        self.log.borrow_mut().push(Event::Abandoned);
-    }
-}
 
 /// The mind as the actuator sees it, over a `TestMind`: another instance's name,
 /// admissions counted, and optionally refused as a mind that cannot be reached would.
@@ -561,7 +357,7 @@ fn the_start_message_is_the_first_thing_written_and_names_the_skill_the_instance
     let ran = go(vec![Out(result_line())]);
     assert!(matches!(&ran.events[0], Event::Wrote(_)), "the start precedes the first read: {:?}", ran.events[0]);
     let written = ran.written();
-    for needle in ["Plan usage: five_hour 42.3% allowed, resets at unix ms 1793307000000", "about 90% of the weekly allowance", "nothing enforces it"] {
+    for needle in ["Plan usage: five_hour 42.3% allowed, resets at 2026-10-29T20:50:00Z, read at 2026-10-29T20:33Z", "about 90% of the weekly allowance", "nothing enforces it"] {
         assert!(written[0].contains(needle), "the lease grant plan windows reach the child: {needle}: {}", written[0]);
     }
     for needle in ["Use the eureka skill.", "yggdrasil", "yggdrasil:run:selfrun-a", AGENT] {
@@ -1420,11 +1216,16 @@ fn the_start_message_carries_the_claimed_follow_ups_item_and_id_verbatim() {
     let mind = claiming(std::slice::from_ref(&claim), vec![brief]);
     let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
     let first = &ran.written()[0];
-    assert!(first.starts_with(&start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_000_000)), "{first}");
+    assert!(first.starts_with(&start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], at_start().timestamp_millis() as u64)), "{first}");
     for needle in ["Fix the thing.\nThen report \u{e9}.", claim.id.0.as_str(), "Use the eureka skill."] {
         assert!(first.contains(needle), "{needle}: {first}");
     }
-    assert!(first.contains(&format!("(campaign `{}`)", follow_up_campaign())), "{first}");
+    assert!(first.contains(&format!("(campaign `{}`, repo `{}`)", follow_up_campaign(), follow_up_repo())), "{first}");
+}
+
+fn follow_up_repo() -> String {
+    let PipelineDocument::FollowUp(document) = follow_up("c", &spec_ref("x")) else { unreachable!() };
+    document.repo.0
 }
 
 fn follow_up_campaign() -> String {
@@ -1482,7 +1283,7 @@ fn a_mind_query_failure_on_a_claim_fails_the_run_with_the_cause_and_starts_no_ch
 #[test]
 fn a_run_without_claims_gets_the_identity_lines_alone() {
     let ran = go(vec![Out(result_line())]);
-    assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], 1_793_306_000_000));
+    assert_eq!(ran.written()[0], start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[plan_window()], at_start().timestamp_millis() as u64));
 }
 
 // ---- the live session -----------------------------------------------------
@@ -1580,6 +1381,8 @@ fn a_brief_derived_while_a_turn_runs_is_written_at_once_counted_at_its_echo_and_
     assert_eq!(told.len(), 1, "{:?}", ran.written());
     assert!(told[0].contains(&brief_ref("b1").id.0) && told[0].contains("Survey the noise functions."), "{}", told[0]);
     assert!(told[0].contains("resolve follow-up") && told[0].contains("Recorded"), "she is told how to close it: {}", told[0]);
+    // The plan line is restated under every brief for the run's life, so it names the instant of the reading, never an age that stops being true.
+    assert!(told[0].contains("read at 2026-10-29T20:33Z") && !told[0].contains(" ago"), "{}", told[0]);
     assert_eq!(ran.written().len(), 2, "the start message and one tell: {:?}", ran.written());
     assert!(ran.out.contains("decision Write { tells: true, flush: None } prefix 10 ttl_s 0 idle_s working inbox true written 2 consumed 1\n"), "{}", ran.out);
     assert_eq!(ran.count(&Event::InputClosed), 0);
@@ -1887,5 +1690,57 @@ fn a_brief_the_run_claims_is_in_the_task_once_and_not_again_under_also_open() {
     let ran = carry_with(&Seen::of(&mind), vec![Out(echo())], Some(0), false);
     let start = &ran.written()[0];
     assert_eq!(start.matches("claimed follow-up").count(), 1, "{start}");
+    assert!(start.contains(", repo `"), "the claimed task names the repo the work belongs to: {start}");
     assert!(start.contains("Do the claimed thing.") && !start.contains("Also open for you"), "{start}");
+}
+
+/// The Persona's boundary: the bubblewrap wrapper `ClaudeSpawner` runs when it has a sandbox.
+#[cfg(unix)]
+mod sandbox {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[test]
+    fn the_sandbox_arguments_are_pinned() {
+        let args = sandbox_args(Path::new("/var/lib/mind-x/sandbox"), Path::new("/run/mind-x"));
+        let expected: Vec<String> = [
+            "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run", "--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve", "--ro-bind", "/run/mind-x", "/run/mind-x", "--bind",
+            "/run/mind-x/claude-config", "/run/mind-x/claude-config", "--tmpfs", "/etc/gamecult", "--tmpfs", "/var/lib", "--bind", "/var/lib/mind-x/sandbox", "/var/lib/mind-x/sandbox", "--unshare-pid", "--die-with-parent", "--new-session", "--chdir", "/var/lib/mind-x/sandbox", "--",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(args, expected);
+        // The credentials are hidden before the sandbox and the scratch are bound back, and the network is not unshared.
+        let at = |needle: &str| args.iter().position(|arg| arg == needle).unwrap();
+        assert!(at("/run") < at("/run/mind-x") && at("/var/lib") < at("/var/lib/mind-x/sandbox"));
+        // The scratch is read-only to her: no plain bind of it, so she cannot plant a link where the organ writes.
+        assert!(!args.windows(3).any(|w| w[0] == "--bind" && w[1] == "/run/mind-x"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg == "--unshare-net" || arg == "--unshare-all"));
+    }
+
+    #[test]
+    fn a_sandboxed_spawner_runs_bwrap_with_its_arguments_then_claude_and_the_child_sees_no_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, scratch, sandbox) = (dir.path().join("bin"), dir.path().join("scratch"), dir.path().join("sandbox"));
+        for made in [&bin, &scratch, &sandbox] {
+            std::fs::create_dir(made).unwrap();
+        }
+        let (argv, environment) = (dir.path().join("argv"), dir.path().join("environment"));
+        let fake = bin.join("bwrap");
+        std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\n' \"$@\" > {}\nenv > {}\n", argv.display(), environment.display())).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut unit: Vec<(std::ffi::OsString, std::ffi::OsString)> = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "UNLISTED_VARIABLE"].iter().map(|name| ((*name).into(), format!("canary-{name}").into())).collect();
+        unit.push(("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()).into()));
+        unit.push((SCRATCH_VARIABLE.into(), scratch.clone().into_os_string()));
+        let spawner = ClaudeSpawner::in_sandbox(unit, "MIND_PERSONA_CONFIG_SEED", Some(sandbox.clone())).unwrap();
+        let mut child = spawner.spawn(&["--flag".to_string(), "value".to_string()], &token_holding("tok-canary")).unwrap();
+        while !matches!(child.next(StdDuration::from_secs(20)), Read::Exited(_) | Read::Timeout) {}
+        let recorded: Vec<String> = std::fs::read_to_string(&argv).unwrap().lines().map(String::from).collect();
+        let mut expected = sandbox_args(&sandbox, &scratch);
+        expected.extend(["claude", "--flag", "value"].map(String::from));
+        assert_eq!(recorded, expected, "bwrap, its arguments, then claude and its own");
+        let seen = std::fs::read_to_string(&environment).unwrap();
+        assert!(!seen.contains("canary") && !seen.contains("UNLISTED"), "the child's environment is the allow-list: {seen}");
+    }
 }

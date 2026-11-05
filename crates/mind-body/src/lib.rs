@@ -12,12 +12,12 @@
 //! the `mind-heartbeat` binary, that decides who wakes and when, by the rule in
 //! `tempo` (the Minds' votes make the beat; the pick chooses who takes it).
 //!
-//! `persona` is the Persona organ: one start of `mind-persona@<instance>` drains her
-//! pending chat through the connector, one typed reply per turn (`chat_client` is
-//! the chat wire and port, `chat_rudp` its RUDP transport to Bifrost's mouth, and
-//! `connector` the model transport over ModelConnector's kit client).
+//! `persona` is the Persona organ: one start of `mind-persona@<instance>` carries her live
+//! `claude` session under bubblewrap in her sandbox, driven by the Self's own driver, with her
+//! pending chat as the inbox and one typed reply per result (`chat_client` is the chat wire and
+//! port and `chat_rudp` its RUDP transport to Bifrost's mouth).
 //!
-//! `lease_client` asks the Claude connector for a Self run's credential and the
+//! `lease_client` asks the Claude connector for a session's credential and the
 //! plan's usage windows. `self_run` carries one Self run inside `mind-self@<instance>`: the
 //! `mind-self-run` binary runs `claude` over stream-json for her one open Self
 //! run, asks for the flush at the context ceiling and stops a child that outlives it.

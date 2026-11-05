@@ -647,6 +647,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "tempfile",
  "tokio",
 ]
@@ -1160,7 +1161,6 @@ source = "git+https://eureka.gamecult.org/forge/GameCult/ModelConnector.git?rev=
 dependencies = [
  "aes-gcm",
  "base64",
- "cultcache-rs 0.3.1",
  "cultnet-rs 0.2.0",
  "rand_core 0.6.4",
  "rmp-serde",

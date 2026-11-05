@@ -17,7 +17,7 @@ use eureka_pipeline::{
     RulingAuthority, RunOperator, RunTurn, Slug,
 };
 
-use crate::docs::{CitationRole, Held, kind_of_id, kind_of_type};
+use crate::docs::{CitationRole, kind_of_id, kind_of_type};
 use crate::query::PipelineDocumentView;
 use crate::refusal::MindRefusal;
 
@@ -59,6 +59,8 @@ pub(crate) enum Alias {
     /// A memory's origin kind: `Room`, `Direct`, `Wake` or `SelfRun`. Named `memory_origin` because
     /// `origin` already selects a finding's origin.
     MemoryOrigin,
+    /// A research note's or an idea's `pass` label: a pass lists whole by root and pass.
+    Pass,
 }
 
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
@@ -68,8 +70,14 @@ const MEMORY_ORIGINS: [&str; 4] = ["Room", "Direct", "Wake", "SelfRun"];
 /// The one value a presence alias answers with; a row without it answers nothing.
 const PRESENT: [&str; 1] = ["true"];
 
+/// The aliases whose values follow a row's status. Every other alias's values are
+/// fixed when the row is written, so the held image may narrow by them at any
+/// snapshot and by these only at the head. A test pins that no other alias
+/// changes across a status change.
+pub(crate) const STATUS_ALIASES: [Alias; 2] = [Alias::InForce, Alias::Ran];
+
 impl Alias {
-    const ALL: [Alias; 19] = [
+    pub(crate) const ALL: [Alias; 20] = [
         Self::Root,
         Self::InForce,
         Self::Faculty,
@@ -89,9 +97,10 @@ impl Alias {
         Self::Sort,
         Self::About,
         Self::MemoryOrigin,
+        Self::Pass,
     ];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Root => "root",
             Self::InForce => "in_force",
@@ -112,10 +121,11 @@ impl Alias {
             Self::Sort => "sort",
             Self::About => "about",
             Self::MemoryOrigin => "memory_origin",
+            Self::Pass => "pass",
         }
     }
 
-    fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|alias| alias.name() == name)
     }
 
@@ -134,6 +144,7 @@ impl Alias {
             Self::Turn | Self::OperatedBy | Self::Ran => kind == K::Run,
             Self::Voted | Self::Urged => kind == K::Pulse,
             Self::Sort | Self::About | Self::MemoryOrigin => kind == K::Memory,
+            Self::Pass => matches!(kind, K::Research | K::Idea),
         }
     }
 
@@ -153,7 +164,7 @@ impl Alias {
             Self::Ran | Self::Voted | Self::Urged => Some(&PRESENT),
             Self::Sort => Some(MemorySort::NAMES),
             Self::MemoryOrigin => Some(&MEMORY_ORIGINS),
-            Self::Root | Self::Repo | Self::Cut | Self::About => None,
+            Self::Root | Self::Repo | Self::Cut | Self::About | Self::Pass => None,
         }
     }
 
@@ -163,7 +174,7 @@ impl Alias {
         match self {
             Self::Root => Slug(value.into()).validate_slug().is_ok(),
             Self::Repo => OrgRepo(value.into()).validate_org_repo().is_ok(),
-            Self::Cut => Label(value.into()).validate_label().is_ok(),
+            Self::Cut | Self::Pass => Label(value.into()).validate_label().is_ok(),
             Self::About => !value.is_empty() && value.len() <= 200,
             closed => closed.closed().is_some_and(|set| set.contains(&value)),
         }
@@ -193,11 +204,11 @@ fn outcome_name(outcome: &ResolutionOutcome) -> &'static str {
 
 /// One document as the evaluator sees it: its identity, its ordinal, what it
 /// answers for each alias, its citation edges, and the view a page projects.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SelectionRow {
     pub(crate) kind: PipelineKind,
     pub(crate) key: String,
-    ordinal: u64,
+    pub(crate) ordinal: u64,
     values: BTreeMap<&'static str, Vec<String>>,
     refs: Vec<(CitationRole, PipelineRef)>,
     pub(crate) view: PipelineDocumentView,
@@ -205,38 +216,42 @@ pub(crate) struct SelectionRow {
 
 impl SelectionRow {
     /// `base` is the first non-resolution the document reaches through its
-    /// subjects: the row a resolution's `repo` and `cut` are read from.
+    /// subjects: the row a resolution's `repo` and `cut` are read from; `None`
+    /// is a document that is its own base. The row is the only decoded copy of
+    /// its document: it lives in `view`.
     pub(crate) fn new(
-        held: &Held,
-        base: &Held,
+        kind: PipelineKind,
+        key: &str,
+        base: Option<(&str, &PipelineDocument)>,
         view: PipelineDocumentView,
         refs: Vec<(CitationRole, PipelineRef)>,
     ) -> Self {
         use PipelineDocument as D;
+        let (base_key, base_document) = base.unwrap_or((key, &view.document));
         let mut values: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
         let mut put = |alias: Alias, found: Vec<String>| {
             values.insert(alias.name(), found);
         };
-        put(Alias::Root, vec![root_and_local(&held.key).0.to_string()]);
+        put(Alias::Root, vec![root_and_local(key).0.to_string()]);
         put(Alias::InForce, vec![matches!(view.status, crate::query::PipelineStatus::InForce).to_string()]);
         put(Alias::Faculty, vec![format!("{:?}", view.admission.provenance.faculty)]);
         put(
             Alias::Repo,
-            match &base.document {
+            match base_document {
                 D::Campaign(campaign) => campaign.repos.iter().map(OrgRepo::identity).collect(),
                 D::CutSpec(spec) => vec![spec.repo.identity()],
                 D::CutReport(report) => vec![report.repo.identity()],
                 D::FollowUp(follow_up) => vec![follow_up.repo.identity()],
                 D::Stewardship(stewardship) => vec![stewardship.repo.identity()],
                 D::HandOff(hand_off) => vec![hand_off.repo.identity()],
-                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Memory(_) => {
+                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => {
                     Vec::new()
                 }
             },
         );
         put(
             Alias::Cut,
-            root_and_local(&base.key)
+            root_and_local(base_key)
                 .1
                 .strip_prefix("cut-")
                 .and_then(|rest| rest.split_once('.'))
@@ -244,7 +259,7 @@ impl SelectionRow {
                 .into_iter()
                 .collect(),
         );
-        match &held.document {
+        match &view.document {
             D::Finding(finding) => {
                 put(Alias::Severity, vec![format!("{:?}", finding.severity)]);
                 put(Alias::Confidence, vec![format!("{:?}", finding.confidence)]);
@@ -275,9 +290,16 @@ impl SelectionRow {
                     MemoryOrigin::SelfRun { .. } => "SelfRun",
                 }.to_string()]);
             }
+            D::Research(research) => put(Alias::Pass, vec![research.pass.0.clone()]),
+            D::Idea(idea) => put(Alias::Pass, vec![idea.pass.0.clone()]),
             _ => {}
         }
-        Self { kind: held.kind, key: held.key.clone(), ordinal: view.admission.ordinal, values, refs, view }
+        Self { kind, key: key.to_string(), ordinal: view.admission.ordinal, values, refs, view }
+    }
+
+    /// Each alias this row answers, with its values: what the held image indexes.
+    pub(crate) fn alias_values(&self) -> impl Iterator<Item = (&'static str, &[String])> {
+        self.values.iter().map(|(alias, values)| (*alias, values.as_slice()))
     }
 }
 
@@ -307,7 +329,7 @@ impl Row for SelectionRow {
     }
 }
 
-/// The organ's closed lists: sixteen schemas, nineteen aliases, seventeen roles.
+/// The organ's closed lists: eighteen schemas, twenty aliases, twenty-one roles.
 /// A schema's name is its id, so the substrate's alias matching resolves
 /// nothing beyond exact ids.
 pub(crate) struct Vocabulary;
@@ -353,7 +375,7 @@ fn invalid(field: impl Into<String>, value: &str, message: impl Into<String>) ->
 /// because `OrgRepo` identity is case-insensitive.
 ///
 /// Refuses, naming the field the client sent: a `schemas` entry that is not
-/// one of the sixteen ids; a `keys` entry that is not a full id whose kind
+/// one of the eighteen ids; a `keys` entry that is not a full id whose kind
 /// segment reads and passes the leaf's ref grammar; an `any_of` value outside
 /// its alias's domain; and a `cites.target` whose key fails the ref grammar
 /// for its schema's kind (V24's rule, at this door). Whether the target
@@ -420,7 +442,7 @@ mod tests {
     /// refused at the substrate's door.
     #[test]
     fn each_kind_declares_exactly_its_aliases_and_none_is_numeric() {
-        let table: [(K, &[&str]); 16] = [
+        let table: [(K, &[&str]); 18] = [
             (K::Campaign, &["repo"]),
             (K::Target, &[]),
             (K::Question, &[]),
@@ -437,6 +459,8 @@ mod tests {
             (K::Run, &["turn", "operated_by", "ran"]),
             (K::Pulse, &["voted", "urged"]),
             (K::Memory, &["sort", "about", "memory_origin"]),
+            (K::Research, &["pass"]),
+            (K::Idea, &["pass"]),
         ];
         for (kind, extra) in table {
             let want = [&["root", "in_force", "faculty"][..], extra].concat();
@@ -449,10 +473,10 @@ mod tests {
 
     /// Each role is declared by the one kind whose field carries it, and its
     /// targets are the kinds that field is typed to, "any" spelled as all
-    /// sixteen.
+    /// eighteen.
     #[test]
     fn each_kind_declares_the_roles_it_carries_and_their_targets() {
-        let table: [(K, &[&str]); 16] = [
+        let table: [(K, &[&str]); 18] = [
             (K::Campaign, &[]),
             (K::Target, &[]),
             (K::Question, &["raised_in"]),
@@ -469,13 +493,15 @@ mod tests {
             (K::Run, &["claims"]),
             (K::Pulse, &[]),
             (K::Memory, &["consolidates"]),
+            (K::Research, &["serves", "sources"]),
+            (K::Idea, &["rests_on", "toward"]),
         ];
         for (kind, roles) in table {
             assert_eq!(sorted(Vocabulary.declared_roles(kind.type_id())), strings(roles), "{kind:?}");
         }
         assert_eq!(Vocabulary.target_leaves("answers"), vec![K::Question.type_id().to_string()]);
         assert_eq!(Vocabulary.target_leaves("rulings"), vec![K::Ruling.type_id().to_string()]);
-        assert_eq!(Vocabulary.target_leaves("subject").len(), 16);
+        assert_eq!(Vocabulary.target_leaves("subject").len(), 18);
         assert_eq!(
             sorted(Vocabulary.target_leaves("claims")),
             sorted([K::CutSpec, K::Finding, K::FollowUp].iter().map(|kind| kind.type_id().to_string()).collect())

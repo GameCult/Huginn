@@ -116,12 +116,14 @@ pub struct Options {
     /// The CPU host: takes embedding only while no GPU host can.
     pub reserve_ollama_urls: Vec<String>,
     pub embedding_model: String,
+    /// The forge a persona's activity read goes to; absent, that read is refused.
+    pub forge_url: Option<String>,
 }
 
 /// Exactly `--state-root`, `--instance`, `--bind`, `--qdrant-url`,
 /// `--ollama-url` and `--embedding-model`, each required, each once, except
 /// `--ollama-url`, which repeats for each GPU host, and the optional
-/// `--reserve-ollama-url`, which repeats for each CPU host. The URLs are plain
+/// `--reserve-ollama-url`, which repeats for each CPU host, and the optional `--forge-url`, once. The URLs are plain
 /// `http://`: this build carries no TLS.
 pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     let mut args = args;
@@ -130,7 +132,7 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     while let Some(name) = args.next() {
         let name = name.strip_prefix("--").with_context(|| format!("expected --option, got {name:?}"))?;
         ensure!(
-            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model"),
+            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model" | "forge-url"),
             "unsupported Huginn option --{name}"
         );
         let value = args.next().with_context(|| format!("missing value for --{name}"))?;
@@ -165,6 +167,7 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
         },
         reserve_ollama_urls,
         embedding_model,
+        forge_url: values.contains_key("forge-url").then(|| url("forge-url")).transpose()?,
     })
 }
 
@@ -188,7 +191,12 @@ where
     let hub = bind(options.bind, &runtime_id(&options.instance))?;
     let startup_entries = mind.index_entries(None)?;
     let sink = WorkerSink::spawn(embedder, index, &options.instance, mind.genesis_receipt_id()?, startup_entries, backoff);
-    Ok((Daemon::new(mind, sink), hub, schema_registry()?))
+    let daemon = Daemon::new(mind, sink);
+    let daemon = match &options.forge_url {
+        Some(url) => daemon.with_forge(crate::sources::forge::HttpForge::new(url)),
+        None => daemon,
+    };
+    Ok((daemon, hub, schema_registry()?))
 }
 
 /// The bytes one reliable packet carries, and the packets one session may hold
@@ -784,6 +792,173 @@ mod tests {
         assert_eq!(documents(&mut daemon), 1, "the admission that crossed the wire landed");
     }
 
+    fn question_doc(n: usize) -> huginn_mind::eureka_pipeline::PipelineDocument {
+        use huginn_mind::eureka_pipeline::{Date, PipelineDocument, PipelineQuestion, QuestionOption, Title};
+        PipelineDocument::Question(PipelineQuestion {
+            campaign: slug(crate::daemon::tests::CAMPAIGN),
+            label: format!("Q{n}").as_str().into(),
+            title: Title("Who owns the state?".into()),
+            question: "Who owns the state?".into(),
+            options: vec![
+                QuestionOption { label: "A".into(), text: "the organ".into() },
+                QuestionOption { label: "B".into(), text: "the client".into() },
+            ],
+            recommended: "A".into(),
+            depends: vec![],
+            raised_in: None,
+            asked_on: Date("2026-09-16".into()),
+        })
+    }
+
+    fn resolution_of(subject: PipelineRef, outcome: huginn_mind::eureka_pipeline::ResolutionOutcome) -> huginn_mind::eureka_pipeline::PipelineDocument {
+        huginn_mind::eureka_pipeline::PipelineDocument::Resolution(huginn_mind::eureka_pipeline::PipelineResolution {
+            subject,
+            sequence: 1,
+            outcome,
+            rationale: "Resolved.".into(),
+            resolved_on: huginn_mind::eureka_pipeline::Date("2026-09-16".into()),
+        })
+    }
+
+    /// One client session asks `request` and decodes the answer.
+    fn ask(client: &mut Client, message_id: &str, request: &HuginnMindRequest) -> HuginnMindResponse {
+        let reply = exchange(client, &encode_request(message_id, request, None).unwrap()).unwrap();
+        decode_response(&reply).unwrap().1.unwrap_or_else(|failure| panic!("{message_id}: {failure:?}"))
+    }
+
+    fn connect(endpoint: &str, name: &str) -> Client {
+        let mut client = CultMesh::create_rudp_client_for_endpoint(
+            format!("eureka-state-{name}"),
+            CULTNET_OPERATION_CONNECTION_ID,
+            endpoint,
+            CultMeshRudpSocketOptions::default(),
+        )
+        .unwrap();
+        client.connect(Vec::new()).unwrap();
+        for _ in 0..1000 {
+            let _ = client.receive_once();
+            if client.connected() {
+                return client;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("{name} never connected");
+    }
+
+    /// One client admits batches that close, withdraw and re-open records while three others read
+    /// the same mind: fresh queries, cursor walks across commits, a hop and whoami. The loop is
+    /// serial, so every answer is one snapshot's; at quiesce each answer must equal what a fresh
+    /// derivation from the store gives at the snapshot it names, and no client sees the head go
+    /// backwards. The test pins the behaviour, not the mechanism.
+    #[test]
+    fn reads_racing_admissions_on_the_wire_answer_their_snapshot() {
+        use huginn_mind::eureka_pipeline::{PipelineKind as K, ResolutionOutcome};
+        let root = tempfile::tempdir().unwrap();
+        let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
+        let seeded = daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, crate::daemon::tests::campaign_seed())), now()).answered();
+        assert!(matches!(seeded, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })), "{seeded:?}");
+        let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
+        let endpoint = format!("rudp://{}", hub.local_addr().unwrap());
+        let registry = schema_registry().unwrap();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let loop_stopping = Arc::clone(&stopping);
+        let serving = std::thread::spawn(move || {
+            let result = run(&mut daemon, &mut hub, &registry, &loop_stopping, &ServeOptions::default());
+            (result, daemon)
+        });
+
+        let done = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (endpoint, done) = (endpoint.clone(), Arc::clone(&done));
+            std::thread::spawn(move || {
+                let mut client = connect(&endpoint, "writer");
+                let admit = |client: &mut Client, n: usize, documents| {
+                    let answer = ask(client, &format!("w-{n}"), &HuginnMindRequest::Admit(batch(INSTANCE, documents)));
+                    assert!(matches!(answer, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })), "{answer:?}");
+                };
+                let withdrawn = || ResolutionOutcome::Withdrawn { reason: "race".into() };
+                let mut n = 0;
+                for cut in 0..14 {
+                    let spec = PipelineRef { kind: K::Question, id: format!("{}:question:Q{cut}", crate::daemon::tests::CAMPAIGN).as_str().into() };
+                    admit(&mut client, n, vec![question_doc(cut)]);
+                    admit(&mut client, n + 1, vec![resolution_of(spec, withdrawn())]);
+                    if cut % 2 == 0 {
+                        let closing = PipelineRef { kind: K::Resolution, id: format!("{}:resolution:question.Q{cut}.n1", crate::daemon::tests::CAMPAIGN).as_str().into() };
+                        admit(&mut client, n + 2, vec![resolution_of(closing, withdrawn())]);
+                    }
+                    n += 3;
+                }
+                done.store(true, Ordering::Relaxed);
+            })
+        };
+        let readers: Vec<_> = (0..3)
+            .map(|index| {
+                let (endpoint, done) = (endpoint.clone(), Arc::clone(&done));
+                std::thread::spawn(move || {
+                    let mut client = connect(&endpoint, &format!("reader-{index}"));
+                    let of_specs = |extra: Selection| Selection { schemas: Some(vec![K::Question.type_id().into()]), ..extra };
+                    let in_force = FieldPredicate { index: "in_force".into(), op: "any_of".into(), values: Some(vec!["true".into()]), number: None };
+                    let mut recorded: Vec<(Selection, huginn_mind::PipelineSelectionPage)> = Vec::new();
+                    let mut status_walk = of_specs(Selection { fields: Some(vec![in_force.clone()]), limit: Some(1), projection: "document".into(), ..Selection::default() });
+                    let mut head = 0;
+                    let mut round = 0;
+                    while !done.load(Ordering::Relaxed) || round < 3 {
+                        round += 1;
+                        let query = |client: &mut Client, selection: &Selection| {
+                            match ask(client, &format!("r-{index}-{round}"), &HuginnMindRequest::Query { instance: slug(INSTANCE), selection: selection.clone(), semantic: None }) {
+                                HuginnMindResponse::Query(page) => page,
+                                other => panic!("expected a page, got {other:?}"),
+                            }
+                        };
+                        let fresh = of_specs(Selection { fields: Some(vec![in_force.clone()]), limit: Some(5), ..Selection::default() });
+                        let page = query(&mut client, &fresh);
+                        assert!(page.as_of >= head, "a client's head never goes backwards");
+                        head = page.as_of;
+                        recorded.push((fresh, page));
+                        let mut walking = of_specs(Selection { limit: Some(1), ..Selection::default() });
+                        for _ in 0..3 {
+                            let page = query(&mut client, &walking);
+                            let next = page.next.clone();
+                            recorded.push((walking.clone(), page));
+                            match next {
+                                Some(cursor) => walking.cursor = Some(cursor),
+                                None => break,
+                            }
+                        }
+                        // A status walk: its cursor pins the snapshot it began at while the writer
+                        // closes and reopens the questions, so a page is read at an old snapshot
+                        // through the status filter and the document, which only the row's
+                        // status_changed can answer.
+                        let page = query(&mut client, &status_walk);
+                        let next = page.next.clone();
+                        recorded.push((status_walk.clone(), page));
+                        status_walk.cursor = next;
+                        let hop = Selection { cited: Some(cultnet_rs::Incoming { role: "subject".into(), exists: true }), ..Selection::default() };
+                        let page = query(&mut client, &hop);
+                        recorded.push((hop, page));
+                        assert!(matches!(ask(&mut client, "whoami", &HuginnMindRequest::Whoami), HuginnMindResponse::Whoami(_)));
+                    }
+                    recorded
+                })
+            })
+            .collect();
+
+        writer.join().unwrap();
+        let recorded: Vec<_> = readers.into_iter().flat_map(|reader| reader.join().unwrap()).collect();
+        stopping.store(true, Ordering::Relaxed);
+        let (result, daemon) = serving.join().unwrap();
+        result.unwrap();
+        let mind = daemon.mind();
+        let final_head = mind.query(&Selection::default()).unwrap().as_of;
+        let mut snapshots = std::collections::BTreeSet::new();
+        for (selection, page) in &recorded {
+            snapshots.insert(page.as_of);
+            assert_eq!(huginn_mind::oracle::oracle_page(mind, selection, page.as_of).as_ref(), Ok(page), "{selection:?} at {}", page.as_of);
+        }
+        assert!(snapshots.len() > 1, "the readers saw more than one snapshot: {snapshots:?}");
+        assert!(snapshots.iter().all(|as_of| *as_of <= final_head));
+    }
+
     fn encoded_len(message: &CultNetMessage) -> u64 {
         encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap().len() as u64
     }
@@ -1365,6 +1540,7 @@ mod tests {
             ollama_urls: vec!["http://127.0.0.1:1".into()],
             reserve_ollama_urls: Vec::new(),
             embedding_model: "a-model".into(),
+            forge_url: None,
         };
         let started = |options: &Options| {
             let (embedder, index) = crate::index::fakes::pair();
@@ -1402,6 +1578,7 @@ mod tests {
                 ollama_urls: vec!["http://10.77.0.4:11434".into()],
                 reserve_ollama_urls: Vec::new(),
                 embedding_model: "qwen3-embedding:0.6b".into(),
+                forge_url: None,
             }
         );
         // Each of the six is required: there is no index-less mode.
@@ -1434,5 +1611,10 @@ mod tests {
         assert_eq!(parsed.ollama_urls, ["http://10.77.0.4:11434", "http://10.77.0.2:11434"]);
         assert_eq!(parsed.reserve_ollama_urls, ["http://127.0.0.1:11434"]);
         assert!(parse_options(args(&[good.to_vec(), vec!["--reserve-ollama-url", "127.0.0.1:11434"]].concat())).is_err());
+        // The forge is optional, once, and plain http like the others.
+        let forged = [good.to_vec(), vec!["--forge-url", "http://127.0.0.1:3310"]].concat();
+        assert_eq!(parse_options(args(&forged)).unwrap().forge_url.as_deref(), Some("http://127.0.0.1:3310"));
+        assert!(parse_options(args(&[good.to_vec(), vec!["--forge-url", "https://127.0.0.1:3310"]].concat())).is_err());
+        assert!(parse_options(args(&[forged.clone(), vec!["--forge-url", "http://127.0.0.1:3311"]].concat())).is_err());
     }
 }

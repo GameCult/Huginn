@@ -479,3 +479,34 @@ fn the_ladder_allowance_is_three_escalations_the_drain_and_a_minute() {
     // The sweep above is only as long as this constant: pin the number the spec derives (3 * 120 + 2 + 60).
     assert_eq!(LADDER_S, 422);
 }
+
+#[test]
+fn a_yield_closes_stdin_at_idle_only_and_a_session_with_a_line_outstanding_or_a_turn_open_waits() {
+    // Outstanding write (the start line has no echo yet): held.
+    assert_eq!(feed(working(), Event::Yield, 1).1, Action::None);
+    // Mid-turn: held, and it acts at the idle the result brings.
+    let (state, actions) = run(vec![(Event::Echo, 0), (Event::Yield, 1)]);
+    assert_eq!(actions[1], Action::None);
+    assert_eq!(feed(state, OK, 5).1, Action::CloseStdin);
+    // Idle: at once, and only once.
+    let (state, _) = idle_at(5);
+    let (state, action) = feed(state, Event::Yield, 6);
+    assert_eq!(action, Action::CloseStdin);
+    assert_eq!(feed(state, Event::Tick, 7).1, Action::None, "stdin is closed once");
+}
+
+#[test]
+fn nothing_is_written_to_a_session_after_it_was_told_to_yield() {
+    let (state, _) = idle_at(5);
+    let (state, closed) = feed(state, Event::Yield, 5);
+    assert_eq!(closed, Action::CloseStdin);
+    assert_eq!(feed(state, Event::Inbox { pending: true }, 6).1, Action::None, "closed: text that waits is told to the next session");
+}
+
+#[test]
+fn a_flush_already_written_ends_the_session_by_itself_and_a_yield_does_not_cut_in() {
+    let (state, actions) = run(vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), 1)]);
+    assert_eq!(actions[1], flush(Why::Ceiling), "the ceiling's flush is written at once");
+    let (_, action) = feed(state, Event::Yield, 3);
+    assert_eq!(action, Action::None, "the flush's own answer closes stdin");
+}

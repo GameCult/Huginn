@@ -6,7 +6,7 @@
 
 use cultcache_rs::DatabaseEntry;
 use cultnet_rs::{CultMeshCdnArtifactManifest, Selection};
-use eureka_pipeline::{Line, PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Short, Slug};
+use eureka_pipeline::{Line, OrgRepo, PIPELINE_SCHEMA_EPOCH, PipelineKind, PipelineRef, Short, Slug};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::admission::{PipelineAdmissionBatch, PipelineAdmissionOutcome};
 use crate::mind::Mind;
 use crate::persona::{PersonaPutOutcome, PersonaStateView};
-use crate::query::{PipelineDocumentView, PipelineSelectionPage, SemanticQuery};
+use crate::query::{PipelineDocumentView, PipelineSelectionPage, RootTouched, SemanticQuery};
 use crate::receipt::{HuginnCommitReceipt, PipelineProvenance};
 use crate::refusal::MindRefusal;
 use crate::store::MindStore;
@@ -92,6 +92,90 @@ pub enum HuginnMindRequest {
     /// docs, which no mind holds. The daemon embeds the text and asks the
     /// index it does not write.
     SearchSources { instance: Slug, query: SourceQuery },
+    /// What others did in `repos` on the forge since the `after` cursor: the
+    /// daemon reads the forge and no document of the mind, and answers
+    /// `Refused(Unavailable)` when it has no forge or the forge does not answer
+    /// in time. The repos are the asker's to name (her stewardships); the
+    /// instance's own login is dropped from the answer.
+    StewardedActivity { instance: Slug, repos: Vec<OrgRepo>, after: Option<u64> },
+    /// Every root the mind holds a document under, with its newest admission and a campaign's repos in force: the mind's own
+    /// records, one pass at the head.
+    RootsTouched { instance: Slug },
+}
+
+/// The most repos one activity read names.
+pub const ACTIVITY_REPOS_MAX: usize = 64;
+
+/// What a pull-request event did. The words are the forge's op names, nothing
+/// a person wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum PrAction {
+    Opened,
+    Merged,
+    Closed,
+    Reopened,
+    Commented,
+    Approved,
+    Rejected,
+    AutoMerge,
+}
+
+/// What an event was. No field carries text a person wrote: a title, a comment
+/// or a commit message is another person's word and has no place here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum RepoChange {
+    /// A push to the repo's default branch of `commits` commits.
+    Pushed { commits: u32 },
+    Pr { number: u32, action: PrAction },
+}
+
+/// One thing someone else did in a repo of the asker's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepoEvent {
+    /// The forge's own monotonic feed id.
+    pub id: u64,
+    /// When it happened, Unix milliseconds.
+    pub at: u64,
+    pub repo: OrgRepo,
+    /// The forge login that did it.
+    pub actor: Short,
+    pub change: RepoChange,
+}
+
+/// A pull request open on the forge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OpenPr {
+    pub repo: OrgRepo,
+    pub number: u32,
+    pub author: Short,
+    /// Unix milliseconds.
+    pub updated_at: u64,
+}
+
+/// The answer to an activity read. `events` are other people's changes only,
+/// the asker's own login already dropped, and on a read with no `after` only
+/// those of the last 72 hours: the reader filters nothing again. `head` is the
+/// newest feed id the read saw in those repos, whether or not any event
+/// survived the filter, an entry older than the window too: the cursor to ask
+/// `after` next. `capped` names the repos whose feed the read stopped reading at its page limit: their older entries were not read.
+/// `open_prs` comes only on a read with no `after`; `unseen` and `moved` come on every read, because a repo can go dark in the middle of a session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepoActivity {
+    pub head: u64,
+    pub events: Vec<RepoEvent>,
+    pub capped: Vec<OrgRepo>,
+    pub open_prs: Vec<OpenPr>,
+    /// Repos asked about that the anonymous read cannot see: their feed answered 404 or a redirect, and on a read with no `after` the org listing does not hold them either. A repo the listing holds whose feed is dark, and a read with an `after` in which every repo is dark, are not told here: they fail the read.
+    pub unseen: Vec<OrgRepo>,
+    /// Of those, the ones whose feed answered a redirect to the forge's own feed route for another repo. The redirect is not followed; a `Location` that is anything else names nothing.
+    pub moved: Vec<RepoMoved>,
+}
+
+/// A redirect the forge answered for a repo's feed: it points at `to`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RepoMoved {
+    pub from: OrgRepo,
+    pub to: OrgRepo,
 }
 
 /// The most hits a source search answers.
@@ -168,6 +252,8 @@ impl HuginnMindRequest {
             Self::PersonaGet { .. } => "persona_get",
             Self::PersonaPut { .. } => "persona_put",
             Self::SearchSources { .. } => "search_sources",
+            Self::StewardedActivity { .. } => "stewarded_activity",
+            Self::RootsTouched { .. } => "roots_touched",
         }
     }
 
@@ -180,7 +266,9 @@ impl HuginnMindRequest {
             | Self::Query { instance, .. }
             | Self::PersonaGet { instance }
             | Self::PersonaPut { instance, .. }
-            | Self::SearchSources { instance, .. } => Some(instance),
+            | Self::SearchSources { instance, .. }
+            | Self::StewardedActivity { instance, .. }
+            | Self::RootsTouched { instance } => Some(instance),
         }
     }
 }
@@ -198,6 +286,8 @@ pub enum HuginnMindResponse {
     Persona(Option<PersonaStateView>),
     PersonaPut(PersonaPutOutcome),
     Sources(SourceHits),
+    Activity(RepoActivity),
+    RootsTouched(Vec<RootTouched>),
     /// The answer did not fit one send and is being held for the client to
     /// fetch. Nothing in a mind produces this: the daemon's serve module does,
     /// in place of an answer, and the answer it stands for is the named
@@ -280,15 +370,9 @@ impl<S: MindStore> Mind<S> {
     /// `whoami`, derived from the image every time it is asked, and from the
     /// index status the caller holds: the mind stores neither.
     pub fn status(&self, index: IndexStatus) -> MindStatus {
-        let mut documents = 0_u32;
-        let mut receipts = 0_u32;
-        for envelope in self.envelopes() {
-            if envelope.r#type == HuginnCommitReceipt::TYPE {
-                receipts += 1;
-            } else if PipelineKind::ALL.iter().any(|kind| kind.type_id() == envelope.r#type) {
-                documents += 1;
-            }
-        }
+        let count = |type_id: &str| self.envelopes.get(type_id).map_or(0, |keyed| keyed.len() as u32);
+        let receipts = count(HuginnCommitReceipt::TYPE);
+        let documents = PipelineKind::ALL.iter().map(|kind| count(kind.type_id())).sum();
         MindStatus {
             instance: self.instance().clone(),
             schema_epoch: PIPELINE_SCHEMA_EPOCH.to_string(),
@@ -333,6 +417,7 @@ mod tests {
                 instance: slug(INSTANCE),
                 query: SourceQuery { text: Line("reconcile".into()), top_k: 5, repo: Some(Short("Huginn".into())) },
             },
+            HuginnMindRequest::RootsTouched { instance: slug(INSTANCE) },
         ]
     }
 
@@ -382,6 +467,7 @@ mod tests {
                     text: "x".into(),
                 }],
             }),
+            HuginnMindResponse::RootsTouched(seeded().roots_touched().unwrap()),
             HuginnMindResponse::Deferred(DeferredAnswer {
                 manifest: cultnet_rs::pack_content("huginn.mind_response", "package", "", "", "", b"body", 4)
                     .unwrap()
@@ -396,7 +482,7 @@ mod tests {
     #[test]
     fn the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response() {
         let names: Vec<&str> = requests().iter().map(|request| request.operation()).collect();
-        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources"]);
+        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources", "roots_touched"]);
         for request in requests() {
             let declared = request.instance().is_none();
             assert_eq!(declared, matches!(request, HuginnMindRequest::Whoami), "{request:?}");

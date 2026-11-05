@@ -114,6 +114,33 @@
       ]
     },
     {
+      "type": "object",
+      "properties": {
+        "Activity": {
+          "$ref": "#/$defs/RepoActivity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Activity"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "RootsTouched": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RootTouched"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "RootsTouched"
+      ]
+    },
+    {
       "description": "The answer did not fit one send and is being held for the client to\nfetch. Nothing in a mind produces this: the daemon's serve module does,\nin place of an answer, and the answer it stands for is the named\nMessagePack of the `HuginnMindResponse` the mind gave.",
       "type": "object",
       "properties": {
@@ -229,7 +256,11 @@
         "deferred_to",
         "documents",
         "claims",
-        "consolidates"
+        "consolidates",
+        "serves",
+        "sources",
+        "rests_on",
+        "toward"
       ]
     },
     "ClaimOutcome": {
@@ -1816,6 +1847,35 @@
         "scope"
       ]
     },
+    "OpenPr": {
+      "description": "A pull request open on the forge.",
+      "type": "object",
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/Short"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "updated_at": {
+          "description": "Unix milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "author",
+        "updated_at"
+      ]
+    },
     "OrgRepo": {
       "description": "A GitHub repository as `Org/Repo`, at most 140 UTF-8 bytes (39 + 1 +\n100). The owner is 1 to 39 `[A-Za-z0-9-]` bytes with no leading or\ntrailing hyphen; the repo is 1 to 100 `[A-Za-z0-9._-]` bytes, is never\n`.` or `..`, and does not end in `.git`, ASCII-case-insensitively.\nIdentity is case-insensitive: `GameCult/Epiphany` and `gamecult/epiphany`\nare the same repository.",
       "type": "string",
@@ -2263,7 +2323,7 @@
       ]
     },
     "PipelineDocument": {
-      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\nsixteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
+      "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\neighteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
       "oneOf": [
         {
           "type": "object",
@@ -2514,6 +2574,38 @@
             },
             "value": {
               "$ref": "#/$defs/PipelineMemory"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineResearch"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "idea"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineIdea"
             }
           },
           "required": [
@@ -3283,6 +3375,82 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "research"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/Line"
+                },
+                "inferred": {
+                  "type": "boolean"
+                },
+                "label": {
+                  "$ref": "#/$defs/Label"
+                },
+                "observed_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "pass": {
+                  "$ref": "#/$defs/Label"
+                }
+              },
+              "required": [
+                "pass",
+                "label",
+                "claim",
+                "inferred",
+                "observed_on"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "idea"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "$ref": "#/$defs/Label"
+                },
+                "pass": {
+                  "$ref": "#/$defs/Label"
+                },
+                "proposed_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "title": {
+                  "$ref": "#/$defs/Title"
+                }
+              },
+              "required": [
+                "pass",
+                "label",
+                "title",
+                "proposed_on"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -3440,6 +3608,58 @@
         "handed_on"
       ]
     },
+    "PipelineIdea": {
+      "description": "One thing that could be, including options rejected and ideas no cut\nuses yet. `rests_on` is what it stands on (a reader selects the ideas\nresting on a stale note with `cites`); `toward` is the fork, ruling or\nfollow-up it was made for, and empty is legal. It stores no status:\ntaken up is its Deferred resolution, rejected its Recorded one.\nCampaign-rooted: `<campaign>:idea:<pass>.<label>`.",
+      "type": "object",
+      "properties": {
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "idea": {
+          "$ref": "#/$defs/Para"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "pass": {
+          "$ref": "#/$defs/Label"
+        },
+        "proposed_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "rests_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 16
+        },
+        "title": {
+          "$ref": "#/$defs/Title"
+        },
+        "toward": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 8
+        },
+        "tradeoffs": {
+          "$ref": "#/$defs/Para"
+        }
+      },
+      "required": [
+        "campaign",
+        "pass",
+        "label",
+        "title",
+        "idea",
+        "tradeoffs",
+        "rests_on",
+        "toward",
+        "proposed_on"
+      ]
+    },
     "PipelineInstance": {
       "description": "A mind's identity document. A store is canonical to exactly one\ninstance, and this says which; identity lives in the state, not in a\npath.",
       "type": "object",
@@ -3482,7 +3702,9 @@
         "HandOff",
         "Run",
         "Pulse",
-        "Memory"
+        "Memory",
+        "Research",
+        "Idea"
       ]
     },
     "PipelineMemory": {
@@ -3847,6 +4069,58 @@
             "ForeignStore"
           ]
         }
+      ]
+    },
+    "PipelineResearch": {
+      "description": "One claim a pass found, with the sources it stands on, grouped by `pass`.\nWhat is so, never what to do: a recommendation is an idea. `inferred`\nmarks a claim read from its sources rather than seen in them. It stores\nno status: whether a note is current, superseded or wrong is its\nresolutions'. `serves` names the question, cut or campaign document it\nwas gathered for. The pass's method and what it did not search is its\nfirst note, labelled `scope`. Campaign-rooted:\n`<campaign>:research:<pass>.<label>`.",
+      "type": "object",
+      "properties": {
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "claim": {
+          "$ref": "#/$defs/Line"
+        },
+        "detail": {
+          "$ref": "#/$defs/Para"
+        },
+        "inferred": {
+          "type": "boolean"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "observed_on": {
+          "$ref": "#/$defs/Date"
+        },
+        "pass": {
+          "$ref": "#/$defs/Label"
+        },
+        "serves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 8
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResearchSource"
+          },
+          "maxItems": 16
+        }
+      },
+      "required": [
+        "campaign",
+        "pass",
+        "label",
+        "claim",
+        "detail",
+        "inferred",
+        "sources",
+        "serves",
+        "observed_on"
       ]
     },
     "PipelineResolution": {
@@ -4235,6 +4509,20 @@
         "claims"
       ]
     },
+    "PrAction": {
+      "description": "What a pull-request event did. The words are the forge's op names, nothing\na person wrote.",
+      "type": "string",
+      "enum": [
+        "Opened",
+        "Merged",
+        "Closed",
+        "Reopened",
+        "Commented",
+        "Approved",
+        "Rejected",
+        "AutoMerge"
+      ]
+    },
     "Promise": {
       "description": "A promise a report makes about what it landed. Not a document and not\nresolvable: it is identified by its report's id and its label, as a\n`TargetInvariant` is by its target's. Soul measures every one (ruling\nA), and the rule that every one is measured is admission's.",
       "type": "object",
@@ -4282,6 +4570,162 @@
         "why"
       ]
     },
+    "RepoActivity": {
+      "description": "The answer to an activity read. `events` are other people's changes only,\nthe asker's own login already dropped, and on a read with no `after` only\nthose of the last 72 hours: the reader filters nothing again. `head` is the\nnewest feed id the read saw in those repos, whether or not any event\nsurvived the filter, an entry older than the window too: the cursor to ask\n`after` next. `capped` names the repos whose feed the read stopped reading at its page limit: their older entries were not read.\n`open_prs` comes only on a read with no `after`; `unseen` and `moved` come on every read, because a repo can go dark in the middle of a session.",
+      "type": "object",
+      "properties": {
+        "capped": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrgRepo"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RepoEvent"
+          }
+        },
+        "head": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "moved": {
+          "description": "Of those, the ones whose feed answered a redirect to the forge's own feed route for another repo. The redirect is not followed; a `Location` that is anything else names nothing.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RepoMoved"
+          }
+        },
+        "open_prs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OpenPr"
+          }
+        },
+        "unseen": {
+          "description": "Repos asked about that the anonymous read cannot see: their feed answered 404 or a redirect, and on a read with no `after` the org listing does not hold them either. A repo the listing holds whose feed is dark, and a read with an `after` in which every repo is dark, are not told here: they fail the read.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrgRepo"
+          }
+        }
+      },
+      "required": [
+        "head",
+        "events",
+        "capped",
+        "open_prs",
+        "unseen",
+        "moved"
+      ]
+    },
+    "RepoChange": {
+      "description": "What an event was. No field carries text a person wrote: a title, a comment\nor a commit message is another person's word and has no place here.",
+      "oneOf": [
+        {
+          "description": "A push to the repo's default branch of `commits` commits.",
+          "type": "object",
+          "properties": {
+            "Pushed": {
+              "type": "object",
+              "properties": {
+                "commits": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "commits"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Pushed"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Pr": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "$ref": "#/$defs/PrAction"
+                },
+                "number": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "number",
+                "action"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Pr"
+          ]
+        }
+      ]
+    },
+    "RepoEvent": {
+      "description": "One thing someone else did in a repo of the asker's.",
+      "type": "object",
+      "properties": {
+        "actor": {
+          "description": "The forge login that did it.",
+          "$ref": "#/$defs/Short"
+        },
+        "at": {
+          "description": "When it happened, Unix milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "change": {
+          "$ref": "#/$defs/RepoChange"
+        },
+        "id": {
+          "description": "The forge's own monotonic feed id.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "repo": {
+          "$ref": "#/$defs/OrgRepo"
+        }
+      },
+      "required": [
+        "id",
+        "at",
+        "repo",
+        "actor",
+        "change"
+      ]
+    },
+    "RepoMoved": {
+      "description": "A redirect the forge answered for a repo's feed: it points at `to`.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/OrgRepo"
+        },
+        "to": {
+          "$ref": "#/$defs/OrgRepo"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ]
+    },
     "ReportCommit": {
       "type": "object",
       "properties": {
@@ -4299,6 +4743,107 @@
         "sha",
         "subject",
         "builds"
+      ]
+    },
+    "ResearchSource": {
+      "description": "Where a research claim comes from. A `Repo` pin and a `Web` page are\noutside the document set; an `Observed` result reuses a finding's evidence;\na `Document` is the one source that is a citation edge.",
+      "oneOf": [
+        {
+          "description": "A pinned file range in a repo.",
+          "type": "object",
+          "properties": {
+            "Repo": {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "$ref": "#/$defs/DocRef"
+                },
+                "repo": {
+                  "$ref": "#/$defs/OrgRepo"
+                }
+              },
+              "required": [
+                "repo",
+                "at"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Repo"
+          ]
+        },
+        {
+          "description": "A page read on the web: its address, the work it belongs to, and when.",
+          "type": "object",
+          "properties": {
+            "Web": {
+              "type": "object",
+              "properties": {
+                "retrieved_on": {
+                  "$ref": "#/$defs/Date"
+                },
+                "url": {
+                  "$ref": "#/$defs/Line"
+                },
+                "work": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "url",
+                "work",
+                "retrieved_on"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Web"
+          ]
+        },
+        {
+          "description": "A command, probe, read or capture the pass ran itself.",
+          "type": "object",
+          "properties": {
+            "Observed": {
+              "type": "object",
+              "properties": {
+                "evidence": {
+                  "$ref": "#/$defs/Evidence"
+                }
+              },
+              "required": [
+                "evidence"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Observed"
+          ]
+        },
+        {
+          "description": "Another document in the mind.",
+          "type": "object",
+          "properties": {
+            "Document": {
+              "type": "object",
+              "properties": {
+                "reference": {
+                  "$ref": "#/$defs/PipelineRef"
+                }
+              },
+              "required": [
+                "reference"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Document"
+          ]
+        }
       ]
     },
     "ResolutionOutcome": {
@@ -4439,6 +4984,35 @@
             "Withdrawn"
           ]
         }
+      ]
+    },
+    "RootTouched": {
+      "description": "A root of the mind and the newest admission under it. `repos` is the repo set in force of a root that is an in-force campaign,\nand empty for any other root.",
+      "type": "object",
+      "properties": {
+        "admitted_at": {
+          "type": "string"
+        },
+        "ordinal": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "repos": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrgRepo"
+          }
+        },
+        "root": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "root",
+        "admitted_at",
+        "ordinal",
+        "repos"
       ]
     },
     "RulingAuthority": {

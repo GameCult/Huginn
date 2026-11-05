@@ -1,5 +1,5 @@
-//! `mind-persona --instance <slug> [--endpoint rudp://<ip>:<port>] [--max-turns n]`:
-//! one start of the Persona organ (`mind_body::persona::start`) inside
+//! `mind-persona --instance <slug> [--endpoint rudp://<ip>:<port>]`:
+//! one start of the Persona organ (`mind_body::persona::carry`) inside
 //! `mind-persona@<instance>`. This reads the process's arguments and
 //! environment, the things the library never reads, and prints the outcome. It
 //! exits 0 for every outcome, including a unit that is dead because the brake is
@@ -12,35 +12,39 @@
 //! (`--rooms`, `--operator`, `--minds`, `--self-sender`), and `MIND_HEARTBEAT_STATE` (optional: the path of the
 //! heartbeat's `heartbeat.cc`, which the unit reads and never writes, for the tempo in her input); `MIND_PERSONA_DOCTRINE`
 //! (optional, absolute paths separated by `:`) names the doctrine files read at each
-//! turn start and put ahead of her persona;
-//! `MIND_CONNECTOR_ENDPOINT` (`<ip>:<port>`, the connector's loopback listener),
-//! `MIND_CONNECTOR_KEY_FILE` and `MIND_CONNECTOR_MODEL`; `BIFROST_CHAT_ENDPOINT`
+//! process start and put ahead of her persona; `MIND_PERSONA_MODEL` is the model her session runs;
+//! `MIND_PERSONA_RUN_CAP_S` is the unit's `RuntimeMaxSec` in seconds, the one length of a start;
+//! `MIND_PERSONA_CONFIG_SEED` optionally names a root-owned directory copied into each
+//! process's fresh configuration; `CLAUDE_LEASE_SOCKET` is the connector's lease socket (the token itself
+//! is never in this process's environment, only the descriptor a lease grants); `RUNTIME_DIRECTORY` (the
+//! unit's `RuntimeDirectory=`) holds each process's configuration and instructions; `BIFROST_CHAT_ENDPOINT`
 //! (`rudp://<ip>:<port>`, the mouth) and `BIFROST_CHAT_KEY_FILE`. Without
 //! `--endpoint` the daemon is `HUGINN_ENDPOINT`; the trace is `persona-trace.cc`
-//! under `STATE_DIRECTORY`. Key files are read here and their text goes to the
-//! transports, which hold it; nothing is printed.
+//! under `STATE_DIRECTORY`, and her sandbox is `STATE_DIRECTORY/sandbox`. The key file is read here and its
+//! text goes to the transport, which holds it; nothing is printed.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use eureka_state::HuginnClient;
 use mind_body::chat_rudp::{RudpChat, connection_id};
 use mind_body::cli::instance_and_endpoint;
-use mind_body::connector::{self, KitConnector};
 use mind_body::control::{CONTROL_ROOT, FileSource, control_path, swarm_path};
 use mind_body::launch::{SystemClock, SystemdLauncher};
 use mind_body::heartbeat::FileStore;
-use mind_body::persona::{Config, FileTrace, HuginnPersona, Organs, start};
+use mind_body::lease_client::{LEASE_SOCKET_VARIABLE, SocketLender};
+use mind_body::persona::{Config, ENV_CONFIG_SEED, ENV_RUN_CAP, FileTrace, HuginnPersona, Organs, SANDBOX_DIR, carry};
 use mind_body::queue::HuginnMind;
+use mind_body::self_run::{ClaudeSpawner, SCRATCH_VARIABLE};
 
 /// How long one call to the mind may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the mouth may take to answer one chat request (a send is a Matrix PUT).
 const CHAT_TIMEOUT: Duration = Duration::from_secs(20);
 
-const USAGE: &str = "usage: mind-persona --instance <slug> [--endpoint rudp://<ip>:<port>] [--max-turns n] [--rooms a,b] [--operator id[,id]] [--minds id[,id]] [--self-sender id]";
+const USAGE: &str = "usage: mind-persona --instance <slug> [--endpoint rudp://<ip>:<port>] [--rooms a,b] [--operator id[,id]] [--minds id[,id]] [--self-sender id]";
 
 fn host() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname").map(|name| name.trim().to_string()).ok().filter(|name| !name.is_empty()).unwrap_or_else(|| "unknown".into())
@@ -73,7 +77,11 @@ fn run() -> Result<String> {
         .and_then(|address| address.parse().ok())
         .ok_or_else(|| anyhow!("BIFROST_CHAT_ENDPOINT is not rudp://<ip>:<port>"))?;
     let chat = RudpChat::new(chat_endpoint, connection_id(&credential("BIFROST_CHAT_KEY_FILE")?), instance.0.clone(), CHAT_TIMEOUT);
-    let connector = KitConnector::new(connector::endpoint(&required("MIND_CONNECTOR_ENDPOINT")?).context("MIND_CONNECTOR_ENDPOINT must be <ip>:<port> or tcp://<ip>:<port>")?, &credential("MIND_CONNECTOR_KEY_FILE")?, required("MIND_CONNECTOR_MODEL")?, instance.0.clone())?;
+    let run_cap_s: u64 = setting(ENV_RUN_CAP).and_then(|seconds| seconds.parse().ok()).filter(|seconds| *seconds > 0).ok_or_else(|| anyhow!("{ENV_RUN_CAP} is not set to the unit's RuntimeMaxSec in seconds"))?;
+    let scratch = PathBuf::from(required(SCRATCH_VARIABLE)?);
+    let sandbox = Path::new(&state).join(SANDBOX_DIR);
+    let lender = SocketLender::new(required(LEASE_SOCKET_VARIABLE)?);
+    let spawner = ClaudeSpawner::in_sandbox(std::env::vars_os(), ENV_CONFIG_SEED, Some(sandbox.clone()))?;
     let source = FileSource::new(control_path(Path::new(CONTROL_ROOT), &instance)?);
     let mind = HuginnMind::new(HuginnClient::new(address, instance.clone(), TIMEOUT));
     let persona = HuginnPersona::new(HuginnClient::new(address, instance, TIMEOUT));
@@ -81,9 +89,9 @@ fn run() -> Result<String> {
     let launcher = SystemdLauncher::new();
     let host = host();
     let tempo = setting("MIND_HEARTBEAT_STATE").map(FileStore::new);
-    let organs = Organs { mind: &mind, launcher: &launcher, clock: &SystemClock, host: &host, chat: &chat, connector: &connector, persona: &persona, trace: &trace, tempo: tempo.as_ref().map(|store| store as &dyn mind_body::heartbeat::TempoView) };
+    let organs = Organs { mind: &mind, launcher: &launcher, clock: &SystemClock, host: &host, chat: &chat, persona: &persona, trace: &trace, tempo: tempo.as_ref().map(|store| store as &dyn mind_body::heartbeat::TempoView), lender: &lender, spawner: &spawner, run_cap_s, sandbox: &sandbox, scratch: &scratch };
     let swarm = FileSource::new(swarm_path(Path::new(CONTROL_ROOT)));
-    Ok(start(&organs, &source, &swarm, &config)?.to_string())
+    Ok(carry(&organs, &source, &swarm, &config)?.to_string())
 }
 
 fn main() {

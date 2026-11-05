@@ -10,9 +10,10 @@
 //! cross-document rule, every derived write, and the replay check, in one
 //! ordered path that `admit`, the daemon's sink and the hand-off all share.
 //!
-//! The read side derives status, joins the receipts and answers one typed
-//! selection (CultNet's, over rows this crate supplies) through the same
-//! `docs` the rules use; nothing is stored for it.
+//! The read side answers one typed selection (CultNet's, over rows this crate
+//! supplies) from the mind's held image: a fold of the receipts, held by `Mind`,
+//! advanced per commit, rebuilt on restart and on a lost swap. Status is derived
+//! through the same `docs` the rules use; nothing is stored for it.
 //!
 //! The wire vocabulary and its operation envelope (`envelope`) are here too,
 //! so the daemon and the client share one set
@@ -27,11 +28,14 @@
 
 pub mod admission;
 mod docs;
+mod image;
 pub mod envelope;
 pub mod index;
 pub mod mind;
 pub mod persona;
 mod rows;
+#[cfg(any(test, feature = "test-support"))]
+pub mod oracle;
 pub mod query;
 pub mod receipt;
 pub mod refusal;
@@ -41,6 +45,9 @@ pub mod wire;
 #[cfg(test)]
 pub(crate) mod fixtures;
 
+#[cfg(test)]
+mod read_tests;
+
 pub use docs::CitationRole;
 pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
@@ -48,7 +55,7 @@ pub use mind::{HuginnMindEpoch, Mind};
 pub use persona::{PersonaPutOutcome, PersonaStateView};
 pub use query::{
     AdmissionFacts, PipelineDocumentSummary, PipelineDocumentView, PipelineEdge, PipelineFacts, PipelinePageItems,
-    Members, PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, Ranked, SUMMARY_MAX_BYTES, SemanticQuery,
+    Members, PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, Ranked, RootTouched, SUMMARY_MAX_BYTES, SemanticQuery,
 };
 pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
 pub use refusal::{MindRefusal, RunId};
@@ -56,7 +63,7 @@ pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{
     DeferredAnswer, HuginnMindRequest, HuginnMindResponse, IndexStatus, MAX_DEFERRED_BODY_BYTES, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON,
     MIND_RESPONSE_SCHEMA, MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus, PersonaStatus,
-    SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery,
+    ACTIVITY_REPOS_MAX, OpenPr, PrAction, RepoActivity, RepoChange, RepoEvent, RepoMoved, SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery,
 };
 
 /// The leaf, whole, through the one crate that pins its rev: the daemon and
