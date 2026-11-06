@@ -6367,3 +6367,283 @@ fn a_flush_written_beside_a_revision_line_still_makes_the_reply_final() {
 fn session_of(config: &Config, first: Vec<ChatDelivery>) -> Session {
     Session { conversation: first.first().map_or(Conversation::Public, Conversation::of), origin: origin_of(config, &first, &MemoryOrigin::Wake).0, first }
 }
+
+// ---- a Self reply is told only in its brief's conversation ----
+
+const AQUA_DM: &str = "!aqua:chat";
+const LIBBY_DM: &str = "!libby:chat";
+
+fn dm_origin(room: &str, member: &str) -> MemoryOrigin {
+    MemoryOrigin::Direct { room: room.into(), with: vec![member.into()] }
+}
+
+/// An open brief her Persona admitted from a turn of `origin` (none: one admitted before origins were recorded).
+fn brief_asked(label: &str, origin: Option<MemoryOrigin>) -> PipelineDocument {
+    let source = reference(K::Ruling, &id("ruling", "shape"));
+    let PipelineDocument::FollowUp(mut brief) = open_follow_up(label, &source, "Review the shaders") else { unreachable!() };
+    brief.origin = origin;
+    PipelineDocument::FollowUp(brief)
+}
+
+/// Her Self's run and the briefs two members asked in their DMs, one asked in the public rooms and one with no origin.
+fn briefs_in_every_room() -> Vec<PipelineDocument> {
+    vec![
+        ruling("shape", None),
+        brief_asked("ask-aqua", Some(dm_origin(AQUA_DM, "@aqua:chat"))),
+        brief_asked("ask-libby", Some(dm_origin(LIBBY_DM, "@libby:chat"))),
+        brief_asked("ask-public", Some(MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec!["@m:chat".into()] })),
+        brief_asked("ask-old", None),
+        run("self-r", RunTurn::SelfRun, RunOperator::Mind, &[]),
+    ]
+}
+
+fn self_reply_to(label: &str, briefs: &[&str], text: &str) -> PipelineDocument {
+    PipelineDocument::Reply(eureka_pipeline::PipelineReply {
+        instance: Slug(INSTANCE.into()),
+        label: label.into(),
+        run: run_ref("self-r"),
+        answers: briefs.iter().map(|brief| reference(K::FollowUp, &id("follow_up", brief))).collect(),
+        text: text.into(),
+    })
+}
+
+/// The lines of each process, in the order the processes started.
+fn told_by_process(rig: &Rig) -> Vec<Vec<String>> {
+    let mut schemas: Vec<String> = Vec::new();
+    let mut processes: Vec<Vec<String>> = Vec::new();
+    for told in rig.model.requests.borrow().iter() {
+        match schemas.iter().position(|schema| *schema == told.output_schema_json) {
+            Some(at) => processes[at].push(told.input.clone()),
+            None => {
+                schemas.push(told.output_schema_json.clone());
+                processes.push(vec![told.input.clone()]);
+            }
+        }
+    }
+    processes
+}
+
+const AQUA_WORDS: &str = "walnut-shelf review done";
+const AQUA_ASK: &str = "aqua asks about walnut";
+
+/// Soul's scenario: a reply from one member's DM brief is told in that DM's session and in no other, public or private.
+#[test]
+fn a_reply_to_a_dm_brief_is_told_only_in_that_dms_session() {
+    let pending = vec![direct(1, LIBBY_DM, "@libby:chat", "libby asks about cedar"), delivery(2, "swarm", "@m:chat", "public asks about oak"), direct(3, AQUA_DM, "@aqua:chat", AQUA_ASK)];
+    let rig = Rig::new(pending, &[says(&[]), says(&[]), says(&[])]);
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-aqua", &["ask-aqua"], AQUA_WORDS)]);
+    assert_eq!(failure_of(rig.go()), None);
+    let processes = told_by_process(&rig);
+    assert_eq!(processes.len(), 3, "a process per conversation: {processes:?}");
+    for process in &processes {
+        let all = process.concat();
+        let aqua = all.contains(AQUA_ASK);
+        assert_eq!(all.contains(AQUA_WORDS), aqua, "the reply is told exactly in Aqua's DM session: {all}");
+        assert_eq!(all.contains("reply role=self"), aqua, "{all}");
+    }
+    assert_eq!(outcome_of(&rig, &reply_id("r-aqua")), heard_outcome());
+}
+
+#[test]
+fn a_start_with_no_delivery_and_a_dm_reply_waiting_opens_that_dm_for_the_reply_alone() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-aqua", &["ask-aqua"], AQUA_WORDS)]);
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (1, None));
+    assert_eq!(rig.model.spawns.borrow().len(), 1, "one reply-only process, and the resolved reply starts no second");
+    let requests = rig.model.requests.borrow();
+    assert!(requests[0].input.contains(AQUA_WORDS) && requests[0].input.contains("reply role=self"));
+    assert!(!requests[0].input.contains("message from"), "no message in it: {}", requests[0].input);
+    assert!(requests[0].output_schema_json.contains(AQUA_DM) && !requests[0].output_schema_json.contains(LIBBY_DM), "her answer may go to that DM's room");
+    assert!(rig.chat.acked.borrow().is_empty(), "a reply alone acks nothing");
+    assert_eq!(outcome_of(&rig, &reply_id("r-aqua")), heard_outcome());
+}
+
+#[test]
+fn a_start_opens_a_conversation_for_a_reply_alone_at_most_once() {
+    let rig = Rig::new(vec![], &std::iter::repeat_n("not json".to_string(), 12).collect::<Vec<_>>());
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-aqua", &["ask-aqua"], AQUA_WORDS)]);
+    rig.go();
+    assert_eq!(rig.model.spawns.borrow().len(), 1, "a reply that cannot be resolved does not loop processes");
+    assert_eq!(outcome_of(&rig, &reply_id("r-aqua")), None, "it stays in force for the next start");
+}
+
+fn route(id: &str, at_unix_ms: u64, conversation: Conversation) -> Route {
+    Route { id: id.into(), ordinal: at_unix_ms, at_unix_ms, conversation, origin: None }
+}
+
+fn at_ms(delivery: ChatDelivery, at_unix_ms: u64) -> ChatDelivery {
+    ChatDelivery { at_unix_ms, ..delivery }
+}
+
+#[test]
+fn the_oldest_waiting_thing_decides_the_next_session() {
+    let dm = Conversation::Direct(AQUA_DM.into());
+    let public = at_ms(delivery(1, "swarm", "@m:chat", "x"), 5_000);
+    // A reply older than the oldest delivery, of another conversation, is served alone and first.
+    let mut alone = BTreeSet::new();
+    let session = next_session(&config(), vec![public.clone()], &[route("r1", 4_000, dm.clone())], &mut alone, 0, 0).unwrap();
+    assert_eq!((session.conversation, session.first.len()), (dm.clone(), 0));
+    assert_eq!(alone.len(), 1);
+    // A younger one waits for the delivery's session.
+    let mut alone = BTreeSet::new();
+    let session = next_session(&config(), vec![public.clone()], &[route("r1", 6_000, dm.clone())], &mut alone, 0, 0).unwrap();
+    assert_eq!((session.conversation, session.first.len()), (Conversation::Public, 1));
+    assert!(alone.is_empty());
+    // A reply of the batch's own conversation rides it, whatever its age.
+    let session = next_session(&config(), vec![public.clone()], &[route("r1", 4_000, Conversation::Public)], &mut alone, 0, 0).unwrap();
+    assert_eq!((session.conversation, session.first.len()), (Conversation::Public, 1));
+    assert!(alone.is_empty());
+    // A reply already opened alone is skipped, and with no delivery either a later process ends the start.
+    let mut alone = BTreeSet::from(["r1".to_string()]);
+    let session = next_session(&config(), vec![public], &[route("r1", 4_000, dm.clone())], &mut alone, 1, 0).unwrap();
+    assert_eq!(session.first.len(), 1);
+    assert!(next_session(&config(), vec![], &[route("r1", 4_000, dm.clone())], &mut alone, 1, 0).is_none());
+    let mut alone = BTreeSet::new();
+    assert!(next_session(&config(), vec![], &[], &mut alone, 1, 0).is_none());
+    let wake = next_session(&config(), vec![], &[], &mut alone, 0, 0).unwrap();
+    assert_eq!((wake.conversation, wake.origin, wake.first.len()), (Conversation::Public, MemoryOrigin::Wake, 0));
+    // A reply-only session records the brief's origin.
+    let mut with_origin = route("r2", 4_000, dm);
+    with_origin.origin = Some(dm_origin(AQUA_DM, "@aqua:chat"));
+    let session = next_session(&config(), vec![], &[with_origin], &mut alone, 0, 0).unwrap();
+    assert_eq!(session.origin, dm_origin(AQUA_DM, "@aqua:chat"));
+}
+
+#[test]
+fn a_reply_to_no_brief_a_public_brief_or_a_brief_with_no_origin_is_told_in_the_public_session() {
+    assert_eq!(reply_conversation(&[]), Some(Conversation::Public));
+    for origin in [None, Some(MemoryOrigin::Wake), Some(MemoryOrigin::SelfRun { run: "r".into() }), Some(MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec![] })] {
+        assert_eq!(reply_conversation(&[origin]), Some(Conversation::Public));
+    }
+    // End to end: a DM session comes first, then the public one; the pre-deploy brief's reply is in the public one only.
+    let pending = vec![direct(1, AQUA_DM, "@aqua:chat", AQUA_ASK), delivery(2, "swarm", "@m:chat", "public asks about oak")];
+    let rig = Rig::new(pending, &[says(&[]), says(&[])]);
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-old", &["ask-old"], "old-brief words"), self_reply_to("r-none", &[], "no-brief words"), self_reply_to("r-pub", &["ask-public"], "public-brief words")]);
+    assert_eq!(failure_of(rig.go()), None);
+    let processes = told_by_process(&rig);
+    assert_eq!(processes.len(), 2);
+    for process in processes {
+        let all = process.concat();
+        let public = all.contains("public asks about oak");
+        for words in ["old-brief words", "no-brief words", "public-brief words"] {
+            assert_eq!(all.contains(words), public, "{words} is told in the public session only: {all}");
+        }
+    }
+}
+
+#[test]
+fn a_reply_whose_briefs_name_two_conversations_is_told_in_no_session_and_stays_in_force() {
+    assert_eq!(reply_conversation(&[Some(dm_origin(AQUA_DM, "@a:chat")), Some(dm_origin(LIBBY_DM, "@l:chat"))]), None);
+    assert_eq!(reply_conversation(&[Some(dm_origin(AQUA_DM, "@a:chat")), None]), None);
+    let pending = vec![direct(1, AQUA_DM, "@aqua:chat", AQUA_ASK), direct(2, LIBBY_DM, "@libby:chat", "libby asks about cedar"), delivery(3, "swarm", "@m:chat", "public asks about oak")];
+    let rig = Rig::new(pending, &[says(&[]), says(&[]), says(&[])]);
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-both", &["ask-aqua", "ask-libby"], "both-rooms words")]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(rig.model.spawns.borrow().len(), 3, "only the deliveries' sessions");
+    assert!(!rig.model.requests.borrow().iter().any(|told| told.input.contains("both-rooms words")));
+    assert!(reply_in_force(&rig.mind, &reply_id("r-both")).unwrap());
+}
+
+#[test]
+fn a_session_with_nothing_of_its_own_pending_yields_when_another_conversations_reply_waits() {
+    let rig = Rig::new(vec![delivery(1, "swarm", "@m:chat", "public asks about oak")], &[says(&[]), says(&[])]);
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-aqua", &["ask-aqua"], AQUA_WORDS)]);
+    rig.clock.step.set(1);
+    rig.model.linger.set(true);
+    // Only the reply-only session may end by itself: the public one must be ended by its yield.
+    let (linger, echoes, now) = (rig.model.linger.clone(), Cell::new(0), rig.clock.now.clone());
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        echoes.set(echoes.get() + 1);
+        now.set(now.get() + PAST_THE_REPLY_READ_MS);
+        if echoes.get() >= 2 {
+            linger.set(false);
+        }
+    }));
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!((answered, failure), (2, None));
+    let processes = told_by_process(&rig);
+    assert_eq!(processes.len(), 2);
+    assert!(processes[0].concat().contains("public asks about oak") && !processes[0].concat().contains(AQUA_WORDS));
+    assert!(processes[1].concat().contains(AQUA_WORDS));
+}
+
+#[test]
+fn a_session_with_its_own_work_does_not_yield_for_another_conversations_reply() {
+    let rig = Rig::new(vec![delivery(1, "swarm", "@m:chat", "public asks about oak")], &[says(&[]), says(&[]), says(&[])]);
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-aqua", &["ask-aqua"], AQUA_WORDS)]);
+    tell_one_more(&rig);
+    let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, None);
+    let processes = told_by_process(&rig);
+    assert!(processes[0].concat().contains("two"), "the public session told its second message before it ended: {processes:?}");
+    assert!(processes.last().unwrap().concat().contains(AQUA_WORDS));
+    assert_eq!(answered, 3);
+}
+
+fn brief_documents(rig: &Rig) -> Vec<eureka_pipeline::PipelineFollowUp> {
+    rig.mind
+        .ids(K::FollowUp)
+        .into_iter()
+        .filter(|key| key.contains(":follow_up:chat-"))
+        .map(|key| match rig.mind.view(K::FollowUp, &key).unwrap().document {
+            PipelineDocument::FollowUp(brief) => brief,
+            _ => unreachable!(),
+        })
+        .collect()
+}
+
+#[test]
+fn a_reply_only_dm_turn_records_its_brief_and_memories_as_that_dms() {
+    let answer = reply(&[], json!([keeps("Learned", "walnut is her wood", &["@aqua:chat"])]), json!([]), starting(json!(null)));
+    let rig = Rig::new(vec![], &[answer]);
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-aqua", &["ask-aqua"], AQUA_WORDS)]);
+    assert_eq!(failure_of(rig.go()), None);
+    let aqua = dm_origin(AQUA_DM, "@aqua:chat");
+    assert_eq!(memories(&rig).remove(0).1.origin, aqua, "a memory of a turn with no message is the DM's, not a wake's");
+    let briefs = brief_documents(&rig);
+    assert_eq!(briefs.len(), 1);
+    assert_eq!(briefs[0].origin, Some(aqua), "the brief records the conversation whose reply started it");
+}
+
+#[test]
+fn a_reply_only_dm_session_may_name_its_member_in_a_memory() {
+    let rig = Rig::new(vec![], &[reply(&[], json!([keeps("Learned", "walnut is her wood", &["@aqua:chat"])]), json!([]), json!(null))]);
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-aqua", &["ask-aqua"], AQUA_WORDS)]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(memories(&rig).len(), 1);
+}
+
+#[test]
+fn a_turns_memories_and_its_brief_take_the_same_origin() {
+    for (pending, expected) in [
+        (vec![delivery(1, "swarm", "@m:chat", "public asks about oak")], MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec!["@m:chat".into()] }),
+        (vec![direct(1, LIBBY_DM, "@libby:chat", "libby asks about cedar")], dm_origin(LIBBY_DM, "@libby:chat")),
+    ] {
+        let rig = Rig::new(pending, &[reply(&[], json!([keeps("Learned", "cedar is warm", &[])]), json!([]), starting(json!(null)))]);
+        assert_eq!(failure_of(rig.go()), None);
+        assert_eq!(memories(&rig).remove(0).1.origin, expected);
+        assert_eq!(brief_documents(&rig)[0].origin, Some(expected));
+    }
+}
+
+#[test]
+fn an_open_briefs_first_line_entry_is_marked_with_its_origin_as_a_memory_is() {
+    let rig = Rig::new(vec![direct(1, AQUA_DM, "@aqua:chat", AQUA_ASK)], &[says(&[])]);
+    rig.mind.committed(briefs_in_every_room());
+    assert_eq!(failure_of(rig.go()), None);
+    let first = input_of(&rig, 0);
+    let entry = |label: &str| first.lines().find(|line| line.contains(&format!("/{label} ("))).unwrap_or_else(|| panic!("{label} is open: {first}")).to_string();
+    assert!(entry("ask-aqua").contains("privately, with \"aqua\""), "{}", entry("ask-aqua"));
+    assert!(entry("ask-public").contains("in #swarm, with"), "{}", entry("ask-public"));
+    assert!(!entry("ask-old").contains("privately") && !entry("ask-old").contains(" in #"), "{}", entry("ask-old"));
+}
