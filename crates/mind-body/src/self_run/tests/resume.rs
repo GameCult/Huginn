@@ -216,7 +216,7 @@ fn keeping_one_conversation_removes_the_one_before_it_and_clearing_leaves_the_di
     write(&state.path().join("session/stray.jsonl.tmp"), "half");
 
     spawner.keep(Some((newer, until))).unwrap();
-    assert_eq!(names(&state.path().join("session")), ["kept.json", &format!("{newer}.jsonl")], "at most one transcript, and no stray");
+    assert_eq!(names(&state.path().join("session")), [format!("{newer}.jsonl"), "kept.json".to_string()], "at most one transcript, and no stray");
     assert_eq!(spawner.kept(), Some(Kept { session: newer, transcript: newer_path, warm_until: until, same_seed: true }));
 
     spawner.keep(None).unwrap();

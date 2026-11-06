@@ -167,7 +167,7 @@ impl Ran {
 
     /// What the unit's stdout holds apart from the decisions the actuator journals.
     fn lines(&self) -> String {
-        self.out.lines().filter(|line| !line.starts_with("decision ")).map(|line| format!("{line}\n")).collect()
+        self.out.lines().filter(|line| !line.starts_with("decision ") && !line.starts_with("session ")).map(|line| format!("{line}\n")).collect()
     }
 
     fn count(&self, wanted: &Event) -> usize {
@@ -548,7 +548,7 @@ fn records_that_share_a_message_id_count_once_and_subagent_records_never_move_th
     steps.insert(3, Out(subagent("msg_sub", 999_999)));
     let ran = go(steps);
     assert_eq!(
-        ran.out,
+        ran.lines(),
         "request 1 prefix 84210
 request 2 prefix 100751
 request 3 prefix 117174
@@ -874,8 +874,8 @@ fn a_child_that_exited_is_never_signalled_however_long_its_stream_stays_open() {
 #[test]
 fn the_outcome_names_how_it_ended_and_the_exit_status_follows_the_childs_code() {
     let own = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", 10)), Out(result_line())], Some(0), false);
-    assert_eq!(own.outcome.as_ref().unwrap(), &SelfRunOutcome::Ended { cause: Cause::Own, code: Some(0), requests: 1, prefix: 10, warm_until: Some(at_start() + ChronoDuration::seconds(TTL_1H_S - TTL_MARGIN_S)) });
-    assert_eq!(own.outcome.as_ref().unwrap().to_string(), "ended: own code 0 requests 1 prefix 10 warm until 2026-10-09T14:14:00Z");
+    assert_eq!(own.outcome.as_ref().unwrap(), &SelfRunOutcome::Ended { cause: Cause::Own, code: Some(0), requests: 1, prefix: 10, warm_until: None });
+    assert_eq!(own.outcome.as_ref().unwrap().to_string(), "ended: own code 0 requests 1 prefix 10");
     assert_eq!(own.outcome.unwrap().exit_status(), 0);
 
     let flushed = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Out(result_line())], Some(0), false);
@@ -1111,7 +1111,7 @@ exit 0");
         let mut out = Vec::new();
         let outcome = carry(&Seen::of(&mind), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
         assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000, warm_until: None });
-        let printed: String = String::from_utf8(out).unwrap().lines().filter(|line| !line.starts_with("decision ")).map(|line| format!("{line}\n")).collect();
+        let printed: String = String::from_utf8(out).unwrap().lines().filter(|line| !line.starts_with("decision ") && !line.starts_with("session ")).map(|line| format!("{line}\n")).collect();
         assert_eq!(printed, "request 1 prefix 10
 request 2 prefix 300000
 result subtype=success is_error=false: The answer.
