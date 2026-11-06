@@ -70,6 +70,7 @@ fn run() -> Result<()> {
     let mode = if args.dry_run { Mode::DryRun } else { Mode::Live };
     let once = args.once || args.dry_run;
     loop {
+        let mut faulted = false;
         let waits = match tick(&organs, &|| read_effective(&instance), mode, Utc::now()) {
             Ok(Outcome::Thought { thought, admitted }) => {
                 if admitted {
@@ -87,11 +88,12 @@ fn run() -> Result<()> {
             Ok(Outcome::NotDue) => false,
             Err(fault) => {
                 eprintln!("mind-stream: {}", format!("{fault:#}").replace('\n', " "));
+                faulted = true;
                 true
             }
         };
         if once {
-            return Ok(());
+            return if faulted { Err(anyhow!("the tick faulted")) } else { Ok(()) };
         }
         std::thread::sleep(Duration::from_secs(if waits { STREAM_MIN_GAP_S as u64 } else { POLL_S }));
     }
