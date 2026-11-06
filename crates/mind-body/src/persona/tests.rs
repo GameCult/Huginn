@@ -353,7 +353,7 @@ fn config() -> Config {
 /// ranks first among the Minds. The tests that are about the stagger name their events.
 fn delivery(seq: u64, room: &str, sender: &str, text: &str) -> ChatDelivery {
     let ranked_first = |event_id: &str| stagger_ms(&config(), &own_addressee(&config()), &ChatDelivery { event_id: event_id.into(), ..delivery_of(seq, room, sender, text, event_id) }) == 0;
-    let event_id = (0..).map(|n| if n == 0 { format!("$e{seq}") } else { format!("$e{seq}-{n}") }).find(|id| ranked_first(id)).unwrap();
+    let event_id = (0..1000).map(|n| if n == 0 { format!("$e{seq}") } else { format!("$e{seq}-{n}") }).find(|id| ranked_first(id)).expect("among 1000 events one ranks her first: the stagger ranks nobody first");
     delivery_of(seq, room, sender, text, &event_id)
 }
 
@@ -6296,7 +6296,10 @@ fn three_minds(own: &str) -> Config {
 
 /// An unaddressed swarm message whose event ranks `eureka` at `rank` of three.
 fn unaddressed_at_rank(seq: u64, rank: u64, text: &str) -> ChatDelivery {
-    (0..).map(|n| delivery_of(seq, "swarm", "@op:chat", text, &format!("$r{seq}-{n}"))).find(|candidate| stagger_ms(&three_minds("@eureka:chat"), &own_addressee(&three_minds("@eureka:chat")), candidate) == rank * STAGGER_STEP_S * 1000).unwrap()
+    (0..1000)
+        .map(|n| delivery_of(seq, "swarm", "@op:chat", text, &format!("$r{seq}-{n}")))
+        .find(|candidate| stagger_ms(&three_minds("@eureka:chat"), &own_addressee(&three_minds("@eureka:chat")), candidate) == rank * STAGGER_STEP_S * 1000)
+        .unwrap_or_else(|| panic!("among 1000 events one ranks her at {rank}: the stagger never does"))
 }
 
 #[test]

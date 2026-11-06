@@ -1,8 +1,8 @@
 //! Whether a chat delivery is for a Mind: the one rule the heartbeat's off-beat wake and beat score and the Persona's `to_you` and
 //! stagger rank all call. A delivery addresses a Mind when its `m.mentions` holds her Matrix id (a tag), or its text holds one of her
 //! names as a whole word. Her names are her own (handle, public name; case does not matter) and her projects': the names her
-//! stewardship records list, matched exactly as written, or, when a record lists none, the repo's name and its split form, matched in
-//! any case. A deterministic identity match on names, not a reading of meaning.
+//! stewardship records list, matched exactly as written, or, when a record lists none, the repo's name matched exactly as the repo
+//! spells it and, for a multi-word name, its split form matched in any case. A deterministic identity match on names, not a reading of meaning.
 
 use eureka_pipeline::{OrgRepo, Short};
 
@@ -52,8 +52,9 @@ pub(crate) fn addresses(who: &Addressee, delivery: &ChatDelivery) -> bool {
 }
 
 /// The chat names of one stewarded repo. Listed names are exactly those, each matched exactly as the steward wrote it (capitalization
-/// tells a project from a common word). With none listed: the repo's name after the org, and that name split at `-`, `_`, `.` and where a
-/// lower-case letter or digit meets a capital, when the split reads differently; both match in any case.
+/// tells a project from a common word). With none listed: the repo's name after the org, matched exactly as the repo spells it
+/// (`Thing`, not `thing`), and that name split at `-`, `_`, `.` and where a lower-case letter or digit meets a capital, when the split
+/// reads differently, matched in any case (a split phrase is not a common word).
 pub(crate) fn project_names(repo: &OrgRepo, listed: &[Short]) -> Vec<Name> {
     if !listed.is_empty() {
         return listed.iter().map(|name| Name { text: name.0.clone(), exact: true }).collect();
@@ -72,9 +73,9 @@ pub(crate) fn project_names(repo: &OrgRepo, listed: &[Short]) -> Vec<Name> {
         }
         previous = Some(ch);
     }
-    let (whole, split) = (whole.to_lowercase(), split.to_lowercase());
-    let mut names = vec![Name { text: whole.clone(), exact: false }];
-    if split != whole {
+    let split = split.to_lowercase();
+    let mut names = vec![Name { text: whole.to_string(), exact: true }];
+    if split != whole.to_lowercase() {
         names.push(Name { text: split, exact: false });
     }
     names
@@ -87,11 +88,18 @@ pub(crate) fn names_whole_word(text: &str, name: &str, exact: bool) -> bool {
     if name.is_empty() {
         return false;
     }
-    text.match_indices(&name).any(|(start, _)| {
+    let mut from = 0;
+    while let Some(found) = text[from..].find(&name) {
+        let start = from + found;
         let before = text[..start].chars().next_back();
         let after = text[start + name.len()..].chars().next();
-        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
-    })
+        if !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric) {
+            return true;
+        }
+        // Step one character, not one name: matches may overlap ("ab ab" in "xab ab ab").
+        from = start + text[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
 }
 
 #[cfg(test)]
