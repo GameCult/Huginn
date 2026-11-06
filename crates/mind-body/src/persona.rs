@@ -1999,6 +1999,7 @@ fn reply_in_force(mind: &dyn MindPort, id: &str) -> Result<bool> {
 /// The brief becomes a follow-up of the Persona turn's run, and a Self run
 /// claims it. A Self run already live is her Self run: the follow-up waits in
 /// the queue for it. Answers that run and the follow-up it admitted.
+#[allow(clippy::too_many_arguments, reason = "one admission's inputs are these few things, and a struct for them would be a second owner")]
 fn start_self_run(
     organs: &Organs,
     control: &impl ControlSource,

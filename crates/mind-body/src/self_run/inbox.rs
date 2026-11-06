@@ -35,7 +35,7 @@ pub struct Brief {
     pub ordinal: u64,
     /// The conversation her Persona was in when it gave the brief, from the origin the follow-up records
     /// (none recorded, a brief admitted before origins existed, is the public one).
-    pub conversation: persona::Conversation,
+    pub(crate) conversation: persona::Conversation,
 }
 
 /// The ids of the follow-ups a closed run claims, with the run each was claimed by.
