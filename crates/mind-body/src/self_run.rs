@@ -230,7 +230,7 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
     Uuid::new_v5(&SESSION_NAMESPACE, run.id.0.as_bytes())
 }
 
-/// The argument list of the child, and nothing else: no `--continue`, no model,
+/// The argument list of the child, and nothing else: no continue flag, no model,
 /// no settings and no hooks belong to this actuator. With a kept conversation it
 /// appends `--resume <transcript path> --fork-session`: the fork is why the new
 /// run's own `--session-id` is accepted beside a resume (the CLI refuses the two
