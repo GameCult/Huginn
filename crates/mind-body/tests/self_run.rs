@@ -185,10 +185,17 @@ mod lane {
     /// The daemon over a store seeded with `documents`, and the endpoint it listens on.
     /// It needs a built `huginn-daemon` beside the binary (`cargo build -p huginn-daemon`).
     fn serve(documents: Vec<PipelineDocument>) -> (Daemon, TempDir, String) {
-        let slug = Slug(INSTANCE.into());
         let state = TempDir::new().unwrap();
+        admit(state.path(), documents);
+        let (daemon, endpoint) = daemon_over(state.path());
+        (daemon, state, endpoint)
+    }
+
+    /// Admits `documents` into the store at `state`, which no daemon holds open.
+    fn admit(state: &Path, documents: Vec<PipelineDocument>) {
+        let slug = Slug(INSTANCE.into());
         {
-            let mut mind = Mind::open(state.path(), &slug).unwrap();
+            let mut mind = Mind::open(state, &slug).unwrap();
             let batch = PipelineAdmissionBatch {
                 instance: slug.clone(),
                 provenance: PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into() },
@@ -196,29 +203,42 @@ mod lane {
             };
             assert!(matches!(mind.admit(batch, Utc::now()), PipelineAdmissionOutcome::Committed { .. }));
         }
+    }
+
+    /// A daemon over the store at `state`, and the endpoint it listens on.
+    fn daemon_over(state: &Path) -> (Daemon, String) {
         let port = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let exe = Path::new(env!("CARGO_BIN_EXE_mind-self-run"));
         let daemon_exe = exe.with_file_name("huginn-daemon");
         assert!(daemon_exe.exists(), "build huginn-daemon first: {}", daemon_exe.display());
         let daemon = Daemon(
             Command::new(&daemon_exe)
-                .args(["--state-root", state.path().to_str().unwrap(), "--instance", INSTANCE, "--bind", &format!("127.0.0.1:{port}")])
+                .args(["--state-root", state.to_str().unwrap(), "--instance", INSTANCE, "--bind", &format!("127.0.0.1:{port}")])
                 .args(["--qdrant-url", "http://127.0.0.1:1", "--ollama-url", "http://127.0.0.1:1", "--embedding-model", "x"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap(),
         );
-        (daemon, state, format!("rudp://127.0.0.1:{port}"))
+        (daemon, format!("rudp://127.0.0.1:{port}"))
     }
 
     /// The binary with `bin` first on `PATH`, until the daemon answers (exit 2 before that
     /// has started nothing). `SELF_RUN_ENV_CANARY` is a variable of the unit's environment.
     fn ask(endpoint: &str, bin: &Path, socket: &Path) -> Output {
+        ask_in(endpoint, bin, socket, None)
+    }
+
+    /// The same, in a unit whose `StateDirectory=` is `state_directory`.
+    fn ask_in(endpoint: &str, bin: &Path, socket: &Path, state_directory: Option<&Path>) -> Output {
         let exe = Path::new(env!("CARGO_BIN_EXE_mind-self-run"));
         let path = format!("{}:/usr/bin:/bin", bin.display());
         for _ in 0..40 {
-            let attempt = Command::new(exe)
+            let mut command = Command::new(exe);
+            if let Some(state_directory) = state_directory {
+                command.env("STATE_DIRECTORY", state_directory);
+            }
+            let attempt = command
                 .args(["--instance", INSTANCE, "--endpoint", endpoint])
                 .env("PATH", &path)
                 .env("SELF_RUN_ENV_CANARY", ENV_CANARY)
@@ -336,7 +356,7 @@ echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         assert_eq!(output.status.code(), Some(0), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-        let printed: String = stdout.lines().filter(|line| !line.starts_with("decision ") && !line.starts_with("result")).map(|line| format!("{line}\n")).collect();
+        let printed: String = stdout.lines().filter(|line| !line.starts_with("decision ") && !line.starts_with("result") && !line.starts_with("session ") && !line.starts_with("STATE_DIRECTORY")).map(|line| format!("{line}\n")).collect();
         assert_eq!(printed, "request 1 prefix 101\nrequest 2 prefix 300000\nended: flush-requested code 0 requests 2 prefix 300000\n");
         assert!(!all_output(&output).contains(ENV_CANARY), "the unit environment is not echoed");
         assert!(String::from_utf8_lossy(&output.stderr).contains("journal-line"), "the child's stderr is the unit's journal");
@@ -369,5 +389,64 @@ echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start
         assert_eq!(output.status.code(), Some(3), "{}", all_output(&output));
         assert_eq!(String::from_utf8_lossy(&output.stdout), "no run: she has no single open Self run\n");
         assert!(!record.exists(), "claude was started");
+    }
+
+    /// Two real `mind-self-run` processes share one `STATE_DIRECTORY`. The fake `claude`
+    /// writes its transcript where the CLI would, prints a request that wrote an hour's
+    /// cache and an ok result, and exits 0: a clean end inside the cache's life. The second
+    /// process, under a second run, resumes the first's kept transcript by its path, forked.
+    #[test]
+    #[ignore = "container only: a built huginn-daemon beside the binary, and a POSIX shell"]
+    fn two_real_processes_sharing_a_state_directory_resume_across_the_unit_boundary() {
+        use eureka_pipeline::{PipelineKind, PipelineRef};
+        use mind_body::self_run::session_id;
+
+        let (daemon, state, endpoint) = serve(seed());
+        let units_state = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        let argv_log = bin.path().join("argv-log");
+        let body = format!(
+            "sid=''; prev=''; for a in \"$@\"; do [ \"$prev\" = --session-id ] && sid=$a; prev=$a; done
+echo \"$@\" >> {argv_log}
+mkdir -p \"$CLAUDE_CONFIG_DIR/projects/p\"; echo '{{}}' > \"$CLAUDE_CONFIG_DIR/projects/p/$sid.jsonl\"
+read -t 5 start
+echo '{request}'\necho '{echo}'\necho '{result}'\nexit 0",
+            argv_log = argv_log.display(),
+            request = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg_1","usage":{"input_tokens":1,"cache_read_input_tokens":100,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":5}}}}"#,
+            echo = r#"{"type":"user","isReplay":true,"message":{"role":"user","content":"x"}}"#,
+            result = r#"{"type":"result","subtype":"success","is_error":false,"result":""}"#,
+        );
+        fake_claude(bin.path(), &body);
+        let connector = fake_connector();
+
+        let first = ask_in(&endpoint, bin.path(), &connector.path, Some(units_state.path()));
+        assert_eq!(first.status.code(), Some(0), "{}", all_output(&first));
+        let kept = units_state.path().join("session");
+        let mut names: Vec<String> = std::fs::read_dir(&kept).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, [format!("{LANE_SESSION}.jsonl"), "kept.json".to_string()], "the first process kept its conversation");
+
+        // Her second run: the first closed itself, so the store is quiet while the next is admitted.
+        drop(daemon);
+        let mut second_run = seed().pop().unwrap();
+        let PipelineDocument::Run(run) = &mut second_run else { unreachable!() };
+        run.label = eureka_pipeline::Label("selfrun-lane-two".into());
+        admit(state.path(), vec![second_run]);
+        let (daemon, endpoint) = daemon_over(state.path());
+        let second = ask_in(&endpoint, bin.path(), &connector.path, Some(units_state.path()));
+        drop(daemon);
+        assert_eq!(second.status.code(), Some(0), "{}", all_output(&second));
+
+        let second_session = session_id(&PipelineRef { kind: PipelineKind::Run, id: format!("{INSTANCE}:run:selfrun-lane-two").as_str().into() });
+        let argvs = std::fs::read_to_string(&argv_log).unwrap();
+        let second_argv = argvs.lines().nth(1).expect("the second process started");
+        assert!(second_argv.contains(&format!("--session-id {second_session}")), "{second_argv}");
+        assert!(second_argv.contains(&format!("--resume {}/{LANE_SESSION}.jsonl --fork-session", kept.display())), "{second_argv}");
+        assert!(!argvs.lines().next().unwrap().contains("--resume"), "the first process had nothing to resume");
+        let stdout = String::from_utf8_lossy(&second.stdout).to_string();
+        assert!(stdout.contains(&format!("session resumed {LANE_SESSION}")), "{stdout}");
+        let mut names: Vec<String> = std::fs::read_dir(&kept).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, [format!("{second_session}.jsonl"), "kept.json".to_string()], "one transcript, the newer");
     }
 }
