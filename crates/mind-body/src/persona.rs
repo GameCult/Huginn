@@ -891,7 +891,9 @@ fn one_process(
         return Ok(());
     };
     let mut inbox = PersonaInbox::new(organs, control, swarm, config, run, progress, first, started_ms, render_plan(lease.plan_quota(), started_ms));
-    drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout())?;
+    let driven = drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout());
+    inbox.settle_replies();
+    driven?;
     Ok(())
 }
 
@@ -1093,6 +1095,9 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     waiting_replies: Vec<HeardReply>,
     /// The replies the CLI took in since the last result: that result is what answers them.
     echoed_replies: Vec<HeardReply>,
+    /// Replies she answered whose resolution the mind has not yet shown took, with the follow-up her answer started: retried at each
+    /// result and at close, never told again. A later process tells only what the mind still holds in force.
+    answered_replies: Vec<(HeardReply, Option<PipelineRef>)>,
     /// When her replies are next read; 0 reads them at the first chance, the session's first line.
     reply_read_due_ms: u64,
     /// The notice lines for changes in her repos, to go with the next tell. Only a live session fills them, so a notice never starts one.
@@ -1141,6 +1146,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
             told_replies: BTreeSet::new(),
             waiting_replies: Vec::new(),
             echoed_replies: Vec::new(),
+            answered_replies: Vec::new(),
             reply_read_due_ms: 0,
             notices: Vec::new(),
             repos: Vec::new(),
@@ -1215,7 +1221,8 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
     }
 
     /// Replies that were told and not answered are told again: the line failed, was stale or was refused. A reply no longer in force
-    /// (resolved by her answer, by someone else, or by a resolution whose answer was lost) leaves for good: it stays in `told_replies`, so no read returns it.
+    /// (resolved by someone else, or by a resolution whose answer was lost) leaves for good: it stays in `told_replies`, so no read returns it.
+    /// A read that fails leaves the reply in force: told twice is better than lost unheard.
     fn untell(&mut self, replies: Vec<HeardReply>) {
         for reply in replies {
             if matches!(reply_in_force(self.organs.mind, &reply.id), Ok(false)) {
@@ -1225,6 +1232,18 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
             self.waiting_replies.push(reply);
         }
         self.waiting_replies.sort_by_key(|reply| reply.ordinal);
+    }
+
+    /// Resolves each reply she answered, one by one so that one refusal holds no other hostage: Answered by the follow-up her answer's
+    /// `start_self_run` admitted, else Recorded as heard. Whether it took is read from the mind, not from the admit's answer: a reply
+    /// still in force stays here to be retried at the next result and at close; one out of force (resolved, or resolved elsewhere) is done.
+    fn settle_replies(&mut self) {
+        for (reply, by) in std::mem::take(&mut self.answered_replies) {
+            let _ = resolve_reply(self.organs, self.run, &reply, by.as_ref());
+            if !matches!(reply_in_force(self.organs.mind, &reply.id), Ok(false)) {
+                self.answered_replies.push((reply, by));
+            }
+        }
     }
 
     /// Her in-force replies this process has not told become waiting replies, at most once in `REPLY_READ_EVERY_S`: one selection of her
@@ -1425,8 +1444,9 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         match step {
             Step::Answered(started, intent, opened) => {
                 // The result answers the replies its lines carried: they are heard now, and only now.
-                hear_replies(self.organs, self.run, &heard, started.as_ref().map(|(_, follow_up)| follow_up));
-                self.untell(heard);
+                let by = started.as_ref().map(|(_, follow_up)| follow_up.clone());
+                self.answered_replies.extend(heard.into_iter().map(|reply| (reply, by.clone())));
+                self.settle_replies();
                 // What she admitted this turn is hers to settle or take on for the rest of the session, though no line showed its id.
                 self.seen.add(Shown { people: Vec::new(), open: opened });
                 // The one ack rule: through the highest answered seq, never past a delivery still told
@@ -1837,16 +1857,7 @@ fn unheard_replies(mind: &dyn MindPort, told: &BTreeSet<String>, waiting: &[Hear
     Ok(found)
 }
 
-/// The result that answers a line resolves each reply the line carried, one by one: Answered by the follow-up her answer's
-/// `start_self_run` admitted, else Recorded as heard. A resolved reply is out of force, so no later process tells it. Whether it took is
-/// read from the mind (`reply_in_force`, in `untell`), not from this answer: a reply whose resolution failed stays in force and is told
-/// again, one that someone else resolved, or whose answer was lost, is not; and one failure holds no other reply hostage.
-fn hear_replies(organs: &Organs, run: &PipelineRef, heard: &[HeardReply], follow_up: Option<&PipelineRef>) {
-    for reply in heard {
-        let _ = resolve_reply(organs, run, reply, follow_up);
-    }
-}
-
+/// One heard reply resolved: Answered by `follow_up`, else Recorded as heard.
 fn resolve_reply(organs: &Organs, run: &PipelineRef, reply: &HeardReply, follow_up: Option<&PipelineRef>) -> Result<()> {
     let subject = PipelineRef { kind: PipelineKind::Reply, id: reply.id.as_str().into() };
     let outcome = match follow_up {

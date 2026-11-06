@@ -4279,11 +4279,14 @@ struct Timeline<'a> {
     mind: &'a TestMind,
     doing: Rc<RefCell<VecDeque<Vec<PipelineDocument>>>>,
     reads: Rc<Cell<u32>>,
+    /// How many of the next keyed in-force reads of a reply fail, and how many of the next resolutions of a reply are refused by the port.
+    keyed_fail: Rc<Cell<u32>>,
+    admit_fail: Rc<Cell<u32>>,
 }
 
 impl<'a> Timeline<'a> {
     fn over(mind: &'a TestMind) -> Self {
-        Self { mind, doing: Rc::default(), reads: Rc::default() }
+        Self { mind, doing: Rc::default(), reads: Rc::default(), keyed_fail: Rc::default(), admit_fail: Rc::default() }
     }
 }
 
@@ -4299,6 +4302,11 @@ impl MindPort for Timeline<'_> {
         if *selection == in_force(any_of(of_kind(K::Reply), "root", &[INSTANCE])) {
             self.reads.set(self.reads.get() + 1);
         }
+        let keyed = selection.keys.is_some() && cultnet_rs::Selection { keys: None, ..selection.clone() } == in_force(of_kind(K::Reply));
+        if keyed && self.keyed_fail.get() > 0 {
+            self.keyed_fail.set(self.keyed_fail.get() - 1);
+            anyhow::bail!("the mind did not answer");
+        }
         self.mind.query(selection)
     }
 
@@ -4307,6 +4315,11 @@ impl MindPort for Timeline<'_> {
     }
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<AdmissionOutcome> {
+        let resolves_a_reply = documents.iter().any(|document| matches!(document, PipelineDocument::Resolution(resolution) if resolution.subject.kind == K::Reply));
+        if resolves_a_reply && self.admit_fail.get() > 0 {
+            self.admit_fail.set(self.admit_fail.get() - 1);
+            anyhow::bail!("the mind did not take it");
+        }
         self.mind.admit(agent, session, documents)
     }
 }
@@ -4323,11 +4336,17 @@ fn all_notices(lines: &[String]) -> Vec<&str> {
 /// next read, each past the next reply read and with a message, so a line carries what that read found; then two more quiet messages.
 /// Answers the lines.
 fn a_session_then(rig: &Rig, acts: Vec<Vec<PipelineDocument>>) -> Vec<String> {
+    a_session_with(rig, acts, |_| {})
+}
+
+/// `a_session_then` over a mind `flaws` has first set to fail.
+fn a_session_with(rig: &Rig, acts: Vec<Vec<PipelineDocument>>, flaws: impl FnOnce(&Timeline)) -> Vec<String> {
     rig.model.replies.borrow_mut().extend(std::iter::repeat_n(says(&[]), acts.len() + 4));
     rig.clock.step.set(1);
     rig.model.linger.set(true);
     rig.open_the_run();
     let timeline = Timeline::over(&rig.mind);
+    flaws(&timeline);
     let (now, linger, deliveries, echoes) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(1u64));
     let doing_then = timeline.doing.clone();
     let acts = RefCell::new(VecDeque::from(acts));
@@ -4371,6 +4390,87 @@ fn a_reply_admitted_while_her_session_lives_reaches_it_once_on_the_next_tell() {
     assert!(line.contains(&format!("answers=[{} repo {}]", quoted(&the_brief()), quoted(REPO))), "{line}");
     assert!(!lines[0].contains("reply role=self"), "it did not exist at the start: {}", lines[0]);
     assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), heard_outcome());
+}
+
+/// How many resolutions `subject` has in the mind.
+fn resolutions_of(rig: &Rig, subject: &str) -> usize {
+    rig.mind
+        .ids(K::Resolution)
+        .into_iter()
+        .filter(|id| matches!(rig.mind.view(K::Resolution, id).unwrap().document, PipelineDocument::Resolution(resolution) if resolution.subject.id.0 == subject))
+        .count()
+}
+
+/// A reply she answered is told once and resolved once however the resolution goes: a keyed read that fails after it took, or a resolution
+/// the port refuses, is retried at the next result without telling her the reply again.
+#[test]
+fn an_answered_reply_is_told_once_and_resolved_once_when_the_read_or_the_admit_fails() {
+    for flaw in ["keyed read", "admit"] {
+        let rig = Rig::new(vec![operator_says(1, "hello")], &[]);
+        let mut act = her_self_asked();
+        act.push(self_reply("self-r-r1", "The shaders are reviewed."));
+        let lines = a_session_with(&rig, vec![act], |timeline| if flaw == "admit" { timeline.admit_fail.set(1) } else { timeline.keyed_fail.set(1) });
+        assert_eq!(all_replies(&lines).len(), 1, "{flaw}: told once: {lines:?}");
+        assert!(lines.len() >= 3, "{flaw}: lines followed her answer: {lines:?}");
+        assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), heard_outcome(), "{flaw}");
+        assert_eq!(resolutions_of(&rig, &reply_id("self-r-r1")), 1, "{flaw}: resolved once");
+    }
+}
+
+/// A resolution the port refuses at her last result is retried when the process closes.
+#[test]
+fn a_resolution_refused_at_her_last_result_is_retried_at_close() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[])]);
+    rig.mind.committed(her_self_asked());
+    rig.mind.committed(vec![self_reply("self-r-r1", "Done.")]);
+    rig.open_the_run();
+    let timeline = Timeline::over(&rig.mind);
+    timeline.admit_fail.set(1);
+    assert_eq!(failure_of(rig.start_over(&timeline, &config())), None);
+    assert_eq!(all_replies(&told(&rig)).len(), 1);
+    assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), heard_outcome());
+    assert_eq!(resolutions_of(&rig, &reply_id("self-r-r1")), 1);
+}
+
+/// A reply told on a line her refused result did not answer: another writer resolves it meanwhile and it is not told again, nor does
+/// the retell hear it; or the mind cannot say whether it is in force and it is told again, once, until her answer resolves it.
+#[test]
+fn a_refused_line_retells_a_reply_the_mind_holds_in_force_or_cannot_say_and_not_one_resolved_elsewhere() {
+    for flaw in ["resolved elsewhere", "unreadable"] {
+        let rig = Rig::new(vec![operator_says(1, "a")], &["not a reply at all".to_string(), says(&[])]);
+        rig.mind.committed(her_self_asked());
+        rig.mind.committed(vec![self_reply("self-r-r1", "Done.")]);
+        rig.open_the_run();
+        let timeline = Timeline::over(&rig.mind);
+        if flaw == "unreadable" {
+            timeline.keyed_fail.set(1);
+        } else {
+            let doing_then = timeline.doing.clone();
+            let once = Cell::new(false);
+            *rig.model.before_result.borrow_mut() = Some(Box::new(move || {
+                if once.replace(true) {
+                    return;
+                }
+                doing_then.borrow_mut().push_back(vec![PipelineDocument::Resolution(eureka_pipeline::PipelineResolution {
+                    subject: reference(K::Reply, &reply_id("self-r-r1")),
+                    sequence: 1,
+                    outcome: ResolutionOutcome::Recorded { reason: "elsewhere".into() },
+                    rationale: "Resolved by another writer.".into(),
+                    resolved_on: Date("2026-10-09".into()),
+                })]);
+            }));
+        }
+        assert_eq!(failure_of(rig.start_over(&timeline, &config())), None, "{flaw}");
+        let lines = told(&rig);
+        if flaw == "unreadable" {
+            assert_eq!(all_replies(&lines).len(), 2, "{flaw}: told on the refused line and again on the retell: {lines:?}");
+            assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), heard_outcome(), "{flaw}");
+        } else {
+            assert_eq!(all_replies(&lines).len(), 1, "{flaw}: told once: {lines:?}");
+            assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), Some(ResolutionOutcome::Recorded { reason: "elsewhere".into() }), "{flaw}");
+        }
+        assert_eq!(resolutions_of(&rig, &reply_id("self-r-r1")), 1, "{flaw}");
+    }
 }
 
 /// However often chat is polled, her replies are read once at the start and then once in `REPLY_READ_EVERY_S`.
