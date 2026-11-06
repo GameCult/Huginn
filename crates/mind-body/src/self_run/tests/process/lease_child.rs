@@ -27,7 +27,7 @@ fn granted_fd_reaches_child_env_var() {
     let dir = tempfile::tempdir().unwrap();
     let program = script(&dir, READS_ITS_CREDENTIAL);
     let token = token_holding("tok-canary-7f3a");
-    let mut child = start_with(&program, &claude_args(session_id(&run_ref("selfrun-a"))), &token);
+    let mut child = start_with(&program, &claude_args(session_id(&run_ref("selfrun-a")), None), &token);
     child.close_input();
     let (lines, code) = drain(&mut *child);
     assert_eq!(code, Some(0), "{lines:?}");
@@ -90,7 +90,7 @@ echo left > "$CLAUDE_CONFIG_DIR/leftover"
 "#;
 
 fn run_once(program: &Path, scratch: &Path, seed: Option<&Path>) -> Vec<String> {
-    let config = FreshConfig::create(scratch, seed).unwrap();
+    let config = FreshConfig::create(scratch, seed, None).unwrap();
     let mut child = spawn_program(program, &[], &token_holding("tok-canary-7f3a"), &unit_environment(), config).unwrap();
     child.close_input();
     let (lines, code) = drain(&mut *child);
@@ -116,7 +116,7 @@ fn each_run_gets_a_fresh_owner_only_configuration_that_what_it_writes_does_not_o
     assert!(!dir.path().join("claude-config").exists(), "removed when the child's handle went");
 
     std::os::unix::fs::symlink("/etc/passwd", seed.path().join("link")).unwrap();
-    let refused = FreshConfig::create(dir.path(), Some(seed.path())).err().expect("an absolute seed link is refused");
+    let refused = FreshConfig::create(dir.path(), Some(seed.path()), None).err().expect("an absolute seed link is refused");
     assert!(format!("{refused:#}").contains("leaves the seed"), "{refused:#}");
     assert!(!dir.path().join("claude-config").exists(), "a refused copy leaves no configuration behind");
 
@@ -166,7 +166,7 @@ fn the_child_scrubs_its_subprocesses_unless_the_unit_says_off() {
     let scrub_with = |value: Option<&str>| {
         let mut unit = unit_environment();
         unit.extend(value.map(|value| (SCRUB_VARIABLE.into(), value.into())));
-        let config = FreshConfig::create(dir.path(), None).unwrap();
+        let config = FreshConfig::create(dir.path(), None, None).unwrap();
         let mut child = spawn_program(&program, &[], &token_holding("tok-canary-7f3a"), &unit, config).unwrap();
         child.close_input();
         let (lines, _) = drain(&mut *child);

@@ -26,8 +26,15 @@
 //! answers; the actuator closes none, and a brief she left open is told to her
 //! next session. Compaction is off in
 //! the CLI (`DISABLE_COMPACT=1`): the organ's own ceiling, flush, end and rehydrate
-//! is the only path. The session ends where its cache would be evicted, near the
-//! unit's cap, at the context ceiling, or after the flush each of those asks.
+//! is the only path. The session ends where its cache would be evicted (and is
+//! then cleared), near the unit's cap, at the context ceiling, or after the flush
+//! each of those asks. A clean end inside the cache's life is kept
+//! (`decide::warm_until`), and the next process resumes it with
+//! `--resume <kept path> --fork-session` while the cache is still warm and the
+//! seed is unchanged (`decide::resumes`; rulings
+//! `eureka-body:ruling:session-rotate-and-resume` and
+//! `eureka-body:ruling:live-session-floor-cache-evicts`). The kept transcript is a
+//! cache of the conversation, never memory: her mind and replies stay the truth.
 //!
 //! Every timing decision is one pure function, `decide` (the `decide` module,
 //! ruling `eureka-body:ruling:self-run-decider`). `carry` is the loop that turns
@@ -65,7 +72,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, PipelineReply, ResolutionOutcome, RunTurn, Slug};
 use huginn_mind::{PipelineAdmissionOutcome, PipelinePageItems};
@@ -158,6 +165,16 @@ pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota
     )
 }
 
+/// What a resumed process is told instead of the start message: the conversation
+/// is hers already (the skill is loaded), so only the new run and its plan are new.
+pub fn continue_message(run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
+    format!(
+        "Your session continues in a new process under a new run: your run is now `{}`; the previous run is closed. Admit as faculty SelfFaculty, agent {AGENT}. What you say when you end a turn still reaches your Persona as a reply, and your Persona's answers come as briefs.\n\n{}",
+        run.id.0,
+        render_plan(plan_quota, now_ms)
+    )
+}
+
 /// The task section of the start message: one section per claim, in claim
 /// order. A claimed follow-up gives its id, campaign, repo and `item` verbatim,
 /// because the brief lives in the claim and a run that cannot reach its mind
@@ -202,7 +219,7 @@ pub const FLUSH_MESSAGE: &str = "The context ceiling is reached. Admit to the mi
 fn flush_text(why: Why) -> String {
     let cause = match why {
         Why::Ceiling => "",
-        Why::Rotation => " (This session ends soon: the unit's time is nearly up.)",
+        Why::Rotation => " (This process ends soon: the unit's time is nearly up. If your next brief comes within the hour, the next process continues this conversation.)",
         Why::Idle => " (This session ends because nothing is waiting and its cache would lapse.)",
     };
     format!("{FLUSH_MESSAGE}{cause} Resolve each brief you answered (Recorded, your answer as rationale); a brief you are still working stays open and the next session continues it.")
@@ -213,8 +230,13 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
     Uuid::new_v5(&SESSION_NAMESPACE, run.id.0.as_bytes())
 }
 
-/// The argument list of the child, and nothing else: no resume, continue or
-/// fork, no model, no settings and no hooks belong to this actuator. It asks the
+/// The argument list of the child, and nothing else: no `--continue`, no model,
+/// no settings and no hooks belong to this actuator. With a kept conversation it
+/// appends `--resume <transcript path> --fork-session`: the fork is why the new
+/// run's own `--session-id` is accepted beside a resume (the CLI refuses the two
+/// without it, probe P2b; ruling `eureka-body:ruling:claude-code-handle-reseeds`),
+/// and the path, not the CLI's cwd-slug lookup, is what finds the transcript
+/// (probe P2d). It asks the
 /// CLI to echo each stdin line it takes into a request (`--replay-user-messages`),
 /// which is how delivery is counted. It fixes the permission mode: print mode starts in Manual when nothing on the command
 /// line sets a mode (the managed `defaultMode` was not applied in print mode,
@@ -226,8 +248,8 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
 /// user's settings load (the fresh configuration directory
 /// the seed fills); the working directory's project and local settings, which a
 /// run could have written, do not.
-pub fn claude_args(session: Uuid) -> Vec<String> {
-    [
+pub fn claude_args(session: Uuid, resume: Option<&Path>) -> Vec<String> {
+    let mut args: Vec<String> = [
         "-p",
         "--input-format",
         "stream-json",
@@ -247,7 +269,11 @@ pub fn claude_args(session: Uuid) -> Vec<String> {
         "--replay-user-messages",
     ]
     .map(String::from)
-    .to_vec()
+    .to_vec();
+    if let Some(transcript) = resume {
+        args.extend(["--resume".to_string(), transcript.to_string_lossy().into_owned(), "--fork-session".to_string()]);
+    }
+    args
 }
 
 /// The model name on the CLI's own assistant lines, which no request produced.
@@ -354,9 +380,31 @@ impl Stop {
     }
 }
 
+/// The organ's one kept conversation: the transcript of the last clean process,
+/// the instant its cache runs out, and whether the seed is still the one it was
+/// made under. Whether it is resumed is `decide::resumes`, nothing else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kept {
+    /// The session id the kept transcript was written under.
+    pub session: Uuid,
+    pub transcript: PathBuf,
+    pub warm_until: DateTime<Utc>,
+    pub same_seed: bool,
+}
+
 pub trait Spawner {
     /// Starts the child with `token` as its credential descriptor.
     fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>>;
+
+    /// The organ's one kept conversation, if any. A spawner that keeps nothing says none.
+    fn kept(&self) -> Option<Kept> {
+        None
+    }
+
+    /// Keeps the conversation this process ended under `session` until the instant, replacing any other; none clears it.
+    fn keep(&self, _keep: Option<(Uuid, DateTime<Utc>)>) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Why a run ended.
@@ -379,7 +427,8 @@ pub enum SelfRunOutcome {
     NoRun,
     /// The connector would not lend: the run is closed Recorded and nothing was started.
     LeaseRefused { kind: LeaseRefusalKind },
-    Ended { cause: Cause, code: Option<i32>, requests: u64, prefix: u64 },
+    /// `warm_until`: until when the conversation is worth resuming (`decide::warm_until`), none when it is not.
+    Ended { cause: Cause, code: Option<i32>, requests: u64, prefix: u64, warm_until: Option<DateTime<Utc>> },
 }
 
 impl SelfRunOutcome {
@@ -400,7 +449,7 @@ impl fmt::Display for SelfRunOutcome {
         match self {
             Self::NoRun => write!(f, "no run: she has no single open Self run"),
             Self::LeaseRefused { kind } => write!(f, "no run: the connector refused the lease ({kind:?})"),
-            Self::Ended { cause, code, requests, prefix } => {
+            Self::Ended { cause, code, requests, prefix, warm_until } => {
                 let cause = match cause {
                     Cause::Own => "own",
                     Cause::FlushRequested => "flush-requested",
@@ -410,8 +459,12 @@ impl fmt::Display for SelfRunOutcome {
                     Cause::Unstoppable => "unstoppable",
                 };
                 match code {
-                    Some(code) => write!(f, "ended: {cause} code {code} requests {requests} prefix {prefix}"),
-                    None => write!(f, "ended: {cause} signal requests {requests} prefix {prefix}"),
+                    Some(code) => write!(f, "ended: {cause} code {code} requests {requests} prefix {prefix}")?,
+                    None => write!(f, "ended: {cause} signal requests {requests} prefix {prefix}")?,
+                }
+                match warm_until {
+                    Some(until) => write!(f, " warm until {}", until.to_rfc3339_opts(SecondsFormat::Secs, true)),
+                    None => Ok(()),
                 }
             }
         }
@@ -437,6 +490,8 @@ fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, Vec<PipelineRef>)
 struct Heard {
     /// The last result heard, ok or not: its head line.
     concluded: Option<String>,
+    /// The session this process resumed; none when it started fresh. Set at the start, read by the closure's reason.
+    resumed: Option<Uuid>,
 }
 
 impl Heard {
@@ -484,6 +539,10 @@ fn close_if_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, ran:
     let reason = match &heard.concluded {
         Some(head) => format!("{how}; {head}"),
         None => format!("{how}; claude gave no result"),
+    };
+    let reason = match heard.resumed {
+        Some(previous) => format!("{reason}; resumed {previous}"),
+        None => format!("{reason}; fresh"),
     };
     admit_closure(mind, clock, run, ResolutionOutcome::Recorded { reason: reason.as_str().into() }, CARRIER_CLOSED)
 }
@@ -553,10 +612,38 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         }
         Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
-    let child = spawner.spawn(&claude_args(session_id(run)), lease.token())?;
-    let mut inbox = SelfInbox::new(mind, (run, claims), task, (lease.plan_quota(), started_ms), told, heard);
+    // The one start decision: a kept conversation is resumed iff `decide::resumes`; any other is cleared before the child starts.
+    let kept = spawner.kept();
+    let resume = kept.clone().filter(|kept| decide::resumes(kept, clock.now()));
+    if resume.is_none() {
+        let why = match &kept {
+            None => "none kept",
+            Some(kept) if !kept.same_seed => "seed changed",
+            Some(_) => "cold",
+        };
+        if spawner.keep(None).is_err() {
+            writeln!(out, "session cache could not be cleared")?;
+        }
+        writeln!(out, "session fresh: {why}")?;
+    }
+    if let Some(kept) = &resume {
+        heard.resumed = Some(kept.session);
+        writeln!(out, "session resumed {} warm until {}", kept.session, kept.warm_until.to_rfc3339_opts(SecondsFormat::Secs, true))?;
+    }
+    let child = spawner.spawn(&claude_args(session_id(run), resume.as_ref().map(|kept| kept.transcript.as_path())), lease.token())?;
+    let mut inbox = SelfInbox::new(mind, (run, claims), task, (lease.plan_quota(), started_ms), told, heard, resume.is_some());
     let ran = drive(clock, child, &mut inbox, run_cap_s, out);
     inbox.admit_unadmitted();
+    // The one end decision: a clean end inside the cache's life is kept under this run's session, any other end (an Err included) clears.
+    let keep = match &ran {
+        Ok(SelfRunOutcome::Ended { warm_until: Some(until), .. }) => Some((session_id(run), *until)),
+        _ => None,
+    };
+    let _ = match (spawner.keep(keep), keep) {
+        (Ok(()), Some((_, until))) => writeln!(out, "session kept until {}", until.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        (Ok(()), None) => writeln!(out, "session cleared"),
+        (Err(_), _) => writeln!(out, "session cache could not be updated"),
+    };
     ran
 }
 
@@ -582,8 +669,10 @@ struct SelfInbox<'a> {
 
 impl<'a> SelfInbox<'a> {
     /// The start line carries the claimed follow-ups and every brief already open (`told`).
-    fn new(mind: &'a dyn MindPort, (run, claims): (&PipelineRef, &[PipelineRef]), task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), told: &'a mut Vec<Brief>, heard: &'a mut Heard) -> Self {
-        let start = format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms));
+    fn new(mind: &'a dyn MindPort, (run, claims): (&PipelineRef, &[PipelineRef]), task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), told: &'a mut Vec<Brief>, heard: &'a mut Heard, resumed: bool) -> Self {
+        // A resumed conversation holds the skill already: it is told only that it continues under this run, then its task.
+        let opening = if resumed { continue_message(run, plan_quota, now_ms) } else { start_message(mind.instance(), run, plan_quota, now_ms) };
+        let start = format!("{opening}{task}");
         let mut carried: Vec<String> = claims.iter().filter(|claim| claim.kind == PipelineKind::FollowUp).map(|claim| claim.id.0.clone()).collect();
         for brief in told.iter() {
             if !carried.contains(&brief.id) {
@@ -705,7 +794,7 @@ fn describe_result(event: &serde_json::Map<String, Value>, limit: usize) -> Stri
 }
 
 /// What `claude` concluded, written to the unit's stdout so it reaches the
-/// journal before the transcript goes with the runtime directory.
+/// journal: the transcript is a cache, and the result's words are kept here.
 fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
     let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return Ok(()) };
     if event.get("type").and_then(Value::as_str) != Some("result") {
@@ -725,12 +814,30 @@ pub struct ClaudeSpawner {
     seed: Option<PathBuf>,
     /// Her sandbox: with it the child runs under bubblewrap (`sandbox_args`), the Persona's; the Self passes none.
     sandbox: Option<PathBuf>,
+    /// Where her one kept conversation lives (`$STATE_DIRECTORY/session`); none keeps nothing, and every start is fresh.
+    keep: Option<PathBuf>,
+    /// The digest of the seed tree this process copies from (empty without a seed); none when the seed cannot be read, which no kept conversation matches.
+    seed_digest: Option<String>,
 }
 
 impl ClaudeSpawner {
-    /// From the unit's environment: it must name [`SCRATCH_VARIABLE`], and may name [`SEED_VARIABLE`].
+    /// From the unit's environment: it must name [`SCRATCH_VARIABLE`], and may name [`SEED_VARIABLE`] and
+    /// [`STATE_DIRECTORY_VARIABLE`]. With the last, the spawner keeps her last clean conversation for the next process;
+    /// without it every start is fresh, and the journal says so.
     pub fn new(unit_environment: impl IntoIterator<Item = (OsString, OsString)>) -> Result<Self> {
-        Self::in_sandbox(unit_environment, SEED_VARIABLE, None)
+        let unit_environment: Vec<(OsString, OsString)> = unit_environment.into_iter().collect();
+        // systemd lists several state directories colon-separated; the unit names one.
+        let keep = unit_environment
+            .iter()
+            .find(|(name, _)| name == STATE_DIRECTORY_VARIABLE)
+            .and_then(|(_, value)| value.to_string_lossy().split(':').next().filter(|first| !first.is_empty()).map(|first| Path::new(first).join(KEPT_DIR_NAME)));
+        let mut spawner = Self::in_sandbox(unit_environment, SEED_VARIABLE, None)?;
+        spawner.seed_digest = match &spawner.seed {
+            Some(seed) => seed_digest(seed).ok(),
+            None => Some(String::new()),
+        };
+        spawner.keep = keep;
+        Ok(spawner)
     }
 
     /// The same, with the seed named by `seed_variable` and, if `sandbox` is given, the child run under bubblewrap with that directory as its writable home.
@@ -740,13 +847,106 @@ impl ClaudeSpawner {
         // systemd lists several runtime directories colon-separated; the unit names one.
         let scratch = named(SCRATCH_VARIABLE).filter(|path| !path.as_os_str().is_empty()).ok_or_else(|| anyhow!("{SCRATCH_VARIABLE} is not set: the unit needs RuntimeDirectory="))?;
         let seed = named(seed_variable).filter(|path| !path.as_os_str().is_empty());
-        Ok(Self { unit_environment, scratch, seed, sandbox })
+        Ok(Self { unit_environment, scratch, seed, sandbox, keep: None, seed_digest: None })
     }
 }
 
+/// The unit's `StateDirectory=`, which systemd names in the environment: where her kept conversation lives, in [`KEPT_DIR_NAME`].
+pub const STATE_DIRECTORY_VARIABLE: &str = "STATE_DIRECTORY";
+/// The directory of the kept conversation inside the state directory.
+const KEPT_DIR_NAME: &str = "session";
+/// The record of the kept conversation beside its transcript: `{"session", "warm_until", "seed"}`.
+const KEPT_RECORD: &str = "kept.json";
+
+/// The digest of a seed tree: sha256 over every file's and link's relative path in sorted order,
+/// each with the file's bytes or the link's target, as lowercase hex. A conversation made under
+/// one seed is never resumed under another.
+fn seed_digest(seed: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    fn walk(root: &Path, dir: &Path, hash: &mut Sha256) -> std::io::Result<()> {
+        let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+            if kind.is_dir() {
+                walk(root, &path, hash)?;
+                continue;
+            }
+            let (tag, body) = if kind.is_symlink() { (b'l', std::fs::read_link(&path)?.to_string_lossy().into_owned().into_bytes()) } else { (b'f', std::fs::read(&path)?) };
+            hash.update([tag]);
+            hash.update((relative.len() as u64).to_le_bytes());
+            hash.update(relative.as_bytes());
+            hash.update((body.len() as u64).to_le_bytes());
+            hash.update(&body);
+        }
+        Ok(())
+    }
+    let mut hash = Sha256::new();
+    walk(seed, seed, &mut hash)?;
+    Ok(hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Writes `bytes` to `dir/name` through a `.tmp` and a rename.
+fn write_through_tmp(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = dir.join(format!("{name}.tmp"));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, dir.join(name))
+}
+
+/// Makes the kept directory owner-only if it is not there.
+fn make_kept_dir(dir: &Path) -> std::io::Result<()> {
+    let mut made = std::fs::DirBuilder::new();
+    made.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut made, 0o700);
+    made.create(dir)
+}
+
+/// Removes every file of the kept directory but `except`.
+fn clear_kept_dir(dir: &Path, except: &[String]) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !except.contains(&entry.file_name().to_string_lossy().into_owned()) && entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 impl Spawner for ClaudeSpawner {
+    fn kept(&self) -> Option<Kept> {
+        let dir = self.keep.as_ref()?;
+        let record: Value = serde_json::from_slice(&std::fs::read(dir.join(KEPT_RECORD)).ok()?).ok()?;
+        let session = Uuid::parse_str(record.get("session")?.as_str()?).ok()?;
+        let warm_until = DateTime::parse_from_rfc3339(record.get("warm_until")?.as_str()?).ok()?.with_timezone(&Utc);
+        let transcript = dir.join(format!("{session}.jsonl"));
+        transcript.is_file().then_some(())?;
+        let same_seed = self.seed_digest.as_deref() == Some(record.get("seed")?.as_str()?);
+        Some(Kept { session, transcript, warm_until, same_seed })
+    }
+
+    fn keep(&self, keep: Option<(Uuid, DateTime<Utc>)>) -> Result<()> {
+        let Some(dir) = &self.keep else { return Ok(()) };
+        let kept = keep.and_then(|(session, until)| Some((session, until, self.seed_digest.as_ref()?)));
+        let Some((session, until, seed)) = kept.filter(|(session, ..)| dir.join(format!("{session}.jsonl")).is_file()) else {
+            // The clear: the record goes first, so no record ever names a transcript that is gone.
+            let _ = std::fs::remove_file(dir.join(KEPT_RECORD));
+            return clear_kept_dir(dir, &[]).context("the kept conversation could not be cleared");
+        };
+        let record = serde_json::json!({"session": session.to_string(), "warm_until": until.to_rfc3339_opts(SecondsFormat::Secs, true), "seed": seed});
+        write_through_tmp(dir, KEPT_RECORD, record.to_string().as_bytes()).context("the kept conversation's record could not be written")?;
+        clear_kept_dir(dir, &[KEPT_RECORD.to_string(), format!("{session}.jsonl")]).context("the conversation before it could not be removed")
+    }
+
     fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
-        let config = FreshConfig::create(&self.scratch, self.seed.as_deref())?;
+        let config = FreshConfig::create(&self.scratch, self.seed.as_deref(), self.keep.clone())?;
         let Some(sandbox) = &self.sandbox else { return spawn_program(Path::new("claude"), args, token, &self.unit_environment, config) };
         let mut wrapped = sandbox_args(sandbox, &self.scratch);
         wrapped.push("claude".into());
@@ -796,10 +996,14 @@ const CONFIG_DIR_NAME: &str = "claude-config";
 /// owner-only, and removed when the child's handle goes. Whatever the run writes
 /// there (settings that set an environment variable, an `apiKeyHelper`, a base
 /// URL, a hook) lasts only as long as that run: the next one starts from the seed.
-struct FreshConfig(PathBuf);
+struct FreshConfig {
+    dir: PathBuf,
+    /// Where the main transcripts go when the config does: the kept directory, none where nothing is kept.
+    keep: Option<PathBuf>,
+}
 
 impl FreshConfig {
-    fn create(scratch: &Path, seed: Option<&Path>) -> Result<Self> {
+    fn create(scratch: &Path, seed: Option<&Path>, keep: Option<PathBuf>) -> Result<Self> {
         let dir = scratch.join(CONFIG_DIR_NAME);
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {}
@@ -810,9 +1014,9 @@ impl FreshConfig {
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut made, 0o700);
         made.create(&dir).context("the configuration directory could not be made")?;
-        let fresh = Self(dir);
+        let fresh = Self { dir, keep };
         if let Some(seed) = seed {
-            copy_tree(seed, &fresh.0).context("the configuration seed could not be copied")?;
+            copy_tree(seed, &fresh.dir).context("the configuration seed could not be copied")?;
         }
         Ok(fresh)
     }
@@ -820,8 +1024,36 @@ impl FreshConfig {
 
 impl Drop for FreshConfig {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if let Some(keep) = &self.keep {
+            // A conversation that cannot be copied out is a fresh start; nothing here decides whether it is kept.
+            let _ = move_out_transcripts(&self.dir, keep);
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Copies the main transcripts out of a config directory, `projects/*/*.jsonl`
+/// and nothing deeper (never a project's `memory/` or a session's own directory),
+/// into `keep` as `<name>`, each through a `.tmp` and a rename.
+fn move_out_transcripts(config: &Path, keep: &Path) -> std::io::Result<()> {
+    make_kept_dir(keep)?;
+    for project in std::fs::read_dir(config.join("projects"))? {
+        let project = project?;
+        if !project.file_type()?.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(project.path())? {
+            let file = file?;
+            let path = file.path();
+            if file.file_type()?.is_file() && path.extension().is_some_and(|extension| extension == "jsonl") {
+                let name = file.file_name().to_string_lossy().into_owned();
+                let tmp = keep.join(format!("{name}.tmp"));
+                std::fs::copy(&path, &tmp)?;
+                std::fs::rename(tmp, keep.join(name))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A seed link the copy refuses: it would reach outside the seed.
@@ -923,7 +1155,7 @@ fn spawn_program(program: &Path, args: &[String], token: &TokenFd, unit: &[(OsSt
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     command.env_clear().envs(child_environment(unit));
-    command.env("HOME", &config.0).env(CONFIG_DIR_VARIABLE, &config.0);
+    command.env("HOME", &config.dir).env(CONFIG_DIR_VARIABLE, &config.dir);
     command.env(DISABLE_COMPACT_VARIABLE, "1").env(TOKEN_FD_VARIABLE, inheritable.number().to_string()).env(ENV_SCRUB_VARIABLE, if scrub_is_off(unit) { "0" } else { "1" });
     // Its own process group, so that a signal reaches what the child started too.
     #[cfg(unix)]

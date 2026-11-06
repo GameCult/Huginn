@@ -145,7 +145,7 @@ struct Ran {
 impl Ran {
     fn ended(&self) -> (Cause, Option<i32>, u64, u64) {
         match self.outcome.as_ref().unwrap() {
-            SelfRunOutcome::Ended { cause, code, requests, prefix } => (*cause, *code, *requests, *prefix),
+            SelfRunOutcome::Ended { cause, code, requests, prefix, .. } => (*cause, *code, *requests, *prefix),
             other => panic!("not ended: {other:?}"),
         }
     }
@@ -303,7 +303,7 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
 #[test]
 fn claude_args_is_exactly_the_fixed_list_for_a_session() {
     let session = Uuid::parse_str(SESSION_OF_RUN_A).unwrap();
-    let args = claude_args(session);
+    let args = claude_args(session, None);
     assert_eq!(
         args,
         [
@@ -351,7 +351,7 @@ fn the_child_is_started_for_her_run_with_the_fixed_list_whatever_the_run_record_
         mind.committed(vec![self_run("selfrun-b", budget)]);
         let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
         assert_eq!(ran.spawns.len(), 1, "{budget}");
-        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap()), "{budget}");
+        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap(), None), "{budget}");
     }
 }
 
@@ -950,7 +950,7 @@ mod process {
 
     fn start_with(program: &Path, args: &[String], token: &TokenFd) -> Box<dyn Child> {
         for _ in 0..50 {
-            let config = FreshConfig::create(program.parent().unwrap(), None).unwrap();
+            let config = FreshConfig::create(program.parent().unwrap(), None, None).unwrap();
             match spawn_program(program, args, token, &unit_environment(), config) {
                 Ok(child) => return child,
                 Err(error) if format!("{error:#}").contains("busy") => std::thread::sleep(StdDuration::from_millis(100)),
@@ -1022,7 +1022,7 @@ mod process {
     fn a_program_that_cannot_start_is_an_error_that_names_no_argument() {
         let canary = "canary-argument-6b0d";
         let scratch = tempfile::tempdir().unwrap();
-        let config = FreshConfig::create(scratch.path(), None).unwrap();
+        let config = FreshConfig::create(scratch.path(), None, None).unwrap();
         let error = spawn_program(Path::new("/nonexistent/claude"), &[canary.to_string()], &token_holding("tok-canary"), &[], config).err().unwrap();
         assert!(!format!("{error:#}").contains(canary) && !format!("{error:#}").contains("nonexistent"), "{error:#}");
     }

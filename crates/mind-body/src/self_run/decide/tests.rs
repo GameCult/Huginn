@@ -63,7 +63,7 @@ fn delivered(how: Stop) -> Event {
 }
 
 fn ended(cause: Cause, code: Option<i32>, requests: u64, prefix: u64) -> Action {
-    Action::Finish(SelfRunOutcome::Ended { cause, code, requests, prefix })
+    Action::Finish(SelfRunOutcome::Ended { cause, code, requests, prefix, warm_until: None })
 }
 
 const GRACE: i64 = FLUSH_GRACE_S;

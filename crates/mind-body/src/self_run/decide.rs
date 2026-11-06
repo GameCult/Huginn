@@ -41,7 +41,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, Duration, Utc};
 
 use super::{
-    CEILING_TOKENS, Cause, ESCALATE_AFTER_S, EXIT_DRAIN_S, FLUSH_GRACE_S, FLUSH_HEADROOM_TOKENS, LADDER_S, ROTATE_MARGIN_S, SelfRunOutcome, Stop, TTL_1H_S, TTL_5M_S, TTL_MARGIN_S,
+    CEILING_TOKENS, Cause, ESCALATE_AFTER_S, EXIT_DRAIN_S, FLUSH_GRACE_S, FLUSH_HEADROOM_TOKENS, LADDER_S, ROTATE_MARGIN_S, Kept, SelfRunOutcome, Stop, TTL_1H_S, TTL_5M_S, TTL_MARGIN_S,
 };
 
 /// Why the flush was asked: the session's own end, three ways.
@@ -114,6 +114,12 @@ pub(super) struct State {
     /// An ok result has come: the session holds an answer worth its cache.
     answered_once: bool,
     last_result_at: Option<DateTime<Utc>>,
+    /// When the last new request of the main thread was read. The cache's lifetime runs from a request's start (research `cache-pricing`), so `warm_until` counts from here and never from the last result.
+    last_request_at: Option<DateTime<Utc>>,
+    /// The last result was not an error.
+    last_ok: bool,
+    /// The CLI refused a result as over its context limit; once seen, it stays seen.
+    blocked: bool,
     /// The cache lifetime the last result left, in seconds.
     pub(super) ttl_s: i64,
     pub(super) inbox: bool,
@@ -154,7 +160,37 @@ impl State {
 }
 
 fn outcome(state: &State, cause: Cause, code: Option<i32>) -> SelfRunOutcome {
-    SelfRunOutcome::Ended { cause, code, requests: state.requests, prefix: state.prefix }
+    SelfRunOutcome::Ended { cause, code, requests: state.requests, prefix: state.prefix, warm_until: warm_until(state) }
+}
+
+/// Until when the conversation this process ended is worth resuming: its last
+/// request plus its cache's lifetime less the margin. Some only for a clean end
+/// inside the cache's life: no signal was delivered, the child exited 0, no turn
+/// was open, the last result was ok and none was blocked, the prefix is under the
+/// ceiling, and no flush was asked or it was the rotation's. An idle flush means
+/// the cache is about to be evicted and the session is cleared then (ruling
+/// `eureka-body:ruling:live-session-floor-cache-evicts`); a ceiling end would only
+/// flush again. This is the one place a conversation's worth is decided; the next
+/// process resumes it by [`resumes`] (ruling `eureka-body:ruling:session-rotate-and-resume`).
+pub(super) fn warm_until(state: &State) -> Option<DateTime<Utc>> {
+    let clean = state.delivered.is_none()
+        && matches!(state.exited, Some((Some(0), _)))
+        && !state.turn_open
+        && state.last_ok
+        && !state.blocked
+        && state.prefix < CEILING_TOKENS
+        && state.flush.as_ref().is_none_or(|flush| flush.why == Why::Rotation);
+    if !clean {
+        return None;
+    }
+    state.last_request_at.map(|at| at + Duration::seconds(state.ttl_s - TTL_MARGIN_S))
+}
+
+/// Whether a kept conversation is resumed by a process starting at `now`: its
+/// cache is still warm and its seed is the one it was made under. Nothing else
+/// decides resume or fresh.
+pub(super) fn resumes(kept: &Kept, now: DateTime<Utc>) -> bool {
+    kept.same_seed && now < kept.warm_until
 }
 
 /// How the run ended, by what was done to the child: the strongest signal delivered, else the flush, else nothing.
@@ -257,6 +293,7 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
         Event::Request { id, prefix } => {
             if state.seen.insert(id) {
                 state.requests += 1;
+                state.last_request_at = Some(now);
                 state.prefix = prefix;
                 if let Some(flush) = state.flush.as_mut()
                     && flush.consumed
@@ -282,6 +319,8 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
         Event::Result { ok, blocked, ttl_1h } => {
             state.turn_open = false;
             state.last_result_at = Some(now);
+            state.last_ok = ok;
+            state.blocked |= blocked;
             state.ttl_s = if ttl_1h { TTL_1H_S } else { TTL_5M_S };
             let no_answer = !ok && !state.answered_once;
             state.answered_once |= ok;
