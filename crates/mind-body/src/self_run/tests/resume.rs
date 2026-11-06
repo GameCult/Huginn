@@ -290,3 +290,12 @@ fn a_changed_seed_file_or_link_target_changes_the_digest_and_an_identical_copy_d
         assert!(!spawner_over(state.path(), state.path(), None).kept().unwrap().same_seed);
     }
 }
+
+#[test]
+fn clearing_a_kept_directory_that_does_not_exist_is_nothing_and_one_that_cannot_be_read_is_an_error() {
+    let state = tempfile::tempdir().unwrap();
+    let spawner = spawner_over(state.path(), state.path(), None);
+    spawner.keep(None).expect("no directory is already clear");
+    write(&state.path().join("session"), "a file where the directory belongs");
+    assert!(spawner.keep(None).is_err(), "a conversation that cannot be cleared is told, not swallowed");
+}
