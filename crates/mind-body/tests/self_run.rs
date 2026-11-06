@@ -343,7 +343,7 @@ mod lane {
         let body = format!(
             "read -r -u \"$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR\" cred
 echo journal-line >&2
-echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho \"$SELF_RUN_ENV_CANARY\" >> {record}\necho \"$cred\" >> {record}\necho '{echo}'\necho '{echo}'\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0",
+echo '{first}'\necho '{second}'\necho '{echo}'\nread -t 5 start\nread -t 5 flush\necho \"$start\" >> {record}\necho \"$flush\" >> {record}\necho \"$SELF_RUN_ENV_CANARY\" >> {record}\necho \"$cred\" >> {record}\necho '{echo}'\necho '{{\"type\":\"result\"}}'\nwhile read more; do :; done\nexit 0",
             first = request("msg_1", 100),
             second = request("msg_2", 299_999),
             echo = r#"{"type":"user","isReplay":true,"message":{"role":"user","content":"x"}}"#,
