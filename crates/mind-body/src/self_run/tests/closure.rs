@@ -5,7 +5,7 @@ use eureka_pipeline::ResolutionOutcome;
 use super::*;
 
 /// The reason of the run's one closure; fails if it was closed other than once.
-fn reason_of(mind: &TestMind, label: &str) -> String {
+pub(super) fn reason_of(mind: &TestMind, label: &str) -> String {
     let id = format!("{INSTANCE}:resolution:run.{label}.n1");
     let PipelineDocument::Resolution(closure) = mind.view(K::Resolution, &id).unwrap_or_else(|| panic!("{label} was not closed")).document else { panic!("not a resolution") };
     assert!(mind.view(K::Resolution, &format!("{INSTANCE}:resolution:run.{label}.n2")).is_none(), "{label} was closed twice");

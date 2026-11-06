@@ -198,16 +198,22 @@ fn carry_scripted(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Opt
     carry_one(seen, steps, (code, dies_on, refuses, hangs))
 }
 
-fn carry_one(seen: &Seen, steps: Vec<Step>, (code, dies_on, refuses, hangs): (Option<i32>, Option<Stop>, &[Stop], bool)) -> Ran {
+fn carry_one(seen: &Seen, steps: Vec<Step>, how: (Option<i32>, Option<Stop>, &[Stop], bool)) -> Ran {
+    carry_kept(seen, steps, how, None)
+}
+
+/// The same, with `kept` the conversation the spawner reports as kept.
+fn carry_kept(seen: &Seen, steps: Vec<Step>, (code, dies_on, refuses, hangs): (Option<i32>, Option<Stop>, &[Stop], bool), kept: Option<Kept>) -> Ran {
     let log = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(Fixed(Cell::new(at_start())));
     let fake = Fake::with(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false, asked: 0 }), false);
+    *fake.kept.borrow_mut() = kept;
     let lender = FakeLender::logging(log.clone(), Answer::Grant);
     let mut out = Vec::new();
     let outcome = carry(seen, &*clock, &lender, &fake, TEST_CAP_S, &mut out);
     let all = log.borrow().clone();
     // The child's own events; the lease's are in `all`, in order with them.
-    let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Abandoned)).cloned().collect();
+    let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Abandoned | Event::Kept(_))).cloned().collect();
     let spawns = fake.spawns.borrow().clone();
     Ran { outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
 }
@@ -327,7 +333,7 @@ fn claude_args_is_exactly_the_fixed_list_for_a_session() {
         ]
     );
     // Those belong to the run measure or to the unit's managed settings.
-    for forbidden in ["--resume", "--continue", "--fork-session", "--model", "--dangerously-skip-permissions", "--system-prompt", "--max-budget"] {
+    for forbidden in ["--continue", "--model", "--dangerously-skip-permissions", "--system-prompt", "--max-budget"] {
         assert!(!args.iter().any(|arg| arg.starts_with(forbidden) || arg.contains("dangerously")), "{forbidden}");
     }
     // Print mode starts in Manual without a mode, and prompts none then denies.
@@ -868,8 +874,8 @@ fn a_child_that_exited_is_never_signalled_however_long_its_stream_stays_open() {
 #[test]
 fn the_outcome_names_how_it_ended_and_the_exit_status_follows_the_childs_code() {
     let own = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", 10)), Out(result_line())], Some(0), false);
-    assert_eq!(own.outcome.as_ref().unwrap(), &SelfRunOutcome::Ended { cause: Cause::Own, code: Some(0), requests: 1, prefix: 10 });
-    assert_eq!(own.outcome.as_ref().unwrap().to_string(), "ended: own code 0 requests 1 prefix 10");
+    assert_eq!(own.outcome.as_ref().unwrap(), &SelfRunOutcome::Ended { cause: Cause::Own, code: Some(0), requests: 1, prefix: 10, warm_until: Some(at_start() + ChronoDuration::seconds(TTL_1H_S - TTL_MARGIN_S)) });
+    assert_eq!(own.outcome.as_ref().unwrap().to_string(), "ended: own code 0 requests 1 prefix 10 warm until 2026-10-09T14:14:00Z");
     assert_eq!(own.outcome.unwrap().exit_status(), 0);
 
     let flushed = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", CEILING_TOKENS)), Out(result_line())], Some(0), false);
@@ -1104,7 +1110,7 @@ exit 0");
         let mind = with_run();
         let mut out = Vec::new();
         let outcome = carry(&Seen::of(&mind), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
-        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000 });
+        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000, warm_until: None });
         let printed: String = String::from_utf8(out).unwrap().lines().filter(|line| !line.starts_with("decision ")).map(|line| format!("{line}\n")).collect();
         assert_eq!(printed, "request 1 prefix 10
 request 2 prefix 300000
@@ -1121,7 +1127,7 @@ result subtype=success is_error=false: The answer.
         let started = std::time::Instant::now();
         let mut out = Vec::new();
         let outcome = carry(&Seen::of(&with_run()), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
-        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::Own, code: Some(1), requests: 0, prefix: 0 });
+        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::Own, code: Some(1), requests: 0, prefix: 0, warm_until: None });
         assert_eq!(outcome.exit_status(), 1);
         assert!(!String::from_utf8_lossy(&out).contains("request "), "no request was heard");
         assert!(started.elapsed() < StdDuration::from_secs(20), "it ended promptly");
@@ -1144,7 +1150,7 @@ result subtype=success is_error=false: The answer.
             let holder = std::fs::read_to_string(&pids).unwrap().trim().to_string();
             let cause = if flushed { Cause::FlushRequested } else { Cause::Own };
             let (requests, prefix) = if flushed { (1, CEILING_TOKENS) } else { (0, 0) };
-            assert_eq!(outcome, SelfRunOutcome::Ended { cause, code: Some(0), requests, prefix }, "flushed: {flushed}");
+            assert_eq!(outcome, SelfRunOutcome::Ended { cause, code: Some(0), requests, prefix, warm_until: None }, "flushed: {flushed}");
             assert!(alive(&holder), "the actuator signals no one after the child is gone");
             assert!(started.elapsed() < StdDuration::from_secs(20), "it ended on the child's exit: {:?}", started.elapsed());
             Command::new("kill").arg(&holder).status().unwrap();
@@ -1193,6 +1199,7 @@ result subtype=success is_error=false: The answer.
 mod lease;
 mod closure;
 mod reply;
+mod resume;
 
 // ---- the task in the start message ---------------------------------------
 

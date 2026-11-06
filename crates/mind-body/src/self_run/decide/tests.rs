@@ -510,3 +510,65 @@ fn a_flush_already_written_ends_the_session_by_itself_and_a_yield_does_not_cut_i
     let (_, action) = feed(state, Event::Yield, 3);
     assert_eq!(action, Action::None, "the flush's own answer closes stdin");
 }
+
+// ---- the conversation worth keeping ---------------------------------------------
+
+/// Runs `events` from a state, then the child exits with `code` and its stream ends: the `warm_until` of the outcome the run finishes with.
+fn warm_after(state: State, mut events: Vec<(Event, i64)>, code: Option<i32>) -> Option<DateTime<Utc>> {
+    events.extend([(Event::ChildExited(code), 9_000), (Event::StdoutEof, 9_000)]);
+    match run_from(state, events).1.pop() {
+        Some(Action::Finish(SelfRunOutcome::Ended { warm_until, .. })) => warm_until,
+        other => panic!("the run did not finish: {other:?}"),
+    }
+}
+
+/// A cap that puts the rotation flush at second 100, before any idle lapse.
+fn near_cap() -> State {
+    State::started(t(0), u64::try_from(ROTATE_MARGIN_S + 100).unwrap())
+}
+
+#[test]
+fn a_clean_end_is_kept_until_its_last_request_plus_its_cache_lifetime_less_the_margin() {
+    // Two requests and a result at three different times: the base is the last request's.
+    let events = |result: Event| vec![(Event::Echo, 0), (req("a", 10), 10), (req("b", 20), 50), (result, 90)];
+    assert_eq!(warm_after(working(), events(OK), Some(0)), Some(t(50 + 3600 - 60)));
+    assert_eq!(warm_after(working(), events(OK_SHORT), Some(0)), Some(t(50 + 300 - 60)));
+    // A repeated request id is not a new request and moves nothing.
+    let repeated = vec![(Event::Echo, 0), (req("a", 10), 10), (req("a", 10), 50), (OK, 90)];
+    assert_eq!(warm_after(working(), repeated, Some(0)), Some(t(10 + 3600 - 60)));
+}
+
+#[test]
+fn the_rotation_flush_keeps_its_conversation_and_every_other_end_clears_it() {
+    let clean = vec![(Event::Echo, 0), (req("a", 10), 10), (OK, 20)];
+    let with = |more: Vec<(Event, i64)>| [clean.clone(), more].concat();
+    assert_eq!(warm_after(working(), clean.clone(), Some(0)), Some(t(10 + 3600 - 60)));
+    // The rotation: the flush is asked near the cap, answered, and the end is kept from that answer's request.
+    let rotation = vec![(Event::Tick, 100), (Event::Echo, 101), (req("b", 20), 101), (OK, 102)];
+    assert_eq!(warm_after(near_cap(), with(rotation.clone()), Some(0)), Some(t(101 + 3600 - 60)));
+    // Each condition alone clears.
+    let idle = vec![(Event::Tick, 3560), (Event::Echo, 3561), (req("b", 20), 3561), (OK, 3562)];
+    assert_eq!(warm_after(working(), with(idle), Some(0)), None, "an idle end is the clear");
+    let ceiling = vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), 10), (Event::Echo, 11), (OK, 20)];
+    assert_eq!(warm_after(working(), ceiling, Some(0)), None, "a ceiling end would only flush again");
+    let over_after_rotation = with(vec![(Event::Tick, 100), (Event::Echo, 101), (req("b", CEILING_TOKENS), 101), (OK, 102)]);
+    assert_eq!(warm_after(near_cap(), over_after_rotation, Some(0)), None, "the prefix alone, under a rotation flush");
+    assert_eq!(warm_after(working(), with(vec![(delivered(Stop::Interrupt), 30)]), Some(0)), None, "a delivered signal");
+    assert_eq!(warm_after(working(), with(vec![(Event::Signalled { how: Stop::Interrupt, delivered: false }, 30)]), Some(0)), Some(t(10 + 3600 - 60)), "a signal that never went out ended nothing");
+    let blocked_but_ok = vec![(Event::Echo, 0), (req("a", 10), 10), (Event::Result { ok: true, blocked: true, ttl_1h: true }, 20), (OK, 30)];
+    assert_eq!(warm_after(working(), blocked_but_ok, Some(0)), None, "blocked is sticky");
+    assert_eq!(warm_after(working(), with(vec![(Event::Echo, 30), (FAILED, 40)]), Some(0)), None, "the last result failed");
+    assert_eq!(warm_after(working(), with(vec![(Event::Echo, 30)]), Some(0)), None, "a turn was open");
+    assert_eq!(warm_after(working(), clean.clone(), Some(1)), None, "a non-zero exit");
+    assert_eq!(warm_after(working(), clean, None), None, "an exit by signal");
+    assert_eq!(warm_after(working(), vec![(Event::Echo, 0), (OK, 20)], Some(0)), None, "no request, no cache");
+}
+
+#[test]
+fn a_kept_conversation_resumes_until_its_warm_until_and_not_after_and_never_across_a_seed_change() {
+    let kept = |same_seed| Kept { session: uuid::Uuid::nil(), transcript: "/state/session/x.jsonl".into(), warm_until: t(100), same_seed };
+    assert!(resumes(&kept(true), t(99)));
+    assert!(!resumes(&kept(true), t(100)));
+    assert!(!resumes(&kept(true), t(101)));
+    assert!(!resumes(&kept(false), t(0)));
+}
