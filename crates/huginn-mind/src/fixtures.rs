@@ -9,7 +9,7 @@ use eureka_pipeline::{
     FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MemoryOrigin, MemorySort, MutationRecord, OrgRepo, PipelineCampaign,
     PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFinding, PipelineFollowUp, PipelineHandOff,
     PipelineInstance, PipelineKind, PipelineMemory, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling,
-    PipelineRun, PipelineStewardship, PipelineTarget, PipelineVerdict, Promise, QuestionOption, ReportCommit,
+    PipelineThought, PipelineRun, PipelineStewardship, PipelineTarget, PipelineVerdict, Promise, QuestionOption, ReportCommit,
     ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Short, Slug, StructuralDelta, TargetInvariant, VerdictClaim,
 };
 
@@ -351,6 +351,31 @@ fn run_of(label: &str, operated_by: RunOperator, turn: RunTurn, claims: &[Pipeli
         budget_usd: s("5"),
         claims: claims.to_vec(),
         campaigns: vec![slug(CAMPAIGN)],
+    })
+}
+
+/// One of her thoughts: the chosen candidate is `text`, the only candidate, as near as 1000 (no earlier thought).
+pub(crate) fn thought(label: &str, text: &str, reads: &[PipelineRef]) -> PipelineDocument {
+    PipelineDocument::Thought(PipelineThought {
+        instance: slug(INSTANCE),
+        label: l(label),
+        text: text.into(),
+        reads: reads.to_vec(),
+        persona_receipt: s("mind-commit-0"),
+        identity: "Eureka".into(),
+        context: "".into(),
+        stimulus: "".into(),
+        projector_model: s("projector"),
+        projection: "A projection.".into(),
+        base_model: s("base"),
+        temperature_permille: 1000,
+        min_p_permille: 50,
+        max_tokens: 160,
+        candidates: vec![text.into()],
+        nearest_permille: vec![1000],
+        chosen: 0,
+        projector_ms: 1,
+        continuer_ms: 1,
     })
 }
 

@@ -261,7 +261,8 @@
         "sources",
         "rests_on",
         "toward",
-        "run"
+        "run",
+        "reads"
       ]
     },
     "ClaimOutcome": {
@@ -2629,6 +2630,22 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "thought"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineThought"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -3387,6 +3404,44 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "thought"
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "chosen": {
+                  "type": "integer",
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0
+                },
+                "label": {
+                  "$ref": "#/$defs/Label"
+                },
+                "nearest_permille": {
+                  "type": "integer",
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "label",
+                "chosen",
+                "nearest_permille"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "memory"
             },
             "value": {
@@ -3757,7 +3812,8 @@
         "Memory",
         "Research",
         "Idea",
-        "Reply"
+        "Reply",
+        "Thought"
       ]
     },
     "PipelineMemory": {
@@ -4559,6 +4615,121 @@
         "not_in_scope",
         "canonical_implementations",
         "doc"
+      ]
+    },
+    "PipelineThought": {
+      "description": "One tick of her stream of thought, offline: the words a base model\ncontinued from a projection of her own state, with the whole trace that\nmade them (the seed, the projection, every candidate and how near each\nwas to her earlier thoughts). `text` is the chosen candidate. `reads`\nare the documents the seed was drawn from. A thought is divergence for\ndelivery to weigh, never a memory: its words reach a later seed only\nthrough something she wrote. Instance-rooted: the key is\n`<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.\nSemantically indexed on `text` only. `nearest_permille` is 1000 where she\nhad no earlier thought.",
+      "type": "object",
+      "properties": {
+        "base_model": {
+          "$ref": "#/$defs/Short"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 4
+        },
+        "chosen": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "context": {
+          "$ref": "#/$defs/Para"
+        },
+        "continuer_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "identity": {
+          "$ref": "#/$defs/Line"
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "max_tokens": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "min_p_permille": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "nearest_permille": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0
+          },
+          "maxItems": 4
+        },
+        "persona_receipt": {
+          "$ref": "#/$defs/Short"
+        },
+        "projection": {
+          "$ref": "#/$defs/Para"
+        },
+        "projector_model": {
+          "$ref": "#/$defs/Short"
+        },
+        "projector_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 64
+        },
+        "stimulus": {
+          "$ref": "#/$defs/Para"
+        },
+        "temperature_permille": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "text": {
+          "$ref": "#/$defs/Para"
+        }
+      },
+      "required": [
+        "instance",
+        "label",
+        "text",
+        "reads",
+        "persona_receipt",
+        "identity",
+        "context",
+        "stimulus",
+        "projector_model",
+        "projection",
+        "base_model",
+        "temperature_permille",
+        "min_p_permille",
+        "max_tokens",
+        "candidates",
+        "nearest_permille",
+        "chosen",
+        "projector_ms",
+        "continuer_ms"
       ]
     },
     "PipelineVerdict": {

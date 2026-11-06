@@ -314,6 +314,7 @@ fn refuse_foreign_instance(document: &PipelineDocument, mind: &Slug) -> Result<(
         PipelineDocument::Run(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Pulse(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Reply(value) if value.instance != *mind => Err(foreign(&value.instance)),
+        PipelineDocument::Thought(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Memory(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::HandOff(value) if value.from_instance != *mind && value.to_instance != *mind => {
             Err(foreign(&value.from_instance))
@@ -624,7 +625,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusa
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
             run_rule(docs, key, run, replay)
         }
-        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Reply(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => Ok(()),
+        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => Ok(()),
     }
 }
 
@@ -730,6 +731,8 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Idea, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::Reply, O::Answered { by }) => by.kind == K::FollowUp,
         (K::Reply, O::Recorded { .. }) => true,
+        (K::Thought, O::Answered { by }) => by.kind == K::FollowUp,
+        (K::Thought, O::Recorded { .. }) => true,
         (K::Resolution, O::Withdrawn { .. }) => true,
         _ => false,
     }
@@ -2496,6 +2499,44 @@ mod tests {
         );
         committed(admit(&mut mind, vec![run("w1", &[])]));
         committed(admit(&mut mind, vec![reply(INSTANCE)]));
+    }
+
+    /// A thought is her own: one of another mind is a ForeignInstance, her own is admitted.
+    #[test]
+    fn a_thought_of_another_mind_is_a_foreign_instance_and_her_own_is_admitted() {
+        let mut mind = with_specs();
+        let D::Thought(mut foreign) = crate::fixtures::thought("t1", "A drift.", &[]) else { unreachable!() };
+        foreign.instance = slug(OTHER_INSTANCE);
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Thought(foreign)])),
+            MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() }
+        );
+        committed(admit(&mut mind, vec![crate::fixtures::thought("t1", "A drift.", &[])]));
+    }
+
+    /// A thought resolves Answered by a follow-up or Recorded; no other outcome.
+    #[test]
+    fn a_thought_resolves_answered_by_a_follow_up_or_recorded_and_nothing_else() {
+        let incompatible = |outcome: &str| MindRefusal::IncompatibleResolution { subject_kind: K::Thought, outcome: outcome.into() };
+        let subject = || r(K::Thought, &format!("{INSTANCE}:thought:t1"));
+        let fu = || r(K::FollowUp, &id("follow_up", "FU1"));
+        let open = || {
+            let mut mind = with_specs();
+            committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), follow_up("FU1", r(K::Ruling, &id("ruling", "R1")))]));
+            committed(admit(&mut mind, vec![crate::fixtures::thought("t1", "A drift.", &[])]));
+            mind
+        };
+        committed(admit(&mut open(), vec![resolution(subject(), ResolutionOutcome::Answered { by: fu() })]));
+        committed(admit(&mut open(), vec![resolution(subject(), ResolutionOutcome::Recorded { reason: "weighed".into() })]));
+        let refused = [
+            (ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) }, "Answered"),
+            (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
+            (ResolutionOutcome::Deferred { to: fu() }, "Deferred"),
+            (withdrawn(), "Withdrawn"),
+        ];
+        for (outcome, name) in refused {
+            assert_eq!(refusal(admit(&mut open(), vec![resolution(subject(), outcome)])), incompatible(name), "{name}");
+        }
     }
 
     fn memory_key(label: &str) -> String {

@@ -118,7 +118,7 @@ macro_rules! unbounded_scalars {
     )*};
 }
 
-unbounded_scalars!(u16, u32, u64, bool);
+unbounded_scalars!(u8, u16, u32, u64, bool);
 
 fn bound(field: &str, limit: usize, actual: usize) -> Result<(), PipelineRefusal> {
     if actual > limit {
@@ -622,6 +622,34 @@ fn reply_is_well_formed(reply: &PipelineReply, at: &str) -> Result<(), PipelineR
     Ok(())
 }
 
+/// The most candidates a continuation may offer, and the nearness that means
+/// she had no earlier thought to be near.
+pub const THOUGHT_CANDIDATES_MAX: usize = 4;
+pub const THOUGHT_NEAREST_NONE_PERMILLE: u16 = 1000;
+
+/// A thought says something it was chosen to say: its text is not blank and is
+/// the chosen candidate, every candidate has its nearness, and no nearness is
+/// over 1000 thousandths.
+fn thought_is_well_formed(thought: &PipelineThought, at: &str) -> Result<(), PipelineRefusal> {
+    if thought.text.0.trim().is_empty() {
+        return Err(format_error(&format!("{at}.text"), "a thought with no words"));
+    }
+    if thought.candidates.is_empty() || thought.candidates.len() > THOUGHT_CANDIDATES_MAX {
+        return Err(format_error(&format!("{at}.candidates"), &format!("{} candidates", thought.candidates.len())));
+    }
+    if thought.nearest_permille.len() != thought.candidates.len() {
+        return Err(format_error(&format!("{at}.nearest_permille"), "a nearness list that is not one per candidate"));
+    }
+    if let Some(over) = thought.nearest_permille.iter().position(|near| *near > THOUGHT_NEAREST_NONE_PERMILLE) {
+        return Err(format_error(&format!("{at}.nearest_permille[{over}]"), &thought.nearest_permille[over].to_string()));
+    }
+    match thought.candidates.get(usize::from(thought.chosen)) {
+        None => Err(format_error(&format!("{at}.chosen"), &thought.chosen.to_string())),
+        Some(chosen) if chosen.0 != thought.text.0 => Err(format_error(&format!("{at}.text"), "a thought that is not its chosen candidate")),
+        Some(_) => Ok(()),
+    }
+}
+
 /// The most thousandths a memory's salience may carry.
 pub const SALIENCE_MAX_PERMILLE: u16 = 1000;
 
@@ -841,6 +869,22 @@ value_types! {
     /// Instance-rooted: the key is `<instance>:reply:<label>`. Not semantically
     /// indexed. Whether the run is hers is admission's rule.
     pub struct PipelineReply { instance: Slug, label: Label, run: PipelineRef, answers: Vec<PipelineRef>[64], text: Para } => reply_is_well_formed
+    /// One tick of her stream of thought, offline: the words a base model
+    /// continued from a projection of her own state, with the whole trace that
+    /// made them (the seed, the projection, every candidate and how near each
+    /// was to her earlier thoughts). `text` is the chosen candidate. `reads`
+    /// are the documents the seed was drawn from. A thought is divergence for
+    /// delivery to weigh, never a memory: its words reach a later seed only
+    /// through something she wrote. Instance-rooted: the key is
+    /// `<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.
+    /// Semantically indexed on `text` only. `nearest_permille` is 1000 where she
+    /// had no earlier thought.
+    pub struct PipelineThought {
+        instance: Slug, label: Label, text: Para, reads: Vec<PipelineRef>[64], persona_receipt: Short,
+        identity: Line, context: Para, stimulus: Para, projector_model: Short, projection: Para, base_model: Short,
+        temperature_permille: u16, min_p_permille: u16, max_tokens: u16,
+        candidates: Vec<Line>[4], nearest_permille: Vec<u16>[4], chosen: u8, projector_ms: u32, continuer_ms: u32,
+    } => thought_is_well_formed
     /// One thing a Mind keeps for herself, in her own mind: what she was asked,
     /// decided, committed to, learned or did, an idea, or the rapport between
     /// her and another Mind or person. `text` is her own words. `about` names
@@ -1181,6 +1225,8 @@ pipeline_kinds! {
         "epiphany.pipeline.idea.v2", "EpiphanyPipelineIdeaDocument";
     Reply(PipelineReply) => EpiphanyPipelineReplyDocument, "reply",
         "epiphany.pipeline.reply.v2", "EpiphanyPipelineReplyDocument";
+    Thought(PipelineThought) => EpiphanyPipelineThoughtDocument, "thought",
+        "epiphany.pipeline.thought.v2", "EpiphanyPipelineThoughtDocument";
 }
 
 /// Parses a full document id: the grammar read backwards. A key and an id are
@@ -1378,6 +1424,7 @@ pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefus
         D::Run(value) => ("run.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Pulse(value) => ("pulse.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Reply(value) => ("reply.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
+        D::Thought(value) => ("thought.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Memory(value) => ("memory.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Research(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.pass.0, &value.label.0])?),
         D::Idea(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.pass.0, &value.label.0])?),
@@ -1658,6 +1705,17 @@ mod tests {
                 answers: vec![PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "ask-the-self") }],
                 text: "The shader pass is done; the sounds are Libby's.".into(),
             }), format!("{INSTANCE}:reply:mind-2026-10-09-1-r1")),
+            (D::Thought(PipelineThought {
+                instance: slug(INSTANCE), label: l("t1793000000"),
+                text: "The sounds are Libby's; the shaders were never the hard part.".into(),
+                reads: vec![PipelineRef { kind: PipelineKind::Memory, id: Short(format!("{INSTANCE}:memory:2026-10-31t041200-t0-m0")) }],
+                persona_receipt: s("mind-commit-0a1b"), identity: "Eureka, she/her, plain-spoken.".into(),
+                context: "Values: coherence over velocity.".into(), stimulus: "Libby asked about the sounds.".into(),
+                projector_model: s("projector:latest"), projection: "I keep turning over who holds the sounds.".into(), base_model: s("base:latest"),
+                temperature_permille: 1000, min_p_permille: 50, max_tokens: 160,
+                candidates: vec!["The sounds are Libby's; the shaders were never the hard part.".into(), "A second drift.".into()],
+                nearest_permille: vec![310, 870], chosen: 0, projector_ms: 4200, continuer_ms: 9100,
+            }), format!("{INSTANCE}:thought:t1793000000")),
         ]
     }
 
@@ -1990,6 +2048,35 @@ mod tests {
         ] {
             assert!(matches!(validated(change), Err(PipelineRefusal::InvalidFormat { field: f, .. }) if f == field), "{field}");
         }
+    }
+
+    /// A thought is its chosen candidate, with one nearness per candidate, in bounds.
+    #[test]
+    fn malformed_thought_refused() {
+        let validated = |change: &dyn Fn(&mut PipelineThought)| {
+            let PipelineDocument::Thought(mut thought) = samples().remove(19).0 else { unreachable!() };
+            change(&mut thought);
+            PipelineDocument::Thought(thought).validate()
+        };
+        assert_eq!(validated(&|_| {}), Ok(()));
+        assert_eq!(validated(&|thought| { thought.chosen = 1; thought.text = thought.candidates[1].0.as_str().into(); }), Ok(()));
+        assert_eq!(validated(&|thought| { thought.candidates.truncate(1); thought.nearest_permille.truncate(1); }), Ok(()));
+        assert_eq!(validated(&|thought| thought.nearest_permille[0] = 1000), Ok(()), "1000 means no earlier thought");
+        for (change, field) in [
+            (&(|thought: &mut PipelineThought| { thought.text = " \n".into(); thought.candidates[0] = " \n".into(); }) as &dyn Fn(&mut PipelineThought), "thought.text"),
+            (&|thought: &mut PipelineThought| thought.text = "Another thing entirely.".into(), "thought.text"),
+            (&|thought: &mut PipelineThought| { thought.nearest_permille.pop(); }, "thought.nearest_permille"),
+            (&|thought: &mut PipelineThought| thought.nearest_permille[1] = 1001, "thought.nearest_permille[1]"),
+            (&|thought: &mut PipelineThought| thought.chosen = 2, "thought.chosen"),
+            (&|thought: &mut PipelineThought| { thought.candidates.clear(); thought.nearest_permille.clear(); }, "thought.candidates"),
+        ] {
+            assert!(matches!(validated(change), Err(PipelineRefusal::InvalidFormat { field: f, .. }) if f == field), "{field}");
+        }
+        let five = |thought: &mut PipelineThought| {
+            thought.candidates = vec![thought.text.0.as_str().into(); 5];
+            thought.nearest_permille = vec![0; 5];
+        };
+        assert!(matches!(validated(&five), Err(PipelineRefusal::FieldBound { .. })), "five candidates are over the bound");
     }
 
     /// A pulse votes a tempo in bounds, declares an urgency in bounds, or does both; a pulse that does neither is refused.
@@ -3691,11 +3778,11 @@ mod tests {
         };
         let document_schema = serde_json::to_value(schemars::schema_for!(PipelineDocument))?;
         let variants = document_schema["oneOf"].as_array().expect("the document schema is a oneOf");
-        assert_eq!(PipelineKind::ALL.len(), 19, "nineteen kinds");
+        assert_eq!(PipelineKind::ALL.len(), 20, "twenty kinds");
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
-            "the document schema lists exactly the nineteen kinds, by name"
+            "the document schema lists exactly the twenty kinds, by name"
         );
 
         let refusal_schema = serde_json::to_value(schemars::schema_for!(PipelineRefusal))?;

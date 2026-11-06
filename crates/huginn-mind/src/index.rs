@@ -85,6 +85,7 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
         D::Resolution(resolution) => lines.push(&resolution.rationale.0),
         D::HandOff(hand_off) => lines.push(&hand_off.reason.0),
         D::Memory(memory) => lines.push(&memory.text.0),
+        D::Thought(thought) => lines.push(&thought.text.0),
         D::Research(research) => {
             lines.push(&research.claim.0);
             lines.push(&research.detail.0);

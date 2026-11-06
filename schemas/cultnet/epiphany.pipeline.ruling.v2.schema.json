@@ -73,7 +73,8 @@
         "Memory",
         "Research",
         "Idea",
-        "Reply"
+        "Reply",
+        "Thought"
       ],
       "type": "string"
     },
