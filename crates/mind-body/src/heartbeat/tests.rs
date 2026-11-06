@@ -512,6 +512,19 @@ fn a_member_naming_a_persona_launches_nobody_off_the_beat_but_counts_as_full_urg
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] });
 }
 
+#[test]
+fn a_member_message_naming_nobody_of_hers_scores_nobody() {
+    let rig = Rig::new();
+    rig.turn(ANN, 1000);
+    rig.turn(BOB, 90);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig.say(BOB, delivery(1, "@member:chat", "good morning, swarm", &[]));
+    rig.say(BOB, delivery(2, "@member:chat", "is BDS green?", &[]));
+    rig.advance(900);
+    // Ann waited 1900 s at one order; Bob 990 s, and a member naming nothing of his gives him no urgency: Ann wins the beat.
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] }, "BDS is nobody's here: no one stewards it");
+}
+
 /// `who` also stewards `repo`, with `names` listed or none.
 fn steward(rig: &Rig, who: usize, repo: &str, names: &[&str]) {
     rig.minds[who].committed(vec![eureka_pipeline::PipelineDocument::Stewardship(eureka_pipeline::PipelineStewardship {
