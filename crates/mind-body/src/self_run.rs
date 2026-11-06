@@ -671,7 +671,7 @@ impl SessionInbox for SelfInbox<'_> {
 const RESULT_TEXT_LIMIT: usize = 4096;
 /// The most of a result's text that a reply holds
 /// (a `Para` holds 4000 bytes; the cut marker rides inside the rest).
-pub const REPLY_TEXT_LIMIT: usize = 3800;
+const REPLY_TEXT_LIMIT: usize = 3800;
 
 /// A result event's subtype and error flag when it has them, as one line.
 fn result_head(event: &serde_json::Map<String, Value>) -> String {
