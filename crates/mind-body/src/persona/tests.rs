@@ -1182,7 +1182,7 @@ fn a_turn_shows_her_stewardships_follow_ups_and_the_rulings_they_cite() {
     let input = first_input(&rig);
     assert!(input.contains("What you are responsible for"), "{input}");
     assert!(input.contains("Open follow-ups, newest first:"), "{input}");
-    assert!(input.contains("- steward of GameCult/cinny: the chat client; design law in eureka-body:ruling:client-first."), "{input}");
+    assert!(input.contains("- steward of GameCult/cinny (chat names, any case: cinny): the chat client; design law in eureka-body:ruling:client-first."), "{input}");
     let (newer, older) = (input.find("eureka-body/newer").unwrap(), input.find("eureka-body/older").unwrap());
     assert!(newer < older, "{input}");
     assert!(input.contains("Ship the other thing.") && !input.contains("Second line."), "{input}");

@@ -10,6 +10,7 @@ mind_body: mod persona
 mind_body: mod queue
 mind_body: mod self_run
 mind_body: mod tempo
+mind_body::address: impl Addressee
 mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Refusal { Brake , PersonaMismatch , UnknownRoom , EmptyText , SendFailed , UnknownPersona , RoomMoved , }
 mind_body::chat_client: const ACK : & str
 mind_body::chat_client: const PENDING : & str
