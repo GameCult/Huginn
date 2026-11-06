@@ -105,6 +105,8 @@ impl Chat for FakeChat {
 struct MemStore {
     state: RefCell<Option<HeartbeatState>>,
     traces: RefCell<Vec<PollTrace>>,
+    addressing: RefCell<Option<Addressing>>,
+    addressing_saves: Cell<u32>,
 }
 
 impl Store for MemStore {
@@ -119,6 +121,16 @@ impl Store for MemStore {
 
     fn record(&self, trace: &PollTrace) -> Result<()> {
         self.traces.borrow_mut().push(trace.clone());
+        Ok(())
+    }
+
+    fn load_addressing(&self) -> Result<Option<Addressing>> {
+        Ok(self.addressing.borrow().clone())
+    }
+
+    fn save_addressing(&self, addressing: &Addressing) -> Result<()> {
+        self.addressing_saves.set(self.addressing_saves.get() + 1);
+        *self.addressing.borrow_mut() = Some(addressing.clone());
         Ok(())
     }
 }
@@ -600,6 +612,46 @@ fn a_stewardship_is_read_only_when_chat_is_pending_and_a_failed_read_keeps_her_r
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] }, "her own name still wakes her");
     assert_eq!(rig.stewardship_reads.get(), 1, "one read for her one poll");
     assert!(notes_of(&rig).iter().any(|note| note.contains("stewardship names unread")), "{:?}", notes_of(&rig));
+}
+
+fn table_row(rig: &Rig, id: &str) -> Addressee {
+    rig.store.addressing.borrow().as_ref().expect("the heartbeat wrote a table").minds.iter().find(|row| row.matrix_id() == id).cloned().expect("her row")
+}
+
+#[test]
+fn the_heartbeat_writes_the_table_it_read_and_only_when_it_changed() {
+    let rig = quiet_rig();
+    steward(&rig, BOB, "GameCult/BadDaySimulator", &["BDS"]);
+    rig.poll();
+    assert_eq!(rig.store.addressing_saves.get(), 1, "the roster is written at the first poll");
+    assert!(!addresses(&table_row(&rig, "@bob:chat"), &delivery(9, "@op:chat", "BDS is down", &[])), "nothing pending, nothing read: no project name yet");
+    rig.say(BOB, delivery(1, "@member:chat", "hello", &[]));
+    rig.poll();
+    assert_eq!(rig.store.addressing_saves.get(), 2);
+    assert!(addresses(&table_row(&rig, "@bob:chat"), &delivery(9, "@op:chat", "BDS is down", &[])));
+    assert!(addresses(&table_row(&rig, "@ann:chat"), &delivery(9, "@op:chat", "Ann?", &[])) && !addresses(&table_row(&rig, "@ann:chat"), &delivery(9, "@op:chat", "BDS", &[])));
+    rig.poll();
+    assert_eq!(rig.store.addressing_saves.get(), 2, "an identical poll writes nothing");
+}
+
+#[test]
+fn a_failed_stewardship_read_keeps_her_last_read_names_and_roster_names_when_none_are_stored() {
+    let rig = quiet_rig();
+    steward(&rig, BOB, "GameCult/BadDaySimulator", &["BDS"]);
+    rig.say(BOB, delivery(1, "@member:chat", "hello", &[]));
+    rig.poll();
+    rig.stewardship_down.set(true);
+    rig.say(BOB, delivery(2, "@op:chat", "BDS is down", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] }, "her stored names still wake her");
+    assert!(notes_of(&rig).iter().any(|note| note.contains("stewardship names unread")), "{:?}", notes_of(&rig));
+    assert!(addresses(&table_row(&rig, "@bob:chat"), &delivery(9, "@op:chat", "BDS", &[])), "the table keeps her names");
+    let rig = quiet_rig();
+    steward(&rig, BOB, "GameCult/BadDaySimulator", &["BDS"]);
+    rig.stewardship_down.set(true);
+    rig.say(BOB, delivery(1, "@op:chat", "BDS is down", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "nothing stored: roster names only");
+    rig.say(BOB, delivery(2, "@op:chat", "bob, a word", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] });
 }
 
 #[test]
@@ -1359,4 +1411,15 @@ fn a_persona_run_whose_unit_is_active_is_busy() {
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
     assert_eq!(rig.launched(), vec![]);
     assert!(matches!(rig.minds[BOB].view(K::Run, "bob:run:held").unwrap().status, huginn_mind::PipelineStatus::InForce));
+}
+
+#[test]
+fn the_file_store_reads_back_the_addressing_it_wrote_to_the_view() {
+    let dir = TempDir::new().unwrap();
+    let store = FileStore::new(dir.path().join("heartbeat.cc"));
+    assert_eq!(store.addressing().unwrap(), None);
+    let table = Addressing { minds: vec![Addressee::new("@bob:chat", ["Bob"]).with_projects([Name { text: "BDS".into(), exact: true }])] };
+    store.save_addressing(&table).unwrap();
+    assert_eq!(store.addressing().unwrap(), Some(table.clone()));
+    assert_eq!(store.load_addressing().unwrap(), Some(table));
 }

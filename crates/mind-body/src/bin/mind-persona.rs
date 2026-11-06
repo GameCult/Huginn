@@ -88,8 +88,8 @@ fn run() -> Result<String> {
     let trace = FileTrace::new(Path::new(&state).join("persona-trace.cc"));
     let launcher = SystemdLauncher::new();
     let host = host();
-    let tempo = setting("MIND_HEARTBEAT_STATE").map(FileStore::new);
-    let organs = Organs { mind: &mind, launcher: &launcher, clock: &SystemClock, host: &host, chat: &chat, persona: &persona, trace: &trace, tempo: tempo.as_ref().map(|store| store as &dyn mind_body::heartbeat::TempoView), lender: &lender, spawner: &spawner, run_cap_s, sandbox: &sandbox, scratch: &scratch };
+    let heartbeat = setting("MIND_HEARTBEAT_STATE").map(FileStore::new);
+    let organs = Organs { mind: &mind, launcher: &launcher, clock: &SystemClock, host: &host, chat: &chat, persona: &persona, trace: &trace, heartbeat: heartbeat.as_ref().map(|store| store as &dyn mind_body::heartbeat::HeartbeatView), lender: &lender, spawner: &spawner, run_cap_s, sandbox: &sandbox, scratch: &scratch };
     let swarm = FileSource::new(swarm_path(Path::new(CONTROL_ROOT)));
     Ok(carry(&organs, &source, &swarm, &config)?.to_string())
 }

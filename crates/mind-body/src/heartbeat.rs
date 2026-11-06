@@ -143,6 +143,18 @@ pub struct HeartbeatState {
 
 const STATE_KEY: &str = "state";
 
+/// The swarm's addressing as the heartbeat last read it: each Mind's Matrix id and the names a delivery may call her (her own and her
+/// projects'), in roster order. A cache of the stewardship records, written only by the heartbeat's poll; the Personas read it to rank
+/// and show whom a delivery is for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "eureka.heartbeat.addressing.v1", schema = "HeartbeatAddressing")]
+pub struct Addressing {
+    #[cultcache(key = 0)]
+    pub minds: Vec<Addressee>,
+}
+
+const ADDRESSING_KEY: &str = "addressing";
+
 /// One instance's line in a poll's trace.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstanceTrace {
@@ -203,16 +215,19 @@ pub trait Store {
     fn load(&self) -> Result<Option<HeartbeatState>>;
     fn save(&self, state: &HeartbeatState) -> Result<()>;
     fn record(&self, trace: &PollTrace) -> Result<()>;
+    fn load_addressing(&self) -> Result<Option<Addressing>>;
+    fn save_addressing(&self, addressing: &Addressing) -> Result<()>;
 }
 
 /// What a Persona unit may read of `heartbeat.cc`: the newest trace, which
-/// carries the tempo and every Mind's vote and declared urgency. Read-only.
-pub trait TempoView {
+/// carries the tempo and every Mind's vote and declared urgency, and the swarm's addressing. Read-only.
+pub trait HeartbeatView {
     fn latest(&self) -> Result<Option<PollTrace>>;
+    fn addressing(&self) -> Result<Option<Addressing>>;
 }
 
 /// The store as a CultCache single-file store under the unit's state directory.
-/// It registers the state and the trace and nothing else: a file still holding
+/// It registers the state, the trace and the addressing and nothing else: a file still holding
 /// any older document does not decode, and every use of it fails
 /// naming the file. It is never migrated.
 pub struct FileStore {
@@ -228,6 +243,7 @@ impl FileStore {
         let mut cache = CultCache::new();
         cache.register_entry_type::<HeartbeatState>()?;
         cache.register_entry_type::<PollTrace>()?;
+        cache.register_entry_type::<Addressing>()?;
         Ok(cache)
     }
 
@@ -266,6 +282,15 @@ impl Store for FileStore {
         self.open()?.put(format!("{:020}", trace.at.timestamp_millis()), trace)?;
         self.settle()
     }
+
+    fn load_addressing(&self) -> Result<Option<Addressing>> {
+        self.snapshot()?.get::<Addressing>(ADDRESSING_KEY)
+    }
+
+    fn save_addressing(&self, addressing: &Addressing) -> Result<()> {
+        self.open()?.put(ADDRESSING_KEY, addressing)?;
+        self.settle()
+    }
 }
 
 impl FileStore {
@@ -279,11 +304,15 @@ impl FileStore {
     }
 }
 
-impl TempoView for FileStore {
+impl HeartbeatView for FileStore {
     fn latest(&self) -> Result<Option<PollTrace>> {
         let mut all = self.snapshot()?.get_all_with_keys::<PollTrace>()?;
         all.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(all.pop().map(|(_, trace)| trace))
+    }
+
+    fn addressing(&self) -> Result<Option<Addressing>> {
+        self.load_addressing()
     }
 }
 
@@ -519,7 +548,7 @@ struct Row<'a> {
     read: Option<MindRead>,
     released: bool,
     pending: Vec<ChatDelivery>,
-    /// Whom a delivery may address in her: her roster names always, her projects' names once a poll has read her pending chat.
+    /// Whom a delivery may address in her: her roster names and her projects' names as the last poll that read her pending chat left them.
     addressee: Addressee,
     busy: bool,
     note: String,
@@ -645,6 +674,11 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     let stored = organs.store.load()?;
     let mut state = stored.clone().unwrap_or(HeartbeatState { last_beat_at: DateTime::<Utc>::UNIX_EPOCH, handled_mentions: vec![] });
     let mut eventful = false;
+    // The table as the last poll left it; unreadable counts as none, is noted in the trace, and is not overwritten.
+    let (stored_addressing, addressing_unread) = match organs.store.load_addressing() {
+        Ok(found) => (found.unwrap_or_default(), None),
+        Err(error) => (Addressing::default(), Some(format!("addressing unread: {error}"))),
+    };
 
     let mut rows: Vec<Row> = Vec::new();
     for seat in organs.seats {
@@ -657,18 +691,20 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
                 (None, format!("skipped: her mind could not be read: {error}"))
             }
         };
+        // Her last-read names when the table holds her, else her roster names alone.
         let roster = Addressee::new(&seat.who.matrix_id, [seat.who.public_name.as_str(), seat.who.handle.as_str()]);
-        let mut row = Row { seat, busy: read.as_ref().is_some_and(|read| read.busy), read, released, pending: vec![], addressee: roster, note };
+        let kept = stored_addressing.minds.iter().find(|stored| stored.matrix_id() == seat.who.matrix_id).cloned().unwrap_or_else(|| roster.clone());
+        let mut row = Row { seat, busy: read.as_ref().is_some_and(|read| read.busy), read, released, pending: vec![], addressee: kept, note };
         // Pending chat, read-only, for a released Mind whose mind could be read.
         if row.released && row.read.is_some() {
             match read_pending(seat.chat) {
                 Ok(deliveries) => row.pending = deliveries,
                 Err(_) => row.note = "chat: pending failed".into(),
             }
-            // Her projects' names address her too; read only when something is pending. A failed read keeps her roster names.
+            // Her projects' names address her too; read only when something is pending. A failed read keeps her last-read row.
             if !row.pending.is_empty() {
                 match project_names_of(seat.mind) {
-                    Ok(names) => row.addressee = row.addressee.clone().with_projects(names),
+                    Ok(names) => row.addressee = roster.with_projects(names),
                     Err(error) => row.note = format!("{} stewardship names unread: {error}", row.note).trim().to_string(),
                 }
             }
@@ -794,6 +830,17 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
 
     if stored.as_ref() != Some(&state) {
         organs.store.save(&state)?;
+    }
+    let addressing = Addressing { minds: rows.iter().map(|row| row.addressee.clone()).collect() };
+    match addressing_unread {
+        None if addressing != stored_addressing => organs.store.save_addressing(&addressing)?,
+        None => {}
+        Some(note) => {
+            eventful = true;
+            if let Some(first) = rows.first_mut() {
+                first.note = format!("{} {note}", first.note).trim().to_string();
+            }
+        }
     }
     if eventful || !launches.is_empty() || rows.iter().any(|row| !row.note.is_empty()) {
         let trace = PollTrace {

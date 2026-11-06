@@ -9,16 +9,16 @@ use eureka_pipeline::{OrgRepo, Short};
 use crate::chat_client::ChatDelivery;
 
 /// A word a message may call a Mind or her project by.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Name {
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Name {
     pub(crate) text: String,
     /// Matched case-sensitively, as written; otherwise in any case.
     pub(crate) exact: bool,
 }
 
 /// Whom a delivery may be addressing: one Mind's Matrix id and her names.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Addressee {
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Addressee {
     matrix_id: String,
     names: Vec<Name>,
 }

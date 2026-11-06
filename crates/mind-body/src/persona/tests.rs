@@ -352,9 +352,14 @@ fn config() -> Config {
 /// A delivery whose event the stagger tells her at once, whatever the clock does: the first of `$e<seq>`, `$e<seq>-1`... where she
 /// ranks first among the Minds. The tests that are about the stagger name their events.
 fn delivery(seq: u64, room: &str, sender: &str, text: &str) -> ChatDelivery {
-    let ranked_first = |event_id: &str| stagger_ms(&config(), &own_addressee(&config()), &ChatDelivery { event_id: event_id.into(), ..delivery_of(seq, room, sender, text, event_id) }) == 0;
+    let ranked_first = |event_id: &str| stagger(&config(), &own_addressee(&config()), &ChatDelivery { event_id: event_id.into(), ..delivery_of(seq, room, sender, text, event_id) }) == 0;
     let event_id = (0..1000).map(|n| if n == 0 { format!("$e{seq}") } else { format!("$e{seq}-{n}") }).find(|id| ranked_first(id)).expect("among 1000 events one ranks her first: the stagger ranks nobody first");
     delivery_of(seq, room, sender, text, &event_id)
+}
+
+/// The stagger of `delivery` for a Mind whose own addressee is `own`, with no heartbeat table: the configured Minds by tag and localpart.
+fn stagger(config: &Config, own: &Addressee, delivery: &ChatDelivery) -> u64 {
+    stagger_ms(config, &addressing_of(config, None, own), delivery)
 }
 
 fn delivery_of(seq: u64, room: &str, sender: &str, text: &str, event_id: &str) -> ChatDelivery {
@@ -479,7 +484,7 @@ impl Rig {
             chat: &self.chat,
             persona: &self.persona,
             trace: &self.trace,
-            tempo: None,
+            heartbeat: None,
             lender: &self.lender,
             spawner: &self.model,
             run_cap_s: self.cap.get(),
@@ -1234,7 +1239,7 @@ fn a_message_naming_her_project_or_her_name_renders_to_you_and_to_lists_tags_onl
     assert!(line("a word").contains(" to_you=true "), "{input}");
     assert!(!line("simulated").contains("to_you"), "{input}");
     assert!(line("Aqua?").contains(" to_you=true to=[\"@aqua:chat\"] "), "the tag stays in `to`, hers is not listed: {input}");
-    let other = message_lines(&config(), &own_addressee(&config()), &[delivery(1, "swarm", "@op:chat", "is the bad day simulator green?")], &[vec![]]);
+    let other = message_lines(&config(), &own_addressee(&config()), &[], &[delivery(1, "swarm", "@op:chat", "is the bad day simulator green?")], &[vec![]]);
     assert!(!other.contains("to_you"), "another Mind is not addressed by a project she does not steward: {other}");
 }
 
@@ -1298,7 +1303,7 @@ fn input_for(mentions: &[&str], display: &str) -> String {
     said.mentions = mentions.iter().map(|m| (*m).to_string()).collect();
     let c = config();
     let batch = [aqua, said];
-    render_input(&c, true, &message_lines(&c, &own_addressee(&c), &batch, &earlier_shown(&batch, &BTreeSet::new(), &c.own_sender, u64::MAX)), None, &[], "", "", "", "usage", &[])
+    render_input(&c, true, &message_lines(&c, &own_addressee(&c), &[], &batch, &earlier_shown(&batch, &BTreeSet::new(), &c.own_sender, u64::MAX)), None, &[], "", "", "", "usage", &[])
 }
 
 fn message_two(input: &str) -> &str {
@@ -2622,7 +2627,7 @@ fn carry_children<T: Child + 'static>(rig: &Rig, children: Vec<T>) -> (Outcome, 
         chat: &rig.chat,
         persona: &rig.persona,
         trace: &rig.trace,
-        tempo: None,
+        heartbeat: None,
         lender: &rig.lender,
         spawner: &spawner,
         run_cap_s: rig.cap.get(),
@@ -5963,7 +5968,7 @@ impl Rig {
             chat: &self.chat,
             persona: &self.persona,
             trace: &self.trace,
-            tempo: None,
+            heartbeat: None,
             lender: &self.lender,
             spawner: &self.model,
             run_cap_s: self.cap.get(),
@@ -6213,7 +6218,7 @@ fn a_process_that_ends_with_a_revision_waiting_leaves_the_batch_unacked() {
         assert!(inbox.revision.is_some());
     });
     assert!(rig.chat.acked.borrow().is_empty());
-    let next = next_batch(&config(), rig.chat.pending(0).unwrap(), 0);
+    let next = next_batch(&config(), &[], rig.chat.pending(0).unwrap(), 0);
     assert_eq!(next.len(), 2);
     with_inbox(&rig, &config(), next, |inbox| {
         let line = inbox.start_line().unwrap();
@@ -6298,7 +6303,7 @@ fn three_minds(own: &str) -> Config {
 fn unaddressed_at_rank(seq: u64, rank: u64, text: &str) -> ChatDelivery {
     (0..1000)
         .map(|n| delivery_of(seq, "swarm", "@op:chat", text, &format!("$r{seq}-{n}")))
-        .find(|candidate| stagger_ms(&three_minds("@eureka:chat"), &own_addressee(&three_minds("@eureka:chat")), candidate) == rank * STAGGER_STEP_S * 1000)
+        .find(|candidate| stagger(&three_minds("@eureka:chat"), &own_addressee(&three_minds("@eureka:chat")), candidate) == rank * STAGGER_STEP_S * 1000)
         .unwrap_or_else(|| panic!("among 1000 events one ranks her at {rank}: the stagger never does"))
 }
 
@@ -6360,14 +6365,14 @@ fn a_message_naming_her_project_or_her_name_ranks_her_among_the_addressed_in_the
     let step = STAGGER_STEP_S * 1000;
     let steward = own_addressee(&config).with_projects(project_names(&OrgRepo("GameCult/BadDaySimulator".into()), &[]));
     let by_project = unaddressed_at_rank(1, 2, "who takes the bad day simulator?");
-    assert_eq!(stagger_ms(&config, &own_addressee(&config), &by_project), 2 * step, "a Mind it does not name still waits her rank");
-    assert_eq!(stagger_ms(&config, &steward, &by_project), 0, "the only addressed Mind hears at once, as with a tag");
+    assert_eq!(stagger(&config, &own_addressee(&config), &by_project), 2 * step, "a Mind it does not name still waits her rank");
+    assert_eq!(stagger(&config, &steward, &by_project), 0, "the only addressed Mind hears at once, as with a tag");
     let by_name = delivery_of(2, "swarm", "@op:chat", "eureka, who takes the cellar?", "$by-name");
-    assert_eq!(stagger_ms(&config, &own_addressee(&config), &by_name), 0, "her own name ranks her first");
+    assert_eq!(stagger(&config, &own_addressee(&config), &by_name), 0, "her own name ranks her first");
     let plain = unaddressed_at_rank(3, 2, "who takes the cellar?");
-    assert_eq!(stagger_ms(&config, &steward, &plain), 2 * step, "an unaddressed message leaves her rank alone");
+    assert_eq!(stagger(&config, &steward, &plain), 2 * step, "an unaddressed message leaves her rank alone");
     let tagged = ChatDelivery { mentions: vec!["@libby:chat".into()], ..unaddressed_at_rank(4, 2, "who takes the bad day simulator?") };
-    assert!(stagger_ms(&config, &steward, &tagged) <= step, "named by project and a tag on another Mind: ranked among the two addressed");
+    assert!(stagger(&config, &steward, &tagged) <= step, "named by project and a tag on another Mind: ranked among the two addressed");
 }
 
 #[test]
@@ -6377,7 +6382,7 @@ fn the_stagger_ranks_the_minds_by_a_hash_of_mind_and_event_so_nobody_is_always_l
     let mut first = BTreeSet::new();
     for n in 0..64 {
         let event = delivery_of(1, "swarm", "@op:chat", "q", &format!("$event{n}"));
-        let mut ranks: Vec<u64> = minds.iter().map(|mind| stagger_ms(&three_minds(mind), &own_addressee(&three_minds(mind)), &event) / (STAGGER_STEP_S * 1000)).collect();
+        let mut ranks: Vec<u64> = minds.iter().map(|mind| stagger(&three_minds(mind), &own_addressee(&three_minds(mind)), &event) / (STAGGER_STEP_S * 1000)).collect();
         for (mind, rank) in minds.iter().zip(&ranks) {
             if *rank == 2 {
                 last.insert(*mind);
@@ -6399,15 +6404,15 @@ fn naming_several_minds_does_not_make_a_chorus_and_the_unnamed_follow_the_named(
     let mut named_first = BTreeSet::new();
     for n in 0..64 {
         let tagged_two = ChatDelivery { mentions: vec!["@eureka:chat".into(), "@libby:chat".into()], ..delivery_of(1, "swarm", "@op:chat", "q", &format!("$event{n}")) };
-        let waits: Vec<u64> = minds.iter().map(|mind| stagger_ms(&three_minds(mind), &own_addressee(&three_minds(mind)), &tagged_two)).collect();
+        let waits: Vec<u64> = minds.iter().map(|mind| stagger(&three_minds(mind), &own_addressee(&three_minds(mind)), &tagged_two)).collect();
         assert_ne!(waits[0], waits[1], "event {n}: two named Minds never share a rank");
         assert_eq!(waits[0].min(waits[1]), 0, "event {n}: the first named Mind hears at once");
         assert_eq!(waits[0].max(waits[1]), step, "event {n}: the second one step later");
         assert_eq!(waits[2], 2 * step, "event {n}: the unnamed Mind comes after every named one");
         named_first.insert(if waits[0] == 0 { 0 } else { 1 });
         let tagged_one = ChatDelivery { mentions: vec!["@aqua:chat".into()], ..tagged_two };
-        assert_eq!(stagger_ms(&three_minds("@aqua:chat"), &own_addressee(&three_minds("@aqua:chat")), &tagged_one), 0, "event {n}: a message naming one Mind reaches her at once");
-        assert!(minds[..2].iter().all(|mind| stagger_ms(&three_minds(mind), &own_addressee(&three_minds(mind)), &tagged_one) >= step), "event {n}");
+        assert_eq!(stagger(&three_minds("@aqua:chat"), &own_addressee(&three_minds("@aqua:chat")), &tagged_one), 0, "event {n}: a message naming one Mind reaches her at once");
+        assert!(minds[..2].iter().all(|mind| stagger(&three_minds(mind), &own_addressee(&three_minds(mind)), &tagged_one) >= step), "event {n}");
     }
     assert_eq!(named_first.len(), 2, "which named Mind goes first differs per event");
 }
@@ -6431,4 +6436,89 @@ fn a_flush_written_beside_a_revision_line_still_makes_the_reply_final() {
         assert_eq!(rig.chat.sent.borrow()[1].basis, None);
         assert!(rig.chat.sent.borrow()[1].request_id.contains("-r1-"));
     });
+}
+
+/// The swarm's addressing table for eight Minds: `listed` names a Mind's project by repo and listed names; the rest own names only.
+fn eight_minds(listed: &[(&str, &str, &[&str])]) -> Vec<Addressee> {
+    ["@eureka:chat", "@libby:chat", "@nibu:chat", "@aqua:chat", "@bob:chat", "@carol:chat", "@dan:chat", "@eve:chat"]
+        .iter()
+        .map(|id| {
+            let row = Addressee::new(id, [localpart(id)]);
+            match listed.iter().find(|(who, _, _)| who == id) {
+                Some((_, repo, names)) => row.with_projects(project_names(&OrgRepo((*repo).into()), &names.iter().map(|name| eureka_pipeline::Short((*name).into())).collect::<Vec<_>>())),
+                None => row,
+            }
+        })
+        .collect()
+}
+
+/// Every Mind's rank, in steps, for one event from `sender`, each computed by her own session from the same table.
+fn ranks_of(table: &[Addressee], sender: &str, text: &str, event_id: &str) -> Vec<(String, u64)> {
+    let event = ChatDelivery { sender: sender.into(), ..delivery_of(1, "swarm", sender, text, event_id) };
+    table
+        .iter()
+        .filter(|mind| mind.matrix_id() != sender)
+        .map(|mind| {
+            let config = Config { own_sender: mind.matrix_id().into(), minds: table.iter().map(|row| row.matrix_id().to_string()).collect(), ..config() };
+            (mind.matrix_id().to_string(), stagger_ms(&config, table, &event) / (STAGGER_STEP_S * 1000))
+        })
+        .collect()
+}
+
+#[test]
+fn two_name_addressed_minds_take_turns_and_every_unaddressed_mind_follows_them() {
+    let table = eight_minds(&[("@libby:chat", "GameCult/Thing", &["Thing"]), ("@nibu:chat", "GameCult/BadDaySimulator", &[])]);
+    for n in 0..200 {
+        let ranks = ranks_of(&table, "@op:chat", "Thing and the bad day simulator are both red", &format!("$both{n}"));
+        let rank = |id: &str| ranks.iter().find(|(who, _)| who == id).unwrap().1;
+        let mut named = [rank("@libby:chat"), rank("@nibu:chat")];
+        named.sort_unstable();
+        assert_eq!(named, [0, 1], "event {n}: {ranks:?}");
+        assert!(ranks.iter().filter(|(who, _)| who != "@libby:chat" && who != "@nibu:chat").all(|(_, rank)| *rank >= 2), "event {n}: {ranks:?}");
+    }
+}
+
+#[test]
+fn a_project_name_only_message_puts_its_steward_first_and_nobody_beside_her() {
+    let table = eight_minds(&[("@nibu:chat", "GameCult/BadDaySimulator", &["BDS"])]);
+    for n in 0..200 {
+        let ranks = ranks_of(&table, "@op:chat", "is BDS green?", &format!("$bds{n}"));
+        assert_eq!(ranks.iter().filter(|(_, rank)| *rank == 0).collect::<Vec<_>>(), [&("@nibu:chat".to_string(), 0)], "event {n}: {ranks:?}");
+    }
+}
+
+#[test]
+fn every_persona_computes_the_same_order_from_the_same_table() {
+    let table = eight_minds(&[("@libby:chat", "GameCult/Thing", &["Thing"]), ("@nibu:chat", "GameCult/BadDaySimulator", &[])]);
+    for n in 0..50 {
+        for (sender, text) in [("@op:chat", "Thing and the bad day simulator"), ("@aqua:chat", "hello all"), ("@libby:chat", "is the BadDaySimulator green?")] {
+            let mut ranks: Vec<u64> = ranks_of(&table, sender, text, &format!("$perm{n}")).into_iter().map(|(_, rank)| rank).collect();
+            ranks.sort_unstable();
+            let others = u64::try_from(table.iter().filter(|mind| mind.matrix_id() != sender).count()).unwrap();
+            assert_eq!(ranks, (0..others).collect::<Vec<_>>(), "event {n} from {sender}");
+        }
+    }
+}
+
+#[test]
+fn with_no_table_the_stagger_ranks_tags_and_her_own_names_and_to_lists_tags_only() {
+    let config = three_minds("@eureka:chat");
+    let own = own_addressee(&config);
+    let fallback = addressing_of(&config, None, &own);
+    assert_eq!(fallback.iter().map(|mind| mind.matrix_id()).collect::<Vec<_>>(), ["@eureka:chat", "@libby:chat", "@aqua:chat"]);
+    let tagged = ChatDelivery { mentions: vec!["@libby:chat".into()], ..delivery_of(1, "swarm", "@op:chat", "is BDS green?", "$tag") };
+    assert!(stagger_ms(&config, &fallback, &tagged) >= STAGGER_STEP_S * 1000, "the tagged Mind goes first; an unaddressed one follows");
+    let line = message_lines(&config, &own, &fallback, &[tagged], &[vec![]]);
+    assert!(line.contains(" to=[\"@libby:chat\"] ") && !line.contains("to_you"), "{line}");
+}
+
+#[test]
+fn to_lists_a_mind_named_by_her_project() {
+    let table = eight_minds(&[("@nibu:chat", "GameCult/BadDaySimulator", &["BDS"])]);
+    let config = Config { own_sender: "@libby:chat".into(), ..three_minds("@libby:chat") };
+    let own = own_addressee(&config);
+    let line = message_lines(&config, &own, &table, &[delivery_of(1, "swarm", "@op:chat", "is BDS green?", "$bds")], &[vec![]]);
+    assert!(line.contains(" to=[\"@nibu:chat\"] ") && !line.contains("to_you"), "{line}");
+    let by_a_mind = message_lines(&config, &own, &table, &[delivery_of(1, "swarm", "@nibu:chat", "is BDS green?", "$own")], &[vec![]]);
+    assert!(!by_a_mind.contains("to="), "a Mind naming her own project is not shown as addressing herself: {by_a_mind}");
 }
