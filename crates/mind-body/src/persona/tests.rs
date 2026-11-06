@@ -6359,7 +6359,7 @@ fn a_message_naming_her_project_or_her_name_ranks_her_among_the_addressed_in_the
     let by_project = unaddressed_at_rank(1, 2, "who takes the bad day simulator?");
     assert_eq!(stagger_ms(&config, &own_addressee(&config), &by_project), 2 * step, "a Mind it does not name still waits her rank");
     assert_eq!(stagger_ms(&config, &steward, &by_project), 0, "the only addressed Mind hears at once, as with a tag");
-    let by_name = unaddressed_at_rank(2, 2, "eureka, who takes the cellar?");
+    let by_name = delivery_of(2, "swarm", "@op:chat", "eureka, who takes the cellar?", "$by-name");
     assert_eq!(stagger_ms(&config, &own_addressee(&config), &by_name), 0, "her own name ranks her first");
     let plain = unaddressed_at_rank(3, 2, "who takes the cellar?");
     assert_eq!(stagger_ms(&config, &steward, &plain), 2 * step, "an unaddressed message leaves her rank alone");
