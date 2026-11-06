@@ -1145,7 +1145,7 @@ fn schema_prints_the_published_files() {
     assert_eq!(names[14], "pulse");
     assert_eq!(names[15], "memory");
     assert_eq!((names[16], names[17]), ("research", "idea"));
-    assert_eq!(names[18], "selection");
+    assert_eq!((names[18], names[19]), ("reply", "selection"));
     for kind in PipelineKind::ALL {
         assert!(names.contains(&kind.name()), "{}", kind.name());
     }
