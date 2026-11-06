@@ -74,6 +74,7 @@ use uuid::Uuid;
 
 use crate::launch::{Clock, closure, holders};
 use crate::connector::render_plan;
+use crate::persona::Conversation;
 use crate::lease_client::{LeaseRefusalKind, LeaseRequest, Lender, Lent, TokenFd};
 use model_connector::PlanQuota;
 use crate::queue::MindPort;
@@ -151,7 +152,7 @@ pub const SESSION_NAMESPACE: Uuid = Uuid::NAMESPACE_OID;
 /// skill: it names the skill, the instance and the run id.
 pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
     format!(
-        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs.\n\n{}",
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs. Briefs reach you one conversation at a time, and what you say ending a turn reaches your Persona only in the conversation of the briefs that turn answers; a turn that took in no brief continues the one before.\n\n{}",
         instance.0,
         run.id.0,
         render_plan(plan_quota, now_ms)
@@ -517,7 +518,11 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let Some((run, claims)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
     let mut task = task_section(mind, &claims)?;
-    let mut told: Vec<Brief> = inbox::derive(mind, &HashSet::new())?;
+    let open = inbox::derive(mind, &HashSet::new())?;
+    // One Self turn answers one conversation: the start set is the claimed briefs and the open briefs of the first claimed brief's
+    // conversation (with no claimed brief, of the oldest open brief's). The rest are derived by poll, one conversation at a time.
+    let conversation = claims.iter().find_map(|claim| open.iter().find(|brief| brief.id == claim.id.0)).or(open.first()).map(|brief| brief.conversation.clone());
+    let mut told: Vec<Brief> = open.into_iter().filter(|brief| claims.iter().any(|claim| claim.id.0 == brief.id) || Some(&brief.conversation) == conversation.as_ref()).collect();
     let also: Vec<&Brief> = told.iter().filter(|brief| !claims.iter().any(|claim| claim.id.0 == brief.id)).collect();
     if !also.is_empty() {
         task.push_str("
@@ -529,7 +534,7 @@ Also open for you:");
         }
     }
     let mut heard = Heard::default();
-    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &claims, &task), &mut told, &mut heard);
+    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &claims, &task, conversation), &mut told, &mut heard);
     let closed = close_if_open(mind, clock, &run, &ran, &heard);
     if closed.is_err() {
         let _ = writeln!(out, "the run could not be closed: the next launch closes it");
@@ -542,7 +547,7 @@ Also open for you:");
 }
 
 #[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
-fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, claims, task): (&PipelineRef, &[PipelineRef], &str), told: &mut Vec<Brief>, heard: &mut Heard) -> Result<SelfRunOutcome> {
+fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, claims, task, conversation): (&PipelineRef, &[PipelineRef], &str, Option<Conversation>), told: &mut Vec<Brief>, heard: &mut Heard) -> Result<SelfRunOutcome> {
     let started_ms = unix_ms(clock.now());
     let request = LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
@@ -554,7 +559,7 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
     let child = spawner.spawn(&claude_args(session_id(run)), lease.token())?;
-    let mut inbox = SelfInbox::new(mind, (run, claims), task, (lease.plan_quota(), started_ms), told, heard);
+    let mut inbox = SelfInbox::new(mind, (run, claims), task, (lease.plan_quota(), started_ms), (told, conversation), heard);
     let ran = drive(clock, child, &mut inbox, run_cap_s, out);
     inbox.admit_unadmitted();
     ran
@@ -574,6 +579,11 @@ struct SelfInbox<'a> {
     carried: Vec<String>,
     /// The briefs of the lines the CLI took, which the next reply answers.
     echoed: Vec<String>,
+    /// The conversation of the briefs carried or echoed and not yet answered by a reply: while it is set, only that conversation's briefs
+    /// are told, so what she says ending a turn reaches her Persona in one conversation. None when every brief told has been answered.
+    conversation: Option<Conversation>,
+    /// The briefs the last reply answered: a result that took in no brief (a task notification, a flush) continues that turn, so it answers them.
+    last_answers: Vec<String>,
     /// Replies made so far; the next is `<run label>-r<n+1>`.
     replies: u32,
     /// Replies the mind did not take: process memory, retried at the next result and once at the end. The journal keeps their text either way.
@@ -582,7 +592,7 @@ struct SelfInbox<'a> {
 
 impl<'a> SelfInbox<'a> {
     /// The start line carries the claimed follow-ups and every brief already open (`told`).
-    fn new(mind: &'a dyn MindPort, (run, claims): (&PipelineRef, &[PipelineRef]), task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), told: &'a mut Vec<Brief>, heard: &'a mut Heard) -> Self {
+    fn new(mind: &'a dyn MindPort, (run, claims): (&PipelineRef, &[PipelineRef]), task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), (told, conversation): (&'a mut Vec<Brief>, Option<Conversation>), heard: &'a mut Heard) -> Self {
         let start = format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms));
         let mut carried: Vec<String> = claims.iter().filter(|claim| claim.kind == PipelineKind::FollowUp).map(|claim| claim.id.0.clone()).collect();
         for brief in told.iter() {
@@ -590,7 +600,7 @@ impl<'a> SelfInbox<'a> {
                 carried.push(brief.id.clone());
             }
         }
-        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), replies: 0, unadmitted: Vec::new() }
+        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), conversation, last_answers: Vec::new(), replies: 0, unadmitted: Vec::new() }
     }
 
     /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps the reply and never ends the session.
@@ -614,7 +624,10 @@ impl<'a> SelfInbox<'a> {
         if ok && !text.trim().is_empty() {
             self.replies += 1;
             let run_label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0);
-            let answers = std::mem::take(&mut self.echoed).into_iter().take(64).map(|id| PipelineRef { kind: PipelineKind::FollowUp, id: id.as_str().into() }).collect();
+            let taken = std::mem::take(&mut self.echoed);
+            let answered: Vec<String> = if taken.is_empty() { self.last_answers.clone() } else { taken.into_iter().take(64).collect() };
+            let answers = answered.iter().map(|id| PipelineRef { kind: PipelineKind::FollowUp, id: id.as_str().into() }).collect();
+            self.last_answers = answered;
             self.unadmitted.push(PipelineReply {
                 instance: self.mind.instance().clone(),
                 label: format!("{run_label}-r{}", self.replies).as_str().into(),
@@ -624,6 +637,17 @@ impl<'a> SelfInbox<'a> {
             });
         }
         self.admit_unadmitted();
+        self.conversation = self.carried.first().or(self.echoed.first()).and_then(|id| self.conversation_of(id));
+    }
+
+    /// The conversation of a brief told in this run.
+    fn conversation_of(&self, id: &str) -> Option<Conversation> {
+        self.told.iter().find(|brief| brief.id == id).map(|brief| brief.conversation.clone())
+    }
+
+    /// Whether a waiting brief may be told now: any when every brief told has been answered, else only the unanswered ones' conversation.
+    fn may_tell(&self, brief: &Brief) -> bool {
+        self.conversation.as_ref().is_none_or(|conversation| *conversation == brief.conversation)
     }
 }
 
@@ -639,13 +663,18 @@ impl SessionInbox for SelfInbox<'_> {
     fn poll(&mut self) -> Result<Polled> {
         let held: HashSet<String> = self.told.iter().map(|brief| brief.id.clone()).collect();
         self.waiting = inbox::derive(self.mind, &held)?;
-        Ok(Polled { pending: !self.waiting.is_empty(), yield_now: false })
+        Ok(Polled { pending: self.waiting.iter().any(|brief| self.may_tell(brief)), yield_now: false })
     }
 
     fn tell(&mut self) -> Result<String> {
-        let text = inbox::render(&self.waiting, &self.plan);
-        self.carried.extend(self.waiting.iter().map(|brief| brief.id.clone()));
-        self.told.append(&mut self.waiting);
+        // Free, the oldest waiting brief's conversation is the line's; the other conversations' briefs stay untold for a later poll.
+        let conversation = self.conversation.clone().or_else(|| self.waiting.first().map(|brief| brief.conversation.clone()));
+        let (mut mine, rest): (Vec<Brief>, Vec<Brief>) = std::mem::take(&mut self.waiting).into_iter().partition(|brief| Some(&brief.conversation) == conversation.as_ref());
+        self.waiting = rest;
+        let text = inbox::render(&mine, &self.plan);
+        self.carried.extend(mine.iter().map(|brief| brief.id.clone()));
+        self.told.append(&mut mine);
+        self.conversation = conversation;
         Ok(text)
     }
 

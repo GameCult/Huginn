@@ -1192,6 +1192,7 @@ result subtype=success is_error=false: The answer.
 
 mod lease;
 mod closure;
+mod conversation;
 mod reply;
 
 // ---- the task in the start message ---------------------------------------

@@ -101,7 +101,7 @@ fn the_backlog_lists_in_force_persona_briefs_claimed_by_closed_runs_and_admits_n
 
 #[test]
 fn a_tell_names_each_brief_the_plan_and_how_she_resolves_it() {
-    let brief = Brief { id: "eureka-body:follow_up:b1".into(), campaign: "eureka-body".into(), repo: "GameCult/Huginn".into(), item: "Wire the thing.".into(), ordinal: 1 };
+    let brief = Brief { id: "eureka-body:follow_up:b1".into(), campaign: "eureka-body".into(), repo: "GameCult/Huginn".into(), item: "Wire the thing.".into(), ordinal: 1, conversation: persona::Conversation::Public };
     let text = render(&[brief], "Plan: 5h at 40%.");
     assert!(text.contains("eureka-body:follow_up:b1") && text.contains("Wire the thing."), "{text}");
     assert!(text.contains("resolve follow-up eureka-body:follow_up:b1 Recorded") && text.contains("Withdrawn"), "she is told to resolve it: {text}");

@@ -44,7 +44,7 @@ fn each_result_with_text_is_one_reply_in_order_answering_the_briefs_echoed_since
     let (r1, r2, r3) = (reply_of(&mind, 1).unwrap(), reply_of(&mind, 2).unwrap(), reply_of(&mind, 3).unwrap());
     assert_eq!((r1.text.0.as_str(), r2.text.0.as_str(), r3.text.0.as_str()), ("first", "second", "third"));
     assert_eq!(answered(&r1), vec![brief_ref("b1").id.0], "the brief whose line the CLI took before the first result");
-    assert!(answered(&r2).is_empty(), "no line was taken between the first result and the second");
+    assert_eq!(answered(&r2), vec![brief_ref("b1").id.0], "no line was taken between the first result and the second: it continues the turn before");
     assert_eq!(answered(&r3), vec![brief_ref("b2").id.0]);
     assert!(r1.run == run_ref("selfrun-a") && r1.instance.0 == INSTANCE);
     assert!(resolutions_of(&mind, &brief_ref("b1")).is_empty() && resolutions_of(&mind, &brief_ref("b2")).is_empty(), "the actuator never resolves a brief");

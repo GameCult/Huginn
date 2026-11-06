@@ -33,6 +33,9 @@ pub struct Brief {
     pub item: String,
     /// The admission ordinal: the order briefs were given in.
     pub ordinal: u64,
+    /// The conversation her Persona was in when it gave the brief, from the origin the follow-up records
+    /// (none recorded, a brief admitted before origins existed, is the public one).
+    pub conversation: persona::Conversation,
 }
 
 /// The ids of the follow-ups a closed run claims, with the run each was claimed by.
@@ -54,9 +57,9 @@ fn open_briefs(mind: &dyn MindPort) -> Result<Vec<Brief>> {
     let mut briefs: Vec<Brief> = headers(mind, &in_force(of_kind(PipelineKind::FollowUp)))?
         .into_iter()
         .filter_map(|summary| match summary.facts {
-            PipelineFacts::FollowUp { repo, owner, item, .. } if owner.0 == OWNER && summary.admission.provenance.agent.0 == persona::AGENT => {
+            PipelineFacts::FollowUp { repo, owner, item, origin, .. } if owner.0 == OWNER && summary.admission.provenance.agent.0 == persona::AGENT => {
                 let campaign = summary.id.id.0.split(':').next().unwrap_or("").to_string();
-                Some(Brief { id: summary.id.id.0, campaign, repo: repo.0, item: item.0, ordinal: summary.admission.ordinal })
+                Some(Brief { id: summary.id.id.0, campaign, repo: repo.0, item: item.0, ordinal: summary.admission.ordinal, conversation: persona::Conversation::of_origin(origin.as_ref()) })
             }
             _ => None,
         })
