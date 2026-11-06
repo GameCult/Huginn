@@ -87,6 +87,8 @@ struct Seen<'a> {
     instance: Slug,
     doubled: bool,
     admit_fails: bool,
+    /// The next this many admissions fail as an unreachable mind would, then the mind answers again.
+    fail_admits: Cell<usize>,
     /// A query for this key fails.
     query_fails_on: Option<String>,
     admits: Cell<usize>,
@@ -94,7 +96,7 @@ struct Seen<'a> {
 
 impl<'a> Seen<'a> {
     fn of(inner: &'a TestMind) -> Self {
-        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, query_fails_on: None, admits: Cell::new(0) }
+        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, fail_admits: Cell::new(0), query_fails_on: None, admits: Cell::new(0) }
     }
 }
 
@@ -121,7 +123,8 @@ impl MindPort for Seen<'_> {
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
         self.admits.set(self.admits.get() + 1);
-        if self.admit_fails {
+        if self.admit_fails || self.fail_admits.get() > 0 {
+            self.fail_admits.set(self.fail_admits.get().saturating_sub(1));
             return Err(anyhow!("down"));
         }
         self.inner.admit(agent, session, documents)
@@ -1189,6 +1192,7 @@ result subtype=success is_error=false: The answer.
 
 mod lease;
 mod closure;
+mod reply;
 
 // ---- the task in the start message ---------------------------------------
 

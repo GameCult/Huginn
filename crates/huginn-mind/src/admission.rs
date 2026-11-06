@@ -728,6 +728,8 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Idea, O::Deferred { to }) => matches!(to.kind, K::Question | K::CutSpec | K::FollowUp | K::Ruling),
         (K::Idea, O::Superseded { by }) => all(by, K::Idea),
         (K::Idea, O::Recorded { .. } | O::Withdrawn { .. }) => true,
+        (K::Reply, O::Answered { by }) => by.kind == K::FollowUp,
+        (K::Reply, O::Recorded { .. }) => true,
         (K::Resolution, O::Withdrawn { .. }) => true,
         _ => false,
     }
@@ -2763,6 +2765,36 @@ mod tests {
         ];
         for (outcome, name) in refused {
             assert_eq!(refusal(admit(&mut open(), vec![resolution(subject(), outcome)])), incompatible(name), "{name}");
+        }
+    }
+
+    /// A reply is heard: Answered by the follow-up her answer admitted, or Recorded; no other outcome.
+    #[test]
+    fn a_reply_resolves_answered_by_a_follow_up_or_recorded_and_nothing_else() {
+        let incompatible = |outcome: &str| MindRefusal::IncompatibleResolution { subject_kind: K::Reply, outcome: outcome.into() };
+        let subject = || r(K::Reply, &format!("{INSTANCE}:reply:w1-r1"));
+        let fu = || r(K::FollowUp, &id("follow_up", "FU1"));
+        let open = || {
+            let mut mind = with_specs();
+            committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), follow_up("FU1", r(K::Ruling, &id("ruling", "R1"))), run("w1", &[])]));
+            committed(admit(&mut mind, vec![D::Reply(eureka_pipeline::PipelineReply {
+                instance: slug(INSTANCE), label: l("w1-r1"), run: r(K::Run, &run_key("w1")), answers: vec![fu()], text: "Done.".into(),
+            })]));
+            mind
+        };
+        committed(admit(&mut open(), vec![resolution(subject(), ResolutionOutcome::Answered { by: fu() })]));
+        committed(admit(&mut open(), vec![recorded_reply()]));
+        let refused = [
+            (ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) }, "Answered"),
+            (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
+            (ResolutionOutcome::Deferred { to: fu() }, "Deferred"),
+            (withdrawn(), "Withdrawn"),
+        ];
+        for (outcome, name) in refused {
+            assert_eq!(refusal(admit(&mut open(), vec![resolution(subject(), outcome)])), incompatible(name), "{name}");
+        }
+        fn recorded_reply() -> D {
+            resolution(r(K::Reply, &format!("{INSTANCE}:reply:w1-r1")), ResolutionOutcome::Recorded { reason: "heard".into() })
         }
     }
 

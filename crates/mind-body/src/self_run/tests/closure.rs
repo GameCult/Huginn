@@ -25,42 +25,47 @@ fn rationale_of(mind: &TestMind, label: &str) -> String {
 fn result_with(text: &str) -> String {
     let mut event: Value = serde_json::from_str(&result_line()).unwrap();
     event["result"] = json!(text);
+    event["is_error"] = json!(false);
+    event["subtype"] = json!("success");
     event.to_string()
 }
 
 #[test]
-fn a_normal_exit_resolves_the_run_once_with_the_reason_as_the_head_and_the_rationale_as_the_text() {
+fn a_normal_exit_resolves_the_run_once_with_the_reason_as_the_head_and_a_rationale_that_holds_no_result_text() {
     let mind = with_run();
     let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
     assert!(ran.outcome.is_ok());
     assert_eq!(ran.admits, 1);
     let reason = reason_of(&mind, "selfrun-a");
     assert!(reason.contains("subtype=success is_error=true") && !reason.contains("Failed to authenticate"), "{reason}");
-    assert!(rationale_of(&mind, "selfrun-a").contains("Failed to authenticate: OAuth session expired"));
+    let rationale = rationale_of(&mind, "selfrun-a");
+    assert!(rationale.contains("what she said is in her replies") && !rationale.contains("Failed to authenticate"), "{rationale}");
     assert_eq!(mind.ids(K::Resolution).len(), 1);
+    assert!(mind.ids(K::Reply).is_empty(), "an error result is no reply");
 }
 
 #[test]
-fn a_result_over_a_reasons_line_reaches_the_rationale_whole() {
+fn the_closure_holds_no_result_text_however_long_it_is() {
     let mind = with_run();
     let text = format!("{}END", "word ".repeat(600));
-    assert!(text.len() > 1000 && text.len() < RATIONALE_RESULT_LIMIT);
+    assert!(text.len() > 1000 && text.len() < REPLY_TEXT_LIMIT);
     carry_with(&Seen::of(&mind), vec![Out(result_with(&text))], Some(0), false).outcome.unwrap();
-    assert_eq!(rationale_of(&mind, "selfrun-a"), text);
-    assert!(reason_of(&mind, "selfrun-a").len() < 200);
+    let rationale = rationale_of(&mind, "selfrun-a");
+    assert!(!rationale.contains("word") && !rationale.contains("END"), "the closure is no owner of her words: {rationale}");
+    assert!(!reason_of(&mind, "selfrun-a").contains("word"));
 }
 
 #[test]
-fn a_result_over_the_bound_is_cut_at_a_character_boundary_marked_and_still_admitted() {
+fn a_result_over_the_bound_is_cut_in_its_reply_at_a_character_boundary_marked_and_still_admitted() {
     let mind = with_run();
     // Two bytes a character after a one-byte head, so the bound falls inside a character.
     let text = format!("x{}", "é".repeat(3000));
     carry_with(&Seen::of(&mind), vec![Out(result_with(&text))], Some(0), false).outcome.unwrap();
-    let rationale = rationale_of(&mind, "selfrun-a");
-    let kept = rationale.strip_suffix("\n[truncated]").expect("a cut result is marked");
-    assert_eq!(kept.len(), RATIONALE_RESULT_LIMIT - 1);
+    let PipelineDocument::Reply(reply) = mind.view(K::Reply, &format!("{INSTANCE}:reply:selfrun-a-r1")).expect("the reply was admitted").document else { panic!("a reply") };
+    let kept = reply.text.0.strip_suffix("\n[truncated]").expect("a cut result is marked");
+    assert_eq!(kept.len(), REPLY_TEXT_LIMIT - 1);
     assert!(text.starts_with(kept));
-    assert!(rationale.len() <= 4000);
+    assert!(reply.text.0.len() <= 4000);
 }
 
 #[test]

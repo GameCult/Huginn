@@ -45,14 +45,15 @@
 //! `RuntimeMaxSec` and the context-ceiling flush. The grant carries the plan usage
 //! windows, which go to the child in its start message.
 //!
-//! The actuator admits run closures and brief closures, nothing else. Every exit of
-//! `carry` that leaves her run open resolves it Recorded exactly once (the
-//! child's result in the rationale, or that it gave none in the reason). It reads neither the
+//! The actuator admits run closures and the replies of her Self (each result's
+//! words, `SelfInbox::result`), nothing else. Every exit of `carry` that leaves
+//! her run open resolves it Recorded exactly once (how it ended and the
+//! child's last result head in the reason; her words are her replies). It reads neither the
 //! brake nor the environment and stops no unit: the gate and the brake hold own those.
 //! It never echoes an argument, an endpoint, a
 //! connector's refusal text or a stream line. Stream-json is Claude Code's wire, a
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
-//! parsed is stored.
+//! parsed is stored but a result's text, as a reply.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -66,7 +67,7 @@ use std::time::Duration as StdDuration;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
-use eureka_pipeline::{PipelineDocument, PipelineRef, ResolutionOutcome, RunTurn, Slug};
+use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, PipelineReply, ResolutionOutcome, RunTurn, Slug};
 use huginn_mind::{PipelineAdmissionOutcome, PipelinePageItems};
 use serde_json::Value;
 use uuid::Uuid;
@@ -150,7 +151,7 @@ pub const SESSION_NAMESPACE: Uuid = Uuid::NAMESPACE_OID;
 /// skill: it names the skill, the instance and the run id.
 pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
     format!(
-        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own.\n\n{}",
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs.\n\n{}",
         instance.0,
         run.id.0,
         render_plan(plan_quota, now_ms)
@@ -431,18 +432,18 @@ fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, Vec<PipelineRef>)
     }
 }
 
-/// What the stream said at the end of the run: its head becomes the closure's reason, its text (bounded) the rationale.
+/// What the stream said at the end of the run: the head of its last result becomes the closure's reason. Her words are her replies, not the closure's.
 #[derive(Default)]
 struct Heard {
-    /// The last result heard, ok or not: its head line and its text cut to `RATIONALE_RESULT_LIMIT`.
-    concluded: Option<(String, String)>,
+    /// The last result heard, ok or not: its head line.
+    concluded: Option<String>,
 }
 
 impl Heard {
     fn hear(&mut self, line: &str) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         if event.get("type").and_then(Value::as_str) == Some("result") {
-            self.concluded = Some((result_head(&event), cut_text(result_text(&event), RATIONALE_RESULT_LIMIT)));
+            self.concluded = Some(result_head(&event));
         }
     }
 }
@@ -480,16 +481,15 @@ fn close_if_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, ran:
         Ok(outcome) => outcome.to_string(),
         Err(_) => "the actuator failed after the run opened".to_string(),
     };
-    let (reason, rationale) = match &heard.concluded {
-        Some((head, text)) if !text.is_empty() => (format!("{how}; {head}"), text.as_str()),
-        Some((head, _)) => (format!("{how}; {head}"), CARRIER_CLOSED),
-        None => (format!("{how}; claude gave no result"), CARRIER_CLOSED),
+    let reason = match &heard.concluded {
+        Some(head) => format!("{how}; {head}"),
+        None => format!("{how}; claude gave no result"),
     };
-    admit_closure(mind, clock, run, ResolutionOutcome::Recorded { reason: reason.as_str().into() }, rationale)
+    admit_closure(mind, clock, run, ResolutionOutcome::Recorded { reason: reason.as_str().into() }, CARRIER_CLOSED)
 }
 
-/// The rationale of a closure that has no result text to give.
-const CARRIER_CLOSED: &str = "The Self run's carrier closed the run its claude left open.";
+/// The rationale of every closure the carrier writes: what she said is in her replies.
+const CARRIER_CLOSED: &str = "The Self run's carrier closed the run its claude left open; what she said is in her replies.";
 
 /// Closes a run whose lease was refused for its length: Withdrawn, because no
 /// claude ever ran and a misconfiguration is not an empty run; the breaker
@@ -529,7 +529,7 @@ Also open for you:");
         }
     }
     let mut heard = Heard::default();
-    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &task), &mut told, &mut heard);
+    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &claims, &task), &mut told, &mut heard);
     let closed = close_if_open(mind, clock, &run, &ran, &heard);
     if closed.is_err() {
         let _ = writeln!(out, "the run could not be closed: the next launch closes it");
@@ -542,7 +542,7 @@ Also open for you:");
 }
 
 #[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
-fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, task): (&PipelineRef, &str), told: &mut Vec<Brief>, heard: &mut Heard) -> Result<SelfRunOutcome> {
+fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, claims, task): (&PipelineRef, &[PipelineRef], &str), told: &mut Vec<Brief>, heard: &mut Heard) -> Result<SelfRunOutcome> {
     let started_ms = unix_ms(clock.now());
     let request = LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
@@ -554,8 +554,10 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
     let child = spawner.spawn(&claude_args(session_id(run)), lease.token())?;
-    let mut inbox = SelfInbox::new(mind, run, task, (lease.plan_quota(), started_ms), told, heard);
-    drive(clock, child, &mut inbox, run_cap_s, out)
+    let mut inbox = SelfInbox::new(mind, (run, claims), task, (lease.plan_quota(), started_ms), told, heard);
+    let ran = drive(clock, child, &mut inbox, run_cap_s, out);
+    inbox.admit_unadmitted();
+    ran
 }
 
 /// The Self's side of the session: her briefs, derived from the mind, are what she is told.
@@ -567,12 +569,61 @@ struct SelfInbox<'a> {
     /// The briefs derived at the last poll that no line has carried yet.
     waiting: Vec<Brief>,
     heard: &'a mut Heard,
+    run: PipelineRef,
+    /// The briefs of the lines written that the CLI has not yet taken into a request: the start line's, then each `tell`'s.
+    carried: Vec<String>,
+    /// The briefs of the lines the CLI took, which the next reply answers.
+    echoed: Vec<String>,
+    /// Replies made so far; the next is `<run label>-r<n+1>`.
+    replies: u32,
+    /// Replies the mind did not take: process memory, retried at the next result and once at the end. The journal keeps their text either way.
+    unadmitted: Vec<PipelineReply>,
 }
 
 impl<'a> SelfInbox<'a> {
-    fn new(mind: &'a dyn MindPort, run: &PipelineRef, task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), told: &'a mut Vec<Brief>, heard: &'a mut Heard) -> Self {
+    /// The start line carries the claimed follow-ups and every brief already open (`told`).
+    fn new(mind: &'a dyn MindPort, (run, claims): (&PipelineRef, &[PipelineRef]), task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), told: &'a mut Vec<Brief>, heard: &'a mut Heard) -> Self {
         let start = format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms));
-        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard }
+        let mut carried: Vec<String> = claims.iter().filter(|claim| claim.kind == PipelineKind::FollowUp).map(|claim| claim.id.0.clone()).collect();
+        for brief in told.iter() {
+            if !carried.contains(&brief.id) {
+                carried.push(brief.id.clone());
+            }
+        }
+        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), replies: 0, unadmitted: Vec::new() }
+    }
+
+    /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps the reply and never ends the session.
+    fn admit_unadmitted(&mut self) {
+        let label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0).to_string();
+        let mut kept = Vec::new();
+        for reply in std::mem::take(&mut self.unadmitted) {
+            let taken = matches!(self.mind.admit(AGENT, &label, vec![PipelineDocument::Reply(reply.clone())]), Ok(PipelineAdmissionOutcome::Committed { .. } | PipelineAdmissionOutcome::AlreadyAdmitted { .. }));
+            if !taken {
+                kept.push(reply);
+            }
+        }
+        self.unadmitted = kept;
+    }
+
+    /// One result of the main thread: with words, one reply answering the briefs the CLI has taken since the last reply (the first 64, in tell order).
+    /// An error or an empty result makes none and leaves those briefs for the next reply.
+    fn reply_to(&mut self, line: &str, ok: bool) {
+        let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
+        let text = result_text(&event);
+        if ok && !text.trim().is_empty() {
+            self.replies += 1;
+            let run_label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0);
+            let answers = std::mem::take(&mut self.echoed).into_iter().take(64).map(|id| PipelineRef { kind: PipelineKind::FollowUp, id: id.as_str().into() }).collect();
+            self.unadmitted.push(PipelineReply {
+                instance: self.mind.instance().clone(),
+                label: format!("{run_label}-r{}", self.replies).as_str().into(),
+                run: self.run.clone(),
+                answers,
+                text: cut_text(text, REPLY_TEXT_LIMIT).as_str().into(),
+            });
+        }
+        self.admit_unadmitted();
     }
 }
 
@@ -593,6 +644,7 @@ impl SessionInbox for SelfInbox<'_> {
 
     fn tell(&mut self) -> Result<String> {
         let text = inbox::render(&self.waiting, &self.plan);
+        self.carried.extend(self.waiting.iter().map(|brief| brief.id.clone()));
         self.told.append(&mut self.waiting);
         Ok(text)
     }
@@ -604,13 +656,22 @@ impl SessionInbox for SelfInbox<'_> {
     fn line(&mut self, line: &str) {
         self.heard.hear(line);
     }
+
+    fn echoed(&mut self) {
+        self.echoed.append(&mut self.carried);
+    }
+
+    fn result(&mut self, line: &str, ok: bool, blocked: bool) -> Result<(bool, bool)> {
+        self.reply_to(line, ok);
+        Ok((ok, blocked))
+    }
 }
 
 /// The most of a result's text that reaches the journal.
 const RESULT_TEXT_LIMIT: usize = 4096;
-/// The most of a result's text that reaches the closing resolution's rationale
+/// The most of a result's text that a reply holds
 /// (a `Para` holds 4000 bytes; the cut marker rides inside the rest).
-const RATIONALE_RESULT_LIMIT: usize = 3800;
+pub const REPLY_TEXT_LIMIT: usize = 3800;
 
 /// A result event's subtype and error flag when it has them, as one line.
 fn result_head(event: &serde_json::Map<String, Value>) -> String {
