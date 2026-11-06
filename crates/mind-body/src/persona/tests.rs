@@ -4406,6 +4406,9 @@ fn a_first_line_carries_the_in_force_replies_oldest_first_within_the_bound_and_t
     }
     let lines = a_session_then(&rig, vec![]);
     let order: Vec<usize> = all_replies(&lines).iter().map(|line| labels.iter().position(|label| line.contains(&reply_id(label))).expect("a known reply")).collect();
+    for (line, label) in all_replies(&lines).iter().zip(&labels) {
+        assert!(line.contains(&format!("text=\"{label} x")), "each line carries its own reply's words: {}", &line[..120]);
+    }
     assert_eq!(order, vec![0, 1, 2, 3, 4, 5], "each once, oldest first, over the lines: {order:?}");
     for line in &lines {
         let bytes: usize = replies_in(line).iter().map(|reply| reply.len() + 1).sum();
