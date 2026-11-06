@@ -606,6 +606,22 @@ fn pulse_is_well_formed(pulse: &PipelinePulse, at: &str) -> Result<(), PipelineR
     Ok(())
 }
 
+/// A reply says something and answers only follow-ups, from a run.
+fn reply_is_well_formed(reply: &PipelineReply, at: &str) -> Result<(), PipelineRefusal> {
+    if reply.text.0.trim().is_empty() {
+        return Err(format_error(&format!("{at}.text"), "a reply with no words"));
+    }
+    if reply.run.kind != PipelineKind::Run {
+        return Err(format_error(&format!("{at}.run.kind"), reply.run.kind.name()));
+    }
+    for (index, answer) in reply.answers.iter().enumerate() {
+        if answer.kind != PipelineKind::FollowUp {
+            return Err(format_error(&format!("{at}.answers[{index}].kind"), answer.kind.name()));
+        }
+    }
+    Ok(())
+}
+
 /// The most thousandths a memory's salience may carry.
 pub const SALIENCE_MAX_PERMILLE: u16 = 1000;
 
@@ -820,6 +836,11 @@ value_types! {
     pub struct PipelinePulse {
         instance: Slug, label: Label, tempo_vote_beat_s: Option<u32>, tempo_vote_withdrawn: bool = absent, urgency_permille: Option<u16>, note: Line,
     } => pulse_is_well_formed
+    /// One result of her Self session, as its actuator heard it: the words her
+    /// Self ended a turn with, and the follow-ups (briefs) the turn answers.
+    /// Instance-rooted: the key is `<instance>:reply:<label>`. Not semantically
+    /// indexed. Whether the run is hers is admission's rule.
+    pub struct PipelineReply { instance: Slug, label: Label, run: PipelineRef, answers: Vec<PipelineRef>[64], text: Para } => reply_is_well_formed
     /// One thing a Mind keeps for herself, in her own mind: what she was asked,
     /// decided, committed to, learned or did, an idea, or the rapport between
     /// her and another Mind or person. `text` is her own words. `about` names
@@ -1158,6 +1179,8 @@ pipeline_kinds! {
         "epiphany.pipeline.research.v2", "EpiphanyPipelineResearchDocument";
     Idea(PipelineIdea) => EpiphanyPipelineIdeaDocument, "idea",
         "epiphany.pipeline.idea.v2", "EpiphanyPipelineIdeaDocument";
+    Reply(PipelineReply) => EpiphanyPipelineReplyDocument, "reply",
+        "epiphany.pipeline.reply.v2", "EpiphanyPipelineReplyDocument";
 }
 
 /// Parses a full document id: the grammar read backwards. A key and an id are
@@ -1354,6 +1377,7 @@ pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefus
         // A run hangs off its instance too: its label is its whole local.
         D::Run(value) => ("run.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Pulse(value) => ("pulse.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
+        D::Reply(value) => ("reply.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Memory(value) => ("memory.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Research(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.pass.0, &value.label.0])?),
         D::Idea(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.pass.0, &value.label.0])?),
@@ -1628,6 +1652,12 @@ mod tests {
                 rests_on: vec![PipelineRef { kind: PipelineKind::Research, id: id("research", "p1.scope") }],
                 toward: vec![PipelineRef { kind: PipelineKind::Question, id: id("question", "Q1") }], proposed_on: date(),
             }), format!("{CAMPAIGN}:idea:p1.i1")),
+            (D::Reply(PipelineReply {
+                instance: slug(INSTANCE), label: l("mind-2026-10-09-1-r1"),
+                run: PipelineRef { kind: PipelineKind::Run, id: Short(format!("{INSTANCE}:run:mind-2026-10-09-1")) },
+                answers: vec![PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "ask-the-self") }],
+                text: "The shader pass is done; the sounds are Libby's.".into(),
+            }), format!("{INSTANCE}:reply:mind-2026-10-09-1-r1")),
         ]
     }
 
@@ -1938,6 +1968,27 @@ mod tests {
                 matches!(validated(bad), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "run.budget_usd"),
                 "{bad:?} is refused"
             );
+        }
+    }
+
+    /// A reply has words, comes from a run, and answers only follow-ups.
+    #[test]
+    fn a_reply_has_words_a_run_and_follow_ups() {
+        let validated = |change: &dyn Fn(&mut PipelineReply)| {
+            let PipelineDocument::Reply(mut reply) = samples().remove(18).0 else { unreachable!() };
+            change(&mut reply);
+            PipelineDocument::Reply(reply).validate()
+        };
+        assert_eq!(validated(&|_| {}), Ok(()));
+        assert_eq!(validated(&|reply| reply.answers.clear()), Ok(()), "a reply may answer nothing");
+        for (change, field) in [
+            (&(|reply: &mut PipelineReply| reply.text = "".into()) as &dyn Fn(&mut PipelineReply), "reply.text"),
+            (&|reply: &mut PipelineReply| reply.text = " 
+	".into(), "reply.text"),
+            (&|reply: &mut PipelineReply| reply.run = PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "ask-the-self") }, "reply.run.kind"),
+            (&|reply: &mut PipelineReply| reply.answers[0] = PipelineRef { kind: PipelineKind::Run, id: Short(format!("{INSTANCE}:run:mind-2026-10-09-1")) }, "reply.answers[0].kind"),
+        ] {
+            assert!(matches!(validated(change), Err(PipelineRefusal::InvalidFormat { field: f, .. }) if f == field), "{field}");
         }
     }
 
@@ -3640,11 +3691,11 @@ mod tests {
         };
         let document_schema = serde_json::to_value(schemars::schema_for!(PipelineDocument))?;
         let variants = document_schema["oneOf"].as_array().expect("the document schema is a oneOf");
-        assert_eq!(PipelineKind::ALL.len(), 18, "eighteen kinds");
+        assert_eq!(PipelineKind::ALL.len(), 19, "nineteen kinds");
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
-            "the document schema lists exactly the eighteen kinds, by name"
+            "the document schema lists exactly the nineteen kinds, by name"
         );
 
         let refusal_schema = serde_json::to_value(schemars::schema_for!(PipelineRefusal))?;

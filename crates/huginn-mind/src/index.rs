@@ -101,7 +101,7 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
             lines.push(&idea.idea.0);
             lines.push(&idea.tradeoffs.0);
         }
-        D::Instance(_) | D::Stewardship(_) | D::Run(_) | D::Pulse(_) => {}
+        D::Instance(_) | D::Stewardship(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) => {}
     }
     lines.retain(|line| !line.is_empty());
     if lines.is_empty() {

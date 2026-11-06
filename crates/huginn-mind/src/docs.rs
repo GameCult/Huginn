@@ -343,7 +343,8 @@ pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
         | D::Instance(_)
         | D::HandOff(_)
         | D::Run(_)
-        | D::Pulse(_) => None,
+        | D::Pulse(_)
+        | D::Reply(_) => None,
     }
 }
 
@@ -392,10 +393,11 @@ pub enum CitationRole {
     Sources,
     RestsOn,
     Toward,
+    Run,
 }
 
 impl CitationRole {
-    pub const ALL: [CitationRole; 21] = [
+    pub const ALL: [CitationRole; 22] = [
         Self::RaisedIn,
         Self::Answers,
         Self::Rulings,
@@ -417,6 +419,7 @@ impl CitationRole {
         Self::Sources,
         Self::RestsOn,
         Self::Toward,
+        Self::Run,
     ];
 
     /// The wire spelling, equal to the referring field's name.
@@ -443,6 +446,7 @@ impl CitationRole {
             Self::Sources => "sources",
             Self::RestsOn => "rests_on",
             Self::Toward => "toward",
+            Self::Run => "run",
         }
     }
 
@@ -467,6 +471,7 @@ impl CitationRole {
             Self::Consolidates => K::Memory,
             Self::Serves | Self::Sources => K::Research,
             Self::RestsOn | Self::Toward => K::Idea,
+            Self::Run => K::Reply,
         }
     }
 
@@ -484,6 +489,7 @@ impl CitationRole {
             Self::Verdict => vec![K::Verdict],
             Self::Claims => vec![K::CutSpec, K::Finding, K::FollowUp],
             Self::Consolidates => vec![K::Memory],
+            Self::Run => vec![K::Run],
             Self::RaisedIn
             | Self::Source
             | Self::Subject
@@ -566,6 +572,7 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
             hand_off.documents.iter().filter_map(|to| kind_of_id(&to.0).map(|kind| (R::Documents, cited(kind, to)))),
         ),
         D::Run(run) => edges.extend(run.claims.iter().map(|to| (R::Claims, to.clone()))),
+        D::Reply(reply) => edges.push((R::Run, reply.run.clone())),
         D::Memory(memory) => edges.extend(memory.consolidates.iter().map(|to| (R::Consolidates, to.clone()))),
         D::Research(research) => {
             edges.extend(research.serves.iter().map(|to| (R::Serves, to.clone())));

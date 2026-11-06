@@ -72,7 +72,8 @@
         "Pulse",
         "Memory",
         "Research",
-        "Idea"
+        "Idea",
+        "Reply"
       ],
       "type": "string"
     },

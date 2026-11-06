@@ -147,6 +147,7 @@ pub enum PipelineFacts {
     HandOff { from_instance: Slug, to_instance: Slug, repo: OrgRepo, handed_on: Date },
     Run { label: Label, operated_by: RunOperator, turn: RunTurn, started_on: Date, claims: Vec<PipelineRef> },
     Pulse { label: Label, tempo_vote_beat_s: Option<u32>, #[serde(default)] tempo_vote_withdrawn: bool, urgency_permille: Option<u16> },
+    Reply { label: Label, run: PipelineRef, answers: Vec<PipelineRef> },
     Memory { label: Label, sort: MemorySort, about: Vec<Short>, origin: MemoryOrigin, salience_permille: u16 },
     Research { pass: Label, label: Label, claim: Line, inferred: bool, observed_on: Date },
     Idea { pass: Label, label: Label, title: Title, proposed_on: Date },
@@ -254,6 +255,7 @@ impl PipelineFacts {
                 tempo_vote_withdrawn: value.tempo_vote_withdrawn,
                 urgency_permille: value.urgency_permille,
             },
+            D::Reply(value) => Self::Reply { label: value.label.clone(), run: value.run.clone(), answers: value.answers.clone() },
             D::Memory(value) => Self::Memory {
                 label: value.label.clone(),
                 sort: value.sort,
@@ -1736,6 +1738,10 @@ mod tests {
         let handoff = landed.iter().find(|write| write.kind == K::HandOff).expect("the hand-off landed").id.0.clone();
         let (_, landed) = committed(admit(&mut mind, vec![run("w1", &[r(K::CutSpec, &id("cut_spec", "cut-1.r2")), r(K::FollowUp, &fu)])]));
         let run_id = landed[0].id.0.clone();
+        let reply_id = format!("{INSTANCE}:reply:w1-r1");
+        committed(admit(&mut mind, vec![D::Reply(eureka_pipeline::PipelineReply {
+            instance: INSTANCE.into(), label: "w1-r1".into(), run: r(K::Run, &run_id), answers: vec![r(K::FollowUp, &fu)], text: "Done.".into(),
+        })]));
         let (older, newer) = (format!("{INSTANCE}:memory:m1"), format!("{INSTANCE}:memory:m2"));
         committed(admit(&mut mind, vec![memory("m1", MemorySort::Idea, "one", &[])]));
         let D::Memory(mut consolidating) = memory("m2", MemorySort::Idea, "two", &[]) else { unreachable!() };
@@ -1785,13 +1791,14 @@ mod tests {
             (CitationRole::Documents, &handoff, &q1),
             (CitationRole::Claims, &run_id, &spec_r2),
             (CitationRole::Claims, &run_id, &fu),
+            (CitationRole::Run, &reply_id, &run_id),
             (CitationRole::Consolidates, &newer, &older),
             (CitationRole::Serves, &note, &q1),
             (CitationRole::Sources, &note, &f1),
             (CitationRole::RestsOn, &way, &note),
             (CitationRole::Toward, &way, &q1),
         ];
-        assert_eq!(CitationRole::ALL.len(), 21);
+        assert_eq!(CitationRole::ALL.len(), 22);
         for role in CitationRole::ALL {
             let selection =
                 Selection { cited: Some(Incoming { role: role.name().into(), exists: true }), ..Selection::default() };

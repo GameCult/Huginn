@@ -313,6 +313,7 @@ fn refuse_foreign_instance(document: &PipelineDocument, mind: &Slug) -> Result<(
         PipelineDocument::Stewardship(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Run(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Pulse(value) if value.instance != *mind => Err(foreign(&value.instance)),
+        PipelineDocument::Reply(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Memory(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::HandOff(value) if value.from_instance != *mind && value.to_instance != *mind => {
             Err(foreign(&value.from_instance))
@@ -623,7 +624,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusa
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
             run_rule(docs, key, run, replay)
         }
-        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => Ok(()),
+        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Reply(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => Ok(()),
     }
 }
 
@@ -2472,6 +2473,27 @@ mod tests {
             MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() }
         );
         committed(admit(&mut mind, vec![pulse(INSTANCE)]));
+    }
+
+    /// A reply is her own: one of another mind is a ForeignInstance, her own is admitted.
+    #[test]
+    fn a_reply_of_another_mind_is_a_foreign_instance_and_her_own_is_admitted() {
+        let mut mind = with_specs();
+        let reply = |instance: &str| {
+            D::Reply(eureka_pipeline::PipelineReply {
+                instance: slug(instance),
+                label: l("w1-r1"),
+                run: r(K::Run, &format!("{INSTANCE}:run:w1")),
+                answers: vec![],
+                text: "Done.".into(),
+            })
+        };
+        assert_eq!(
+            refusal(admit(&mut mind, vec![reply(OTHER_INSTANCE)])),
+            MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() }
+        );
+        committed(admit(&mut mind, vec![run("w1", &[])]));
+        committed(admit(&mut mind, vec![reply(INSTANCE)]));
     }
 
     fn memory_key(label: &str) -> String {

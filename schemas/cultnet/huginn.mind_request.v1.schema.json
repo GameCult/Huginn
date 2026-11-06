@@ -1310,6 +1310,22 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "reply"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineReply"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -1563,7 +1579,8 @@
         "Pulse",
         "Memory",
         "Research",
-        "Idea"
+        "Idea",
+        "Reply"
       ]
     },
     "PipelineMemory": {
@@ -1760,6 +1777,38 @@
       "required": [
         "kind",
         "id"
+      ]
+    },
+    "PipelineReply": {
+      "description": "One result of her Self session, as its actuator heard it: the words her\nSelf ended a turn with, and the follow-ups (briefs) the turn answers.\nInstance-rooted: the key is `<instance>:reply:<label>`. Not semantically\nindexed. Whether the run is hers is admission's rule.",
+      "type": "object",
+      "properties": {
+        "answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 64
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "run": {
+          "$ref": "#/$defs/PipelineRef"
+        },
+        "text": {
+          "$ref": "#/$defs/Para"
+        }
+      },
+      "required": [
+        "instance",
+        "label",
+        "run",
+        "answers",
+        "text"
       ]
     },
     "PipelineResearch": {
