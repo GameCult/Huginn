@@ -48,7 +48,7 @@ pub(crate) fn localpart(matrix_id: &str) -> &str {
 
 /// Whether a delivery is for `who`: tagged, or named by a word of hers.
 pub(crate) fn addresses(who: &Addressee, delivery: &ChatDelivery) -> bool {
-    delivery.mentions.iter().any(|id| *id == who.matrix_id) || who.names.iter().any(|name| names_whole_word(&delivery.text, &name.text, name.exact))
+    delivery.mentions.contains(&who.matrix_id) || who.names.iter().any(|name| names_whole_word(&delivery.text, &name.text, name.exact))
 }
 
 /// The chat names of one stewarded repo. Listed names are exactly those, each matched exactly as the steward wrote it (capitalization
