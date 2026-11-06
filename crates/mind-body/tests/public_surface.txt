@@ -9,6 +9,7 @@ mind_body: mod lease_client
 mind_body: mod persona
 mind_body: mod queue
 mind_body: mod self_run
+mind_body: mod stream
 mind_body: mod tempo
 mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Refusal { Brake , PersonaMismatch , UnknownRoom , EmptyText , SendFailed , UnknownPersona , RoomMoved , }
 mind_body::chat_client: const ACK : & str
@@ -274,6 +275,27 @@ mind_body::self_run::inbox: fn derive_counting_held (mind : & dyn MindPort , hol
 mind_body::self_run::inbox: fn render (briefs : & [Brief] , plan : & str) -> String
 mind_body::self_run::inbox: fn resolving_sentence (id : & str) -> String
 mind_body::self_run::inbox: struct Brief # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[id: String, campaign: String, repo: String, item: String, ordinal: u64]
+mind_body::stream: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Mode { Live , DryRun , }
+mind_body::stream: # [derive (Clone , Debug , PartialEq)] pub enum Outcome { Held (crate :: control :: HeldReason) , NotDue , Blank , Thought { thought : Box < PipelineThought > , admitted : bool } , }
+mind_body::stream: const AGENT : & str
+mind_body::stream: const STREAM_IDLE_GAP_S : i64
+mind_body::stream: const STREAM_MIN_GAP_S : i64
+mind_body::stream: fn tick (organs : & Organs , brake : & dyn Fn () -> Effective , mode : Mode , now : DateTime < Utc >) -> Result < Outcome >
+mind_body::stream: impl HuginnPersonaSource
+mind_body::stream: impl HuginnPersonaSource: fn new (client : HuginnClient) -> Self
+mind_body::stream: impl OllamaStream
+mind_body::stream: impl OllamaStream: fn open (endpoint : & str , projector_model : & str , base_model : & str) -> Result < Self >
+mind_body::stream: impl PersonaSource for HuginnPersonaSource
+mind_body::stream: impl Sampling
+mind_body::stream: impl Seed
+mind_body::stream: impl StreamModel for OllamaStream
+mind_body::stream: pub trait PersonaSource { fn persona (& self) -> Result < PersonaRead > ; }
+mind_body::stream: pub trait StreamModel { fn project (& self , prompt : & str) -> Result < String > ; fn continue_raw (& self , prompt : & str , sampling : & Sampling , n : usize) -> Result < Vec < String > > ; }
+mind_body::stream: struct HuginnPersonaSource  pub-fields[]
+mind_body::stream: struct OllamaStream  pub-fields[]
+mind_body::stream: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, persona: & 'a dyn PersonaSource, model: & 'a dyn StreamModel, projector_model: & 'a str, base_model: & 'a str]
+mind_body::stream: struct PersonaRead  pub-fields[state: Value, receipt_id: String]
+mind_body::stream: struct Sampling # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub-fields[temperature_permille: u16, min_p_permille: u16, max_tokens: u16]
 mind_body::tempo: const DEFAULT_BEAT_S : u32
 mind_body::tempo: const FALLBACK_MAX_S : u32
 mind_body::tempo: const FALLBACK_MIN_S : u32

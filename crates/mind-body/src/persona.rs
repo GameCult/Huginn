@@ -2125,7 +2125,7 @@ fn ruling_ids_in(text: &str) -> Vec<String> {
 /// first, until the bound; and the rulings those cite, so she knows which to
 /// `huginn view`. Her open runs are the recent-runs section's. Anything the
 /// bound drops is counted in the text.
-fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, names: &BTreeMap<&str, &str>) -> Result<Responsibilities> {
+pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, names: &BTreeMap<&str, &str>) -> Result<Responsibilities> {
     let mut listed: Vec<String> = Vec::new();
     let claimed: Vec<PipelineRef> = live_claims(mind, instance, &[])?;
     let mut out = String::from("What you are responsible for (from your own mind; `huginn view <id>` reads a record):\n");
@@ -2257,15 +2257,15 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, names: &BTreeMa
 
 /// The responsibilities section, and the ids of the follow-ups and rulings it lists, which recall
 /// does not repeat.
-struct Responsibilities {
-    text: String,
-    listed: Vec<String>,
+pub(crate) struct Responsibilities {
+    pub(crate) text: String,
+    pub(crate) listed: Vec<String>,
     /// The ids of the open commitments and asks it showed: the only ones a reply may settle or take on.
     open: Vec<String>,
     /// The Matrix ids those open items name.
     people: Vec<String>,
     /// Her stewardships in force, by repo: the only map from her mind to the repos the forge is asked about.
-    repos: Vec<OrgRepo>,
+    pub(crate) repos: Vec<OrgRepo>,
     /// The campaigns that hold a follow-up in force in her mind, whether or not the bound showed its line.
     open_roots: Vec<String>,
 }
@@ -2274,7 +2274,7 @@ struct Responsibilities {
 /// Self said is not here: it reaches her as replies. Her own start's rationale
 /// (her last intent) stays stored and does not render: her stated aims would
 /// return as her next wake's framing.
-fn recent_runs(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<String>> {
+pub(crate) fn recent_runs(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<String>> {
     let mine = any_of(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]), "operated_by", &[&format!("{:?}", RunOperator::Mind)]);
     let selection = Selection { descending: true, limit: Some(RECENT_RUNS), ..mine };
     let PipelinePageItems::Headers(runs) = mind.query(&selection)?.items else { bail!("the mind answered documents to a header selection") };
@@ -2392,7 +2392,7 @@ fn message_line(config: &Config, label: &str, room: &str, sender: &str, display:
 }
 
 /// A closing in plain words: the reason of a Recorded one, and for the others what they point at.
-fn outcome_words(outcome: &ResolutionOutcome) -> String {
+pub(crate) fn outcome_words(outcome: &ResolutionOutcome) -> String {
     match outcome {
         ResolutionOutcome::Recorded { reason } => reason.0.clone(),
         ResolutionOutcome::Withdrawn { reason } => format!("withdrawn: {}", reason.0),
@@ -2479,7 +2479,7 @@ fn pr_action_word(action: PrAction) -> &'static str {
 /// The organ's own line about her repos: the read's events as one notice, grouped by repo and then actor, ids and counts and
 /// logins only, its text quoted and cut at an entry. Nothing a person wrote on the forge is in the read, so none of it can be here.
 /// `None` when the read found nothing to say.
-fn repo_notice_line(activity: &RepoActivity, at_unix_ms: u64) -> Option<String> {
+pub(crate) fn repo_notice_line(activity: &RepoActivity, at_unix_ms: u64) -> Option<String> {
     if activity.events.is_empty() && activity.capped.is_empty() {
         return None;
     }
