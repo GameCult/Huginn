@@ -507,3 +507,100 @@ fn non_loopback_endpoint_refused() {
         assert!(OllamaStream::open(opened, "p", "b").is_ok(), "{opened} is loopback");
     }
 }
+
+#[test]
+fn cap_cuts_at_a_line_else_at_a_character() {
+    assert_eq!(cap("short", 10), "short");
+    assert_eq!(cap("ab\ncd", 4), "ab", "whole lines only");
+    assert_eq!(cap("abcdef", 4), "abcd", "no newline to cut at");
+    assert_eq!(cap("\nabc", 3), "\nab", "a newline at the very start is no cut point");
+    assert_eq!(cap("aé\nb", 2), "a", "never inside a character");
+    assert_eq!(cap("ééé", 5), "éé");
+}
+
+#[test]
+fn bonds_name_the_label_else_the_id_else_someone() {
+    let line = |bond: Value| bond_line(&bond);
+    assert_eq!(line(json!({ "object": { "label": "Libby", "id": "@libby:chat" }, "relationshipKind": "friend", "summary": "s" })), "- Libby (friend): s");
+    assert_eq!(line(json!({ "object": { "label": "", "id": "@libby:chat" }, "relationshipKind": "friend", "summary": "s" })), "- @libby:chat (friend): s");
+    assert_eq!(line(json!({ "object": {}, "relationshipKind": "friend", "summary": "s" })), "- someone (friend): s");
+}
+
+#[test]
+fn only_person_bonds_with_ids_are_people_she_asks_her_memories_about() {
+    let state = json!({ "affect": { "socialBonds": [
+        { "object": { "kind": "person", "id": "@libby:chat" } },
+        { "object": { "kind": "repo", "id": "GameCult/Huginn" } },
+        { "object": { "kind": "person", "id": "" } },
+        { "object": { "kind": "person", "id": "@noor:chat" } },
+    ] } });
+    assert_eq!(bonded_people(&state), ["@libby:chat", "@noor:chat"]);
+    assert!(bonded_people(&json!({})).is_empty());
+}
+
+#[test]
+fn news_is_strictly_after_her_newest_thought() {
+    let mind = TestMind::seeded();
+    mind.admit_at(t(500));
+    mind.committed(vec![memory("m1", MemorySort::Learned, "Admitted at the very instant of the thought", &[])]);
+    let read = PersonaRead { state: state(), receipt_id: "r".into() };
+    let seed = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(500)), t(600)).unwrap();
+    assert!(!seed.news, "{}", seed.stimulus);
+    let seed = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(499)), t(600)).unwrap();
+    assert!(seed.news);
+}
+
+#[test]
+fn an_unbidden_memory_is_older_than_seven_days_not_exactly_seven() {
+    let mind = TestMind::seeded();
+    mind.admit_at(t(1000));
+    mind.committed(vec![memory("m1", MemorySort::Learned, "The week-old thing", &[])]);
+    let read = PersonaRead { state: state(), receipt_id: "r".into() };
+    let week = 7 * 86_400;
+    let exactly = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(1000)), t(1000 + week)).unwrap();
+    assert!(exactly.stimulus.starts_with("Nothing has happened"), "{}", exactly.stimulus);
+    let over = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(1000)), t(1001 + week)).unwrap();
+    assert!(over.stimulus.contains("The week-old thing"), "{}", over.stimulus);
+}
+
+#[test]
+fn a_flood_of_news_fills_the_stimulus_with_whole_lines_newest_first() {
+    let mind = TestMind::seeded();
+    let flood: Vec<PipelineDocument> = (0..60).map(|at| memory(&format!("f{at:02}"), MemorySort::Learned, &format!("{at:02} {}", "w".repeat(150)), &[])).collect();
+    mind.admit_at(t(100));
+    mind.committed(flood);
+    let read = PersonaRead { state: state(), receipt_id: "r".into() };
+    let seed = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(50)), t(200)).unwrap();
+    let lines: Vec<&str> = seed.stimulus.lines().skip(1).collect();
+    assert!(seed.stimulus.len() <= SECTION_MAX_BYTES && seed.stimulus.len() > SECTION_MAX_BYTES - 250, "{}", seed.stimulus.len());
+    assert!(lines.iter().all(|line| line.starts_with("- You noted") && line.ends_with('"')), "a line was cut: {lines:?}");
+    assert!(lines.len() > 10 && lines.len() < 30, "{}", lines.len());
+    let newest = lines[0];
+    assert!(newest.contains("\"29 ") || newest.contains("\"59 "), "newest first: {newest}");
+}
+
+#[test]
+fn the_newest_thought_sets_the_cadence_not_the_oldest() {
+    let mind = TestMind::seeded();
+    mind.admit_at(t(100));
+    mind.committed(vec![thought_doc("t1", "An old drift")]);
+    mind.admit_at(t(10_000));
+    mind.committed(vec![thought_doc("t2", "A recent drift")]);
+    let model = Fake::saying("I turn it over.", &["A new drift"]);
+    let persona = persona();
+    let wrap = Wrap::over(&mind, &[0.1]);
+    let tick_at = |secs: i64| tick(&organs(&wrap, &persona, &model), &|| released(), Mode::Live, t(secs)).unwrap();
+    assert_eq!(tick_at(10_000 + STREAM_MIN_GAP_S - 1), Outcome::NotDue, "a recent thought holds the stream back whatever the oldest says");
+    assert_eq!(model.calls(), 0);
+}
+
+#[test]
+fn news_at_exactly_the_minimum_gap_is_due() {
+    let mind = mind_with_thought(1000);
+    mind.admit_at(t(1500));
+    mind.committed(vec![memory("m9", MemorySort::Decided, "Something happened", &[])]);
+    let model = Fake::saying("I turn it over.", &["A new drift"]);
+    let persona = persona();
+    let wrap = Wrap::over(&mind, &[0.1]);
+    let Outcome::Thought { admitted: true, .. } = tick(&organs(&wrap, &persona, &model), &|| released(), Mode::Live, t(1000 + STREAM_MIN_GAP_S)).unwrap() else { panic!("due at the minimum gap") };
+}
