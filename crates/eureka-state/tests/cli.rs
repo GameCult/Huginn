@@ -1140,7 +1140,7 @@ fn schema_prints_the_published_files() {
     let names = run(&[], &["schema"], None);
     assert_eq!(names.code, 0);
     let names: Vec<&str> = names.out.lines().collect();
-    assert_eq!(names.len(), 19, "{names:?}");
+    assert_eq!(names.len(), 20, "{names:?}");
     assert_eq!(names[0], "campaign");
     assert_eq!(names[14], "pulse");
     assert_eq!(names[15], "memory");
