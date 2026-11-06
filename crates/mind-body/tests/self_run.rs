@@ -226,7 +226,7 @@ mod lane {
     /// The binary with `bin` first on `PATH`, until the daemon answers (exit 2 before that
     /// has started nothing). `SELF_RUN_ENV_CANARY` is a variable of the unit's environment.
     fn ask(endpoint: &str, bin: &Path, socket: &Path) -> Output {
-        ask_in(endpoint, bin, socket, None)
+        ask_in(endpoint, bin, socket, Some(&bin.join("state")))
     }
 
     /// The same, in a unit whose `StateDirectory=` is `state_directory`.
@@ -356,7 +356,7 @@ echo '{first}'\necho '{second}'\nread -t 5 start\nread -t 5 flush\necho \"$start
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         assert_eq!(output.status.code(), Some(0), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-        let printed: String = stdout.lines().filter(|line| !line.starts_with("decision ") && !line.starts_with("result") && !line.starts_with("session ") && !line.starts_with("STATE_DIRECTORY")).map(|line| format!("{line}\n")).collect();
+        let printed: String = stdout.lines().filter(|line| !line.starts_with("decision ") && !line.starts_with("result") && !line.starts_with("session ")).map(|line| format!("{line}\n")).collect();
         assert_eq!(printed, "request 1 prefix 101\nrequest 2 prefix 300000\nended: flush-requested code 0 requests 2 prefix 300000\n");
         assert!(!all_output(&output).contains(ENV_CANARY), "the unit environment is not echoed");
         assert!(String::from_utf8_lossy(&output.stderr).contains("journal-line"), "the child's stderr is the unit's journal");
