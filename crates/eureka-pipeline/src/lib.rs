@@ -784,9 +784,13 @@ value_types! {
         severity: FindingSeverity, claim: Line, invariants: Vec<Label>[8], locations: Vec<CodeLocation>[16],
         failure_scenario: Para, evidence: Vec<Evidence>[16], precedents: Vec<ForeignRef>[8], origin: FindingOrigin,
     }
+    /// A follow-up. `origin` is where the Persona turn that admitted it was
+    /// asked, as the organ derived it: a brief records the conversation whose
+    /// message started it. Absent on follow-ups no Persona turn admitted and
+    /// on briefs admitted before it existed.
     pub struct PipelineFollowUp {
         campaign: Slug, label: Label, source: PipelineRef, repo: OrgRepo, locations: Vec<CodeLocation>[16],
-        item: Line, why_it_can_wait: Line, owner: Short,
+        item: Line, why_it_can_wait: Line, owner: Short, origin: Option<MemoryOrigin> = absent,
     }
     /// The record of how a subject was closed and by what. `sequence` is per
     /// subject and set by the writer, `1` for the first, and it is the last
@@ -914,8 +918,9 @@ impl PipelineRef {
     }
 }
 
-/// Where a memory came from and whom she heard it from. The organ derives it
-/// from the batch of the turn that wrote the memory; the model never writes it.
+/// Where a Persona turn's batch came from and whom she heard it from: a
+/// memory's origin and a brief's. The organ derives it from the batch of the
+/// turn; the model never writes it.
 /// `about` names whom a memory concerns, this names the room and the voices.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum MemoryOrigin {
@@ -1598,6 +1603,7 @@ mod tests {
                 source: PipelineRef { kind: PipelineKind::Finding, id: id("finding", "cut-3a.s2.F4") },
                 repo: repo(), locations: vec![location()], item: "Per-kind admission rules.".into(),
                 why_it_can_wait: "The organ owns admission.".into(), owner: s("Hands"),
+                origin: None,
             }), format!("{CAMPAIGN}:follow_up:FU-4")),
             (D::Resolution(PipelineResolution {
                 subject: PipelineRef { kind: PipelineKind::Question, id: id("question", "Q1") }, sequence: 1,
@@ -3601,6 +3607,30 @@ mod tests {
         let packed = rmp_serde::to_vec_named(&document)?;
         assert_eq!(rmp_serde::from_slice::<PipelineDocument>(&packed)?, document);
         assert!(packed.windows(5).any(|window| window == b"repos"), "the repos key is written");
+        Ok(())
+    }
+
+    #[test]
+    fn follow_up_origin_absent_is_not_written_and_a_direct_origin_round_trips() -> Result<()> {
+        let sample = samples()
+            .into_iter()
+            .find_map(|(document, _)| if let PipelineDocument::FollowUp(follow_up) = document { Some(follow_up) } else { None })
+            .expect("a follow_up sample");
+        let json = serde_json::to_value(PipelineDocument::FollowUp(sample.clone()))?;
+        assert!(json["value"].get("origin").is_none(), "an absent origin is not written");
+        assert!(!rmp_serde::to_vec_named(&PipelineDocument::FollowUp(sample.clone()))?.windows(6).any(|window| window == b"origin"));
+        let PipelineDocument::FollowUp(decoded) = serde_json::from_value::<PipelineDocument>(json)? else { unreachable!() };
+        assert_eq!(decoded.origin, None);
+
+        let mut direct = sample;
+        direct.origin = Some(MemoryOrigin::Direct { room: "!dm:chat".into(), with: vec!["@sample:chat".into()] });
+        let document = PipelineDocument::FollowUp(direct);
+        document.validate()?;
+        let json = serde_json::to_value(&document)?;
+        assert_eq!(serde_json::from_value::<PipelineDocument>(json)?, document);
+        let packed = rmp_serde::to_vec_named(&document)?;
+        assert_eq!(rmp_serde::from_slice::<PipelineDocument>(&packed)?, document);
+        assert!(packed.windows(6).any(|window| window == b"origin"), "the origin key is written");
         Ok(())
     }
 

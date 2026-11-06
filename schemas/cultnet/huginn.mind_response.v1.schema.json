@@ -705,7 +705,7 @@
       "maxLength": 1000
     },
     "MemoryOrigin": {
-      "description": "Where a memory came from and whom she heard it from. The organ derives it\nfrom the batch of the turn that wrote the memory; the model never writes it.\n`about` names whom a memory concerns, this names the room and the voices.",
+      "description": "Where a Persona turn's batch came from and whom she heard it from: a\nmemory's origin and a brief's. The organ derives it from the batch of the\nturn; the model never writes it.\n`about` names whom a memory concerns, this names the room and the voices.",
       "oneOf": [
         {
           "description": "A turn in rooms: their aliases comma-joined, and the batch's other senders.",
@@ -3083,6 +3083,17 @@
                 "label": {
                   "$ref": "#/$defs/Label"
                 },
+                "origin": {
+                  "description": "Where the Persona turn that admitted it was asked; absent on follow-ups no turn admitted.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/MemoryOrigin"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "owner": {
                   "$ref": "#/$defs/Short"
                 },
@@ -3582,6 +3593,7 @@
       ]
     },
     "PipelineFollowUp": {
+      "description": "A follow-up. `origin` is where the Persona turn that admitted it was\nasked, as the organ derived it: a brief records the conversation whose\nmessage started it. Absent on follow-ups no Persona turn admitted and\non briefs admitted before it existed.",
       "type": "object",
       "properties": {
         "campaign": {
@@ -3599,6 +3611,16 @@
             "$ref": "#/$defs/CodeLocation"
           },
           "maxItems": 16
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "owner": {
           "$ref": "#/$defs/Short"

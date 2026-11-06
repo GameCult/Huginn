@@ -510,6 +510,7 @@ pub(crate) fn follow_up(label: &str, source: &PipelineRef) -> PipelineDocument {
         item: "Later.".into(),
         why_it_can_wait: "It can.".into(),
         owner: "Hands".into(),
+        origin: None,
     })
 }
 

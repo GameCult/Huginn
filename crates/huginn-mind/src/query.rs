@@ -140,7 +140,16 @@ pub enum PipelineFacts {
         invariants: Vec<Label>,
         range: CommitRange,
     },
-    FollowUp { label: Label, source: PipelineRef, repo: OrgRepo, owner: Short, item: Line },
+    FollowUp {
+        label: Label,
+        source: PipelineRef,
+        repo: OrgRepo,
+        owner: Short,
+        item: Line,
+        /// Where the Persona turn that admitted it was asked; absent on follow-ups no turn admitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<MemoryOrigin>,
+    },
     Resolution { subject: PipelineRef, sequence: u32, outcome: ResolutionOutcome, resolved_on: Date },
     Instance { instance: Slug, display_name: Short, host: Short, created_at: Date },
     Stewardship { instance: Slug, repo: OrgRepo, sequence: u32, assigned_on: Date, note: Line },
@@ -216,6 +225,7 @@ impl PipelineFacts {
                 repo: value.repo.clone(),
                 owner: value.owner.clone(),
                 item: value.item.clone(),
+                origin: value.origin.clone(),
             },
             D::Resolution(value) => Self::Resolution {
                 subject: value.subject.clone(),
@@ -1630,6 +1640,27 @@ mod tests {
         let page = mind.query(&with(of_kinds(&[K::Memory]), any_of("sort", &["Rapport"]))).unwrap();
         let PipelinePageItems::Headers(found) = page.items else { panic!("headers") };
         assert!(matches!(&found[0].facts, PipelineFacts::Memory { sort: MemorySort::Rapport, origin: MemoryOrigin::Room { .. }, salience_permille: 500, .. }), "{:?}", found[0].facts);
+    }
+
+    /// A follow-up's origin reaches its header facts when it has one, and is absent when it has none.
+    #[test]
+    fn a_follow_up_header_carries_the_origin_its_turn_recorded() {
+        let mut mind = seeded();
+        let q1 = id("question", "Q1");
+        let D::FollowUp(mut asked) = follow_up("FU-dm", r(K::Question, &q1)) else { panic!() };
+        asked.origin = Some(MemoryOrigin::Direct { room: s("!dm:chat"), with: vec![s("@op:chat")] });
+        committed(admit(&mut mind, vec![question_n(1), D::FollowUp(asked), follow_up("FU-old", r(K::Question, &q1))]));
+        let PipelinePageItems::Headers(found) = mind.query(&of_kinds(&[K::FollowUp])).unwrap().items else { panic!("headers") };
+        let origin_of = |label: &str| {
+            found.iter().find_map(|header| match &header.facts {
+                PipelineFacts::FollowUp { label: found, origin, .. } if found.0 == label => Some(origin.clone()),
+                _ => None,
+            })
+        };
+        assert_eq!(origin_of("FU-dm"), Some(Some(MemoryOrigin::Direct { room: s("!dm:chat"), with: vec![s("@op:chat")] })));
+        assert_eq!(origin_of("FU-old"), Some(None));
+        let wire = serde_json::to_value(found.iter().find(|header| matches!(&header.facts, PipelineFacts::FollowUp { origin: None, .. })).unwrap()).unwrap();
+        assert!(!wire.to_string().contains("\"origin\""), "an absent origin is not written");
     }
 
     /// A withdrawal pulse admitted into the mind is read back as a withdrawal: its

@@ -1905,6 +1905,7 @@ fn start_self_run(
         item: ask.brief.as_str().into(),
         why_it_can_wait: "Started from chat; the Self run that claims it works it now.".into(),
         owner: "self-run".into(),
+        origin: None,
     });
     let claim = PipelineRef { kind: PipelineKind::FollowUp, id: pipeline_key(&follow_up).map_err(|_| anyhow!("the follow-up could not be keyed"))?.as_str().into() };
     let mut documents = vec![follow_up];
