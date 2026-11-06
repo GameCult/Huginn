@@ -578,6 +578,16 @@ fn run_is_well_formed(run: &PipelineRun, at: &str) -> Result<(), PipelineRefusal
     }
 }
 
+/// A chat name holds a letter or a digit and has no space at either end, so it can match a whole word.
+fn stewardship_is_well_formed(stewardship: &PipelineStewardship, at: &str) -> Result<(), PipelineRefusal> {
+    for (index, name) in stewardship.names.iter().enumerate() {
+        if name.0.trim() != name.0 || !name.0.chars().any(char::is_alphanumeric) {
+            return Err(format_error(&format!("{at}.names[{index}]"), &name.0));
+        }
+    }
+    Ok(())
+}
+
 /// The longest and shortest beat a Mind may vote for, in seconds.
 pub const TEMPO_VOTE_MIN_S: u32 = 60;
 pub const TEMPO_VOTE_MAX_S: u32 = 86_400;
@@ -810,7 +820,9 @@ value_types! {
     /// is a field, not a key part. As on a resolution, whether the sequence
     /// is the previous plus one, and which assignment is in force, are
     /// admission's rules and not this crate's.
-    pub struct PipelineStewardship { instance: Slug, repo: OrgRepo, sequence: u32, assigned_on: Date, note: Line }
+    /// `names` are the chat names that address her for this repo, matched exactly
+    /// as written; none means the repo's own name, matched in any case.
+    pub struct PipelineStewardship { instance: Slug, repo: OrgRepo, sequence: u32, assigned_on: Date, note: Line, names: Vec<Short>[8] = absent } => stewardship_is_well_formed
     /// A reassignment of stewardship, recorded in both minds. `documents` names
     /// what travels with it.
     pub struct PipelineHandOff {
@@ -1612,7 +1624,7 @@ mod tests {
             }), format!("{INSTANCE}:instance:self")),
             (D::Stewardship(PipelineStewardship {
                 instance: slug(INSTANCE), repo: repo(), sequence: 1, assigned_on: date(),
-                note: "The Eureka campaign repo.".into(),
+                note: "The Eureka campaign repo.".into(), names: vec![],
             }), format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1")),
             (D::HandOff(PipelineHandOff {
                 from_instance: slug(INSTANCE), to_instance: slug("thought-cage"), repo: repo(),
@@ -1832,6 +1844,9 @@ mod tests {
         let PipelineDocument::Target(mut target) = samples().remove(1).0 else { unreachable!() };
         target.repos = vec![OrgRepo("GameCult/Epiphany".into()), OrgRepo("GameCult/Huginn".into())];
         out.push(("target.repos".into(), D::Target(target)));
+        let mut stewardship = stewardship_sample();
+        stewardship.names = vec![s("BDS"), s("Bad Day Simulator")];
+        out.push(("stewardship.names".into(), D::Stewardship(stewardship)));
         out
     }
 
@@ -1969,6 +1984,26 @@ mod tests {
                 "{bad:?} is refused"
             );
         }
+    }
+
+    /// A name must be able to match a whole word; a stewardship with none writes what it wrote before names existed.
+    #[test]
+    fn a_stewardships_names_are_words_and_absent_when_empty() -> Result<()> {
+        let validated = |names: Vec<&str>| {
+            let mut stewardship = stewardship_sample();
+            stewardship.names = names.into_iter().map(s).collect();
+            PipelineDocument::Stewardship(stewardship).validate()
+        };
+        assert_eq!(validated(vec!["BDS", "Bad Day Simulator", "moonlight-ios", "3D"]), Ok(()));
+        for bad in ["", " ", "BDS ", " BDS", "--", "\tBDS"] {
+            assert!(matches!(validated(vec!["ok", bad]), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "stewardship.names[1]"), "{bad:?} is refused");
+        }
+        let nine: Vec<&str> = vec!["a"; 9];
+        assert!(validated(nine).is_err(), "a ninth name is refused");
+        assert_eq!(validated(vec!["a"; 8]), Ok(()));
+        let json = serde_json::to_value(stewardship_sample())?;
+        assert!(json.get("names").is_none(), "no names writes no field");
+        Ok(())
     }
 
     /// A reply has words, comes from a run, and answers only follow-ups.
