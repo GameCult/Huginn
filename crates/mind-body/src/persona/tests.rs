@@ -4483,7 +4483,9 @@ fn a_refused_result_leaves_its_replies_in_force_and_they_are_told_again() {
 fn a_reply_put_out_of_force_after_it_was_told_leaves_for_good_and_holds_no_other_reply_hostage() {
     let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[]), says(&[]), says(&[]), says(&[])]);
     rig.mind.committed(her_self_asked());
-    rig.mind.committed(vec![self_reply("self-r-r1", "One."), self_reply("self-r-r2", "Two.")]);
+    // Five long replies after the first: the first line cannot hold them all, so some wait for a later line while the first is untold.
+    let long = "x".repeat(3900);
+    rig.mind.committed(vec![self_reply("self-r-r1", "One."), self_reply("self-r-r2", &long), self_reply("self-r-r3", &long), self_reply("self-r-r4", &long), self_reply("self-r-r5", &long), self_reply("self-r-r6", &long)]);
     rig.clock.step.set(1);
     rig.model.linger.set(true);
     rig.open_the_run();
@@ -4512,10 +4514,14 @@ fn a_reply_put_out_of_force_after_it_was_told_leaves_for_good_and_holds_no_other
     assert_eq!(failure_of(rig.start_over(&timeline, &config())), None);
     let lines = told(&rig);
     let told_of = |label: &str| all_replies(&lines).iter().filter(|line| line.contains(&reply_id(label))).count();
-    assert_eq!((told_of("self-r-r1"), told_of("self-r-r2")), (1, 1), "each told once: {lines:?}");
+    for n in 1..=6 {
+        assert_eq!(told_of(&format!("self-r-r{n}")), 1, "r{n} told once: {}", lines.len());
+    }
     assert!(lines.len() >= 3, "later lines followed: {lines:?}");
     assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), Some(ResolutionOutcome::Recorded { reason: "elsewhere".into() }));
-    assert_eq!(outcome_of(&rig, &reply_id("self-r-r2")), heard_outcome(), "the reply beside it was heard");
+    for n in 2..=6 {
+        assert_eq!(outcome_of(&rig, &reply_id(&format!("self-r-r{n}"))), heard_outcome(), "r{n}, beside it or on a later line, was heard");
+    }
 }
 
 /// A reply that reaches a session with no chat pending is read at the next interval, told on the line it makes, and resolved.
