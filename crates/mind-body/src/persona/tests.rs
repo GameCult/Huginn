@@ -756,7 +756,7 @@ fn a_room_outside_hers_sends_nothing_and_acks_nothing() {
 }
 
 fn direct(seq: u64, room_id: &str, sender: &str, text: &str) -> ChatDelivery {
-    ChatDelivery { is_direct: true, ..delivery(seq, room_id, sender, text) }
+    ChatDelivery { is_direct: true, room_id: room_id.into(), ..delivery(seq, room_id, sender, text) }
 }
 
 #[test]
@@ -1852,7 +1852,7 @@ fn where_and_from_whom_she_learned_a_memory_comes_from_the_batch_and_no_model_fi
     assert_eq!(memory.origin, MemoryOrigin::Room { rooms: "swarm, usage".into(), heard_from: vec!["@aqua:chat".into(), "@libby:chat".into()] });
     assert_eq!(memory.sources, vec![Short(delivery(1, "swarm", "@aqua:chat", "hello").event_id), Short(delivery(2, "usage", "@libby:chat", "hi").event_id)]);
     // A direct message: the room id and the others who spoke in it, and its own event ids only.
-    let dm = Rig::new(vec![direct(1, "dm", "@aqua:chat", "psst")], &[reply(&[], json!([keeps("Learned", "a secret", &["@aqua:chat"])]), json!([]), json!(null))]);
+    let dm = Rig::new(vec![direct(1, "!dm:chat", "@aqua:chat", "psst")], &[reply(&[], json!([keeps("Learned", "a secret", &["@aqua:chat"])]), json!([]), json!(null))]);
     assert_eq!(failure_of(dm.go_with(&config())), None);
     let (_, memory) = memories(&dm).remove(0);
     assert_eq!((memory.origin, memory.sources.len()), (MemoryOrigin::Direct { room: "!dm:chat".into(), with: vec!["@aqua:chat".into()] }, 1));
@@ -1996,7 +1996,7 @@ fn resolution_sequences_count_up_per_subject() {
 
 #[test]
 fn a_memorys_rooms_are_cut_to_what_a_short_holds_and_whole_characters() {
-    let rooms = |alias: &str| match origin_of(&config(), &[delivery(1, alias, "@a:chat", "x")]).0 {
+    let rooms = |alias: &str| match origin_of(&config(), &[delivery(1, alias, "@a:chat", "x")], &MemoryOrigin::Wake).0 {
         MemoryOrigin::Room { rooms, .. } => rooms.0,
         other => panic!("{other:?}"),
     };
@@ -2004,7 +2004,7 @@ fn a_memorys_rooms_are_cut_to_what_a_short_holds_and_whole_characters() {
     assert_eq!(rooms(&"r".repeat(201)).len(), 200);
     let wide = format!("{}é", "r".repeat(199));
     assert_eq!(rooms(&wide), "r".repeat(199), "a character that would straddle the bound goes whole");
-    let joined = origin_of(&config(), &[delivery(1, &"a".repeat(150), "@a:chat", "x"), delivery(2, &"b".repeat(150), "@a:chat", "y")]).0;
+    let joined = origin_of(&config(), &[delivery(1, &"a".repeat(150), "@a:chat", "x"), delivery(2, &"b".repeat(150), "@a:chat", "y")], &MemoryOrigin::Wake).0;
     let MemoryOrigin::Room { rooms, .. } = joined else { panic!("a room origin") };
     assert_eq!(rooms.0.len(), 200, "{rooms:?}");
 }
@@ -5936,7 +5936,7 @@ fn with_inbox<R>(rig: &Rig, config: &Config, first: Vec<ChatDelivery>, f: impl F
     let (control, swarm, run) = (FileSource::new(rig.store()), FileSource::new(rig.swarm_store()), rig.the_run());
     let mut progress = Progress::default();
     let started_ms = unix_ms(rig.clock.now());
-    let mut inbox = PersonaInbox::new(&organs, &control, &swarm, config, &run, &mut progress, first, started_ms, String::new());
+    let mut inbox = PersonaInbox::new(&organs, &control, &swarm, config, &run, &mut progress, session_of(config, first), started_ms, String::new());
     f(&mut inbox)
 }
 
@@ -6210,7 +6210,7 @@ fn eight_sessions_one_operator_question() {
     let mut inboxes: Vec<PersonaInbox<'_, FileSource, FileSource>> = progresses
         .iter_mut()
         .zip(&configs)
-        .map(|(progress, config)| PersonaInbox::new(&organs, &control, &swarm, config, &run, progress, vec![question.clone()], 0, String::new()))
+        .map(|(progress, config)| PersonaInbox::new(&organs, &control, &swarm, config, &run, progress, session_of(config, vec![question.clone()]), 0, String::new()))
         .collect();
     for inbox in &mut inboxes {
         inbox.start_line().unwrap();
@@ -6361,4 +6361,9 @@ fn a_flush_written_beside_a_revision_line_still_makes_the_reply_final() {
         assert_eq!(rig.chat.sent.borrow()[1].basis, None);
         assert!(rig.chat.sent.borrow()[1].request_id.contains("-r1-"));
     });
+}
+
+/// The session a start would open over `first` with no reply waiting: its conversation and origin are the batch's.
+fn session_of(config: &Config, first: Vec<ChatDelivery>) -> Session {
+    Session { conversation: first.first().map_or(Conversation::Public, Conversation::of), origin: origin_of(config, &first, &MemoryOrigin::Wake).0, first }
 }

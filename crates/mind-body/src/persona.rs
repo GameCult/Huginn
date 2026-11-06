@@ -805,6 +805,8 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
     make_sandbox(organs.sandbox)?;
     let mut progress = Progress::default();
     let started = organs.clock.now();
+    // The replies a session opened alone for, this start: a reply that cannot be resolved never loops processes.
+    let mut opened_alone = BTreeSet::new();
     for process in 0u32.. {
         if process > 0
             && let Effective::Held { reason } = read(control, swarm, &instance)
@@ -816,13 +818,15 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
             progress.failure = Some(Failure::Chat);
             break;
         };
-        let first = next_batch(config, pending, unix_ms(organs.clock.now()));
+        // A mind that cannot be asked for her Self's replies still serves her chat.
+        let routes = reply_routes(organs.mind, &BTreeSet::new()).unwrap_or_default();
+        let Some(session) = next_session(config, pending, &routes, &mut opened_alone, process, unix_ms(organs.clock.now())) else { break };
         let remaining_s = i64::try_from(organs.run_cap_s).unwrap_or(i64::MAX).saturating_sub((organs.clock.now() - started).num_seconds());
-        if process > 0 && (first.is_empty() || remaining_s <= ROTATE_MARGIN_S) {
+        if process > 0 && remaining_s <= ROTATE_MARGIN_S {
             break;
         }
         let turns = progress.turn;
-        one_process(organs, control, swarm, config, &run, process, first, u64::try_from(remaining_s.max(1)).unwrap_or(1), &mut progress)?;
+        one_process(organs, control, swarm, config, &run, process, session, u64::try_from(remaining_s.max(1)).unwrap_or(1), &mut progress)?;
         // A process that gave no result answered nothing: another would only repeat it.
         if progress.failure.is_none() && progress.turn == turns {
             progress.failure = Some(Failure::Session);
@@ -854,7 +858,7 @@ fn one_process(
     config: &Config,
     run: &PipelineRef,
     process: u32,
-    first: Vec<ChatDelivery>,
+    session: Session,
     remaining_s: u64,
     progress: &mut Progress,
 ) -> Result<()> {
@@ -870,7 +874,7 @@ fn one_process(
         }
     };
     let campaigns = campaigns_in_force(organs.mind)?;
-    let rooms = reply_rooms(config, &first);
+    let rooms = reply_rooms(config, &session.conversation);
     let schema = reply_schema(&rooms, &campaigns.iter().map(|(slug, _)| slug.clone()).collect::<Vec<_>>());
     let prompt = organs.scratch.join(INSTRUCTIONS_FILE);
     if std::fs::write(&prompt, format!("{doctrine}{persona}\n\n{}", render_campaigns(&campaigns))).is_err() {
@@ -885,12 +889,12 @@ fn one_process(
             return Ok(());
         }
     };
-    let session = Uuid::new_v5(&SESSION_NAMESPACE, format!("{}:p{process}", run.id.0).as_bytes());
-    let Ok(child) = organs.spawner.spawn(&persona_args(session, &config.model, &schema, &prompt), lease.token()) else {
+    let session_id = Uuid::new_v5(&SESSION_NAMESPACE, format!("{}:p{process}", run.id.0).as_bytes());
+    let Ok(child) = organs.spawner.spawn(&persona_args(session_id, &config.model, &schema, &prompt), lease.token()) else {
         progress.failure = Some(Failure::Session);
         return Ok(());
     };
-    let mut inbox = PersonaInbox::new(organs, control, swarm, config, run, progress, first, started_ms, render_plan(lease.plan_quota(), started_ms));
+    let mut inbox = PersonaInbox::new(organs, control, swarm, config, run, progress, session, started_ms, render_plan(lease.plan_quota(), started_ms));
     let driven = drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout());
     inbox.settle_replies();
     driven?;
@@ -937,7 +941,7 @@ fn persona_args(session: Uuid, model: &str, schema: &str, system_prompt_file: &P
 
 /// A conversation: the public rooms together, or one direct message room alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Conversation {
+pub(crate) enum Conversation {
     Public,
     Direct(String),
 }
@@ -945,6 +949,100 @@ enum Conversation {
 impl Conversation {
     fn of(delivery: &ChatDelivery) -> Self {
         if delivery.is_direct { Self::Direct(delivery.room_id.clone()) } else { Self::Public }
+    }
+
+    /// The conversation an origin records: a direct message's room, else the public one. No origin (a brief
+    /// admitted before origins were recorded) is public.
+    pub(crate) fn of_origin(origin: Option<&MemoryOrigin>) -> Self {
+        match origin {
+            Some(MemoryOrigin::Direct { room, .. }) => Self::Direct(room.0.clone()),
+            _ => Self::Public,
+        }
+    }
+}
+
+/// The conversation a reply is told in: the one conversation its briefs' origins name (no brief is the public one),
+/// or none when they name two. A reply of two conversations is told in no session, so no member's words
+/// reach another's room, and it stays in force.
+fn reply_conversation(answers: &[Option<MemoryOrigin>]) -> Option<Conversation> {
+    let mut conversations = answers.iter().map(|origin| Conversation::of_origin(origin.as_ref()));
+    let Some(first) = conversations.next() else { return Some(Conversation::Public) };
+    conversations.all(|conversation| conversation == first).then_some(first)
+}
+
+/// A reply of her Self in force and where it is told: the one derivation of a reply's conversation. Nothing stores it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Route {
+    id: String,
+    ordinal: u64,
+    at_unix_ms: u64,
+    conversation: Conversation,
+    /// The origin of the first brief the reply answers that has one: what a session opened for the reply alone records.
+    origin: Option<MemoryOrigin>,
+}
+
+/// Her in-force replies this process has not told, oldest first, each with its conversation: one selection of the replies and
+/// one keyed selection of the briefs they answer. A reply whose briefs name two conversations is left out: no session tells it.
+fn reply_routes(mind: &dyn MindPort, told: &BTreeSet<String>) -> Result<Vec<Route>> {
+    let replies: Vec<_> = headers(mind, &in_force(any_of(of_kind(PipelineKind::Reply), "root", &[&mind.instance().0])))?.into_iter().filter(|header| !told.contains(&header.id.id.0)).collect();
+    let mut keys: Vec<String> = replies
+        .iter()
+        .flat_map(|header| match &header.facts {
+            PipelineFacts::Reply { answers, .. } => answers.iter().map(|brief| brief.id.0.clone()).collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let mut origins: BTreeMap<String, Option<MemoryOrigin>> = BTreeMap::new();
+    if !keys.is_empty() {
+        for header in headers(mind, &Selection { keys: Some(keys), ..of_kind(PipelineKind::FollowUp) })? {
+            if let PipelineFacts::FollowUp { origin, .. } = header.facts {
+                origins.insert(header.id.id.0, origin);
+            }
+        }
+    }
+    let mut routes = Vec::new();
+    for header in replies {
+        let PipelineFacts::Reply { answers, .. } = &header.facts else { continue };
+        let of_answers: Vec<Option<MemoryOrigin>> = answers.iter().map(|brief| origins.get(&brief.id.0).cloned().flatten()).collect();
+        let Some(conversation) = reply_conversation(&of_answers) else { continue };
+        routes.push(Route {
+            id: header.id.id.0.clone(),
+            ordinal: header.admission.ordinal,
+            at_unix_ms: instant_ms(&header.admission.admitted_at).unwrap_or(0),
+            conversation,
+            origin: of_answers.into_iter().flatten().next(),
+        });
+    }
+    routes.sort_by_key(|route| route.ordinal);
+    Ok(routes)
+}
+
+/// One Persona process: the conversation it serves, the origin a turn of it with no message records, and its first batch.
+struct Session {
+    conversation: Conversation,
+    origin: MemoryOrigin,
+    first: Vec<ChatDelivery>,
+}
+
+/// The session the oldest waiting thing asks for. A delivery batch (`next_batch`) opens its conversation, and a reply of that
+/// conversation rides it; a reply older than the batch, of another conversation, opens its own conversation alone, with no
+/// message, at most once in a start (`opened_alone`). The first process with neither is the public wake; a later one ends the start.
+fn next_session(config: &Config, pending: Vec<ChatDelivery>, routes: &[Route], opened_alone: &mut BTreeSet<String>, process: u32, now_ms: u64) -> Option<Session> {
+    let batch = next_batch(config, pending, now_ms);
+    let route = routes.iter().find(|route| !opened_alone.contains(&route.id));
+    if let Some(first) = batch.first()
+        && route.is_none_or(|route| first.at_unix_ms <= route.at_unix_ms || Conversation::of(first) == route.conversation)
+    {
+        return Some(Session { conversation: Conversation::of(first), origin: origin_of(config, &batch, &MemoryOrigin::Wake).0, first: batch });
+    }
+    match route {
+        Some(route) => {
+            opened_alone.insert(route.id.clone());
+            Some(Session { conversation: route.conversation.clone(), origin: route.origin.clone().unwrap_or(MemoryOrigin::Wake), first: Vec::new() })
+        }
+        None => (process == 0).then(|| Session { conversation: Conversation::Public, origin: MemoryOrigin::Wake, first: Vec::new() }),
     }
 }
 
@@ -1051,6 +1149,10 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     progress: &'a mut Progress,
     rooms: Vec<String>,
     conversation: Conversation,
+    /// Where a turn of this session with no message came from: the first batch's, else the reply's brief's, else a wake.
+    origin: MemoryOrigin,
+    /// An in-force reply of another conversation waits, as the last read saw it: this session yields to it at idle.
+    replies_elsewhere: bool,
     /// The plan windows the lease granted, as one line.
     plan: String,
     /// When this process began: a line of her own from then on she wrote in this session.
@@ -1113,9 +1215,9 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
 impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
     /// One process's session inbox over its first batch. The caller has read the gate and started the child.
     #[allow(clippy::too_many_arguments, reason = "one process's state is these few things, and a struct for them would be a second owner")]
-    fn new(organs: &'a Organs<'a>, control: &'a C, swarm: &'a S, config: &'a Config, run: &'a PipelineRef, progress: &'a mut Progress, first: Vec<ChatDelivery>, started_ms: u64, plan: String) -> Self {
-        let rooms = reply_rooms(config, &first);
-        let conversation = first.first().map_or(Conversation::Public, Conversation::of);
+    fn new(organs: &'a Organs<'a>, control: &'a C, swarm: &'a S, config: &'a Config, run: &'a PipelineRef, progress: &'a mut Progress, session: Session, started_ms: u64, plan: String) -> Self {
+        let Session { conversation, origin, first } = session;
+        let rooms = reply_rooms(config, &conversation);
         Self {
             organs,
             control,
@@ -1125,6 +1227,8 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
             progress,
             rooms,
             conversation,
+            origin,
+            replies_elsewhere: false,
             plan,
             started_ms,
             told: BTreeSet::new(),
@@ -1174,7 +1278,11 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         let senders = other_senders(self.config, deliveries);
         let cue = recall::Cue { senders, texts: deliveries.iter().rev().map(|delivery| delivery.text.as_str()).collect(), names: names.clone(), listed: &goals.listed, now: organs.clock.now() };
         let recalled = recall::select(organs.mind, &cue)?;
-        let shown: Vec<&str> = goals.people.iter().map(String::as_str).chain(recalled.entries().flat_map(|entry| entry.people.iter().map(String::as_str))).collect();
+        let session_with: &[Short] = match &self.origin {
+            MemoryOrigin::Direct { with, .. } => with,
+            _ => &[],
+        };
+        let shown: Vec<&str> = goals.people.iter().map(String::as_str).chain(recalled.entries().flat_map(|entry| entry.people.iter().map(String::as_str))).chain(session_with.iter().map(|id| id.0.as_str())).collect();
         let earlier = self.earlier(deliveries);
         let people = people_she_may_name(self.config, deliveries, &earlier, &shown);
         let started_self_today = started_self_today(organs.mind, &instance, organs.clock.now()).unwrap_or(true);
@@ -1255,7 +1363,11 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
             return;
         }
         self.reply_read_due_ms = now + REPLY_READ_EVERY_S * 1000;
-        let Ok(unheard) = unheard_replies(self.organs.mind, &self.told_replies, &self.waiting_replies) else { return };
+        let Ok(routes) = reply_routes(self.organs.mind, &self.told_replies) else { return };
+        let (own, elsewhere): (Vec<Route>, Vec<Route>) =
+            routes.into_iter().filter(|route| !self.waiting_replies.iter().any(|reply| reply.id == route.id)).partition(|route| route.conversation == self.conversation);
+        self.replies_elsewhere = !elsewhere.is_empty();
+        let Ok(unheard) = unheard_replies(self.organs.mind, &own) else { return };
         self.waiting_replies.extend(unheard);
         self.waiting_replies.sort_by_key(|reply| reply.ordinal);
     }
@@ -1302,6 +1414,12 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         }
     }
 
+    /// What a poll answers: with nothing of its own to tell (not even an untold message of this conversation, whose stagger
+    /// has not run) and another conversation's reply waiting, the session ends at its idle and the next process serves that reply.
+    fn polled(&self, pending: bool, own_untold: bool) -> Polled {
+        Polled { pending, yield_now: !pending && !own_untold && self.replies_elsewhere }
+    }
+
     fn held(&self) -> Option<HeldReason> {
         match read(self.control, self.swarm, self.organs.mind.instance()) {
             Effective::Held { reason } => Some(reason),
@@ -1342,7 +1460,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
             revision.ready |= revision.polls >= REVISION_POLLS || revision.awaiting.iter().all(|id| pending.iter().any(|delivery| delivery.event_id == *id));
         }
         let revision_ready = self.revision_ready();
-        let Some(oldest) = pending.first() else { return Ok(Polled { pending: self.retell.is_some() || revision_ready || !self.notices.is_empty() || !self.waiting_replies.is_empty(), yield_now: false }) };
+        let Some(oldest) = pending.first() else { return Ok(self.polled(self.retell.is_some() || revision_ready || !self.notices.is_empty() || !self.waiting_replies.is_empty(), false)) };
         if Conversation::of(oldest) != self.conversation {
             return Ok(Polled { pending: false, yield_now: true });
         }
@@ -1354,9 +1472,10 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         for delivery in &untold {
             self.first_seen.entry(delivery.seq).or_insert(now);
         }
+        let any_untold = !untold.is_empty();
         let due = revision_ready || untold.iter().any(|delivery| now >= self.first_seen[&delivery.seq] + stagger_ms(self.config, delivery));
         self.waiting = if due { one_line_of(untold, |batch| message_lines(self.config, batch, &self.earlier(batch)).len()) } else { Vec::new() };
-        Ok(Polled { pending: !self.waiting.is_empty() || self.retell.is_some() || revision_ready || !self.notices.is_empty() || !self.waiting_replies.is_empty(), yield_now: false })
+        Ok(self.polled(!self.waiting.is_empty() || self.retell.is_some() || revision_ready || !self.notices.is_empty() || !self.waiting_replies.is_empty(), any_untold))
     }
 
     fn tell(&mut self) -> Result<String> {
@@ -1655,7 +1774,9 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
         }
         outputs.push(TraceItem { provenance: "her own".into(), room: say.room.clone(), text });
     }
-    let memories = build_memories(&instance, run, turn, &reply, &origin_of(config, batch));
+    // The one origin of this turn: its memories and its brief record the same conversation.
+    let origin = origin_of(config, batch, &inbox.origin);
+    let memories = build_memories(&instance, run, turn, &reply, &origin);
     for remembered in &reply.remember {
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("remember {:?}: {}", remembered.sort, remembered.text) });
     }
@@ -1673,7 +1794,7 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
     if let Some(ask) = &reply.start_self_run {
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("start_self_run {} {}: {}", ask.campaign, ask.repo, ask.brief) });
         let taken = item_taken(ask, &memories)?;
-        match start_self_run(organs, control, swarm, run, &batch_id, ask, taken)? {
+        match start_self_run(organs, control, swarm, run, &batch_id, ask, taken, &origin.0)? {
             Ok(launched) => started = Some(launched),
             Err(why) => {
                 organs.trace.record(&record(outputs, format!("failed: {why}")))?;
@@ -1744,15 +1865,14 @@ fn one_line_of(mut waiting: Vec<ChatDelivery>, rendered_bytes: impl Fn(&[ChatDel
     waiting
 }
 
-/// The rooms a reply to these deliveries may name: hers, and the room each
-/// direct message arrived under (a DM's alias is its room id, which the mouth
-/// sends into). Never a room no delivery came from and she was not given.
-fn reply_rooms(config: &Config, deliveries: &[ChatDelivery]) -> Vec<String> {
+/// The rooms a reply in this conversation may name: hers, and for a direct message its room id (a DM's alias is
+/// its room id, which the mouth sends into). Never a room of another conversation.
+fn reply_rooms(config: &Config, conversation: &Conversation) -> Vec<String> {
     let mut rooms = config.rooms.clone();
-    for delivery in deliveries.iter().filter(|delivery| delivery.is_direct) {
-        if !rooms.contains(&delivery.room_alias) {
-            rooms.push(delivery.room_alias.clone());
-        }
+    if let Conversation::Direct(room) = conversation
+        && !rooms.contains(room)
+    {
+        rooms.push(room.clone());
     }
     rooms
 }
@@ -1827,17 +1947,12 @@ fn decode_reply(text: &str, rooms: &[String], people: &[String], open: &[String]
     Ok(reply)
 }
 
-/// Her in-force replies that this process has neither told nor read already, oldest first: one selection of the kind, then the document of each new reply
-/// and the repos of the briefs it answers. A reply whose document cannot be read is left for the next read.
-fn unheard_replies(mind: &dyn MindPort, told: &BTreeSet<String>, waiting: &[HeardReply]) -> Result<Vec<HeardReply>> {
-    let mut fresh: Vec<(u64, String)> = headers(mind, &in_force(any_of(of_kind(PipelineKind::Reply), "root", &[&mind.instance().0])))?
-        .into_iter()
-        .filter(|header| !told.contains(&header.id.id.0) && !waiting.iter().any(|reply| reply.id == header.id.id.0))
-        .map(|header| (header.admission.ordinal, header.id.id.0))
-        .collect();
-    fresh.sort();
+/// The replies of these routes, oldest first: the document of each and the repos of the briefs it answers. A reply whose
+/// document cannot be read is left for the next read. Only the routes of the session's own conversation are given.
+fn unheard_replies(mind: &dyn MindPort, routes: &[Route]) -> Result<Vec<HeardReply>> {
     let mut found = Vec::new();
-    for (ordinal, id) in fresh {
+    for Route { id, ordinal, .. } in routes {
+        let (id, ordinal) = (id.clone(), *ordinal);
         let one = Selection { keys: Some(vec![id.clone()]), projection: "document".into(), ..Selection::default() };
         let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
         let Some(view) = views.into_iter().next() else { continue };
@@ -1892,6 +2007,7 @@ fn start_self_run(
     batch: &str,
     ask: &StartSelfRun,
     taken: Option<PipelineRef>,
+    origin: &MemoryOrigin,
 ) -> Result<Result<(PipelineRef, PipelineRef), Failure>> {
     if !campaigns_in_force(organs.mind)?.iter().any(|(slug, _)| *slug == ask.campaign) {
         return Ok(Err(Failure::SelfRun));
@@ -1905,7 +2021,7 @@ fn start_self_run(
         item: ask.brief.as_str().into(),
         why_it_can_wait: "Started from chat; the Self run that claims it works it now.".into(),
         owner: "self-run".into(),
-        origin: None,
+        origin: Some(origin.clone()),
     });
     let claim = PipelineRef { kind: PipelineKind::FollowUp, id: pipeline_key(&follow_up).map_err(|_| anyhow!("the follow-up could not be keyed"))?.as_str().into() };
     let mut documents = vec![follow_up];
@@ -1974,10 +2090,11 @@ fn votes(reply: &PersonaReply) -> bool {
 }
 
 /// Where a batch came from and whom she heard it from, and the event ids it rests on: what the organ
-/// knows, which no model writes. No deliveries is a wake; a direct first delivery is that DM and the
-/// others who spoke in it; else the rooms' aliases and the batch's other senders.
-fn origin_of(config: &Config, deliveries: &[ChatDelivery]) -> (MemoryOrigin, Vec<String>) {
-    let Some(first) = deliveries.first() else { return (MemoryOrigin::Wake, vec![]) };
+/// knows, which no model writes. No deliveries is the session's origin (a wake, or the conversation a reply
+/// alone opened); a direct first delivery is that DM and the others who spoke in it; else the rooms' aliases and
+/// the batch's other senders.
+fn origin_of(config: &Config, deliveries: &[ChatDelivery], session: &MemoryOrigin) -> (MemoryOrigin, Vec<String>) {
+    let Some(first) = deliveries.first() else { return (session.clone(), vec![]) };
     let heard: Vec<Short> = other_senders(config, deliveries).into_iter().take(SOURCES_MAX).map(|id| Short(id.to_string())).collect();
     let origin = if first.is_direct {
         MemoryOrigin::Direct { room: Short(first.room_id.clone()), with: heard }
@@ -2218,10 +2335,11 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, names: &BTreeMa
         out.push_str("Open follow-ups, newest first:\n");
     }
     for follow_up in &follow_ups {
-        let PipelineFacts::FollowUp { label, source, repo, item, .. } = &follow_up.facts else { continue };
+        let PipelineFacts::FollowUp { label, source, repo, item, origin, .. } = &follow_up.facts else { continue };
+        let asked = origin.as_ref().map_or_else(String::new, |origin| format!(", {}", recall::origin_phrase(origin, names)));
         let campaign = follow_up.id.id.0.split_once(":follow_up:").map_or("", |(campaign, _)| campaign);
         let held = if claimed.contains(&follow_up.id) { " [claimed by a run]" } else { "" };
-        let line = format!("- {campaign}/{} ({}){held}: {}\n", label.0, repo.0, item.0.lines().next().unwrap_or(""));
+        let line = format!("- {campaign}/{} ({}{asked}){held}: {}\n", label.0, repo.0, item.0.lines().next().unwrap_or(""));
         if out.len() - open_len + line.len() > GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE {
             dropped += 1;
             continue;
