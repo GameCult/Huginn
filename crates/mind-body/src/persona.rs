@@ -1214,9 +1214,13 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         (text, taken)
     }
 
-    /// Replies that were told and not answered are told again: the line failed, was stale or was refused.
+    /// Replies that were told and not answered are told again: the line failed, was stale or was refused. A reply no longer in force
+    /// (resolved by someone, or by a resolution whose answer was lost) leaves for good: it stays in `told_replies`, so no read returns it.
     fn untell(&mut self, replies: Vec<HeardReply>) {
         for reply in replies {
+            if matches!(reply_in_force(self.organs.mind, &reply.id), Ok(false)) {
+                continue;
+            }
             self.told_replies.remove(&reply.id);
             self.waiting_replies.push(reply);
         }
@@ -1421,9 +1425,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         match step {
             Step::Answered(started, intent, opened) => {
                 // The result answers the replies its lines carried: they are heard now, and only now.
-                if hear_replies(self.organs, self.run, &heard, started.as_ref().map(|(_, follow_up)| follow_up)).is_err() {
-                    self.untell(heard);
-                }
+                let unresolved = hear_replies(self.organs, self.run, heard, started.as_ref().map(|(_, follow_up)| follow_up));
+                self.untell(unresolved);
                 // What she admitted this turn is hers to settle or take on for the rest of the session, though no line showed its id.
                 self.seen.add(Shown { people: Vec::new(), open: opened });
                 // The one ack rule: through the highest answered seq, never past a delivery still told
@@ -1834,31 +1837,36 @@ fn unheard_replies(mind: &dyn MindPort, told: &BTreeSet<String>, waiting: &[Hear
     Ok(found)
 }
 
-/// The result that answers a line resolves the replies the line carried, in one batch: Answered by the follow-up her answer's `start_self_run`
-/// admitted, else Recorded as heard. A reply resolved is out of force, so no later process tells it.
-fn hear_replies(organs: &Organs, run: &PipelineRef, heard: &[HeardReply], follow_up: Option<&PipelineRef>) -> Result<()> {
-    if heard.is_empty() {
-        return Ok(());
-    }
-    let mut resolutions = Vec::new();
-    for reply in heard {
-        let subject = PipelineRef { kind: PipelineKind::Reply, id: reply.id.as_str().into() };
-        let outcome = match follow_up {
-            Some(by) => ResolutionOutcome::Answered { by: by.clone() },
-            None => ResolutionOutcome::Recorded { reason: "heard".into() },
-        };
-        resolutions.push(PipelineDocument::Resolution(PipelineResolution {
-            sequence: next_sequence(organs.mind, &subject)?,
-            subject,
-            outcome,
-            rationale: "Her Persona heard this reply of her Self in a turn and answered it.".into(),
-            resolved_on: date(organs.clock.now()),
-        }));
-    }
-    match organs.mind.admit(AGENT, label_of(run), resolutions)? {
+/// The result that answers a line resolves each reply the line carried, one by one: Answered by the follow-up her answer's
+/// `start_self_run` admitted, else Recorded as heard. A reply resolved is out of force, so no later process tells it. A reply whose
+/// resolution fails does not hold the others hostage: it is returned, to be told again if it is still in force.
+fn hear_replies(organs: &Organs, run: &PipelineRef, heard: Vec<HeardReply>, follow_up: Option<&PipelineRef>) -> Vec<HeardReply> {
+    heard.into_iter().filter(|reply| resolve_reply(organs, run, reply, follow_up).is_err()).collect()
+}
+
+fn resolve_reply(organs: &Organs, run: &PipelineRef, reply: &HeardReply, follow_up: Option<&PipelineRef>) -> Result<()> {
+    let subject = PipelineRef { kind: PipelineKind::Reply, id: reply.id.as_str().into() };
+    let outcome = match follow_up {
+        Some(by) => ResolutionOutcome::Answered { by: by.clone() },
+        None => ResolutionOutcome::Recorded { reason: "heard".into() },
+    };
+    let resolution = PipelineDocument::Resolution(PipelineResolution {
+        sequence: next_sequence(organs.mind, &subject)?,
+        subject,
+        outcome,
+        rationale: "Her Persona heard this reply of her Self in a turn and answered it.".into(),
+        resolved_on: date(organs.clock.now()),
+    });
+    match organs.mind.admit(AGENT, label_of(run), vec![resolution])? {
         PipelineAdmissionOutcome::Committed { .. } | PipelineAdmissionOutcome::AlreadyAdmitted { .. } => Ok(()),
-        _ => bail!("the replies could not be resolved"),
+        _ => bail!("the reply could not be resolved"),
     }
+}
+
+/// Whether the reply is still in force in her mind.
+fn reply_in_force(mind: &dyn MindPort, id: &str) -> Result<bool> {
+    let one = Selection { keys: Some(vec![id.to_string()]), ..in_force(of_kind(PipelineKind::Reply)) };
+    Ok(!headers(mind, &one)?.is_empty())
 }
 
 /// The brief becomes a follow-up of the Persona turn's run, and a Self run

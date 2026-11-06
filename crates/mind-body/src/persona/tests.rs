@@ -177,6 +177,8 @@ struct FakeSession {
     refuse: Cell<bool>,
     /// The child stays while replies are left, though the chat holds nothing: a line with no delivery can still come.
     linger: Rc<Cell<bool>>,
+    /// How many reads a written line's echo is held back for: the driver sees timeouts, and polls, before it.
+    stall: Rc<Cell<u32>>,
 }
 
 impl Spawner for FakeSession {
@@ -198,6 +200,7 @@ impl Spawner for FakeSession {
             instructions,
             schema: after("--json-schema"),
             linger: self.linger.clone(),
+            stall: self.stall.clone(),
             queue: VecDeque::new(),
             closed: false,
             answered: false,
@@ -217,6 +220,7 @@ struct Replying {
     instructions: String,
     schema: String,
     linger: Rc<Cell<bool>>,
+    stall: Rc<Cell<u32>>,
     queue: VecDeque<Read>,
     closed: bool,
     /// A canned reply was given; once they are spent and the queue is empty the child ends.
@@ -255,6 +259,10 @@ impl Child for Replying {
     fn next(&mut self, _timeout: StdDuration) -> Read {
         self.asked += 1;
         assert!(self.asked < 3000, "the loop never ended");
+        if !self.queue.is_empty() && self.stall.get() > 0 {
+            self.stall.set(self.stall.get() - 1);
+            return Read::Timeout;
+        }
         if let Some(read) = self.queue.pop_front() {
             if matches!(&read, Read::Line(line) if line.contains("isReplay"))
                 && let Some(after_echo) = &*self.after_echo.borrow()
@@ -405,6 +413,7 @@ impl Rig {
                 pending,
                 refuse: Cell::new(false),
                 linger: Rc::default(),
+                stall: Rc::default(),
             },
             lender: FakeLender::new(Answer::Grant),
             persona: FakePersona(Cell::new(false)),
@@ -4466,6 +4475,97 @@ fn a_refused_result_leaves_its_replies_in_force_and_they_are_told_again() {
     rig.mind.committed(vec![self_reply("self-r-r1", "Done.")]);
     assert_eq!(failure_of(rig.go()), Some(Failure::Undecodable));
     assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), None, "nothing is heard that was not answered");
+}
+
+/// A reply another writer resolved after it was told is out of force: its resolution is refused, it is not told again, and it does not
+/// keep the reply told beside it from being heard.
+#[test]
+fn a_reply_put_out_of_force_after_it_was_told_leaves_for_good_and_holds_no_other_reply_hostage() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[]), says(&[]), says(&[]), says(&[])]);
+    rig.mind.committed(her_self_asked());
+    rig.mind.committed(vec![self_reply("self-r-r1", "One."), self_reply("self-r-r2", "Two.")]);
+    rig.clock.step.set(1);
+    rig.model.linger.set(true);
+    rig.open_the_run();
+    let timeline = Timeline::over(&rig.mind);
+    let (now, linger, deliveries, echoes) = (rig.clock.now.clone(), rig.model.linger.clone(), rig.chat.deliveries.clone(), Cell::new(0u64));
+    let doing_then = timeline.doing.clone();
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        echoes.set(echoes.get() + 1);
+        now.set(now.get() + PAST_THE_REPLY_READ_MS);
+        if echoes.get() == 1 {
+            // Told on the first line; someone else resolves the first before her answer is heard.
+            doing_then.borrow_mut().push_back(vec![PipelineDocument::Resolution(eureka_pipeline::PipelineResolution {
+                subject: reference(K::Reply, &reply_id("self-r-r1")),
+                sequence: 1,
+                outcome: ResolutionOutcome::Recorded { reason: "elsewhere".into() },
+                rationale: "Resolved by another writer.".into(),
+                resolved_on: Date("2026-10-09".into()),
+            })]);
+        }
+        if echoes.get() <= 3 {
+            deliveries.borrow_mut().push(operator_says(echoes.get() + 1, "and on"));
+        } else {
+            linger.set(false);
+        }
+    }));
+    assert_eq!(failure_of(rig.start_over(&timeline, &config())), None);
+    let lines = told(&rig);
+    let told_of = |label: &str| all_replies(&lines).iter().filter(|line| line.contains(&reply_id(label))).count();
+    assert_eq!((told_of("self-r-r1"), told_of("self-r-r2")), (1, 1), "each told once: {lines:?}");
+    assert!(lines.len() >= 3, "later lines followed: {lines:?}");
+    assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), Some(ResolutionOutcome::Recorded { reason: "elsewhere".into() }));
+    assert_eq!(outcome_of(&rig, &reply_id("self-r-r2")), heard_outcome(), "the reply beside it was heard");
+}
+
+/// A reply that reaches a session with no chat pending is read at the next interval, told on the line it makes, and resolved.
+#[test]
+fn a_reply_reaching_an_idle_session_with_no_chat_pending_is_told_once_and_resolved() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[]), says(&[])]);
+    rig.mind.committed(her_self_asked());
+    rig.clock.step.set(1);
+    rig.model.linger.set(true);
+    rig.open_the_run();
+    let timeline = Timeline::over(&rig.mind);
+    let (now, linger, results) = (rig.clock.now.clone(), rig.model.linger.clone(), Cell::new(0u64));
+    let doing_then = timeline.doing.clone();
+    *rig.model.before_result.borrow_mut() = Some(Box::new(move || {
+        results.set(results.get() + 1);
+        now.set(now.get() + PAST_THE_REPLY_READ_MS);
+        if results.get() == 1 {
+            // Her first line is answered and acked; with nothing left in the chat, the reply arrives while she is idle, and the poll after that result reads it.
+            doing_then.borrow_mut().push_back(vec![self_reply("self-r-r1", "The shaders are reviewed.")]);
+        } else {
+            linger.set(false);
+        }
+    }));
+    assert_eq!(failure_of(rig.start_over(&timeline, &config())), None);
+    let lines = told(&rig);
+    assert_eq!(all_replies(&lines).len(), 1, "told once: {lines:?}");
+    assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), heard_outcome());
+}
+
+/// A reply read while a written line is not yet echoed waits, and a later read of the same interval does not wait it twice.
+#[test]
+fn a_reply_waiting_across_a_read_while_a_line_is_not_echoed_is_told_once() {
+    let rig = Rig::new(vec![operator_says(1, "hello")], &[says(&[]), says(&[])]);
+    rig.mind.committed(her_self_asked());
+    rig.clock.step.set(PAST_THE_REPLY_READ_MS);
+    rig.open_the_run();
+    let timeline = Timeline::over(&rig.mind);
+    let doing_then = timeline.doing.clone();
+    // The first line is written; her reply arrives, and the echo is held past three reads of her replies.
+    rig.model.stall.set(3);
+    let arrived = Cell::new(false);
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        if !arrived.replace(true) {
+            doing_then.borrow_mut().push_back(vec![self_reply("self-r-r1", "Which shader first?")]);
+        }
+    }));
+    assert_eq!(failure_of(rig.start_over(&timeline, &config())), None);
+    let lines = told(&rig);
+    assert_eq!(all_replies(&lines).len(), 1, "told once: {lines:?}");
+    assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), heard_outcome());
 }
 
 /// Nothing a reply's text holds passes for a message, a notice or a field of another reply.
