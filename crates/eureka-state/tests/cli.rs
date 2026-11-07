@@ -2025,7 +2025,7 @@ fn d2_a_cited_record_is_never_a_neighbour_and_top_k_bounds_each_anchor() {
     let mut asked: Vec<u32> = queried(&seen).into_iter().map(|(_, top_k)| top_k).collect();
     asked.sort();
     assert_eq!(asked, [5, 5], "top_k 3 plus the two cited");
-    let (server, seen) = scene.serve();
+    let (server, seen) = scene.rank("Beta", vec![]).serve();
     let ran = dispatch(server.addr, &brief_hook(brief), &["--top-k", "2"]);
     assert_eq!(recalled_ids(&ran, brief), ["t:ruling:n1", "t:ruling:n2"]);
     assert!(queried(&seen).iter().all(|(_, top_k)| *top_k == 4));
