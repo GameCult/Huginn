@@ -55,7 +55,7 @@
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
 //! parsed is stored but a result's text, as a reply.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
@@ -152,7 +152,7 @@ pub const SESSION_NAMESPACE: Uuid = Uuid::NAMESPACE_OID;
 /// skill: it names the skill, the instance and the run id.
 pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
     format!(
-        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs. Briefs reach you one conversation at a time, and what you say ending a turn reaches your Persona only in the conversation of the briefs that turn answers; a turn that took in no brief continues the one before.\n\n{}",
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs. Briefs reach you one conversation at a time. What you say ending a turn reaches your Persona in the conversation of the briefs that turn took in. When a background task you started finishes, its result goes to the conversation of the turn that started it, and no other conversation's brief is told into that turn. A result that cannot be placed reaches your Persona only as a pointer to it by id, without its text.\n\n{}",
         instance.0,
         run.id.0,
         render_plan(plan_quota, now_ms)
@@ -519,14 +519,22 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawne
     let Some((run, claims)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
     let open = inbox::derive(mind, &HashSet::new())?;
     // One Self turn answers one conversation: the start set is the claimed briefs and the open briefs of the first claimed brief's
-    // conversation (with no claimed brief, of the oldest open brief's). The rest are derived by poll, one conversation at a time.
-    let conversation = claims.iter().find_map(|claim| open.iter().find(|brief| brief.id == claim.id.0)).or(open.first()).map(|brief| brief.conversation.clone());
-    // A claim of another conversation, or one no longer open beside open briefs of a conversation, is not rendered or carried:
-    // the start line holds one conversation only.
-    let claims: Vec<PipelineRef> = claims
-        .into_iter()
-        .filter(|claim| claim.kind != PipelineKind::FollowUp || open.iter().find(|brief| brief.id == claim.id.0).map_or(conversation.is_none(), |brief| Some(&brief.conversation) == conversation.as_ref()))
-        .collect();
+    // conversation (with no claimed brief, of the oldest open brief's). A claim no longer open (resolved) has its conversation read by
+    // key from the mind, as a reply's briefs are: the gate opens only for it. The rest are derived by poll, one conversation at a time.
+    let mut claimed: Vec<(PipelineRef, Option<Conversation>)> = Vec::new();
+    for claim in claims {
+        let of = if claim.kind != PipelineKind::FollowUp {
+            None
+        } else if let Some(brief) = open.iter().find(|brief| brief.id == claim.id.0) {
+            Some(brief.conversation.clone())
+        } else {
+            inbox::conversation_by_key(mind, &claim.id.0).with_context(|| format!("the claim `{}` could not be read from the mind", claim.id.0))?
+        };
+        claimed.push((claim, of));
+    }
+    let conversation = claimed.iter().find_map(|(_, of)| of.clone()).or_else(|| open.first().map(|brief| brief.conversation.clone()));
+    // A claim of another conversation is not rendered or carried: the start line holds one conversation only.
+    let claims: Vec<PipelineRef> = claimed.into_iter().filter(|(claim, of)| claim.kind != PipelineKind::FollowUp || *of == conversation).map(|(claim, _)| claim).collect();
     let mut task = task_section(mind, &claims)?;
     let mut told: Vec<Brief> = open.into_iter().filter(|brief| claims.iter().any(|claim| claim.id.0 == brief.id) || Some(&brief.conversation) == conversation.as_ref()).collect();
     let also: Vec<&Brief> = told.iter().filter(|brief| !claims.iter().any(|claim| claim.id.0 == brief.id)).collect();
@@ -588,10 +596,15 @@ struct SelfInbox<'a> {
     /// The conversation of the briefs carried or echoed and not yet answered by a reply: while it is set, only that conversation's briefs
     /// are told, so what she says ending a turn reaches her Persona in one conversation. None when every brief told has been answered.
     conversation: Option<Conversation>,
-    /// The briefs the last reply answered. A result that took in no brief (a task notification) continues that turn, so it answers them,
-    /// only while every brief this run told is of one conversation: the actuator cannot tell whose work a notification is, so once two
-    /// conversations were told it answers nothing, is told in no session and stays in force.
+    /// The briefs the last reply answered. A result that took in no brief and follows no task notification continues that turn, so it
+    /// answers them, only while every brief this run told is of one conversation; once two were told it answers nothing and is pointed at.
     last_answers: Vec<String>,
+    /// What each background task answers, by the `tool_use_id` the stream carries on its start: the briefs of the turn that started it.
+    /// A notification's result goes to that conversation.
+    tasks: HashMap<String, Vec<String>>,
+    /// The `tool_use_id`s of task notifications whose turn has not yet ended in a result that took in no brief. While any is pending, a
+    /// brief is written only when it is of the conversation the notification is attributed to.
+    notified: Vec<String>,
     /// The flush was written and the CLI has not yet taken it.
     flush_written: bool,
     /// The CLI took the flush and its result has not come: that result is the session's note to its successor, never a reply to a brief.
@@ -612,7 +625,7 @@ impl<'a> SelfInbox<'a> {
                 carried.push(brief.id.clone());
             }
         }
-        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), conversation, last_answers: Vec::new(), flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
+        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), conversation, last_answers: Vec::new(), tasks: HashMap::new(), notified: Vec::new(), flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
     }
 
     /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps the reply and never ends the session.
@@ -633,18 +646,13 @@ impl<'a> SelfInbox<'a> {
     fn reply_to(&mut self, line: &str, ok: bool) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         let text = result_text(&event);
-        if ok && !text.trim().is_empty() {
+        let flush = std::mem::take(&mut self.flushing);
+        // The flush result is the session's note to its successor, in the journal: it is no reply, so nothing ever points at it.
+        if ok && !flush && !text.trim().is_empty() {
             self.replies += 1;
             let run_label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0);
-            let flush = std::mem::take(&mut self.flushing);
-            let taken = if flush { Vec::new() } else { std::mem::take(&mut self.echoed) };
-            let answered: Vec<String> = if !taken.is_empty() {
-                taken.into_iter().take(64).collect()
-            } else if !flush && self.one_conversation_told() {
-                self.last_answers.clone()
-            } else {
-                Vec::new()
-            };
+            let taken = std::mem::take(&mut self.echoed);
+            let answered: Vec<String> = if taken.is_empty() { self.briefless_answers() } else { taken.into_iter().take(64).collect() };
             let answers = answered.iter().map(|id| PipelineRef { kind: PipelineKind::FollowUp, id: id.as_str().into() }).collect();
             if !answered.is_empty() {
                 self.last_answers = answered;
@@ -657,6 +665,10 @@ impl<'a> SelfInbox<'a> {
                 text: cut_text(text, REPLY_TEXT_LIMIT).as_str().into(),
             });
         }
+        // A turn that took in no brief has ended: it was the turn of the notifications pending, which are now answered.
+        if !flush && self.echoed.is_empty() {
+            self.notified.clear();
+        }
         self.admit_unadmitted();
         self.conversation = self.carried.first().or(self.echoed.first()).and_then(|id| self.conversation_of(id));
     }
@@ -666,14 +678,67 @@ impl<'a> SelfInbox<'a> {
         self.told.iter().all(|brief| brief.conversation == self.told[0].conversation)
     }
 
+    /// The briefs a turn that took in no brief answers: those of the turns that started the tasks whose notifications are pending
+    /// (any notification the stream did not attribute makes the result unplaceable), else, with no notification, the turn before
+    /// while the run has told one conversation only.
+    fn briefless_answers(&self) -> Vec<String> {
+        let continued = if self.one_conversation_told() { self.last_answers.clone() } else { Vec::new() };
+        if self.notified.is_empty() {
+            return continued;
+        }
+        let mut answers: Vec<String> = Vec::new();
+        for id in &self.notified {
+            let own = self.tasks.get(id).filter(|briefs| !briefs.is_empty());
+            let Some(own) = own else { return Vec::new() };
+            answers.extend(own.iter().filter(|brief| !answers.contains(brief)).cloned().collect::<Vec<_>>());
+        }
+        answers
+    }
+
+    /// The one conversation the pending notifications are attributed to; none when they name two, or one could not be attributed.
+    fn notified_conversation(&self) -> Option<Conversation> {
+        let answers = self.briefless_answers();
+        let mut conversations = answers.iter().map(|id| self.conversation_of(id));
+        let first = conversations.next()??;
+        conversations.all(|conversation| conversation.as_ref() == Some(&first)).then_some(first)
+    }
+
+    /// What a task's start or a notification in the stream says: a task is answered by the turn that started it.
+    fn note_task(&mut self, line: &str) {
+        if !line.contains("task_started") && !line.contains("task_notification") {
+            return;
+        }
+        let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
+        if event.get("type").and_then(Value::as_str) != Some("system") {
+            return;
+        }
+        let Some(tool_use) = event.get("tool_use_id").and_then(Value::as_str) else {
+            // A notification with no id cannot be placed: the sentinel finds no task, so the turn it opens answers none.
+            if event.get("subtype").and_then(Value::as_str) == Some("task_notification") {
+                self.notified.push(String::new());
+            }
+            return;
+        };
+        match event.get("subtype").and_then(Value::as_str) {
+            Some("task_started") => {
+                // The turn that starts it is answering the briefs echoed, else what a briefless turn answers now.
+                let answers = if self.echoed.is_empty() { self.briefless_answers() } else { self.echoed.iter().take(64).cloned().collect() };
+                self.tasks.entry(tool_use.to_string()).or_insert(answers);
+            }
+            Some("task_notification") if !self.notified.iter().any(|pending| pending == tool_use) => self.notified.push(tool_use.to_string()),
+            _ => {}
+        }
+    }
+
     /// The conversation of a brief told in this run.
     fn conversation_of(&self, id: &str) -> Option<Conversation> {
         self.told.iter().find(|brief| brief.id == id).map(|brief| brief.conversation.clone())
     }
 
     /// Whether a waiting brief may be told now: any when every brief told has been answered, else only the unanswered ones' conversation.
+    /// While a task notification's turn is open, only the conversation the notification is attributed to may be told (none when it cannot be placed).
     fn may_tell(&self, brief: &Brief) -> bool {
-        self.conversation.as_ref().is_none_or(|conversation| *conversation == brief.conversation)
+        (self.notified.is_empty() || self.notified_conversation().as_ref() == Some(&brief.conversation)) && self.conversation.as_ref().is_none_or(|conversation| *conversation == brief.conversation)
     }
 }
 
@@ -693,8 +758,8 @@ impl SessionInbox for SelfInbox<'_> {
     }
 
     fn tell(&mut self) -> Result<String> {
-        // Free, the oldest waiting brief's conversation is the line's; the other conversations' briefs stay untold for a later poll.
-        let conversation = self.conversation.clone().or_else(|| self.waiting.first().map(|brief| brief.conversation.clone()));
+        // The oldest waiting brief the gate lets through decides the line's conversation; the other conversations' briefs stay untold for a later poll.
+        let conversation = self.waiting.iter().find(|brief| self.may_tell(brief)).map(|brief| brief.conversation.clone());
         let (mut mine, rest): (Vec<Brief>, Vec<Brief>) = std::mem::take(&mut self.waiting).into_iter().partition(|brief| Some(&brief.conversation) == conversation.as_ref());
         self.waiting = rest;
         let text = inbox::render(&mine, &self.plan);
@@ -711,6 +776,7 @@ impl SessionInbox for SelfInbox<'_> {
 
     fn line(&mut self, line: &str) {
         self.heard.hear(line);
+        self.note_task(line);
     }
 
     fn echoed(&mut self) {

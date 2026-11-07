@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use cultnet_rs::Selection;
 use eureka_pipeline::PipelineKind;
 use huginn_mind::{PipelineFacts, PipelineStatusSummary};
 
@@ -66,6 +67,15 @@ fn open_briefs(mind: &dyn MindPort) -> Result<Vec<Brief>> {
         .collect();
     briefs.sort_by_key(|brief| brief.ordinal);
     Ok(briefs)
+}
+
+/// The conversation a follow-up was given in, read by its key whether or not it is still in force; none when the mind does not hold it.
+pub(crate) fn conversation_by_key(mind: &dyn MindPort, id: &str) -> Result<Option<persona::Conversation>> {
+    let one = Selection { keys: Some(vec![id.to_string()]), ..of_kind(PipelineKind::FollowUp) };
+    Ok(headers(mind, &one)?.into_iter().find_map(|header| match header.facts {
+        PipelineFacts::FollowUp { origin, .. } => Some(persona::Conversation::of_origin(origin.as_ref())),
+        _ => None,
+    }))
 }
 
 /// Her briefs in force that the session has not been told and no open question
