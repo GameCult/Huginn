@@ -19,6 +19,11 @@ fn t(secs: i64) -> DateTime<Utc> {
     at(secs * 1000)
 }
 
+/// The label of a thought ticked at test-clock `secs`: the Unix seconds of that instant.
+fn ticked(secs: i64) -> String {
+    format!("t{}", t(secs).timestamp())
+}
+
 fn released() -> Effective {
     Effective::Released(Grant::for_test(Slug(INSTANCE.into())))
 }
@@ -86,11 +91,12 @@ struct Wrap<'a> {
     selections: RefCell<Vec<Selection>>,
     admitted: RefCell<Vec<Vec<PipelineDocument>>>,
     forge: Option<RepoActivity>,
+    forge_reads: std::cell::Cell<usize>,
 }
 
 impl<'a> Wrap<'a> {
     fn over(inner: &'a TestMind, scores: &[f32]) -> Self {
-        Self { inner, scores: RefCell::new(scores.iter().copied().collect()), selections: RefCell::default(), admitted: RefCell::default(), forge: None }
+        Self { inner, scores: RefCell::new(scores.iter().copied().collect()), selections: RefCell::default(), admitted: RefCell::default(), forge: None, forge_reads: std::cell::Cell::new(0) }
     }
 
     /// The same mind with a forge that answers `events`, whatever the asker's cursor.
@@ -122,6 +128,7 @@ impl MindPort for Wrap<'_> {
     }
 
     fn stewarded_activity(&self, repos: &[huginn_mind::eureka_pipeline::OrgRepo], after: Option<u64>) -> Result<RepoActivity> {
+        self.forge_reads.set(self.forge_reads.get() + 1);
         match &self.forge {
             Some(activity) => Ok(activity.clone()),
             None => self.inner.stewarded_activity(repos, after),
@@ -137,7 +144,8 @@ impl MindPort for Wrap<'_> {
 /// The seed as the tick builds it: the cheap reads first, then the rest.
 fn seed_of(mind: &dyn MindPort, read: &PersonaRead, since: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Result<Seed> {
     let responsibilities = render_responsibilities(mind, mind.instance(), &BTreeMap::new())?;
-    let fresh = news(mind, mind.instance(), since, &responsibilities, now)?;
+    let mut fresh = mind_news(mind, mind.instance(), since)?;
+    fresh.extend(repo_news(mind, since, &responsibilities, now));
     build_seed(mind, read, since, now, &responsibilities, fresh)
 }
 
@@ -187,7 +195,7 @@ fn mind_with_thought(thought_at: i64) -> TestMind {
     mind.admit_at(t(10));
     mind.committed(vec![memory("m1", MemorySort::Learned, "Libby wants the sounds before the shaders", &["@libby:chat"])]);
     mind.admit_at(t(thought_at));
-    mind.committed(vec![thought_doc("t1", "An earlier drift")]);
+    mind.committed(vec![thought_doc(&ticked(thought_at), "An earlier drift")]);
     mind
 }
 
@@ -271,7 +279,7 @@ fn stimulus_is_what_is_new() {
     mind.admit_at(t(100));
     mind.committed(vec![memory("m1", MemorySort::Learned, "Before the thought, the kettle", &[])]);
     mind.admit_at(t(200));
-    mind.committed(vec![thought_doc("t1", "A drift")]);
+    mind.committed(vec![thought_doc(&ticked(200), "A drift")]);
     mind.admit_at(t(300));
     mind.committed(vec![memory("m2", MemorySort::Decided, "After the thought, the window", &[]), run("w9", RunTurn::SelfRun, RunOperator::Mind, &[])]);
     mind.admit_at(t(350));
@@ -639,9 +647,9 @@ fn a_flood_of_news_fills_the_stimulus_with_whole_lines_newest_first() {
 fn the_newest_thought_sets_the_cadence_not_the_oldest() {
     let mind = TestMind::seeded();
     mind.admit_at(t(100));
-    mind.committed(vec![thought_doc("t1", "An old drift")]);
+    mind.committed(vec![thought_doc(&ticked(100), "An old drift")]);
     mind.admit_at(t(10_000));
-    mind.committed(vec![thought_doc("t2", "A recent drift")]);
+    mind.committed(vec![thought_doc(&ticked(10_000), "A recent drift")]);
     let model = Fake::saying("I turn it over.", &["A new drift"]);
     let persona = persona();
     let wrap = Wrap::over(&mind, &[0.1]);
@@ -710,11 +718,11 @@ fn new_repo_activity_makes_a_tick_due_and_the_hourly_memory_comes_for_an_active_
     mind.admit_at(t(100));
     mind.committed(vec![memory("m1", MemorySort::Learned, "An old thing she holds", &[])]);
     mind.admit_at(t(week));
-    mind.committed(vec![thought_doc("t1", "An earlier drift")]);
+    mind.committed(vec![thought_doc(&ticked(week), "An earlier drift")]);
     let model = Fake::saying("I turn it over.", &["A new drift", "Another"]);
     let persona = persona();
     let fresh = Wrap::over(&mind, &[0.1, 0.2]).with_forge(vec![push(2, week + 1000)]);
-    let Outcome::Thought { thought, admitted: true } = tick(&organs(&fresh, &persona, &model), &|| released(), Mode::Live, t(week + 1000 + STREAM_MIN_GAP_S)).unwrap() else { panic!("new activity past the minimum gap") };
+    let Outcome::Thought { thought, admitted: true } = tick(&organs(&fresh, &persona, &model), &|| released(), Mode::Live, t(week + 2 * STREAM_MIN_GAP_S)).unwrap() else { panic!("new activity at the next gap mark") };
     assert!(thought.stimulus.0.contains("Changes in your repos"), "{}", thought.stimulus.0);
 
     let model = Fake::saying("I turn it over.", &["Yet another"]);
@@ -772,3 +780,84 @@ fn every_thought_records_the_fixed_parts_of_its_prompts() {
     assert_eq!(model.projected.borrow()[0], rebuilt, "the trace rebuilds the Projector's exact prompt");
 }
 
+
+/// A thought ticked at 900 s and admitted at 1000 s: what landed at 950 s while the models ran is news to the next one.
+#[test]
+fn what_lands_while_she_thinks_is_news_to_the_next_thought() {
+    let mind = TestMind::seeded();
+    mind.admit_at(t(950));
+    mind.committed(vec![memory("m9", MemorySort::Decided, "Landed while the Projector ran", &[])]);
+    mind.admit_at(t(1000));
+    mind.committed(vec![thought_doc(&ticked(900), "A drift that took a hundred seconds")]);
+    let model = Fake::saying("I turn it over.", &["A new drift"]);
+    let persona = persona();
+    let wrap = Wrap::over(&mind, &[0.1]).with_forge(vec![push(2, 1000), push(1, 950), push(0, 899)]);
+    let Outcome::Thought { thought, admitted: true } = tick(&organs(&wrap, &persona, &model), &|| released(), Mode::Live, t(1901)).unwrap() else { panic!("news past the gap") };
+    assert!(thought.stimulus.0.contains("Landed while the Projector ran"), "{}", thought.stimulus.0);
+    assert!(thought.stimulus.0.contains("2 commits pushed by libby"), "the pushes at 950 s and 1000 s, not the one at 899 s: {}", thought.stimulus.0);
+}
+
+#[test]
+fn a_capped_repo_is_judged_by_its_own_events_and_disclosed_when_they_do_not_decide_it() {
+    let mind = mind_with_thought(1000);
+    let read = PersonaRead { state: state(), receipt_id: "r".into() };
+    let cultlib = |id, secs| RepoEvent { repo: "GameCult/CultLib".into(), ..push(id, secs) };
+    let mut two = Wrap::over(&mind, &[]).with_forge(vec![push(2, 1500), cultlib(1, 500)]);
+    two.forge.as_mut().unwrap().capped = vec!["GameCult/Huginn".into(), "GameCult/CultLib".into()];
+    let seed = seed_of(&two, &read, Some(t(1000)), t(1901)).unwrap();
+    assert!(seed.stimulus.to_lowercase().contains("page limit") && seed.stimulus.contains("GameCult/Huginn"), "the repo no event decides stays disclosed: {}", seed.stimulus);
+    assert!(!seed.stimulus.contains("GameCult/CultLib"), "an event before her thought decides CultLib's cap: {}", seed.stimulus);
+    let mut flooded = Wrap::over(&mind, &[]).with_forge(vec![]);
+    flooded.forge.as_mut().unwrap().capped = vec!["GameCult/Huginn".into()];
+    let seed = seed_of(&flooded, &read, Some(t(1000)), t(1901)).unwrap();
+    assert!(seed.news && seed.stimulus.to_lowercase().contains("page limit"), "a cap with no event at all is disclosed: {}", seed.stimulus);
+}
+
+#[test]
+fn a_quiet_hour_reads_the_forge_at_each_gap_mark_only() {
+    let mind = mind_with_thought(1000);
+    let model = Fake::saying("I turn it over.", &["A new drift"]);
+    let persona = persona();
+    let wrap = Wrap::over(&mind, &[0.1]).with_forge(vec![push(1, 500)]);
+    let organs = organs(&wrap, &persona, &model);
+    let mut secs = 1000 + STREAM_POLL_S;
+    while secs < 1000 + STREAM_IDLE_GAP_S {
+        assert_eq!(tick(&organs, &|| released(), Mode::Live, t(secs)).unwrap(), Outcome::NotDue, "at {secs}");
+        secs += STREAM_POLL_S;
+    }
+    assert_eq!(wrap.forge_reads.get(), 3, "one read for each mark crossed at 900, 1800 and 2700 s");
+    assert_eq!(model.calls(), 0);
+}
+
+#[test]
+fn identical_memory_lines_are_each_cited_once() {
+    let mind = TestMind::seeded();
+    mind.admit_at(t(100));
+    mind.committed((0..12).map(|at| memory(&format!("m{at:02}"), MemorySort::Learned, &format!("the same thing {}", "x".repeat(290)), &["@libby:chat"])).collect());
+    let read = PersonaRead { state: state(), receipt_id: "r".into() };
+    let seed = seed_of(&Wrap::over(&mind, &[]), &read, Some(t(300)), t(400)).unwrap();
+    let shown = seed.context.lines().filter(|line| line.contains("the same thing")).count();
+    let cited = seed.reads.iter().filter(|read| read.kind == PipelineKind::Memory).count();
+    assert!(shown >= 1 && cited == shown, "{shown} lines shown, {cited} cited");
+}
+
+/// The environment's proxy settings are read when an agent is built, so the check runs in a child process that has them.
+#[test]
+fn the_stream_agent_ignores_the_proxy_environment() {
+    if std::env::var("STREAM_PROXY_CHILD").is_ok() {
+        let plain: ureq::Agent = ureq::Agent::config_builder().build().into();
+        assert!(plain.config().proxy().is_some(), "the child's environment names a proxy");
+        let stream = OllamaStream::open("http://127.0.0.1:9", "p", "b").unwrap();
+        assert!(stream.agent.config().proxy().is_none(), "the stream's agent took the environment's proxy");
+        assert_eq!(stream.agent.config().max_redirects(), 0);
+        return;
+    }
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "stream::tests::the_stream_agent_ignores_the_proxy_environment", "--nocapture"])
+        .env("STREAM_PROXY_CHILD", "1")
+        .env("ALL_PROXY", "http://192.0.2.1:3128")
+        .env("HTTP_PROXY", "http://192.0.2.1:3128")
+        .output()
+        .unwrap();
+    assert!(child.status.success(), "{}{}", String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+}

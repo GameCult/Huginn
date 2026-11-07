@@ -1,6 +1,6 @@
 //! `mind-stream --instance <slug> [--once] [--dry-run]`: her stream of thought.
 //!
-//! Without `--once` it runs forever: one `mind_body::stream::tick` per `POLL_S`, or per
+//! Without `--once` it runs forever: one `mind_body::stream::tick` per `STREAM_POLL_S`, or per
 //! `STREAM_MIN_GAP_S` after a blank or a fault. `--dry-run` runs one tick that admits nothing and
 //! prints the thought it would admit as JSON. A model or mind fault ends the tick, never the
 //! process: it is one line on stderr. This reads the process's arguments and environment, which
@@ -20,10 +20,9 @@ use eureka_pipeline::Slug;
 use eureka_state::HuginnClient;
 use mind_body::control::read_effective;
 use mind_body::queue::HuginnMind;
-use mind_body::stream::{HuginnPersonaSource, Mode, OllamaStream, Organs, Outcome, STREAM_MIN_GAP_S, tick};
+use mind_body::stream::{HuginnPersonaSource, Mode, OllamaStream, Organs, Outcome, STREAM_MIN_GAP_S, STREAM_POLL_S, tick};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
-const POLL_S: u64 = 60;
 
 #[allow(clippy::disallowed_methods, reason = "the binary reads its own environment, and hands it to the library")]
 fn setting(name: &str) -> Option<String> {
@@ -95,7 +94,7 @@ fn run() -> Result<()> {
         if once {
             return if faulted { Err(anyhow!("the tick faulted")) } else { Ok(()) };
         }
-        std::thread::sleep(Duration::from_secs(if waits { STREAM_MIN_GAP_S as u64 } else { POLL_S }));
+        std::thread::sleep(Duration::from_secs(if waits { STREAM_MIN_GAP_S as u64 } else { STREAM_POLL_S as u64 }));
     }
 }
 

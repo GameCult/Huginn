@@ -36,6 +36,8 @@ pub const AGENT: &str = "mind-stream";
 
 /// No tick sooner than this after her newest thought, whatever has happened.
 pub const STREAM_MIN_GAP_S: i64 = 900;
+/// How often the stream process polls: the unit in which a poll "crosses" a `STREAM_MIN_GAP_S` mark.
+pub const STREAM_POLL_S: i64 = 60;
 /// A tick is due after this long even when nothing has happened.
 pub const STREAM_IDLE_GAP_S: i64 = 3600;
 /// The most bytes of context and of stimulus the Projector is shown.
@@ -128,6 +130,9 @@ impl OllamaStream {
             .timeout_global(Some(Duration::from_secs(900)))
             .timeout_connect(Some(Duration::from_secs(3)))
             .http_status_as_error(false)
+            // The host checked above is the host connected to: no proxy from the environment, no redirect to elsewhere.
+            .proxy(None)
+            .max_redirects(0)
             .build()
             .into();
         Ok(Self { base: format!("http://{authority}"), projector_model: projector_model.to_owned(), base_model: base_model.to_owned(), agent })
@@ -331,7 +336,7 @@ fn replies(mind: &dyn MindPort, instance: &Slug) -> Result<Vec<(PipelineRef, Str
 }
 
 /// What her mind admitted since `since`, newest first: one line and one citation each.
-fn news(mind: &dyn MindPort, instance: &Slug, since: Option<DateTime<Utc>>, responsibilities: &Responsibilities, now: DateTime<Utc>) -> Result<Vec<(String, Option<PipelineRef>)>> {
+fn mind_news(mind: &dyn MindPort, instance: &Slug, since: Option<DateTime<Utc>>) -> Result<Vec<(String, Option<PipelineRef>)>> {
     let after = |view: &PipelineDocumentView| since.is_none_or(|since| admitted_at(view).is_some_and(|at| at > since));
     let mut found: Vec<(u64, String, PipelineRef)> = Vec::new();
     for view in documents(mind, in_force(mine(PipelineKind::Memory, instance)), RECENT_READ)?.into_iter().filter(&after) {
@@ -353,24 +358,26 @@ fn news(mind: &dyn MindPort, instance: &Slug, since: Option<DateTime<Utc>>, resp
         }
     }
     found.sort_by_key(|(ordinal, ..)| std::cmp::Reverse(*ordinal));
-    let mut out: Vec<(String, Option<PipelineRef>)> = found.into_iter().map(|(_, line, id)| (line, Some(id))).collect();
-    // Her stewarded repos' activity by others is the forge's word, not a document; a daemon with no forge adds nothing.
-    // Only what happened after her newest thought is news, and the notice is stamped with when it happened.
-    if !responsibilities.repos.is_empty()
-        && let Ok(mut activity) = mind.stewarded_activity(&responsibilities.repos, None)
-    {
-        let since_ms = since.map_or(0, |since| u64::try_from(since.timestamp_millis()).unwrap_or(0));
-        activity.events.retain(|event| since.is_none() || event.at > since_ms);
-        // A capped repo has no time of its own: it is news only beside an event that is.
-        if activity.events.is_empty() && since.is_some() {
-            activity.capped.clear();
-        }
-        let happened = activity.events.iter().map(|event| event.at).max().unwrap_or_else(|| u64::try_from(now.timestamp_millis()).unwrap_or(0));
-        if let Some(line) = repo_notice_line(&activity, happened) {
-            out.push((format!("- {line}"), None));
-        }
+    Ok(found.into_iter().map(|(_, line, id)| (line, Some(id))).collect())
+}
+
+/// Her stewarded repos' activity by others is the forge's word, not a document; a daemon with no forge adds nothing.
+/// Only what happened after `since` is news, and the notice is stamped with when it happened.
+fn repo_news(mind: &dyn MindPort, since: Option<DateTime<Utc>>, responsibilities: &Responsibilities, now: DateTime<Utc>) -> Option<(String, Option<PipelineRef>)> {
+    if responsibilities.repos.is_empty() {
+        return None;
     }
-    Ok(out)
+    let mut activity = mind.stewarded_activity(&responsibilities.repos, None).ok()?;
+    if let Some(since) = since {
+        let since_ms = u64::try_from(since.timestamp_millis()).unwrap_or(0);
+        // A capped repo's unread entries are older than the oldest it showed. Once the read shows an event of the repo at or before
+        // `since` they are older than `since` too; until then the cap is disclosed, whatever other repos showed.
+        let decided: Vec<String> = activity.events.iter().filter(|event| event.at <= since_ms).map(|event| event.repo.identity()).collect();
+        activity.capped.retain(|repo| !decided.contains(&repo.identity()));
+        activity.events.retain(|event| event.at > since_ms);
+    }
+    let happened = activity.events.iter().map(|event| event.at).max().unwrap_or_else(|| u64::try_from(now.timestamp_millis()).unwrap_or(0));
+    repo_notice_line(&activity, happened).map(|line| (format!("- {line}"), None))
 }
 
 /// One in-force memory of hers older than `UNBIDDEN_AFTER_DAYS`, picked uniformly by `pick`.
@@ -422,8 +429,13 @@ fn build_seed(mind: &dyn MindPort, persona: &PersonaRead, since: Option<DateTime
     ];
     let kept: Vec<String> = sections.iter().zip(BUDGETS).map(|(text, (_, budget))| cap(text, budget)).collect();
     // The reads are what the Projector was shown after the bounds: the recall lines and replies the capped sections kept.
-    for entry in recalled.entries().filter(|entry| kept[5].contains(entry.line.trim_end())) {
-        cite(PipelineRef { kind: PipelineKind::Memory, id: Short(entry.id.clone()) });
+    // Each shown line is one citation: a memory reading like another takes its own line, not a share of the first's.
+    let mut shown: Vec<&str> = kept[5].lines().collect();
+    for entry in recalled.entries() {
+        if let Some(at) = shown.iter().position(|line| *line == entry.line.trim_end()) {
+            shown.remove(at);
+            cite(PipelineRef { kind: PipelineKind::Memory, id: Short(entry.id.clone()) });
+        }
     }
     let replies_shown = kept[6].lines().count().saturating_sub(1);
     heard.iter().take(replies_shown).for_each(|(id, _)| cite(id.clone()));
@@ -528,10 +540,19 @@ fn due(since: Option<DateTime<Utc>>, now: DateTime<Utc>, news: bool) -> bool {
     }
 }
 
+/// When her newest thought was ticked: its label's instant, never later than its admission. The models take minutes between the
+/// two, and what the mind or the forge admitted meanwhile is news to the next thought, which the admission time would hide.
 fn newest_thought(mind: &dyn MindPort) -> Result<Option<DateTime<Utc>>> {
     let newest = cultnet_rs::Selection { descending: true, limit: Some(1), ..mine(PipelineKind::Thought, mind.instance()) };
     let PipelinePageItems::Headers(found) = mind.query(&newest)?.items else { bail!("the mind answered documents to a header selection") };
-    Ok(found.iter().filter_map(|header| DateTime::parse_from_rfc3339(&header.admission.admitted_at).ok()).map(|at| at.with_timezone(&Utc)).max())
+    Ok(found
+        .iter()
+        .filter_map(|header| {
+            let admitted = DateTime::parse_from_rfc3339(&header.admission.admitted_at).ok()?.with_timezone(&Utc);
+            let label = header.id.id.0.rsplit(':').next().and_then(|label| label.strip_prefix('t')).and_then(|label| label.parse::<i64>().ok()).and_then(|label| DateTime::from_timestamp(label, 0));
+            Some(label.map_or(admitted, |at| at.min(admitted)))
+        })
+        .max())
 }
 
 fn bounded(text: &str, max: usize) -> String {
@@ -550,8 +571,14 @@ pub fn tick(organs: &Organs, brake: &dyn Fn() -> Effective, mode: Mode, now: Dat
     }
     // Due-ness is decided on the cheap reads; the seed (recall, runs, replies) is built only for a tick that may run.
     let responsibilities = render_responsibilities(mind, mind.instance(), &BTreeMap::new())?;
-    let fresh = news(mind, mind.instance(), since, &responsibilities, now)?;
-    if mode == Mode::Live && !due(since, now, !fresh.is_empty()) {
+    let mut fresh = mind_news(mind, mind.instance(), since)?;
+    // The forge is read when a tick will run anyway, and on a quiet stretch only by the poll that crosses each minimum-gap mark.
+    let quiet = mode == Mode::Live && !due(since, now, !fresh.is_empty());
+    if quiet && since.is_some_and(|at| (now - at).num_seconds() % STREAM_MIN_GAP_S >= STREAM_POLL_S) {
+        return Ok(Outcome::NotDue);
+    }
+    fresh.extend(repo_news(mind, since, &responsibilities, now));
+    if quiet && fresh.is_empty() {
         return Ok(Outcome::NotDue);
     }
     let persona = organs.persona.persona()?;
