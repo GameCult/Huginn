@@ -88,18 +88,12 @@ pub(crate) fn names_whole_word(text: &str, name: &str, exact: bool) -> bool {
     if name.is_empty() {
         return false;
     }
-    let mut from = 0;
-    while let Some(found) = text[from..].find(&name) {
-        let start = from + found;
-        let before = text[..start].chars().next_back();
-        let after = text[start + name.len()..].chars().next();
-        if !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric) {
-            return true;
-        }
-        // Step one character, not one name: matches may overlap ("ab ab" in "xab ab ab").
-        from = start + text[start..].chars().next().map_or(1, char::len_utf8);
-    }
-    false
+    // Every character offset, not every non-overlapping match: a name may overlap itself ("ab ab" in "xab ab ab").
+    text.char_indices().any(|(start, _)| {
+        text[start..].starts_with(&name)
+            && !text[..start].chars().next_back().is_some_and(char::is_alphanumeric)
+            && !text[start + name.len()..].chars().next().is_some_and(char::is_alphanumeric)
+    })
 }
 
 #[cfg(test)]

@@ -6475,6 +6475,8 @@ fn two_name_addressed_minds_take_turns_and_every_unaddressed_mind_follows_them()
         let mut named = [rank("@libby:chat"), rank("@nibu:chat")];
         named.sort_unstable();
         assert_eq!(named, [0, 1], "event {n}: {ranks:?}");
+        let event_id = format!("$both{n}");
+        assert_eq!(rank("@libby:chat") < rank("@nibu:chat"), stagger_hash("@libby:chat", &event_id) < stagger_hash("@nibu:chat", &event_id), "event {n}: the lower hash goes first");
         assert!(ranks.iter().filter(|(who, _)| who != "@libby:chat" && who != "@nibu:chat").all(|(_, rank)| *rank >= 2), "event {n}: {ranks:?}");
     }
 }
@@ -6507,6 +6509,10 @@ fn with_no_table_the_stagger_ranks_tags_and_her_own_names_and_to_lists_tags_only
     let own = own_addressee(&config);
     let fallback = addressing_of(&config, None, &own);
     assert_eq!(fallback.iter().map(|mind| mind.matrix_id()).collect::<Vec<_>>(), ["@eureka:chat", "@libby:chat", "@aqua:chat"]);
+    let steward = own.clone().with_projects([crate::address::Name { text: "BDS".into(), exact: true }]);
+    let with_projects = addressing_of(&config, None, &steward);
+    let bds = delivery_of(1, "swarm", "@op:chat", "BDS is down", "$bds");
+    assert_eq!(with_projects.iter().map(|mind| addresses(mind, &bds)).collect::<Vec<_>>(), [true, false, false], "only her own row is her session addressee");
     let tagged = ChatDelivery { mentions: vec!["@libby:chat".into()], ..delivery_of(1, "swarm", "@op:chat", "is BDS green?", "$tag") };
     assert!(stagger_ms(&config, &fallback, &tagged) >= STAGGER_STEP_S * 1000, "the tagged Mind goes first; an unaddressed one follows");
     let line = message_lines(&config, &own, &fallback, &[tagged], &[vec![]]);
@@ -6522,4 +6528,38 @@ fn to_lists_a_mind_named_by_her_project() {
     assert!(line.contains(" to=[\"@nibu:chat\"] ") && !line.contains("to_you"), "{line}");
     let by_a_mind = message_lines(&config, &own, &table, &[delivery_of(1, "swarm", "@nibu:chat", "is BDS green?", "$own")], &[vec![]]);
     assert!(!by_a_mind.contains("to="), "a Mind naming her own project is not shown as addressing herself: {by_a_mind}");
+}
+
+struct FakeHeartbeat(RefCell<Option<crate::heartbeat::Addressing>>);
+
+impl HeartbeatView for FakeHeartbeat {
+    fn latest(&self) -> Result<Option<PollTrace>> {
+        Ok(None)
+    }
+
+    fn addressing(&self) -> Result<Option<crate::heartbeat::Addressing>> {
+        Ok(self.0.borrow().clone())
+    }
+}
+
+#[test]
+fn a_poll_with_untold_messages_reads_the_heartbeats_table_again() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let config = three_minds("@eureka:chat");
+    let view = FakeHeartbeat(RefCell::new(None));
+    let (sandbox, scratch) = (rig.sandbox(), rig.scratch());
+    let mut organs = rig.organs(&sandbox, &scratch);
+    organs.heartbeat = Some(&view);
+    let (control, swarm, run) = (FileSource::new(rig.store()), FileSource::new(rig.swarm_store()), rig.the_run());
+    let mut progress = Progress::default();
+    let started_ms = unix_ms(rig.clock.now());
+    let mut inbox = PersonaInbox::new(&organs, &control, &swarm, &config, &run, &mut progress, vec![], started_ms, String::new());
+    let message = unaddressed_at_rank(1, 2, "who takes the bad day simulator?");
+    arrives(&rig, &message);
+    assert!(!inbox.poll().unwrap().pending, "no table: unaddressed, she waits her rank");
+    let mut minds = eight_minds(&[("@eureka:chat", "GameCult/BadDaySimulator", &[])]);
+    minds.truncate(1);
+    *view.0.borrow_mut() = Some(crate::heartbeat::Addressing { minds });
+    assert!(inbox.poll().unwrap().pending, "the heartbeat now says the message names her project: she is told at once");
 }
