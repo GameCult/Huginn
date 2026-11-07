@@ -6481,7 +6481,7 @@ fn a_start_opens_a_conversation_for_a_reply_alone_at_most_once() {
 }
 
 fn route(id: &str, at_unix_ms: u64, conversation: Conversation) -> Route {
-    Route { id: id.into(), ordinal: at_unix_ms, at_unix_ms, conversation, origin: None }
+    Route { id: id.into(), ordinal: at_unix_ms, at_unix_ms, conversation, origin: None, pointer: false }
 }
 
 fn at_ms(delivery: ChatDelivery, at_unix_ms: u64) -> ChatDelivery {
@@ -6542,22 +6542,47 @@ fn a_reply_to_a_public_brief_or_a_brief_with_no_origin_is_told_in_the_public_ses
         for words in ["old-brief words", "public-brief words"] {
             assert_eq!(all.contains(words), public, "{words} is told in the public session only: {all}");
         }
-        assert!(!all.contains("no-brief words"), "a reply the Self could not attribute is told in no session: {all}");
+        assert!(!all.contains("no-brief words"), "a reply the Self could not attribute puts no text in any session: {all}");
     }
 }
 
+/// The inputs of the sessions that were told a pointer, and every input the model was given.
+fn pointed_inputs(rig: &Rig) -> (Vec<String>, Vec<String>) {
+    let all: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
+    (all.iter().filter(|input| input.contains("unplaced=true")).cloned().collect(), all)
+}
+
 #[test]
-fn a_reply_whose_briefs_name_two_conversations_is_told_in_no_session_and_stays_in_force() {
+fn a_reply_whose_briefs_name_two_conversations_is_a_text_free_pointer_in_the_public_session_only() {
     assert_eq!(reply_conversation(&[Some(dm_origin(AQUA_DM, "@a:chat")), Some(dm_origin(LIBBY_DM, "@l:chat"))]), None);
     assert_eq!(reply_conversation(&[Some(dm_origin(AQUA_DM, "@a:chat")), None]), None);
     let pending = vec![direct(1, AQUA_DM, "@aqua:chat", AQUA_ASK), direct(2, LIBBY_DM, "@libby:chat", "libby asks about cedar"), delivery(3, "swarm", "@m:chat", "public asks about oak")];
-    let rig = Rig::new(pending, &[says(&[]), says(&[]), says(&[])]);
+    let rig = Rig::new(pending, &[says(&[]), says(&[]), says(&[]), says(&[])]);
     rig.mind.committed(briefs_in_every_room());
     rig.mind.committed(vec![self_reply_to("r-both", &["ask-aqua", "ask-libby"], "both-rooms words")]);
     assert_eq!(failure_of(rig.go()), None);
-    assert_eq!(rig.model.spawns.borrow().len(), 3, "only the deliveries' sessions");
-    assert!(!rig.model.requests.borrow().iter().any(|told| told.input.contains("both-rooms words")));
-    assert!(reply_in_force(&rig.mind, &reply_id("r-both")).unwrap());
+    let (pointed, all) = pointed_inputs(&rig);
+    assert_eq!(pointed.len(), 1, "one pointer, in one session: {all:?}");
+    assert!(pointed[0].contains(&reply_id("r-both")), "{}", pointed[0]);
+    assert!(!pointed[0].contains(AQUA_ASK) && !pointed[0].contains("libby asks about cedar"), "no direct message in the pointer's session: {}", pointed[0]);
+    assert!(!all.iter().any(|input| input.contains("both-rooms words")), "no reply text reaches any line");
+    // The Persona reads it by id: the reply document holds the words the line does not.
+    let PipelineDocument::Reply(reply) = rig.mind.view(K::Reply, &reply_id("r-both")).unwrap().document else { panic!("a reply") };
+    assert_eq!(reply.text.0, "both-rooms words");
+    assert!(!reply_in_force(&rig.mind, &reply_id("r-both")).unwrap(), "heard once, it no longer re-pages on every read");
+}
+
+#[test]
+fn a_reply_that_answers_no_brief_is_a_text_free_pointer_with_its_id() {
+    let rig = Rig::new(vec![delivery(1, "swarm", "@m:chat", "public asks about oak")], &[says(&[]), says(&[])]);
+    rig.mind.committed(briefs_in_every_room());
+    rig.mind.committed(vec![self_reply_to("r-none", &[], "stranded words")]);
+    assert_eq!(failure_of(rig.go()), None);
+    let (pointed, all) = pointed_inputs(&rig);
+    assert_eq!(pointed.len(), 1, "{all:?}");
+    assert!(pointed[0].contains(&reply_id("r-none")) && pointed[0].contains("could not place"), "{}", pointed[0]);
+    assert!(!all.iter().any(|input| input.contains("stranded words")));
+    assert!(!reply_in_force(&rig.mind, &reply_id("r-none")).unwrap());
 }
 
 #[test]
