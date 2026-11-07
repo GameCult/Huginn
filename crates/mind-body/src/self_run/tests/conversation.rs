@@ -116,7 +116,7 @@ fn the_same_conversations_briefs_are_still_told_while_its_turn_is_unanswered() {
     assert_eq!(answered(&mind, 1), vec![id_of("a1"), id_of("a2")]);
 }
 
-/// A task notification or a flush is a turn that took in no brief: it continues the turn before, so its words are that conversation's.
+/// A task notification is a turn that took in no brief: while the run has told one conversation only, it continues the turn before.
 #[test]
 fn a_result_that_took_in_no_brief_answers_the_previous_replys_briefs() {
     let mind = live_mind();
@@ -126,4 +126,99 @@ fn a_result_that_took_in_no_brief_answers_the_previous_replys_briefs() {
     assert!(answered(&mind, 1).is_empty(), "a run's first reply with nothing echoed answers none");
     assert_eq!(answered(&mind, 2), vec![id_of("a1")]);
     assert_eq!(answered(&mind, 3), vec![id_of("a1")], "continues the turn before");
+}
+
+/// The actuator cannot tell whose work a notification is, so once the run has told two conversations a result that took in no brief
+/// answers nothing (her Persona tells such a reply in no session).
+#[test]
+fn a_result_that_took_in_no_brief_answers_nothing_once_two_conversations_were_told() {
+    let mind = live_mind();
+    let steps = vec![
+        Out(echo()),
+        Out(saying("nothing yet")),
+        briefed(&mind, 31, vec![aqua("a1")]),
+        Out(echo()),
+        Out(saying("aqua turn: started a background task")),
+        briefed(&mind, 31, vec![libby("l1")]),
+        Out(echo()),
+        Out(saying("libby turn")),
+        Out(saying("the background task for aqua finished")),
+    ];
+    let ran = mind_run(&mind, steps);
+    assert!(ran.outcome.is_ok());
+    assert_eq!(answered(&mind, 2), vec![id_of("a1")]);
+    assert_eq!(answered(&mind, 3), vec![id_of("l1")]);
+    assert!(answered(&mind, 4).is_empty(), "the notification is told in neither conversation");
+}
+
+/// The flush result is the session's note to its successor: it answers no brief, though one conversation was told and a notification would continue it.
+#[test]
+fn the_result_of_the_flush_answers_no_brief() {
+    let mind = live_mind();
+    persona_commit(&mind, vec![aqua("a1")]);
+    let steps = vec![Out(echo()), Out(at("m1", CEILING_TOKENS)), Out(saying("aqua work")), Out(echo()), Out(saying("note to my successor"))];
+    let ran = mind_run(&mind, steps);
+    assert!(ran.outcome.is_ok());
+    assert_eq!(answered(&mind, 1), vec![id_of("a1")]);
+    assert!(answered(&mind, 2).is_empty(), "the flush is never told as a reply");
+}
+
+/// A restart whose claimed brief was resolved while another conversation's brief is open: the start line holds the open brief only.
+#[test]
+fn a_restart_with_a_resolved_claim_puts_one_conversation_on_the_start_line() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x"), run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    persona_commit(&mind, vec![aqua("a1")]);
+    persona_commit(&mind, vec![libby("l1")]);
+    mind.committed(vec![run("selfrun-a", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("a1")])]);
+    mind.committed(vec![close(brief_ref("a1"), recorded())]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(echo()), Out(saying("libby done"))], Some(0), false);
+    assert!(ran.outcome.is_ok());
+    let start = &ran.written()[0];
+    assert!(start.contains(&id_of("l1")) && !start.contains(&id_of("a1")), "{start}");
+    assert_eq!(answered(&mind, 1), vec![id_of("l1")], "told in the right conversation, none stranded");
+}
+
+/// The claim is the first open brief and another conversation's brief is next: the start set follows the claim.
+#[test]
+fn the_start_set_follows_the_claim_not_the_next_open_brief() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x"), run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    persona_commit(&mind, vec![aqua("a1")]);
+    persona_commit(&mind, vec![libby("l1")]);
+    mind.committed(vec![run("selfrun-a", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("a1")])]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(echo()), Out(saying("aqua done"))], Some(0), false);
+    assert!(ran.outcome.is_ok());
+    let start = &ran.written()[0];
+    assert!(start.contains(&id_of("a1")) && !start.contains(&id_of("l1")), "{start}");
+}
+
+/// A result arrives while a line of its conversation is written and unechoed, after another conversation's brief was told first:
+/// the gate holds, so the other conversation's next brief waits for the reply.
+#[test]
+fn the_gate_holds_across_a_result_while_a_line_of_its_conversation_is_unechoed() {
+    let mind = live_mind();
+    let steps = vec![
+        Out(echo()),
+        Out(saying("nothing yet")),
+        briefed(&mind, 31, vec![libby("l1")]),
+        Out(echo()),
+        Out(saying("l1 done")),
+        briefed(&mind, 31, vec![aqua("a1")]),
+        Out(echo()),
+        briefed(&mind, 31, vec![aqua("a2")]),
+        Out(saying("a1 done")),
+        briefed(&mind, 31, vec![libby("l2")]),
+        Out(echo()),
+        Idle(31),
+        Out(saying("a2 done")),
+        Idle(31),
+        Out(echo()),
+        Out(saying("l2 done")),
+    ];
+    let ran = mind_run(&mind, steps);
+    assert!(ran.outcome.is_ok());
+    let told = tells(&ran);
+    assert!(told.iter().all(|line| u8::from(line.contains(&id_of("l2"))) + u8::from(line.contains(&id_of("a2"))) <= 1), "{told:?}");
+    assert_eq!((answered(&mind, 2), answered(&mind, 3), answered(&mind, 4), answered(&mind, 5)), (vec![id_of("l1")], vec![id_of("a1")], vec![id_of("a2")], vec![id_of("l2")]));
 }

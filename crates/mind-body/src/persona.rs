@@ -961,12 +961,12 @@ impl Conversation {
     }
 }
 
-/// The conversation a reply is told in: the one conversation its briefs' origins name (no brief is the public one),
-/// or none when they name two. A reply of two conversations is told in no session, so no member's words
+/// The conversation a reply is told in: the one conversation its briefs' origins name, or none when they name two or
+/// it answers no brief (a result the Self could not attribute). Such a reply is told in no session, so no member's words
 /// reach another's room, and it stays in force.
 fn reply_conversation(answers: &[Option<MemoryOrigin>]) -> Option<Conversation> {
     let mut conversations = answers.iter().map(|origin| Conversation::of_origin(origin.as_ref()));
-    let Some(first) = conversations.next() else { return Some(Conversation::Public) };
+    let first = conversations.next()?;
     conversations.all(|conversation| conversation == first).then_some(first)
 }
 

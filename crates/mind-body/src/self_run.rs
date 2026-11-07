@@ -517,11 +517,17 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 /// error, and the launch that opens the next run closes the run left open.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let Some((run, claims)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
-    let mut task = task_section(mind, &claims)?;
     let open = inbox::derive(mind, &HashSet::new())?;
     // One Self turn answers one conversation: the start set is the claimed briefs and the open briefs of the first claimed brief's
     // conversation (with no claimed brief, of the oldest open brief's). The rest are derived by poll, one conversation at a time.
     let conversation = claims.iter().find_map(|claim| open.iter().find(|brief| brief.id == claim.id.0)).or(open.first()).map(|brief| brief.conversation.clone());
+    // A claim of another conversation, or one no longer open beside open briefs of a conversation, is not rendered or carried:
+    // the start line holds one conversation only.
+    let claims: Vec<PipelineRef> = claims
+        .into_iter()
+        .filter(|claim| claim.kind != PipelineKind::FollowUp || open.iter().find(|brief| brief.id == claim.id.0).map_or(conversation.is_none(), |brief| Some(&brief.conversation) == conversation.as_ref()))
+        .collect();
+    let mut task = task_section(mind, &claims)?;
     let mut told: Vec<Brief> = open.into_iter().filter(|brief| claims.iter().any(|claim| claim.id.0 == brief.id) || Some(&brief.conversation) == conversation.as_ref()).collect();
     let also: Vec<&Brief> = told.iter().filter(|brief| !claims.iter().any(|claim| claim.id.0 == brief.id)).collect();
     if !also.is_empty() {
@@ -582,8 +588,14 @@ struct SelfInbox<'a> {
     /// The conversation of the briefs carried or echoed and not yet answered by a reply: while it is set, only that conversation's briefs
     /// are told, so what she says ending a turn reaches her Persona in one conversation. None when every brief told has been answered.
     conversation: Option<Conversation>,
-    /// The briefs the last reply answered: a result that took in no brief (a task notification, a flush) continues that turn, so it answers them.
+    /// The briefs the last reply answered. A result that took in no brief (a task notification) continues that turn, so it answers them,
+    /// only while every brief this run told is of one conversation: the actuator cannot tell whose work a notification is, so once two
+    /// conversations were told it answers nothing, is told in no session and stays in force.
     last_answers: Vec<String>,
+    /// The flush was written and the CLI has not yet taken it.
+    flush_written: bool,
+    /// The CLI took the flush and its result has not come: that result is the session's note to its successor, never a reply to a brief.
+    flushing: bool,
     /// Replies made so far; the next is `<run label>-r<n+1>`.
     replies: u32,
     /// Replies the mind did not take: process memory, retried at the next result and once at the end. The journal keeps their text either way.
@@ -600,7 +612,7 @@ impl<'a> SelfInbox<'a> {
                 carried.push(brief.id.clone());
             }
         }
-        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), conversation, last_answers: Vec::new(), replies: 0, unadmitted: Vec::new() }
+        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), conversation, last_answers: Vec::new(), flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
     }
 
     /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps the reply and never ends the session.
@@ -624,10 +636,19 @@ impl<'a> SelfInbox<'a> {
         if ok && !text.trim().is_empty() {
             self.replies += 1;
             let run_label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0);
-            let taken = std::mem::take(&mut self.echoed);
-            let answered: Vec<String> = if taken.is_empty() { self.last_answers.clone() } else { taken.into_iter().take(64).collect() };
+            let flush = std::mem::take(&mut self.flushing);
+            let taken = if flush { Vec::new() } else { std::mem::take(&mut self.echoed) };
+            let answered: Vec<String> = if !taken.is_empty() {
+                taken.into_iter().take(64).collect()
+            } else if !flush && self.one_conversation_told() {
+                self.last_answers.clone()
+            } else {
+                Vec::new()
+            };
             let answers = answered.iter().map(|id| PipelineRef { kind: PipelineKind::FollowUp, id: id.as_str().into() }).collect();
-            self.last_answers = answered;
+            if !answered.is_empty() {
+                self.last_answers = answered;
+            }
             self.unadmitted.push(PipelineReply {
                 instance: self.mind.instance().clone(),
                 label: format!("{run_label}-r{}", self.replies).as_str().into(),
@@ -638,6 +659,11 @@ impl<'a> SelfInbox<'a> {
         }
         self.admit_unadmitted();
         self.conversation = self.carried.first().or(self.echoed.first()).and_then(|id| self.conversation_of(id));
+    }
+
+    /// Whether every brief this run told is of one conversation.
+    fn one_conversation_told(&self) -> bool {
+        self.told.iter().all(|brief| brief.conversation == self.told[0].conversation)
     }
 
     /// The conversation of a brief told in this run.
@@ -679,6 +705,7 @@ impl SessionInbox for SelfInbox<'_> {
     }
 
     fn flush_text(&mut self, why: Why) -> String {
+        self.flush_written = true;
         flush_text(why)
     }
 
@@ -688,6 +715,7 @@ impl SessionInbox for SelfInbox<'_> {
 
     fn echoed(&mut self) {
         self.echoed.append(&mut self.carried);
+        self.flushing |= std::mem::take(&mut self.flush_written);
     }
 
     fn result(&mut self, line: &str, ok: bool, blocked: bool) -> Result<(bool, bool)> {
