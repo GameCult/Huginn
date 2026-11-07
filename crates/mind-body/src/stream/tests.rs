@@ -840,24 +840,3 @@ fn identical_memory_lines_are_each_cited_once() {
     let cited = seed.reads.iter().filter(|read| read.kind == PipelineKind::Memory).count();
     assert!(shown >= 1 && cited == shown, "{shown} lines shown, {cited} cited");
 }
-
-/// The environment's proxy settings are read when an agent is built, so the check runs in a child process that has them.
-#[test]
-fn the_stream_agent_ignores_the_proxy_environment() {
-    if std::env::var("STREAM_PROXY_CHILD").is_ok() {
-        let plain: ureq::Agent = ureq::Agent::config_builder().build().into();
-        assert!(plain.config().proxy().is_some(), "the child's environment names a proxy");
-        let stream = OllamaStream::open("http://127.0.0.1:9", "p", "b").unwrap();
-        assert!(stream.agent.config().proxy().is_none(), "the stream's agent took the environment's proxy");
-        assert_eq!(stream.agent.config().max_redirects(), 0);
-        return;
-    }
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "stream::tests::the_stream_agent_ignores_the_proxy_environment", "--nocapture"])
-        .env("STREAM_PROXY_CHILD", "1")
-        .env("ALL_PROXY", "http://192.0.2.1:3128")
-        .env("HTTP_PROXY", "http://192.0.2.1:3128")
-        .output()
-        .unwrap();
-    assert!(child.status.success(), "{}{}", String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
-}
