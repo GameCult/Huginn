@@ -204,10 +204,13 @@ fn cited(text: &str) -> Vec<String> {
             continue;
         }
         let standing = at == 0 || !(word(bytes[at - 1]) || matches!(bytes[at - 1], b'.' | b':'));
+        if !standing {
+            continue;
+        }
         let mut end = run(at);
         // Dotted campaign slugs: each pass takes a dot and the word after it.
         for _ in 0..bytes.len() {
-            if !(standing && end > at && bytes.get(end) == Some(&b'.') && run(end + 1) > end + 1) {
+            if !(end > at && bytes.get(end) == Some(&b'.') && run(end + 1) > end + 1) {
                 break;
             }
             end = run(end + 1);
@@ -216,7 +219,7 @@ fn cited(text: &str) -> Vec<String> {
             bytes.get(end) == Some(&b':') && bytes[end + 1..].starts_with(kind.as_bytes()) && bytes.get(end + 1 + kind.len()) == Some(&b':')
         });
         match kind {
-            Some(kind) if standing && end > at => {
+            Some(kind) if end > at => {
                 let label = end + kind.len() + 2;
                 let stop = run(label);
                 if stop > label {
@@ -326,6 +329,17 @@ mod tests {
         assert_eq!(cited("日t:ruling:a"), ["t:ruling:a"]);
         assert!(cited(".a:ruling:b").is_empty() && cited("a.:ruling:b").is_empty());
         assert_eq!(cited("a.b.c:ruling:d t:ruling:e"), ["a.b.c:ruling:d", "t:ruling:e"]);
+    }
+
+    #[test]
+    fn a_megabyte_word_run_is_scanned_in_linear_time() {
+        for unit in ["a", "a.", "a-1_"] {
+            let text = format!("{} t:ruling:x", unit.repeat((1 << 20) / unit.len()));
+            let began = std::time::Instant::now();
+            let found = cited(&text);
+            assert!(began.elapsed() < std::time::Duration::from_millis(500), "{unit}: {:?}", began.elapsed());
+            assert_eq!(found, ["t:ruling:x"]);
+        }
     }
 
     #[test]
