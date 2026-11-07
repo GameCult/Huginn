@@ -757,7 +757,7 @@ fn reads_cite_only_what_the_context_showed() {
     assert_eq!(shown, cited.len(), "every memory the context shows is cited");
     let replies_cited = seed.reads.iter().filter(|read| read.kind == PipelineKind::Reply).count();
     let replies_shown = (1..=3).filter(|at| seed.context.contains(&format!("rp{at} "))).count();
-    assert!(replies_shown >= 1 && replies_shown < 3, "the replies section is bounded: {replies_shown}");
+    assert!((1..3).contains(&replies_shown), "the replies section is bounded: {replies_shown}");
     assert_eq!(replies_cited, replies_shown, "replies cited are the replies shown");
 }
 

@@ -39,6 +39,7 @@ struct Args {
     dry_run: bool,
 }
 
+#[allow(clippy::disallowed_methods, reason = "the binary reads its own arguments")]
 fn arguments() -> Result<Args> {
     let mut args = Args { instance: None, once: false, dry_run: false };
     let mut given = std::env::args().skip(1);
