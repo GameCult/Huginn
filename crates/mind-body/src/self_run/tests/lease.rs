@@ -56,7 +56,7 @@ fn a_lease_is_asked_for_before_claude_starts_for_the_units_runtime_cap() {
     let ran = go(vec![Out(result_line())]);
     assert_eq!(ran.asked, vec![LeaseRequest { expires_at_unix_ms: u64::try_from(at_start().timestamp_millis()).unwrap() + TEST_CAP_S * 1000 }], "the request is only the expiry, the cap the unit gave");
     assert_eq!(ran.all.first(), Some(&Event::Lent), "nothing happens before the lease");
-    assert_eq!(ran.all.get(1), Some(&Event::Spawned), "the child is the next thing");
+    assert_eq!(ran.all.get(2), Some(&Event::Spawned), "the child is the next thing after the (empty) kept conversation is cleared");
 }
 
 #[test]

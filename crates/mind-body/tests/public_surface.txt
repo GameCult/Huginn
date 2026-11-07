@@ -220,7 +220,7 @@ mind_body::recall: impl Recalled
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq , PartialOrd , Ord)] pub enum Stop { Interrupt , Terminate , Kill , }
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Cause { Own , FlushRequested , Signalled (Stop) , Unstoppable , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Eof , Exited (Option < i32 >) , }
-mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , LeaseRefused { kind : LeaseRefusalKind } , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 } , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , LeaseRefused { kind : LeaseRefusalKind } , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 , warm_until : Option < DateTime < Utc > > } , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 , stops : Vec < String > } , Echo , TurnBegan , BackgroundTasks { live : Vec < String > , main : Vec < String > , shell : Vec < String > } , TaskBackgrounded { id : String , shell : bool } , TaskNotified { id : String , stopped : bool } , NotificationTaken { id : String } , Result { ok : bool , blocked : bool } , Other , Unreadable , }
 mind_body::self_run: const AGENT : & str
 mind_body::self_run: const CEILING_TOKENS : u64
@@ -237,11 +237,13 @@ mind_body::self_run: const RUN_CAP_VARIABLE : & str
 mind_body::self_run: const SCRATCH_VARIABLE : & str
 mind_body::self_run: const SEED_VARIABLE : & str
 mind_body::self_run: const SESSION_NAMESPACE : Uuid
+mind_body::self_run: const STATE_DIRECTORY_VARIABLE : & str
 mind_body::self_run: const TTL_1H_S : i64
 mind_body::self_run: const TTL_5M_S : i64
 mind_body::self_run: const TTL_MARGIN_S : i64
 mind_body::self_run: fn carry (mind : & dyn MindPort , clock : & dyn Clock , lender : & dyn Lender , spawner : & dyn Spawner , run_cap_s : u64 , out : & mut dyn Write) -> Result < SelfRunOutcome >
-mind_body::self_run: fn claude_args (session : Uuid) -> Vec < String >
+mind_body::self_run: fn claude_args (session : Uuid , resume : Option < & Path >) -> Vec < String >
+mind_body::self_run: fn continue_message (run : & PipelineRef , plan_quota : & [PlanQuota] , now_ms : u64) -> String
 mind_body::self_run: fn read_usage (line : & str) -> Usage
 mind_body::self_run: fn session_id (run : & PipelineRef) -> Uuid
 mind_body::self_run: fn start_message (instance : & Slug , run : & PipelineRef , plan_quota : & [PlanQuota] , now_ms : u64) -> String
@@ -264,8 +266,9 @@ mind_body::self_run: impl std :: error :: Error for SeedLinkRefused
 mind_body::self_run: impl< 'a > SelfInbox < 'a >
 mind_body::self_run: mod inbox
 mind_body::self_run: pub trait Child { fn write_line (& mut self , line : & str) ; fn close_input (& mut self) ; fn next (& mut self , timeout : StdDuration) -> Read ; fn stop (& mut self , how : Stop) -> bool ; }
-mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String] , token : & TokenFd) -> Result < Box < dyn Child > > ; }
+mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String] , token : & TokenFd) -> Result < Box < dyn Child > > ; fn kept (& self) -> Option < Kept > { None } fn keep (& self , _keep : Option < (Uuid , DateTime < Utc >) >) -> Result < () > { Ok (()) } }
 mind_body::self_run: struct ClaudeSpawner  pub-fields[]
+mind_body::self_run: struct Kept # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[session: Uuid, transcript: PathBuf, warm_until: DateTime < Utc >, written_at: DateTime < Utc >, same_seed: bool]
 mind_body::self_run::decide: impl State
 mind_body::self_run::inbox: const OWNER : & str
 mind_body::self_run::inbox: fn backlog (mind : & dyn MindPort) -> Result < Vec < (Brief , String) > >

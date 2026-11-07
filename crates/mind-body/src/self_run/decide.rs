@@ -50,7 +50,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use chrono::{DateTime, Duration, Utc};
 
 use super::{
-    CEILING_TOKENS, Cause, ESCALATE_AFTER_S, EXIT_DRAIN_S, FLUSH_GRACE_S, FLUSH_HEADROOM_TOKENS, LADDER_S, ROTATE_MARGIN_S, SelfRunOutcome, Stop, TTL_1H_S, TTL_5M_S, TTL_MARGIN_S,
+    CEILING_TOKENS, Cause, ESCALATE_AFTER_S, EXIT_DRAIN_S, FLUSH_GRACE_S, FLUSH_HEADROOM_TOKENS, LADDER_S, ROTATE_MARGIN_S, Kept, SelfRunOutcome, Stop, TTL_1H_S, TTL_5M_S, TTL_MARGIN_S,
 };
 
 /// Why the flush was asked: the session's own end, three ways.
@@ -167,6 +167,14 @@ pub(super) struct State {
     /// An ok result has come: the session holds an answer worth its cache.
     answered_once: bool,
     last_result_at: Option<DateTime<Utc>>,
+    /// When the last new request of the main thread began, as far as the stream shows: the line before its first assistant line, never that line's own read time, which comes after the request started. The cache's lifetime runs from a request's start (research `cache-pricing`), so `warm_until` counts from here and never from the last result; a slow response only makes the window shorter than the cache's real life.
+    last_request_at: Option<DateTime<Utc>>,
+    /// When the last line of the stream that matters (an echo, a result, or a request's line) was read: the earliest bound the stream gives on when the next request began, since a request starts after the line before it.
+    stream_at: Option<DateTime<Utc>>,
+    /// The last result was not an error.
+    last_ok: bool,
+    /// The CLI refused a result as over its context limit; once seen, it stays seen.
+    blocked: bool,
     /// The cache lifetime the last result left, in seconds.
     pub(super) ttl_s: i64,
     pub(super) inbox: bool,
@@ -222,7 +230,40 @@ impl State {
 }
 
 fn outcome(state: &State, cause: Cause, code: Option<i32>) -> SelfRunOutcome {
-    SelfRunOutcome::Ended { cause, code, requests: state.requests, prefix: state.prefix }
+    SelfRunOutcome::Ended { cause, code, requests: state.requests, prefix: state.prefix, warm_until: warm_until(state) }
+}
+
+/// Until when the conversation this process ended is worth resuming: its last
+/// request plus its cache's lifetime less the margin. Some only for a clean end
+/// inside the cache's life: no signal was delivered, the child exited 0, no turn
+/// was open, the last result was ok and none was blocked, the prefix is under the
+/// ceiling, and no flush was asked or it was the rotation's. An idle flush means
+/// the cache is about to be evicted and the session is cleared then (ruling
+/// `eureka-body:ruling:live-session-floor-cache-evicts`); a ceiling end would only
+/// flush again. This is the one place a conversation's worth is decided; the next
+/// process resumes it by [`resumes`] (ruling `eureka-body:ruling:session-rotate-and-resume`).
+pub(super) fn warm_until(state: &State) -> Option<DateTime<Utc>> {
+    let clean = state.delivered.is_none()
+        && matches!(state.exited, Some((Some(0), _)))
+        && !state.turn_open
+        && state.last_ok
+        && !state.blocked
+        && state.prefix < CEILING_TOKENS
+        && state.flush.as_ref().is_none_or(|flush| flush.why == Why::Rotation);
+    if !clean {
+        return None;
+    }
+    state.last_request_at.map(|at| at + Duration::seconds(state.ttl_s - TTL_MARGIN_S))
+}
+
+/// Whether a kept conversation is resumed by a process starting at `now`: its
+/// cache is still warm, its seed is the one it was made under, and its record
+/// claims no more warmth than a cache has: a `warm_until` later than the record's
+/// write time plus the longest lifetime (one hour) is forged or wrong, and the
+/// conversation is cold (ruling `eureka-body:ruling:kept-session-ordinary-separation`).
+/// Nothing else decides resume or fresh.
+pub(super) fn resumes(kept: &Kept, now: DateTime<Utc>) -> bool {
+    kept.same_seed && now < kept.warm_until && kept.warm_until <= kept.written_at + Duration::seconds(TTL_1H_S)
 }
 
 /// How the run ended, by what was done to the child: the strongest signal delivered, else the flush, else nothing.
@@ -356,8 +397,11 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
         Event::Request { id, prefix, stops } => {
             state.open_turn(Some(TurnBy::Cli));
             state.stopped_by_us.extend(stops);
+            let began = state.stream_at.or(state.cap.map(|(at, _)| at)).unwrap_or(now);
+            state.stream_at = Some(now);
             if state.seen.insert(id) {
                 state.requests += 1;
+                state.last_request_at = Some(began);
                 state.prefix = prefix;
                 if let Some(flush) = state.flush.as_mut()
                     && flush.consumed
@@ -371,6 +415,7 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
             }
         }
         Event::Echo => {
+            state.stream_at = Some(now);
             state.consumed += 1;
             state.open_turn(Some(TurnBy::Us));
             let consumed = state.consumed;
@@ -387,6 +432,9 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
             let (turns, by) = (state.turns, state.turn_by);
             state.owed.retain(|_, owed| !(owed.taken || (by != TurnBy::Us && owed.since < turns)));
             state.last_result_at = Some(now);
+            state.stream_at = Some(now);
+            state.last_ok = ok;
+            state.blocked |= blocked;
             state.ttl_s = if ttl_1h { TTL_1H_S } else { TTL_5M_S };
             let no_answer = !ok && !state.answered_once;
             state.answered_once |= ok;
