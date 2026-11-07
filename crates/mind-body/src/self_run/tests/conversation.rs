@@ -193,32 +193,31 @@ fn the_start_set_follows_the_claim_not_the_next_open_brief() {
     assert!(start.contains(&id_of("a1")) && !start.contains(&id_of("l1")), "{start}");
 }
 
-/// A result arrives while a line of its conversation is written and unechoed, after another conversation's brief was told first:
-/// the gate holds, so the other conversation's next brief waits for the reply.
+/// A result arrives while a line of its conversation is written and not yet echoed, after another conversation's brief was told first:
+/// the gate holds on the written line's conversation, so the other conversation's brief waits until that line is answered.
 #[test]
 fn the_gate_holds_across_a_result_while_a_line_of_its_conversation_is_unechoed() {
+    use crate::self_run::session::SessionInbox;
     let mind = live_mind();
-    let steps = vec![
-        Out(echo()),
-        Out(saying("nothing yet")),
-        briefed(&mind, 31, vec![libby("l1")]),
-        Out(echo()),
-        Out(saying("l1 done")),
-        briefed(&mind, 31, vec![aqua("a1")]),
-        Out(echo()),
-        briefed(&mind, 31, vec![aqua("a2")]),
-        Out(saying("a1 done")),
-        briefed(&mind, 31, vec![libby("l2")]),
-        Out(echo()),
-        Idle(31),
-        Out(saying("a2 done")),
-        Idle(31),
-        Out(echo()),
-        Out(saying("l2 done")),
-    ];
-    let ran = mind_run(&mind, steps);
-    assert!(ran.outcome.is_ok());
-    let told = tells(&ran);
-    assert!(told.iter().all(|line| u8::from(line.contains(&id_of("l2"))) + u8::from(line.contains(&id_of("a2"))) <= 1), "{told:?}");
-    assert_eq!((answered(&mind, 2), answered(&mind, 3), answered(&mind, 4), answered(&mind, 5)), (vec![id_of("l1")], vec![id_of("a1")], vec![id_of("a2")], vec![id_of("l2")]));
+    persona_commit(&mind, vec![libby("l0")]);
+    let mut told = inbox::derive(&*mind, &HashSet::new()).unwrap();
+    let conversation = told.first().map(|brief| brief.conversation.clone());
+    let (run, claims) = her_run(&*mind).unwrap().unwrap();
+    let mut heard = Heard::default();
+    let mut live = SelfInbox::new(&*mind, (&run, &claims), "", (&[], 0), (&mut told, conversation), &mut heard);
+    live.echoed();
+    live.result(&saying("l0 done"), true, false).unwrap();
+    persona_commit(&mind, vec![aqua("a1")]);
+    assert!(live.poll().unwrap().pending);
+    live.tell().unwrap();
+    live.echoed();
+    persona_commit(&mind, vec![aqua("a2")]);
+    assert!(live.poll().unwrap().pending);
+    live.tell().unwrap();
+    live.result(&saying("a1 done"), true, false).unwrap();
+    persona_commit(&mind, vec![libby("l2")]);
+    assert!(!live.poll().unwrap().pending, "a2 is written and unanswered: another conversation's brief waits");
+    live.echoed();
+    live.result(&saying("a2 done"), true, false).unwrap();
+    assert!(live.poll().unwrap().pending, "a2 is answered: the gate is free");
 }
