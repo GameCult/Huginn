@@ -280,6 +280,7 @@ mind_body::stream: # [derive (Clone , Debug , PartialEq)] pub enum Outcome { Hel
 mind_body::stream: const AGENT : & str
 mind_body::stream: const STREAM_IDLE_GAP_S : i64
 mind_body::stream: const STREAM_MIN_GAP_S : i64
+mind_body::stream: const STREAM_POLL_S : i64
 mind_body::stream: fn tick (organs : & Organs , brake : & dyn Fn () -> Effective , mode : Mode , now : DateTime < Utc >) -> Result < Outcome >
 mind_body::stream: impl HuginnPersonaSource
 mind_body::stream: impl HuginnPersonaSource: fn new (client : HuginnClient) -> Self
