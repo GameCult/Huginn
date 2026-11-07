@@ -2229,6 +2229,16 @@ fn d10_a_record_near_two_anchors_appears_once_at_its_best_score() {
         .serve();
     let ran = dispatch(server.addr, &brief_hook(brief), &[]);
     assert_eq!(recalled_ids(&ran, brief), ["t:ruling:n2", "t:ruling:n1", "t:ruling:n3"]);
+    // At an equal score the first anchor's record stays.
+    let tied = |title: &str| held("ruling", "t:ruling:n1", title, None);
+    let (server, _) = scene()
+        .anchor("ruling", "a", "Alpha")
+        .anchor("ruling", "b", "Beta")
+        .rank("Alpha", vec![(tied("first"), 0.5)])
+        .rank("Beta", vec![(tied("second"), 0.5)])
+        .serve();
+    let ran = dispatch(server.addr, &brief_hook(brief), &[]);
+    assert_eq!(recalled(&ran, brief), [json!({ "id": "t:ruling:n1", "title": "first" })]);
 }
 
 #[test]

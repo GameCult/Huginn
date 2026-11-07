@@ -198,11 +198,18 @@ fn cited(text: &str) -> Vec<String> {
     let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-';
     let run = |from: usize| from + bytes[from..].iter().take_while(|byte| word(**byte)).count();
     let mut ids: Vec<String> = Vec::new();
-    let mut at = 0;
-    while at < bytes.len() {
+    let mut skip = 0;
+    for at in 0..bytes.len() {
+        if at < skip {
+            continue;
+        }
         let standing = at == 0 || !(word(bytes[at - 1]) || matches!(bytes[at - 1], b'.' | b':'));
         let mut end = run(at);
-        while standing && end > at && bytes.get(end) == Some(&b'.') && run(end + 1) > end + 1 {
+        // Dotted campaign slugs: each pass takes a dot and the word after it.
+        for _ in 0..bytes.len() {
+            if !(standing && end > at && bytes.get(end) == Some(&b'.') && run(end + 1) > end + 1) {
+                break;
+            }
             end = run(end + 1);
         }
         let kind = ["ruling", "question", "follow_up"].into_iter().find(|kind| {
@@ -217,13 +224,11 @@ fn cited(text: &str) -> Vec<String> {
                     if !ids.iter().any(|seen| seen == id) {
                         ids.push(id.to_string());
                     }
-                    at = stop;
-                    continue;
+                    skip = stop;
                 }
             }
             _ => {}
         }
-        at += 1;
     }
     ids
 }
@@ -319,6 +324,8 @@ mod tests {
             assert!(cited(text).is_empty(), "{text}: {:?}", cited(text));
         }
         assert_eq!(cited("日t:ruling:a"), ["t:ruling:a"]);
+        assert!(cited(".a:ruling:b").is_empty() && cited("a.:ruling:b").is_empty());
+        assert_eq!(cited("a.b.c:ruling:d t:ruling:e"), ["a.b.c:ruling:d", "t:ruling:e"]);
     }
 
     #[test]
