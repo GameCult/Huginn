@@ -2230,7 +2230,7 @@ fn a_dm_memory_names_its_confidant_not_its_subject() {
 fn about_can_name_an_absent_mind() {
     let (libby, op) = ("@libby:chat", "@op:chat");
     let decided = reply(&[("!dm-op:chat", "ok")], json!([keeps("Decided", "Libby does the shaders for the Cinny fork", &[libby])]), json!([]), json!(null));
-    let dm = ChatDelivery { is_direct: true, ..delivery_of(1, "!dm-op:chat", op, "Libby will do the shaders for the Cinny fork", "$dm-libby") };
+    let dm = ChatDelivery { is_direct: true, room_id: "!dm-op:chat".into(), ..delivery_of(1, "!dm-op:chat", op, "Libby will do the shaders for the Cinny fork", "$dm-libby") };
     let rig = Rig::new(vec![dm], &[decided, says(&[("swarm", "go")])]);
     assert_eq!(failure_of(rig.go()), None);
     assert_eq!(rig.sent_texts().len(), 1);
