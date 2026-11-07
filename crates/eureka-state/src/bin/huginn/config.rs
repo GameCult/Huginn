@@ -3,7 +3,7 @@
 //! (`rudp://<ip>:<port>`) the daemon that holds it.
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eureka_state::HuginnClient;
 use huginn_mind::eureka_pipeline::Slug;
@@ -15,6 +15,8 @@ use crate::trouble::Trouble;
 pub const TOOL: &str = "huginn";
 /// How long one call may take, connection to last byte.
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// What `ask_until` leaves of its deadline for the caller to print and exit.
+const RESERVE: Duration = Duration::from_millis(100);
 
 /// The two environment values as given, and the client they make when both
 /// are valid.
@@ -41,6 +43,23 @@ impl Settings {
     /// that instance, never from anything the caller sent. No retry.
     pub fn ask(&self, request: impl FnOnce(&Slug) -> HuginnMindRequest) -> Result<HuginnMindResponse, Trouble> {
         let client = self.client()?;
+        client.call(request(client.instance())).map_err(Trouble::from)
+    }
+
+    /// `ask` bounded by a deadline instead of the fixed call time: the call
+    /// may take what is left of `deadline` less a short reserve, and is
+    /// `Unavailable` without being sent when nothing is left.
+    pub fn ask_until(
+        &self,
+        deadline: Instant,
+        request: impl FnOnce(&Slug) -> HuginnMindRequest,
+    ) -> Result<HuginnMindResponse, Trouble> {
+        let client = self.client()?;
+        let left = deadline.saturating_duration_since(Instant::now()).saturating_sub(RESERVE);
+        if left.is_zero() {
+            return Err(Trouble::Unavailable("the deadline has no time left for a call".to_string()));
+        }
+        let client = client.with_timeout(left);
         client.call(request(client.instance())).map_err(Trouble::from)
     }
 }

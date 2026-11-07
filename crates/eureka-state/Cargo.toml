@@ -43,6 +43,7 @@ serde_json = "1"
 serde_path_to_error = "0.1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt", "macros", "io-std"] }
+unicode-general-category = "1"
 
 # Tests run a real daemon in-process against a temporary mind, and the real
 # binary against it.

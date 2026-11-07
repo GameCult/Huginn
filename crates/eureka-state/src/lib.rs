@@ -106,6 +106,11 @@ impl HuginnClient {
         Self { endpoint, instance, timeout }
     }
 
+    /// The same endpoint and instance under another whole-call bound.
+    pub fn with_timeout(&self, timeout: Duration) -> Self {
+        Self { timeout, ..self.clone() }
+    }
+
     /// The instance this client acts for. Requests name their own instance;
     /// this is the one the caller's tools fill in.
     pub fn instance(&self) -> &Slug {
