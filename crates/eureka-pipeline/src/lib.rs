@@ -2062,6 +2062,11 @@ mod tests {
         assert_eq!(validated(&|thought| { thought.chosen = 1; thought.text = thought.candidates[1].0.as_str().into(); }), Ok(()));
         assert_eq!(validated(&|thought| { thought.candidates.truncate(1); thought.nearest_permille.truncate(1); }), Ok(()));
         assert_eq!(validated(&|thought| thought.nearest_permille[0] = 1000), Ok(()), "1000 means no earlier thought");
+        let four = |thought: &mut PipelineThought| {
+            thought.candidates = vec![thought.text.0.as_str().into(); 4];
+            thought.nearest_permille = vec![0; 4];
+        };
+        assert_eq!(validated(&four), Ok(()), "four candidates are the most there may be");
         for (change, field) in [
             (&(|thought: &mut PipelineThought| { thought.text = " \n".into(); thought.candidates[0] = " \n".into(); }) as &dyn Fn(&mut PipelineThought), "thought.text"),
             (&|thought: &mut PipelineThought| thought.text = "Another thing entirely.".into(), "thought.text"),
