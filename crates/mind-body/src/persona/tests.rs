@@ -6563,3 +6563,18 @@ fn a_poll_with_untold_messages_reads_the_heartbeats_table_again() {
     *view.0.borrow_mut() = Some(crate::heartbeat::Addressing { minds });
     assert!(inbox.poll().unwrap().pending, "the heartbeat now says the message names her project: she is told at once");
 }
+
+#[test]
+fn her_own_row_is_in_the_addressing_exactly_once_whatever_the_table_holds() {
+    let config = three_minds("@eureka:chat");
+    let own = own_addressee(&config);
+    let ids = |minds: Vec<crate::heartbeat::Addressing>| {
+        let view = FakeHeartbeat(RefCell::new(minds.into_iter().next()));
+        addressing_of(&config, Some(&view), &own).iter().map(|mind| mind.matrix_id().to_string()).collect::<Vec<_>>()
+    };
+    let rows = eight_minds(&[]);
+    let (eureka, libby, aqua) = (rows[0].clone(), rows[1].clone(), rows[3].clone());
+    assert_eq!(ids(vec![crate::heartbeat::Addressing { minds: vec![libby.clone(), aqua.clone()] }]), ["@libby:chat", "@aqua:chat", "@eureka:chat"], "a table without her gains her session addressee");
+    assert_eq!(ids(vec![crate::heartbeat::Addressing { minds: vec![eureka.clone()] }]), ["@eureka:chat"]);
+    assert_eq!(ids(vec![crate::heartbeat::Addressing { minds: vec![libby, eureka, aqua] }]), ["@libby:chat", "@eureka:chat", "@aqua:chat"], "a table with her keeps its own order and row");
+}
