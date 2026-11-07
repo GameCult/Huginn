@@ -69,7 +69,7 @@
   },
   "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.thought.v2.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "One tick of her stream of thought, offline: the words a base model\ncontinued from a projection of her own state, with the whole trace that\nmade them (the seed, the projection, every candidate and how near each\nwas to her earlier thoughts). `text` is the chosen candidate. `reads`\nare the documents the seed was drawn from. A thought is divergence for\ndelivery to weigh, never a memory: its words reach a later seed only\nthrough something she wrote. Instance-rooted: the key is\n`<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.\nSemantically indexed on `text` only. `nearest_permille` is 1000 where she\nhad no earlier thought.",
+  "description": "One tick of her stream of thought, offline: the words a base model\ncontinued from a projection of her own state, with the whole trace that\nmade them (the seed, the projection, every candidate and how near each\nwas to her earlier thoughts). `text` is the chosen candidate. `reads`\nare the documents the seed was drawn from. A thought is divergence for\ndelivery to weigh, never a memory: its words reach a later seed only\nthrough something she wrote. Instance-rooted: the key is\n`<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.\nSemantically indexed on `text` only. `nearest_permille` is 1000 where she\nhad no earlier thought. `prompt_version` names the fixed parts of both\nprompts (the Projector's builder revision, guidance and word budget, and\nthe continuer's frame), so the exact prompts of an old thought can be\nrebuilt from the trace.",
   "properties": {
     "base_model": {
       "$ref": "#/$defs/Short"
@@ -140,6 +140,9 @@
       "minimum": 0,
       "type": "integer"
     },
+    "prompt_version": {
+      "$ref": "#/$defs/Line"
+    },
     "reads": {
       "items": {
         "$ref": "#/$defs/PipelineRef"
@@ -179,7 +182,8 @@
     "nearest_permille",
     "chosen",
     "projector_ms",
-    "continuer_ms"
+    "continuer_ms",
+    "prompt_version"
   ],
   "title": "PipelineThought",
   "type": "object"

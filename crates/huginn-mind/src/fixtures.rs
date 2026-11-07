@@ -376,6 +376,7 @@ pub(crate) fn thought(label: &str, text: &str, reads: &[PipelineRef]) -> Pipelin
         chosen: 0,
         projector_ms: 1,
         continuer_ms: 1,
+        prompt_version: "test".into(),
     })
 }
 

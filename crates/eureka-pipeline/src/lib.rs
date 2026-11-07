@@ -634,6 +634,9 @@ fn thought_is_well_formed(thought: &PipelineThought, at: &str) -> Result<(), Pip
     if thought.text.0.trim().is_empty() {
         return Err(format_error(&format!("{at}.text"), "a thought with no words"));
     }
+    if thought.prompt_version.0.trim().is_empty() {
+        return Err(format_error(&format!("{at}.prompt_version"), "a thought with no prompt version"));
+    }
     if thought.candidates.is_empty() || thought.candidates.len() > THOUGHT_CANDIDATES_MAX {
         return Err(format_error(&format!("{at}.candidates"), &format!("{} candidates", thought.candidates.len())));
     }
@@ -878,12 +881,16 @@ value_types! {
     /// through something she wrote. Instance-rooted: the key is
     /// `<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.
     /// Semantically indexed on `text` only. `nearest_permille` is 1000 where she
-    /// had no earlier thought.
+    /// had no earlier thought. `prompt_version` names the fixed parts of both
+    /// prompts (the Projector's builder revision, guidance and word budget, and
+    /// the continuer's frame), so the exact prompts of an old thought can be
+    /// rebuilt from the trace.
     pub struct PipelineThought {
         instance: Slug, label: Label, text: Para, reads: Vec<PipelineRef>[64], persona_receipt: Short,
         identity: Line, context: Para, stimulus: Para, projector_model: Short, projection: Para, base_model: Short,
         temperature_permille: u16, min_p_permille: u16, max_tokens: u16,
         candidates: Vec<Line>[4], nearest_permille: Vec<u16>[4], chosen: u8, projector_ms: u32, continuer_ms: u32,
+        prompt_version: Line,
     } => thought_is_well_formed
     /// One thing a Mind keeps for herself, in her own mind: what she was asked,
     /// decided, committed to, learned or did, an idea, or the rapport between
@@ -1715,6 +1722,7 @@ mod tests {
                 temperature_permille: 1000, min_p_permille: 50, max_tokens: 160,
                 candidates: vec!["The sounds are Libby's; the shaders were never the hard part.".into(), "A second drift.".into()],
                 nearest_permille: vec![310, 870], chosen: 0, projector_ms: 4200, continuer_ms: 9100,
+                prompt_version: "ghostlight=c43eb54; words=180".into(),
             }), format!("{INSTANCE}:thought:t1793000000")),
         ]
     }
@@ -2073,6 +2081,7 @@ mod tests {
             (&|thought: &mut PipelineThought| { thought.nearest_permille.pop(); }, "thought.nearest_permille"),
             (&|thought: &mut PipelineThought| thought.nearest_permille[1] = 1001, "thought.nearest_permille[1]"),
             (&|thought: &mut PipelineThought| thought.chosen = 2, "thought.chosen"),
+            (&|thought: &mut PipelineThought| thought.prompt_version = " ".into(), "thought.prompt_version"),
             (&|thought: &mut PipelineThought| { thought.candidates.clear(); thought.nearest_permille.clear(); }, "thought.candidates"),
         ] {
             assert!(matches!(validated(change), Err(PipelineRefusal::InvalidFormat { field: f, .. }) if f == field), "{field}");

@@ -50,6 +50,11 @@ const MIN_P_PERMILLE: u16 = 50;
 const MAX_TOKENS: u16 = 160;
 const NUM_THREAD: u32 = 4;
 
+/// The Ghostlight revision `build_projector_prompt` comes from; a test holds it to the manifest's pin.
+const GHOSTLIGHT_REV: &str = "c43eb54962ed4a09cc737ecac73a16b0d7ce62b4";
+/// How the continuer frame writes the date.
+const FRAME_DATE_FORMAT: &str = "%-d %B %Y";
+
 /// The setting the Projector renders for: where she is between conversations.
 const STREAM_GUIDANCE: &str = "This person is a Mind of the GameCult swarm in the quiet between conversations. What she holds is her repos, her fellow Minds and the people she works with. Render what is on her mind in this quiet.";
 
@@ -105,15 +110,16 @@ pub struct OllamaStream {
 impl OllamaStream {
     /// `endpoint` is `http://<loopback host>:<port>`; any other address is refused here.
     pub fn open(endpoint: &str, projector_model: &str, base_model: &str) -> Result<Self> {
-        let rest = endpoint.strip_prefix("http://").ok_or_else(|| anyhow!("the stream endpoint must be http://<loopback>:<port>"))?;
-        let authority = rest.trim_end_matches('/');
-        if authority.contains('/') {
+        // Parsed as the HTTP client parses it, so the host checked is the host connected to.
+        let uri: ureq::http::Uri = endpoint.parse().map_err(|_| anyhow!("the stream endpoint is not a URL"))?;
+        let authority = uri.authority().filter(|_| uri.scheme_str() == Some("http")).ok_or_else(|| anyhow!("the stream endpoint must be http://<loopback>:<port>"))?;
+        if authority.as_str().contains('@') {
+            bail!("the stream endpoint carries userinfo");
+        }
+        if uri.path() != "/" || uri.query().is_some() {
             bail!("the stream endpoint is an origin, not a path");
         }
-        let host = match authority.strip_prefix('[') {
-            Some(inner) => inner.split(']').next().unwrap_or_default(),
-            None => authority.rsplit_once(':').map_or(authority, |(host, _)| host),
-        };
+        let host = authority.host().trim_start_matches('[').trim_end_matches(']');
         let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
         if !loopback {
             bail!("the stream endpoint is not a loopback address");
@@ -349,11 +355,20 @@ fn news(mind: &dyn MindPort, instance: &Slug, since: Option<DateTime<Utc>>, resp
     found.sort_by_key(|(ordinal, ..)| std::cmp::Reverse(*ordinal));
     let mut out: Vec<(String, Option<PipelineRef>)> = found.into_iter().map(|(_, line, id)| (line, Some(id))).collect();
     // Her stewarded repos' activity by others is the forge's word, not a document; a daemon with no forge adds nothing.
+    // Only what happened after her newest thought is news, and the notice is stamped with when it happened.
     if !responsibilities.repos.is_empty()
-        && let Ok(activity) = mind.stewarded_activity(&responsibilities.repos, None)
-        && let Some(line) = repo_notice_line(&activity, u64::try_from(now.timestamp_millis()).unwrap_or(0))
+        && let Ok(mut activity) = mind.stewarded_activity(&responsibilities.repos, None)
     {
-        out.push((format!("- {line}"), None));
+        let since_ms = since.map_or(0, |since| u64::try_from(since.timestamp_millis()).unwrap_or(0));
+        activity.events.retain(|event| since.is_none() || event.at > since_ms);
+        // A capped repo has no time of its own: it is news only beside an event that is.
+        if activity.events.is_empty() && since.is_some() {
+            activity.capped.clear();
+        }
+        let happened = activity.events.iter().map(|event| event.at).max().unwrap_or_else(|| u64::try_from(now.timestamp_millis()).unwrap_or(0));
+        if let Some(line) = repo_notice_line(&activity, happened) {
+            out.push((format!("- {line}"), None));
+        }
     }
     Ok(out)
 }
@@ -378,8 +393,8 @@ fn unbidden(mind: &dyn MindPort, instance: &Slug, now: DateTime<Utc>, pick: u64)
     }))
 }
 
-/// The seed, rebuilt from her mind and nothing else. `since` is her newest thought's admission.
-fn build_seed(mind: &dyn MindPort, persona: &PersonaRead, since: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Result<Seed> {
+/// The seed, rebuilt from her mind and nothing else. `since` is her newest thought's admission and `fresh` what `news` found.
+fn build_seed(mind: &dyn MindPort, persona: &PersonaRead, since: Option<DateTime<Utc>>, now: DateTime<Utc>, responsibilities: &Responsibilities, fresh: Vec<(String, Option<PipelineRef>)>) -> Result<Seed> {
     let instance = mind.instance().clone();
     let state = &persona.state;
     let mut reads: Vec<PipelineRef> = Vec::new();
@@ -389,17 +404,12 @@ fn build_seed(mind: &dyn MindPort, persona: &PersonaRead, since: Option<DateTime
         }
     };
 
-    let responsibilities = render_responsibilities(mind, &instance, &BTreeMap::new())?;
     let runs = recent_runs(mind, &instance)?;
     let people = bonded_people(state);
     let cue = Cue { senders: people.iter().map(String::as_str).collect(), texts: Vec::new(), names: BTreeMap::new(), listed: &responsibilities.listed, now };
     let recalled = recall::select(mind, &cue)?;
-    for entry in recalled.entries() {
-        cite(PipelineRef { kind: PipelineKind::Memory, id: Short(entry.id.clone()) });
-    }
     let heard = replies(mind, &instance)?;
     let heard_section = section("What your Self said lately:", heard.iter().map(|(_, text)| format!("- {}", quoted(text))).collect());
-    heard.iter().for_each(|(id, _)| cite(id.clone()));
 
     let sections = [
         values_section(state),
@@ -410,9 +420,15 @@ fn build_seed(mind: &dyn MindPort, persona: &PersonaRead, since: Option<DateTime
         recall::render(&recalled),
         heard_section,
     ];
-    let context = sections.iter().zip(BUDGETS).map(|(text, (_, budget))| cap(text, budget)).filter(|text| !text.trim().is_empty()).collect::<Vec<_>>().join("\n");
+    let kept: Vec<String> = sections.iter().zip(BUDGETS).map(|(text, (_, budget))| cap(text, budget)).collect();
+    // The reads are what the Projector was shown after the bounds: the recall lines and replies the capped sections kept.
+    for entry in recalled.entries().filter(|entry| kept[5].contains(entry.line.trim_end())) {
+        cite(PipelineRef { kind: PipelineKind::Memory, id: Short(entry.id.clone()) });
+    }
+    let replies_shown = kept[6].lines().count().saturating_sub(1);
+    heard.iter().take(replies_shown).for_each(|(id, _)| cite(id.clone()));
+    let context = kept.iter().filter(|text| !text.trim().is_empty()).cloned().collect::<Vec<_>>().join("\n");
 
-    let fresh = news(mind, &instance, since, &responsibilities, now)?;
     let has_news = !fresh.is_empty();
     let stimulus = if has_news {
         let body: Vec<&str> = fresh.iter().map(|(line, _)| line.as_str()).collect();
@@ -437,8 +453,16 @@ fn build_seed(mind: &dyn MindPort, persona: &PersonaRead, since: Option<DateTime
 
 /// The frame the base model continues: her notebook heading, the date, the projection verbatim
 /// and an open paragraph. It instructs nothing.
-fn continuer_frame(name: &str, now: DateTime<Utc>, projection: &str) -> String {
-    format!("{name}'s notebook\n\n{}\n\n{projection}\n\n", now.format("%-d %B %Y"))
+fn continuer_frame(name: &str, date: &str, projection: &str) -> String {
+    format!("{name}'s notebook\n\n{date}\n\n{projection}\n\n")
+}
+
+/// The fixed parts of both prompts, recorded in every thought: the frame is the function's own output over placeholders.
+fn prompt_version() -> String {
+    format!(
+        "ghostlight={GHOSTLIGHT_REV}; words={PROJECTOR_WORDS}; guidance={STREAM_GUIDANCE:?}; frame={:?}",
+        continuer_frame("<name>", &format!("<date {FRAME_DATE_FORMAT}>"), "<projection>")
+    )
 }
 
 /// Each candidate's nearness to her earlier thoughts, in thousandths of the daemon's top score;
@@ -524,11 +548,14 @@ pub fn tick(organs: &Organs, brake: &dyn Fn() -> Effective, mode: Mode, now: Dat
     if mode == Mode::Live && since.is_some_and(|at| (now - at).num_seconds() < STREAM_MIN_GAP_S) {
         return Ok(Outcome::NotDue);
     }
-    let persona = organs.persona.persona()?;
-    let seed = build_seed(mind, &persona, since, now)?;
-    if mode == Mode::Live && !due(since, now, seed.news) {
+    // Due-ness is decided on the cheap reads; the seed (recall, runs, replies) is built only for a tick that may run.
+    let responsibilities = render_responsibilities(mind, mind.instance(), &BTreeMap::new())?;
+    let fresh = news(mind, mind.instance(), since, &responsibilities, now)?;
+    if mode == Mode::Live && !due(since, now, !fresh.is_empty()) {
         return Ok(Outcome::NotDue);
     }
+    let persona = organs.persona.persona()?;
+    let seed = build_seed(mind, &persona, since, now, &responsibilities, fresh)?;
 
     let began = std::time::Instant::now();
     let projection = bounded(&organs.model.project(&seed.projector_prompt())?, PARA_MAX_BYTES);
@@ -536,7 +563,7 @@ pub fn tick(organs: &Organs, brake: &dyn Fn() -> Effective, mode: Mode, now: Dat
     if projection.is_empty() {
         return Ok(Outcome::Blank);
     }
-    let frame = continuer_frame(text_of(&persona.state, &["publicName"]), now, &projection);
+    let frame = continuer_frame(text_of(&persona.state, &["publicName"]), &now.format(FRAME_DATE_FORMAT).to_string(), &projection);
     let began = std::time::Instant::now();
     let candidates: Vec<String> = organs
         .model
@@ -572,6 +599,7 @@ pub fn tick(organs: &Organs, brake: &dyn Fn() -> Effective, mode: Mode, now: Dat
         chosen: u8::try_from(chosen).unwrap_or(0),
         projector_ms,
         continuer_ms,
+        prompt_version: Line::from(prompt_version().as_str()),
     };
     if mode == Mode::DryRun {
         return Ok(Outcome::Thought { thought: Box::new(thought), admitted: false });

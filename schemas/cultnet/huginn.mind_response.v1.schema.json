@@ -4618,7 +4618,7 @@
       ]
     },
     "PipelineThought": {
-      "description": "One tick of her stream of thought, offline: the words a base model\ncontinued from a projection of her own state, with the whole trace that\nmade them (the seed, the projection, every candidate and how near each\nwas to her earlier thoughts). `text` is the chosen candidate. `reads`\nare the documents the seed was drawn from. A thought is divergence for\ndelivery to weigh, never a memory: its words reach a later seed only\nthrough something she wrote. Instance-rooted: the key is\n`<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.\nSemantically indexed on `text` only. `nearest_permille` is 1000 where she\nhad no earlier thought.",
+      "description": "One tick of her stream of thought, offline: the words a base model\ncontinued from a projection of her own state, with the whole trace that\nmade them (the seed, the projection, every candidate and how near each\nwas to her earlier thoughts). `text` is the chosen candidate. `reads`\nare the documents the seed was drawn from. A thought is divergence for\ndelivery to weigh, never a memory: its words reach a later seed only\nthrough something she wrote. Instance-rooted: the key is\n`<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.\nSemantically indexed on `text` only. `nearest_permille` is 1000 where she\nhad no earlier thought. `prompt_version` names the fixed parts of both\nprompts (the Projector's builder revision, guidance and word budget, and\nthe continuer's frame), so the exact prompts of an old thought can be\nrebuilt from the trace.",
       "type": "object",
       "properties": {
         "base_model": {
@@ -4690,6 +4690,9 @@
           "format": "uint32",
           "minimum": 0
         },
+        "prompt_version": {
+          "$ref": "#/$defs/Line"
+        },
         "reads": {
           "type": "array",
           "items": {
@@ -4729,7 +4732,8 @@
         "nearest_permille",
         "chosen",
         "projector_ms",
-        "continuer_ms"
+        "continuer_ms",
+        "prompt_version"
       ]
     },
     "PipelineVerdict": {

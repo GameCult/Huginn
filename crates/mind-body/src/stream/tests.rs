@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{MemorySort, PipelineDocument, PipelineKind, PipelineReply, PipelineThought, RunOperator, RunTurn, Slug};
-use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
+use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage, RepoActivity, RepoChange, RepoEvent};
 use serde_json::{Value, json};
 
 use super::*;
@@ -85,11 +85,18 @@ struct Wrap<'a> {
     scores: RefCell<VecDeque<f32>>,
     selections: RefCell<Vec<Selection>>,
     admitted: RefCell<Vec<Vec<PipelineDocument>>>,
+    forge: Option<RepoActivity>,
 }
 
 impl<'a> Wrap<'a> {
     fn over(inner: &'a TestMind, scores: &[f32]) -> Self {
-        Self { inner, scores: RefCell::new(scores.iter().copied().collect()), selections: RefCell::default(), admitted: RefCell::default() }
+        Self { inner, scores: RefCell::new(scores.iter().copied().collect()), selections: RefCell::default(), admitted: RefCell::default(), forge: None }
+    }
+
+    /// The same mind with a forge that answers `events`, whatever the asker's cursor.
+    fn with_forge(mut self, events: Vec<RepoEvent>) -> Self {
+        self.forge = Some(RepoActivity { head: 1, events, capped: vec![], open_prs: vec![], unseen: vec![], moved: vec![] });
+        self
     }
 }
 
@@ -114,9 +121,38 @@ impl MindPort for Wrap<'_> {
         self.inner.roots_touched()
     }
 
+    fn stewarded_activity(&self, repos: &[huginn_mind::eureka_pipeline::OrgRepo], after: Option<u64>) -> Result<RepoActivity> {
+        match &self.forge {
+            Some(activity) => Ok(activity.clone()),
+            None => self.inner.stewarded_activity(repos, after),
+        }
+    }
+
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
         self.admitted.borrow_mut().push(documents.clone());
         self.inner.admit(agent, session, documents)
+    }
+}
+
+/// The seed as the tick builds it: the cheap reads first, then the rest.
+fn seed_of(mind: &dyn MindPort, read: &PersonaRead, since: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Result<Seed> {
+    let responsibilities = render_responsibilities(mind, mind.instance(), &BTreeMap::new())?;
+    let fresh = news(mind, mind.instance(), since, &responsibilities, now)?;
+    build_seed(mind, read, since, now, &responsibilities, fresh)
+}
+
+/// A push by someone else to her repo at `secs`.
+fn push(id: u64, secs: i64) -> RepoEvent {
+    RepoEvent { id, at: u64::try_from(t(secs).timestamp_millis()).unwrap(), repo: "GameCult/Huginn".into(), actor: "libby".into(), change: RepoChange::Pushed { commits: 1 } }
+}
+
+/// Counts how often her persona is read, which only a tick that may run does.
+struct CountedPersona(Persona, std::cell::Cell<usize>);
+
+impl PersonaSource for CountedPersona {
+    fn persona(&self) -> Result<PersonaRead> {
+        self.1.set(self.1.get() + 1);
+        self.0.persona()
     }
 }
 
@@ -141,6 +177,7 @@ fn thought_doc(label: &str, text: &str) -> PipelineDocument {
         chosen: 0,
         projector_ms: 0,
         continuer_ms: 0,
+        prompt_version: "test".into(),
     })
 }
 
@@ -177,8 +214,8 @@ fn seed_reads_no_thought() {
     with.committed(vec![thought_doc("t1", "A drift that must stay out of the seed")]);
     let (plain, thoughtful) = (Wrap::over(&without, &[]), Wrap::over(&with, &[]));
     let read = PersonaRead { state: state(), receipt_id: "r".into() };
-    let one = build_seed(&plain, &read, None, t(100_000)).unwrap();
-    let two = build_seed(&thoughtful, &read, None, t(100_000)).unwrap();
+    let one = seed_of(&plain, &read, None, t(100_000)).unwrap();
+    let two = seed_of(&thoughtful, &read, None, t(100_000)).unwrap();
     assert_eq!(one.projector_prompt(), two.projector_prompt(), "a mind holding thoughts yields the prompt of the same mind without them");
     assert_eq!(one.reads, two.reads);
     assert!(!two.projector_prompt().contains("must stay out"));
@@ -203,7 +240,7 @@ fn seed_carries_relationships() {
         answers: vec![],
         text: "The shader pass is done; the sounds are Libby's.".into(),
     })]);
-    let seed = build_seed(&Wrap::over(&mind, &[]), &PersonaRead { state: state(), receipt_id: "r".into() }, None, t(100_000)).unwrap();
+    let seed = seed_of(&Wrap::over(&mind, &[]), &PersonaRead { state: state(), receipt_id: "r".into() }, None, t(100_000)).unwrap();
     for wanted in ["Libby holds the sounds", "collaborator", "Libby wants the sounds before the shaders", "Noor distrusts the new scheduler", "The shader pass is done", "Coherence over velocity", "The shaders are late"] {
         assert!(seed.context.contains(wanted), "{wanted:?} missing from {}", seed.context);
     }
@@ -220,7 +257,7 @@ fn seed_sections_keep_budgets() {
     crowded["agencyPressure"]["pressures"] = json!((0..40).map(|_| json!({ "summary": huge })).collect::<Vec<_>>());
     let mind = TestMind::seeded();
     mind.committed(vec![memory("m1", MemorySort::Learned, "Libby wants the sounds first", &["@libby:chat"])]);
-    let seed = build_seed(&Wrap::over(&mind, &[]), &PersonaRead { state: crowded, receipt_id: "r".into() }, None, t(100_000)).unwrap();
+    let seed = seed_of(&Wrap::over(&mind, &[]), &PersonaRead { state: crowded, receipt_id: "r".into() }, None, t(100_000)).unwrap();
     assert!(seed.context.len() <= SECTION_MAX_BYTES, "{}", seed.context.len());
     assert!(seed.context.contains("Libby holds the sounds"), "oversized values and pressures crowded out the bonds");
     assert!(seed.context.contains("Libby wants the sounds first"), "oversized values and pressures crowded out the recall");
@@ -241,7 +278,7 @@ fn stimulus_is_what_is_new() {
     mind.committed(vec![crate::testkit::close(run_ref("w9"), crate::testkit::recorded())]);
     let wrap = Wrap::over(&mind, &[]);
     let read = PersonaRead { state: state(), receipt_id: "r".into() };
-    let seed = build_seed(&wrap, &read, Some(t(200)), t(400)).unwrap();
+    let seed = seed_of(&wrap, &read, Some(t(200)), t(400)).unwrap();
     assert!(seed.news);
     assert!(seed.stimulus.contains("After the thought, the window"), "{}", seed.stimulus);
     assert!(seed.stimulus.contains("w9 closed"), "a run closure is news: {}", seed.stimulus);
@@ -262,7 +299,7 @@ fn stimulus_without_news_is_an_unbidden_memory_chosen_by_the_tick_label_else_the
     let read = PersonaRead { state: state(), receipt_id: "r".into() };
     let picks: Vec<String> = (0..4)
         .map(|offset| {
-            let seed = build_seed(&wrap, &read, Some(t(long_after - 10)), t(long_after + offset)).unwrap();
+            let seed = seed_of(&wrap, &read, Some(t(long_after - 10)), t(long_after + offset)).unwrap();
             assert!(!seed.news);
             seed.stimulus
         })
@@ -273,7 +310,7 @@ fn stimulus_without_news_is_an_unbidden_memory_chosen_by_the_tick_label_else_the
     assert_eq!(picks[0], picks[2], "the same label seed picks the same memory");
 
     let bare = TestMind::seeded();
-    let seed = build_seed(&Wrap::over(&bare, &[]), &read, Some(t(1000)), t(5000)).unwrap();
+    let seed = seed_of(&Wrap::over(&bare, &[]), &read, Some(t(1000)), t(5000)).unwrap();
     assert!(!seed.news);
     assert!(seed.stimulus.starts_with("Nothing has happened since"), "{}", seed.stimulus);
 }
@@ -355,7 +392,7 @@ fn no_earlier_thought_is_nearness_1000() {
 
 #[test]
 fn frame_holds_projection_verbatim() {
-    assert_eq!(continuer_frame("Yggdrasil", t(0), "I turn it over."), "Yggdrasil's notebook\n\n9 October 2026\n\nI turn it over.\n\n");
+    assert_eq!(continuer_frame("Yggdrasil", "9 October 2026", "I turn it over."), "Yggdrasil's notebook\n\n9 October 2026\n\nI turn it over.\n\n");
     let mind = mind_with_thought(1000);
     let model = Fake::saying("I keep turning over the sounds.", &["a", "b", "c", "d", "e"]);
     let persona = persona();
@@ -363,7 +400,7 @@ fn frame_holds_projection_verbatim() {
     tick(&organs(&wrap, &persona, &model), &|| released(), Mode::Live, t(1000 + STREAM_IDLE_GAP_S)).unwrap();
     let continued = model.continued.borrow();
     let (prompt, sampling, n) = &continued[0];
-    assert_eq!(prompt, &continuer_frame("Yggdrasil", t(1000 + STREAM_IDLE_GAP_S), "I keep turning over the sounds."));
+    assert_eq!(prompt, &continuer_frame("Yggdrasil", &t(1000 + STREAM_IDLE_GAP_S).format(FRAME_DATE_FORMAT).to_string(), "I keep turning over the sounds."));
     assert_eq!((*n, *sampling), (4, Sampling::STREAM));
     for foreign in ["Libby", "Coherence", "Plain.", "she/her", "private Projector"] {
         assert!(!prompt.contains(foreign), "{foreign} reached the continuer");
@@ -500,10 +537,27 @@ fn a_model_host_that_answers_badly_is_a_fault() {
 
 #[test]
 fn non_loopback_endpoint_refused() {
+    for refused in [
+        "http://localhost:11434@example.com",
+        "http://localhost@example.com",
+        "http://127.0.0.1:11434@example.com:80",
+        "http://user:secret@127.0.0.1:11434",
+        "http://127.0.0.1:11434@localhost",
+        "http://[::1]:11434@example.com",
+        "http://localhost:11434\\@example.com",
+        "http://example.com#@127.0.0.1",
+        "http://example.com?@localhost",
+        "http://127.0.0.1:11434?x=1",
+        "http://localhost.example.com:11434",
+        "http://",
+        "",
+    ] {
+        assert!(OllamaStream::open(refused, "p", "b").is_err(), "{refused} must be refused");
+    }
     for refused in ["http://10.77.0.1:11434", "http://example.com:11434", "http://0.0.0.0:11434", "https://127.0.0.1:11434", "127.0.0.1:11434", "http://127.0.0.1:11434/api", "http://[2001:db8::1]:11434"] {
         assert!(OllamaStream::open(refused, "p", "b").is_err(), "{refused} must be refused");
     }
-    for opened in ["http://127.0.0.1:11434", "http://localhost:11434", "http://[::1]:11434", "http://127.0.0.2:1/"] {
+    for opened in ["http://127.0.0.1:11434", "http://localhost:11434", "http://[::1]:11434", "http://127.0.0.2:1/", "http://LOCALHOST:11434/"] {
         assert!(OllamaStream::open(opened, "p", "b").is_ok(), "{opened} is loopback");
     }
 }
@@ -544,9 +598,9 @@ fn news_is_strictly_after_her_newest_thought() {
     mind.admit_at(t(500));
     mind.committed(vec![memory("m1", MemorySort::Learned, "Admitted at the very instant of the thought", &[])]);
     let read = PersonaRead { state: state(), receipt_id: "r".into() };
-    let seed = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(500)), t(600)).unwrap();
+    let seed = seed_of(&Wrap::over(&mind, &[]), &read, Some(t(500)), t(600)).unwrap();
     assert!(!seed.news, "{}", seed.stimulus);
-    let seed = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(499)), t(600)).unwrap();
+    let seed = seed_of(&Wrap::over(&mind, &[]), &read, Some(t(499)), t(600)).unwrap();
     assert!(seed.news);
 }
 
@@ -557,9 +611,9 @@ fn an_unbidden_memory_is_older_than_seven_days_not_exactly_seven() {
     mind.committed(vec![memory("m1", MemorySort::Learned, "The week-old thing", &[])]);
     let read = PersonaRead { state: state(), receipt_id: "r".into() };
     let week = 7 * 86_400;
-    let exactly = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(1000)), t(1000 + week)).unwrap();
+    let exactly = seed_of(&Wrap::over(&mind, &[]), &read, Some(t(1000)), t(1000 + week)).unwrap();
     assert!(exactly.stimulus.starts_with("Nothing has happened"), "{}", exactly.stimulus);
-    let over = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(1000)), t(1001 + week)).unwrap();
+    let over = seed_of(&Wrap::over(&mind, &[]), &read, Some(t(1000)), t(1001 + week)).unwrap();
     assert!(over.stimulus.contains("The week-old thing"), "{}", over.stimulus);
 }
 
@@ -570,7 +624,7 @@ fn a_flood_of_news_fills_the_stimulus_with_whole_lines_newest_first() {
     mind.admit_at(t(100));
     mind.committed(flood);
     let read = PersonaRead { state: state(), receipt_id: "r".into() };
-    let seed = build_seed(&Wrap::over(&mind, &[]), &read, Some(t(50)), t(200)).unwrap();
+    let seed = seed_of(&Wrap::over(&mind, &[]), &read, Some(t(50)), t(200)).unwrap();
     let lines: Vec<&str> = seed.stimulus.lines().skip(1).collect();
     assert!(seed.stimulus.len() <= SECTION_MAX_BYTES && seed.stimulus.len() > SECTION_MAX_BYTES - 250, "{}", seed.stimulus.len());
     assert!(lines.iter().all(|line| line.starts_with("- You noted") && line.ends_with('"')), "a line was cut: {lines:?}");
@@ -606,3 +660,115 @@ fn news_at_exactly_the_minimum_gap_is_due() {
     let wrap = Wrap::over(&mind, &[0.1]);
     let Outcome::Thought { admitted: true, .. } = tick(&organs(&wrap, &persona, &model), &|| released(), Mode::Live, t(1000 + STREAM_MIN_GAP_S)).unwrap() else { panic!("due at the minimum gap") };
 }
+
+#[test]
+fn repo_activity_is_news_only_after_her_newest_thought_and_is_stamped_when_it_happened() {
+    let mind = mind_with_thought(1000);
+    let read = PersonaRead { state: state(), receipt_id: "r".into() };
+    let old = Wrap::over(&mind, &[]).with_forge(vec![push(1, 500)]);
+    let seed = seed_of(&old, &read, Some(t(1000)), t(1901)).unwrap();
+    assert!(!seed.news && !seed.stimulus.contains("Changes in your repos"), "an event older than her newest thought is not news: {}", seed.stimulus);
+    let edge = Wrap::over(&mind, &[]).with_forge(vec![push(1, 1000)]);
+    assert!(!seed_of(&edge, &read, Some(t(1000)), t(1901)).unwrap().news, "an event at her newest thought's time is not after it");
+    let mixed = Wrap::over(&mind, &[]).with_forge(vec![push(2, 1500), push(1, 500)]);
+    let seed = seed_of(&mixed, &read, Some(t(1000)), t(1901)).unwrap();
+    assert!(seed.news && seed.stimulus.contains("Changes in your repos: GameCult/Huginn: 1 commit pushed by libby"), "{}", seed.stimulus);
+    let stamp = t(1500).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    assert!(seed.stimulus.contains(&format!("at={stamp} ")), "the notice carries the event's time, not the tick's: {}", seed.stimulus);
+    let first = Wrap::over(&mind, &[]).with_forge(vec![push(1, 500)]);
+    assert!(seed_of(&first, &read, None, t(1901)).unwrap().news, "with no thought yet, what the forge holds is news");
+}
+
+#[test]
+fn a_capped_repo_is_news_only_beside_an_event_after_her_newest_thought() {
+    let mind = mind_with_thought(1000);
+    let read = PersonaRead { state: state(), receipt_id: "r".into() };
+    let mut quiet = Wrap::over(&mind, &[]).with_forge(vec![push(1, 500)]);
+    quiet.forge.as_mut().unwrap().capped.push("GameCult/Huginn".into());
+    assert!(!seed_of(&quiet, &read, Some(t(1000)), t(1901)).unwrap().news);
+    let mut busy = Wrap::over(&mind, &[]).with_forge(vec![push(2, 1500)]);
+    busy.forge.as_mut().unwrap().capped.push("GameCult/Huginn".into());
+    let seed = seed_of(&busy, &read, Some(t(1000)), t(1901)).unwrap();
+    assert!(seed.news && seed.stimulus.to_lowercase().contains("page limit"), "{}", seed.stimulus);
+}
+
+#[test]
+fn old_repo_activity_does_not_make_a_tick_due() {
+    let mind = mind_with_thought(1000);
+    let model = Fake::saying("I turn it over.", &["A new drift"]);
+    let persona = CountedPersona(persona(), std::cell::Cell::new(0));
+    let wrap = Wrap::over(&mind, &[0.1]).with_forge(vec![push(1, 500)]);
+    let organs = Organs { mind: &wrap, persona: &persona, model: &model, projector_model: "projector:test", base_model: "base:test" };
+    assert_eq!(tick(&organs, &|| released(), Mode::Live, t(1901)).unwrap(), Outcome::NotDue);
+    assert_eq!((model.calls(), persona.1.get(), thoughts(&mind).len()), (0, 0, 1), "no model call, no seed, no thought");
+}
+
+#[test]
+fn new_repo_activity_makes_a_tick_due_and_the_hourly_memory_comes_for_an_active_steward() {
+    let week = 8 * 86_400;
+    let mind = TestMind::seeded();
+    mind.admit_at(t(100));
+    mind.committed(vec![memory("m1", MemorySort::Learned, "An old thing she holds", &[])]);
+    mind.admit_at(t(week));
+    mind.committed(vec![thought_doc("t1", "An earlier drift")]);
+    let model = Fake::saying("I turn it over.", &["A new drift", "Another"]);
+    let persona = persona();
+    let fresh = Wrap::over(&mind, &[0.1, 0.2]).with_forge(vec![push(2, week + 1000)]);
+    let Outcome::Thought { thought, admitted: true } = tick(&organs(&fresh, &persona, &model), &|| released(), Mode::Live, t(week + 1000 + STREAM_MIN_GAP_S)).unwrap() else { panic!("new activity past the minimum gap") };
+    assert!(thought.stimulus.0.contains("Changes in your repos"), "{}", thought.stimulus.0);
+
+    let model = Fake::saying("I turn it over.", &["Yet another"]);
+    let quiet = Wrap::over(&mind, &[0.3]).with_forge(vec![push(1, week - 5000)]);
+    let at = week + 1000 + STREAM_MIN_GAP_S + STREAM_IDLE_GAP_S + 10;
+    let Outcome::Thought { thought, admitted: true } = tick(&organs(&quiet, &persona, &model), &|| released(), Mode::Live, t(at)).unwrap() else { panic!("the idle gap") };
+    assert!(thought.stimulus.0.starts_with("Out of nowhere you recall"), "old activity is not news, so the hourly memory comes: {}", thought.stimulus.0);
+}
+
+#[test]
+fn reads_cite_only_what_the_context_showed() {
+    let mind = TestMind::seeded();
+    let memories: Vec<PipelineDocument> = (0..12).map(|at| memory(&format!("m{at:02}"), MemorySort::Learned, &format!("zz{at:02} {}", "x".repeat(290)), &["@libby:chat"])).collect();
+    mind.admit_at(t(100));
+    mind.committed(memories);
+    mind.admit_at(t(200));
+    mind.committed(vec![run("w1", RunTurn::SelfRun, RunOperator::Mind, &[])]);
+    mind.committed(
+        (1..=3)
+            .map(|at| PipelineDocument::Reply(PipelineReply { instance: Slug(INSTANCE.into()), label: format!("w1-r{at}").as_str().into(), run: run_ref("w1"), answers: vec![], text: format!("rp{at} {}", "y".repeat(400)).as_str().into() }))
+            .collect(),
+    );
+    let read = PersonaRead { state: state(), receipt_id: "r".into() };
+    let seed = seed_of(&Wrap::over(&mind, &[]), &read, Some(t(300)), t(400)).unwrap();
+    assert!(!seed.news);
+    let cited: Vec<String> = seed.reads.iter().filter(|read| read.kind == PipelineKind::Memory).map(|read| read.id.0.rsplit(':').next().unwrap().to_owned()).collect();
+    assert!(!cited.is_empty() && cited.len() < 12, "{cited:?}");
+    for label in &cited {
+        assert!(seed.context.contains(&format!("zz{}", &label[1..])), "{label} is cited but not shown");
+    }
+    let shown = (0..12).filter(|at| seed.context.contains(&format!("zz{at:02}"))).count();
+    assert_eq!(shown, cited.len(), "every memory the context shows is cited");
+    let replies_cited = seed.reads.iter().filter(|read| read.kind == PipelineKind::Reply).count();
+    let replies_shown = (1..=3).filter(|at| seed.context.contains(&format!("rp{at} "))).count();
+    assert!(replies_shown >= 1 && replies_shown < 3, "the replies section is bounded: {replies_shown}");
+    assert_eq!(replies_cited, replies_shown, "replies cited are the replies shown");
+}
+
+#[test]
+fn every_thought_records_the_fixed_parts_of_its_prompts() {
+    let mind = mind_with_thought(1000);
+    let model = Fake::saying("I turn it over.", &["A new drift"]);
+    let persona = persona();
+    let wrap = Wrap::over(&mind, &[0.1]);
+    let Outcome::Thought { thought, .. } = tick(&organs(&wrap, &persona, &model), &|| released(), Mode::Live, t(1000 + STREAM_IDLE_GAP_S)).unwrap() else { panic!("idle gap") };
+    let version = &thought.prompt_version.0;
+    assert_eq!(version, &prompt_version());
+    let guidance = format!("{STREAM_GUIDANCE:?}");
+    for part in [guidance.as_str(), GHOSTLIGHT_REV, "words=180", "<name>'s notebook", "<projection>", "<date %-d %B %Y>"] {
+        assert!(version.contains(part), "{part} missing from {version}");
+    }
+    assert!(version.len() <= LINE_MAX_BYTES, "{}", version.len());
+    assert!(include_str!("../../Cargo.toml").contains(GHOSTLIGHT_REV), "the recorded revision is the manifest's pin");
+    let rebuilt = build_projector_prompt(&ProjectorPrompt { identity: &thought.identity.0, typed_context: &thought.context.0, visible_stimulus: &thought.stimulus.0, domain_guidance: STREAM_GUIDANCE, word_budget: PROJECTOR_WORDS });
+    assert_eq!(model.projected.borrow()[0], rebuilt, "the trace rebuilds the Projector's exact prompt");
+}
+
