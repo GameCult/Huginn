@@ -345,9 +345,9 @@ mod tests {
     #[test]
     fn the_block_keeps_whole_lines_that_fit() {
         let lines = ["- 11", "- 22", "- 33"];
-        assert_eq!(render_block("H", &lines, 9), Some(("H\n- 11\n- 22".to_string(), 2)));
-        assert_eq!(render_block("H", &lines, 5), Some(("H\n- 11".to_string(), 1)));
-        assert_eq!(render_block("H", &lines, 4), None);
+        assert_eq!(render_block("H", &lines, 11), Some(("H\n- 11\n- 22".to_string(), 2)));
+        assert_eq!(render_block("H", &lines, 10), Some(("H\n- 11".to_string(), 1)));
+        assert_eq!(render_block("H", &lines, 5), None);
         assert_eq!(render_block("H", &[], 100), None);
         assert_eq!(render_block("日", &lines, 6), Some(("日\n- 11".to_string(), 1)));
     }
