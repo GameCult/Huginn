@@ -313,6 +313,8 @@ fn refuse_foreign_instance(document: &PipelineDocument, mind: &Slug) -> Result<(
         PipelineDocument::Stewardship(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Run(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Pulse(value) if value.instance != *mind => Err(foreign(&value.instance)),
+        PipelineDocument::Reply(value) if value.instance != *mind => Err(foreign(&value.instance)),
+        PipelineDocument::Thought(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::Memory(value) if value.instance != *mind => Err(foreign(&value.instance)),
         PipelineDocument::HandOff(value) if value.from_instance != *mind && value.to_instance != *mind => {
             Err(foreign(&value.from_instance))
@@ -433,6 +435,7 @@ fn derive(docs: &Docs<'_>, mind: &Slug) -> Vec<PipelineDocument> {
                         sequence: docs.derived_stewardship_sequence(mind, &hand_off.repo, &staged.key),
                         repo: hand_off.repo.clone(),
                         assigned_on: hand_off.handed_on.clone(),
+                        names: vec![],
                         note: Line(staged.key.clone()),
                     }));
                 }
@@ -623,7 +626,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusa
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
             run_rule(docs, key, run, replay)
         }
-        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => Ok(()),
+        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => Ok(()),
     }
 }
 
@@ -727,6 +730,10 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Idea, O::Deferred { to }) => matches!(to.kind, K::Question | K::CutSpec | K::FollowUp | K::Ruling),
         (K::Idea, O::Superseded { by }) => all(by, K::Idea),
         (K::Idea, O::Recorded { .. } | O::Withdrawn { .. }) => true,
+        (K::Reply, O::Answered { by }) => by.kind == K::FollowUp,
+        (K::Reply, O::Recorded { .. }) => true,
+        (K::Thought, O::Answered { by }) => by.kind == K::FollowUp,
+        (K::Thought, O::Recorded { .. }) => true,
         (K::Resolution, O::Withdrawn { .. }) => true,
         _ => false,
     }
@@ -1563,6 +1570,26 @@ mod tests {
         assert_eq!(taken.sequence, 2);
         assert_eq!(taken.assigned_on, eureka_pipeline::Date("2026-09-17".into()));
         assert!(mind.envelope(K::Stewardship, &first).is_some(), "the first assignment is still readable by key");
+    }
+
+    /// A steward revises her chat names the way she revises anything of hers: the next sequence, and a resolution of the last record
+    /// superseding it, in one batch. Without the resolution the old record is still in force and the new one is refused; with it the
+    /// new record is the one in force.
+    #[test]
+    fn a_steward_revises_her_names_by_the_next_sequence_superseding_the_last_in_one_batch() {
+        let mut mind = seeded();
+        let (first, second) = (format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1"), format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2"));
+        let named = |sequence: u32, names: &[&str]| {
+            let D::Stewardship(mut revised) = stewardship_n(INSTANCE, REPO, sequence) else { panic!() };
+            revised.names = names.iter().map(|name| (*name).into()).collect();
+            D::Stewardship(revised)
+        };
+        assert_eq!(refusal(admit(&mut mind, vec![named(2, &["BDS"])])), MindRefusal::AlreadyStewarded { repo: REPO.into() }, "the first record is still in force");
+        let supersede = |by: &str| resolution(r(K::Stewardship, &first), ResolutionOutcome::Superseded { by: vec![r(K::Stewardship, by)] });
+        committed(admit(&mut mind, vec![supersede(&second), named(2, &["BDS", "Bad Day Simulator"])]));
+        let Some(D::Stewardship(in_force)) = mind.get(K::Stewardship, &second).unwrap() else { panic!() };
+        assert_eq!(in_force.names, vec![eureka_pipeline::Short("BDS".into()), eureka_pipeline::Short("Bad Day Simulator".into())]);
+        assert_eq!(refusal(admit(&mut mind, vec![named(3, &["BDS"])])), MindRefusal::AlreadyStewarded { repo: REPO.into() }, "the second record is the one in force now");
     }
 
     /// Q19 A's rationale, which the cap alone does not carry: a withdrawal
@@ -2474,6 +2501,65 @@ mod tests {
         committed(admit(&mut mind, vec![pulse(INSTANCE)]));
     }
 
+    /// A reply is her own: one of another mind is a ForeignInstance, her own is admitted.
+    #[test]
+    fn a_reply_of_another_mind_is_a_foreign_instance_and_her_own_is_admitted() {
+        let mut mind = with_specs();
+        let reply = |instance: &str| {
+            D::Reply(eureka_pipeline::PipelineReply {
+                instance: slug(instance),
+                label: l("w1-r1"),
+                run: r(K::Run, &format!("{INSTANCE}:run:w1")),
+                answers: vec![],
+                text: "Done.".into(),
+            })
+        };
+        assert_eq!(
+            refusal(admit(&mut mind, vec![reply(OTHER_INSTANCE)])),
+            MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() }
+        );
+        committed(admit(&mut mind, vec![run("w1", &[])]));
+        committed(admit(&mut mind, vec![reply(INSTANCE)]));
+    }
+
+    /// A thought is her own: one of another mind is a ForeignInstance, her own is admitted.
+    #[test]
+    fn a_thought_of_another_mind_is_a_foreign_instance_and_her_own_is_admitted() {
+        let mut mind = with_specs();
+        let D::Thought(mut foreign) = crate::fixtures::thought("t1", "A drift.", &[]) else { unreachable!() };
+        foreign.instance = slug(OTHER_INSTANCE);
+        assert_eq!(
+            refusal(admit(&mut mind, vec![D::Thought(foreign)])),
+            MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() }
+        );
+        committed(admit(&mut mind, vec![crate::fixtures::thought("t1", "A drift.", &[])]));
+    }
+
+    /// A thought resolves Answered by a follow-up or Recorded; no other outcome.
+    #[test]
+    fn a_thought_resolves_answered_by_a_follow_up_or_recorded_and_nothing_else() {
+        let incompatible = |outcome: &str| MindRefusal::IncompatibleResolution { subject_kind: K::Thought, outcome: outcome.into() };
+        let subject = || r(K::Thought, &format!("{INSTANCE}:thought:t1"));
+        let fu = || r(K::FollowUp, &id("follow_up", "FU1"));
+        let open = || {
+            let mut mind = with_specs();
+            committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), follow_up("FU1", r(K::Ruling, &id("ruling", "R1")))]));
+            committed(admit(&mut mind, vec![crate::fixtures::thought("t1", "A drift.", &[])]));
+            mind
+        };
+        committed(admit(&mut open(), vec![resolution(subject(), ResolutionOutcome::Answered { by: fu() })]));
+        committed(admit(&mut open(), vec![resolution(subject(), ResolutionOutcome::Recorded { reason: "weighed".into() })]));
+        let refused = [
+            (ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) }, "Answered"),
+            (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
+            (ResolutionOutcome::Deferred { to: fu() }, "Deferred"),
+            (withdrawn(), "Withdrawn"),
+        ];
+        for (outcome, name) in refused {
+            assert_eq!(refusal(admit(&mut open(), vec![resolution(subject(), outcome)])), incompatible(name), "{name}");
+        }
+    }
+
     fn memory_key(label: &str) -> String {
         format!("{INSTANCE}:memory:{label}")
     }
@@ -2741,6 +2827,36 @@ mod tests {
         ];
         for (outcome, name) in refused {
             assert_eq!(refusal(admit(&mut open(), vec![resolution(subject(), outcome)])), incompatible(name), "{name}");
+        }
+    }
+
+    /// A reply is heard: Answered by the follow-up her answer admitted, or Recorded; no other outcome.
+    #[test]
+    fn a_reply_resolves_answered_by_a_follow_up_or_recorded_and_nothing_else() {
+        let incompatible = |outcome: &str| MindRefusal::IncompatibleResolution { subject_kind: K::Reply, outcome: outcome.into() };
+        let subject = || r(K::Reply, &format!("{INSTANCE}:reply:w1-r1"));
+        let fu = || r(K::FollowUp, &id("follow_up", "FU1"));
+        let open = || {
+            let mut mind = with_specs();
+            committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), follow_up("FU1", r(K::Ruling, &id("ruling", "R1"))), run("w1", &[])]));
+            committed(admit(&mut mind, vec![D::Reply(eureka_pipeline::PipelineReply {
+                instance: slug(INSTANCE), label: l("w1-r1"), run: r(K::Run, &run_key("w1")), answers: vec![fu()], text: "Done.".into(),
+            })]));
+            mind
+        };
+        committed(admit(&mut open(), vec![resolution(subject(), ResolutionOutcome::Answered { by: fu() })]));
+        committed(admit(&mut open(), vec![recorded_reply()]));
+        let refused = [
+            (ResolutionOutcome::Answered { by: r(K::Ruling, &id("ruling", "R1")) }, "Answered"),
+            (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
+            (ResolutionOutcome::Deferred { to: fu() }, "Deferred"),
+            (withdrawn(), "Withdrawn"),
+        ];
+        for (outcome, name) in refused {
+            assert_eq!(refusal(admit(&mut open(), vec![resolution(subject(), outcome)])), incompatible(name), "{name}");
+        }
+        fn recorded_reply() -> D {
+            resolution(r(K::Reply, &format!("{INSTANCE}:reply:w1-r1")), ResolutionOutcome::Recorded { reason: "heard".into() })
         }
     }
 

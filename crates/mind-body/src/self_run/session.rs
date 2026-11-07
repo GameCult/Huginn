@@ -20,8 +20,12 @@ use crate::launch::Clock;
 /// What one poll of an inbox found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Polled {
-    /// Something waits to be told.
+    /// A brief of the conversation being served waits to be told.
     pub(crate) pending: bool,
+    /// A brief of another conversation waits: told only when the session is idle (the switch).
+    pub(crate) other: bool,
+    /// The oldest waiting brief is another conversation's: at idle it goes before the served conversation's own.
+    pub(crate) other_first: bool,
     /// The session should end at its next idle: what is oldest and unanswered is not its business.
     pub(crate) yield_now: bool,
 }
@@ -33,8 +37,8 @@ pub(crate) trait SessionInbox {
     /// Seconds between polls.
     fn poll_every_s(&self) -> i64;
     fn poll(&mut self) -> Result<Polled>;
-    /// The text of what waits, which is thereby told.
-    fn tell(&mut self) -> Result<String>;
+    /// The text of what waits, which is thereby told. `switch`: the session is idle and the text is another conversation's, the oldest waiting; else it is the served conversation's.
+    fn tell(&mut self, switch: bool) -> Result<String>;
     fn flush_text(&mut self, why: Why) -> String;
     /// Every line of the child's stream, before it is read.
     fn line(&mut self, _line: &str) {}
@@ -70,11 +74,16 @@ pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dy
                     ttl_1h = hour;
                 }
                 match read_usage(&line) {
-                    Usage::Request { id, prefix } => Event::Request { id, prefix },
+                    Usage::Request { id, prefix, stops } => Event::Request { id, prefix, stops },
                     Usage::Echo => {
                         inbox.echoed();
                         Event::Echo
                     }
+                    Usage::TurnBegan => Event::TurnBegan,
+                    Usage::BackgroundTasks { live, main, shell } => Event::BackgroundTasks { live, main, shell },
+                    Usage::TaskBackgrounded { id, shell } => Event::TaskBackgrounded { id, shell },
+                    Usage::TaskNotified { id, stopped } => Event::TaskNotified { id, stopped },
+                    Usage::NotificationTaken { id } => Event::NotificationTaken { id },
                     Usage::Result { ok, blocked } => {
                         let (ok, blocked) = inbox.result(&line, ok, blocked)?;
                         Event::Result { ok, blocked, ttl_1h }
@@ -92,7 +101,7 @@ pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dy
             polled = now;
             match inbox.poll() {
                 Ok(found) => {
-                    events.push_back(Event::Inbox { pending: found.pending });
+                    events.push_back(Event::Inbox { pending: found.pending, other: found.other, other_first: found.other_first });
                     if found.yield_now {
                         events.push_back(Event::Yield);
                     }
@@ -103,7 +112,7 @@ pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dy
         while let Some(heard_event) = events.pop_front() {
             let counted = state.requests;
             // The decision's inputs, as they stood when the event came.
-            let (ttl_s, inbox_pending, idle_s) = (state.ttl_s, state.inbox || matches!(&heard_event, Event::Inbox { pending: true }), state.idle_s(now));
+            let (ttl_s, inbox_pending, idle_s) = (state.ttl_s, state.inbox || matches!(&heard_event, Event::Inbox { pending: true, .. }), state.idle_s(now));
             let (next, action) = decide(state, heard_event, now);
             state = next;
             if state.requests != counted {
@@ -111,10 +120,10 @@ pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dy
             }
             match &action {
                 Action::None => {}
-                Action::Write { tells, flush } => {
+                Action::Write { tells, switch, flush } => {
                     let mut parts = Vec::new();
                     if *tells {
-                        parts.push(inbox.tell()?);
+                        parts.push(inbox.tell(*switch)?);
                     }
                     if let Some(why) = *flush {
                         parts.push(inbox.flush_text(why));

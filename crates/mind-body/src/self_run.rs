@@ -26,8 +26,15 @@
 //! answers; the actuator closes none, and a brief she left open is told to her
 //! next session. Compaction is off in
 //! the CLI (`DISABLE_COMPACT=1`): the organ's own ceiling, flush, end and rehydrate
-//! is the only path. The session ends where its cache would be evicted, near the
-//! unit's cap, at the context ceiling, or after the flush each of those asks.
+//! is the only path. The session ends where its cache would be evicted (and is
+//! then cleared), near the unit's cap, at the context ceiling, or after the flush
+//! each of those asks. A clean end inside the cache's life is kept
+//! (`decide::warm_until`), and the next process resumes it with
+//! `--resume <kept path> --fork-session` while the cache is still warm and the
+//! seed is unchanged (`decide::resumes`; rulings
+//! `eureka-body:ruling:session-rotate-and-resume` and
+//! `eureka-body:ruling:live-session-floor-cache-evicts`). The kept transcript is a
+//! cache of the conversation, never memory: her mind and replies stay the truth.
 //!
 //! Every timing decision is one pure function, `decide` (the `decide` module,
 //! ruling `eureka-body:ruling:self-run-decider`). `carry` is the loop that turns
@@ -45,14 +52,15 @@
 //! `RuntimeMaxSec` and the context-ceiling flush. The grant carries the plan usage
 //! windows, which go to the child in its start message.
 //!
-//! The actuator admits run closures and brief closures, nothing else. Every exit of
-//! `carry` that leaves her run open resolves it Recorded exactly once (the
-//! child's result in the rationale, or that it gave none in the reason). It reads neither the
+//! The actuator admits run closures and the replies of her Self (each result's
+//! words, `SelfInbox::result`), nothing else. Every exit of `carry` that leaves
+//! her run open resolves it Recorded exactly once (how it ended and the
+//! child's last result head in the reason; her words are her replies). It reads neither the
 //! brake nor the environment and stops no unit: the gate and the brake hold own those.
 //! It never echoes an argument, an endpoint, a
 //! connector's refusal text or a stream line. Stream-json is Claude Code's wire, a
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
-//! parsed is stored.
+//! parsed is stored but a result's text, as a reply.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -64,15 +72,16 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use cultnet_rs::Selection;
-use eureka_pipeline::{PipelineDocument, PipelineRef, ResolutionOutcome, RunTurn, Slug};
+use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, PipelineReply, ResolutionOutcome, RunTurn, Slug};
 use huginn_mind::{PipelineAdmissionOutcome, PipelinePageItems};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::launch::{Clock, closure, holders};
 use crate::connector::render_plan;
+use crate::persona::Conversation;
 use crate::lease_client::{LeaseRefusalKind, LeaseRequest, Lender, Lent, TokenFd};
 use model_connector::PlanQuota;
 use crate::queue::MindPort;
@@ -150,8 +159,18 @@ pub const SESSION_NAMESPACE: Uuid = Uuid::NAMESPACE_OID;
 /// skill: it names the skill, the instance and the run id.
 pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
     format!(
-        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own.\n\n{}",
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs. Briefs reach you one conversation at a time. More briefs of the conversation you are serving may arrive while you work; another conversation's brief is told only once you are idle, with no turn running and no background task of yours still running or waiting for its turn. What you say ending any turn, the turns that report your background tasks included, reaches your Persona in the conversation you are serving, so a long background task keeps other members waiting.\n\n{}",
         instance.0,
+        run.id.0,
+        render_plan(plan_quota, now_ms)
+    )
+}
+
+/// What a resumed process is told instead of the start message: the conversation
+/// is hers already (the skill is loaded), so only the new run and its plan are new.
+pub fn continue_message(run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
+    format!(
+        "Your session continues in a new process under a new run: your run is now `{}`; the previous run is closed. Admit as faculty SelfFaculty, agent {AGENT}. What you say when you end a turn still reaches your Persona as a reply, and your Persona's answers come as briefs.\n\n{}",
         run.id.0,
         render_plan(plan_quota, now_ms)
     )
@@ -201,7 +220,7 @@ pub const FLUSH_MESSAGE: &str = "The context ceiling is reached. Admit to the mi
 fn flush_text(why: Why) -> String {
     let cause = match why {
         Why::Ceiling => "",
-        Why::Rotation => " (This session ends soon: the unit's time is nearly up.)",
+        Why::Rotation => " (This process ends soon: the unit's time is nearly up. If your next brief comes within the hour, the next process continues this conversation.)",
         Why::Idle => " (This session ends because nothing is waiting and its cache would lapse.)",
     };
     format!("{FLUSH_MESSAGE}{cause} Resolve each brief you answered (Recorded, your answer as rationale); a brief you are still working stays open and the next session continues it.")
@@ -212,8 +231,13 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
     Uuid::new_v5(&SESSION_NAMESPACE, run.id.0.as_bytes())
 }
 
-/// The argument list of the child, and nothing else: no resume, continue or
-/// fork, no model, no settings and no hooks belong to this actuator. It asks the
+/// The argument list of the child, and nothing else: no continue flag, no model,
+/// no settings and no hooks belong to this actuator. With a kept conversation it
+/// appends `--resume <transcript path> --fork-session`: the fork is why the new
+/// run's own `--session-id` is accepted beside a resume (the CLI refuses the two
+/// without it, probe P2b; ruling `eureka-body:ruling:claude-code-handle-reseeds`),
+/// and the path, not the CLI's cwd-slug lookup, is what finds the transcript
+/// (probe P2d). It asks the
 /// CLI to echo each stdin line it takes into a request (`--replay-user-messages`),
 /// which is how delivery is counted. It fixes the permission mode: print mode starts in Manual when nothing on the command
 /// line sets a mode (the managed `defaultMode` was not applied in print mode,
@@ -225,8 +249,11 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
 /// user's settings load (the fresh configuration directory
 /// the seed fills); the working directory's project and local settings, which a
 /// run could have written, do not.
-pub fn claude_args(session: Uuid) -> Vec<String> {
-    [
+pub fn claude_args(session: Uuid, resume: Option<&Path>) -> Vec<String> {
+    // `--disallowedTools` (probe, claude 2.1.312): the init line's tools lose these two. A turn the CLI begins on its own must be a
+    // notification turn the actuator tracks (a task's), so no wake of the Self's own is scheduled in the CLI: her heartbeat owns her wakes.
+    const DENIED_TOOLS: &str = "ScheduleWakeup,CronCreate";
+    let mut args: Vec<String> = [
         "-p",
         "--input-format",
         "stream-json",
@@ -244,22 +271,52 @@ pub fn claude_args(session: Uuid) -> Vec<String> {
         "--setting-sources",
         "user",
         "--replay-user-messages",
+        "--disallowedTools",
+        DENIED_TOOLS,
     ]
     .map(String::from)
-    .to_vec()
+    .to_vec();
+    if let Some(transcript) = resume {
+        args.extend(["--resume".to_string(), transcript.to_string_lossy().into_owned(), "--fork-session".to_string()]);
+    }
+    args
 }
+
+/// What a user line starts with when the CLI replays a task notification to the model.
+const NOTIFICATION_TAG: &str = "<task-notification>";
+
+/// The names a task-stopping call carries on the stream: the tool's own and its two aliases, each of which the CLI runs as the same stop and the
+/// stream shows as the model named it (real claude 2.1.312, fake API).
+const STOP_TOOLS: [&str; 3] = ["TaskStop", "KillShell", "KillBash"];
 
 /// The model name on the CLI's own assistant lines, which no request produced.
 const SYNTHETIC_MODEL: &str = "<synthetic>";
 
+/// The kinds (`task_type`) whose stop by the session queues nothing for the model, so their stopped notification owes no turn: `local_bash` (a Bash task or a Monitor) is captured, the rest are read from the bundle's kill code
+/// (Soul verdict `eureka-body:verdict:cut-self-reply-conversation.s6`). `local_agent`, `monitor_mcp`, `monitor_ws` and any kind not listed or unread queue a message when stopped, so they owe their turn.
+const SILENT_STOP_KINDS: [&str; 8] = ["local_bash", "local_workflow", "remote_agent", "mcp_task", "in_process_teammate", "dream", "auto_mode_scan", "local_memory_import"];
+
 /// One line of the child's stream, as far as the actuator reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Usage {
-    /// A request of the main thread: the message's id and the context it
-    /// read (input, cache read and cache write tokens).
-    Request { id: String, prefix: u64 },
-    /// A user line of the main thread that the CLI took into a request (a replay echo): ours, never a tool result.
+    /// A request of the main thread: the message's id, the context it
+    /// read (input, cache read and cache write tokens) and the tasks a stop call (`TaskStop` or its aliases) on its line names (`task_id`, else `shell_id`).
+    Request { id: String, prefix: u64, stops: Vec<String> },
+    /// A user line of the main thread that the CLI took into a request (a replay echo): ours, never a tool result and never the CLI's
+    /// own replay of a task notification.
     Echo,
+    /// The CLI began a turn: a `system` init line.
+    TurnBegan,
+    /// The CLI's level of background tasks (`background_tasks_changed`): `live` the `task_id` of every entry, `main` those of entries with no
+    /// parent task that nobody awaits.
+    BackgroundTasks { live: Vec<String>, main: Vec<String>, shell: Vec<String> },
+    /// A task of the main session went to the background, by `task_id`: a `task_started` with `is_backgrounded` true and no parent task or
+    /// awaiter, or a `task_updated` whose patch backgrounds it.
+    TaskBackgrounded { id: String, shell: bool },
+    /// A task notification, by `task_id`; `stopped`: its status is `stopped`.
+    TaskNotified { id: String, stopped: bool },
+    /// The CLI replayed a task notification as a user line, taking it into a turn; the `<task-id>` is the task's.
+    NotificationTaken { id: String },
     /// A turn ended. `ok`: not an error. `blocked`: the CLI refused the context (`blocking_limit`).
     Result { ok: bool, blocked: bool },
     /// Valid JSON that is none of the above, or a request of a subagent.
@@ -288,12 +345,39 @@ pub fn read_usage(line: &str) -> Usage {
             ok: !event.get("is_error").and_then(Value::as_bool).unwrap_or(false),
             blocked: event.get("terminal_reason").and_then(Value::as_str) == Some("blocking_limit"),
         },
-        Some("user")
-            if event.get("isReplay").and_then(Value::as_bool) == Some(true)
-                && event.get("parent_tool_use_id").is_none_or(Value::is_null)
-                && event.get("message").and_then(|message| message.get("content")).is_some_and(Value::is_string) =>
-        {
-            Usage::Echo
+        // Task lines are read for liveness only: they name a task by its `task_id` and never a conversation.
+        Some("system") => {
+            let task_id = |object: &serde_json::Map<String, Value>| object.get("task_id").and_then(Value::as_str).map(String::from);
+            // A task of the main session that nobody awaits: no parent task, `awaited` not true.
+            let main = |object: &serde_json::Map<String, Value>| object.get("parent_task_id").is_none_or(Value::is_null) && object.get("awaited").and_then(Value::as_bool) != Some(true);
+            // The kind the CLI gives a task, `task_type`: only a kind in `SILENT_STOP_KINDS` is known to get no turn when we stop it.
+            let shell = |object: &serde_json::Map<String, Value>| object.get("task_type").and_then(Value::as_str).is_some_and(|kind| SILENT_STOP_KINDS.contains(&kind));
+            match event.get("subtype").and_then(Value::as_str) {
+                Some("init") => Usage::TurnBegan,
+                Some("background_tasks_changed") => {
+                    let entries: Vec<&serde_json::Map<String, Value>> = event.get("tasks").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_object).collect();
+                    Usage::BackgroundTasks {
+                        live: entries.iter().copied().filter_map(task_id).collect(),
+                        main: entries.iter().copied().filter(|entry| main(entry)).filter_map(task_id).collect(),
+                        shell: entries.iter().copied().filter(|entry| shell(entry)).filter_map(task_id).collect(),
+                    }
+                }
+                Some("task_started") if event.get("is_backgrounded").and_then(Value::as_bool) == Some(true) && main(&event) => task_id(&event).map_or(Usage::Other, |id| Usage::TaskBackgrounded { id, shell: shell(&event) }),
+                Some("task_updated") if event.get("patch").and_then(|patch| patch.get("is_backgrounded")).and_then(Value::as_bool) == Some(true) => task_id(&event).map_or(Usage::Other, |id| Usage::TaskBackgrounded { id, shell: false }),
+                Some("task_notification") => task_id(&event).map_or(Usage::Other, |id| Usage::TaskNotified { id, stopped: event.get("status").and_then(Value::as_str) == Some("stopped") }),
+                _ => Usage::Other,
+            }
+        }
+        Some("user") if event.get("isReplay").and_then(Value::as_bool) == Some(true) && event.get("parent_tool_use_id").is_none_or(Value::is_null) => {
+            match event.get("message").and_then(|message| message.get("content")).and_then(Value::as_str) {
+                // The CLI replays a notification it takes into a turn: it is the CLI's line, never our echo.
+                Some(content) if content.starts_with(NOTIFICATION_TAG) => content
+                    .split_once("<task-id>")
+                    .and_then(|(_, rest)| rest.split_once("</task-id>"))
+                    .map_or(Usage::Other, |(id, _)| Usage::NotificationTaken { id: id.to_string() }),
+                Some(_) => Usage::Echo,
+                None => Usage::Other,
+            }
         }
         Some("assistant") if event.get("parent_tool_use_id").is_none_or(Value::is_null) => {
             let message = event.get("message");
@@ -306,7 +390,16 @@ pub fn read_usage(line: &str) -> Usage {
             let field = |name: &str| usage.and_then(|usage| usage.get(name)).and_then(Value::as_u64).unwrap_or(0);
             // Saturating: a sum that overflows is at or over the ceiling, never a panic or a wrap.
             let prefix = field("input_tokens").saturating_add(field("cache_read_input_tokens")).saturating_add(field("cache_creation_input_tokens"));
-            Usage::Request { id: id.to_string(), prefix }
+            // The tasks a `TaskStop` call on this line stops: the CLI's kill tells the model nothing, so the decision must know it was ours.
+            let stops = message
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use") && block.get("name").and_then(Value::as_str).is_some_and(|name| STOP_TOOLS.contains(&name)))
+                .filter_map(|block| block.get("input")?.as_object()?.get("task_id").or_else(|| block.get("input")?.get("shell_id"))?.as_str().map(String::from))
+                .collect();
+            Usage::Request { id: id.to_string(), prefix, stops }
         }
         _ => Usage::Other,
     }
@@ -353,9 +446,33 @@ impl Stop {
     }
 }
 
+/// The organ's one kept conversation: the transcript of the last clean process,
+/// the instant its cache runs out, and whether the seed is still the one it was
+/// made under. Whether it is resumed is `decide::resumes`, nothing else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kept {
+    /// The session id the kept transcript was written under.
+    pub session: Uuid,
+    pub transcript: PathBuf,
+    pub warm_until: DateTime<Utc>,
+    /// When the record was written; `warm_until` may not lie more than the longest cache lifetime past it.
+    pub written_at: DateTime<Utc>,
+    pub same_seed: bool,
+}
+
 pub trait Spawner {
     /// Starts the child with `token` as its credential descriptor.
     fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>>;
+
+    /// The organ's one kept conversation, if any. A spawner that keeps nothing says none.
+    fn kept(&self) -> Option<Kept> {
+        None
+    }
+
+    /// Keeps the conversation this process ended under `session` until the instant, replacing any other; none clears it.
+    fn keep(&self, _keep: Option<(Uuid, DateTime<Utc>)>) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Why a run ended.
@@ -378,7 +495,8 @@ pub enum SelfRunOutcome {
     NoRun,
     /// The connector would not lend: the run is closed Recorded and nothing was started.
     LeaseRefused { kind: LeaseRefusalKind },
-    Ended { cause: Cause, code: Option<i32>, requests: u64, prefix: u64 },
+    /// `warm_until`: until when the conversation is worth resuming (`decide::warm_until`), none when it is not.
+    Ended { cause: Cause, code: Option<i32>, requests: u64, prefix: u64, warm_until: Option<DateTime<Utc>> },
 }
 
 impl SelfRunOutcome {
@@ -399,7 +517,7 @@ impl fmt::Display for SelfRunOutcome {
         match self {
             Self::NoRun => write!(f, "no run: she has no single open Self run"),
             Self::LeaseRefused { kind } => write!(f, "no run: the connector refused the lease ({kind:?})"),
-            Self::Ended { cause, code, requests, prefix } => {
+            Self::Ended { cause, code, requests, prefix, warm_until } => {
                 let cause = match cause {
                     Cause::Own => "own",
                     Cause::FlushRequested => "flush-requested",
@@ -409,8 +527,12 @@ impl fmt::Display for SelfRunOutcome {
                     Cause::Unstoppable => "unstoppable",
                 };
                 match code {
-                    Some(code) => write!(f, "ended: {cause} code {code} requests {requests} prefix {prefix}"),
-                    None => write!(f, "ended: {cause} signal requests {requests} prefix {prefix}"),
+                    Some(code) => write!(f, "ended: {cause} code {code} requests {requests} prefix {prefix}")?,
+                    None => write!(f, "ended: {cause} signal requests {requests} prefix {prefix}")?,
+                }
+                match warm_until {
+                    Some(until) => write!(f, " warm until {}", until.to_rfc3339_opts(SecondsFormat::Secs, true)),
+                    None => Ok(()),
                 }
             }
         }
@@ -431,18 +553,20 @@ fn her_run(mind: &dyn MindPort) -> Result<Option<(PipelineRef, Vec<PipelineRef>)
     }
 }
 
-/// What the stream said at the end of the run: its head becomes the closure's reason, its text (bounded) the rationale.
+/// What the stream said at the end of the run: the head of its last result becomes the closure's reason. Her words are her replies, not the closure's.
 #[derive(Default)]
 struct Heard {
-    /// The last result heard, ok or not: its head line and its text cut to `RATIONALE_RESULT_LIMIT`.
-    concluded: Option<(String, String)>,
+    /// The last result heard, ok or not: its head line.
+    concluded: Option<String>,
+    /// The session this process resumed; none when it started fresh. Set at the start, read by the closure's reason.
+    resumed: Option<Uuid>,
 }
 
 impl Heard {
     fn hear(&mut self, line: &str) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         if event.get("type").and_then(Value::as_str) == Some("result") {
-            self.concluded = Some((result_head(&event), cut_text(result_text(&event), RATIONALE_RESULT_LIMIT)));
+            self.concluded = Some(result_head(&event));
         }
     }
 }
@@ -480,16 +604,19 @@ fn close_if_open(mind: &dyn MindPort, clock: &dyn Clock, run: &PipelineRef, ran:
         Ok(outcome) => outcome.to_string(),
         Err(_) => "the actuator failed after the run opened".to_string(),
     };
-    let (reason, rationale) = match &heard.concluded {
-        Some((head, text)) if !text.is_empty() => (format!("{how}; {head}"), text.as_str()),
-        Some((head, _)) => (format!("{how}; {head}"), CARRIER_CLOSED),
-        None => (format!("{how}; claude gave no result"), CARRIER_CLOSED),
+    let reason = match &heard.concluded {
+        Some(head) => format!("{how}; {head}"),
+        None => format!("{how}; claude gave no result"),
     };
-    admit_closure(mind, clock, run, ResolutionOutcome::Recorded { reason: reason.as_str().into() }, rationale)
+    let reason = match heard.resumed {
+        Some(previous) => format!("{reason}; resumed {previous}"),
+        None => format!("{reason}; fresh"),
+    };
+    admit_closure(mind, clock, run, ResolutionOutcome::Recorded { reason: reason.as_str().into() }, CARRIER_CLOSED)
 }
 
-/// The rationale of a closure that has no result text to give.
-const CARRIER_CLOSED: &str = "The Self run's carrier closed the run its claude left open.";
+/// The rationale of every closure the carrier writes: what she said is in her replies.
+const CARRIER_CLOSED: &str = "The Self run's carrier closed the run its claude left open; what she said is in her replies.";
 
 /// Closes a run whose lease was refused for its length: Withdrawn, because no
 /// claude ever ran and a misconfiguration is not an empty run; the breaker
@@ -516,8 +643,28 @@ fn withdraw_misconfigured(mind: &dyn MindPort, clock: &dyn Clock, run: &Pipeline
 /// error, and the launch that opens the next run closes the run left open.
 pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
     let Some((run, claims)) = her_run(mind)? else { return Ok(SelfRunOutcome::NoRun) };
+    let open = inbox::derive(mind, &HashSet::new())?;
+    // One Self turn answers one conversation: the start set is the claimed briefs and the open briefs of the first claimed brief's
+    // conversation (with no claimed brief, of the oldest open brief's). A claim no longer open (resolved) has its conversation read by
+    // key from the mind, as a reply's briefs are: the gate opens only for it. The rest are derived by poll, one conversation at a time.
+    let mut claimed: Vec<(PipelineRef, Option<Conversation>)> = Vec::new();
+    for claim in claims {
+        let of = if claim.kind != PipelineKind::FollowUp {
+            None
+        } else if let Some(brief) = open.iter().find(|brief| brief.id == claim.id.0) {
+            Some(brief.conversation.clone())
+        } else {
+            inbox::conversation_by_key(mind, &claim.id.0).with_context(|| format!("the claim `{}` could not be read from the mind", claim.id.0))?
+        };
+        claimed.push((claim, of));
+    }
+    let first = claimed.iter().find_map(|(_, of)| of.clone()).or_else(|| open.first().map(|brief| brief.conversation.clone()));
+    // A claim of another conversation is not rendered or carried: the start line holds one conversation only.
+    let claims: Vec<PipelineRef> = claimed.into_iter().filter(|(claim, of)| claim.kind != PipelineKind::FollowUp || *of == first).map(|(claim, _)| claim).collect();
+    // The conversation the session serves from its start: the claim's, else the oldest open brief's, else the public one.
+    let conversation = first.clone().unwrap_or(Conversation::Public);
     let mut task = task_section(mind, &claims)?;
-    let mut told: Vec<Brief> = inbox::derive(mind, &HashSet::new())?;
+    let mut told: Vec<Brief> = open.into_iter().filter(|brief| claims.iter().any(|claim| claim.id.0 == brief.id) || Some(&brief.conversation) == first.as_ref()).collect();
     let also: Vec<&Brief> = told.iter().filter(|brief| !claims.iter().any(|claim| claim.id.0 == brief.id)).collect();
     if !also.is_empty() {
         task.push_str("
@@ -529,7 +676,7 @@ Also open for you:");
         }
     }
     let mut heard = Heard::default();
-    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &task), &mut told, &mut heard);
+    let ran = lend_and_drive(mind, clock, lender, spawner, run_cap_s, out, (&run, &claims, &task, conversation), &mut told, &mut heard);
     let closed = close_if_open(mind, clock, &run, &ran, &heard);
     if closed.is_err() {
         let _ = writeln!(out, "the run could not be closed: the next launch closes it");
@@ -542,7 +689,7 @@ Also open for you:");
 }
 
 #[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
-fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, task): (&PipelineRef, &str), told: &mut Vec<Brief>, heard: &mut Heard) -> Result<SelfRunOutcome> {
+fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, claims, task, conversation): (&PipelineRef, &[PipelineRef], &str, Conversation), told: &mut Vec<Brief>, heard: &mut Heard) -> Result<SelfRunOutcome> {
     let started_ms = unix_ms(clock.now());
     let request = LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
@@ -553,12 +700,53 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         }
         Lent::Refused(refused) => return close_refused(mind, clock, run, refused.kind),
     };
-    let child = spawner.spawn(&claude_args(session_id(run)), lease.token())?;
-    let mut inbox = SelfInbox::new(mind, run, task, (lease.plan_quota(), started_ms), told, heard);
-    drive(clock, child, &mut inbox, run_cap_s, out)
+    // The one start decision: a kept conversation is resumed iff `decide::resumes`; any other is cleared before the child starts.
+    let kept = spawner.kept();
+    let mut resume = kept.clone().filter(|kept| decide::resumes(kept, clock.now()));
+    if let Some(warm) = &resume {
+        // A resumed start consumes the record before the child exists: the same conversation, kept as already cold (its transcript stays for `--resume`),
+        // so a process that never reaches the end keep (a signal, a panic) cannot let the next resume from before the run it was killed in.
+        if spawner.keep(Some((warm.session, clock.now()))).is_err() {
+            resume = None;
+        }
+    }
+    if resume.is_none() {
+        let why = match &kept {
+            None => "none kept",
+            Some(kept) if !kept.same_seed => "seed changed",
+            Some(_) => "cold",
+        };
+        if spawner.keep(None).is_err() {
+            writeln!(out, "session cache could not be cleared")?;
+        }
+        writeln!(out, "session fresh: {why}")?;
+    }
+    if let Some(kept) = &resume {
+        heard.resumed = Some(kept.session);
+        writeln!(out, "session resumed {} warm until {}", kept.session, kept.warm_until.to_rfc3339_opts(SecondsFormat::Secs, true))?;
+    }
+    let child = spawner.spawn(&claude_args(session_id(run), resume.as_ref().map(|kept| kept.transcript.as_path())), lease.token())?;
+    let mut inbox = SelfInbox::new(mind, (run, claims), task, (lease.plan_quota(), started_ms), (told, conversation), heard, resume.is_some());
+    let ran = drive(clock, child, &mut inbox, run_cap_s, out);
+    inbox.admit_unadmitted();
+    // The one end decision: a clean end inside the cache's life is kept under this run's session, any other end (an Err included) clears.
+    let keep = match &ran {
+        Ok(SelfRunOutcome::Ended { warm_until: Some(until), .. }) => Some((session_id(run), *until)),
+        _ => None,
+    };
+    let _ = match (spawner.keep(keep), keep) {
+        (Ok(()), Some((_, until))) => writeln!(out, "session kept until {}", until.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        (Ok(()), None) => writeln!(out, "session cleared"),
+        (Err(_), _) => writeln!(out, "session cache could not be updated"),
+    };
+    ran
 }
 
 /// The Self's side of the session: her briefs, derived from the mind, are what she is told.
+///
+/// One conversation at a time (ruling `eureka-body:ruling:self-serves-one-conversation-at-a-time`): the session serves one conversation, and
+/// every result belongs to it. The actuator changes it only in a write `decide` marks `switch`, which `decide` issues only when the session is
+/// idle; a result is never attributed from the order of the stream.
 struct SelfInbox<'a> {
     mind: &'a dyn MindPort,
     start: String,
@@ -567,12 +755,81 @@ struct SelfInbox<'a> {
     /// The briefs derived at the last poll that no line has carried yet.
     waiting: Vec<Brief>,
     heard: &'a mut Heard,
+    run: PipelineRef,
+    /// The briefs of the lines written that the CLI has not yet taken into a request: the start line's, then each `tell`'s.
+    carried: Vec<String>,
+    /// The briefs of the lines the CLI took, which the next reply answers.
+    echoed: Vec<String>,
+    /// The conversation being served: the start line's, then the one each switch writes. Its new briefs may be written at any time; another
+    /// conversation's only at the switch.
+    serving: Conversation,
+    /// The briefs the last reply answered, or the briefs of the line that began this span. A result that took in no brief (a notification
+    /// turn, an error, an empty answer) answers them: it belongs to the span being served.
+    last_answers: Vec<String>,
+    /// The flush was written and the CLI has not yet taken it.
+    flush_written: bool,
+    /// The CLI took the flush and its result has not come: that result is the session's note to its successor, never a reply to a brief.
+    flushing: bool,
+    /// Replies made so far; the next is `<run label>-r<n+1>`.
+    replies: u32,
+    /// Replies the mind did not take: process memory, retried at the next result and once at the end. The journal keeps their text either way.
+    unadmitted: Vec<PipelineReply>,
 }
 
 impl<'a> SelfInbox<'a> {
-    fn new(mind: &'a dyn MindPort, run: &PipelineRef, task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), told: &'a mut Vec<Brief>, heard: &'a mut Heard) -> Self {
-        let start = format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms));
-        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard }
+    /// The start line carries the claimed follow-ups and every brief already open (`told`), all of `serving`'s conversation. A resumed conversation holds the skill already.
+    fn new(mind: &'a dyn MindPort, (run, claims): (&PipelineRef, &[PipelineRef]), task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), (told, serving): (&'a mut Vec<Brief>, Conversation), heard: &'a mut Heard, resumed: bool) -> Self {
+        // A resumed conversation holds the skill already: it is told only that it continues under this run, then its task.
+        let opening = if resumed { continue_message(run, plan_quota, now_ms) } else { start_message(mind.instance(), run, plan_quota, now_ms) };
+        let start = format!("{opening}{task}");
+        let mut carried: Vec<String> = claims.iter().filter(|claim| claim.kind == PipelineKind::FollowUp).map(|claim| claim.id.0.clone()).collect();
+        for brief in told.iter() {
+            if !carried.contains(&brief.id) {
+                carried.push(brief.id.clone());
+            }
+        }
+        let last_answers = carried.clone();
+        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), serving, last_answers, flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
+    }
+
+    /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps the reply and never ends the session.
+    fn admit_unadmitted(&mut self) {
+        let label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0).to_string();
+        let mut kept = Vec::new();
+        for reply in std::mem::take(&mut self.unadmitted) {
+            let taken = matches!(self.mind.admit(AGENT, &label, vec![PipelineDocument::Reply(reply.clone())]), Ok(PipelineAdmissionOutcome::Committed { .. } | PipelineAdmissionOutcome::AlreadyAdmitted { .. }));
+            if !taken {
+                kept.push(reply);
+            }
+        }
+        self.unadmitted = kept;
+    }
+
+    /// One result of the main thread: with words, one reply answering the briefs the CLI has taken since the last reply (the first 64, in tell
+    /// order), else the briefs of the span being served. An error or an empty result makes none and leaves those briefs for the next reply.
+    fn reply_to(&mut self, line: &str, ok: bool) {
+        let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
+        let text = result_text(&event);
+        let flush = std::mem::take(&mut self.flushing);
+        // The flush result is the session's note to its successor, in the journal: it is no reply.
+        if ok && !flush && !text.trim().is_empty() {
+            self.replies += 1;
+            let run_label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0);
+            let taken = std::mem::take(&mut self.echoed);
+            let answered: Vec<String> = if taken.is_empty() { self.last_answers.clone() } else { taken.into_iter().take(64).collect() };
+            let answers = answered.iter().map(|id| PipelineRef { kind: PipelineKind::FollowUp, id: id.as_str().into() }).collect();
+            if !answered.is_empty() {
+                self.last_answers = answered;
+            }
+            self.unadmitted.push(PipelineReply {
+                instance: self.mind.instance().clone(),
+                label: format!("{run_label}-r{}", self.replies).as_str().into(),
+                run: self.run.clone(),
+                answers,
+                text: cut_text(text, REPLY_TEXT_LIMIT).as_str().into(),
+            });
+        }
+        self.admit_unadmitted();
     }
 }
 
@@ -588,29 +845,55 @@ impl SessionInbox for SelfInbox<'_> {
     fn poll(&mut self) -> Result<Polled> {
         let held: HashSet<String> = self.told.iter().map(|brief| brief.id.clone()).collect();
         self.waiting = inbox::derive(self.mind, &held)?;
-        Ok(Polled { pending: !self.waiting.is_empty(), yield_now: false })
+        let pending = self.waiting.iter().any(|brief| brief.conversation == self.serving);
+        let other = self.waiting.iter().any(|brief| brief.conversation != self.serving);
+        let other_first = self.waiting.first().is_some_and(|brief| brief.conversation != self.serving);
+        Ok(Polled { pending, other, other_first, yield_now: false })
     }
 
-    fn tell(&mut self) -> Result<String> {
-        let text = inbox::render(&self.waiting, &self.plan);
-        self.told.append(&mut self.waiting);
+    /// The served conversation's waiting briefs; at a switch, those of the oldest waiting brief's conversation, which then is served and starts
+    /// its own span: no turn of it inherits the old one's briefs.
+    fn tell(&mut self, switch: bool) -> Result<String> {
+        let conversation = if switch { self.waiting.first().map_or_else(|| self.serving.clone(), |brief| brief.conversation.clone()) } else { self.serving.clone() };
+        let (mut mine, rest): (Vec<Brief>, Vec<Brief>) = std::mem::take(&mut self.waiting).into_iter().partition(|brief| brief.conversation == conversation);
+        self.waiting = rest;
+        let text = inbox::render(&mine, &self.plan);
+        let ids: Vec<String> = mine.iter().map(|brief| brief.id.clone()).collect();
+        if conversation != self.serving {
+            self.serving = conversation;
+            self.echoed.clear();
+            self.last_answers = ids.clone();
+        }
+        self.carried.extend(ids);
+        self.told.append(&mut mine);
         Ok(text)
     }
 
     fn flush_text(&mut self, why: Why) -> String {
+        self.flush_written = true;
         flush_text(why)
     }
 
     fn line(&mut self, line: &str) {
         self.heard.hear(line);
     }
+
+    fn echoed(&mut self) {
+        self.echoed.append(&mut self.carried);
+        self.flushing |= std::mem::take(&mut self.flush_written);
+    }
+
+    fn result(&mut self, line: &str, ok: bool, blocked: bool) -> Result<(bool, bool)> {
+        self.reply_to(line, ok);
+        Ok((ok, blocked))
+    }
 }
 
 /// The most of a result's text that reaches the journal.
 const RESULT_TEXT_LIMIT: usize = 4096;
-/// The most of a result's text that reaches the closing resolution's rationale
+/// The most of a result's text that a reply holds
 /// (a `Para` holds 4000 bytes; the cut marker rides inside the rest).
-const RATIONALE_RESULT_LIMIT: usize = 3800;
+const REPLY_TEXT_LIMIT: usize = 3800;
 
 /// A result event's subtype and error flag when it has them, as one line.
 fn result_head(event: &serde_json::Map<String, Value>) -> String {
@@ -644,7 +927,7 @@ fn describe_result(event: &serde_json::Map<String, Value>, limit: usize) -> Stri
 }
 
 /// What `claude` concluded, written to the unit's stdout so it reaches the
-/// journal before the transcript goes with the runtime directory.
+/// journal: the transcript is a cache, and the result's words are kept here.
 fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
     let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return Ok(()) };
     if event.get("type").and_then(Value::as_str) != Some("result") {
@@ -664,12 +947,30 @@ pub struct ClaudeSpawner {
     seed: Option<PathBuf>,
     /// Her sandbox: with it the child runs under bubblewrap (`sandbox_args`), the Persona's; the Self passes none.
     sandbox: Option<PathBuf>,
+    /// Where her one kept conversation lives (the second of the unit's `STATE_DIRECTORY` entries, outside her working directory, the first); none keeps nothing, and every start is fresh.
+    keep: Option<PathBuf>,
+    /// The digest of the seed tree this process copies from (empty without a seed); none when the seed cannot be read, which no kept conversation matches.
+    seed_digest: Option<String>,
 }
 
 impl ClaudeSpawner {
-    /// From the unit's environment: it must name [`SCRATCH_VARIABLE`], and may name [`SEED_VARIABLE`].
+    /// From the unit's environment: it must name [`SCRATCH_VARIABLE`], and may name [`SEED_VARIABLE`] and
+    /// [`STATE_DIRECTORY_VARIABLE`]. With the last, the spawner keeps her last clean conversation for the next process;
+    /// without it every start is fresh, and the journal says so.
     pub fn new(unit_environment: impl IntoIterator<Item = (OsString, OsString)>) -> Result<Self> {
-        Self::in_sandbox(unit_environment, SEED_VARIABLE, None)
+        let unit_environment: Vec<(OsString, OsString)> = unit_environment.into_iter().collect();
+        // systemd lists several state directories colon-separated: the first is her working directory, the second the kept conversation's own, outside it.
+        let keep = unit_environment
+            .iter()
+            .find(|(name, _)| name == STATE_DIRECTORY_VARIABLE)
+            .and_then(|(_, value)| value.to_string_lossy().split(':').nth(1).filter(|second| !second.is_empty()).map(PathBuf::from));
+        let mut spawner = Self::in_sandbox(unit_environment, SEED_VARIABLE, None)?;
+        spawner.seed_digest = match &spawner.seed {
+            Some(seed) => seed_digest(seed).ok(),
+            None => Some(String::new()),
+        };
+        spawner.keep = keep;
+        Ok(spawner)
     }
 
     /// The same, with the seed named by `seed_variable` and, if `sandbox` is given, the child run under bubblewrap with that directory as its writable home.
@@ -679,13 +980,105 @@ impl ClaudeSpawner {
         // systemd lists several runtime directories colon-separated; the unit names one.
         let scratch = named(SCRATCH_VARIABLE).filter(|path| !path.as_os_str().is_empty()).ok_or_else(|| anyhow!("{SCRATCH_VARIABLE} is not set: the unit needs RuntimeDirectory="))?;
         let seed = named(seed_variable).filter(|path| !path.as_os_str().is_empty());
-        Ok(Self { unit_environment, scratch, seed, sandbox })
+        Ok(Self { unit_environment, scratch, seed, sandbox, keep: None, seed_digest: None })
     }
 }
 
+/// The unit's `StateDirectory=`, which systemd names in the environment, colon-separated: her working directory first, then the kept conversation's own directory (ruling `eureka-body:ruling:kept-session-ordinary-separation`).
+pub const STATE_DIRECTORY_VARIABLE: &str = "STATE_DIRECTORY";
+/// The record of the kept conversation beside its transcript: `{"session", "warm_until", "seed"}`.
+const KEPT_RECORD: &str = "kept.json";
+
+/// The digest of a seed tree: sha256 over every file's and link's relative path in sorted order,
+/// each with the file's bytes or the link's target, as lowercase hex. A conversation made under
+/// one seed is never resumed under another.
+fn seed_digest(seed: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    fn walk(root: &Path, dir: &Path, hash: &mut Sha256) -> std::io::Result<()> {
+        let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+            if kind.is_dir() {
+                walk(root, &path, hash)?;
+                continue;
+            }
+            let (tag, body) = if kind.is_symlink() { (b'l', std::fs::read_link(&path)?.to_string_lossy().into_owned().into_bytes()) } else { (b'f', std::fs::read(&path)?) };
+            hash.update([tag]);
+            hash.update((relative.len() as u64).to_le_bytes());
+            hash.update(relative.as_bytes());
+            hash.update((body.len() as u64).to_le_bytes());
+            hash.update(&body);
+        }
+        Ok(())
+    }
+    let mut hash = Sha256::new();
+    walk(seed, seed, &mut hash)?;
+    Ok(hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Writes `bytes` to `dir/name` through a `.tmp` and a rename.
+fn write_through_tmp(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = dir.join(format!("{name}.tmp"));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, dir.join(name))
+}
+
+/// Makes the kept directory owner-only if it is not there.
+fn make_kept_dir(dir: &Path) -> std::io::Result<()> {
+    let mut made = std::fs::DirBuilder::new();
+    made.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut made, 0o700);
+    made.create(dir)
+}
+
+/// Removes every file of the kept directory but `except`.
+fn clear_kept_dir(dir: &Path, except: &[String]) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !except.contains(&entry.file_name().to_string_lossy().into_owned()) && entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 impl Spawner for ClaudeSpawner {
+    fn kept(&self) -> Option<Kept> {
+        let dir = self.keep.as_ref()?;
+        let record: Value = serde_json::from_slice(&std::fs::read(dir.join(KEPT_RECORD)).ok()?).ok()?;
+        let session = Uuid::parse_str(record.get("session")?.as_str()?).ok()?;
+        let warm_until = DateTime::parse_from_rfc3339(record.get("warm_until")?.as_str()?).ok()?.with_timezone(&Utc);
+        let transcript = dir.join(format!("{session}.jsonl"));
+        transcript.is_file().then_some(())?;
+        let same_seed = self.seed_digest.as_deref() == Some(record.get("seed")?.as_str()?);
+        let written_at = DateTime::parse_from_rfc3339(record.get("written_at")?.as_str()?).ok()?.with_timezone(&Utc);
+        Some(Kept { session, transcript, warm_until, written_at, same_seed })
+    }
+
+    fn keep(&self, keep: Option<(Uuid, DateTime<Utc>)>) -> Result<()> {
+        let Some(dir) = &self.keep else { return Ok(()) };
+        let kept = keep.and_then(|(session, until)| Some((session, until, self.seed_digest.as_ref()?)));
+        let Some((session, until, seed)) = kept.filter(|(session, ..)| dir.join(format!("{session}.jsonl")).is_file()) else {
+            // The clear: the record goes first, so no record ever names a transcript that is gone.
+            let _ = std::fs::remove_file(dir.join(KEPT_RECORD));
+            return clear_kept_dir(dir, &[]).context("the kept conversation could not be cleared");
+        };
+        let record = serde_json::json!({"session": session.to_string(), "warm_until": until.to_rfc3339_opts(SecondsFormat::Secs, true), "written_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true), "seed": seed});
+        write_through_tmp(dir, KEPT_RECORD, record.to_string().as_bytes()).context("the kept conversation's record could not be written")?;
+        clear_kept_dir(dir, &[KEPT_RECORD.to_string(), format!("{session}.jsonl")]).context("the conversation before it could not be removed")
+    }
+
     fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
-        let config = FreshConfig::create(&self.scratch, self.seed.as_deref())?;
+        let config = FreshConfig::create(&self.scratch, self.seed.as_deref(), self.keep.clone())?;
         let Some(sandbox) = &self.sandbox else { return spawn_program(Path::new("claude"), args, token, &self.unit_environment, config) };
         let mut wrapped = sandbox_args(sandbox, &self.scratch);
         wrapped.push("claude".into());
@@ -735,10 +1128,14 @@ const CONFIG_DIR_NAME: &str = "claude-config";
 /// owner-only, and removed when the child's handle goes. Whatever the run writes
 /// there (settings that set an environment variable, an `apiKeyHelper`, a base
 /// URL, a hook) lasts only as long as that run: the next one starts from the seed.
-struct FreshConfig(PathBuf);
+struct FreshConfig {
+    dir: PathBuf,
+    /// Where the main transcripts go when the config does: the kept directory, none where nothing is kept.
+    keep: Option<PathBuf>,
+}
 
 impl FreshConfig {
-    fn create(scratch: &Path, seed: Option<&Path>) -> Result<Self> {
+    fn create(scratch: &Path, seed: Option<&Path>, keep: Option<PathBuf>) -> Result<Self> {
         let dir = scratch.join(CONFIG_DIR_NAME);
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {}
@@ -749,9 +1146,9 @@ impl FreshConfig {
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut made, 0o700);
         made.create(&dir).context("the configuration directory could not be made")?;
-        let fresh = Self(dir);
+        let fresh = Self { dir, keep };
         if let Some(seed) = seed {
-            copy_tree(seed, &fresh.0).context("the configuration seed could not be copied")?;
+            copy_tree(seed, &fresh.dir).context("the configuration seed could not be copied")?;
         }
         Ok(fresh)
     }
@@ -759,8 +1156,36 @@ impl FreshConfig {
 
 impl Drop for FreshConfig {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if let Some(keep) = &self.keep {
+            // A conversation that cannot be copied out is a fresh start; nothing here decides whether it is kept.
+            let _ = move_out_transcripts(&self.dir, keep);
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Copies the main transcripts out of a config directory, `projects/*/*.jsonl`
+/// and nothing deeper (never a project's `memory/` or a session's own directory),
+/// into `keep` as `<name>`, each through a `.tmp` and a rename.
+fn move_out_transcripts(config: &Path, keep: &Path) -> std::io::Result<()> {
+    make_kept_dir(keep)?;
+    for project in std::fs::read_dir(config.join("projects"))? {
+        let project = project?;
+        if !project.file_type()?.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(project.path())? {
+            let file = file?;
+            let path = file.path();
+            if file.file_type()?.is_file() && path.extension().is_some_and(|extension| extension == "jsonl") {
+                let name = file.file_name().to_string_lossy().into_owned();
+                let tmp = keep.join(format!("{name}.tmp"));
+                std::fs::copy(&path, &tmp)?;
+                std::fs::rename(tmp, keep.join(name))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A seed link the copy refuses: it would reach outside the seed.
@@ -862,7 +1287,7 @@ fn spawn_program(program: &Path, args: &[String], token: &TokenFd, unit: &[(OsSt
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     command.env_clear().envs(child_environment(unit));
-    command.env("HOME", &config.0).env(CONFIG_DIR_VARIABLE, &config.0);
+    command.env("HOME", &config.dir).env(CONFIG_DIR_VARIABLE, &config.dir);
     command.env(DISABLE_COMPACT_VARIABLE, "1").env(TOKEN_FD_VARIABLE, inheritable.number().to_string()).env(ENV_SCRUB_VARIABLE, if scrub_is_off(unit) { "0" } else { "1" });
     // Its own process group, so that a signal reaches what the child started too.
     #[cfg(unix)]

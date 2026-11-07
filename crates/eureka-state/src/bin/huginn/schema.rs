@@ -20,7 +20,7 @@ macro_rules! kinds {
 
 kinds!(
     campaign, target, question, ruling, cut_spec, cut_report, verdict, finding, follow_up, resolution, instance, stewardship,
-    hand_off, run, pulse, memory, research, idea,
+    hand_off, run, pulse, memory, research, idea, reply, thought,
 );
 
 /// The schema named, or the names when none is: the exit code is 2 for a name

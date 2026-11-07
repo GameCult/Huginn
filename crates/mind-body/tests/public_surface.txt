@@ -9,7 +9,11 @@ mind_body: mod lease_client
 mind_body: mod persona
 mind_body: mod queue
 mind_body: mod self_run
+mind_body: mod stream
 mind_body: mod tempo
+mind_body::address: impl Addressee
+mind_body::address: struct Addressee # [derive (Clone , Debug , PartialEq , Eq , serde :: Serialize , serde :: Deserialize)] pub-fields[]
+mind_body::address: struct Name # [derive (Clone , Debug , PartialEq , Eq , serde :: Serialize , serde :: Deserialize)] pub-fields[]
 mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Refusal { Brake , PersonaMismatch , UnknownRoom , EmptyText , SendFailed , UnknownPersona , RoomMoved , }
 mind_body::chat_client: const ACK : & str
 mind_body::chat_client: const PENDING : & str
@@ -88,16 +92,17 @@ mind_body::heartbeat: impl Control for FileControl
 mind_body::heartbeat: impl FileStore
 mind_body::heartbeat: impl FileStore: fn check (& self) -> Result < () >
 mind_body::heartbeat: impl FileStore: fn new (path : impl Into < PathBuf >) -> Self
+mind_body::heartbeat: impl HeartbeatView for FileStore
 mind_body::heartbeat: impl PersonaId
 mind_body::heartbeat: impl PersonaId: fn parse (spec : & str) -> Result < Self >
 mind_body::heartbeat: impl Row < '_ >
 mind_body::heartbeat: impl Store for FileStore
-mind_body::heartbeat: impl TempoView for FileStore
 mind_body::heartbeat: impl fmt :: Display for Outcome
 mind_body::heartbeat: impl fmt :: Display for PollTrace
 mind_body::heartbeat: pub trait Control { fn envelope (& self) -> SwarmEffective ; fn effective (& self , instance : & Slug) -> Effective ; }
-mind_body::heartbeat: pub trait Store { fn load (& self) -> Result < Option < HeartbeatState > > ; fn save (& self , state : & HeartbeatState) -> Result < () > ; fn record (& self , trace : & PollTrace) -> Result < () > ; }
-mind_body::heartbeat: pub trait TempoView { fn latest (& self) -> Result < Option < PollTrace > > ; }
+mind_body::heartbeat: pub trait HeartbeatView { fn latest (& self) -> Result < Option < PollTrace > > ; fn addressing (& self) -> Result < Option < Addressing > > ; }
+mind_body::heartbeat: pub trait Store { fn load (& self) -> Result < Option < HeartbeatState > > ; fn save (& self , state : & HeartbeatState) -> Result < () > ; fn record (& self , trace : & PollTrace) -> Result < () > ; fn load_addressing (& self) -> Result < Option < Addressing > > ; fn save_addressing (& self , addressing : & Addressing) -> Result < () > ; }
+mind_body::heartbeat: struct Addressing # [derive (Clone , Debug , Default , PartialEq , Eq , DatabaseEntry)] pub-fields[minds: Vec < Addressee >]
 mind_body::heartbeat: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[personas: Vec < PersonaId >, operators: Vec < String >]
 mind_body::heartbeat: struct FileControl  pub-fields[]
 mind_body::heartbeat: struct FileStore  pub-fields[]
@@ -190,7 +195,7 @@ mind_body::persona: pub use model_connector :: PlanQuota ;
 mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[rooms: Vec < String >, operators: Vec < String >, minds: Vec < String >, own_sender: String, model: String, doctrine: Vec < PathBuf >]
 mind_body::persona: struct FileTrace  pub-fields[]
 mind_body::persona: struct HuginnPersona  pub-fields[]
-mind_body::persona: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, chat: & 'a dyn Chat, persona: & 'a dyn PersonaState, trace: & 'a dyn Trace, tempo: Option < & 'a dyn TempoView >, lender: & 'a dyn Lender, spawner: & 'a dyn Spawner, run_cap_s: u64, sandbox: & 'a Path, scratch: & 'a Path]
+mind_body::persona: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, chat: & 'a dyn Chat, persona: & 'a dyn PersonaState, trace: & 'a dyn Trace, heartbeat: Option < & 'a dyn HeartbeatView >, lender: & 'a dyn Lender, spawner: & 'a dyn Spawner, run_cap_s: u64, sandbox: & 'a Path, scratch: & 'a Path]
 mind_body::persona: struct PersonaReply # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[intent: String, say: Vec < Say >, start_self_run: Option < StartSelfRun >, remember: Vec < Remember >, settle: Vec < Settle >, tempo_vote_beat_s: Option < Option < u32 > >, urgency_permille: Option < u16 >]
 mind_body::persona: struct Remember # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[sort: MemorySort, text: String, about: Vec < String >, salience_permille: u16]
 mind_body::persona: struct Say # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[room: String, text: String]
@@ -220,8 +225,8 @@ mind_body::recall: impl Recalled
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq , PartialOrd , Ord)] pub enum Stop { Interrupt , Terminate , Kill , }
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Cause { Own , FlushRequested , Signalled (Stop) , Unstoppable , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Eof , Exited (Option < i32 >) , }
-mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , LeaseRefused { kind : LeaseRefusalKind } , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 } , }
-mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 } , Echo , Result { ok : bool , blocked : bool } , Other , Unreadable , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , LeaseRefused { kind : LeaseRefusalKind } , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 , warm_until : Option < DateTime < Utc > > } , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 , stops : Vec < String > } , Echo , TurnBegan , BackgroundTasks { live : Vec < String > , main : Vec < String > , shell : Vec < String > } , TaskBackgrounded { id : String , shell : bool } , TaskNotified { id : String , stopped : bool } , NotificationTaken { id : String } , Result { ok : bool , blocked : bool } , Other , Unreadable , }
 mind_body::self_run: const AGENT : & str
 mind_body::self_run: const CEILING_TOKENS : u64
 mind_body::self_run: const ESCALATE_AFTER_S : i64
@@ -237,11 +242,13 @@ mind_body::self_run: const RUN_CAP_VARIABLE : & str
 mind_body::self_run: const SCRATCH_VARIABLE : & str
 mind_body::self_run: const SEED_VARIABLE : & str
 mind_body::self_run: const SESSION_NAMESPACE : Uuid
+mind_body::self_run: const STATE_DIRECTORY_VARIABLE : & str
 mind_body::self_run: const TTL_1H_S : i64
 mind_body::self_run: const TTL_5M_S : i64
 mind_body::self_run: const TTL_MARGIN_S : i64
 mind_body::self_run: fn carry (mind : & dyn MindPort , clock : & dyn Clock , lender : & dyn Lender , spawner : & dyn Spawner , run_cap_s : u64 , out : & mut dyn Write) -> Result < SelfRunOutcome >
-mind_body::self_run: fn claude_args (session : Uuid) -> Vec < String >
+mind_body::self_run: fn claude_args (session : Uuid , resume : Option < & Path >) -> Vec < String >
+mind_body::self_run: fn continue_message (run : & PipelineRef , plan_quota : & [PlanQuota] , now_ms : u64) -> String
 mind_body::self_run: fn read_usage (line : & str) -> Usage
 mind_body::self_run: fn session_id (run : & PipelineRef) -> Uuid
 mind_body::self_run: fn start_message (instance : & Slug , run : & PipelineRef , plan_quota : & [PlanQuota] , now_ms : u64) -> String
@@ -264,8 +271,9 @@ mind_body::self_run: impl std :: error :: Error for SeedLinkRefused
 mind_body::self_run: impl< 'a > SelfInbox < 'a >
 mind_body::self_run: mod inbox
 mind_body::self_run: pub trait Child { fn write_line (& mut self , line : & str) ; fn close_input (& mut self) ; fn next (& mut self , timeout : StdDuration) -> Read ; fn stop (& mut self , how : Stop) -> bool ; }
-mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String] , token : & TokenFd) -> Result < Box < dyn Child > > ; }
+mind_body::self_run: pub trait Spawner { fn spawn (& self , args : & [String] , token : & TokenFd) -> Result < Box < dyn Child > > ; fn kept (& self) -> Option < Kept > { None } fn keep (& self , _keep : Option < (Uuid , DateTime < Utc >) >) -> Result < () > { Ok (()) } }
 mind_body::self_run: struct ClaudeSpawner  pub-fields[]
+mind_body::self_run: struct Kept # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[session: Uuid, transcript: PathBuf, warm_until: DateTime < Utc >, written_at: DateTime < Utc >, same_seed: bool]
 mind_body::self_run::decide: impl State
 mind_body::self_run::inbox: const OWNER : & str
 mind_body::self_run::inbox: fn backlog (mind : & dyn MindPort) -> Result < Vec < (Brief , String) > >
@@ -274,6 +282,28 @@ mind_body::self_run::inbox: fn derive_counting_held (mind : & dyn MindPort , hol
 mind_body::self_run::inbox: fn render (briefs : & [Brief] , plan : & str) -> String
 mind_body::self_run::inbox: fn resolving_sentence (id : & str) -> String
 mind_body::self_run::inbox: struct Brief # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[id: String, campaign: String, repo: String, item: String, ordinal: u64]
+mind_body::stream: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Mode { Live , DryRun , }
+mind_body::stream: # [derive (Clone , Debug , PartialEq)] pub enum Outcome { Held (crate :: control :: HeldReason) , NotDue , Blank , Thought { thought : Box < PipelineThought > , admitted : bool } , }
+mind_body::stream: const AGENT : & str
+mind_body::stream: const STREAM_IDLE_GAP_S : i64
+mind_body::stream: const STREAM_MIN_GAP_S : i64
+mind_body::stream: const STREAM_POLL_S : i64
+mind_body::stream: fn tick (organs : & Organs , brake : & dyn Fn () -> Effective , mode : Mode , now : DateTime < Utc >) -> Result < Outcome >
+mind_body::stream: impl HuginnPersonaSource
+mind_body::stream: impl HuginnPersonaSource: fn new (client : HuginnClient) -> Self
+mind_body::stream: impl OllamaStream
+mind_body::stream: impl OllamaStream: fn open (endpoint : & str , projector_model : & str , base_model : & str) -> Result < Self >
+mind_body::stream: impl PersonaSource for HuginnPersonaSource
+mind_body::stream: impl Sampling
+mind_body::stream: impl Seed
+mind_body::stream: impl StreamModel for OllamaStream
+mind_body::stream: pub trait PersonaSource { fn persona (& self) -> Result < PersonaRead > ; }
+mind_body::stream: pub trait StreamModel { fn project (& self , prompt : & str) -> Result < String > ; fn continue_raw (& self , prompt : & str , sampling : & Sampling , n : usize) -> Result < Vec < String > > ; }
+mind_body::stream: struct HuginnPersonaSource  pub-fields[]
+mind_body::stream: struct OllamaStream  pub-fields[]
+mind_body::stream: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, persona: & 'a dyn PersonaSource, model: & 'a dyn StreamModel, projector_model: & 'a str, base_model: & 'a str]
+mind_body::stream: struct PersonaRead  pub-fields[state: Value, receipt_id: String]
+mind_body::stream: struct Sampling # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub-fields[temperature_permille: u16, min_p_permille: u16, max_tokens: u16]
 mind_body::tempo: const DEFAULT_BEAT_S : u32
 mind_body::tempo: const FALLBACK_MAX_S : u32
 mind_body::tempo: const FALLBACK_MIN_S : u32

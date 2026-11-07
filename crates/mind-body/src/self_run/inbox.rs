@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use cultnet_rs::Selection;
 use eureka_pipeline::PipelineKind;
 use huginn_mind::{PipelineFacts, PipelineStatusSummary};
 
@@ -33,6 +34,9 @@ pub struct Brief {
     pub item: String,
     /// The admission ordinal: the order briefs were given in.
     pub ordinal: u64,
+    /// The conversation her Persona was in when it gave the brief, from the origin the follow-up records
+    /// (none recorded, a brief admitted before origins existed, is the public one).
+    pub(crate) conversation: persona::Conversation,
 }
 
 /// The ids of the follow-ups a closed run claims, with the run each was claimed by.
@@ -54,15 +58,24 @@ fn open_briefs(mind: &dyn MindPort) -> Result<Vec<Brief>> {
     let mut briefs: Vec<Brief> = headers(mind, &in_force(of_kind(PipelineKind::FollowUp)))?
         .into_iter()
         .filter_map(|summary| match summary.facts {
-            PipelineFacts::FollowUp { repo, owner, item, .. } if owner.0 == OWNER && summary.admission.provenance.agent.0 == persona::AGENT => {
+            PipelineFacts::FollowUp { repo, owner, item, origin, .. } if owner.0 == OWNER && summary.admission.provenance.agent.0 == persona::AGENT => {
                 let campaign = summary.id.id.0.split(':').next().unwrap_or("").to_string();
-                Some(Brief { id: summary.id.id.0, campaign, repo: repo.0, item: item.0, ordinal: summary.admission.ordinal })
+                Some(Brief { id: summary.id.id.0, campaign, repo: repo.0, item: item.0, ordinal: summary.admission.ordinal, conversation: persona::Conversation::of_origin(origin.as_ref()) })
             }
             _ => None,
         })
         .collect();
     briefs.sort_by_key(|brief| brief.ordinal);
     Ok(briefs)
+}
+
+/// The conversation a follow-up was given in, read by its key whether or not it is still in force; none when the mind does not hold it.
+pub(crate) fn conversation_by_key(mind: &dyn MindPort, id: &str) -> Result<Option<persona::Conversation>> {
+    let one = Selection { keys: Some(vec![id.to_string()]), ..of_kind(PipelineKind::FollowUp) };
+    Ok(headers(mind, &one)?.into_iter().find_map(|header| match header.facts {
+        PipelineFacts::FollowUp { origin, .. } => Some(persona::Conversation::of_origin(origin.as_ref())),
+        _ => None,
+    }))
 }
 
 /// Her briefs in force that the session has not been told and no open question

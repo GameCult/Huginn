@@ -578,7 +578,7 @@
       "maxLength": 1000
     },
     "MemoryOrigin": {
-      "description": "Where a memory came from and whom she heard it from. The organ derives it\nfrom the batch of the turn that wrote the memory; the model never writes it.\n`about` names whom a memory concerns, this names the room and the voices.",
+      "description": "Where a Persona turn's batch came from and whom she heard it from: a\nmemory's origin and a brief's. The organ derives it from the batch of the\nturn; the model never writes it.\n`about` names whom a memory concerns, this names the room and the voices.",
       "oneOf": [
         {
           "description": "A turn in rooms: their aliases comma-joined, and the batch's other senders.",
@@ -1310,6 +1310,38 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "reply"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineReply"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "thought"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineThought"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -1389,6 +1421,7 @@
       ]
     },
     "PipelineFollowUp": {
+      "description": "A follow-up. `origin` is where the Persona turn that admitted it was\nasked, as the organ derived it: a brief records the conversation whose\nmessage started it. Absent on follow-ups no Persona turn admitted and\non briefs admitted before it existed.",
       "type": "object",
       "properties": {
         "campaign": {
@@ -1406,6 +1439,16 @@
             "$ref": "#/$defs/CodeLocation"
           },
           "maxItems": 16
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "owner": {
           "$ref": "#/$defs/Short"
@@ -1563,7 +1606,9 @@
         "Pulse",
         "Memory",
         "Research",
-        "Idea"
+        "Idea",
+        "Reply",
+        "Thought"
       ]
     },
     "PipelineMemory": {
@@ -1760,6 +1805,38 @@
       "required": [
         "kind",
         "id"
+      ]
+    },
+    "PipelineReply": {
+      "description": "One result of her Self session, as its actuator heard it: the words her\nSelf ended a turn with, and the follow-ups (briefs) the turn answers.\nInstance-rooted: the key is `<instance>:reply:<label>`. Not semantically\nindexed. Whether the run is hers is admission's rule.",
+      "type": "object",
+      "properties": {
+        "answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 64
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "run": {
+          "$ref": "#/$defs/PipelineRef"
+        },
+        "text": {
+          "$ref": "#/$defs/Para"
+        }
+      },
+      "required": [
+        "instance",
+        "label",
+        "run",
+        "answers",
+        "text"
       ]
     },
     "PipelineResearch": {
@@ -1966,7 +2043,7 @@
       ]
     },
     "PipelineStewardship": {
-      "description": "Stewardship over a repo, as an assignment recorded in a mind. One\ninstance may steward several repos, so the repo is part of the key.\n`sequence` is per `(instance, repo)`, set by the writer, `1` for the\nfirst, so a repo transferred away and back is two records under one\nprefix rather than one document overwriting the other. `assigned_on`\nis a field, not a key part. As on a resolution, whether the sequence\nis the previous plus one, and which assignment is in force, are\nadmission's rules and not this crate's.",
+      "description": "Stewardship over a repo, as an assignment recorded in a mind. One\ninstance may steward several repos, so the repo is part of the key.\n`sequence` is per `(instance, repo)`, set by the writer, `1` for the\nfirst, so a repo transferred away and back is two records under one\nprefix rather than one document overwriting the other. `assigned_on`\nis a field, not a key part. As on a resolution, whether the sequence\nis the previous plus one, and which assignment is in force, are\nadmission's rules and not this crate's.\n`names` are the chat names that address her for this repo, matched exactly\nas written; none means the repo's own name, matched in any case.",
       "type": "object",
       "properties": {
         "assigned_on": {
@@ -1974,6 +2051,13 @@
         },
         "instance": {
           "$ref": "#/$defs/Slug"
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 8
         },
         "note": {
           "$ref": "#/$defs/Line"
@@ -2046,6 +2130,125 @@
         "not_in_scope",
         "canonical_implementations",
         "doc"
+      ]
+    },
+    "PipelineThought": {
+      "description": "One tick of her stream of thought, offline: the words a base model\ncontinued from a projection of her own state, with the whole trace that\nmade them (the seed, the projection, every candidate and how near each\nwas to her earlier thoughts). `text` is the chosen candidate. `reads`\nare the documents the seed was drawn from. A thought is divergence for\ndelivery to weigh, never a memory: its words reach a later seed only\nthrough something she wrote. Instance-rooted: the key is\n`<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.\nSemantically indexed on `text` only. `nearest_permille` is 1000 where she\nhad no earlier thought. `prompt_version` names the fixed parts of both\nprompts (the Projector's builder revision, guidance and word budget, and\nthe continuer's frame), so the exact prompts of an old thought can be\nrebuilt from the trace.",
+      "type": "object",
+      "properties": {
+        "base_model": {
+          "$ref": "#/$defs/Short"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Line"
+          },
+          "maxItems": 4
+        },
+        "chosen": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "context": {
+          "$ref": "#/$defs/Para"
+        },
+        "continuer_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "identity": {
+          "$ref": "#/$defs/Line"
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "label": {
+          "$ref": "#/$defs/Label"
+        },
+        "max_tokens": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "min_p_permille": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "nearest_permille": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0
+          },
+          "maxItems": 4
+        },
+        "persona_receipt": {
+          "$ref": "#/$defs/Short"
+        },
+        "projection": {
+          "$ref": "#/$defs/Para"
+        },
+        "projector_model": {
+          "$ref": "#/$defs/Short"
+        },
+        "projector_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "prompt_version": {
+          "$ref": "#/$defs/Line"
+        },
+        "reads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 64
+        },
+        "stimulus": {
+          "$ref": "#/$defs/Para"
+        },
+        "temperature_permille": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "text": {
+          "$ref": "#/$defs/Para"
+        }
+      },
+      "required": [
+        "instance",
+        "label",
+        "text",
+        "reads",
+        "persona_receipt",
+        "identity",
+        "context",
+        "stimulus",
+        "projector_model",
+        "projection",
+        "base_model",
+        "temperature_permille",
+        "min_p_permille",
+        "max_tokens",
+        "candidates",
+        "nearest_permille",
+        "chosen",
+        "projector_ms",
+        "continuer_ms",
+        "prompt_version"
       ]
     },
     "PipelineVerdict": {

@@ -1,0 +1,190 @@
+{
+  "$defs": {
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "Para": {
+      "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
+      "maxLength": 4000,
+      "type": "string"
+    },
+    "PipelineKind": {
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff",
+        "Run",
+        "Pulse",
+        "Memory",
+        "Research",
+        "Idea",
+        "Reply",
+        "Thought"
+      ],
+      "type": "string"
+    },
+    "PipelineRef": {
+      "description": "A reference to another document. The id is parsed as a full pipeline id of\nthe declared `kind`, so the kind and the id's kind segment cannot disagree.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.thought.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One tick of her stream of thought, offline: the words a base model\ncontinued from a projection of her own state, with the whole trace that\nmade them (the seed, the projection, every candidate and how near each\nwas to her earlier thoughts). `text` is the chosen candidate. `reads`\nare the documents the seed was drawn from. A thought is divergence for\ndelivery to weigh, never a memory: its words reach a later seed only\nthrough something she wrote. Instance-rooted: the key is\n`<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.\nSemantically indexed on `text` only. `nearest_permille` is 1000 where she\nhad no earlier thought. `prompt_version` names the fixed parts of both\nprompts (the Projector's builder revision, guidance and word budget, and\nthe continuer's frame), so the exact prompts of an old thought can be\nrebuilt from the trace.",
+  "properties": {
+    "base_model": {
+      "$ref": "#/$defs/Short"
+    },
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/Line"
+      },
+      "maxItems": 4,
+      "type": "array"
+    },
+    "chosen": {
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "context": {
+      "$ref": "#/$defs/Para"
+    },
+    "continuer_ms": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "identity": {
+      "$ref": "#/$defs/Line"
+    },
+    "instance": {
+      "$ref": "#/$defs/Slug"
+    },
+    "label": {
+      "$ref": "#/$defs/Label"
+    },
+    "max_tokens": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "min_p_permille": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "nearest_permille": {
+      "items": {
+        "format": "uint16",
+        "maximum": 65535,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "maxItems": 4,
+      "type": "array"
+    },
+    "persona_receipt": {
+      "$ref": "#/$defs/Short"
+    },
+    "projection": {
+      "$ref": "#/$defs/Para"
+    },
+    "projector_model": {
+      "$ref": "#/$defs/Short"
+    },
+    "projector_ms": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "prompt_version": {
+      "$ref": "#/$defs/Line"
+    },
+    "reads": {
+      "items": {
+        "$ref": "#/$defs/PipelineRef"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "stimulus": {
+      "$ref": "#/$defs/Para"
+    },
+    "temperature_permille": {
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "text": {
+      "$ref": "#/$defs/Para"
+    }
+  },
+  "required": [
+    "instance",
+    "label",
+    "text",
+    "reads",
+    "persona_receipt",
+    "identity",
+    "context",
+    "stimulus",
+    "projector_model",
+    "projection",
+    "base_model",
+    "temperature_permille",
+    "min_p_permille",
+    "max_tokens",
+    "candidates",
+    "nearest_permille",
+    "chosen",
+    "projector_ms",
+    "continuer_ms",
+    "prompt_version"
+  ],
+  "title": "PipelineThought",
+  "type": "object"
+}

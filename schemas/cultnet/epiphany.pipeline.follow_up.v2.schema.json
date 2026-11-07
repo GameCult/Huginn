@@ -45,6 +45,95 @@
       "maxLength": 1000,
       "type": "string"
     },
+    "MemoryOrigin": {
+      "description": "Where a Persona turn's batch came from and whom she heard it from: a\nmemory's origin and a brief's. The organ derives it from the batch of the\nturn; the model never writes it.\n`about` names whom a memory concerns, this names the room and the voices.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A turn in rooms: their aliases comma-joined, and the batch's other senders.",
+          "properties": {
+            "Room": {
+              "properties": {
+                "heard_from": {
+                  "items": {
+                    "$ref": "#/$defs/Short"
+                  },
+                  "maxItems": 8,
+                  "type": "array"
+                },
+                "rooms": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "rooms",
+                "heard_from"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Room"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A direct message: the DM's room id, and the others who spoke in it (whom\nshe heard it from in confidence).",
+          "properties": {
+            "Direct": {
+              "properties": {
+                "room": {
+                  "$ref": "#/$defs/Short"
+                },
+                "with": {
+                  "items": {
+                    "$ref": "#/$defs/Short"
+                  },
+                  "maxItems": 8,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "room",
+                "with"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Direct"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "Wake",
+          "description": "A wake: no one spoke.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A Self run of hers, by its label.",
+          "properties": {
+            "SelfRun": {
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "run"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "SelfRun"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "OrgRepo": {
       "description": "A GitHub repository as `Org/Repo`, at most 140 UTF-8 bytes (39 + 1 +\n100). The owner is 1 to 39 `[A-Za-z0-9-]` bytes with no leading or\ntrailing hyphen; the repo is 1 to 100 `[A-Za-z0-9._-]` bytes, is never\n`.` or `..`, and does not end in `.git`, ASCII-case-insensitively.\nIdentity is case-insensitive: `GameCult/Epiphany` and `gamecult/epiphany`\nare the same repository.",
       "maxLength": 140,
@@ -69,7 +158,9 @@
         "Pulse",
         "Memory",
         "Research",
-        "Idea"
+        "Idea",
+        "Reply",
+        "Thought"
       ],
       "type": "string"
     },
@@ -108,6 +199,7 @@
   },
   "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.follow_up.v2.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A follow-up. `origin` is where the Persona turn that admitted it was\nasked, as the organ derived it: a brief records the conversation whose\nmessage started it. Absent on follow-ups no Persona turn admitted and\non briefs admitted before it existed.",
   "properties": {
     "campaign": {
       "$ref": "#/$defs/Slug"
@@ -124,6 +216,16 @@
       },
       "maxItems": 16,
       "type": "array"
+    },
+    "origin": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MemoryOrigin"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "owner": {
       "$ref": "#/$defs/Short"

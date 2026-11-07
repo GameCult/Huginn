@@ -118,7 +118,7 @@ macro_rules! unbounded_scalars {
     )*};
 }
 
-unbounded_scalars!(u16, u32, u64, bool);
+unbounded_scalars!(u8, u16, u32, u64, bool);
 
 fn bound(field: &str, limit: usize, actual: usize) -> Result<(), PipelineRefusal> {
     if actual > limit {
@@ -578,6 +578,16 @@ fn run_is_well_formed(run: &PipelineRun, at: &str) -> Result<(), PipelineRefusal
     }
 }
 
+/// A chat name holds a letter or a digit and has no space at either end, so it can match a whole word.
+fn stewardship_is_well_formed(stewardship: &PipelineStewardship, at: &str) -> Result<(), PipelineRefusal> {
+    for (index, name) in stewardship.names.iter().enumerate() {
+        if name.0.trim() != name.0 || !name.0.chars().any(char::is_alphanumeric) {
+            return Err(format_error(&format!("{at}.names[{index}]"), &name.0));
+        }
+    }
+    Ok(())
+}
+
 /// The longest and shortest beat a Mind may vote for, in seconds.
 pub const TEMPO_VOTE_MIN_S: u32 = 60;
 pub const TEMPO_VOTE_MAX_S: u32 = 86_400;
@@ -604,6 +614,53 @@ fn pulse_is_well_formed(pulse: &PipelinePulse, at: &str) -> Result<(), PipelineR
         return Err(format_error(&format!("{at}.tempo_vote_beat_s"), "a pulse that votes and declares nothing"));
     }
     Ok(())
+}
+
+/// A reply says something and answers only follow-ups, from a run.
+fn reply_is_well_formed(reply: &PipelineReply, at: &str) -> Result<(), PipelineRefusal> {
+    if reply.text.0.trim().is_empty() {
+        return Err(format_error(&format!("{at}.text"), "a reply with no words"));
+    }
+    if reply.run.kind != PipelineKind::Run {
+        return Err(format_error(&format!("{at}.run.kind"), reply.run.kind.name()));
+    }
+    for (index, answer) in reply.answers.iter().enumerate() {
+        if answer.kind != PipelineKind::FollowUp {
+            return Err(format_error(&format!("{at}.answers[{index}].kind"), answer.kind.name()));
+        }
+    }
+    Ok(())
+}
+
+/// The most candidates a continuation may offer, and the nearness that means
+/// she had no earlier thought to be near.
+pub const THOUGHT_CANDIDATES_MAX: usize = 4;
+pub const THOUGHT_NEAREST_NONE_PERMILLE: u16 = 1000;
+
+/// A thought says something it was chosen to say: its text is not blank and is
+/// the chosen candidate, every candidate has its nearness, and no nearness is
+/// over 1000 thousandths.
+fn thought_is_well_formed(thought: &PipelineThought, at: &str) -> Result<(), PipelineRefusal> {
+    if thought.text.0.trim().is_empty() {
+        return Err(format_error(&format!("{at}.text"), "a thought with no words"));
+    }
+    if thought.prompt_version.0.trim().is_empty() {
+        return Err(format_error(&format!("{at}.prompt_version"), "a thought with no prompt version"));
+    }
+    if thought.candidates.is_empty() || thought.candidates.len() > THOUGHT_CANDIDATES_MAX {
+        return Err(format_error(&format!("{at}.candidates"), &format!("{} candidates", thought.candidates.len())));
+    }
+    if thought.nearest_permille.len() != thought.candidates.len() {
+        return Err(format_error(&format!("{at}.nearest_permille"), "a nearness list that is not one per candidate"));
+    }
+    if let Some(over) = thought.nearest_permille.iter().position(|near| *near > THOUGHT_NEAREST_NONE_PERMILLE) {
+        return Err(format_error(&format!("{at}.nearest_permille[{over}]"), &thought.nearest_permille[over].to_string()));
+    }
+    match thought.candidates.get(usize::from(thought.chosen)) {
+        None => Err(format_error(&format!("{at}.chosen"), &thought.chosen.to_string())),
+        Some(chosen) if chosen.0 != thought.text.0 => Err(format_error(&format!("{at}.text"), "a thought that is not its chosen candidate")),
+        Some(_) => Ok(()),
+    }
 }
 
 /// The most thousandths a memory's salience may carry.
@@ -768,9 +825,13 @@ value_types! {
         severity: FindingSeverity, claim: Line, invariants: Vec<Label>[8], locations: Vec<CodeLocation>[16],
         failure_scenario: Para, evidence: Vec<Evidence>[16], precedents: Vec<ForeignRef>[8], origin: FindingOrigin,
     }
+    /// A follow-up. `origin` is where the Persona turn that admitted it was
+    /// asked, as the organ derived it: a brief records the conversation whose
+    /// message started it. Absent on follow-ups no Persona turn admitted and
+    /// on briefs admitted before it existed.
     pub struct PipelineFollowUp {
         campaign: Slug, label: Label, source: PipelineRef, repo: OrgRepo, locations: Vec<CodeLocation>[16],
-        item: Line, why_it_can_wait: Line, owner: Short,
+        item: Line, why_it_can_wait: Line, owner: Short, origin: Option<MemoryOrigin> = absent,
     }
     /// The record of how a subject was closed and by what. `sequence` is per
     /// subject and set by the writer, `1` for the first, and it is the last
@@ -794,7 +855,9 @@ value_types! {
     /// is a field, not a key part. As on a resolution, whether the sequence
     /// is the previous plus one, and which assignment is in force, are
     /// admission's rules and not this crate's.
-    pub struct PipelineStewardship { instance: Slug, repo: OrgRepo, sequence: u32, assigned_on: Date, note: Line }
+    /// `names` are the chat names that address her for this repo, matched exactly
+    /// as written; none means the repo's own name, matched in any case.
+    pub struct PipelineStewardship { instance: Slug, repo: OrgRepo, sequence: u32, assigned_on: Date, note: Line, names: Vec<Short>[8] = absent } => stewardship_is_well_formed
     /// A reassignment of stewardship, recorded in both minds. `documents` names
     /// what travels with it.
     pub struct PipelineHandOff {
@@ -820,6 +883,31 @@ value_types! {
     pub struct PipelinePulse {
         instance: Slug, label: Label, tempo_vote_beat_s: Option<u32>, tempo_vote_withdrawn: bool = absent, urgency_permille: Option<u16>, note: Line,
     } => pulse_is_well_formed
+    /// One result of her Self session, as its actuator heard it: the words her
+    /// Self ended a turn with, and the follow-ups (briefs) the turn answers.
+    /// Instance-rooted: the key is `<instance>:reply:<label>`. Not semantically
+    /// indexed. Whether the run is hers is admission's rule.
+    pub struct PipelineReply { instance: Slug, label: Label, run: PipelineRef, answers: Vec<PipelineRef>[64], text: Para } => reply_is_well_formed
+    /// One tick of her stream of thought, offline: the words a base model
+    /// continued from a projection of her own state, with the whole trace that
+    /// made them (the seed, the projection, every candidate and how near each
+    /// was to her earlier thoughts). `text` is the chosen candidate. `reads`
+    /// are the documents the seed was drawn from. A thought is divergence for
+    /// delivery to weigh, never a memory: its words reach a later seed only
+    /// through something she wrote. Instance-rooted: the key is
+    /// `<instance>:thought:<label>`, the label `t<unix seconds>` of the tick.
+    /// Semantically indexed on `text` only. `nearest_permille` is 1000 where she
+    /// had no earlier thought. `prompt_version` names the fixed parts of both
+    /// prompts (the Projector's builder revision, guidance and word budget, and
+    /// the continuer's frame), so the exact prompts of an old thought can be
+    /// rebuilt from the trace.
+    pub struct PipelineThought {
+        instance: Slug, label: Label, text: Para, reads: Vec<PipelineRef>[64], persona_receipt: Short,
+        identity: Line, context: Para, stimulus: Para, projector_model: Short, projection: Para, base_model: Short,
+        temperature_permille: u16, min_p_permille: u16, max_tokens: u16,
+        candidates: Vec<Line>[4], nearest_permille: Vec<u16>[4], chosen: u8, projector_ms: u32, continuer_ms: u32,
+        prompt_version: Line,
+    } => thought_is_well_formed
     /// One thing a Mind keeps for herself, in her own mind: what she was asked,
     /// decided, committed to, learned or did, an idea, or the rapport between
     /// her and another Mind or person. `text` is her own words. `about` names
@@ -893,8 +981,9 @@ impl PipelineRef {
     }
 }
 
-/// Where a memory came from and whom she heard it from. The organ derives it
-/// from the batch of the turn that wrote the memory; the model never writes it.
+/// Where a Persona turn's batch came from and whom she heard it from: a
+/// memory's origin and a brief's. The organ derives it from the batch of the
+/// turn; the model never writes it.
 /// `about` names whom a memory concerns, this names the room and the voices.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum MemoryOrigin {
@@ -1158,6 +1247,10 @@ pipeline_kinds! {
         "epiphany.pipeline.research.v2", "EpiphanyPipelineResearchDocument";
     Idea(PipelineIdea) => EpiphanyPipelineIdeaDocument, "idea",
         "epiphany.pipeline.idea.v2", "EpiphanyPipelineIdeaDocument";
+    Reply(PipelineReply) => EpiphanyPipelineReplyDocument, "reply",
+        "epiphany.pipeline.reply.v2", "EpiphanyPipelineReplyDocument";
+    Thought(PipelineThought) => EpiphanyPipelineThoughtDocument, "thought",
+        "epiphany.pipeline.thought.v2", "EpiphanyPipelineThoughtDocument";
 }
 
 /// Parses a full document id: the grammar read backwards. A key and an id are
@@ -1354,6 +1447,8 @@ pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefus
         // A run hangs off its instance too: its label is its whole local.
         D::Run(value) => ("run.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Pulse(value) => ("pulse.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
+        D::Reply(value) => ("reply.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
+        D::Thought(value) => ("thought.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Memory(value) => ("memory.instance", value.instance.0.as_str(), local(&key_field, document_kind, &[&value.label.0])?),
         D::Research(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.pass.0, &value.label.0])?),
         D::Idea(value) => (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[&value.pass.0, &value.label.0])?),
@@ -1574,6 +1669,7 @@ mod tests {
                 source: PipelineRef { kind: PipelineKind::Finding, id: id("finding", "cut-3a.s2.F4") },
                 repo: repo(), locations: vec![location()], item: "Per-kind admission rules.".into(),
                 why_it_can_wait: "The organ owns admission.".into(), owner: s("Hands"),
+                origin: None,
             }), format!("{CAMPAIGN}:follow_up:FU-4")),
             (D::Resolution(PipelineResolution {
                 subject: PipelineRef { kind: PipelineKind::Question, id: id("question", "Q1") }, sequence: 1,
@@ -1588,7 +1684,7 @@ mod tests {
             }), format!("{INSTANCE}:instance:self")),
             (D::Stewardship(PipelineStewardship {
                 instance: slug(INSTANCE), repo: repo(), sequence: 1, assigned_on: date(),
-                note: "The Eureka campaign repo.".into(),
+                note: "The Eureka campaign repo.".into(), names: vec![],
             }), format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1")),
             (D::HandOff(PipelineHandOff {
                 from_instance: slug(INSTANCE), to_instance: slug("thought-cage"), repo: repo(),
@@ -1628,6 +1724,24 @@ mod tests {
                 rests_on: vec![PipelineRef { kind: PipelineKind::Research, id: id("research", "p1.scope") }],
                 toward: vec![PipelineRef { kind: PipelineKind::Question, id: id("question", "Q1") }], proposed_on: date(),
             }), format!("{CAMPAIGN}:idea:p1.i1")),
+            (D::Reply(PipelineReply {
+                instance: slug(INSTANCE), label: l("mind-2026-10-09-1-r1"),
+                run: PipelineRef { kind: PipelineKind::Run, id: Short(format!("{INSTANCE}:run:mind-2026-10-09-1")) },
+                answers: vec![PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "ask-the-self") }],
+                text: "The shader pass is done; the sounds are Libby's.".into(),
+            }), format!("{INSTANCE}:reply:mind-2026-10-09-1-r1")),
+            (D::Thought(PipelineThought {
+                instance: slug(INSTANCE), label: l("t1793000000"),
+                text: "The sounds are Libby's; the shaders were never the hard part.".into(),
+                reads: vec![PipelineRef { kind: PipelineKind::Memory, id: Short(format!("{INSTANCE}:memory:2026-10-31t041200-t0-m0")) }],
+                persona_receipt: s("mind-commit-0a1b"), identity: "Eureka, she/her, plain-spoken.".into(),
+                context: "Values: coherence over velocity.".into(), stimulus: "Libby asked about the sounds.".into(),
+                projector_model: s("projector:latest"), projection: "I keep turning over who holds the sounds.".into(), base_model: s("base:latest"),
+                temperature_permille: 1000, min_p_permille: 50, max_tokens: 160,
+                candidates: vec!["The sounds are Libby's; the shaders were never the hard part.".into(), "A second drift.".into()],
+                nearest_permille: vec![310, 870], chosen: 0, projector_ms: 4200, continuer_ms: 9100,
+                prompt_version: "ghostlight=c43eb54; words=180".into(),
+            }), format!("{INSTANCE}:thought:t1793000000")),
         ]
     }
 
@@ -1802,6 +1916,9 @@ mod tests {
         let PipelineDocument::Target(mut target) = samples().remove(1).0 else { unreachable!() };
         target.repos = vec![OrgRepo("GameCult/Epiphany".into()), OrgRepo("GameCult/Huginn".into())];
         out.push(("target.repos".into(), D::Target(target)));
+        let mut stewardship = stewardship_sample();
+        stewardship.names = vec![s("BDS"), s("Bad Day Simulator")];
+        out.push(("stewardship.names".into(), D::Stewardship(stewardship)));
         out
     }
 
@@ -1939,6 +2056,82 @@ mod tests {
                 "{bad:?} is refused"
             );
         }
+    }
+
+    /// A name must be able to match a whole word; a stewardship with none writes what it wrote before names existed.
+    #[test]
+    fn a_stewardships_names_are_words_and_absent_when_empty() -> Result<()> {
+        let validated = |names: Vec<&str>| {
+            let mut stewardship = stewardship_sample();
+            stewardship.names = names.into_iter().map(s).collect();
+            PipelineDocument::Stewardship(stewardship).validate()
+        };
+        assert_eq!(validated(vec!["BDS", "Bad Day Simulator", "moonlight-ios", "3D"]), Ok(()));
+        for bad in ["", " ", "BDS ", " BDS", "--", "\tBDS"] {
+            assert!(matches!(validated(vec!["ok", bad]), Err(PipelineRefusal::InvalidFormat { field, .. }) if field == "stewardship.names[1]"), "{bad:?} is refused");
+        }
+        let nine: Vec<&str> = vec!["a"; 9];
+        assert!(validated(nine).is_err(), "a ninth name is refused");
+        assert_eq!(validated(vec!["a"; 8]), Ok(()));
+        let json = serde_json::to_value(stewardship_sample())?;
+        assert!(json.get("names").is_none(), "no names writes no field");
+        Ok(())
+    }
+
+    /// A reply has words, comes from a run, and answers only follow-ups.
+    #[test]
+    fn a_reply_has_words_a_run_and_follow_ups() {
+        let validated = |change: &dyn Fn(&mut PipelineReply)| {
+            let PipelineDocument::Reply(mut reply) = samples().remove(18).0 else { unreachable!() };
+            change(&mut reply);
+            PipelineDocument::Reply(reply).validate()
+        };
+        assert_eq!(validated(&|_| {}), Ok(()));
+        assert_eq!(validated(&|reply| reply.answers.clear()), Ok(()), "a reply may answer nothing");
+        for (change, field) in [
+            (&(|reply: &mut PipelineReply| reply.text = "".into()) as &dyn Fn(&mut PipelineReply), "reply.text"),
+            (&|reply: &mut PipelineReply| reply.text = " 
+	".into(), "reply.text"),
+            (&|reply: &mut PipelineReply| reply.run = PipelineRef { kind: PipelineKind::FollowUp, id: id("follow_up", "ask-the-self") }, "reply.run.kind"),
+            (&|reply: &mut PipelineReply| reply.answers[0] = PipelineRef { kind: PipelineKind::Run, id: Short(format!("{INSTANCE}:run:mind-2026-10-09-1")) }, "reply.answers[0].kind"),
+        ] {
+            assert!(matches!(validated(change), Err(PipelineRefusal::InvalidFormat { field: f, .. }) if f == field), "{field}");
+        }
+    }
+
+    /// A thought is its chosen candidate, with one nearness per candidate, in bounds.
+    #[test]
+    fn malformed_thought_refused() {
+        let validated = |change: &dyn Fn(&mut PipelineThought)| {
+            let PipelineDocument::Thought(mut thought) = samples().remove(19).0 else { unreachable!() };
+            change(&mut thought);
+            PipelineDocument::Thought(thought).validate()
+        };
+        assert_eq!(validated(&|_| {}), Ok(()));
+        assert_eq!(validated(&|thought| { thought.chosen = 1; thought.text = thought.candidates[1].0.as_str().into(); }), Ok(()));
+        assert_eq!(validated(&|thought| { thought.candidates.truncate(1); thought.nearest_permille.truncate(1); }), Ok(()));
+        assert_eq!(validated(&|thought| thought.nearest_permille[0] = 1000), Ok(()), "1000 means no earlier thought");
+        let four = |thought: &mut PipelineThought| {
+            thought.candidates = vec![thought.text.0.as_str().into(); 4];
+            thought.nearest_permille = vec![0; 4];
+        };
+        assert_eq!(validated(&four), Ok(()), "four candidates are the most there may be");
+        for (change, field) in [
+            (&(|thought: &mut PipelineThought| { thought.text = " \n".into(); thought.candidates[0] = " \n".into(); }) as &dyn Fn(&mut PipelineThought), "thought.text"),
+            (&|thought: &mut PipelineThought| thought.text = "Another thing entirely.".into(), "thought.text"),
+            (&|thought: &mut PipelineThought| { thought.nearest_permille.pop(); }, "thought.nearest_permille"),
+            (&|thought: &mut PipelineThought| thought.nearest_permille[1] = 1001, "thought.nearest_permille[1]"),
+            (&|thought: &mut PipelineThought| thought.chosen = 2, "thought.chosen"),
+            (&|thought: &mut PipelineThought| thought.prompt_version = " ".into(), "thought.prompt_version"),
+            (&|thought: &mut PipelineThought| { thought.candidates.clear(); thought.nearest_permille.clear(); }, "thought.candidates"),
+        ] {
+            assert!(matches!(validated(change), Err(PipelineRefusal::InvalidFormat { field: f, .. }) if f == field), "{field}");
+        }
+        let five = |thought: &mut PipelineThought| {
+            thought.candidates = vec![thought.text.0.as_str().into(); 5];
+            thought.nearest_permille = vec![0; 5];
+        };
+        assert!(matches!(validated(&five), Err(PipelineRefusal::FieldBound { .. })), "five candidates are over the bound");
     }
 
     /// A pulse votes a tempo in bounds, declares an urgency in bounds, or does both; a pulse that does neither is refused.
@@ -3554,6 +3747,30 @@ mod tests {
     }
 
     #[test]
+    fn follow_up_origin_absent_is_not_written_and_a_direct_origin_round_trips() -> Result<()> {
+        let sample = samples()
+            .into_iter()
+            .find_map(|(document, _)| if let PipelineDocument::FollowUp(follow_up) = document { Some(follow_up) } else { None })
+            .expect("a follow_up sample");
+        let json = serde_json::to_value(PipelineDocument::FollowUp(sample.clone()))?;
+        assert!(json["value"].get("origin").is_none(), "an absent origin is not written");
+        assert!(!rmp_serde::to_vec_named(&PipelineDocument::FollowUp(sample.clone()))?.windows(6).any(|window| window == b"origin"));
+        let PipelineDocument::FollowUp(decoded) = serde_json::from_value::<PipelineDocument>(json)? else { unreachable!() };
+        assert_eq!(decoded.origin, None);
+
+        let mut direct = sample;
+        direct.origin = Some(MemoryOrigin::Direct { room: "!dm:chat".into(), with: vec!["@sample:chat".into()] });
+        let document = PipelineDocument::FollowUp(direct);
+        document.validate()?;
+        let json = serde_json::to_value(&document)?;
+        assert_eq!(serde_json::from_value::<PipelineDocument>(json)?, document);
+        let packed = rmp_serde::to_vec_named(&document)?;
+        assert_eq!(rmp_serde::from_slice::<PipelineDocument>(&packed)?, document);
+        assert!(packed.windows(6).any(|window| window == b"origin"), "the origin key is written");
+        Ok(())
+    }
+
+    #[test]
     fn target_repos_bounded_and_distinct() {
         let with_repos = |repos: Vec<OrgRepo>| {
             let PipelineDocument::Target(mut target) = samples().remove(1).0 else { unreachable!() };
@@ -3640,11 +3857,11 @@ mod tests {
         };
         let document_schema = serde_json::to_value(schemars::schema_for!(PipelineDocument))?;
         let variants = document_schema["oneOf"].as_array().expect("the document schema is a oneOf");
-        assert_eq!(PipelineKind::ALL.len(), 18, "eighteen kinds");
+        assert_eq!(PipelineKind::ALL.len(), 20, "twenty kinds");
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
-            "the document schema lists exactly the eighteen kinds, by name"
+            "the document schema lists exactly the twenty kinds, by name"
         );
 
         let refusal_schema = serde_json::to_value(schemars::schema_for!(PipelineRefusal))?;

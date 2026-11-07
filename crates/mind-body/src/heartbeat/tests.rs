@@ -23,6 +23,9 @@ struct Counting<'a> {
     down: &'a Cell<bool>,
     /// Queries of a newest-shaped read (`ran`, `voted`, `urged`) that did not ask for one header.
     unbounded: &'a Cell<u32>,
+    /// Reads of the stewardship kind, and whether they fail while everything else answers.
+    stewardship_reads: &'a Cell<u32>,
+    stewardship_down: &'a Cell<bool>,
 }
 
 impl MindPort for Counting<'_> {
@@ -35,6 +38,12 @@ impl MindPort for Counting<'_> {
             return Err(anyhow!("the daemon is down"));
         }
         self.calls.set(self.calls.get() + 1);
+        if selection.schemas.iter().flatten().any(|schema| schema == K::Stewardship.type_id()) {
+            self.stewardship_reads.set(self.stewardship_reads.get() + 1);
+            if self.stewardship_down.get() {
+                return Err(anyhow!("the stewardship read failed"));
+            }
+        }
         let newest_shaped = selection.fields.iter().flatten().any(|predicate| matches!(predicate.index.as_str(), "ran" | "voted" | "urged"));
         if newest_shaped && selection.limit != Some(1) {
             self.unbounded.set(self.unbounded.get() + 1);
@@ -96,6 +105,8 @@ impl Chat for FakeChat {
 struct MemStore {
     state: RefCell<Option<HeartbeatState>>,
     traces: RefCell<Vec<PollTrace>>,
+    addressing: RefCell<Option<Addressing>>,
+    addressing_saves: Cell<u32>,
 }
 
 impl Store for MemStore {
@@ -110,6 +121,16 @@ impl Store for MemStore {
 
     fn record(&self, trace: &PollTrace) -> Result<()> {
         self.traces.borrow_mut().push(trace.clone());
+        Ok(())
+    }
+
+    fn load_addressing(&self) -> Result<Option<Addressing>> {
+        Ok(self.addressing.borrow().clone())
+    }
+
+    fn save_addressing(&self, addressing: &Addressing) -> Result<()> {
+        self.addressing_saves.set(self.addressing_saves.get() + 1);
+        *self.addressing.borrow_mut() = Some(addressing.clone());
         Ok(())
     }
 }
@@ -144,6 +165,8 @@ struct Rig {
     calls: Vec<Cell<u32>>,
     down: Vec<Cell<bool>>,
     unbounded: Vec<Cell<u32>>,
+    stewardship_reads: Cell<u32>,
+    stewardship_down: Cell<bool>,
     chats: Vec<FakeChat>,
     control: FakeControl,
     launcher: Recording,
@@ -161,6 +184,8 @@ impl Rig {
             calls: vec![Cell::new(0), Cell::new(0)],
             down: vec![Cell::new(false), Cell::new(false)],
             unbounded: vec![Cell::new(0), Cell::new(0)],
+            stewardship_reads: Cell::new(0),
+            stewardship_down: Cell::new(false),
             chats: vec![FakeChat::default(), FakeChat::default()],
             control: FakeControl::new(),
             launcher: Recording::default(),
@@ -188,7 +213,7 @@ impl Rig {
         for mind in &self.minds {
             mind.admit_at(self.now());
         }
-        let ports: Vec<Counting> = self.minds.iter().zip(self.calls.iter().zip(self.down.iter().zip(&self.unbounded))).map(|(inner, (calls, (down, unbounded)))| Counting { inner, calls, down, unbounded }).collect();
+        let ports: Vec<Counting> = self.minds.iter().zip(self.calls.iter().zip(self.down.iter().zip(&self.unbounded))).map(|(inner, (calls, (down, unbounded)))| Counting { inner, calls, down, unbounded, stewardship_reads: &self.stewardship_reads, stewardship_down: &self.stewardship_down }).collect();
         let seats: Vec<Seat> = self.config.personas.iter().enumerate().map(|(index, who)| Seat { who: who.clone(), mind: &ports[index], chat: &self.chats[index] }).collect();
         let organs = Organs { seats: &seats, control: &self.control, launcher: &self.launcher, clock: &self.clock, host: "test-host", store: &self.store };
         poll(&organs, &self.config).unwrap()
@@ -496,6 +521,136 @@ fn a_member_naming_a_persona_launches_nobody_off_the_beat_but_counts_as_full_urg
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "a member does not start a turn");
     rig.advance(900);
     // Bob waited 990 s x ten for the member addressing him; Ann waited 1900 s x one: Bob wins the beat.
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] });
+}
+
+#[test]
+fn a_member_message_naming_nobody_of_hers_scores_nobody() {
+    let rig = Rig::new();
+    rig.turn(ANN, 1000);
+    rig.turn(BOB, 90);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig.say(BOB, delivery(1, "@member:chat", "good morning, swarm", &[]));
+    rig.say(BOB, delivery(2, "@member:chat", "is BDS green?", &[]));
+    rig.advance(900);
+    // Ann waited 1900 s at one order; Bob 990 s, and a member naming nothing of his gives him no urgency: Ann wins the beat.
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] }, "BDS is nobody's here: no one stewards it");
+}
+
+/// `who` also stewards `repo`, with `names` listed or none.
+fn steward(rig: &Rig, who: usize, repo: &str, names: &[&str]) {
+    rig.minds[who].committed(vec![eureka_pipeline::PipelineDocument::Stewardship(eureka_pipeline::PipelineStewardship {
+        instance: Slug(NAMES[who].into()),
+        repo: repo.into(),
+        sequence: 1,
+        assigned_on: eureka_pipeline::Date("2026-11-06".into()),
+        note: "assigned".into(),
+        names: names.iter().map(|name| (*name).into()).collect(),
+    })]);
+}
+
+/// A rig on the beat's far side, so only an off-beat wake can launch.
+fn quiet_rig() -> Box<Rig> {
+    let rig = Rig::new();
+    rig.turn(ANN, 10);
+    rig.turn(BOB, 10);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig
+}
+
+#[test]
+fn the_operator_naming_a_project_untagged_wakes_its_idle_steward_once_off_the_beat() {
+    let rig = quiet_rig();
+    steward(&rig, ANN, "GameCult/BadDaySimulator", &["BDS"]);
+    rig.say(ANN, delivery(1, "@op:chat", "BDS is down", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
+    rig.end_run(ANN);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "the same message polled again launches nobody");
+    rig.say(ANN, delivery(2, "@op:chat", "BDSX is down", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "a substring of a name is not the name");
+}
+
+#[test]
+fn a_listed_name_wakes_on_its_exact_spelling_only_and_a_derived_name_in_any_case() {
+    let rig = quiet_rig();
+    steward(&rig, ANN, "GameCult/Thing", &["Thing"]);
+    rig.say(ANN, delivery(1, "@op:chat", "one more thing", &[]));
+    rig.say(ANN, delivery(2, "@op:chat", "THING", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "a listed name is exactly as written");
+    rig.say(ANN, delivery(3, "@op:chat", "Thing is broken", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
+    let rig = quiet_rig();
+    steward(&rig, BOB, "GameCult/BadDaySimulator", &[]);
+    rig.say(BOB, delivery(1, "@op:chat", "is the BAD DAY SIMULATOR build green?", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] }, "a derived name matches in any case");
+}
+
+#[test]
+fn another_mind_naming_a_project_wakes_its_steward_and_a_member_scores_her_without_waking_her() {
+    let rig = quiet_rig();
+    steward(&rig, BOB, "GameCult/BadDaySimulator", &["BDS"]);
+    rig.say(BOB, delivery(1, "@ann:chat", "BDS needs a look", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] }, "a Mind of the roster naming her project wakes her");
+    let rig = Rig::new();
+    rig.turn(ANN, 1000);
+    rig.turn(BOB, 90);
+    steward(&rig, BOB, "GameCult/BadDaySimulator", &["BDS"]);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig.say(BOB, delivery(1, "@member:chat", "is BDS green?", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "a member does not start a turn");
+    rig.advance(900);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] }, "the member's naming scores her at full urgency");
+}
+
+#[test]
+fn a_stewardship_is_read_only_when_chat_is_pending_and_a_failed_read_keeps_her_roster_names() {
+    let rig = quiet_rig();
+    rig.poll();
+    assert_eq!(rig.stewardship_reads.get(), 0, "nothing pending, nothing read");
+    rig.stewardship_down.set(true);
+    rig.say(ANN, delivery(1, "@op:chat", "Ann, a word", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] }, "her own name still wakes her");
+    assert_eq!(rig.stewardship_reads.get(), 1, "one read for her one poll");
+    assert!(notes_of(&rig).iter().any(|note| note.contains("stewardship names unread")), "{:?}", notes_of(&rig));
+}
+
+fn table_row(rig: &Rig, id: &str) -> Addressee {
+    rig.store.addressing.borrow().as_ref().expect("the heartbeat wrote a table").minds.iter().find(|row| row.matrix_id() == id).cloned().expect("her row")
+}
+
+#[test]
+fn the_heartbeat_writes_the_table_it_read_and_only_when_it_changed() {
+    let rig = quiet_rig();
+    steward(&rig, BOB, "GameCult/BadDaySimulator", &["BDS"]);
+    rig.poll();
+    assert_eq!(rig.store.addressing_saves.get(), 1, "the roster is written at the first poll");
+    assert!(!addresses(&table_row(&rig, "@bob:chat"), &delivery(9, "@op:chat", "BDS is down", &[])), "nothing pending, nothing read: no project name yet");
+    rig.say(BOB, delivery(1, "@member:chat", "hello", &[]));
+    rig.poll();
+    assert_eq!(rig.store.addressing_saves.get(), 2);
+    assert!(addresses(&table_row(&rig, "@bob:chat"), &delivery(9, "@op:chat", "BDS is down", &[])));
+    assert!(addresses(&table_row(&rig, "@ann:chat"), &delivery(9, "@op:chat", "Ann?", &[])) && !addresses(&table_row(&rig, "@ann:chat"), &delivery(9, "@op:chat", "BDS", &[])));
+    rig.poll();
+    assert_eq!(rig.store.addressing_saves.get(), 2, "an identical poll writes nothing");
+}
+
+#[test]
+fn a_failed_stewardship_read_keeps_her_last_read_names_and_roster_names_when_none_are_stored() {
+    let rig = quiet_rig();
+    steward(&rig, BOB, "GameCult/BadDaySimulator", &["BDS"]);
+    rig.say(BOB, delivery(1, "@member:chat", "hello", &[]));
+    rig.poll();
+    rig.stewardship_down.set(true);
+    rig.say(BOB, delivery(2, "@op:chat", "BDS is down", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] }, "her stored names still wake her");
+    assert!(notes_of(&rig).iter().any(|note| note.contains("stewardship names unread")), "{:?}", notes_of(&rig));
+    assert!(addresses(&table_row(&rig, "@bob:chat"), &delivery(9, "@op:chat", "BDS", &[])), "the table keeps her names");
+    let rig = quiet_rig();
+    steward(&rig, BOB, "GameCult/BadDaySimulator", &["BDS"]);
+    rig.stewardship_down.set(true);
+    rig.say(BOB, delivery(1, "@op:chat", "BDS is down", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "nothing stored: roster names only");
+    rig.say(BOB, delivery(2, "@op:chat", "bob, a word", &[]));
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] });
 }
 
@@ -1256,4 +1411,15 @@ fn a_persona_run_whose_unit_is_active_is_busy() {
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
     assert_eq!(rig.launched(), vec![]);
     assert!(matches!(rig.minds[BOB].view(K::Run, "bob:run:held").unwrap().status, huginn_mind::PipelineStatus::InForce));
+}
+
+#[test]
+fn the_file_store_reads_back_the_addressing_it_wrote_to_the_view() {
+    let dir = TempDir::new().unwrap();
+    let store = FileStore::new(dir.path().join("heartbeat.cc"));
+    assert_eq!(store.addressing().unwrap(), None);
+    let table = Addressing { minds: vec![Addressee::new("@bob:chat", ["Bob"]).with_projects([Name { text: "BDS".into(), exact: true }])] };
+    store.save_addressing(&table).unwrap();
+    assert_eq!(store.addressing().unwrap(), Some(table.clone()));
+    assert_eq!(store.load_addressing().unwrap(), Some(table));
 }

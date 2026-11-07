@@ -87,6 +87,8 @@ struct Seen<'a> {
     instance: Slug,
     doubled: bool,
     admit_fails: bool,
+    /// The next this many admissions fail as an unreachable mind would, then the mind answers again.
+    fail_admits: Cell<usize>,
     /// A query for this key fails.
     query_fails_on: Option<String>,
     admits: Cell<usize>,
@@ -94,7 +96,7 @@ struct Seen<'a> {
 
 impl<'a> Seen<'a> {
     fn of(inner: &'a TestMind) -> Self {
-        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, query_fails_on: None, admits: Cell::new(0) }
+        Self { inner, instance: inner.instance().clone(), doubled: false, admit_fails: false, fail_admits: Cell::new(0), query_fails_on: None, admits: Cell::new(0) }
     }
 }
 
@@ -121,7 +123,8 @@ impl MindPort for Seen<'_> {
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
         self.admits.set(self.admits.get() + 1);
-        if self.admit_fails {
+        if self.admit_fails || self.fail_admits.get() > 0 {
+            self.fail_admits.set(self.fail_admits.get().saturating_sub(1));
             return Err(anyhow!("down"));
         }
         self.inner.admit(agent, session, documents)
@@ -142,7 +145,7 @@ struct Ran {
 impl Ran {
     fn ended(&self) -> (Cause, Option<i32>, u64, u64) {
         match self.outcome.as_ref().unwrap() {
-            SelfRunOutcome::Ended { cause, code, requests, prefix } => (*cause, *code, *requests, *prefix),
+            SelfRunOutcome::Ended { cause, code, requests, prefix, .. } => (*cause, *code, *requests, *prefix),
             other => panic!("not ended: {other:?}"),
         }
     }
@@ -164,7 +167,7 @@ impl Ran {
 
     /// What the unit's stdout holds apart from the decisions the actuator journals.
     fn lines(&self) -> String {
-        self.out.lines().filter(|line| !line.starts_with("decision ")).map(|line| format!("{line}\n")).collect()
+        self.out.lines().filter(|line| !line.starts_with("decision ") && !line.starts_with("session ")).map(|line| format!("{line}\n")).collect()
     }
 
     fn count(&self, wanted: &Event) -> usize {
@@ -195,16 +198,22 @@ fn carry_scripted(seen: &Seen, steps: Vec<Step>, code: Option<i32>, dies_on: Opt
     carry_one(seen, steps, (code, dies_on, refuses, hangs))
 }
 
-fn carry_one(seen: &Seen, steps: Vec<Step>, (code, dies_on, refuses, hangs): (Option<i32>, Option<Stop>, &[Stop], bool)) -> Ran {
+fn carry_one(seen: &Seen, steps: Vec<Step>, how: (Option<i32>, Option<Stop>, &[Stop], bool)) -> Ran {
+    carry_kept(seen, steps, how, None)
+}
+
+/// The same, with `kept` the conversation the spawner reports as kept.
+fn carry_kept(seen: &Seen, steps: Vec<Step>, (code, dies_on, refuses, hangs): (Option<i32>, Option<Stop>, &[Stop], bool), kept: Option<Kept>) -> Ran {
     let log = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(Fixed(Cell::new(at_start())));
     let fake = Fake::with(Some(Scripted { steps: steps.into(), log: log.clone(), clock: clock.clone(), code, dies_on, refuses: refuses.to_vec(), hangs, exited: false, eof: false, asked: 0 }), false);
+    *fake.kept.borrow_mut() = kept;
     let lender = FakeLender::logging(log.clone(), Answer::Grant);
     let mut out = Vec::new();
     let outcome = carry(seen, &*clock, &lender, &fake, TEST_CAP_S, &mut out);
     let all = log.borrow().clone();
     // The child's own events; the lease's are in `all`, in order with them.
-    let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Abandoned)).cloned().collect();
+    let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Abandoned | Event::Kept(_))).cloned().collect();
     let spawns = fake.spawns.borrow().clone();
     Ran { outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
 }
@@ -300,7 +309,7 @@ fn a_mind_that_cannot_be_read_or_a_child_that_cannot_start_is_an_error_not_an_ou
 #[test]
 fn claude_args_is_exactly_the_fixed_list_for_a_session() {
     let session = Uuid::parse_str(SESSION_OF_RUN_A).unwrap();
-    let args = claude_args(session);
+    let args = claude_args(session, None);
     assert_eq!(
         args,
         [
@@ -321,10 +330,12 @@ fn claude_args_is_exactly_the_fixed_list_for_a_session() {
             "--setting-sources",
             "user",
             "--replay-user-messages",
+            "--disallowedTools",
+            "ScheduleWakeup,CronCreate",
         ]
     );
     // Those belong to the run measure or to the unit's managed settings.
-    for forbidden in ["--resume", "--continue", "--fork-session", "--model", "--dangerously-skip-permissions", "--system-prompt", "--max-budget"] {
+    for forbidden in ["--continue", "--model", "--dangerously-skip-permissions", "--system-prompt", "--max-budget"] {
         assert!(!args.iter().any(|arg| arg.starts_with(forbidden) || arg.contains("dangerously")), "{forbidden}");
     }
     // Print mode starts in Manual without a mode, and prompts none then denies.
@@ -348,7 +359,7 @@ fn the_child_is_started_for_her_run_with_the_fixed_list_whatever_the_run_record_
         mind.committed(vec![self_run("selfrun-b", budget)]);
         let ran = carry_with(&Seen::of(&mind), vec![Out(result_line())], Some(0), false);
         assert_eq!(ran.spawns.len(), 1, "{budget}");
-        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap()), "{budget}");
+        assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap(), None), "{budget}");
     }
 }
 
@@ -478,20 +489,20 @@ fn a_long_result_is_cut_at_the_limit_on_a_character_boundary_and_marked() {
 
 #[test]
 fn read_usage_sums_input_cache_read_and_cache_write_and_reads_absent_fields_as_zero() {
-    assert_eq!(read_usage(&request("m1", 1, 20, 300)), Usage::Request { id: "m1".into(), prefix: 321 });
+    assert_eq!(read_usage(&request("m1", 1, 20, 300)), Usage::Request { id: "m1".into(), prefix: 321, stops: vec![] });
     // Each term alone, so dropping or doubling any one is seen.
-    assert_eq!(read_usage(&request("m", 7, 0, 0)), Usage::Request { id: "m".into(), prefix: 7 });
-    assert_eq!(read_usage(&request("m", 0, 7, 0)), Usage::Request { id: "m".into(), prefix: 7 });
-    assert_eq!(read_usage(&request("m", 0, 0, 7)), Usage::Request { id: "m".into(), prefix: 7 });
+    assert_eq!(read_usage(&request("m", 7, 0, 0)), Usage::Request { id: "m".into(), prefix: 7, stops: vec![] });
+    assert_eq!(read_usage(&request("m", 0, 7, 0)), Usage::Request { id: "m".into(), prefix: 7, stops: vec![] });
+    assert_eq!(read_usage(&request("m", 0, 0, 7)), Usage::Request { id: "m".into(), prefix: 7, stops: vec![] });
     for absent in ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"] {
         let mut event: Value = serde_json::from_str(&request("m", 1, 20, 300)).unwrap();
         event["message"]["usage"].as_object_mut().unwrap().remove(absent);
         let want = 321 - [("input_tokens", 1), ("cache_read_input_tokens", 20), ("cache_creation_input_tokens", 300)].iter().find(|(name, _)| *name == absent).unwrap().1;
-        assert_eq!(read_usage(&event.to_string()), Usage::Request { id: "m".into(), prefix: want }, "{absent} absent");
+        assert_eq!(read_usage(&event.to_string()), Usage::Request { id: "m".into(), prefix: want, stops: vec![] }, "{absent} absent");
     }
     let mut no_usage: Value = serde_json::from_str(&request("m", 1, 1, 1)).unwrap();
     no_usage["message"].as_object_mut().unwrap().remove("usage");
-    assert_eq!(read_usage(&no_usage.to_string()), Usage::Request { id: "m".into(), prefix: 0 });
+    assert_eq!(read_usage(&no_usage.to_string()), Usage::Request { id: "m".into(), prefix: 0, stops: vec![] });
 }
 
 #[test]
@@ -499,7 +510,7 @@ fn read_usage_classifies_the_owners_real_records() {
     let sums = [84210, 100751, 117174, 118336, 126746, 127250, 129853];
     let mut seen = Vec::new();
     for line in RECORDS.lines() {
-        let Usage::Request { id, prefix } = read_usage(line) else { panic!("an assistant record of the main thread is a request: {line}") };
+        let Usage::Request { id, prefix, .. } = read_usage(line) else { panic!("an assistant record of the main thread is a request: {line}") };
         if !seen.iter().any(|(known, _)| *known == id) {
             seen.push((id, prefix));
         }
@@ -517,17 +528,21 @@ fn read_usage_classifies_the_owners_real_records() {
     assert_eq!(read_usage(&not_replayed), Usage::Other);
     let subagent_echo = json!({"type": "user", "isReplay": true, "parent_tool_use_id": "toolu_1", "message": {"role": "user", "content": "a line"}}).to_string();
     assert_eq!(read_usage(&subagent_echo), Usage::Other, "a subagent's line is not ours");
-    assert_eq!(read_usage(&init_line()), Usage::Other);
+    assert_eq!(read_usage(&init_line()), Usage::TurnBegan);
+    let replayed = json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": "<task-notification>
+<task-id>t</task-id>
+</task-notification>"}}).to_string();
+    assert_eq!(read_usage(&replayed), Usage::NotificationTaken { id: "t".into() }, "the CLI's replay of a notification is never our echo");
     assert_eq!(read_usage(&subagent("m", 5)), Usage::Other, "a subagent's request is not the main thread's");
     let mut no_id: Value = serde_json::from_str(&at("m", 5)).unwrap();
     no_id["message"].as_object_mut().unwrap().remove("id");
     assert_eq!(read_usage(&no_id.to_string()), Usage::Other);
     let mut null_parent: Value = serde_json::from_str(&at("m", 5)).unwrap();
     null_parent["parent_tool_use_id"] = Value::Null;
-    assert_eq!(read_usage(&null_parent.to_string()), Usage::Request { id: "m".into(), prefix: 5 });
+    assert_eq!(read_usage(&null_parent.to_string()), Usage::Request { id: "m".into(), prefix: 5, stops: vec![] });
     let mut no_parent: Value = serde_json::from_str(&at("m", 5)).unwrap();
     no_parent.as_object_mut().unwrap().remove("parent_tool_use_id");
-    assert_eq!(read_usage(&no_parent.to_string()), Usage::Request { id: "m".into(), prefix: 5 });
+    assert_eq!(read_usage(&no_parent.to_string()), Usage::Request { id: "m".into(), prefix: 5, stops: vec![] });
     for unreadable in ["", "not json", "[1,2]", "\"assistant\"", "12", "null", "{\"type\":"] {
         assert_eq!(read_usage(unreadable), Usage::Unreadable, "{unreadable:?}");
     }
@@ -539,7 +554,7 @@ fn records_that_share_a_message_id_count_once_and_subagent_records_never_move_th
     steps.insert(3, Out(subagent("msg_sub", 999_999)));
     let ran = go(steps);
     assert_eq!(
-        ran.out,
+        ran.lines(),
         "request 1 prefix 84210
 request 2 prefix 100751
 request 3 prefix 117174
@@ -724,9 +739,9 @@ fn the_message_ids_of_a_long_run_are_all_remembered() {
 #[test]
 fn a_usage_sum_that_overflows_is_at_or_over_the_ceiling_not_a_panic_or_a_wrap() {
     let line = request("m", u64::MAX, 1, 0);
-    assert_eq!(read_usage(&line), Usage::Request { id: "m".into(), prefix: u64::MAX });
-    assert_eq!(read_usage(&request("m", u64::MAX, u64::MAX, u64::MAX)), Usage::Request { id: "m".into(), prefix: u64::MAX });
-    assert_eq!(read_usage(&request("m", 1, u64::MAX, 1)), Usage::Request { id: "m".into(), prefix: u64::MAX });
+    assert_eq!(read_usage(&line), Usage::Request { id: "m".into(), prefix: u64::MAX, stops: vec![] });
+    assert_eq!(read_usage(&request("m", u64::MAX, u64::MAX, u64::MAX)), Usage::Request { id: "m".into(), prefix: u64::MAX, stops: vec![] });
+    assert_eq!(read_usage(&request("m", 1, u64::MAX, 1)), Usage::Request { id: "m".into(), prefix: u64::MAX, stops: vec![] });
     // Through the actuator: the flush is asked for, and the headroom beyond a saturated prefix does not overflow
     // either, and the pass that wrote the flush does not interrupt.
     let ran = go(vec![Out(echo()), Out(request("m1", u64::MAX, 7, 0)), Out(request("m2", 0, 0, 0))]);
@@ -865,7 +880,7 @@ fn a_child_that_exited_is_never_signalled_however_long_its_stream_stays_open() {
 #[test]
 fn the_outcome_names_how_it_ended_and_the_exit_status_follows_the_childs_code() {
     let own = carry_with(&Seen::of(&with_run()), vec![Out(at("m1", 10)), Out(result_line())], Some(0), false);
-    assert_eq!(own.outcome.as_ref().unwrap(), &SelfRunOutcome::Ended { cause: Cause::Own, code: Some(0), requests: 1, prefix: 10 });
+    assert_eq!(own.outcome.as_ref().unwrap(), &SelfRunOutcome::Ended { cause: Cause::Own, code: Some(0), requests: 1, prefix: 10, warm_until: None });
     assert_eq!(own.outcome.as_ref().unwrap().to_string(), "ended: own code 0 requests 1 prefix 10");
     assert_eq!(own.outcome.unwrap().exit_status(), 0);
 
@@ -947,7 +962,7 @@ mod process {
 
     fn start_with(program: &Path, args: &[String], token: &TokenFd) -> Box<dyn Child> {
         for _ in 0..50 {
-            let config = FreshConfig::create(program.parent().unwrap(), None).unwrap();
+            let config = FreshConfig::create(program.parent().unwrap(), None, None).unwrap();
             match spawn_program(program, args, token, &unit_environment(), config) {
                 Ok(child) => return child,
                 Err(error) if format!("{error:#}").contains("busy") => std::thread::sleep(StdDuration::from_millis(100)),
@@ -1008,7 +1023,7 @@ mod process {
     #[test]
     fn interrupt_is_sigint_the_childs_own_handler_can_catch() {
         let dir = tempfile::tempdir().unwrap();
-        let program = script(&dir, "trap 'echo interrupted; exit 130' INT\necho ready\nwhile :; do sleep 0.05; done");
+        let program = script(&dir, "trap 'echo interrupted; exit 130' INT\necho ready\nwhile :; do read -t 0.05 -r _; [ $? -le 128 ] && break; done");
         let mut child = start(&program, &[]);
         assert_eq!(child.next(StdDuration::from_secs(20)), Read::Line("ready".into()));
         child.stop(Stop::Interrupt);
@@ -1019,7 +1034,7 @@ mod process {
     fn a_program_that_cannot_start_is_an_error_that_names_no_argument() {
         let canary = "canary-argument-6b0d";
         let scratch = tempfile::tempdir().unwrap();
-        let config = FreshConfig::create(scratch.path(), None).unwrap();
+        let config = FreshConfig::create(scratch.path(), None, None).unwrap();
         let error = spawn_program(Path::new("/nonexistent/claude"), &[canary.to_string()], &token_holding("tok-canary"), &[], config).err().unwrap();
         assert!(!format!("{error:#}").contains(canary) && !format!("{error:#}").contains("nonexistent"), "{error:#}");
     }
@@ -1101,8 +1116,8 @@ exit 0");
         let mind = with_run();
         let mut out = Vec::new();
         let outcome = carry(&Seen::of(&mind), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
-        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000 });
-        let printed: String = String::from_utf8(out).unwrap().lines().filter(|line| !line.starts_with("decision ")).map(|line| format!("{line}\n")).collect();
+        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::FlushRequested, code: Some(0), requests: 2, prefix: 300_000, warm_until: None });
+        let printed: String = String::from_utf8(out).unwrap().lines().filter(|line| !line.starts_with("decision ") && !line.starts_with("session ")).map(|line| format!("{line}\n")).collect();
         assert_eq!(printed, "request 1 prefix 10
 request 2 prefix 300000
 result subtype=success is_error=false: The answer.
@@ -1118,7 +1133,7 @@ result subtype=success is_error=false: The answer.
         let started = std::time::Instant::now();
         let mut out = Vec::new();
         let outcome = carry(&Seen::of(&with_run()), &SystemClock, &FakeLender::new(Answer::Grant), &Spawn(program), TEST_CAP_S, &mut out).unwrap();
-        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::Own, code: Some(1), requests: 0, prefix: 0 });
+        assert_eq!(outcome, SelfRunOutcome::Ended { cause: Cause::Own, code: Some(1), requests: 0, prefix: 0, warm_until: None });
         assert_eq!(outcome.exit_status(), 1);
         assert!(!String::from_utf8_lossy(&out).contains("request "), "no request was heard");
         assert!(started.elapsed() < StdDuration::from_secs(20), "it ended promptly");
@@ -1141,7 +1156,7 @@ result subtype=success is_error=false: The answer.
             let holder = std::fs::read_to_string(&pids).unwrap().trim().to_string();
             let cause = if flushed { Cause::FlushRequested } else { Cause::Own };
             let (requests, prefix) = if flushed { (1, CEILING_TOKENS) } else { (0, 0) };
-            assert_eq!(outcome, SelfRunOutcome::Ended { cause, code: Some(0), requests, prefix }, "flushed: {flushed}");
+            assert_eq!(outcome, SelfRunOutcome::Ended { cause, code: Some(0), requests, prefix, warm_until: None }, "flushed: {flushed}");
             assert!(alive(&holder), "the actuator signals no one after the child is gone");
             assert!(started.elapsed() < StdDuration::from_secs(20), "it ended on the child's exit: {:?}", started.elapsed());
             Command::new("kill").arg(&holder).status().unwrap();
@@ -1151,7 +1166,7 @@ result subtype=success is_error=false: The answer.
     #[test]
     fn each_signal_reaches_a_child_that_ignores_the_weaker_ones_and_one_for_a_gone_child_is_not_delivered() {
         let dir = tempfile::tempdir().unwrap();
-        let program = script(&dir, "trap '' INT TERM\necho ready\nwhile :; do sleep 0.05; done");
+        let program = script(&dir, "trap '' INT TERM\necho ready\nwhile :; do read -t 0.05 -r _; [ $? -le 128 ] && break; done");
         let mut child = start(&program, &[]);
         assert_eq!(child.next(StdDuration::from_secs(20)), Read::Line("ready".into()));
         assert!(child.stop(Stop::Interrupt) && child.stop(Stop::Terminate), "delivered, and ignored");
@@ -1189,6 +1204,9 @@ result subtype=success is_error=false: The answer.
 
 mod lease;
 mod closure;
+mod conversation;
+mod reply;
+mod resume;
 
 // ---- the task in the start message ---------------------------------------
 
@@ -1384,7 +1402,7 @@ fn a_brief_derived_while_a_turn_runs_is_written_at_once_counted_at_its_echo_and_
     // The plan line is restated under every brief for the run's life, so it names the instant of the reading, never an age that stops being true.
     assert!(told[0].contains("read at 2026-10-29T20:33Z") && !told[0].contains(" ago"), "{}", told[0]);
     assert_eq!(ran.written().len(), 2, "the start message and one tell: {:?}", ran.written());
-    assert!(ran.out.contains("decision Write { tells: true, flush: None } prefix 10 ttl_s 0 idle_s working inbox true written 2 consumed 1\n"), "{}", ran.out);
+    assert!(ran.out.contains("decision Write { tells: true, switch: false, flush: None } prefix 10 ttl_s 0 idle_s working inbox true written 2 consumed 1\n"), "{}", ran.out);
     assert_eq!(ran.count(&Event::InputClosed), 0);
     // A result is not an answer: nothing closes the brief by its timing.
     assert!(resolutions_of(&mind, &brief_ref("b1")).is_empty());
@@ -1474,7 +1492,7 @@ fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_
     let flush_at = hour.events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains(FLUSH_MESSAGE))).unwrap();
     let closed_at = hour.events.iter().position(|event| *event == Event::InputClosed).unwrap();
     assert!(flush_at < closed_at && hour.count(&Event::InputClosed) == 1, "{:?}", hour.events);
-    assert!(hour.out.contains("decision Write { tells: false, flush: Some(Idle) } prefix 10 ttl_s 3600 idle_s 3540 inbox false written 2 consumed 1\n"), "{}", hour.out);
+    assert!(hour.out.contains("decision Write { tells: false, switch: false, flush: Some(Idle) } prefix 10 ttl_s 3600 idle_s 3540 inbox false written 2 consumed 1\n"), "{}", hour.out);
     assert!(hour.written().iter().any(|text| text.contains("nothing is waiting and its cache would lapse") && text.contains("Resolve each brief you answered")), "{:?}", hour.written());
     // Five minutes' cache: the flush at 240 s.
     let short = go(vec![Out(echo()), Out(five_minute_request("m1", 10)), Out(ok_result()), Idle(239), Idle(1), Out(echo()), Out(ok_result()), Idle(1)]);
@@ -1533,7 +1551,7 @@ mod live_session {
     use super::*;
 
     fn flush(why: Why) -> Do {
-        Do::Write { tells: false, flush: Some(why) }
+        Do::Write { tells: false, switch: false, flush: Some(why) }
     }
 
     /// One recorded line as the loop would hear it: a label for the stream, the decision's action.
@@ -1550,7 +1568,7 @@ mod live_session {
             let entry: Value = serde_json::from_str(entry).unwrap();
             let at = crate::testkit::at((entry["t"].as_f64().unwrap() * 1000.0) as i64);
             if let Some(text) = entry.get("want").and_then(Value::as_str) {
-                let (label, fact) = if text.starts_with(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true }) };
+                let (label, fact) = if text.starts_with(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true, other: false, other_first: false }) };
                 let (next, action) = decide(state, fact, at);
                 state = next;
                 trace.push((label.to_string(), action));
@@ -1561,8 +1579,13 @@ mod live_session {
                 ttl_1h = hour;
             }
             let (label, fact) = match read_usage(line) {
-                Usage::Request { id, prefix } => (format!("request:{prefix}"), Fact::Request { id, prefix }),
+                Usage::Request { id, prefix, stops } => (format!("request:{prefix}"), Fact::Request { id, prefix, stops }),
                 Usage::Echo => ("echo".to_string(), Fact::Echo),
+                Usage::TurnBegan => ("turn".to_string(), Fact::TurnBegan),
+                Usage::BackgroundTasks { live, main, shell } => ("level".to_string(), Fact::BackgroundTasks { live, main, shell }),
+                Usage::TaskBackgrounded { id, shell } => ("backgrounded".to_string(), Fact::TaskBackgrounded { id, shell }),
+                Usage::TaskNotified { id, stopped } => ("notified".to_string(), Fact::TaskNotified { id, stopped }),
+                Usage::NotificationTaken { id } => ("taken".to_string(), Fact::NotificationTaken { id }),
                 Usage::Result { ok, blocked } => (format!("result:{}", if blocked { "blocked" } else if ok { "ok" } else { "error" }), Fact::Result { ok, blocked, ttl_1h }),
                 Usage::Other | Usage::Unreadable => ("other".to_string(), Fact::Tick),
             };
@@ -1591,12 +1614,23 @@ mod live_session {
     const API_ERROR: [&str; 2] = [include_str!("claude-2.1.312-live-session-api-error-first.jsonl"), include_str!("claude-2.1.312-live-session-api-error-first-scrub.jsonl")];
     const BLOCKING: [&str; 2] = [include_str!("claude-2.1.312-live-session-blocking-limit.jsonl"), include_str!("claude-2.1.312-live-session-blocking-limit-scrub.jsonl")];
     const COMPACTION_OFF: [&str; 2] = [include_str!("claude-2.1.312-live-session-compaction-off-360k.jsonl"), include_str!("claude-2.1.312-live-session-compaction-off-360k-scrub.jsonl")];
+    const BG_IDLE: &str = include_str!("claude-2.1.312-live-session-bg-idle.jsonl");
+    const BG_FOLD: &str = include_str!("claude-2.1.312-live-session-bg-fold.jsonl");
+    const BG_OTHER: &str = include_str!("claude-2.1.312-live-session-bg-other.jsonl");
+    const BG_RACE: &str = include_str!("claude-2.1.312-live-session-bg-race.jsonl");
+    const BG_AGENT: &str = include_str!("claude-2.1.312-live-session-bg-agent.jsonl");
+    const BG_LATE: &str = include_str!("claude-2.1.312-live-session-bg-late.jsonl");
+    const BG_FGTO: &str = include_str!("claude-2.1.312-live-session-bg-fgto.jsonl");
+    const BG_KILL: &str = include_str!("claude-2.1.312-live-session-bg-kill.jsonl");
+    const BG_MONITOR: &str = include_str!("claude-2.1.312-live-session-bg-monitor.jsonl");
+    const BG_KILLSHELL: &str = include_str!("claude-2.1.312-live-session-bg-killshell.jsonl");
+    const BG_DEADLINE_RACE: &str = include_str!("claude-2.1.312-live-session-bg-deadline-race.jsonl");
 
     #[test]
     fn a_line_written_during_a_tool_call_is_folded_one_result_and_its_echo_before_the_request_that_carries_it() {
         let trace = replay(FOLDED);
         // The tool_result's own user line is no echo: it is a foreign owner's array content.
-        assert_eq!(kinds(&trace), ["other", "echo", "request:10", "other", "other", "other", "echo", "request:10", "result:ok"]);
+        assert_eq!(kinds(&trace), ["turn", "echo", "request:10", "other", "notified", "other", "echo", "request:10", "result:ok"]);
         assert!(acted(&trace).is_empty(), "{:?}", acted(&trace));
     }
 
@@ -1604,7 +1638,7 @@ mod live_session {
     fn a_line_written_while_the_last_request_is_in_flight_is_queued_two_results_and_its_echo_after_the_first() {
         for stream in QUEUED {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:10", "result:ok", "other", "echo", "request:10", "result:ok"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "request:10", "result:ok", "turn", "echo", "request:10", "result:ok"]);
             assert!(acted(&trace).is_empty(), "{:?}", acted(&trace));
         }
     }
@@ -1628,10 +1662,10 @@ mod live_session {
             let (trace, state) = replay_state(stream);
             assert_eq!(
                 kinds(&trace),
-                ["other", "want", "want", "echo", "request:10", "result:ok", "other", "echo", "request:300000", "result:ok", "flush-asked", "other", "echo", "request:10", "result:ok"]
+                ["turn", "want", "want", "echo", "request:10", "result:ok", "turn", "echo", "request:300000", "result:ok", "flush-asked", "turn", "echo", "request:10", "result:ok"]
             );
             // Both briefs wait for the start message's echo and go as one line; the flush is written at the ceiling request; the result after its echo closes stdin.
-            assert_eq!(acted(&trace), vec![(3, Do::Write { tells: true, flush: None }), (8, flush(Why::Ceiling)), (14, Do::CloseStdin)]);
+            assert_eq!(acted(&trace), vec![(3, Do::Write { tells: true, switch: false, flush: None }), (8, flush(Why::Ceiling)), (14, Do::CloseStdin)]);
             assert_eq!((sent(stream), state.written, state.consumed), (3, 3, 3), "every line written has its own echo");
         }
     }
@@ -1639,7 +1673,7 @@ mod live_session {
     #[test]
     fn the_flush_folded_into_a_running_turn_is_answered_at_its_one_result() {
         let trace = replay(CEILING_FOLDED);
-        assert_eq!(kinds(&trace), ["other", "echo", "request:300000", "other", "other", "other", "echo", "request:10", "result:ok"]);
+        assert_eq!(kinds(&trace), ["turn", "echo", "request:300000", "other", "notified", "other", "echo", "request:10", "result:ok"]);
         assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (8, Do::CloseStdin)], "never a grace interrupt");
     }
 
@@ -1647,7 +1681,7 @@ mod live_session {
     fn the_flush_queued_behind_the_turn_that_reached_the_ceiling_is_answered_at_its_own_second_result() {
         for stream in CEILING_QUEUED {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:300000", "result:ok", "other", "echo", "request:10", "result:ok"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "request:300000", "result:ok", "turn", "echo", "request:10", "result:ok"]);
             // The first result ends the turn the flush was queued behind: it closes nothing.
             assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (7, Do::CloseStdin)], "never a grace interrupt");
         }
@@ -1657,7 +1691,7 @@ mod live_session {
     fn an_api_error_before_any_answer_closes_the_session_at_once_with_no_flush() {
         for stream in API_ERROR {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "other", "result:error"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "other", "result:error"]);
             assert_eq!(acted(&trace), vec![(3, Do::CloseStdin)]);
         }
     }
@@ -1666,7 +1700,7 @@ mod live_session {
     fn a_context_over_the_blocking_limit_is_a_blocked_result_that_closes_the_session() {
         for stream in BLOCKING {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:990000", "result:ok", "other", "echo", "other", "result:blocked"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "request:990000", "result:ok", "turn", "echo", "other", "result:blocked"]);
             assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (7, Do::CloseStdin)]);
         }
     }
@@ -1675,9 +1709,142 @@ mod live_session {
     fn with_compaction_off_a_request_at_360k_is_sent_and_answered_not_compacted_or_blocked() {
         for stream in COMPACTION_OFF {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:360000", "result:ok", "other", "echo", "request:10", "result:ok"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "request:360000", "result:ok", "turn", "echo", "request:10", "result:ok"]);
             assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (7, Do::CloseStdin)]);
         }
+    }
+
+    /// Whether the session is idle after each stream line, by the line's label.
+    fn idleness(jsonl: &str) -> Vec<(String, bool)> {
+        let lines: Vec<&str> = jsonl.lines().collect();
+        (1..=lines.len())
+            .filter_map(|n| {
+                let entry: Value = serde_json::from_str(lines[n - 1]).unwrap();
+                entry.get("line")?.as_str()?;
+                let (trace, state) = replay_state(&lines[..n].join("\n"));
+                Some((trace.last().unwrap().0.clone(), state.idle_s(crate::testkit::at(1_000_000)).is_some()))
+            })
+            .collect()
+    }
+
+    fn significant(trace: &[(String, Do)]) -> Vec<&str> {
+        kinds(trace).into_iter().filter(|kind| *kind != "other").collect()
+    }
+
+    fn usages(jsonl: &str) -> Vec<Usage> {
+        jsonl.lines().filter_map(|entry| serde_json::from_str::<Value>(entry).ok()?.get("line")?.as_str().map(read_usage)).collect()
+    }
+
+    #[test]
+    fn read_usage_reads_the_level_the_backgrounded_lines_the_notifications_and_the_stops_the_captures_hold() {
+        // A turn is begun by the init line, a task joins the level and is backgrounded, its notification comes by its event and the level
+        // empties after it; the CLI's replay of that notification is taken, never our echo.
+        let level = ["level", "backgrounded", "notified", "level"];
+        assert_eq!(significant(&replay(BG_FOLD)), [vec!["turn", "echo", "request:10"], level.to_vec(), vec!["request:10", "taken", "request:10", "result:ok"]].concat());
+        assert_eq!(significant(&replay(BG_IDLE)), [vec!["turn", "echo", "request:10"], level.to_vec(), vec!["request:10", "result:ok", "turn", "request:10", "result:ok"]].concat());
+        assert_eq!(significant(&replay(BG_RACE)), [vec!["turn", "echo", "request:10"], level.to_vec(), vec!["request:10", "result:ok", "turn", "request:10", "result:ok", "turn", "echo", "request:10", "result:ok"]].concat());
+        assert_eq!(significant(&replay(BG_OTHER)), [vec!["turn", "echo", "request:10"], level.to_vec(), vec!["request:10", "result:ok", "turn", "request:10", "echo", "request:10", "result:ok"]].concat());
+        // A persistent monitor: notice turns the CLI begins while its task stays in the level, then the notification and the level's end.
+        assert_eq!(significant(&replay(BG_MONITOR)).iter().filter(|kind| **kind == "level").count(), 2);
+        let task = |usage: &Usage| match usage {
+            Usage::TaskBackgrounded { id, .. } | Usage::TaskNotified { id, .. } | Usage::NotificationTaken { id } => Some(id.clone()),
+            _ => None,
+        };
+        let fold = usages(BG_FOLD);
+        let ids: Vec<String> = fold.iter().filter_map(task).collect();
+        assert_eq!(ids.len(), 3, "backgrounded, notified, taken");
+        assert!(ids.iter().all(|id| *id == ids[0]) && !ids[0].starts_with("toolu_"), "one task_id names the task at its three lines: {ids:?}");
+        assert!(fold.contains(&Usage::BackgroundTasks { live: vec![ids[0].clone()], main: vec![ids[0].clone()], shell: vec![ids[0].clone()] }) && fold.contains(&Usage::BackgroundTasks { live: vec![], main: vec![], shell: vec![] }));
+        // A task that went to the background at its timeout was announced foreground and is backgrounded by the update that moved it: the start is no reading.
+        let fgto = usages(BG_FGTO);
+        let moved: Vec<&Usage> = fgto.iter().filter(|usage| matches!(usage, Usage::TaskBackgrounded { .. })).collect();
+        assert_eq!(moved.len(), 1, "{fgto:?}");
+        assert!(fgto.iter().any(|usage| matches!(usage, Usage::TaskNotified { stopped: false, .. })));
+        // A stop is a notification whose status is stopped, and the TaskStop call on the request line names the task.
+        let kill = usages(BG_KILL);
+        let Some(Usage::TaskBackgrounded { id: killed, shell: true }) = kill.iter().find(|usage| matches!(usage, Usage::TaskBackgrounded { .. })) else { panic!("{kill:?}") };
+        assert!(kill.contains(&Usage::TaskNotified { id: killed.clone(), stopped: true }));
+        assert!(kill.iter().any(|usage| matches!(usage, Usage::Request { stops, .. } if stops == std::slice::from_ref(killed))), "{kill:?}");
+        assert_eq!(kill.iter().filter(|usage| matches!(usage, Usage::Request { stops, .. } if !stops.is_empty())).count(), 1);
+        // The level's `main` leaves out a subagent's and an awaited task; a start under a parent task, or awaited, or in the foreground, is no reading.
+        let changed = json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "m", "task_type": "local_bash"}, {"task_id": "s", "parent_task_id": "p", "task_type": "local_agent"}, {"task_id": "w", "awaited": true}, {"task_id": "n", "parent_task_id": null, "awaited": false}]}).to_string();
+        assert_eq!(read_usage(&changed), Usage::BackgroundTasks { live: vec!["m".into(), "s".into(), "w".into(), "n".into()], main: vec!["m".into(), "n".into()], shell: vec!["m".into()] });
+        let started = |extra: Value| {
+            let mut line = json!({"type": "system", "subtype": "task_started", "task_id": "t", "is_backgrounded": true});
+            line.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            read_usage(&line.to_string())
+        };
+        assert_eq!(started(json!({})), Usage::TaskBackgrounded { id: "t".into(), shell: false }, "no task_type is no shell");
+        assert_eq!(started(json!({"task_type": "local_bash"})), Usage::TaskBackgrounded { id: "t".into(), shell: true });
+        assert_eq!(started(json!({"task_type": "local_agent"})), Usage::TaskBackgrounded { id: "t".into(), shell: false });
+        // Every kind the CLI source shows queues nothing for the model when the session stops it is silent; the kinds that queue a message, and any unknown one, are not.
+        for kind in ["local_bash", "local_workflow", "remote_agent", "mcp_task", "in_process_teammate", "dream", "auto_mode_scan", "local_memory_import"] {
+            assert_eq!(started(json!({"task_type": kind})), Usage::TaskBackgrounded { id: "t".into(), shell: true }, "{kind}");
+        }
+        for kind in ["local_agent", "monitor_mcp", "monitor_ws", "some_new_kind"] {
+            assert_eq!(started(json!({"task_type": kind})), Usage::TaskBackgrounded { id: "t".into(), shell: false }, "{kind}");
+        }
+        // The move to the background read from `task_updated` names no kind, so it claims no silence.
+        let updated = json!({"type": "system", "subtype": "task_updated", "task_id": "t", "patch": {"is_backgrounded": true}}).to_string();
+        assert_eq!(read_usage(&updated), Usage::TaskBackgrounded { id: "t".into(), shell: false });
+        assert_eq!(started(json!({"is_backgrounded": false})), Usage::Other, "a foreground task is no reading");
+        assert_eq!(started(json!({"parent_task_id": "p"})), Usage::Other);
+        assert_eq!(started(json!({"awaited": true})), Usage::Other);
+        // The notification's old key is no key: a line without a task_id is nothing.
+        let keyed = json!({"type": "system", "subtype": "task_notification", "tool_use_id": "toolu_9", "status": "completed"}).to_string();
+        assert_eq!(read_usage(&keyed), Usage::Other);
+        // The stop is read under any name of the task's id the call carries, and only from a TaskStop call.
+        let call = |name: &str, input: Value| {
+            let mut event: Value = serde_json::from_str(RECORDS.lines().next().unwrap()).unwrap();
+            event["message"]["content"] = json!([{"type": "text", "text": "stopping"}, {"type": "tool_use", "id": "toolu_5", "name": name, "input": input}]);
+            let Usage::Request { stops, .. } = read_usage(&event.to_string()) else { panic!("a request") };
+            stops
+        };
+        assert_eq!(call("TaskStop", json!({"task_id": "t"})), ["t"]);
+        assert_eq!(call("TaskStop", json!({"shell_id": "u"})), ["u"]);
+        for alias in ["KillShell", "KillBash"] {
+            assert_eq!(call(alias, json!({"shell_id": "u"})), ["u"], "{alias} is the same stop under another name");
+        }
+        assert!(call("Bash", json!({"task_id": "t"})).is_empty());
+    }
+
+    #[test]
+    fn a_shell_task_stopped_by_killshell_or_by_a_deadline_that_beat_our_taskstop_gives_no_cli_turn_and_leaves_the_session_idle() {
+        for capture in [BG_KILLSHELL, BG_DEADLINE_RACE] {
+            let usages = usages(capture);
+            assert!(usages.iter().any(|usage| matches!(usage, Usage::TaskNotified { stopped: true, .. })), "{usages:?}");
+            assert!(usages.iter().any(|usage| matches!(usage, Usage::Request { stops, .. } if !stops.is_empty())), "{usages:?}");
+            assert_eq!(kinds(&replay(capture)).iter().filter(|kind| **kind == "turn").count(), 1, "no turn begins after ours");
+            assert!(idleness(capture).last().unwrap().1, "nothing is owed after the stop");
+        }
+    }
+
+    #[test]
+    fn a_background_agent_announces_itself_as_a_backgrounded_task_and_the_session_is_not_idle_until_its_notification_turn_ends() {
+        let usages = usages(BG_AGENT);
+        // One task_id names the task at its start and at its notification.
+        let ids: Vec<&Usage> = usages.iter().filter(|usage| matches!(usage, Usage::TaskBackgrounded { .. } | Usage::TaskNotified { .. })).collect();
+        assert!(matches!(ids[..], [Usage::TaskBackgrounded { id: started, .. }, Usage::TaskNotified { id: ended, stopped: false }] if started == ended), "{ids:?}");
+        assert!(usages.iter().position(|usage| matches!(usage, Usage::TaskBackgrounded { .. })) < usages.iter().position(|usage| matches!(usage, Usage::TaskNotified { .. })));
+        let idle = idleness(BG_AGENT);
+        let labels: Vec<&str> = idle.iter().map(|(label, _)| label.as_str()).collect();
+        let idle_after = |label: &str, nth: usize| idle.iter().zip(&labels).filter(|(_, l)| **l == label).nth(nth).unwrap().0.1;
+        assert!(!idle_after("backgrounded", 0), "the task runs");
+        assert!(!idle_after("result:ok", 0), "the turn that started it ended, the task still runs");
+        assert!(!idle_after("notified", 0), "the notification is owed its turn");
+        assert!(idle_after("result:ok", 1), "the CLI's notification turn ended");
+    }
+
+    #[test]
+    fn a_background_task_that_ends_while_no_turn_is_open_gets_a_turn_the_cli_begins_and_the_session_is_idle_after_its_result() {
+        let idle = idleness(BG_LATE);
+        let labels: Vec<&str> = idle.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(significant(&replay(BG_LATE)), ["turn", "echo", "request:10", "level", "backgrounded", "request:10", "result:ok", "notified", "level", "turn", "request:10", "result:ok"]);
+        let idle_after = |label: &str, nth: usize| idle.iter().zip(&labels).filter(|(_, l)| **l == label).nth(nth).unwrap().0.1;
+        assert!(!idle_after("result:ok", 0), "idle but for the running task");
+        assert!(!idle_after("notified", 0), "owed its turn");
+        assert!(!idle_after("request:10", 2), "the CLI-begun turn runs");
+        assert!(idle_after("result:ok", 1));
     }
 }
 

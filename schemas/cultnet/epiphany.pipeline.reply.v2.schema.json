@@ -1,0 +1,98 @@
+{
+  "$defs": {
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Para": {
+      "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
+      "maxLength": 4000,
+      "type": "string"
+    },
+    "PipelineKind": {
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff",
+        "Run",
+        "Pulse",
+        "Memory",
+        "Research",
+        "Idea",
+        "Reply",
+        "Thought"
+      ],
+      "type": "string"
+    },
+    "PipelineRef": {
+      "description": "A reference to another document. The id is parsed as a full pipeline id of\nthe declared `kind`, so the kind and the id's kind segment cannot disagree.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Short"
+        },
+        "kind": {
+          "$ref": "#/$defs/PipelineKind"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.reply.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One result of her Self session, as its actuator heard it: the words her\nSelf ended a turn with, and the follow-ups (briefs) the turn answers.\nInstance-rooted: the key is `<instance>:reply:<label>`. Not semantically\nindexed. Whether the run is hers is admission's rule.",
+  "properties": {
+    "answers": {
+      "items": {
+        "$ref": "#/$defs/PipelineRef"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "instance": {
+      "$ref": "#/$defs/Slug"
+    },
+    "label": {
+      "$ref": "#/$defs/Label"
+    },
+    "run": {
+      "$ref": "#/$defs/PipelineRef"
+    },
+    "text": {
+      "$ref": "#/$defs/Para"
+    }
+  },
+  "required": [
+    "instance",
+    "label",
+    "run",
+    "answers",
+    "text"
+  ],
+  "title": "PipelineReply",
+  "type": "object"
+}

@@ -26,7 +26,8 @@ use tempfile::TempDir;
 use crate::launch::{Clock, Launcher};
 use crate::lease_client::{Lease, LeaseRefusalKind, LeaseRefused, LeaseRequest, Lender, Lent, TokenFd, token_holding};
 use crate::queue::MindPort;
-use crate::self_run::{Child, Read, Spawner, Stop};
+use crate::self_run::{Child, Kept, Read, Spawner, Stop};
+use uuid::Uuid;
 
 pub(crate) const INSTANCE: &str = "yggdrasil";
 pub(crate) const CAMPAIGN: &str = "eureka-body";
@@ -292,6 +293,7 @@ fn stewardship(name: &str) -> PipelineDocument {
         sequence: 1,
         assigned_on: Date("2026-10-09".into()),
         note: "assigned".into(),
+        names: vec![],
     })
 }
 
@@ -510,6 +512,7 @@ pub(crate) fn follow_up(label: &str, source: &PipelineRef) -> PipelineDocument {
         item: "Later.".into(),
         why_it_can_wait: "It can.".into(),
         owner: "Hands".into(),
+        origin: None,
     })
 }
 
@@ -525,6 +528,8 @@ pub(crate) enum Event {
     Lent,
     /// A child was started.
     Spawned,
+    /// The spawner was told to keep this conversation until the instant, or to clear it.
+    Kept(Option<(Uuid, DateTime<Utc>)>),
     /// The lease was dropped, which ends it: nothing is settled.
     Abandoned,
 }
@@ -631,15 +636,31 @@ pub(crate) struct Fake {
     pub(crate) child: RefCell<Option<Scripted>>,
     pub(crate) spawns: RefCell<Vec<Vec<String>>>,
     pub(crate) refuse: bool,
+    /// The conversation the spawner reports as kept; a test sets it.
+    pub(crate) kept: RefCell<Option<Kept>>,
+    /// Where `keep` logs, in order with the child's own events: the first child's log.
+    log: Option<Rc<RefCell<Vec<Event>>>>,
 }
 
 impl Fake {
     pub(crate) fn with(child: Option<Scripted>, refuse: bool) -> Self {
-        Self { child: RefCell::new(child), spawns: RefCell::new(Vec::new()), refuse }
+        let log = child.as_ref().map(|child| child.log.clone());
+        Self { child: RefCell::new(child), spawns: RefCell::new(Vec::new()), refuse, kept: RefCell::new(None), log }
     }
 }
 
 impl Spawner for Fake {
+    fn kept(&self) -> Option<Kept> {
+        self.kept.borrow().clone()
+    }
+
+    fn keep(&self, keep: Option<(Uuid, DateTime<Utc>)>) -> Result<()> {
+        if let Some(log) = &self.log {
+            log.borrow_mut().push(Event::Kept(keep));
+        }
+        Ok(())
+    }
+
     fn spawn(&self, args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
         self.spawns.borrow_mut().push(args.to_vec());
         if self.refuse {

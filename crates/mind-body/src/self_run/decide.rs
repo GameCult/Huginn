@@ -15,7 +15,16 @@
 //! replay echo increments `consumed`. The echo is the point the CLI takes a line
 //! into a request, folded into the running turn or queued for the next. What
 //! waits (the briefs, the flush ask) is coalesced into the next single write.
-//! Idle is derived: no turn open and no write outstanding.
+//! Idleness is decided here and nowhere else (ruling
+//! `eureka-body:ruling:self-serves-one-conversation-at-a-time`): no turn open,
+//! no write outstanding, the CLI's own level of background tasks empty and no
+//! task notification owed the turn the CLI will give it. The level is a copy of
+//! the last `background_tasks_changed`, replaced whole and never edited by an
+//! edge line; a notification owes a turn by the CLI's own rule (the task was
+//! backgrounded and the session did not stop it with `TaskStop`). The switch of
+//! the conversation a session serves, the cache-end flush and the yield all read
+//! that one definition. Task lines are keyed by `task_id` and name a task that
+//! runs or owes its turn, never a conversation or an answer.
 //!
 //! The rules, in this order, while stdin is open and no signal is out:
 //! (1) a result that is blocked, or an error before any answer, closes stdin: no
@@ -36,12 +45,12 @@
 //! of an event; a deadline that is already due yields its action at the next
 //! event, and `next_deadline` says it is now.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 
 use super::{
-    CEILING_TOKENS, Cause, ESCALATE_AFTER_S, EXIT_DRAIN_S, FLUSH_GRACE_S, FLUSH_HEADROOM_TOKENS, LADDER_S, ROTATE_MARGIN_S, SelfRunOutcome, Stop, TTL_1H_S, TTL_5M_S, TTL_MARGIN_S,
+    CEILING_TOKENS, Cause, ESCALATE_AFTER_S, EXIT_DRAIN_S, FLUSH_GRACE_S, FLUSH_HEADROOM_TOKENS, LADDER_S, ROTATE_MARGIN_S, Kept, SelfRunOutcome, Stop, TTL_1H_S, TTL_5M_S, TTL_MARGIN_S,
 };
 
 /// Why the flush was asked: the session's own end, three ways.
@@ -58,14 +67,24 @@ pub(crate) enum Why {
 /// What the loop saw, already turned into a fact the decision can use.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Event {
-    /// A request of the main thread: its message id and the context it read.
-    Request { id: String, prefix: u64 },
+    /// A request of the main thread: its message id, the context it read and the tasks a `TaskStop` call on its line names.
+    Request { id: String, prefix: u64, stops: Vec<String> },
     /// The CLI took one of our stdin lines into a request (its replay echo).
     Echo,
     /// A turn ended. `ok`: not an error. `blocked`: the CLI refused the context. `ttl_1h`: the last request wrote its cache for an hour, else five minutes.
     Result { ok: bool, blocked: bool, ttl_1h: bool },
-    /// A poll of the mind: whether a brief waits to be told.
-    Inbox { pending: bool },
+    /// A poll of the mind: whether a brief of the conversation being served waits (`pending`), whether a brief of another conversation does (`other`), and whether the oldest waiting brief is another conversation's (`other_first`).
+    Inbox { pending: bool, other: bool, other_first: bool },
+    /// The CLI began a turn (its `system` init line).
+    TurnBegan,
+    /// The CLI's level of background tasks (`background_tasks_changed`): `live` every task in it, `main` those of the main session that nobody awaits.
+    BackgroundTasks { live: Vec<String>, main: Vec<String>, shell: Vec<String> },
+    /// A task of the main session went to the background (`task_started` backgrounded, or a `task_updated` that backgrounded it), by `task_id`.
+    TaskBackgrounded { id: String, shell: bool },
+    /// A task notification came (`task_notification`), by `task_id`; `stopped`: its status says it was stopped.
+    TaskNotified { id: String, stopped: bool },
+    /// The CLI replayed a task notification as a user line: it took that notification into a turn, by `task_id`. Never one of our echoes.
+    NotificationTaken { id: String },
     /// `waitpid` returned: the child's exit code, none when a signal ended it.
     ChildExited(Option<i32>),
     StdoutEof,
@@ -80,8 +99,8 @@ pub(super) enum Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     None,
-    /// The one write: the waiting briefs and the flush ask, coalesced into one user line.
-    Write { tells: bool, flush: Option<Why> },
+    /// The one write: the waiting briefs and the flush ask, coalesced into one user line. `switch`: the briefs are another conversation's, which is written only at idle and never with the flush.
+    Write { tells: bool, switch: bool, flush: Option<Why> },
     CloseStdin,
     /// To the child's whole process group.
     Signal(Stop),
@@ -102,6 +121,24 @@ struct Flush {
     why: Why,
 }
 
+/// Who began the open turn: decided by the first of an echo (our line) and a request (the CLI's own).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TurnBy {
+    #[default]
+    Unknown,
+    Us,
+    Cli,
+}
+
+/// A task notification that has come and has not yet been given its turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Owed {
+    /// The turn count when it came: the turn open then (or the last one) is not the turn that settles it.
+    since: u32,
+    /// The CLI replayed it to the model: the result of the turn that did settles it.
+    taken: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct State {
     seen: HashSet<String>,
@@ -111,9 +148,33 @@ pub(super) struct State {
     pub(super) written: u32,
     pub(super) consumed: u32,
     turn_open: bool,
+    /// Turns opened so far, and who began the open (or last) one.
+    turns: u32,
+    turn_by: TurnBy,
+    /// The CLI's last level of background tasks, by `task_id`: replaced whole at each `background_tasks_changed`, never edited by an edge line.
+    running: BTreeSet<String>,
+    /// Tasks the main session ever backgrounded (the CLI's own SDK consumer's rule), by `task_id`: a monotone cache of the stream.
+    backgrounded: BTreeSet<String>,
+    /// Tasks of a kind whose stop by the session queues nothing for the model (`SILENT_STOP_KINDS`), by `task_id`: the only kinds that owe no turn when we stop them.
+    shell: BTreeSet<String>,
+    /// Tasks a `TaskStop` call of ours named: the CLI's stop tells the model nothing, so such a notification owes no turn.
+    stopped_by_us: BTreeSet<String>,
+    /// Notifications of backgrounded tasks that have not yet been given their turn, by `task_id`.
+    owed: BTreeMap<String, Owed>,
+    /// A brief of another conversation than the one served waits, and whether the oldest waiting brief is another conversation's.
+    other: bool,
+    other_first: bool,
     /// An ok result has come: the session holds an answer worth its cache.
     answered_once: bool,
     last_result_at: Option<DateTime<Utc>>,
+    /// When the last new request of the main thread began, as far as the stream shows: the line before its first assistant line, never that line's own read time, which comes after the request started. The cache's lifetime runs from a request's start (research `cache-pricing`), so `warm_until` counts from here and never from the last result; a slow response only makes the window shorter than the cache's real life.
+    last_request_at: Option<DateTime<Utc>>,
+    /// When the last line of the stream that matters (an echo, a result, or a request's line) was read: the earliest bound the stream gives on when the next request began, since a request starts after the line before it.
+    stream_at: Option<DateTime<Utc>>,
+    /// The last result was not an error.
+    last_ok: bool,
+    /// The CLI refused a result as over its context limit; once seen, it stays seen.
+    blocked: bool,
     /// The cache lifetime the last result left, in seconds.
     pub(super) ttl_s: i64,
     pub(super) inbox: bool,
@@ -143,8 +204,23 @@ impl State {
         self.written > self.consumed
     }
 
+    /// The one definition of idleness: no turn open, no write outstanding, the CLI's level of background tasks empty and no notification owed a turn.
     fn idle(&self) -> bool {
-        !self.turn_open && !self.outstanding()
+        !self.turn_open && !self.outstanding() && self.running.is_empty() && self.owed.is_empty()
+    }
+
+    /// A turn opens at the first turn line, echo or request while none is open; the first echo (ours) or request (the CLI's) says who began it.
+    fn open_turn(&mut self, by: Option<TurnBy>) {
+        if !self.turn_open {
+            self.turn_open = true;
+            self.turns += 1;
+            self.turn_by = TurnBy::Unknown;
+        }
+        if self.turn_by == TurnBy::Unknown
+            && let Some(by) = by
+        {
+            self.turn_by = by;
+        }
     }
 
     /// Seconds idle since the last result, none while a line or a turn is outstanding.
@@ -154,7 +230,40 @@ impl State {
 }
 
 fn outcome(state: &State, cause: Cause, code: Option<i32>) -> SelfRunOutcome {
-    SelfRunOutcome::Ended { cause, code, requests: state.requests, prefix: state.prefix }
+    SelfRunOutcome::Ended { cause, code, requests: state.requests, prefix: state.prefix, warm_until: warm_until(state) }
+}
+
+/// Until when the conversation this process ended is worth resuming: its last
+/// request plus its cache's lifetime less the margin. Some only for a clean end
+/// inside the cache's life: no signal was delivered, the child exited 0, no turn
+/// was open, the last result was ok and none was blocked, the prefix is under the
+/// ceiling, and no flush was asked or it was the rotation's. An idle flush means
+/// the cache is about to be evicted and the session is cleared then (ruling
+/// `eureka-body:ruling:live-session-floor-cache-evicts`); a ceiling end would only
+/// flush again. This is the one place a conversation's worth is decided; the next
+/// process resumes it by [`resumes`] (ruling `eureka-body:ruling:session-rotate-and-resume`).
+pub(super) fn warm_until(state: &State) -> Option<DateTime<Utc>> {
+    let clean = state.delivered.is_none()
+        && matches!(state.exited, Some((Some(0), _)))
+        && !state.turn_open
+        && state.last_ok
+        && !state.blocked
+        && state.prefix < CEILING_TOKENS
+        && state.flush.as_ref().is_none_or(|flush| flush.why == Why::Rotation);
+    if !clean {
+        return None;
+    }
+    state.last_request_at.map(|at| at + Duration::seconds(state.ttl_s - TTL_MARGIN_S))
+}
+
+/// Whether a kept conversation is resumed by a process starting at `now`: its
+/// cache is still warm, its seed is the one it was made under, and its record
+/// claims no more warmth than a cache has: a `warm_until` later than the record's
+/// write time plus the longest lifetime (one hour) is forged or wrong, and the
+/// conversation is cold (ruling `eureka-body:ruling:kept-session-ordinary-separation`).
+/// Nothing else decides resume or fresh.
+pub(super) fn resumes(kept: &Kept, now: DateTime<Utc>) -> bool {
+    kept.same_seed && now < kept.warm_until && kept.warm_until <= kept.written_at + Duration::seconds(TTL_1H_S)
 }
 
 /// How the run ended, by what was done to the child: the strongest signal delivered, else the flush, else nothing.
@@ -183,7 +292,7 @@ fn due(state: &State) -> Option<(DateTime<Utc>, Why)> {
         return None;
     }
     let rotation = state.cap.map(|(started, cap)| (started + Duration::seconds(cap.saturating_sub(ROTATE_MARGIN_S)), Why::Rotation));
-    let idle = (state.idle() && !state.inbox).then_some(state.last_result_at).flatten().map(|last| (last + Duration::seconds(state.ttl_s - TTL_MARGIN_S), Why::Idle));
+    let idle = (state.idle() && !state.inbox && !state.other).then_some(state.last_result_at).flatten().map(|last| (last + Duration::seconds(state.ttl_s - TTL_MARGIN_S), Why::Idle));
     [rotation, idle].into_iter().flatten().min_by_key(|(at, _)| *at)
 }
 
@@ -237,7 +346,10 @@ fn send(state: &mut State) -> Action {
         return Action::None;
     }
     let flush = state.flush.as_ref().map(|flush| flush.why);
-    if !state.inbox && flush.is_none() {
+    // The served conversation's briefs go whenever nothing is outstanding; another conversation's only at idle, with no flush asked, and then
+    // the oldest waiting brief first: the switch.
+    let switch = state.other && flush.is_none() && state.idle() && (!state.inbox || state.other_first);
+    if !state.inbox && !switch && flush.is_none() {
         return Action::None;
     }
     state.written += 1;
@@ -245,7 +357,10 @@ fn send(state: &mut State) -> Action {
     if let Some(flush) = state.flush.as_mut() {
         flush.seq = Some(seq);
     }
-    Action::Write { tells: std::mem::take(&mut state.inbox), flush }
+    if switch {
+        (state.inbox, state.other, state.other_first) = (false, false, false);
+    }
+    Action::Write { tells: std::mem::take(&mut state.inbox) || switch, switch, flush }
 }
 
 pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (State, Action) {
@@ -254,9 +369,39 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
     }
     let mut action = Action::None;
     match event {
-        Event::Request { id, prefix } => {
+        Event::TurnBegan => state.open_turn(None),
+        Event::BackgroundTasks { live, main, shell } => {
+            state.running = live.into_iter().collect();
+            state.backgrounded.extend(main);
+            state.shell.extend(shell);
+        }
+        Event::TaskBackgrounded { id, shell } => {
+            if shell {
+                state.shell.insert(id.clone());
+            }
+            state.backgrounded.insert(id);
+        }
+        // The CLI's rule: a backgrounded task's notification is given a turn, except that of a stop the model asked for itself of a silent-stop kind (any other kind, or an unread one, gets its turn when stopped as when ended). A foreground,
+        // subagent-owned, awaited or unknown task owes nothing; a stop the CLI made on its own (a deadline, memory pressure) owes its turn.
+        Event::TaskNotified { id, stopped } => {
+            if state.backgrounded.contains(&id) && !(stopped && state.stopped_by_us.contains(&id) && state.shell.contains(&id)) {
+                let since = state.turns;
+                state.owed.insert(id, Owed { since, taken: false });
+            }
+        }
+        Event::NotificationTaken { id } => {
+            if let Some(owed) = state.owed.get_mut(&id) {
+                owed.taken = true;
+            }
+        }
+        Event::Request { id, prefix, stops } => {
+            state.open_turn(Some(TurnBy::Cli));
+            state.stopped_by_us.extend(stops);
+            let began = state.stream_at.or(state.cap.map(|(at, _)| at)).unwrap_or(now);
+            state.stream_at = Some(now);
             if state.seen.insert(id) {
                 state.requests += 1;
+                state.last_request_at = Some(began);
                 state.prefix = prefix;
                 if let Some(flush) = state.flush.as_mut()
                     && flush.consumed
@@ -270,8 +415,9 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
             }
         }
         Event::Echo => {
+            state.stream_at = Some(now);
             state.consumed += 1;
-            state.turn_open = true;
+            state.open_turn(Some(TurnBy::Us));
             let consumed = state.consumed;
             if let Some(flush) = state.flush.as_mut()
                 && flush.seq.is_some_and(|seq| consumed >= seq)
@@ -281,7 +427,14 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
         }
         Event::Result { ok, blocked, ttl_1h } => {
             state.turn_open = false;
+            // A notification is settled by the result of a turn that took it in, or of a turn the CLI began after it came. A turn our line
+            // began settles none it did not replay: if the CLI merged it, the hold lasts to the rotation flush.
+            let (turns, by) = (state.turns, state.turn_by);
+            state.owed.retain(|_, owed| !(owed.taken || (by != TurnBy::Us && owed.since < turns)));
             state.last_result_at = Some(now);
+            state.stream_at = Some(now);
+            state.last_ok = ok;
+            state.blocked |= blocked;
             state.ttl_s = if ttl_1h { TTL_1H_S } else { TTL_5M_S };
             let no_answer = !ok && !state.answered_once;
             state.answered_once |= ok;
@@ -291,7 +444,11 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
                 action = Action::CloseStdin;
             }
         }
-        Event::Inbox { pending } => state.inbox = pending,
+        Event::Inbox { pending, other, other_first } => {
+            state.inbox = pending;
+            state.other = other;
+            state.other_first = other_first;
+        }
         Event::Yield => state.yielding = true,
         Event::ChildExited(code) => {
             state.exited.get_or_insert((code, now));

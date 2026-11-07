@@ -218,5 +218,6 @@ pub fn stewardship() -> PipelineDocument {
         sequence: 1,
         assigned_on: Date("2026-09-29".into()),
         note: "assigned".into(),
+        names: vec![],
     })
 }

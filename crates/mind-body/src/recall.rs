@@ -198,6 +198,17 @@ pub(crate) fn people_of(memory: &eureka_pipeline::PipelineMemory) -> Vec<String>
     memory.about.iter().chain(origin).map(|id| id.0.clone()).collect()
 }
 
+/// Where she learned something and from whom, as a phrase: the one render of an origin, for a memory and for a brief.
+pub(crate) fn origin_phrase(origin: &MemoryOrigin, names: &BTreeMap<&str, &str>) -> String {
+    match origin {
+        MemoryOrigin::Room { rooms, heard_from } if heard_from.is_empty() => format!("in #{}", rooms.0),
+        MemoryOrigin::Room { rooms, heard_from } => format!("in #{}, with {}", rooms.0, who(heard_from.iter().map(|id| id.0.as_str()), names)),
+        MemoryOrigin::Direct { with, .. } => format!("privately, with {}", who(with.iter().map(|id| id.0.as_str()), names)),
+        MemoryOrigin::Wake => "on a wake".to_string(),
+        MemoryOrigin::SelfRun { run } => format!("in your Self run {}", run.0),
+    }
+}
+
 /// One memory as its line: date, where and from whom she learned it, what it
 /// is and whom it concerns, then her words. The one way a memory reads, for
 /// recall and for the open items the responsibilities section shows, which pass
@@ -205,13 +216,7 @@ pub(crate) fn people_of(memory: &eureka_pipeline::PipelineMemory) -> Vec<String>
 pub(crate) fn memory_line(view: &PipelineDocumentView, names: &BTreeMap<&str, &str>, with_id: bool) -> Option<String> {
     let PipelineDocument::Memory(memory) = &view.document else { return None };
     let date = view.admission.admitted_at.get(..10).unwrap_or(&view.admission.admitted_at);
-    let origin = match &memory.origin {
-        MemoryOrigin::Room { rooms, heard_from } if heard_from.is_empty() => format!("in #{}", rooms.0),
-        MemoryOrigin::Room { rooms, heard_from } => format!("in #{}, with {}", rooms.0, who(heard_from.iter().map(|id| id.0.as_str()), names)),
-        MemoryOrigin::Direct { with, .. } => format!("privately, with {}", who(with.iter().map(|id| id.0.as_str()), names)),
-        MemoryOrigin::Wake => "on a wake".to_string(),
-        MemoryOrigin::SelfRun { run } => format!("in your Self run {}", run.0),
-    };
+    let origin = origin_phrase(&memory.origin, names);
     let about = who(memory.about.iter().map(|id| id.0.as_str()), names);
     let sort = match (memory.sort, memory.about.is_empty()) {
         (MemorySort::Asked, _) => format!("asked by {about}"),
