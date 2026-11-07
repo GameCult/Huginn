@@ -483,20 +483,20 @@ fn a_long_result_is_cut_at_the_limit_on_a_character_boundary_and_marked() {
 
 #[test]
 fn read_usage_sums_input_cache_read_and_cache_write_and_reads_absent_fields_as_zero() {
-    assert_eq!(read_usage(&request("m1", 1, 20, 300)), Usage::Request { id: "m1".into(), prefix: 321 });
+    assert_eq!(read_usage(&request("m1", 1, 20, 300)), Usage::Request { id: "m1".into(), prefix: 321, stops: vec![] });
     // Each term alone, so dropping or doubling any one is seen.
-    assert_eq!(read_usage(&request("m", 7, 0, 0)), Usage::Request { id: "m".into(), prefix: 7 });
-    assert_eq!(read_usage(&request("m", 0, 7, 0)), Usage::Request { id: "m".into(), prefix: 7 });
-    assert_eq!(read_usage(&request("m", 0, 0, 7)), Usage::Request { id: "m".into(), prefix: 7 });
+    assert_eq!(read_usage(&request("m", 7, 0, 0)), Usage::Request { id: "m".into(), prefix: 7, stops: vec![] });
+    assert_eq!(read_usage(&request("m", 0, 7, 0)), Usage::Request { id: "m".into(), prefix: 7, stops: vec![] });
+    assert_eq!(read_usage(&request("m", 0, 0, 7)), Usage::Request { id: "m".into(), prefix: 7, stops: vec![] });
     for absent in ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"] {
         let mut event: Value = serde_json::from_str(&request("m", 1, 20, 300)).unwrap();
         event["message"]["usage"].as_object_mut().unwrap().remove(absent);
         let want = 321 - [("input_tokens", 1), ("cache_read_input_tokens", 20), ("cache_creation_input_tokens", 300)].iter().find(|(name, _)| *name == absent).unwrap().1;
-        assert_eq!(read_usage(&event.to_string()), Usage::Request { id: "m".into(), prefix: want }, "{absent} absent");
+        assert_eq!(read_usage(&event.to_string()), Usage::Request { id: "m".into(), prefix: want, stops: vec![] }, "{absent} absent");
     }
     let mut no_usage: Value = serde_json::from_str(&request("m", 1, 1, 1)).unwrap();
     no_usage["message"].as_object_mut().unwrap().remove("usage");
-    assert_eq!(read_usage(&no_usage.to_string()), Usage::Request { id: "m".into(), prefix: 0 });
+    assert_eq!(read_usage(&no_usage.to_string()), Usage::Request { id: "m".into(), prefix: 0, stops: vec![] });
 }
 
 #[test]
@@ -504,7 +504,7 @@ fn read_usage_classifies_the_owners_real_records() {
     let sums = [84210, 100751, 117174, 118336, 126746, 127250, 129853];
     let mut seen = Vec::new();
     for line in RECORDS.lines() {
-        let Usage::Request { id, prefix } = read_usage(line) else { panic!("an assistant record of the main thread is a request: {line}") };
+        let Usage::Request { id, prefix, .. } = read_usage(line) else { panic!("an assistant record of the main thread is a request: {line}") };
         if !seen.iter().any(|(known, _)| *known == id) {
             seen.push((id, prefix));
         }
@@ -525,19 +525,18 @@ fn read_usage_classifies_the_owners_real_records() {
     assert_eq!(read_usage(&init_line()), Usage::TurnBegan);
     let replayed = json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": "<task-notification>
 <task-id>t</task-id>
-<tool-use-id>toolu_7</tool-use-id>
 </task-notification>"}}).to_string();
-    assert_eq!(read_usage(&replayed), Usage::NotificationTaken { id: "toolu_7".into() }, "the CLI's replay of a notification is never our echo");
+    assert_eq!(read_usage(&replayed), Usage::NotificationTaken { id: "t".into() }, "the CLI's replay of a notification is never our echo");
     assert_eq!(read_usage(&subagent("m", 5)), Usage::Other, "a subagent's request is not the main thread's");
     let mut no_id: Value = serde_json::from_str(&at("m", 5)).unwrap();
     no_id["message"].as_object_mut().unwrap().remove("id");
     assert_eq!(read_usage(&no_id.to_string()), Usage::Other);
     let mut null_parent: Value = serde_json::from_str(&at("m", 5)).unwrap();
     null_parent["parent_tool_use_id"] = Value::Null;
-    assert_eq!(read_usage(&null_parent.to_string()), Usage::Request { id: "m".into(), prefix: 5 });
+    assert_eq!(read_usage(&null_parent.to_string()), Usage::Request { id: "m".into(), prefix: 5, stops: vec![] });
     let mut no_parent: Value = serde_json::from_str(&at("m", 5)).unwrap();
     no_parent.as_object_mut().unwrap().remove("parent_tool_use_id");
-    assert_eq!(read_usage(&no_parent.to_string()), Usage::Request { id: "m".into(), prefix: 5 });
+    assert_eq!(read_usage(&no_parent.to_string()), Usage::Request { id: "m".into(), prefix: 5, stops: vec![] });
     for unreadable in ["", "not json", "[1,2]", "\"assistant\"", "12", "null", "{\"type\":"] {
         assert_eq!(read_usage(unreadable), Usage::Unreadable, "{unreadable:?}");
     }
@@ -734,9 +733,9 @@ fn the_message_ids_of_a_long_run_are_all_remembered() {
 #[test]
 fn a_usage_sum_that_overflows_is_at_or_over_the_ceiling_not_a_panic_or_a_wrap() {
     let line = request("m", u64::MAX, 1, 0);
-    assert_eq!(read_usage(&line), Usage::Request { id: "m".into(), prefix: u64::MAX });
-    assert_eq!(read_usage(&request("m", u64::MAX, u64::MAX, u64::MAX)), Usage::Request { id: "m".into(), prefix: u64::MAX });
-    assert_eq!(read_usage(&request("m", 1, u64::MAX, 1)), Usage::Request { id: "m".into(), prefix: u64::MAX });
+    assert_eq!(read_usage(&line), Usage::Request { id: "m".into(), prefix: u64::MAX, stops: vec![] });
+    assert_eq!(read_usage(&request("m", u64::MAX, u64::MAX, u64::MAX)), Usage::Request { id: "m".into(), prefix: u64::MAX, stops: vec![] });
+    assert_eq!(read_usage(&request("m", 1, u64::MAX, 1)), Usage::Request { id: "m".into(), prefix: u64::MAX, stops: vec![] });
     // Through the actuator: the flush is asked for, and the headroom beyond a saturated prefix does not overflow
     // either, and the pass that wrote the flush does not interrupt.
     let ran = go(vec![Out(echo()), Out(request("m1", u64::MAX, 7, 0)), Out(request("m2", 0, 0, 0))]);
@@ -1562,7 +1561,7 @@ mod live_session {
             let entry: Value = serde_json::from_str(entry).unwrap();
             let at = crate::testkit::at((entry["t"].as_f64().unwrap() * 1000.0) as i64);
             if let Some(text) = entry.get("want").and_then(Value::as_str) {
-                let (label, fact) = if text.starts_with(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true, other: false }) };
+                let (label, fact) = if text.starts_with(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true, other: false, other_first: false }) };
                 let (next, action) = decide(state, fact, at);
                 state = next;
                 trace.push((label.to_string(), action));
@@ -1573,11 +1572,12 @@ mod live_session {
                 ttl_1h = hour;
             }
             let (label, fact) = match read_usage(line) {
-                Usage::Request { id, prefix } => (format!("request:{prefix}"), Fact::Request { id, prefix }),
+                Usage::Request { id, prefix, stops } => (format!("request:{prefix}"), Fact::Request { id, prefix, stops }),
                 Usage::Echo => ("echo".to_string(), Fact::Echo),
                 Usage::TurnBegan => ("turn".to_string(), Fact::TurnBegan),
-                Usage::TaskStarted { id } => ("task".to_string(), Fact::TaskStarted { id }),
-                Usage::TaskNotified { id } => ("notified".to_string(), Fact::TaskNotified { id }),
+                Usage::BackgroundTasks { live, main } => ("level".to_string(), Fact::BackgroundTasks { live, main }),
+                Usage::TaskBackgrounded { id } => ("backgrounded".to_string(), Fact::TaskBackgrounded { id }),
+                Usage::TaskNotified { id, stopped } => ("notified".to_string(), Fact::TaskNotified { id, stopped }),
                 Usage::NotificationTaken { id } => ("taken".to_string(), Fact::NotificationTaken { id }),
                 Usage::Result { ok, blocked } => (format!("result:{}", if blocked { "blocked" } else if ok { "ok" } else { "error" }), Fact::Result { ok, blocked, ttl_1h }),
                 Usage::Other | Usage::Unreadable => ("other".to_string(), Fact::Tick),
@@ -1613,6 +1613,9 @@ mod live_session {
     const BG_RACE: &str = include_str!("claude-2.1.312-live-session-bg-race.jsonl");
     const BG_AGENT: &str = include_str!("claude-2.1.312-live-session-bg-agent.jsonl");
     const BG_LATE: &str = include_str!("claude-2.1.312-live-session-bg-late.jsonl");
+    const BG_FGTO: &str = include_str!("claude-2.1.312-live-session-bg-fgto.jsonl");
+    const BG_KILL: &str = include_str!("claude-2.1.312-live-session-bg-kill.jsonl");
+    const BG_MONITOR: &str = include_str!("claude-2.1.312-live-session-bg-monitor.jsonl");
 
     #[test]
     fn a_line_written_during_a_tool_call_is_folded_one_result_and_its_echo_before_the_request_that_carries_it() {
@@ -1719,31 +1722,82 @@ mod live_session {
         kinds(trace).into_iter().filter(|kind| *kind != "other").collect()
     }
 
+    fn usages(jsonl: &str) -> Vec<Usage> {
+        jsonl.lines().filter_map(|entry| serde_json::from_str::<Value>(entry).ok()?.get("line")?.as_str().map(read_usage)).collect()
+    }
+
     #[test]
-    fn read_usage_reads_the_stream_lines_the_captures_hold() {
-        // A turn is begun by the init line, a backgrounded task by its start, its notification by its event, and the CLI's replay of that
-        // notification is taken, never our echo.
-        assert_eq!(significant(&replay(BG_FOLD)), ["turn", "echo", "request:10", "task", "notified", "request:10", "taken", "request:10", "result:ok"]);
-        assert_eq!(significant(&replay(BG_IDLE)), ["turn", "echo", "request:10", "task", "notified", "request:10", "result:ok", "turn", "request:10", "result:ok"]);
-        assert_eq!(significant(&replay(BG_RACE)), ["turn", "echo", "request:10", "task", "notified", "request:10", "result:ok", "turn", "request:10", "result:ok", "turn", "echo", "request:10", "result:ok"]);
-        assert_eq!(significant(&replay(BG_OTHER)), ["turn", "echo", "request:10", "task", "notified", "request:10", "result:ok", "turn", "request:10", "echo", "request:10", "result:ok"]);
-        let taken = BG_FOLD.lines().filter_map(|entry| serde_json::from_str::<Value>(entry).ok()?.get("line")?.as_str().map(read_usage)).find(|usage| matches!(usage, Usage::NotificationTaken { .. }));
-        assert_eq!(taken, Some(Usage::NotificationTaken { id: "toolu_0001".into() }));
-        // A task that was not started backgrounded is no task the session waits for.
-        let foreground = json!({"type": "system", "subtype": "task_started", "task_id": "t", "tool_use_id": "toolu_9", "is_backgrounded": false}).to_string();
-        assert_eq!(read_usage(&foreground), Usage::Other);
+    fn read_usage_reads_the_level_the_backgrounded_lines_the_notifications_and_the_stops_the_captures_hold() {
+        // A turn is begun by the init line, a task joins the level and is backgrounded, its notification comes by its event and the level
+        // empties after it; the CLI's replay of that notification is taken, never our echo.
+        let level = ["level", "backgrounded", "notified", "level"];
+        assert_eq!(significant(&replay(BG_FOLD)), [vec!["turn", "echo", "request:10"], level.to_vec(), vec!["request:10", "taken", "request:10", "result:ok"]].concat());
+        assert_eq!(significant(&replay(BG_IDLE)), [vec!["turn", "echo", "request:10"], level.to_vec(), vec!["request:10", "result:ok", "turn", "request:10", "result:ok"]].concat());
+        assert_eq!(significant(&replay(BG_RACE)), [vec!["turn", "echo", "request:10"], level.to_vec(), vec!["request:10", "result:ok", "turn", "request:10", "result:ok", "turn", "echo", "request:10", "result:ok"]].concat());
+        assert_eq!(significant(&replay(BG_OTHER)), [vec!["turn", "echo", "request:10"], level.to_vec(), vec!["request:10", "result:ok", "turn", "request:10", "echo", "request:10", "result:ok"]].concat());
+        // A persistent monitor: notice turns the CLI begins while its task stays in the level, then the notification and the level's end.
+        assert_eq!(significant(&replay(BG_MONITOR)).iter().filter(|kind| **kind == "level").count(), 2);
+        let task = |usage: &Usage| match usage {
+            Usage::TaskBackgrounded { id } | Usage::TaskNotified { id, .. } | Usage::NotificationTaken { id } => Some(id.clone()),
+            _ => None,
+        };
+        let fold = usages(BG_FOLD);
+        let ids: Vec<String> = fold.iter().filter_map(task).collect();
+        assert_eq!(ids.len(), 3, "backgrounded, notified, taken");
+        assert!(ids.iter().all(|id| *id == ids[0]) && !ids[0].starts_with("toolu_"), "one task_id names the task at its three lines: {ids:?}");
+        assert!(fold.contains(&Usage::BackgroundTasks { live: vec![ids[0].clone()], main: vec![ids[0].clone()] }) && fold.contains(&Usage::BackgroundTasks { live: vec![], main: vec![] }));
+        // A task that went to the background at its timeout was announced foreground and is backgrounded by the update that moved it: the start is no reading.
+        let fgto = usages(BG_FGTO);
+        let moved: Vec<&Usage> = fgto.iter().filter(|usage| matches!(usage, Usage::TaskBackgrounded { .. })).collect();
+        assert_eq!(moved.len(), 1, "{fgto:?}");
+        assert!(fgto.iter().any(|usage| matches!(usage, Usage::TaskNotified { stopped: false, .. })));
+        // A stop is a notification whose status is stopped, and the TaskStop call on the request line names the task.
+        let kill = usages(BG_KILL);
+        let Some(Usage::TaskBackgrounded { id: killed }) = kill.iter().find(|usage| matches!(usage, Usage::TaskBackgrounded { .. })) else { panic!("{kill:?}") };
+        assert!(kill.contains(&Usage::TaskNotified { id: killed.clone(), stopped: true }));
+        assert!(kill.iter().any(|usage| matches!(usage, Usage::Request { stops, .. } if stops == std::slice::from_ref(killed))), "{kill:?}");
+        assert_eq!(kill.iter().filter(|usage| matches!(usage, Usage::Request { stops, .. } if !stops.is_empty())).count(), 1);
+        // The level's `main` leaves out a subagent's and an awaited task; a start under a parent task, or awaited, or in the foreground, is no reading.
+        let changed = json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "m"}, {"task_id": "s", "parent_task_id": "p"}, {"task_id": "w", "awaited": true}, {"task_id": "n", "parent_task_id": null, "awaited": false}]}).to_string();
+        assert_eq!(read_usage(&changed), Usage::BackgroundTasks { live: vec!["m".into(), "s".into(), "w".into(), "n".into()], main: vec!["m".into(), "n".into()] });
+        let started = |extra: Value| {
+            let mut line = json!({"type": "system", "subtype": "task_started", "task_id": "t", "is_backgrounded": true});
+            line.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            read_usage(&line.to_string())
+        };
+        assert_eq!(started(json!({})), Usage::TaskBackgrounded { id: "t".into() });
+        assert_eq!(started(json!({"is_backgrounded": false})), Usage::Other, "a foreground task is no reading");
+        assert_eq!(started(json!({"parent_task_id": "p"})), Usage::Other);
+        assert_eq!(started(json!({"awaited": true})), Usage::Other);
+        // The notification's old key is no key: a line without a task_id is nothing.
+        let keyed = json!({"type": "system", "subtype": "task_notification", "tool_use_id": "toolu_9", "status": "completed"}).to_string();
+        assert_eq!(read_usage(&keyed), Usage::Other);
+        // The stop is read under any name of the task's id the call carries, and only from a TaskStop call.
+        let call = |name: &str, input: Value| {
+            let mut event: Value = serde_json::from_str(RECORDS.lines().next().unwrap()).unwrap();
+            event["message"]["content"] = json!([{"type": "text", "text": "stopping"}, {"type": "tool_use", "id": "toolu_5", "name": name, "input": input}]);
+            let Usage::Request { stops, .. } = read_usage(&event.to_string()) else { panic!("a request") };
+            stops
+        };
+        assert_eq!(call("TaskStop", json!({"task_id": "t"})), ["t"]);
+        assert_eq!(call("TaskStop", json!({"shell_id": "u"})), ["u"]);
+        for alias in ["KillShell", "KillBash"] {
+            assert_eq!(call(alias, json!({"shell_id": "u"})), ["u"], "{alias} is the same stop under another name");
+        }
+        assert!(call("Bash", json!({"task_id": "t"})).is_empty());
     }
 
     #[test]
     fn a_background_agent_announces_itself_as_a_backgrounded_task_and_the_session_is_not_idle_until_its_notification_turn_ends() {
-        let usages: Vec<Usage> = BG_AGENT.lines().filter_map(|entry| serde_json::from_str::<Value>(entry).ok()?.get("line")?.as_str().map(read_usage)).collect();
-        let at = |wanted: Usage| usages.iter().position(|usage| *usage == wanted).unwrap_or_else(|| panic!("{wanted:?} is not in the capture"));
-        // The Agent call's own tool_use_id names the task at its start and at its notification.
-        assert!(at(Usage::TaskStarted { id: "toolu_0001".into() }) < at(Usage::TaskNotified { id: "toolu_0001".into() }));
+        let usages = usages(BG_AGENT);
+        // One task_id names the task at its start and at its notification.
+        let ids: Vec<&Usage> = usages.iter().filter(|usage| matches!(usage, Usage::TaskBackgrounded { .. } | Usage::TaskNotified { .. })).collect();
+        assert!(matches!(ids[..], [Usage::TaskBackgrounded { id: started }, Usage::TaskNotified { id: ended, stopped: false }] if started == ended), "{ids:?}");
+        assert!(usages.iter().position(|usage| matches!(usage, Usage::TaskBackgrounded { .. })) < usages.iter().position(|usage| matches!(usage, Usage::TaskNotified { .. })));
         let idle = idleness(BG_AGENT);
         let labels: Vec<&str> = idle.iter().map(|(label, _)| label.as_str()).collect();
         let idle_after = |label: &str, nth: usize| idle.iter().zip(&labels).filter(|(_, l)| **l == label).nth(nth).unwrap().0.1;
-        assert!(!idle_after("task", 0), "the task runs");
+        assert!(!idle_after("backgrounded", 0), "the task runs");
         assert!(!idle_after("result:ok", 0), "the turn that started it ended, the task still runs");
         assert!(!idle_after("notified", 0), "the notification is owed its turn");
         assert!(idle_after("result:ok", 1), "the CLI's notification turn ended");
@@ -1753,7 +1807,7 @@ mod live_session {
     fn a_background_task_that_ends_while_no_turn_is_open_gets_a_turn_the_cli_begins_and_the_session_is_idle_after_its_result() {
         let idle = idleness(BG_LATE);
         let labels: Vec<&str> = idle.iter().map(|(label, _)| label.as_str()).collect();
-        assert_eq!(significant(&replay(BG_LATE)), ["turn", "echo", "request:10", "task", "request:10", "result:ok", "notified", "turn", "request:10", "result:ok"]);
+        assert_eq!(significant(&replay(BG_LATE)), ["turn", "echo", "request:10", "level", "backgrounded", "request:10", "result:ok", "notified", "level", "turn", "request:10", "result:ok"]);
         let idle_after = |label: &str, nth: usize| idle.iter().zip(&labels).filter(|(_, l)| **l == label).nth(nth).unwrap().0.1;
         assert!(!idle_after("result:ok", 0), "idle but for the running task");
         assert!(!idle_after("notified", 0), "owed its turn");

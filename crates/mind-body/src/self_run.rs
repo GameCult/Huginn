@@ -259,25 +259,33 @@ pub fn claude_args(session: Uuid) -> Vec<String> {
 /// What a user line starts with when the CLI replays a task notification to the model.
 const NOTIFICATION_TAG: &str = "<task-notification>";
 
+/// The names a task-stopping call carries on the stream: the tool's own and its two aliases, each of which the CLI runs as the same stop and the
+/// stream shows as the model named it (real claude 2.1.312, fake API).
+const STOP_TOOLS: [&str; 3] = ["TaskStop", "KillShell", "KillBash"];
+
 /// The model name on the CLI's own assistant lines, which no request produced.
 const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 /// One line of the child's stream, as far as the actuator reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Usage {
-    /// A request of the main thread: the message's id and the context it
-    /// read (input, cache read and cache write tokens).
-    Request { id: String, prefix: u64 },
+    /// A request of the main thread: the message's id, the context it
+    /// read (input, cache read and cache write tokens) and the tasks a stop call (`TaskStop` or its aliases) on its line names (`task_id`, else `shell_id`).
+    Request { id: String, prefix: u64, stops: Vec<String> },
     /// A user line of the main thread that the CLI took into a request (a replay echo): ours, never a tool result and never the CLI's
     /// own replay of a task notification.
     Echo,
     /// The CLI began a turn: a `system` init line.
     TurnBegan,
-    /// A backgrounded task started, by the `tool_use_id` of the call that started it.
-    TaskStarted { id: String },
-    /// A task notification, by the `tool_use_id` of the call that started the task.
-    TaskNotified { id: String },
-    /// The CLI replayed a task notification as a user line, taking it into a turn; the `tool_use_id` is the task's.
+    /// The CLI's level of background tasks (`background_tasks_changed`): `live` the `task_id` of every entry, `main` those of entries with no
+    /// parent task that nobody awaits.
+    BackgroundTasks { live: Vec<String>, main: Vec<String> },
+    /// A task of the main session went to the background, by `task_id`: a `task_started` with `is_backgrounded` true and no parent task or
+    /// awaiter, or a `task_updated` whose patch backgrounds it.
+    TaskBackgrounded { id: String },
+    /// A task notification, by `task_id`; `stopped`: its status is `stopped`.
+    TaskNotified { id: String, stopped: bool },
+    /// The CLI replayed a task notification as a user line, taking it into a turn; the `<task-id>` is the task's.
     NotificationTaken { id: String },
     /// A turn ended. `ok`: not an error. `blocked`: the CLI refused the context (`blocking_limit`).
     Result { ok: bool, blocked: bool },
@@ -307,13 +315,23 @@ pub fn read_usage(line: &str) -> Usage {
             ok: !event.get("is_error").and_then(Value::as_bool).unwrap_or(false),
             blocked: event.get("terminal_reason").and_then(Value::as_str) == Some("blocking_limit"),
         },
-        // Task lines are read for liveness only: they name a task by its `tool_use_id` and never a conversation.
+        // Task lines are read for liveness only: they name a task by its `task_id` and never a conversation.
         Some("system") => {
-            let id = || event.get("tool_use_id").and_then(Value::as_str).map(String::from);
+            let task_id = |object: &serde_json::Map<String, Value>| object.get("task_id").and_then(Value::as_str).map(String::from);
+            // A task of the main session that nobody awaits: no parent task, `awaited` not true.
+            let main = |object: &serde_json::Map<String, Value>| object.get("parent_task_id").is_none_or(Value::is_null) && object.get("awaited").and_then(Value::as_bool) != Some(true);
             match event.get("subtype").and_then(Value::as_str) {
                 Some("init") => Usage::TurnBegan,
-                Some("task_started") if event.get("is_backgrounded").and_then(Value::as_bool) == Some(true) => id().map_or(Usage::Other, |id| Usage::TaskStarted { id }),
-                Some("task_notification") => id().map_or(Usage::Other, |id| Usage::TaskNotified { id }),
+                Some("background_tasks_changed") => {
+                    let entries: Vec<&serde_json::Map<String, Value>> = event.get("tasks").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_object).collect();
+                    Usage::BackgroundTasks {
+                        live: entries.iter().copied().filter_map(task_id).collect(),
+                        main: entries.iter().copied().filter(|entry| main(entry)).filter_map(task_id).collect(),
+                    }
+                }
+                Some("task_started") if event.get("is_backgrounded").and_then(Value::as_bool) == Some(true) && main(&event) => task_id(&event).map_or(Usage::Other, |id| Usage::TaskBackgrounded { id }),
+                Some("task_updated") if event.get("patch").and_then(|patch| patch.get("is_backgrounded")).and_then(Value::as_bool) == Some(true) => task_id(&event).map_or(Usage::Other, |id| Usage::TaskBackgrounded { id }),
+                Some("task_notification") => task_id(&event).map_or(Usage::Other, |id| Usage::TaskNotified { id, stopped: event.get("status").and_then(Value::as_str) == Some("stopped") }),
                 _ => Usage::Other,
             }
         }
@@ -321,8 +339,8 @@ pub fn read_usage(line: &str) -> Usage {
             match event.get("message").and_then(|message| message.get("content")).and_then(Value::as_str) {
                 // The CLI replays a notification it takes into a turn: it is the CLI's line, never our echo.
                 Some(content) if content.starts_with(NOTIFICATION_TAG) => content
-                    .split_once("<tool-use-id>")
-                    .and_then(|(_, rest)| rest.split_once("</tool-use-id>"))
+                    .split_once("<task-id>")
+                    .and_then(|(_, rest)| rest.split_once("</task-id>"))
                     .map_or(Usage::Other, |(id, _)| Usage::NotificationTaken { id: id.to_string() }),
                 Some(_) => Usage::Echo,
                 None => Usage::Other,
@@ -339,7 +357,16 @@ pub fn read_usage(line: &str) -> Usage {
             let field = |name: &str| usage.and_then(|usage| usage.get(name)).and_then(Value::as_u64).unwrap_or(0);
             // Saturating: a sum that overflows is at or over the ceiling, never a panic or a wrap.
             let prefix = field("input_tokens").saturating_add(field("cache_read_input_tokens")).saturating_add(field("cache_creation_input_tokens"));
-            Usage::Request { id: id.to_string(), prefix }
+            // The tasks a `TaskStop` call on this line stops: the CLI's kill tells the model nothing, so the decision must know it was ours.
+            let stops = message
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use") && block.get("name").and_then(Value::as_str).is_some_and(|name| STOP_TOOLS.contains(&name)))
+                .filter_map(|block| block.get("input")?.as_object()?.get("task_id").or_else(|| block.get("input")?.get("shell_id"))?.as_str().map(String::from))
+                .collect();
+            Usage::Request { id: id.to_string(), prefix, stops }
         }
         _ => Usage::Other,
     }
@@ -715,7 +742,8 @@ impl SessionInbox for SelfInbox<'_> {
         self.waiting = inbox::derive(self.mind, &held)?;
         let pending = self.waiting.iter().any(|brief| brief.conversation == self.serving);
         let other = self.waiting.iter().any(|brief| brief.conversation != self.serving);
-        Ok(Polled { pending, other, yield_now: false })
+        let other_first = self.waiting.first().is_some_and(|brief| brief.conversation != self.serving);
+        Ok(Polled { pending, other, other_first, yield_now: false })
     }
 
     /// The served conversation's waiting briefs; at a switch, those of the oldest waiting brief's conversation, which then is served and starts

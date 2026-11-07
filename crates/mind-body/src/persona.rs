@@ -1416,7 +1416,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
     /// What a poll answers: with nothing of its own to tell (not even an untold message of this conversation, whose stagger
     /// has not run) and another conversation's reply waiting, the session ends at its idle and the next process serves that reply.
     fn polled(&self, pending: bool, own_untold: bool) -> Polled {
-        Polled { pending, other: false, yield_now: !pending && !own_untold && self.replies_elsewhere }
+        Polled { pending, other: false, other_first: false, yield_now: !pending && !own_untold && self.replies_elsewhere }
     }
 
     fn held(&self) -> Option<HeldReason> {
@@ -1448,7 +1448,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
     fn poll(&mut self) -> Result<Polled> {
         if let Some(reason) = self.held() {
             self.progress.failure.get_or_insert(Failure::Held(reason));
-            return Ok(Polled { pending: false, other: false, yield_now: true });
+            return Ok(Polled { pending: false, other: false, other_first: false, yield_now: true });
         }
         self.read_replies();
         self.note_repo_changes();
@@ -1461,7 +1461,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         let revision_ready = self.revision_ready();
         let Some(oldest) = pending.first() else { return Ok(self.polled(self.retell.is_some() || revision_ready || !self.notices.is_empty() || !self.waiting_replies.is_empty(), false)) };
         if Conversation::of(oldest) != self.conversation {
-            return Ok(Polled { pending: false, other: false, yield_now: true });
+            return Ok(Polled { pending: false, other: false, other_first: false, yield_now: true });
         }
         let untold: Vec<ChatDelivery> = pending.into_iter().filter(|delivery| delivery.seq > self.told_through).take_while(|delivery| Conversation::of(delivery) == self.conversation).collect();
         // A delivery's stagger runs from the poll that first saw it, so a stream of newer messages moves nobody's clock. The line

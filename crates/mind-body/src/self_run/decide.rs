@@ -17,10 +17,13 @@
 //! waits (the briefs, the flush ask) is coalesced into the next single write.
 //! Idleness is decided here and nowhere else (ruling
 //! `eureka-body:ruling:self-serves-one-conversation-at-a-time`): no turn open,
-//! no write outstanding, no backgrounded task running and no task notification
-//! owed the turn the CLI will give it. The switch of the conversation a session
-//! serves, the cache-end flush and the yield all read that one definition. The
-//! task lines carry a `tool_use_id` for liveness only: they name a task that
+//! no write outstanding, the CLI's own level of background tasks empty and no
+//! task notification owed the turn the CLI will give it. The level is a copy of
+//! the last `background_tasks_changed`, replaced whole and never edited by an
+//! edge line; a notification owes a turn by the CLI's own rule (the task was
+//! backgrounded and the session did not stop it with `TaskStop`). The switch of
+//! the conversation a session serves, the cache-end flush and the yield all read
+//! that one definition. Task lines are keyed by `task_id` and name a task that
 //! runs or owes its turn, never a conversation or an answer.
 //!
 //! The rules, in this order, while stdin is open and no signal is out:
@@ -64,21 +67,23 @@ pub(crate) enum Why {
 /// What the loop saw, already turned into a fact the decision can use.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Event {
-    /// A request of the main thread: its message id and the context it read.
-    Request { id: String, prefix: u64 },
+    /// A request of the main thread: its message id, the context it read and the tasks a `TaskStop` call on its line names.
+    Request { id: String, prefix: u64, stops: Vec<String> },
     /// The CLI took one of our stdin lines into a request (its replay echo).
     Echo,
     /// A turn ended. `ok`: not an error. `blocked`: the CLI refused the context. `ttl_1h`: the last request wrote its cache for an hour, else five minutes.
     Result { ok: bool, blocked: bool, ttl_1h: bool },
-    /// A poll of the mind: whether a brief of the conversation being served waits (`pending`), and whether a brief of another conversation does (`other`).
-    Inbox { pending: bool, other: bool },
+    /// A poll of the mind: whether a brief of the conversation being served waits (`pending`), whether a brief of another conversation does (`other`), and whether the oldest waiting brief is another conversation's (`other_first`).
+    Inbox { pending: bool, other: bool, other_first: bool },
     /// The CLI began a turn (its `system` init line).
     TurnBegan,
-    /// A background task started (`task_started`, `is_backgrounded` true), by its `tool_use_id`.
-    TaskStarted { id: String },
-    /// A task notification came (`task_notification`), by its `tool_use_id`.
-    TaskNotified { id: String },
-    /// The CLI replayed a task notification as a user line: it took that notification into a turn. Never one of our echoes.
+    /// The CLI's level of background tasks (`background_tasks_changed`): `live` every task in it, `main` those of the main session that nobody awaits.
+    BackgroundTasks { live: Vec<String>, main: Vec<String> },
+    /// A task of the main session went to the background (`task_started` backgrounded, or a `task_updated` that backgrounded it), by `task_id`.
+    TaskBackgrounded { id: String },
+    /// A task notification came (`task_notification`), by `task_id`; `stopped`: its status says it was stopped.
+    TaskNotified { id: String, stopped: bool },
+    /// The CLI replayed a task notification as a user line: it took that notification into a turn, by `task_id`. Never one of our echoes.
     NotificationTaken { id: String },
     /// `waitpid` returned: the child's exit code, none when a signal ended it.
     ChildExited(Option<i32>),
@@ -146,12 +151,17 @@ pub(super) struct State {
     /// Turns opened so far, and who began the open (or last) one.
     turns: u32,
     turn_by: TurnBy,
-    /// Backgrounded tasks started and not yet notified, by `tool_use_id`: liveness only.
-    tasks: BTreeSet<String>,
-    /// Notifications of those tasks that have not yet been given their turn.
+    /// The CLI's last level of background tasks, by `task_id`: replaced whole at each `background_tasks_changed`, never edited by an edge line.
+    running: BTreeSet<String>,
+    /// Tasks the main session ever backgrounded (the CLI's own SDK consumer's rule), by `task_id`: a monotone cache of the stream.
+    backgrounded: BTreeSet<String>,
+    /// Tasks a `TaskStop` call of ours named: the CLI's stop tells the model nothing, so such a notification owes no turn.
+    stopped_by_us: BTreeSet<String>,
+    /// Notifications of backgrounded tasks that have not yet been given their turn, by `task_id`.
     owed: BTreeMap<String, Owed>,
-    /// A brief of another conversation than the one served waits.
+    /// A brief of another conversation than the one served waits, and whether the oldest waiting brief is another conversation's.
     other: bool,
+    other_first: bool,
     /// An ok result has come: the session holds an answer worth its cache.
     answered_once: bool,
     last_result_at: Option<DateTime<Utc>>,
@@ -184,9 +194,9 @@ impl State {
         self.written > self.consumed
     }
 
-    /// The one definition of idleness: no turn open, no write outstanding, no backgrounded task running and no notification owed a turn.
+    /// The one definition of idleness: no turn open, no write outstanding, the CLI's level of background tasks empty and no notification owed a turn.
     fn idle(&self) -> bool {
-        !self.turn_open && !self.outstanding() && self.tasks.is_empty() && self.owed.is_empty()
+        !self.turn_open && !self.outstanding() && self.running.is_empty() && self.owed.is_empty()
     }
 
     /// A turn opens at the first turn line, echo or request while none is open; the first echo (ours) or request (the CLI's) says who began it.
@@ -293,8 +303,9 @@ fn send(state: &mut State) -> Action {
         return Action::None;
     }
     let flush = state.flush.as_ref().map(|flush| flush.why);
-    // The served conversation's briefs go whenever nothing is outstanding; another conversation's only at idle, with no flush asked: the switch.
-    let switch = !state.inbox && state.other && flush.is_none() && state.idle();
+    // The served conversation's briefs go whenever nothing is outstanding; another conversation's only at idle, with no flush asked, and then
+    // the oldest waiting brief first: the switch.
+    let switch = state.other && flush.is_none() && state.idle() && (!state.inbox || state.other_first);
     if !state.inbox && !switch && flush.is_none() {
         return Action::None;
     }
@@ -304,7 +315,7 @@ fn send(state: &mut State) -> Action {
         flush.seq = Some(seq);
     }
     if switch {
-        state.other = false;
+        (state.inbox, state.other, state.other_first) = (false, false, false);
     }
     Action::Write { tells: std::mem::take(&mut state.inbox) || switch, switch, flush }
 }
@@ -316,12 +327,17 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
     let mut action = Action::None;
     match event {
         Event::TurnBegan => state.open_turn(None),
-        Event::TaskStarted { id } => {
-            state.tasks.insert(id);
+        Event::BackgroundTasks { live, main } => {
+            state.running = live.into_iter().collect();
+            state.backgrounded.extend(main);
         }
-        // A task that was not started backgrounded (a foreground or unknown one) owes nothing: there is nothing to wait on.
-        Event::TaskNotified { id } => {
-            if state.tasks.remove(&id) {
+        Event::TaskBackgrounded { id } => {
+            state.backgrounded.insert(id);
+        }
+        // The CLI's rule: a backgrounded task's notification is given a turn, except that of a stop the model asked for itself. A foreground,
+        // subagent-owned, awaited or unknown task owes nothing; a stop the CLI made on its own (a deadline, memory pressure) owes its turn.
+        Event::TaskNotified { id, stopped } => {
+            if state.backgrounded.contains(&id) && !(stopped && state.stopped_by_us.contains(&id)) {
                 let since = state.turns;
                 state.owed.insert(id, Owed { since, taken: false });
             }
@@ -331,8 +347,9 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
                 owed.taken = true;
             }
         }
-        Event::Request { id, prefix } => {
+        Event::Request { id, prefix, stops } => {
             state.open_turn(Some(TurnBy::Cli));
+            state.stopped_by_us.extend(stops);
             if state.seen.insert(id) {
                 state.requests += 1;
                 state.prefix = prefix;
@@ -373,9 +390,10 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
                 action = Action::CloseStdin;
             }
         }
-        Event::Inbox { pending, other } => {
+        Event::Inbox { pending, other, other_first } => {
             state.inbox = pending;
             state.other = other;
+            state.other_first = other_first;
         }
         Event::Yield => state.yielding = true,
         Event::ChildExited(code) => {

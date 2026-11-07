@@ -11,6 +11,9 @@ const BG_FOLD: &str = include_str!("../claude-2.1.312-live-session-bg-fold.jsonl
 const BG_OTHER: &str = include_str!("../claude-2.1.312-live-session-bg-other.jsonl");
 const BG_RACE: &str = include_str!("../claude-2.1.312-live-session-bg-race.jsonl");
 const BG_LATE: &str = include_str!("../claude-2.1.312-live-session-bg-late.jsonl");
+const BG_FGTO: &str = include_str!("../claude-2.1.312-live-session-bg-fgto.jsonl");
+const BG_KILL: &str = include_str!("../claude-2.1.312-live-session-bg-kill.jsonl");
+const BG_MONITOR: &str = include_str!("../claude-2.1.312-live-session-bg-monitor.jsonl");
 
 fn saying(text: &str) -> String {
     json!({"type": "result", "subtype": "success", "is_error": false, "terminal_reason": "completed", "result": text}).to_string()
@@ -78,7 +81,8 @@ fn label_of(line: &str) -> &'static str {
         Usage::Request { .. } => "request",
         Usage::Echo => "echo",
         Usage::Result { .. } => "result",
-        Usage::TaskStarted { .. } => "started",
+        Usage::BackgroundTasks { .. } => "level",
+        Usage::TaskBackgrounded { .. } => "backgrounded",
         Usage::TaskNotified { .. } => "notified",
         Usage::NotificationTaken { .. } => "taken",
         _ => "other",
@@ -105,8 +109,8 @@ fn script(lines: &[String], splices: Vec<(usize, Vec<Step>)>) -> Vec<Step> {
 }
 
 /// A message of the CLI's that the stream gives for a task the session never saw start.
-fn notification_of(tool_use: &str) -> String {
-    json!({"type": "system", "subtype": "task_notification", "task_id": "unseen", "tool_use_id": tool_use, "status": "completed", "summary": "synthetic task"}).to_string()
+fn notification_of(task: &str) -> String {
+    json!({"type": "system", "subtype": "task_notification", "task_id": task, "status": "completed", "summary": "synthetic task"}).to_string()
 }
 
 // ---- who is served at the start --------------------------------------------
@@ -338,12 +342,13 @@ fn another_conversations_brief_waits_behind_a_notification_turn_with_no_tool() {
 /// A task that was never started backgrounded, and a notification of a task never seen, owe nothing: no wedge.
 #[test]
 fn a_notification_of_a_foreground_or_unknown_task_holds_nothing() {
-    let lines: Vec<String> = stream(BG_IDLE).into_iter().map(|line| line.replace("\"is_backgrounded\":true", "\"is_backgrounded\":false")).collect();
-    assert!(lines.iter().all(|line| !matches!(read_usage(line), Usage::TaskStarted { .. })), "the capture's task is foreground now");
+    // The capture's task is foreground now: not announced backgrounded and in no level.
+    let lines: Vec<String> = stream(BG_IDLE).into_iter().map(|line| line.replace("\"is_backgrounded\":true", "\"is_backgrounded\":false")).filter(|line| label_of(line) != "level").collect();
+    assert!(lines.iter().all(|line| !matches!(read_usage(line), Usage::TaskBackgrounded { .. } | Usage::BackgroundTasks { .. })), "the capture's task is foreground now");
     let (request1, result1) = (after(&lines, "request", 1), after(&lines, "result", 1));
     let mind = serving_aqua();
     let steps = script(&lines[..result1], vec![(request1, vec![briefed(&mind, 31, vec![libby("l1")])])]);
-    let ran = mind_run(&mind, [steps, vec![Out(notification_of("toolu_unseen")), Idle(31), Out(echo()), Out(saying("libby done"))]].concat());
+    let ran = mind_run(&mind, [steps, vec![Out(notification_of("unseen")), Idle(31), Out(echo()), Out(saying("libby done"))]].concat());
     assert!(ran.outcome.is_ok());
     assert_eq!(tells(&ran).len(), 1, "the first idle tells Libby's brief: {:?}", ran.written());
     assert_eq!(answered(&mind, 2), vec![id_of("l1")]);
@@ -363,6 +368,113 @@ fn a_backgrounded_task_that_is_never_notified_holds_other_conversations_to_the_r
     assert!(!written_with(&ran, &id_of("l1")), "the flush never carries another conversation's brief: {:?}", ran.written());
     assert_eq!(ran.count(&Event::InputClosed), 1, "the flush's result closes stdin");
     assert_eq!(answered(&mind, 1), vec![id_of("a1")]);
+}
+
+/// A task of the main session that the CLI moved to the background at its timeout is in the level from then on, with no `task_started` that says
+/// so. Libby's brief, derived after Aqua's turn ended, is written into none of the CLI's turn for the task: not while the level holds it, and
+/// not in the gap after the level empties and before the CLI's init line; only after that turn's result, which was Aqua's.
+#[test]
+fn a_task_moved_to_the_background_at_its_timeout_holds_other_conversations_until_the_clis_turn_for_it_ends() {
+    let lines = stream(BG_FGTO);
+    let (result1, level2, init2, request3, result2) = (after(&lines, "result", 1), after(&lines, "level", 2), after(&lines, "init", 2), after(&lines, "request", 3), after(&lines, "result", 2));
+    let splices = |mind: &Rc<TestMind>| vec![(result1, vec![briefed(mind, 31, vec![libby("l1")]), Idle(31)]), (level2, vec![Idle(31)]), (init2, vec![Idle(31)]), (request3, vec![Idle(31)])];
+    let mind = serving_aqua();
+    let ran = mind_run(&mind, script(&lines[..result2 - 1], splices(&mind)));
+    assert!(ran.outcome.is_ok());
+    assert!(!written_with(&ran, "@libby:chat") && !written_with(&ran, &id_of("l1")), "no line of Libby's reaches the CLI's turn for Aqua's task: {:?}", ran.written());
+    let mind = serving_aqua();
+    let mut steps = splices(&mind);
+    steps.push((result2, vec![Idle(31), Out(echo()), Out(saying("libby done"))]));
+    let ran = mind_run(&mind, script(&lines, steps));
+    assert!(ran.outcome.is_ok());
+    let told = tells(&ran);
+    assert_eq!(told.len(), 1, "{:?}", ran.written());
+    assert!(told[0].contains(&id_of("l1")) && !told[0].contains(&id_of("a1")), "{}", told[0]);
+    assert_eq!((answered(&mind, 1), answered(&mind, 2), answered(&mind, 3)), (vec![id_of("a1")], vec![id_of("a1")], vec![id_of("l1")]));
+}
+
+/// A task the session stops with TaskStop is notified inside the turn that stops it and the CLI gives it no turn: the next conversation is
+/// told at the first idle after that turn's result.
+#[test]
+fn a_task_the_session_stops_with_taskstop_owes_no_turn() {
+    let lines = stream(BG_KILL);
+    let (request1, result1) = (after(&lines, "request", 1), after(&lines, "result", 1));
+    let mind = serving_aqua();
+    let ran = mind_run(&mind, script(&lines, vec![(request1, vec![briefed(&mind, 31, vec![libby("l1")])]), (result1, vec![Idle(31), Out(echo()), Out(saying("libby done"))])]));
+    assert!(ran.outcome.is_ok());
+    let told = tells(&ran);
+    assert_eq!(told.len(), 1, "{:?}", ran.written());
+    assert!(told[0].contains(&id_of("l1")) && !told[0].contains(&id_of("a1")), "{}", told[0]);
+    assert_eq!(ran.count(&Event::InputClosed), 0);
+    assert_eq!((answered(&mind, 1), answered(&mind, 2)), (vec![id_of("a1")], vec![id_of("l1")]), "no CLI turn was awaited");
+}
+
+/// The same stream with the stop made by something else: the TaskStop call is renamed, so the stop was not the session's and the CLI gives the
+/// notification its turn, which follows the result.
+#[test]
+fn a_stop_the_session_did_not_ask_for_owes_its_turn() {
+    let lines: Vec<String> = stream(BG_KILL).into_iter().map(|line| line.replace("\"name\":\"TaskStop\"", "\"name\":\"Other\"")).collect();
+    assert!(lines.iter().all(|line| !matches!(read_usage(line), Usage::Request { stops, .. } if !stops.is_empty())), "no stop of ours is left in the capture");
+    let (request1, result1) = (after(&lines, "request", 1), after(&lines, "result", 1));
+    let cli_turn = |result: Vec<Step>| [vec![Idle(31), Out(init_line()), Out(at("c1", 10)), Idle(31)], result].concat();
+    let splices = |mind: &Rc<TestMind>, rest: Vec<Step>| vec![(request1, vec![briefed(mind, 31, vec![libby("l1")])]), (result1, [vec![Idle(31)], cli_turn(rest)].concat())];
+    let mind = serving_aqua();
+    let ran = mind_run(&mind, script(&lines, splices(&mind, vec![])));
+    assert!(ran.outcome.is_ok());
+    assert!(!written_with(&ran, "@libby:chat") && !written_with(&ran, &id_of("l1")), "the CLI's turn for the stopped task is running: {:?}", ran.written());
+    let mind = serving_aqua();
+    let ran = mind_run(&mind, script(&lines, splices(&mind, vec![Out(saying("the task was stopped")), Idle(31), Out(echo()), Out(saying("libby done"))])));
+    assert!(ran.outcome.is_ok());
+    assert_eq!(tells(&ran).len(), 1, "{:?}", ran.written());
+    assert_eq!((answered(&mind, 1), answered(&mind, 2), answered(&mind, 3)), (vec![id_of("a1")], vec![id_of("a1")], vec![id_of("l1")]), "the CLI's turn answers Aqua's brief, never Libby's");
+}
+
+/// A persistent Monitor stays in the level through several notice turns the CLI begins; Libby's brief waits through all of them and the final turn
+/// of the notification.
+#[test]
+fn a_persistent_monitor_holds_other_conversations_through_its_notice_turns() {
+    let lines = stream(BG_MONITOR);
+    let result1 = after(&lines, "result", 1);
+    let windows = |mind: &Rc<TestMind>, upto: usize| {
+        let mut splices: Vec<(usize, Vec<Step>)> = (result1..=upto).map(|at| (at, vec![Idle(31)])).collect();
+        splices[0].1.insert(0, briefed(mind, 31, vec![libby("l1")]));
+        splices
+    };
+    let mind = serving_aqua();
+    let last_result = lines.len();
+    let ran = mind_run(&mind, script(&lines[..last_result - 1], windows(&mind, last_result - 1)));
+    assert!(ran.outcome.is_ok());
+    assert!(!written_with(&ran, "@libby:chat") && !written_with(&ran, &id_of("l1")), "no line of Libby's reaches a notice turn: {:?}", ran.written());
+    let mind = serving_aqua();
+    let mut splices = windows(&mind, last_result - 1);
+    splices.push((last_result, vec![Idle(31), Out(echo()), Out(saying("libby done"))]));
+    let ran = mind_run(&mind, script(&lines, splices));
+    assert!(ran.outcome.is_ok());
+    assert_eq!(tells(&ran).len(), 1, "{:?}", ran.written());
+    let results = lines.iter().filter(|line| label_of(line) == "result").count();
+    for n in 1..=results {
+        assert_eq!(answered(&mind, u32::try_from(n).unwrap()), vec![id_of("a1")], "reply {n}: the turns of the monitor are Aqua's");
+    }
+    assert_eq!(answered(&mind, u32::try_from(results + 1).unwrap()), vec![id_of("l1")]);
+}
+
+/// A subagent's or an awaited task is in the CLI's level and holds the session while it runs; its notification is no one's turn.
+#[test]
+fn a_subagents_or_an_awaited_tasks_notification_owes_nothing() {
+    let level = |tasks: Value| json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks}).to_string();
+    let ended = |task: &str| json!({"type": "system", "subtype": "task_notification", "task_id": task, "status": "completed", "summary": "synthetic task"}).to_string();
+    let both = || json!([{"task_id": "sub", "parent_task_id": "agent"}, {"task_id": "waited", "awaited": true}]);
+    let mind = serving_aqua();
+    let steps = vec![Out(echo()), Out(level(both())), Out(saying("aqua done")), briefed(&mind, 31, vec![libby("l1")]), Idle(31), Out(ended("sub"))];
+    let ran = mind_run(&mind, steps);
+    assert!(ran.outcome.is_ok());
+    assert!(!written_with(&ran, &id_of("l1")), "while the level holds them: {:?}", ran.written());
+    let mind = serving_aqua();
+    let steps = vec![Out(echo()), Out(level(both())), Out(saying("aqua done")), briefed(&mind, 31, vec![libby("l1")]), Idle(31), Out(ended("sub")), Out(ended("waited")), Out(level(json!([]))), Idle(31), Out(echo()), Out(saying("libby done"))];
+    let ran = mind_run(&mind, steps);
+    assert!(ran.outcome.is_ok());
+    assert_eq!(tells(&ran).len(), 1, "idle once the level is empty: {:?}", ran.written());
+    assert_eq!((answered(&mind, 1), answered(&mind, 2)), (vec![id_of("a1")], vec![id_of("l1")]));
 }
 
 // ---- who a result belongs to ------------------------------------------------
@@ -410,6 +522,21 @@ fn at_idle_the_oldest_waiting_conversation_is_served_first() {
         assert!(others.iter().all(|other| !line.contains(&id_of(other))), "one conversation per line: {line}");
     }
     assert_eq!((answered(&mind, 1), answered(&mind, 2), answered(&mind, 3)), (vec![id_of("a1"), id_of("a2")], vec![id_of("l1")], vec![id_of("m1")]));
+}
+
+/// Aqua is served and idle; Libby's brief is the older of the two now waiting, Aqua's own the newer: at idle the oldest goes first, so Aqua's
+/// brief does not outrun Libby's again and again.
+#[test]
+fn at_idle_an_older_brief_of_another_conversation_goes_before_the_served_ones_newer_brief() {
+    let mind = serving_aqua();
+    let steps = vec![Out(echo()), Out(saying("aqua done")), briefed(&mind, 0, vec![libby("l1")]), briefed(&mind, 31, vec![aqua("a2")]), Idle(31), Out(echo()), Out(saying("libby done")), Idle(31), Out(echo()), Out(saying("aqua again"))];
+    let ran = mind_run(&mind, steps);
+    assert!(ran.outcome.is_ok());
+    let told = tells(&ran);
+    assert_eq!(told.len(), 2, "{:?}", ran.written());
+    assert!(told[0].contains(&id_of("l1")) && !told[0].contains(&id_of("a2")), "the older brief first: {}", told[0]);
+    assert!(told[1].contains(&id_of("a2")) && !told[1].contains(&id_of("l1")), "{}", told[1]);
+    assert_eq!((answered(&mind, 1), answered(&mind, 2), answered(&mind, 3)), (vec![id_of("a1")], vec![id_of("l1")], vec![id_of("a2")]));
 }
 
 /// A result that took in no brief answers the briefs of the span being served: never the span before.

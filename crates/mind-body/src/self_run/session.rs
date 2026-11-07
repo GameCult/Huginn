@@ -24,6 +24,8 @@ pub(crate) struct Polled {
     pub(crate) pending: bool,
     /// A brief of another conversation waits: told only when the session is idle (the switch).
     pub(crate) other: bool,
+    /// The oldest waiting brief is another conversation's: at idle it goes before the served conversation's own.
+    pub(crate) other_first: bool,
     /// The session should end at its next idle: what is oldest and unanswered is not its business.
     pub(crate) yield_now: bool,
 }
@@ -72,14 +74,15 @@ pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dy
                     ttl_1h = hour;
                 }
                 match read_usage(&line) {
-                    Usage::Request { id, prefix } => Event::Request { id, prefix },
+                    Usage::Request { id, prefix, stops } => Event::Request { id, prefix, stops },
                     Usage::Echo => {
                         inbox.echoed();
                         Event::Echo
                     }
                     Usage::TurnBegan => Event::TurnBegan,
-                    Usage::TaskStarted { id } => Event::TaskStarted { id },
-                    Usage::TaskNotified { id } => Event::TaskNotified { id },
+                    Usage::BackgroundTasks { live, main } => Event::BackgroundTasks { live, main },
+                    Usage::TaskBackgrounded { id } => Event::TaskBackgrounded { id },
+                    Usage::TaskNotified { id, stopped } => Event::TaskNotified { id, stopped },
                     Usage::NotificationTaken { id } => Event::NotificationTaken { id },
                     Usage::Result { ok, blocked } => {
                         let (ok, blocked) = inbox.result(&line, ok, blocked)?;
@@ -98,7 +101,7 @@ pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dy
             polled = now;
             match inbox.poll() {
                 Ok(found) => {
-                    events.push_back(Event::Inbox { pending: found.pending, other: found.other });
+                    events.push_back(Event::Inbox { pending: found.pending, other: found.other, other_first: found.other_first });
                     if found.yield_now {
                         events.push_back(Event::Yield);
                     }

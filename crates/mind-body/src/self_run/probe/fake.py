@@ -9,11 +9,15 @@ usage. A marker in the newest user text picks the behaviour:
   MID360     report 360000 input tokens
   BIGCONTEXT report 990000 input tokens (the CLI blocking limit)
 
+FAKE_PLAN is a comma list, one step per main-thread request: text | bg:<s> | fg:<s> | agent | monitor | hold:<s> (text after s seconds) |
+t:<key> (a tool call from FAKE_TOOLS, a json {key: [tool name, input]}; "$ID" in the input is replaced by the last task id a tool result named).
+
 Holds no credential: the CLI is pointed at it with a fake key.
 """
 import json
 import http.server
 import os
+import re
 import threading
 import time
 
@@ -100,6 +104,14 @@ class H(http.server.BaseHTTPRequestHandler):
         if kind in ("agent", "monitor"):
             name, inp = (("Agent", {"description": "probe agent", "prompt": "SUBTASK say done", "subagent_type": "general-purpose", "run_in_background": True}) if kind == "agent" else ("Monitor", {"description": "probe monitor", "command": "sleep 6; echo monitor-done", "timeout_ms": 30000, "persistent": False}))
             self.stream(n, req, {"type": "tool_use", "id": f"toolu_{n:04d}", "name": name, "input": {}}, {"type": "input_json_delta", "partial_json": json.dumps(inp)}, "tool_use", 10)
+            return
+        if kind == "t":
+            name, inp = json.loads(os.environ["FAKE_TOOLS"])[arg]
+            text = json.dumps(inp)
+            if "$ID" in text:
+                ids = re.findall(r"with ID: ([A-Za-z0-9]+)", json.dumps(msgs))
+                text = text.replace("$ID", ids[-1] if ids else "none")
+            self.stream(n, req, {"type": "tool_use", "id": f"toolu_{n:04d}", "name": name, "input": {}}, {"type": "input_json_delta", "partial_json": text}, "tool_use", 10)
             return
         if kind == "hold":
             time.sleep(float(arg))

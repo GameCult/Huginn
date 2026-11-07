@@ -1,7 +1,7 @@
 """Drives the real claude CLI (stream-json, --replay-user-messages) against fake.py
 through one scenario and records its stdout and what was written to its stdin.
 
-  PROBE_SCENARIO  bg-agent | bg-late | bg-monitor (FAKE_PLAN agent,text | bg:8,text | monitor,text) | folded | queued | three-queued | serialized | ceiling-flush-folded |
+  PROBE_SCENARIO  timed (SENDS, RUN_S; any FAKE_PLAN) | bg-agent | bg-late | bg-monitor (FAKE_PLAN agent,text | bg:8,text | monitor,text) | folded | queued | three-queued | serialized | ceiling-flush-folded |
                   ceiling-flush-queued | api-error-first | blocking-limit | compaction-off-360k
                   (three-queued writes a second and a third line while the first request is in
                   flight: the CLI joins them into one echo. serialized is the actuator's policy
@@ -225,6 +225,12 @@ elif SCENARIO == "bg-other":
     wait(lambda: results() >= 2, 30)
     wait(lambda: results() >= 3, 15)
     time.sleep(3)
+elif SCENARIO == "timed":
+    # SENDS: a json list of [at_seconds, text]; RUN_S: seconds the session runs before stdin closes.
+    for at, text in json.loads(os.environ["SENDS"]):
+        time.sleep(max(0, T0 + at - time.time()))
+        send(text)
+    time.sleep(max(0, T0 + float(os.environ.get("RUN_S", "40")) - time.time()))
 elif SCENARIO in ("bg-agent", "bg-late", "bg-monitor"):
     send("PLAN turn A.")
     wait(lambda: results() >= 1)
