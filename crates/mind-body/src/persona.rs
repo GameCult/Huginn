@@ -961,12 +961,11 @@ impl Conversation {
     }
 }
 
-/// The conversation a reply is told in: the one conversation its briefs' origins name, or none when they name two or
-/// it answers no brief (a result the Self could not attribute). Such a reply has no conversation: the public session is told a
-/// pointer to it without its text, so no member's words reach another's room.
+/// The conversation a reply is told in: the one conversation its briefs' origins name, the public one when it answers no brief, or none
+/// when they name two. Such a reply is told in no session, so no member's words reach another's room, and it stays in force.
 fn reply_conversation(answers: &[Option<MemoryOrigin>]) -> Option<Conversation> {
     let mut conversations = answers.iter().map(|origin| Conversation::of_origin(origin.as_ref()));
-    let first = conversations.next()?;
+    let first = conversations.next().unwrap_or(Conversation::Public);
     conversations.all(|conversation| conversation == first).then_some(first)
 }
 
@@ -979,12 +978,10 @@ struct Route {
     conversation: Conversation,
     /// The origin of the first brief the reply answers that has one: what a session opened for the reply alone records.
     origin: Option<MemoryOrigin>,
-    /// The reply could not be placed in one conversation (it answers none, or briefs of two): the public session is told a pointer to it, never its text.
-    pointer: bool,
 }
 
 /// Her in-force replies this process has not told, oldest first, each with its conversation: one selection of the replies and
-/// one keyed selection of the briefs they answer. A reply with no one conversation is a pointer route in the public one.
+/// one keyed selection of the briefs they answer. A reply with no one conversation (briefs of two) is dropped: told in no session, and in force.
 fn reply_routes(mind: &dyn MindPort, told: &BTreeSet<String>) -> Result<Vec<Route>> {
     let replies: Vec<_> = headers(mind, &in_force(any_of(of_kind(PipelineKind::Reply), "root", &[&mind.instance().0])))?.into_iter().filter(|header| !told.contains(&header.id.id.0)).collect();
     let mut keys: Vec<String> = replies
@@ -1008,13 +1005,12 @@ fn reply_routes(mind: &dyn MindPort, told: &BTreeSet<String>) -> Result<Vec<Rout
     for header in replies {
         let PipelineFacts::Reply { answers, .. } = &header.facts else { continue };
         let of_answers: Vec<Option<MemoryOrigin>> = answers.iter().map(|brief| origins.get(&brief.id.0).cloned().flatten()).collect();
-        let placed = reply_conversation(&of_answers);
+        let Some(conversation) = reply_conversation(&of_answers) else { continue };
         routes.push(Route {
             id: header.id.id.0.clone(),
             ordinal: header.admission.ordinal,
             at_unix_ms: instant_ms(&header.admission.admitted_at).unwrap_or(0),
-            pointer: placed.is_none(),
-            conversation: placed.unwrap_or(Conversation::Public),
+            conversation,
             origin: of_answers.into_iter().flatten().next(),
         });
     }
@@ -1126,19 +1122,11 @@ struct HeardReply {
     /// The briefs it answers, each with its repo (empty when the brief's repo could not be read).
     answers: Vec<(String, String)>,
     text: String,
-    /// A pointer to a reply that could not be placed: it holds no answers and no text, only the id.
-    pointer: bool,
 }
-
-/// What a pointer line says, in the organ's own words: the reply is in the mind under its id, and nothing of it is in this line.
-const UNPLACED_NOTE: &str = "Your Self finished something it could not place in any one conversation. Its words are not here: read the reply by this id, privately, and decide where it belongs.";
 
 /// A reply as one line: `role=self` is the organ's word that it is her Self's, and every field a Self wrote is quoted, so nothing in
 /// it can end the line or pass for a message, a notice or a field.
 fn reply_line(reply: &HeardReply) -> String {
-    if reply.pointer {
-        return format!("reply role=self at={} id={} unplaced=true note={}\n", at_text(reply.at_unix_ms), quoted(&reply.id), quoted(UNPLACED_NOTE));
-    }
     let answers = reply
         .answers
         .iter()
@@ -1428,7 +1416,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
     /// What a poll answers: with nothing of its own to tell (not even an untold message of this conversation, whose stagger
     /// has not run) and another conversation's reply waiting, the session ends at its idle and the next process serves that reply.
     fn polled(&self, pending: bool, own_untold: bool) -> Polled {
-        Polled { pending, yield_now: !pending && !own_untold && self.replies_elsewhere }
+        Polled { pending, other: false, yield_now: !pending && !own_untold && self.replies_elsewhere }
     }
 
     fn held(&self) -> Option<HeldReason> {
@@ -1460,7 +1448,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
     fn poll(&mut self) -> Result<Polled> {
         if let Some(reason) = self.held() {
             self.progress.failure.get_or_insert(Failure::Held(reason));
-            return Ok(Polled { pending: false, yield_now: true });
+            return Ok(Polled { pending: false, other: false, yield_now: true });
         }
         self.read_replies();
         self.note_repo_changes();
@@ -1473,7 +1461,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         let revision_ready = self.revision_ready();
         let Some(oldest) = pending.first() else { return Ok(self.polled(self.retell.is_some() || revision_ready || !self.notices.is_empty() || !self.waiting_replies.is_empty(), false)) };
         if Conversation::of(oldest) != self.conversation {
-            return Ok(Polled { pending: false, yield_now: true });
+            return Ok(Polled { pending: false, other: false, yield_now: true });
         }
         let untold: Vec<ChatDelivery> = pending.into_iter().filter(|delivery| delivery.seq > self.told_through).take_while(|delivery| Conversation::of(delivery) == self.conversation).collect();
         // A delivery's stagger runs from the poll that first saw it, so a stream of newer messages moves nobody's clock. The line
@@ -1489,7 +1477,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         Ok(self.polled(!self.waiting.is_empty() || self.retell.is_some() || revision_ready || !self.notices.is_empty() || !self.waiting_replies.is_empty(), any_untold))
     }
 
-    fn tell(&mut self) -> Result<String> {
+    fn tell(&mut self, _switch: bool) -> Result<String> {
         let (heard, replies) = self.take_reply_lines();
         let notices = format!("{heard}{}", std::mem::take(&mut self.notices).concat());
         if self.revision_ready()
@@ -1962,12 +1950,8 @@ fn decode_reply(text: &str, rooms: &[String], people: &[String], open: &[String]
 /// document cannot be read is left for the next read. Only the routes of the session's own conversation are given.
 fn unheard_replies(mind: &dyn MindPort, routes: &[Route]) -> Result<Vec<HeardReply>> {
     let mut found = Vec::new();
-    for Route { id, ordinal, at_unix_ms, pointer, .. } in routes {
+    for Route { id, ordinal, .. } in routes {
         let (id, ordinal) = (id.clone(), *ordinal);
-        if *pointer {
-            found.push(HeardReply { id, ordinal, at_unix_ms: *at_unix_ms, answers: Vec::new(), text: String::new(), pointer: true });
-            continue;
-        }
         let one = Selection { keys: Some(vec![id.clone()]), projection: "document".into(), ..Selection::default() };
         let PipelinePageItems::Documents(views) = mind.query(&one)?.items else { bail!("the mind answered headers to a document selection") };
         let Some(view) = views.into_iter().next() else { continue };
@@ -1982,7 +1966,7 @@ fn unheard_replies(mind: &dyn MindPort, routes: &[Route]) -> Result<Vec<HeardRep
             });
             answers.push((brief.id.0.clone(), repo.unwrap_or_default()));
         }
-        found.push(HeardReply { id, ordinal, at_unix_ms, answers, text: reply.text.0, pointer: false });
+        found.push(HeardReply { id, ordinal, at_unix_ms, answers, text: reply.text.0 });
     }
     Ok(found)
 }

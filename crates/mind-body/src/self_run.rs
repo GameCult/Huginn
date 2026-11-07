@@ -55,7 +55,7 @@
 //! foreign owner's JSON: it is parsed into `serde_json::Value` here and nothing
 //! parsed is stored but a result's text, as a reply.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
@@ -152,7 +152,7 @@ pub const SESSION_NAMESPACE: Uuid = Uuid::NAMESPACE_OID;
 /// skill: it names the skill, the instance and the run id.
 pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
     format!(
-        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs. Briefs reach you one conversation at a time. What you say ending a turn reaches your Persona in the conversation of the briefs that turn took in. When a background task you started finishes, its result goes to the conversation of the turn that started it, and no other conversation's brief is told into that turn. A result that cannot be placed reaches your Persona only as a pointer to it by id, without its text.\n\n{}",
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs. Briefs reach you one conversation at a time. More briefs of the conversation you are serving may arrive while you work; another conversation's brief is told only once you are idle, with no turn running and no background task of yours still running or waiting for its turn. What you say ending any turn, the turns that report your background tasks included, reaches your Persona in the conversation you are serving, so a long background task keeps other members waiting.\n\n{}",
         instance.0,
         run.id.0,
         render_plan(plan_quota, now_ms)
@@ -228,6 +228,9 @@ pub fn session_id(run: &PipelineRef) -> Uuid {
 /// the seed fills); the working directory's project and local settings, which a
 /// run could have written, do not.
 pub fn claude_args(session: Uuid) -> Vec<String> {
+    // `--disallowedTools` (probe, claude 2.1.312): the init line's tools lose these two. A turn the CLI begins on its own must be a
+    // notification turn the actuator tracks (a task's), so no wake of the Self's own is scheduled in the CLI: her heartbeat owns her wakes.
+    const DENIED_TOOLS: &str = "ScheduleWakeup,CronCreate";
     [
         "-p",
         "--input-format",
@@ -246,10 +249,15 @@ pub fn claude_args(session: Uuid) -> Vec<String> {
         "--setting-sources",
         "user",
         "--replay-user-messages",
+        "--disallowedTools",
+        DENIED_TOOLS,
     ]
     .map(String::from)
     .to_vec()
 }
+
+/// What a user line starts with when the CLI replays a task notification to the model.
+const NOTIFICATION_TAG: &str = "<task-notification>";
 
 /// The model name on the CLI's own assistant lines, which no request produced.
 const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -260,8 +268,17 @@ pub enum Usage {
     /// A request of the main thread: the message's id and the context it
     /// read (input, cache read and cache write tokens).
     Request { id: String, prefix: u64 },
-    /// A user line of the main thread that the CLI took into a request (a replay echo): ours, never a tool result.
+    /// A user line of the main thread that the CLI took into a request (a replay echo): ours, never a tool result and never the CLI's
+    /// own replay of a task notification.
     Echo,
+    /// The CLI began a turn: a `system` init line.
+    TurnBegan,
+    /// A backgrounded task started, by the `tool_use_id` of the call that started it.
+    TaskStarted { id: String },
+    /// A task notification, by the `tool_use_id` of the call that started the task.
+    TaskNotified { id: String },
+    /// The CLI replayed a task notification as a user line, taking it into a turn; the `tool_use_id` is the task's.
+    NotificationTaken { id: String },
     /// A turn ended. `ok`: not an error. `blocked`: the CLI refused the context (`blocking_limit`).
     Result { ok: bool, blocked: bool },
     /// Valid JSON that is none of the above, or a request of a subagent.
@@ -290,12 +307,26 @@ pub fn read_usage(line: &str) -> Usage {
             ok: !event.get("is_error").and_then(Value::as_bool).unwrap_or(false),
             blocked: event.get("terminal_reason").and_then(Value::as_str) == Some("blocking_limit"),
         },
-        Some("user")
-            if event.get("isReplay").and_then(Value::as_bool) == Some(true)
-                && event.get("parent_tool_use_id").is_none_or(Value::is_null)
-                && event.get("message").and_then(|message| message.get("content")).is_some_and(Value::is_string) =>
-        {
-            Usage::Echo
+        // Task lines are read for liveness only: they name a task by its `tool_use_id` and never a conversation.
+        Some("system") => {
+            let id = || event.get("tool_use_id").and_then(Value::as_str).map(String::from);
+            match event.get("subtype").and_then(Value::as_str) {
+                Some("init") => Usage::TurnBegan,
+                Some("task_started") if event.get("is_backgrounded").and_then(Value::as_bool) == Some(true) => id().map_or(Usage::Other, |id| Usage::TaskStarted { id }),
+                Some("task_notification") => id().map_or(Usage::Other, |id| Usage::TaskNotified { id }),
+                _ => Usage::Other,
+            }
+        }
+        Some("user") if event.get("isReplay").and_then(Value::as_bool) == Some(true) && event.get("parent_tool_use_id").is_none_or(Value::is_null) => {
+            match event.get("message").and_then(|message| message.get("content")).and_then(Value::as_str) {
+                // The CLI replays a notification it takes into a turn: it is the CLI's line, never our echo.
+                Some(content) if content.starts_with(NOTIFICATION_TAG) => content
+                    .split_once("<tool-use-id>")
+                    .and_then(|(_, rest)| rest.split_once("</tool-use-id>"))
+                    .map_or(Usage::Other, |(id, _)| Usage::NotificationTaken { id: id.to_string() }),
+                Some(_) => Usage::Echo,
+                None => Usage::Other,
+            }
         }
         Some("assistant") if event.get("parent_tool_use_id").is_none_or(Value::is_null) => {
             let message = event.get("message");
@@ -532,11 +563,13 @@ pub fn carry(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawne
         };
         claimed.push((claim, of));
     }
-    let conversation = claimed.iter().find_map(|(_, of)| of.clone()).or_else(|| open.first().map(|brief| brief.conversation.clone()));
+    let first = claimed.iter().find_map(|(_, of)| of.clone()).or_else(|| open.first().map(|brief| brief.conversation.clone()));
     // A claim of another conversation is not rendered or carried: the start line holds one conversation only.
-    let claims: Vec<PipelineRef> = claimed.into_iter().filter(|(claim, of)| claim.kind != PipelineKind::FollowUp || *of == conversation).map(|(claim, _)| claim).collect();
+    let claims: Vec<PipelineRef> = claimed.into_iter().filter(|(claim, of)| claim.kind != PipelineKind::FollowUp || *of == first).map(|(claim, _)| claim).collect();
+    // The conversation the session serves from its start: the claim's, else the oldest open brief's, else the public one.
+    let conversation = first.clone().unwrap_or(Conversation::Public);
     let mut task = task_section(mind, &claims)?;
-    let mut told: Vec<Brief> = open.into_iter().filter(|brief| claims.iter().any(|claim| claim.id.0 == brief.id) || Some(&brief.conversation) == conversation.as_ref()).collect();
+    let mut told: Vec<Brief> = open.into_iter().filter(|brief| claims.iter().any(|claim| claim.id.0 == brief.id) || Some(&brief.conversation) == first.as_ref()).collect();
     let also: Vec<&Brief> = told.iter().filter(|brief| !claims.iter().any(|claim| claim.id.0 == brief.id)).collect();
     if !also.is_empty() {
         task.push_str("
@@ -561,7 +594,7 @@ Also open for you:");
 }
 
 #[allow(clippy::too_many_arguments, reason = "carry's ports, passed on whole")]
-fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, claims, task, conversation): (&PipelineRef, &[PipelineRef], &str, Option<Conversation>), told: &mut Vec<Brief>, heard: &mut Heard) -> Result<SelfRunOutcome> {
+fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, spawner: &dyn Spawner, run_cap_s: u64, out: &mut dyn Write, (run, claims, task, conversation): (&PipelineRef, &[PipelineRef], &str, Conversation), told: &mut Vec<Brief>, heard: &mut Heard) -> Result<SelfRunOutcome> {
     let started_ms = unix_ms(clock.now());
     let request = LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(run_cap_s.saturating_mul(1000)) };
     let lease = match lender.lend(&request)? {
@@ -580,6 +613,10 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
 }
 
 /// The Self's side of the session: her briefs, derived from the mind, are what she is told.
+///
+/// One conversation at a time (ruling `eureka-body:ruling:self-serves-one-conversation-at-a-time`): the session serves one conversation, and
+/// every result belongs to it. The actuator changes it only in a write `decide` marks `switch`, which `decide` issues only when the session is
+/// idle; a result is never attributed from the order of the stream.
 struct SelfInbox<'a> {
     mind: &'a dyn MindPort,
     start: String,
@@ -593,21 +630,12 @@ struct SelfInbox<'a> {
     carried: Vec<String>,
     /// The briefs of the lines the CLI took, which the next reply answers.
     echoed: Vec<String>,
-    /// The conversation of the briefs carried or echoed and not yet answered by a reply: while it is set, only that conversation's briefs
-    /// are told, so what she says ending a turn reaches her Persona in one conversation. None when every brief told has been answered.
-    conversation: Option<Conversation>,
-    /// The briefs the last reply answered. A result that took in no brief and follows no task notification continues that turn, so it
-    /// answers them, only while every brief this run told is of one conversation; once two were told it answers nothing and is pointed at.
+    /// The conversation being served: the start line's, then the one each switch writes. Its new briefs may be written at any time; another
+    /// conversation's only at the switch.
+    serving: Conversation,
+    /// The briefs the last reply answered, or the briefs of the line that began this span. A result that took in no brief (a notification
+    /// turn, an error, an empty answer) answers them: it belongs to the span being served.
     last_answers: Vec<String>,
-    /// What each background task answers, by the `tool_use_id` the stream carries on its start: the briefs of the turn that started it.
-    /// A notification's result goes to that conversation.
-    tasks: HashMap<String, Vec<String>>,
-    /// The `tool_use_id`s of task notifications whose turn has not yet ended in a result that took in no brief. While any is pending, a
-    /// brief is written only when it is of the conversation the notification is attributed to.
-    notified: Vec<String>,
-    /// A turn that took in no brief is open: a request came with nothing echoed, and no line of ours has joined it. Until its result, a brief
-    /// is written only when it is of the conversation that turn is attributed to (the notification'"'"'s task, else the turn before).
-    briefless_open: bool,
     /// The flush was written and the CLI has not yet taken it.
     flush_written: bool,
     /// The CLI took the flush and its result has not come: that result is the session's note to its successor, never a reply to a brief.
@@ -619,8 +647,8 @@ struct SelfInbox<'a> {
 }
 
 impl<'a> SelfInbox<'a> {
-    /// The start line carries the claimed follow-ups and every brief already open (`told`).
-    fn new(mind: &'a dyn MindPort, (run, claims): (&PipelineRef, &[PipelineRef]), task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), (told, conversation): (&'a mut Vec<Brief>, Option<Conversation>), heard: &'a mut Heard) -> Self {
+    /// The start line carries the claimed follow-ups and every brief already open (`told`), all of `serving`'s conversation.
+    fn new(mind: &'a dyn MindPort, (run, claims): (&PipelineRef, &[PipelineRef]), task: &str, (plan_quota, now_ms): (&[PlanQuota], u64), (told, serving): (&'a mut Vec<Brief>, Conversation), heard: &'a mut Heard) -> Self {
         let start = format!("{}{task}", start_message(mind.instance(), run, plan_quota, now_ms));
         let mut carried: Vec<String> = claims.iter().filter(|claim| claim.kind == PipelineKind::FollowUp).map(|claim| claim.id.0.clone()).collect();
         for brief in told.iter() {
@@ -628,7 +656,8 @@ impl<'a> SelfInbox<'a> {
                 carried.push(brief.id.clone());
             }
         }
-        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), conversation, last_answers: Vec::new(), tasks: HashMap::new(), notified: Vec::new(), briefless_open: false, flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
+        let last_answers = carried.clone();
+        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), serving, last_answers, flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
     }
 
     /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps the reply and never ends the session.
@@ -644,19 +673,18 @@ impl<'a> SelfInbox<'a> {
         self.unadmitted = kept;
     }
 
-    /// One result of the main thread: with words, one reply answering the briefs the CLI has taken since the last reply (the first 64, in tell order).
-    /// An error or an empty result makes none and leaves those briefs for the next reply.
+    /// One result of the main thread: with words, one reply answering the briefs the CLI has taken since the last reply (the first 64, in tell
+    /// order), else the briefs of the span being served. An error or an empty result makes none and leaves those briefs for the next reply.
     fn reply_to(&mut self, line: &str, ok: bool) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         let text = result_text(&event);
         let flush = std::mem::take(&mut self.flushing);
-        let took = self.echoed.first().and_then(|id| self.conversation_of(id));
-        // The flush result is the session's note to its successor, in the journal: it is no reply, so nothing ever points at it.
+        // The flush result is the session's note to its successor, in the journal: it is no reply.
         if ok && !flush && !text.trim().is_empty() {
             self.replies += 1;
             let run_label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0);
             let taken = std::mem::take(&mut self.echoed);
-            let answered: Vec<String> = if taken.is_empty() { self.briefless_answers() } else { taken.into_iter().take(64).collect() };
+            let answered: Vec<String> = if taken.is_empty() { self.last_answers.clone() } else { taken.into_iter().take(64).collect() };
             let answers = answered.iter().map(|id| PipelineRef { kind: PipelineKind::FollowUp, id: id.as_str().into() }).collect();
             if !answered.is_empty() {
                 self.last_answers = answered;
@@ -669,82 +697,7 @@ impl<'a> SelfInbox<'a> {
                 text: cut_text(text, REPLY_TEXT_LIMIT).as_str().into(),
             });
         }
-        // The turn has ended. A turn that took in no brief answered the notifications pending; one that took in the notification's own conversation's briefs
-        // took the notification in with them. A notification of another conversation stays pending: its turn is still to come.
-        if took.is_none() || self.turn_conversation() == took {
-            self.notified.clear();
-        }
-        self.briefless_open = false;
         self.admit_unadmitted();
-        self.conversation = self.carried.first().or(self.echoed.first()).and_then(|id| self.conversation_of(id));
-    }
-
-    /// Whether every brief this run told is of one conversation.
-    fn one_conversation_told(&self) -> bool {
-        self.told.iter().all(|brief| brief.conversation == self.told[0].conversation)
-    }
-
-    /// The briefs a turn that took in no brief answers: those of the turns that started the tasks whose notifications are pending
-    /// (any notification the stream did not attribute makes the result unplaceable), else, with no notification, the turn before
-    /// while the run has told one conversation only.
-    fn briefless_answers(&self) -> Vec<String> {
-        let continued = if self.one_conversation_told() { self.last_answers.clone() } else { Vec::new() };
-        if self.notified.is_empty() {
-            return continued;
-        }
-        let mut answers: Vec<String> = Vec::new();
-        for id in &self.notified {
-            let own = self.tasks.get(id).filter(|briefs| !briefs.is_empty());
-            let Some(own) = own else { return Vec::new() };
-            answers.extend(own.iter().filter(|brief| !answers.contains(brief)).cloned().collect::<Vec<_>>());
-        }
-        answers
-    }
-
-    /// The one conversation the open turn is attributed to: its notifications' tasks', else the turn before. None when they name two, or one could not be attributed.
-    fn turn_conversation(&self) -> Option<Conversation> {
-        let answers = self.briefless_answers();
-        let mut conversations = answers.iter().map(|id| self.conversation_of(id));
-        let first = conversations.next()??;
-        conversations.all(|conversation| conversation.as_ref() == Some(&first)).then_some(first)
-    }
-
-    /// What a task's start or a notification in the stream says: a task is answered by the turn that started it.
-    fn note_task(&mut self, line: &str) {
-        if !line.contains("task_started") && !line.contains("task_notification") {
-            return;
-        }
-        let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
-        if event.get("type").and_then(Value::as_str) != Some("system") {
-            return;
-        }
-        let Some(tool_use) = event.get("tool_use_id").and_then(Value::as_str) else { return };
-        match event.get("subtype").and_then(Value::as_str) {
-            Some("task_started") => {
-                // The turn that starts it is answering the briefs echoed, else what a briefless turn answers now.
-                let answers = if self.echoed.is_empty() { self.briefless_answers() } else { self.echoed.iter().take(64).cloned().collect() };
-                self.tasks.entry(tool_use.to_string()).or_insert(answers);
-            }
-            Some("task_notification") => self.notified.push(tool_use.to_string()),
-            _ => {}
-        }
-    }
-
-    /// The conversation of a brief told in this run.
-    fn conversation_of(&self, id: &str) -> Option<Conversation> {
-        self.told.iter().find(|brief| brief.id == id).map(|brief| brief.conversation.clone())
-    }
-
-    /// Whether the open turn lets this brief in: while a task notification or another turn that took in no brief is open, only the conversation
-    /// it is attributed to (none when it cannot be placed), unless nothing has been told yet and no other conversation exists.
-    fn turn_allows(&self, brief: &Brief) -> bool {
-        (self.notified.is_empty() && (!self.briefless_open || self.told.is_empty())) || self.turn_conversation().as_ref() == Some(&brief.conversation)
-    }
-
-    /// Whether a waiting brief may be told now: any when every brief told has been answered, else only the unanswered ones' conversation.
-    /// While a task notification's turn is open, only the conversation the notification is attributed to may be told (none when it cannot be placed).
-    fn may_tell(&self, brief: &Brief) -> bool {
-        self.turn_allows(brief) && self.conversation.as_ref().is_none_or(|conversation| *conversation == brief.conversation)
     }
 }
 
@@ -760,18 +713,26 @@ impl SessionInbox for SelfInbox<'_> {
     fn poll(&mut self) -> Result<Polled> {
         let held: HashSet<String> = self.told.iter().map(|brief| brief.id.clone()).collect();
         self.waiting = inbox::derive(self.mind, &held)?;
-        Ok(Polled { pending: self.waiting.iter().any(|brief| self.may_tell(brief)), yield_now: false })
+        let pending = self.waiting.iter().any(|brief| brief.conversation == self.serving);
+        let other = self.waiting.iter().any(|brief| brief.conversation != self.serving);
+        Ok(Polled { pending, other, yield_now: false })
     }
 
-    fn tell(&mut self) -> Result<String> {
-        // The oldest waiting brief the gate lets through decides the line's conversation; the other conversations' briefs stay untold for a later poll.
-        let conversation = self.waiting.iter().find(|brief| self.may_tell(brief)).map(|brief| brief.conversation.clone());
-        let (mut mine, rest): (Vec<Brief>, Vec<Brief>) = std::mem::take(&mut self.waiting).into_iter().partition(|brief| Some(&brief.conversation) == conversation.as_ref());
+    /// The served conversation's waiting briefs; at a switch, those of the oldest waiting brief's conversation, which then is served and starts
+    /// its own span: no turn of it inherits the old one's briefs.
+    fn tell(&mut self, switch: bool) -> Result<String> {
+        let conversation = if switch { self.waiting.first().map_or_else(|| self.serving.clone(), |brief| brief.conversation.clone()) } else { self.serving.clone() };
+        let (mut mine, rest): (Vec<Brief>, Vec<Brief>) = std::mem::take(&mut self.waiting).into_iter().partition(|brief| brief.conversation == conversation);
         self.waiting = rest;
         let text = inbox::render(&mine, &self.plan);
-        self.carried.extend(mine.iter().map(|brief| brief.id.clone()));
+        let ids: Vec<String> = mine.iter().map(|brief| brief.id.clone()).collect();
+        if conversation != self.serving {
+            self.serving = conversation;
+            self.echoed.clear();
+            self.last_answers = ids.clone();
+        }
+        self.carried.extend(ids);
         self.told.append(&mut mine);
-        self.conversation = conversation;
         Ok(text)
     }
 
@@ -782,16 +743,9 @@ impl SessionInbox for SelfInbox<'_> {
 
     fn line(&mut self, line: &str) {
         self.heard.hear(line);
-        self.note_task(line);
-        if matches!(read_usage(line), Usage::Request { .. }) && self.echoed.is_empty() {
-            self.briefless_open = true;
-        }
     }
 
     fn echoed(&mut self) {
-        if !self.carried.is_empty() {
-            self.briefless_open = false;
-        }
         self.echoed.append(&mut self.carried);
         self.flushing |= std::mem::take(&mut self.flush_written);
     }

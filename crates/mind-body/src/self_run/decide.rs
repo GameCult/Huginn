@@ -15,7 +15,13 @@
 //! replay echo increments `consumed`. The echo is the point the CLI takes a line
 //! into a request, folded into the running turn or queued for the next. What
 //! waits (the briefs, the flush ask) is coalesced into the next single write.
-//! Idle is derived: no turn open and no write outstanding.
+//! Idleness is decided here and nowhere else (ruling
+//! `eureka-body:ruling:self-serves-one-conversation-at-a-time`): no turn open,
+//! no write outstanding, no backgrounded task running and no task notification
+//! owed the turn the CLI will give it. The switch of the conversation a session
+//! serves, the cache-end flush and the yield all read that one definition. The
+//! task lines carry a `tool_use_id` for liveness only: they name a task that
+//! runs or owes its turn, never a conversation or an answer.
 //!
 //! The rules, in this order, while stdin is open and no signal is out:
 //! (1) a result that is blocked, or an error before any answer, closes stdin: no
@@ -36,7 +42,7 @@
 //! of an event; a deadline that is already due yields its action at the next
 //! event, and `next_deadline` says it is now.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -64,8 +70,16 @@ pub(super) enum Event {
     Echo,
     /// A turn ended. `ok`: not an error. `blocked`: the CLI refused the context. `ttl_1h`: the last request wrote its cache for an hour, else five minutes.
     Result { ok: bool, blocked: bool, ttl_1h: bool },
-    /// A poll of the mind: whether a brief waits to be told.
-    Inbox { pending: bool },
+    /// A poll of the mind: whether a brief of the conversation being served waits (`pending`), and whether a brief of another conversation does (`other`).
+    Inbox { pending: bool, other: bool },
+    /// The CLI began a turn (its `system` init line).
+    TurnBegan,
+    /// A background task started (`task_started`, `is_backgrounded` true), by its `tool_use_id`.
+    TaskStarted { id: String },
+    /// A task notification came (`task_notification`), by its `tool_use_id`.
+    TaskNotified { id: String },
+    /// The CLI replayed a task notification as a user line: it took that notification into a turn. Never one of our echoes.
+    NotificationTaken { id: String },
     /// `waitpid` returned: the child's exit code, none when a signal ended it.
     ChildExited(Option<i32>),
     StdoutEof,
@@ -80,8 +94,8 @@ pub(super) enum Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     None,
-    /// The one write: the waiting briefs and the flush ask, coalesced into one user line.
-    Write { tells: bool, flush: Option<Why> },
+    /// The one write: the waiting briefs and the flush ask, coalesced into one user line. `switch`: the briefs are another conversation's, which is written only at idle and never with the flush.
+    Write { tells: bool, switch: bool, flush: Option<Why> },
     CloseStdin,
     /// To the child's whole process group.
     Signal(Stop),
@@ -102,6 +116,24 @@ struct Flush {
     why: Why,
 }
 
+/// Who began the open turn: decided by the first of an echo (our line) and a request (the CLI's own).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TurnBy {
+    #[default]
+    Unknown,
+    Us,
+    Cli,
+}
+
+/// A task notification that has come and has not yet been given its turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Owed {
+    /// The turn count when it came: the turn open then (or the last one) is not the turn that settles it.
+    since: u32,
+    /// The CLI replayed it to the model: the result of the turn that did settles it.
+    taken: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct State {
     seen: HashSet<String>,
@@ -111,6 +143,15 @@ pub(super) struct State {
     pub(super) written: u32,
     pub(super) consumed: u32,
     turn_open: bool,
+    /// Turns opened so far, and who began the open (or last) one.
+    turns: u32,
+    turn_by: TurnBy,
+    /// Backgrounded tasks started and not yet notified, by `tool_use_id`: liveness only.
+    tasks: BTreeSet<String>,
+    /// Notifications of those tasks that have not yet been given their turn.
+    owed: BTreeMap<String, Owed>,
+    /// A brief of another conversation than the one served waits.
+    other: bool,
     /// An ok result has come: the session holds an answer worth its cache.
     answered_once: bool,
     last_result_at: Option<DateTime<Utc>>,
@@ -143,8 +184,23 @@ impl State {
         self.written > self.consumed
     }
 
+    /// The one definition of idleness: no turn open, no write outstanding, no backgrounded task running and no notification owed a turn.
     fn idle(&self) -> bool {
-        !self.turn_open && !self.outstanding()
+        !self.turn_open && !self.outstanding() && self.tasks.is_empty() && self.owed.is_empty()
+    }
+
+    /// A turn opens at the first turn line, echo or request while none is open; the first echo (ours) or request (the CLI's) says who began it.
+    fn open_turn(&mut self, by: Option<TurnBy>) {
+        if !self.turn_open {
+            self.turn_open = true;
+            self.turns += 1;
+            self.turn_by = TurnBy::Unknown;
+        }
+        if self.turn_by == TurnBy::Unknown
+            && let Some(by) = by
+        {
+            self.turn_by = by;
+        }
     }
 
     /// Seconds idle since the last result, none while a line or a turn is outstanding.
@@ -183,7 +239,7 @@ fn due(state: &State) -> Option<(DateTime<Utc>, Why)> {
         return None;
     }
     let rotation = state.cap.map(|(started, cap)| (started + Duration::seconds(cap.saturating_sub(ROTATE_MARGIN_S)), Why::Rotation));
-    let idle = (state.idle() && !state.inbox).then_some(state.last_result_at).flatten().map(|last| (last + Duration::seconds(state.ttl_s - TTL_MARGIN_S), Why::Idle));
+    let idle = (state.idle() && !state.inbox && !state.other).then_some(state.last_result_at).flatten().map(|last| (last + Duration::seconds(state.ttl_s - TTL_MARGIN_S), Why::Idle));
     [rotation, idle].into_iter().flatten().min_by_key(|(at, _)| *at)
 }
 
@@ -237,7 +293,9 @@ fn send(state: &mut State) -> Action {
         return Action::None;
     }
     let flush = state.flush.as_ref().map(|flush| flush.why);
-    if !state.inbox && flush.is_none() {
+    // The served conversation's briefs go whenever nothing is outstanding; another conversation's only at idle, with no flush asked: the switch.
+    let switch = !state.inbox && state.other && flush.is_none() && state.idle();
+    if !state.inbox && !switch && flush.is_none() {
         return Action::None;
     }
     state.written += 1;
@@ -245,7 +303,10 @@ fn send(state: &mut State) -> Action {
     if let Some(flush) = state.flush.as_mut() {
         flush.seq = Some(seq);
     }
-    Action::Write { tells: std::mem::take(&mut state.inbox), flush }
+    if switch {
+        state.other = false;
+    }
+    Action::Write { tells: std::mem::take(&mut state.inbox) || switch, switch, flush }
 }
 
 pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (State, Action) {
@@ -254,7 +315,24 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
     }
     let mut action = Action::None;
     match event {
+        Event::TurnBegan => state.open_turn(None),
+        Event::TaskStarted { id } => {
+            state.tasks.insert(id);
+        }
+        // A task that was not started backgrounded (a foreground or unknown one) owes nothing: there is nothing to wait on.
+        Event::TaskNotified { id } => {
+            if state.tasks.remove(&id) {
+                let since = state.turns;
+                state.owed.insert(id, Owed { since, taken: false });
+            }
+        }
+        Event::NotificationTaken { id } => {
+            if let Some(owed) = state.owed.get_mut(&id) {
+                owed.taken = true;
+            }
+        }
         Event::Request { id, prefix } => {
+            state.open_turn(Some(TurnBy::Cli));
             if state.seen.insert(id) {
                 state.requests += 1;
                 state.prefix = prefix;
@@ -271,7 +349,7 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
         }
         Event::Echo => {
             state.consumed += 1;
-            state.turn_open = true;
+            state.open_turn(Some(TurnBy::Us));
             let consumed = state.consumed;
             if let Some(flush) = state.flush.as_mut()
                 && flush.seq.is_some_and(|seq| consumed >= seq)
@@ -281,6 +359,10 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
         }
         Event::Result { ok, blocked, ttl_1h } => {
             state.turn_open = false;
+            // A notification is settled by the result of a turn that took it in, or of a turn the CLI began after it came. A turn our line
+            // began settles none it did not replay: if the CLI merged it, the hold lasts to the rotation flush.
+            let (turns, by) = (state.turns, state.turn_by);
+            state.owed.retain(|_, owed| !(owed.taken || (by != TurnBy::Us && owed.since < turns)));
             state.last_result_at = Some(now);
             state.ttl_s = if ttl_1h { TTL_1H_S } else { TTL_5M_S };
             let no_answer = !ok && !state.answered_once;
@@ -291,7 +373,10 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
                 action = Action::CloseStdin;
             }
         }
-        Event::Inbox { pending } => state.inbox = pending,
+        Event::Inbox { pending, other } => {
+            state.inbox = pending;
+            state.other = other;
+        }
         Event::Yield => state.yielding = true,
         Event::ChildExited(code) => {
             state.exited.get_or_insert((code, now));

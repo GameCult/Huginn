@@ -221,7 +221,7 @@ mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq , PartialO
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Cause { Own , FlushRequested , Signalled (Stop) , Unstoppable , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Eof , Exited (Option < i32 >) , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum SelfRunOutcome { NoRun , LeaseRefused { kind : LeaseRefusalKind } , Ended { cause : Cause , code : Option < i32 > , requests : u64 , prefix : u64 } , }
-mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 } , Echo , Result { ok : bool , blocked : bool } , Other , Unreadable , }
+mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Usage { Request { id : String , prefix : u64 } , Echo , TurnBegan , TaskStarted { id : String } , TaskNotified { id : String } , NotificationTaken { id : String } , Result { ok : bool , blocked : bool } , Other , Unreadable , }
 mind_body::self_run: const AGENT : & str
 mind_body::self_run: const CEILING_TOKENS : u64
 mind_body::self_run: const ESCALATE_AFTER_S : i64

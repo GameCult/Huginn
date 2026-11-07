@@ -324,6 +324,8 @@ fn claude_args_is_exactly_the_fixed_list_for_a_session() {
             "--setting-sources",
             "user",
             "--replay-user-messages",
+            "--disallowedTools",
+            "ScheduleWakeup,CronCreate",
         ]
     );
     // Those belong to the run measure or to the unit's managed settings.
@@ -520,7 +522,12 @@ fn read_usage_classifies_the_owners_real_records() {
     assert_eq!(read_usage(&not_replayed), Usage::Other);
     let subagent_echo = json!({"type": "user", "isReplay": true, "parent_tool_use_id": "toolu_1", "message": {"role": "user", "content": "a line"}}).to_string();
     assert_eq!(read_usage(&subagent_echo), Usage::Other, "a subagent's line is not ours");
-    assert_eq!(read_usage(&init_line()), Usage::Other);
+    assert_eq!(read_usage(&init_line()), Usage::TurnBegan);
+    let replayed = json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": "<task-notification>
+<task-id>t</task-id>
+<tool-use-id>toolu_7</tool-use-id>
+</task-notification>"}}).to_string();
+    assert_eq!(read_usage(&replayed), Usage::NotificationTaken { id: "toolu_7".into() }, "the CLI's replay of a notification is never our echo");
     assert_eq!(read_usage(&subagent("m", 5)), Usage::Other, "a subagent's request is not the main thread's");
     let mut no_id: Value = serde_json::from_str(&at("m", 5)).unwrap();
     no_id["message"].as_object_mut().unwrap().remove("id");
@@ -1389,7 +1396,7 @@ fn a_brief_derived_while_a_turn_runs_is_written_at_once_counted_at_its_echo_and_
     // The plan line is restated under every brief for the run's life, so it names the instant of the reading, never an age that stops being true.
     assert!(told[0].contains("read at 2026-10-29T20:33Z") && !told[0].contains(" ago"), "{}", told[0]);
     assert_eq!(ran.written().len(), 2, "the start message and one tell: {:?}", ran.written());
-    assert!(ran.out.contains("decision Write { tells: true, flush: None } prefix 10 ttl_s 0 idle_s working inbox true written 2 consumed 1\n"), "{}", ran.out);
+    assert!(ran.out.contains("decision Write { tells: true, switch: false, flush: None } prefix 10 ttl_s 0 idle_s working inbox true written 2 consumed 1\n"), "{}", ran.out);
     assert_eq!(ran.count(&Event::InputClosed), 0);
     // A result is not an answer: nothing closes the brief by its timing.
     assert!(resolutions_of(&mind, &brief_ref("b1")).is_empty());
@@ -1479,7 +1486,7 @@ fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_
     let flush_at = hour.events.iter().position(|event| matches!(event, Event::Wrote(line) if line.contains(FLUSH_MESSAGE))).unwrap();
     let closed_at = hour.events.iter().position(|event| *event == Event::InputClosed).unwrap();
     assert!(flush_at < closed_at && hour.count(&Event::InputClosed) == 1, "{:?}", hour.events);
-    assert!(hour.out.contains("decision Write { tells: false, flush: Some(Idle) } prefix 10 ttl_s 3600 idle_s 3540 inbox false written 2 consumed 1\n"), "{}", hour.out);
+    assert!(hour.out.contains("decision Write { tells: false, switch: false, flush: Some(Idle) } prefix 10 ttl_s 3600 idle_s 3540 inbox false written 2 consumed 1\n"), "{}", hour.out);
     assert!(hour.written().iter().any(|text| text.contains("nothing is waiting and its cache would lapse") && text.contains("Resolve each brief you answered")), "{:?}", hour.written());
     // Five minutes' cache: the flush at 240 s.
     let short = go(vec![Out(echo()), Out(five_minute_request("m1", 10)), Out(ok_result()), Idle(239), Idle(1), Out(echo()), Out(ok_result()), Idle(1)]);
@@ -1538,7 +1545,7 @@ mod live_session {
     use super::*;
 
     fn flush(why: Why) -> Do {
-        Do::Write { tells: false, flush: Some(why) }
+        Do::Write { tells: false, switch: false, flush: Some(why) }
     }
 
     /// One recorded line as the loop would hear it: a label for the stream, the decision's action.
@@ -1555,7 +1562,7 @@ mod live_session {
             let entry: Value = serde_json::from_str(entry).unwrap();
             let at = crate::testkit::at((entry["t"].as_f64().unwrap() * 1000.0) as i64);
             if let Some(text) = entry.get("want").and_then(Value::as_str) {
-                let (label, fact) = if text.starts_with(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true }) };
+                let (label, fact) = if text.starts_with(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true, other: false }) };
                 let (next, action) = decide(state, fact, at);
                 state = next;
                 trace.push((label.to_string(), action));
@@ -1568,6 +1575,10 @@ mod live_session {
             let (label, fact) = match read_usage(line) {
                 Usage::Request { id, prefix } => (format!("request:{prefix}"), Fact::Request { id, prefix }),
                 Usage::Echo => ("echo".to_string(), Fact::Echo),
+                Usage::TurnBegan => ("turn".to_string(), Fact::TurnBegan),
+                Usage::TaskStarted { id } => ("task".to_string(), Fact::TaskStarted { id }),
+                Usage::TaskNotified { id } => ("notified".to_string(), Fact::TaskNotified { id }),
+                Usage::NotificationTaken { id } => ("taken".to_string(), Fact::NotificationTaken { id }),
                 Usage::Result { ok, blocked } => (format!("result:{}", if blocked { "blocked" } else if ok { "ok" } else { "error" }), Fact::Result { ok, blocked, ttl_1h }),
                 Usage::Other | Usage::Unreadable => ("other".to_string(), Fact::Tick),
             };
@@ -1596,12 +1607,18 @@ mod live_session {
     const API_ERROR: [&str; 2] = [include_str!("claude-2.1.312-live-session-api-error-first.jsonl"), include_str!("claude-2.1.312-live-session-api-error-first-scrub.jsonl")];
     const BLOCKING: [&str; 2] = [include_str!("claude-2.1.312-live-session-blocking-limit.jsonl"), include_str!("claude-2.1.312-live-session-blocking-limit-scrub.jsonl")];
     const COMPACTION_OFF: [&str; 2] = [include_str!("claude-2.1.312-live-session-compaction-off-360k.jsonl"), include_str!("claude-2.1.312-live-session-compaction-off-360k-scrub.jsonl")];
+    const BG_IDLE: &str = include_str!("claude-2.1.312-live-session-bg-idle.jsonl");
+    const BG_FOLD: &str = include_str!("claude-2.1.312-live-session-bg-fold.jsonl");
+    const BG_OTHER: &str = include_str!("claude-2.1.312-live-session-bg-other.jsonl");
+    const BG_RACE: &str = include_str!("claude-2.1.312-live-session-bg-race.jsonl");
+    const BG_AGENT: &str = include_str!("claude-2.1.312-live-session-bg-agent.jsonl");
+    const BG_LATE: &str = include_str!("claude-2.1.312-live-session-bg-late.jsonl");
 
     #[test]
     fn a_line_written_during_a_tool_call_is_folded_one_result_and_its_echo_before_the_request_that_carries_it() {
         let trace = replay(FOLDED);
         // The tool_result's own user line is no echo: it is a foreign owner's array content.
-        assert_eq!(kinds(&trace), ["other", "echo", "request:10", "other", "other", "other", "echo", "request:10", "result:ok"]);
+        assert_eq!(kinds(&trace), ["turn", "echo", "request:10", "other", "notified", "other", "echo", "request:10", "result:ok"]);
         assert!(acted(&trace).is_empty(), "{:?}", acted(&trace));
     }
 
@@ -1609,7 +1626,7 @@ mod live_session {
     fn a_line_written_while_the_last_request_is_in_flight_is_queued_two_results_and_its_echo_after_the_first() {
         for stream in QUEUED {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:10", "result:ok", "other", "echo", "request:10", "result:ok"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "request:10", "result:ok", "turn", "echo", "request:10", "result:ok"]);
             assert!(acted(&trace).is_empty(), "{:?}", acted(&trace));
         }
     }
@@ -1633,10 +1650,10 @@ mod live_session {
             let (trace, state) = replay_state(stream);
             assert_eq!(
                 kinds(&trace),
-                ["other", "want", "want", "echo", "request:10", "result:ok", "other", "echo", "request:300000", "result:ok", "flush-asked", "other", "echo", "request:10", "result:ok"]
+                ["turn", "want", "want", "echo", "request:10", "result:ok", "turn", "echo", "request:300000", "result:ok", "flush-asked", "turn", "echo", "request:10", "result:ok"]
             );
             // Both briefs wait for the start message's echo and go as one line; the flush is written at the ceiling request; the result after its echo closes stdin.
-            assert_eq!(acted(&trace), vec![(3, Do::Write { tells: true, flush: None }), (8, flush(Why::Ceiling)), (14, Do::CloseStdin)]);
+            assert_eq!(acted(&trace), vec![(3, Do::Write { tells: true, switch: false, flush: None }), (8, flush(Why::Ceiling)), (14, Do::CloseStdin)]);
             assert_eq!((sent(stream), state.written, state.consumed), (3, 3, 3), "every line written has its own echo");
         }
     }
@@ -1644,7 +1661,7 @@ mod live_session {
     #[test]
     fn the_flush_folded_into_a_running_turn_is_answered_at_its_one_result() {
         let trace = replay(CEILING_FOLDED);
-        assert_eq!(kinds(&trace), ["other", "echo", "request:300000", "other", "other", "other", "echo", "request:10", "result:ok"]);
+        assert_eq!(kinds(&trace), ["turn", "echo", "request:300000", "other", "notified", "other", "echo", "request:10", "result:ok"]);
         assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (8, Do::CloseStdin)], "never a grace interrupt");
     }
 
@@ -1652,7 +1669,7 @@ mod live_session {
     fn the_flush_queued_behind_the_turn_that_reached_the_ceiling_is_answered_at_its_own_second_result() {
         for stream in CEILING_QUEUED {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:300000", "result:ok", "other", "echo", "request:10", "result:ok"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "request:300000", "result:ok", "turn", "echo", "request:10", "result:ok"]);
             // The first result ends the turn the flush was queued behind: it closes nothing.
             assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (7, Do::CloseStdin)], "never a grace interrupt");
         }
@@ -1662,7 +1679,7 @@ mod live_session {
     fn an_api_error_before_any_answer_closes_the_session_at_once_with_no_flush() {
         for stream in API_ERROR {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "other", "result:error"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "other", "result:error"]);
             assert_eq!(acted(&trace), vec![(3, Do::CloseStdin)]);
         }
     }
@@ -1671,7 +1688,7 @@ mod live_session {
     fn a_context_over_the_blocking_limit_is_a_blocked_result_that_closes_the_session() {
         for stream in BLOCKING {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:990000", "result:ok", "other", "echo", "other", "result:blocked"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "request:990000", "result:ok", "turn", "echo", "other", "result:blocked"]);
             assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (7, Do::CloseStdin)]);
         }
     }
@@ -1680,9 +1697,68 @@ mod live_session {
     fn with_compaction_off_a_request_at_360k_is_sent_and_answered_not_compacted_or_blocked() {
         for stream in COMPACTION_OFF {
             let trace = replay(stream);
-            assert_eq!(kinds(&trace), ["other", "echo", "request:360000", "result:ok", "other", "echo", "request:10", "result:ok"]);
+            assert_eq!(kinds(&trace), ["turn", "echo", "request:360000", "result:ok", "turn", "echo", "request:10", "result:ok"]);
             assert_eq!(acted(&trace), vec![(2, flush(Why::Ceiling)), (7, Do::CloseStdin)]);
         }
+    }
+
+    /// Whether the session is idle after each stream line, by the line's label.
+    fn idleness(jsonl: &str) -> Vec<(String, bool)> {
+        let lines: Vec<&str> = jsonl.lines().collect();
+        (1..=lines.len())
+            .filter_map(|n| {
+                let entry: Value = serde_json::from_str(lines[n - 1]).unwrap();
+                entry.get("line")?.as_str()?;
+                let (trace, state) = replay_state(&lines[..n].join("\n"));
+                Some((trace.last().unwrap().0.clone(), state.idle_s(crate::testkit::at(1_000_000)).is_some()))
+            })
+            .collect()
+    }
+
+    fn significant(trace: &[(String, Do)]) -> Vec<&str> {
+        kinds(trace).into_iter().filter(|kind| *kind != "other").collect()
+    }
+
+    #[test]
+    fn read_usage_reads_the_stream_lines_the_captures_hold() {
+        // A turn is begun by the init line, a backgrounded task by its start, its notification by its event, and the CLI's replay of that
+        // notification is taken, never our echo.
+        assert_eq!(significant(&replay(BG_FOLD)), ["turn", "echo", "request:10", "task", "notified", "request:10", "taken", "request:10", "result:ok"]);
+        assert_eq!(significant(&replay(BG_IDLE)), ["turn", "echo", "request:10", "task", "notified", "request:10", "result:ok", "turn", "request:10", "result:ok"]);
+        assert_eq!(significant(&replay(BG_RACE)), ["turn", "echo", "request:10", "task", "notified", "request:10", "result:ok", "turn", "request:10", "result:ok", "turn", "echo", "request:10", "result:ok"]);
+        assert_eq!(significant(&replay(BG_OTHER)), ["turn", "echo", "request:10", "task", "notified", "request:10", "result:ok", "turn", "request:10", "echo", "request:10", "result:ok"]);
+        let taken = BG_FOLD.lines().filter_map(|entry| serde_json::from_str::<Value>(entry).ok()?.get("line")?.as_str().map(read_usage)).find(|usage| matches!(usage, Usage::NotificationTaken { .. }));
+        assert_eq!(taken, Some(Usage::NotificationTaken { id: "toolu_0001".into() }));
+        // A task that was not started backgrounded is no task the session waits for.
+        let foreground = json!({"type": "system", "subtype": "task_started", "task_id": "t", "tool_use_id": "toolu_9", "is_backgrounded": false}).to_string();
+        assert_eq!(read_usage(&foreground), Usage::Other);
+    }
+
+    #[test]
+    fn a_background_agent_announces_itself_as_a_backgrounded_task_and_the_session_is_not_idle_until_its_notification_turn_ends() {
+        let usages: Vec<Usage> = BG_AGENT.lines().filter_map(|entry| serde_json::from_str::<Value>(entry).ok()?.get("line")?.as_str().map(read_usage)).collect();
+        let at = |wanted: Usage| usages.iter().position(|usage| *usage == wanted).unwrap_or_else(|| panic!("{wanted:?} is not in the capture"));
+        // The Agent call's own tool_use_id names the task at its start and at its notification.
+        assert!(at(Usage::TaskStarted { id: "toolu_0001".into() }) < at(Usage::TaskNotified { id: "toolu_0001".into() }));
+        let idle = idleness(BG_AGENT);
+        let labels: Vec<&str> = idle.iter().map(|(label, _)| label.as_str()).collect();
+        let idle_after = |label: &str, nth: usize| idle.iter().zip(&labels).filter(|(_, l)| **l == label).nth(nth).unwrap().0.1;
+        assert!(!idle_after("task", 0), "the task runs");
+        assert!(!idle_after("result:ok", 0), "the turn that started it ended, the task still runs");
+        assert!(!idle_after("notified", 0), "the notification is owed its turn");
+        assert!(idle_after("result:ok", 1), "the CLI's notification turn ended");
+    }
+
+    #[test]
+    fn a_background_task_that_ends_while_no_turn_is_open_gets_a_turn_the_cli_begins_and_the_session_is_idle_after_its_result() {
+        let idle = idleness(BG_LATE);
+        let labels: Vec<&str> = idle.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(significant(&replay(BG_LATE)), ["turn", "echo", "request:10", "task", "request:10", "result:ok", "notified", "turn", "request:10", "result:ok"]);
+        let idle_after = |label: &str, nth: usize| idle.iter().zip(&labels).filter(|(_, l)| **l == label).nth(nth).unwrap().0.1;
+        assert!(!idle_after("result:ok", 0), "idle but for the running task");
+        assert!(!idle_after("notified", 0), "owed its turn");
+        assert!(!idle_after("request:10", 2), "the CLI-begun turn runs");
+        assert!(idle_after("result:ok", 1));
     }
 }
 

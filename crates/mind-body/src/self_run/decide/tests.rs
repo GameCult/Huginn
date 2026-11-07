@@ -51,11 +51,11 @@ fn last(events: Vec<(Event, i64)>) -> Action {
 
 /// The one write with only the waiting briefs, and with only the flush.
 fn tells() -> Action {
-    Action::Write { tells: true, flush: None }
+    Action::Write { tells: true, switch: false, flush: None }
 }
 
 fn flush(why: Why) -> Action {
-    Action::Write { tells: false, flush: Some(why) }
+    Action::Write { tells: false, switch: false, flush: Some(why) }
 }
 
 fn delivered(how: Stop) -> Event {
@@ -87,16 +87,16 @@ fn the_flush_is_asked_once_at_the_ceiling_and_never_after_a_result_or_an_exit_or
 #[test]
 fn what_waits_is_one_write_sent_only_after_the_outstanding_writes_echo_the_briefs_and_the_flush_ask_together() {
     // The start message is not echoed: the ceiling asks the flush and a brief waits, and nothing is written.
-    let (state, actions) = run(vec![(req("a", CEILING_TOKENS), 1), (Event::Inbox { pending: true }, 2), (Event::Tick, 3)]);
+    let (state, actions) = run(vec![(req("a", CEILING_TOKENS), 1), (Event::Inbox { pending: true, other: false }, 2), (Event::Tick, 3)]);
     assert_eq!(actions, vec![Action::None, Action::None, Action::None]);
     assert_eq!(state.written, 1);
     // The echo frees the writer: one write carries both, and the flush is asked only once.
     let (state, action) = feed(state, Event::Echo, 4);
-    assert_eq!(action, Action::Write { tells: true, flush: Some(Why::Ceiling) });
+    assert_eq!(action, Action::Write { tells: true, switch: false, flush: Some(Why::Ceiling) });
     assert_eq!((state.written, state.consumed), (2, 1));
     assert_eq!(next_deadline(&state), Some(t(1 + GRACE)), "the grace runs from the ask");
     // Briefs alone: the first poll writes, the second finds that write outstanding and waits for its echo.
-    let (state, actions) = run(vec![(Event::Echo, 0), (Event::Inbox { pending: true }, 1), (Event::Inbox { pending: true }, 2)]);
+    let (state, actions) = run(vec![(Event::Echo, 0), (Event::Inbox { pending: true, other: false }, 1), (Event::Inbox { pending: true, other: false }, 2)]);
     assert_eq!(actions, vec![Action::None, tells(), Action::None]);
     assert_eq!(state.written, 2);
     let (state, action) = feed(state, Event::Echo, 3);
@@ -114,11 +114,11 @@ fn the_start_message_is_one_line_written_and_the_session_is_idle_only_when_every
     let (state, _) = run(vec![(Event::Echo, 0), (OK, 7)]);
     assert_eq!(state.idle_s(t(10)), Some(3));
     // A tell written after the result is outstanding until its echo: not idle.
-    let (state, actions) = run(vec![(Event::Echo, 0), (OK, 7), (Event::Inbox { pending: true }, 8)]);
+    let (state, actions) = run(vec![(Event::Echo, 0), (OK, 7), (Event::Inbox { pending: true, other: false }, 8)]);
     assert_eq!(actions[2], tells());
     assert_eq!(state.idle_s(t(9)), None);
     // The result of a turn with a queued line outstanding is not idleness.
-    let (state, _) = run(vec![(Event::Echo, 0), (Event::Inbox { pending: true }, 1), (OK, 2)]);
+    let (state, _) = run(vec![(Event::Echo, 0), (Event::Inbox { pending: true, other: false }, 1), (OK, 2)]);
     assert_eq!(state.idle_s(t(3)), None, "the tell written at 1 has not been echoed");
 }
 
@@ -154,7 +154,7 @@ fn an_error_result_before_any_answer_or_a_blocked_one_closes_stdin_at_once_with_
 
 #[test]
 fn an_error_after_an_ok_answer_ends_the_turn_and_not_the_session() {
-    let (state, actions) = run(vec![(Event::Echo, 0), (OK, 1), (Event::Inbox { pending: true }, 2), (Event::Echo, 3), (FAILED, 4)]);
+    let (state, actions) = run(vec![(Event::Echo, 0), (OK, 1), (Event::Inbox { pending: true, other: false }, 2), (Event::Echo, 3), (FAILED, 4)]);
     assert_eq!(actions[4], Action::None);
     assert!(next_deadline(&state).is_some(), "the session waits on its cache still");
     assert_eq!(state.idle_s(t(5)), Some(1));
@@ -163,19 +163,19 @@ fn an_error_after_an_ok_answer_ends_the_turn_and_not_the_session() {
 #[test]
 fn a_brief_waiting_is_told_mid_turn_or_idle_once_and_never_after_the_flush() {
     // Mid-turn: written at once.
-    let (state, actions) = run(vec![(Event::Echo, 0), (Event::Inbox { pending: true }, 1)]);
+    let (state, actions) = run(vec![(Event::Echo, 0), (Event::Inbox { pending: true, other: false }, 1)]);
     assert_eq!(actions[1], tells());
     assert_eq!(state.written, 2);
     // The same poll answered again with nothing new is no second tell.
-    assert_eq!(feed(state.clone(), Event::Inbox { pending: false }, 2).1, Action::None);
+    assert_eq!(feed(state.clone(), Event::Inbox { pending: false, other: false }, 2).1, Action::None);
     assert_eq!(feed(state, Event::Tick, 3).1, Action::None);
     // Idle: the same.
     let (_, actions) = idle_at(5);
     assert!(actions.iter().all(|action| *action == Action::None));
-    assert_eq!(feed(idle_at(5).0, Event::Inbox { pending: true }, 6).1, tells());
+    assert_eq!(feed(idle_at(5).0, Event::Inbox { pending: true, other: false }, 6).1, tells());
     // After the flush no line is written, a brief waiting or not.
     let (state, _) = run(vec![(Event::Echo, 0), (req("a", CEILING_TOKENS), 0)]);
-    assert_eq!(feed(state.clone(), Event::Inbox { pending: true }, 1).1, Action::None);
+    assert_eq!(feed(state.clone(), Event::Inbox { pending: true, other: false }, 1).1, Action::None);
     assert_eq!(feed(state, Event::Tick, 2).1, Action::None);
 }
 
@@ -190,7 +190,7 @@ fn an_idle_session_asks_the_flush_where_the_cache_would_lapse_and_a_waiting_brie
     let (short, _) = run(vec![(Event::Echo, 0), (req("a", 10), 1), (OK_SHORT, 10)]);
     assert_eq!(next_deadline(&short), Some(t(10 + TTL_5M_S - TTL_MARGIN_S)));
     // A brief waiting is told, not flushed, and the lapse is not the end while a line is outstanding.
-    let (waiting, _) = run_from(idle_at(10).0, vec![(Event::Inbox { pending: true }, 11)]);
+    let (waiting, _) = run_from(idle_at(10).0, vec![(Event::Inbox { pending: true, other: false }, 11)]);
     assert_eq!(feed(waiting, Event::Tick, lapse + 100).1, Action::None);
     // The idle flush closes after its own answer.
     let (_, actions) = run_from(idle_at(10).0, vec![(Event::Tick, lapse), (Event::Echo, lapse + 1), (req("b", 11), lapse + 1), (OK, lapse + 2)]);
@@ -397,10 +397,11 @@ enum Sym {
     Failed,
     Waiting,
     Nothing,
+    Other,
     Late,
 }
 
-const SYMBOLS: [Sym; 8] = [Sym::Request, Sym::Ceiling, Sym::Echo, Sym::Ok, Sym::Failed, Sym::Waiting, Sym::Nothing, Sym::Late];
+const SYMBOLS: [Sym; 9] = [Sym::Request, Sym::Ceiling, Sym::Echo, Sym::Ok, Sym::Failed, Sym::Waiting, Sym::Nothing, Sym::Other, Sym::Late];
 
 /// Plays the symbols and asserts, from the actions alone, the write accounting
 /// and the single-writer invariants.
@@ -425,15 +426,17 @@ fn play(symbols: &[Sym]) {
             }
             Sym::Ok => OK,
             Sym::Failed => FAILED,
-            Sym::Waiting => Event::Inbox { pending: true },
-            Sym::Nothing => Event::Inbox { pending: false },
+            Sym::Waiting => Event::Inbox { pending: true, other: false },
+            Sym::Nothing => Event::Inbox { pending: false, other: false },
+            Sym::Other => other_waits(),
             Sym::Late => Event::Tick,
         };
         let (next, action) = feed(state, event, now);
         state = next;
         match action {
-            Action::Write { tells: told, flush } => {
+            Action::Write { tells: told, switch, flush } => {
                 assert!(!flushed && !closed, "a write after the flush or the close: {symbols:?}");
+                assert!(!(switch && flush.is_some()), "a switch carried the flush: {symbols:?}");
                 writes += 1;
                 tells += u32::from(told);
                 if flush.is_some() {
@@ -500,7 +503,7 @@ fn nothing_is_written_to_a_session_after_it_was_told_to_yield() {
     let (state, _) = idle_at(5);
     let (state, closed) = feed(state, Event::Yield, 5);
     assert_eq!(closed, Action::CloseStdin);
-    assert_eq!(feed(state, Event::Inbox { pending: true }, 6).1, Action::None, "closed: text that waits is told to the next session");
+    assert_eq!(feed(state, Event::Inbox { pending: true, other: false }, 6).1, Action::None, "closed: text that waits is told to the next session");
 }
 
 #[test]
@@ -509,4 +512,110 @@ fn a_flush_already_written_ends_the_session_by_itself_and_a_yield_does_not_cut_i
     assert_eq!(actions[1], flush(Why::Ceiling), "the ceiling's flush is written at once");
     let (_, action) = feed(state, Event::Yield, 3);
     assert_eq!(action, Action::None, "the flush's own answer closes stdin");
+}
+
+fn started(id: &str) -> Event {
+    Event::TaskStarted { id: id.to_string() }
+}
+
+fn notified(id: &str) -> Event {
+    Event::TaskNotified { id: id.to_string() }
+}
+
+fn taken(id: &str) -> Event {
+    Event::NotificationTaken { id: id.to_string() }
+}
+
+fn switches() -> Action {
+    Action::Write { tells: true, switch: true, flush: None }
+}
+
+fn other_waits() -> Event {
+    Event::Inbox { pending: false, other: true }
+}
+
+/// The start message echoed and answered: a Self turn of ours is over, at second 2.
+fn answered_start() -> Vec<(Event, i64)> {
+    vec![(Event::TurnBegan, 0), (Event::Echo, 0), (req("a", 10), 1), (OK, 2)]
+}
+
+#[test]
+fn a_turn_opens_at_the_first_turn_line_echo_or_request_and_the_first_echo_or_request_says_who_began_it() {
+    let by = |events: Vec<(Event, i64)>| {
+        let (state, _) = run(events);
+        (state.turns, state.turn_by)
+    };
+    assert_eq!(by(vec![(Event::TurnBegan, 0)]), (1, TurnBy::Unknown), "an init line opens a turn nobody has claimed");
+    assert_eq!(by(vec![(Event::TurnBegan, 0), (Event::Echo, 0)]), (1, TurnBy::Us), "an echo first: our line began it");
+    assert_eq!(by(vec![(Event::TurnBegan, 0), (req("a", 10), 0)]), (1, TurnBy::Cli), "a request first: the CLI began it");
+    assert_eq!(by(vec![(Event::TurnBegan, 0), (req("a", 10), 0), (Event::Echo, 1)]), (1, TurnBy::Cli), "a folded echo does not change who began it");
+    assert_eq!(by(vec![(Event::TurnBegan, 0), (Event::Echo, 0), (req("a", 10), 1), (Event::Echo, 2)]), (1, TurnBy::Us));
+    assert_eq!(by(vec![(Event::Echo, 0), (req("a", 10), 1)]), (1, TurnBy::Us), "no init line: the echo opens it");
+    assert_eq!(by([answered_start(), vec![(Event::TurnBegan, 3), (req("b", 10), 3)]].concat()), (2, TurnBy::Cli), "the CLI's own turn after a result");
+    assert_eq!(by([answered_start(), vec![(Event::TurnBegan, 3), (Event::Echo, 3)]].concat()), (2, TurnBy::Us));
+}
+
+#[test]
+fn a_session_is_idle_only_with_no_turn_no_write_no_running_task_and_no_notification_owed_its_turn() {
+    let idle = |events: Vec<(Event, i64)>| run(events).0.idle_s(t(1_000)).is_some();
+    assert!(!idle(vec![(Event::TurnBegan, 0)]), "a turn is open from its init line");
+    assert!(idle(answered_start()));
+    // A backgrounded task running keeps it busy after the result of the turn that started it.
+    assert!(!idle([answered_start(), vec![(started("t"), 2)]].concat()));
+    let with_task = |rest: Vec<(Event, i64)>| [vec![(Event::TurnBegan, 0), (Event::Echo, 0), (req("a", 10), 1), (started("t"), 1), (OK, 2)], rest].concat();
+    assert!(!idle(with_task(vec![])), "the task still runs");
+    // Its notification is owed a turn: not idle, until the CLI's own turn ends.
+    assert!(!idle(with_task(vec![(notified("t"), 3)])), "owed its turn");
+    assert!(!idle(with_task(vec![(notified("t"), 3), (Event::TurnBegan, 3), (req("b", 10), 3)])), "the notification turn runs");
+    assert!(idle(with_task(vec![(notified("t"), 3), (Event::TurnBegan, 3), (req("b", 10), 3), (OK, 4)])), "the CLI's turn ended");
+    // A notification of a task never started in the background owes nothing, and neither does a repeat of one already given its turn.
+    assert!(idle([answered_start(), vec![(notified("unseen"), 3)]].concat()));
+    assert!(idle(with_task(vec![(notified("t"), 3), (Event::TurnBegan, 3), (req("b", 10), 3), (OK, 4), (notified("t"), 5)])));
+    // A notification that arrives inside the turn that started the task is not settled by that turn's result.
+    let inside = vec![(Event::TurnBegan, 0), (Event::Echo, 0), (req("a", 10), 1), (started("t"), 1), (notified("t"), 1), (OK, 2)];
+    assert!(!idle(inside.clone()), "the result of the starting turn leaves the notification owed");
+    // A notification that arrives inside a turn the CLI began is not settled by that turn's own result: its own turn is still to come.
+    let nested = vec![(Event::TurnBegan, 0), (Event::Echo, 0), (req("a", 10), 1), (started("t"), 1), (started("u"), 1), (notified("t"), 1), (OK, 2), (Event::TurnBegan, 3), (req("b", 10), 3), (notified("u"), 3), (OK, 4)];
+    assert!(!idle(nested.clone()), "the first notification is settled by the turn the CLI began, the second arrived inside it");
+    assert!(idle([nested, vec![(Event::TurnBegan, 5), (req("c", 10), 5), (OK, 6)]].concat()), "the CLI's next turn settles it");
+    // A turn our line began settles none it did not replay: the hold lasts to the rotation flush.
+    assert!(!idle([inside.clone(), vec![(Event::TurnBegan, 3), (Event::Echo, 3), (req("b", 10), 3), (OK, 4)]].concat()));
+    // The replay of the notification settles it with the result of the turn that took it, ours or the CLI's.
+    assert!(idle([inside.clone(), vec![(Event::TurnBegan, 3), (Event::Echo, 3), (taken("t"), 3), (req("b", 10), 3), (OK, 4)]].concat()));
+    assert!(idle([inside, vec![(Event::TurnBegan, 3), (req("b", 10), 3), (OK, 4)]].concat()), "a turn the CLI began after it came");
+}
+
+#[test]
+fn another_conversations_brief_is_written_only_at_idle_with_the_switch_and_never_with_the_flush() {
+    let after = |events: Vec<(Event, i64)>| last([events, vec![(other_waits(), 5)]].concat());
+    assert_eq!(after(answered_start()), switches());
+    assert_eq!(after(vec![(Event::TurnBegan, 0), (Event::Echo, 0)]), Action::None, "a turn runs");
+    assert_eq!(after(vec![(Event::TurnBegan, 0), (Event::Echo, 0), (req("a", 10), 1), (started("t"), 1), (OK, 2)]), Action::None, "a task runs");
+    assert_eq!(after(vec![(Event::TurnBegan, 0), (Event::Echo, 0), (req("a", 10), 1), (started("t"), 1), (notified("t"), 1), (OK, 2)]), Action::None, "a notification is owed");
+    assert_eq!(after(vec![(Event::TurnBegan, 0)]), Action::None);
+    assert_eq!(last(vec![(Event::TurnBegan, 0), (other_waits(), 1)]), Action::None, "the start message is not echoed");
+    // The served conversation's brief goes at any time with nothing outstanding, and wins over a waiting other: no switch.
+    let (state, _) = run(vec![(Event::TurnBegan, 0), (Event::Echo, 0), (req("a", 10), 1)]);
+    assert_eq!(feed(state, Event::Inbox { pending: true, other: true }, 2).1, tells(), "mid-turn: the served conversation's brief, not a switch");
+    assert_eq!(last([answered_start(), vec![(Event::Inbox { pending: true, other: true }, 5)]].concat()), tells());
+    // At idle with the flush asked, the write is the flush alone.
+    let rotation = i64::try_from(CAP_S).unwrap() - ROTATE_MARGIN_S;
+    assert_eq!(last([answered_start(), vec![(other_waits(), rotation)]].concat()), flush(Why::Rotation), "the rotation flush never switches");
+    // A switch takes the other waiting brief with it: the next poll finds it told.
+    let (state, _) = run([answered_start(), vec![(other_waits(), 5)]].concat());
+    assert!(!state.other && state.written == 2);
+}
+
+#[test]
+fn the_cache_end_flush_waits_for_a_running_background_task_and_its_timer_runs_from_the_notification_turns_result() {
+    let ttl = TTL_1H_S - TTL_MARGIN_S;
+    let running = vec![(Event::TurnBegan, 0), (Event::Echo, 0), (req("a", 10), 1), (started("t"), 1), (OK, 2)];
+    assert_eq!(last([running.clone(), vec![(Event::Tick, 2 + ttl + 100)]].concat()), Action::None, "a task runs: the cache end does not close the session");
+    let notified_turn = vec![(notified("t"), 3), (Event::TurnBegan, 3), (req("b", 10), 3), (OK, 4000)];
+    let (state, _) = run([running.clone(), notified_turn.clone()].concat());
+    assert_eq!(next_deadline(&state), Some(t(4000 + ttl).min(t(i64::try_from(CAP_S).unwrap() - ROTATE_MARGIN_S))));
+    assert_eq!(last([running.clone(), notified_turn.clone(), vec![(Event::Tick, 2 + ttl + 100)]].concat()), Action::None, "the timer runs from the notification turn's result, not the first");
+    assert_eq!(last([running, notified_turn, vec![(Event::Tick, 4000 + ttl)]].concat()), flush(Why::Idle));
+    // Another conversation's waiting brief is no reason to end the session at its cache's end either: it is switched to at idle.
+    assert_eq!(last([answered_start(), vec![(other_waits(), 2 + ttl)]].concat()), switches());
 }

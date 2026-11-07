@@ -5988,7 +5988,7 @@ fn a_stale_refusal_is_her_next_input_and_costs_no_refusal() {
 
         assert!(inbox.poll().unwrap().pending, "the interrupting message has reached the organ");
         let expected = inbox.tell_line(std::slice::from_ref(&answer), None, "").input;
-        let line = inbox.tell().unwrap();
+        let line = inbox.tell(false).unwrap();
         assert!(line.starts_with("Your message to swarm was not sent: newer messages reached that room first, below. Send it, change it, or drop it; your answer goes out as you give it."), "{line}");
         assert!(line.contains("Nothing else in that reply was kept: repeat any remember, settle or start_self_run you still want."));
         assert!(!line.contains("Already sent"), "{line}");
@@ -6018,12 +6018,12 @@ fn a_second_revision_waits_for_the_first_and_her_final_answer_spends_it() {
         inbox.echoed();
         arrives(&rig, &second);
         assert!(inbox.poll().unwrap().pending);
-        inbox.tell().unwrap();
+        inbox.tell(false).unwrap();
         inbox.echoed();
         arrives(&rig, &newest);
         inbox.result(&reply_result(&says(&[("swarm", "the stairs are mine")])), true, false).unwrap();
         assert!(inbox.poll().unwrap().pending);
-        inbox.tell().unwrap();
+        inbox.tell(false).unwrap();
         assert!(inbox.written.as_ref().is_some_and(|written| written.revision), "a revision line is in flight");
         inbox.result(&reply_result(&says(&[("swarm", "the cellar too")])), true, false).unwrap();
         inbox.poll().unwrap();
@@ -6051,12 +6051,12 @@ fn eight_stale_refusals_in_a_row_in_different_batches_never_end_the_session() {
         for round in 0..8u64 {
             arrives(&rig, &delivery(round * 10 + 1, "swarm", "@op:chat", &format!("question {round}")));
             assert!(inbox.poll().unwrap().pending);
-            inbox.tell().unwrap();
+            inbox.tell(false).unwrap();
             inbox.echoed();
             arrives(&rig, &delivery(round * 10 + 2, "swarm", "@libby:chat", &format!("answer {round}")));
             inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
             assert!(inbox.poll().unwrap().pending);
-            inbox.tell().unwrap();
+            inbox.tell(false).unwrap();
             inbox.echoed();
             inbox.result(&reply_result(&says(&[("swarm", "revised")])), true, false).unwrap();
             assert_eq!((inbox.progress.failure, inbox.progress.refused.is_none()), (None, true), "round {round}");
@@ -6078,7 +6078,7 @@ fn a_result_answering_a_line_in_flight_is_not_the_revision() {
         arrives(&rig, &answer);
         inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
         assert!(inbox.poll().unwrap().pending);
-        inbox.tell().unwrap();
+        inbox.tell(false).unwrap();
         // The revision line is written; a result for the line before it arrives first, its echo not yet.
         inbox.result(&reply_result(&says(&[("usage", "an aside")])), true, false).unwrap();
         assert!(rig.chat.sent.borrow()[1].basis.is_some(), "only the echo of the revision line makes a reply final");
@@ -6099,7 +6099,7 @@ fn held_comes_from_echoes_not_writes() {
         inbox.echoed();
         arrives(&rig, &second);
         assert!(inbox.poll().unwrap().pending);
-        inbox.tell().unwrap(); // written, never echoed: she has not seen it
+        inbox.tell(false).unwrap(); // written, never echoed: she has not seen it
         inbox.result(&reply_result(&says(&[("swarm", "hi")])), true, false).unwrap();
         let basis = rig.chat.sent.borrow()[0].basis.clone().unwrap();
         assert_eq!(basis.seen_event_id, Some(first.event_id.clone()), "a line written and not echoed is not in the basis");
@@ -6145,7 +6145,7 @@ fn a_stale_say_leaves_earlier_says_standing_and_a_revision_never_reuses_a_landed
 
         assert!(!inbox.poll().unwrap().pending, "the awaited message has not arrived");
         assert!(inbox.poll().unwrap().pending, "a silent ear delays her two polls at most and never strands her");
-        let line = inbox.tell().unwrap();
+        let line = inbox.tell(false).unwrap();
         assert!(line.contains("Already sent: usage."), "{line}");
         inbox.echoed();
         inbox.result(&reply_result(&says(&[("swarm", "new words")])), true, false).unwrap();
@@ -6191,12 +6191,12 @@ fn an_undecodable_revision_stays_final() {
         arrives(&rig, &answer);
         inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
         assert!(inbox.poll().unwrap().pending);
-        inbox.tell().unwrap();
+        inbox.tell(false).unwrap();
         inbox.echoed();
         inbox.result(&json!({"type": "result", "is_error": false, "structured_output": {"nonsense": 1}}).to_string(), true, false).unwrap();
         assert_eq!(inbox.progress.refused.map(|refused| refused.refusals), Some(1), "an undecodable reply is a refusal, as ever");
         assert!(inbox.poll().unwrap().pending);
-        inbox.tell().unwrap();
+        inbox.tell(false).unwrap();
         inbox.echoed();
         inbox.result(&reply_result(&says(&[("swarm", "second try")])), true, false).unwrap();
         assert_eq!(rig.chat.sent.borrow().last().unwrap().basis, None);
@@ -6239,7 +6239,7 @@ fn eight_sessions_one_operator_question() {
     for (index, inbox) in inboxes.iter_mut().enumerate().skip(1) {
         *rig.chat.speaker.borrow_mut() = ids[index].clone();
         assert!(inbox.poll().unwrap().pending, "mind {index}");
-        assert!(inbox.tell().unwrap().contains("mind 0 answers"));
+        assert!(inbox.tell(false).unwrap().contains("mind 0 answers"));
         inbox.echoed();
         inbox.result(&reply_result(&says(&[])), true, false).unwrap();
     }
@@ -6279,7 +6279,7 @@ fn an_addressed_message_is_told_at_once_and_an_unaddressed_one_waits_her_rank() 
             rig.clock.now.set(t0 + wait_ms);
             assert!(inbox.poll().unwrap().pending, "{name}");
             let expected = inbox.tell_line(std::slice::from_ref(&message), None, "").input;
-            assert_eq!(inbox.tell().unwrap(), expected, "{name}: the tell is the message and its envelope, unchanged by the wait");
+            assert_eq!(inbox.tell(false).unwrap(), expected, "{name}: the tell is the message and its envelope, unchanged by the wait");
         });
     }
 }
@@ -6304,7 +6304,7 @@ fn the_wait_is_bounded_under_a_stream_of_messages() {
             }
         }
         assert_eq!(told_at, Some(16), "the first message's clock is its own: newer messages do not move it");
-        let line = inbox.tell().unwrap();
+        let line = inbox.tell(false).unwrap();
         assert!(line.contains("the first") && line.contains("more 15"), "{line}");
     });
 }
@@ -6363,7 +6363,7 @@ fn a_flush_written_beside_a_revision_line_still_makes_the_reply_final() {
         arrives(&rig, &answer);
         inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
         assert!(inbox.poll().unwrap().pending);
-        inbox.tell().unwrap();
+        inbox.tell(false).unwrap();
         inbox.flush_text(Why::Idle);
         inbox.echoed();
         inbox.result(&reply_result(&says(&[("swarm", "revised")])), true, false).unwrap();
@@ -6481,7 +6481,7 @@ fn a_start_opens_a_conversation_for_a_reply_alone_at_most_once() {
 }
 
 fn route(id: &str, at_unix_ms: u64, conversation: Conversation) -> Route {
-    Route { id: id.into(), ordinal: at_unix_ms, at_unix_ms, conversation, origin: None, pointer: false }
+    Route { id: id.into(), ordinal: at_unix_ms, at_unix_ms, conversation, origin: None }
 }
 
 fn at_ms(delivery: ChatDelivery, at_unix_ms: u64) -> ChatDelivery {
@@ -6523,8 +6523,8 @@ fn the_oldest_waiting_thing_decides_the_next_session() {
 }
 
 #[test]
-fn a_reply_to_a_public_brief_or_a_brief_with_no_origin_is_told_in_the_public_session_and_a_reply_to_no_brief_in_none() {
-    assert_eq!(reply_conversation(&[]), None);
+fn a_reply_to_a_public_brief_a_brief_with_no_origin_or_no_brief_is_told_in_the_public_session() {
+    assert_eq!(reply_conversation(&[]), Some(Conversation::Public));
     for origin in [None, Some(MemoryOrigin::Wake), Some(MemoryOrigin::SelfRun { run: "r".into() }), Some(MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec![] })] {
         assert_eq!(reply_conversation(&[origin]), Some(Conversation::Public));
     }
@@ -6539,21 +6539,14 @@ fn a_reply_to_a_public_brief_or_a_brief_with_no_origin_is_told_in_the_public_ses
     for process in processes {
         let all = process.concat();
         let public = all.contains("public asks about oak");
-        for words in ["old-brief words", "public-brief words"] {
+        for words in ["old-brief words", "public-brief words", "no-brief words"] {
             assert_eq!(all.contains(words), public, "{words} is told in the public session only: {all}");
         }
-        assert!(!all.contains("no-brief words"), "a reply the Self could not attribute puts no text in any session: {all}");
     }
 }
 
-/// The inputs of the sessions that were told a pointer, and every input the model was given.
-fn pointed_inputs(rig: &Rig) -> (Vec<String>, Vec<String>) {
-    let all: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
-    (all.iter().filter(|input| input.contains("unplaced=true")).cloned().collect(), all)
-}
-
 #[test]
-fn a_reply_whose_briefs_name_two_conversations_is_a_text_free_pointer_in_the_public_session_only() {
+fn a_reply_whose_briefs_name_two_conversations_is_told_in_no_session_and_stays_in_force() {
     assert_eq!(reply_conversation(&[Some(dm_origin(AQUA_DM, "@a:chat")), Some(dm_origin(LIBBY_DM, "@l:chat"))]), None);
     assert_eq!(reply_conversation(&[Some(dm_origin(AQUA_DM, "@a:chat")), None]), None);
     let pending = vec![direct(1, AQUA_DM, "@aqua:chat", AQUA_ASK), direct(2, LIBBY_DM, "@libby:chat", "libby asks about cedar"), delivery(3, "swarm", "@m:chat", "public asks about oak")];
@@ -6561,28 +6554,9 @@ fn a_reply_whose_briefs_name_two_conversations_is_a_text_free_pointer_in_the_pub
     rig.mind.committed(briefs_in_every_room());
     rig.mind.committed(vec![self_reply_to("r-both", &["ask-aqua", "ask-libby"], "both-rooms words")]);
     assert_eq!(failure_of(rig.go()), None);
-    let (pointed, all) = pointed_inputs(&rig);
-    assert_eq!(pointed.len(), 1, "one pointer, in one session: {all:?}");
-    assert!(pointed[0].contains(&reply_id("r-both")), "{}", pointed[0]);
-    assert!(!pointed[0].contains(AQUA_ASK) && !pointed[0].contains("libby asks about cedar"), "no direct message in the pointer's session: {}", pointed[0]);
-    assert!(!all.iter().any(|input| input.contains("both-rooms words")), "no reply text reaches any line");
-    // The Persona reads it by id: the reply document holds the words the line does not.
-    let PipelineDocument::Reply(reply) = rig.mind.view(K::Reply, &reply_id("r-both")).unwrap().document else { panic!("a reply") };
-    assert_eq!(reply.text.0, "both-rooms words");
-    assert!(!reply_in_force(&rig.mind, &reply_id("r-both")).unwrap(), "heard once, it no longer re-pages on every read");
-}
-
-#[test]
-fn a_reply_that_answers_no_brief_is_a_text_free_pointer_with_its_id() {
-    let rig = Rig::new(vec![delivery(1, "swarm", "@m:chat", "public asks about oak")], &[says(&[]), says(&[])]);
-    rig.mind.committed(briefs_in_every_room());
-    rig.mind.committed(vec![self_reply_to("r-none", &[], "stranded words")]);
-    assert_eq!(failure_of(rig.go()), None);
-    let (pointed, all) = pointed_inputs(&rig);
-    assert_eq!(pointed.len(), 1, "{all:?}");
-    assert!(pointed[0].contains(&reply_id("r-none")) && pointed[0].contains("could not place"), "{}", pointed[0]);
-    assert!(!all.iter().any(|input| input.contains("stranded words")));
-    assert!(!reply_in_force(&rig.mind, &reply_id("r-none")).unwrap());
+    let all: Vec<String> = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect();
+    assert!(!all.iter().any(|input| input.contains("both-rooms words") || input.contains("unplaced")), "no session is told a reply of two conversations, nor a pointer to it: {all:?}");
+    assert!(reply_in_force(&rig.mind, &reply_id("r-both")).unwrap(), "told in no session, it stays in force");
 }
 
 #[test]
