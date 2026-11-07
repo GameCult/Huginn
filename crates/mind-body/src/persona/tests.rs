@@ -4283,11 +4283,13 @@ struct Timeline<'a> {
     /// How many of the next keyed in-force reads of a reply fail, and how many of the next resolutions of a reply are refused by the port.
     keyed_fail: Rc<Cell<u32>>,
     admit_fail: Rc<Cell<u32>>,
+    /// The resolutions of a reply the port was asked to take, refused ones too.
+    admits: Rc<Cell<u32>>,
 }
 
 impl<'a> Timeline<'a> {
     fn over(mind: &'a TestMind) -> Self {
-        Self { mind, doing: Rc::default(), reads: Rc::default(), keyed_fail: Rc::default(), admit_fail: Rc::default() }
+        Self { mind, doing: Rc::default(), reads: Rc::default(), keyed_fail: Rc::default(), admit_fail: Rc::default(), admits: Rc::default() }
     }
 }
 
@@ -4317,6 +4319,7 @@ impl MindPort for Timeline<'_> {
 
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<AdmissionOutcome> {
         let resolves_a_reply = documents.iter().any(|document| matches!(document, PipelineDocument::Resolution(resolution) if resolution.subject.kind == K::Reply));
+        self.admits.set(self.admits.get() + u32::from(resolves_a_reply));
         if resolves_a_reply && self.admit_fail.get() > 0 {
             self.admit_fail.set(self.admit_fail.get() - 1);
             anyhow::bail!("the mind did not take it");
@@ -4406,11 +4409,17 @@ fn resolutions_of(rig: &Rig, subject: &str) -> usize {
 /// the port refuses, is retried at the next result without telling her the reply again.
 #[test]
 fn an_answered_reply_is_told_once_and_resolved_once_when_the_read_or_the_admit_fails() {
-    for flaw in ["keyed read", "admit"] {
+    for flaw in ["keyed read", "admit", "both"] {
         let rig = Rig::new(vec![operator_says(1, "hello")], &[]);
         let mut act = her_self_asked();
         act.push(self_reply("self-r-r1", "The shaders are reviewed."));
-        let lines = a_session_with(&rig, vec![act], |timeline| if flaw == "admit" { timeline.admit_fail.set(1) } else { timeline.keyed_fail.set(1) });
+        let admits = RefCell::new(Rc::<Cell<u32>>::default());
+        let lines = a_session_with(&rig, vec![act], |timeline| {
+            timeline.admit_fail.set(u32::from(flaw != "keyed read"));
+            timeline.keyed_fail.set(u32::from(flaw != "admit"));
+            *admits.borrow_mut() = timeline.admits.clone();
+        });
+        assert_eq!(admits.borrow().get(), 2, "{flaw}: tried, then retried once, and never again once the reply is out of force");
         assert_eq!(all_replies(&lines).len(), 1, "{flaw}: told once: {lines:?}");
         assert!(lines.len() >= 3, "{flaw}: lines followed her answer: {lines:?}");
         assert_eq!(outcome_of(&rig, &reply_id("self-r-r1")), heard_outcome(), "{flaw}");
@@ -6514,8 +6523,8 @@ fn the_oldest_waiting_thing_decides_the_next_session() {
 }
 
 #[test]
-fn a_reply_to_no_brief_a_public_brief_or_a_brief_with_no_origin_is_told_in_the_public_session() {
-    assert_eq!(reply_conversation(&[]), Some(Conversation::Public));
+fn a_reply_to_a_public_brief_or_a_brief_with_no_origin_is_told_in_the_public_session_and_a_reply_to_no_brief_in_none() {
+    assert_eq!(reply_conversation(&[]), None);
     for origin in [None, Some(MemoryOrigin::Wake), Some(MemoryOrigin::SelfRun { run: "r".into() }), Some(MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec![] })] {
         assert_eq!(reply_conversation(&[origin]), Some(Conversation::Public));
     }
@@ -6530,9 +6539,10 @@ fn a_reply_to_no_brief_a_public_brief_or_a_brief_with_no_origin_is_told_in_the_p
     for process in processes {
         let all = process.concat();
         let public = all.contains("public asks about oak");
-        for words in ["old-brief words", "no-brief words", "public-brief words"] {
+        for words in ["old-brief words", "public-brief words"] {
             assert_eq!(all.contains(words), public, "{words} is told in the public session only: {all}");
         }
+        assert!(!all.contains("no-brief words"), "a reply the Self could not attribute is told in no session: {all}");
     }
 }
 
@@ -6646,4 +6656,38 @@ fn an_open_briefs_first_line_entry_is_marked_with_its_origin_as_a_memory_is() {
     assert!(entry("ask-aqua").contains("privately, with \"aqua\""), "{}", entry("ask-aqua"));
     assert!(entry("ask-public").contains("in #swarm, with"), "{}", entry("ask-public"));
     assert!(!entry("ask-old").contains("privately") && !entry("ask-old").contains(" in #"), "{}", entry("ask-old"));
+}
+
+/// A session near its cap that served one conversation does not open another process for the next: the margin ends the start.
+#[test]
+fn a_start_with_no_cap_left_after_its_first_process_opens_no_second() {
+    let rig = Rig::new(vec![direct(1, AQUA_DM, "@aqua:chat", AQUA_ASK), delivery(2, "swarm", "@m:chat", "public asks about oak")], &[says(&[]), says(&[]), says(&[])]);
+    rig.cap.set(u64::try_from(ROTATE_MARGIN_S).unwrap());
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(rig.model.spawns.borrow().len(), 1, "the second conversation waits for the next start");
+}
+
+/// An idle session whose only own work is a retell, a ready revision or a notice tells it, though another conversation's reply waits.
+#[test]
+fn an_idle_session_with_only_its_own_retell_revision_or_notice_work_does_not_yield_for_another_conversations_reply() {
+    for own in ["a retell", "a ready revision", "a notice", "nothing"] {
+        let rig = Rig::new(vec![], &[]);
+        rig.clock.step.set(0);
+        rig.mind.committed(briefs_in_every_room());
+        rig.mind.committed(vec![self_reply_to("r-aqua", &["ask-aqua"], AQUA_WORDS)]);
+        let (sandbox, scratch) = (rig.sandbox(), rig.scratch());
+        let organs = rig.organs(&sandbox, &scratch);
+        let (control, swarm, run) = (FileSource::new(rig.store()), FileSource::new(rig.swarm_store()), rig.the_run());
+        let config = config();
+        let mut progress = Progress::default();
+        let mut inbox = PersonaInbox::new(&organs, &control, &swarm, &config, &run, &mut progress, session_of(&config, vec![]), 0, String::new());
+        match own {
+            "a retell" => inbox.retell = Some(Retell { batch: vec![], why: Failure::Session, refusals: 0, revision: false }),
+            "a ready revision" => inbox.revision = Some(Revision { ready: true, ..Revision::default() }),
+            "a notice" => inbox.notices.push("notice role=organ at=1 text=\"x\"\n".into()),
+            _ => {}
+        }
+        let polled = inbox.poll().unwrap();
+        assert_eq!((polled.pending, polled.yield_now), (own != "nothing", own == "nothing"), "{own}");
+    }
 }
