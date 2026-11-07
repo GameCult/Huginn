@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Document kinds, as the mouth names them.
 pub const PENDING_REQUEST: &str = "gamecult.persona.chat_pending_request.v1";
-pub const PENDING: &str = "gamecult.persona.chat_pending.v1";
+pub const PENDING: &str = "gamecult.persona.chat_pending.v2";
+/// The pending answer of a mouth that has no image field yet: its deliveries decode with `image: None`.
+pub const PENDING_V1: &str = "gamecult.persona.chat_pending.v1";
 pub const ACK: &str = "gamecult.persona.chat_ack.v1";
 pub const SEND_REQUEST: &str = "gamecult.persona.chat_send_request.v2";
 pub const SEND_RECEIPT: &str = "gamecult.persona.chat_send_receipt.v2";
@@ -48,6 +50,20 @@ pub struct ChatDelivery {
     pub mentions: Vec<String>,
     /// Whether the room is a direct message.
     pub is_direct: bool,
+    /// The attachment the mouth stored for an image event. Tuple index 11; a v1 record ends at 10 and reads as none.
+    #[serde(default)]
+    pub image: Option<ChatImage>,
+}
+
+/// An image the mouth fetched and stored, by reference: never its bytes. The path is relative to the Persona's image
+/// store, `<hex sha256 of the room id>/<hex sha256 of the bytes>[.<ext>]`, and every field is re-checked against the
+/// file before it reaches a model (`chat_image`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatImage {
+    pub path: String,
+    pub mime: String,
+    pub size: u64,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

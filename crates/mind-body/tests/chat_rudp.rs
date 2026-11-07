@@ -13,11 +13,12 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cultnet_rs::{CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions};
-use mind_body::chat_client::{self, ACK, Chat, ChatAck, ChatPending, ChatPendingRequest, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, SEND_RECEIPT, SEND_REQUEST};
+use mind_body::chat_client::{self, ACK, Chat, ChatAck, ChatPending, ChatPendingRequest, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, SEND_RECEIPT, SEND_REQUEST};
 use mind_body::chat_rudp::{RudpChat, connection_id};
 
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
-const PENDING_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending.v1.msgpack");
+const PENDING_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending.v1.msgpack");
+const PENDING_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v3/gamecult.persona.chat_pending.v2.image.msgpack");
 const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
 const SEND_RECEIPT_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.sent.msgpack");
 const SEND_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.nil-basis.msgpack");
@@ -65,8 +66,17 @@ fn mouth(key: &str) -> Mouth {
     mouth_at(key, "127.0.0.1:0")
 }
 
+/// A mouth that has no image field yet: it answers a pending request in the v1 kind.
+fn legacy_mouth(key: &str) -> Mouth {
+    serve(key, "127.0.0.1:0", PENDING_V1, PENDING_V1_BYTES)
+}
+
 /// The same mouth on a chosen address: a restart binds the address the old one held.
 fn mouth_at(key: &str, bind: &str) -> Mouth {
+    serve(key, bind, PENDING, PENDING_BYTES)
+}
+
+fn serve(key: &str, bind: &str, pending_kind: &'static str, pending_bytes: &'static [u8]) -> Mouth {
     let socket = UdpSocket::bind(bind).unwrap();
     socket.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
     let address = socket.local_addr().unwrap();
@@ -84,7 +94,7 @@ fn mouth_at(key: &str, bind: &str) -> Mouth {
             log.lock().unwrap().push((document.schema_id.clone(), document.payload.clone()));
             let for_eureka = |persona: &str| persona == "eureka";
             let reply = match document.schema_id.as_str() {
-                PENDING_REQUEST if for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => Some(answer(PENDING, "eureka", PENDING_BYTES)),
+                PENDING_REQUEST if for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => Some(answer(pending_kind, "eureka", pending_bytes)),
                 SEND_REQUEST if for_eureka(&chat_client::decode::<ChatSendRequest>(&document.payload).unwrap().persona) => Some(answer(SEND_RECEIPT, &document.record_key, SEND_RECEIPT_BYTES)),
                 _ => None,
             };
@@ -176,4 +186,16 @@ fn a_send_that_timed_out_is_not_repeated_by_the_client() {
     chat.ack(1).unwrap();
     let sends: Vec<_> = mouth.seen.lock().unwrap().iter().filter(|(kind, _)| kind == SEND_REQUEST).map(|(_, payload)| chat_client::decode::<ChatSendRequest>(payload).unwrap().request_id).collect();
     assert_eq!(sends, ["r-1"], "the send reached the mouth once; a repeat is the caller's, under the same request id");
+}
+
+#[test]
+fn a_v1_mouths_pending_answer_still_reads_with_no_image_and_a_v2_one_carries_it() {
+    let legacy = legacy_mouth(KEY);
+    let old = client(&legacy, KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap();
+    assert_eq!(old.len(), 1);
+    assert!(old[0].image.is_none());
+    let current = mouth(KEY);
+    let new = client(&current, KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap();
+    assert_eq!(new[0].image.as_ref().map(|image| (image.mime.as_str(), image.size)), Some(("image/png", 2048)));
+    assert_eq!(new[0].text, old[0].text, "the same message, with its attachment");
 }

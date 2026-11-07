@@ -18,6 +18,7 @@ mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub e
 mind_body::chat_client: const ACK : & str
 mind_body::chat_client: const PENDING : & str
 mind_body::chat_client: const PENDING_REQUEST : & str
+mind_body::chat_client: const PENDING_V1 : & str
 mind_body::chat_client: const REFUSAL : & str
 mind_body::chat_client: const SEND_RECEIPT : & str
 mind_body::chat_client: const SEND_REQUEST : & str
@@ -29,7 +30,8 @@ mind_body::chat_client: impl Serialize for Refusal
 mind_body::chat_client: impl< 'de > Deserialize < 'de > for Refusal
 mind_body::chat_client: pub trait Chat { fn pending (& self , after_seq : u64) -> Result < Vec < ChatDelivery > > ; fn send (& self , request : & ChatSendRequest) -> Result < ChatSendReceipt > ; fn ack (& self , through_seq : u64) -> Result < () > ; }
 mind_body::chat_client: struct ChatAck # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, through_seq: u64]
-mind_body::chat_client: struct ChatDelivery # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seq: u64, room_alias: String, room_id: String, event_id: String, sender: String, sender_display: String, text: String, at_unix_ms: u64, context: Vec < ContextLine >, mentions: Vec < String >, is_direct: bool]
+mind_body::chat_client: struct ChatDelivery # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seq: u64, room_alias: String, room_id: String, event_id: String, sender: String, sender_display: String, text: String, at_unix_ms: u64, context: Vec < ContextLine >, mentions: Vec < String >, is_direct: bool, image: Option < ChatImage >]
+mind_body::chat_client: struct ChatImage # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[path: String, mime: String, size: u64, sha256: String]
 mind_body::chat_client: struct ChatPending # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, deliveries: Vec < ChatDelivery >]
 mind_body::chat_client: struct ChatPendingRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, after_seq: u64]
 mind_body::chat_client: struct ChatRefusal # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, refusal: Refusal]
@@ -37,6 +39,7 @@ mind_body::chat_client: struct ChatSendReceipt # [derive (Clone , Debug , Partia
 mind_body::chat_client: struct ChatSendRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, persona: String, room_alias: String, text: String, basis: Option < SendBasis >]
 mind_body::chat_client: struct ContextLine # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[sender: String, text: String, at_unix_ms: u64]
 mind_body::chat_client: struct SendBasis # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seen_event_id: Option < String >, since_unix_ms: u64]
+mind_body::chat_image: impl Skip
 mind_body::chat_rudp: fn connection_id (key_file_text : & str) -> u32
 mind_body::chat_rudp: impl Chat for RudpChat
 mind_body::chat_rudp: impl Drop for RudpChat
@@ -160,6 +163,7 @@ mind_body::persona: const AGENT : & str
 mind_body::persona: const DOCTRINE_MAX_BYTES : usize
 mind_body::persona: const ENV_CONFIG_SEED : & str
 mind_body::persona: const ENV_DOCTRINE : & str
+mind_body::persona: const ENV_IMAGE_STORE : & str
 mind_body::persona: const ENV_MINDS : & str
 mind_body::persona: const ENV_MODEL : & str
 mind_body::persona: const ENV_OPERATOR : & str
@@ -192,7 +196,7 @@ mind_body::persona: impl< C : ControlSource , S : ControlSource > SessionInbox f
 mind_body::persona: pub trait PersonaState { fn instructions (& self) -> Result < String > ; }
 mind_body::persona: pub trait Trace { fn record (& self , trace : & TurnTrace) -> Result < () > ; }
 mind_body::persona: pub use model_connector :: PlanQuota ;
-mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[rooms: Vec < String >, operators: Vec < String >, minds: Vec < String >, own_sender: String, model: String, doctrine: Vec < PathBuf >]
+mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[rooms: Vec < String >, operators: Vec < String >, minds: Vec < String >, own_sender: String, model: String, doctrine: Vec < PathBuf >, image_store: Option < PathBuf >]
 mind_body::persona: struct FileTrace  pub-fields[]
 mind_body::persona: struct HuginnPersona  pub-fields[]
 mind_body::persona: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, chat: & 'a dyn Chat, persona: & 'a dyn PersonaState, trace: & 'a dyn Trace, heartbeat: Option < & 'a dyn HeartbeatView >, lender: & 'a dyn Lender, spawner: & 'a dyn Spawner, run_cap_s: u64, sandbox: & 'a Path, scratch: & 'a Path]

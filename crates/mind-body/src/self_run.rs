@@ -376,6 +376,8 @@ pub fn read_usage(line: &str) -> Usage {
                     .and_then(|(_, rest)| rest.split_once("</task-id>"))
                     .map_or(Usage::Other, |(id, _)| Usage::NotificationTaken { id: id.to_string() }),
                 Some(_) => Usage::Echo,
+                // A line with images replays as blocks: a text block first is still our line.
+                None if event.get("message").and_then(|message| message.get("content")).and_then(Value::as_array).and_then(|blocks| blocks.first()).and_then(|block| block.get("type")).and_then(Value::as_str) == Some("text") => Usage::Echo,
                 None => Usage::Other,
             }
         }

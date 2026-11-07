@@ -48,6 +48,11 @@
 //! step per rank
 //! (ruling `eureka-body:ruling:unaddressed-tell-stagger-ruled`), so the Minds read each other before they answer.
 //!
+//! A delivery may carry an image the mouth stored (`ChatDelivery::image`, a reference, never bytes). `attachment_lines` loads it from her
+//! image store (`MIND_PERSONA_IMAGE_STORE`) through `chat_image::load`, which re-checks path, size, hash and magic bytes, and the line
+//! to her session carries it as a base64 image block after its text, with one `attachment role=organ` line saying whether it is
+//! attached or not shown and why.
+//!
 //! The reply is decoded, never scanned: text that is not one `PersonaReply` is a refused
 //! result. Chat, persona state and trace are ports; the chat transport is `chat_rudp::RudpChat`,
 //! wired by the binary. Inside her sandbox her session has a shell and the web (`--tools`);
@@ -78,6 +83,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::address::{Addressee, Name, addresses, localpart, project_names};
+use crate::chat_image::{self, Image, MAX_PER_LINE};
 use crate::chat_client::{Chat, ChatDelivery, ChatSendRequest, ContextLine, Refusal, SendBasis};
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
@@ -131,6 +137,8 @@ pub const ENV_RUN_CAP: &str = "MIND_PERSONA_RUN_CAP_S";
 pub const ENV_CONFIG_SEED: &str = "MIND_PERSONA_CONFIG_SEED";
 /// Colon-separated absolute paths of the doctrine files whose text leads every process's instructions, in order.
 pub const ENV_DOCTRINE: &str = "MIND_PERSONA_DOCTRINE";
+/// The absolute path of her image store (`Config::image_store`).
+pub const ENV_IMAGE_STORE: &str = "MIND_PERSONA_IMAGE_STORE";
 /// The most doctrine text, in bytes, one process's instructions may carry.
 pub const DOCTRINE_MAX_BYTES: usize = 96 * 1024;
 /// How many of her latest runs a turn's input lists.
@@ -185,6 +193,8 @@ pub struct Config {
     pub model: String,
     /// Doctrine files, read at every process start and put ahead of her persona, in this order. Empty is legal.
     pub doctrine: Vec<PathBuf>,
+    /// Her image store: where the mouth keeps the images it fetched for her, one directory per room. None shows no image.
+    pub image_store: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,7 +245,7 @@ impl Config {
             if items.iter().any(String::is_empty) { Err(anyhow!("{usage}")) } else { Ok(items) }
         };
         let rooms = list(rooms)?;
-        let config = Self { rooms, operators: list(operators)?, minds: list(minds)?, own_sender: own.ok_or_else(|| anyhow!("{usage}"))?, model: String::new(), doctrine: Vec::new() };
+        let config = Self { rooms, operators: list(operators)?, minds: list(minds)?, own_sender: own.ok_or_else(|| anyhow!("{usage}"))?, model: String::new(), doctrine: Vec::new(), image_store: None };
         Ok((config, rest))
     }
 
@@ -261,6 +271,12 @@ impl Config {
             if config.doctrine.iter().any(|path| !path.is_absolute()) {
                 bail!("{ENV_DOCTRINE} names a path that is not absolute");
             }
+        }
+        if let Some(path) = lookup(ENV_IMAGE_STORE).filter(|value| !value.is_empty()) {
+            if !Path::new(&path).is_absolute() {
+                bail!("{ENV_IMAGE_STORE} is not an absolute path");
+            }
+            config.image_store = Some(PathBuf::from(path));
         }
         Ok((config, rest))
     }
@@ -1110,6 +1126,8 @@ struct Rendered {
     shown: Shown,
     told: Vec<LineKey>,
     replies: Vec<HeardReply>,
+    /// The images its attachment lines say are attached, in their order.
+    images: Vec<Image>,
 }
 
 /// One result of her Self session, as her mind holds it: what the reply line shows and what resolving it needs.
@@ -1196,6 +1214,8 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     told_replies: BTreeSet<String>,
     /// Her in-force replies read and not yet told, oldest first.
     waiting_replies: Vec<HeardReply>,
+    /// The images of the line last written, until `drive` takes them into its user message.
+    images: Vec<Image>,
     /// The replies the CLI took in since the last result: that result is what answers them.
     echoed_replies: Vec<HeardReply>,
     /// Replies she answered whose resolution the mind has not yet shown took, with the follow-up her answer started: retried at each
@@ -1255,6 +1275,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
             first_seen: BTreeMap::new(),
             told_replies: BTreeSet::new(),
             waiting_replies: Vec::new(),
+            images: Vec::new(),
             echoed_replies: Vec::new(),
             answered_replies: Vec::new(),
             reply_read_due_ms: 0,
@@ -1297,8 +1318,9 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         let people = people_she_may_name(self.config, deliveries, &earlier, &shown);
         let started_self_today = started_self_today(organs.mind, &instance, organs.clock.now()).unwrap_or(true);
         let (heard, replies) = self.take_reply_lines();
-        let input = render_input(self.config, started_self_today, &format!("{heard}{}", message_lines(self.config, &self.addressee, &self.addressing, deliveries, &earlier)), note, &history, &goals.text, &wear, &recall::render(&recalled), &format!("{}\n\n{tempo}", self.plan), &people);
-        Ok(Rendered { input, shown: Shown { people, open: goals.open }, told: lines_told(deliveries, &earlier), replies })
+        let (attached, images) = attachment_lines(self.config, deliveries);
+        let input = render_input(self.config, started_self_today, &format!("{heard}{}{attached}", message_lines(self.config, &self.addressee, &self.addressing, deliveries, &earlier)), note, &history, &goals.text, &wear, &recall::render(&recalled), &format!("{}\n\n{tempo}", self.plan), &people);
+        Ok(Rendered { input, shown: Shown { people, open: goals.open }, told: lines_told(deliveries, &earlier), replies, images })
     }
 
     /// A later line: the messages, a refused batch's note before them, the organ's lines (her Self's replies, the notices of her repos), and
@@ -1306,13 +1328,15 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
     /// The organ's lines come first: they are not messages and answer to no delivery.
     fn tell_line(&self, deliveries: &[ChatDelivery], note: Option<&str>, notices: &str) -> Rendered {
         let earlier = self.earlier(deliveries);
-        let lines = format!("{notices}{}", message_lines(self.config, &self.addressee, &self.addressing, deliveries, &earlier));
+        let (attached, images) = attachment_lines(self.config, deliveries);
+        let lines = format!("{notices}{}{attached}", message_lines(self.config, &self.addressee, &self.addressing, deliveries, &earlier));
         let input = note.map_or_else(|| lines.clone(), |note| format!("{note}\n\n{lines}"));
-        Rendered { input, shown: Shown { people: people_she_may_name(self.config, deliveries, &earlier, &[]), open: Vec::new() }, told: lines_told(deliveries, &earlier), replies: Vec::new() }
+        Rendered { input, shown: Shown { people: people_she_may_name(self.config, deliveries, &earlier, &[]), open: Vec::new() }, told: lines_told(deliveries, &earlier), replies: Vec::new(), images }
     }
 
     /// Notes what a rendered line carries, as it goes to the child.
-    fn write(&mut self, batch: Vec<ChatDelivery>, Rendered { input, shown, told, replies }: Rendered, refusals: u32) -> String {
+    fn write(&mut self, batch: Vec<ChatDelivery>, Rendered { input, shown, told, replies, images }: Rendered, refusals: u32) -> String {
+        self.images = images;
         if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
             self.told_through = self.told_through.max(through);
         }
@@ -1524,6 +1548,10 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         let mut line = self.tell_line(&batch, None, &notices);
         line.replies = replies;
         Ok(self.write(batch, line, 0))
+    }
+
+    fn images(&mut self) -> Vec<Image> {
+        std::mem::take(&mut self.images)
     }
 
     fn flush_text(&mut self, why: Why) -> String {
@@ -3146,6 +3174,27 @@ fn render_input(config: &Config, started_self_today: bool, messages: &str, note:
     out.push_str(TRAFFIC_QUESTION);
     out.push('\n');
     out
+}
+
+/// One line per delivery that carries an image, after the messages: the organ's word whether it is attached to the line (the
+/// next image block, in order) or not shown, and why. Every reason is the organ's fixed words, never the sender's. The images
+/// are loaded here and nowhere else (`chat_image::load`).
+fn attachment_lines(config: &Config, deliveries: &[ChatDelivery]) -> (String, Vec<Image>) {
+    let mut out = String::new();
+    let mut images = Vec::new();
+    for delivery in deliveries {
+        let Some(reference) = &delivery.image else { continue };
+        let loaded = if images.len() >= MAX_PER_LINE { Err(chat_image::Skip::TooMany) } else { chat_image::load(config.image_store.as_deref(), &delivery.room_id, reference) };
+        let status = match loaded {
+            Ok(image) => {
+                images.push(image);
+                format!("status=attached image={}", images.len())
+            }
+            Err(skip) => format!("status=not_shown reason={}", quoted(skip.reason())),
+        };
+        out.push_str(&format!("attachment role=organ room={} event={} at={} {status}\n", quoted(&delivery.room_alias), quoted(&delivery.event_id), at_text(delivery.at_unix_ms)));
+    }
+    (out, images)
 }
 
 /// A batch as framed lines: each message, after the `earlier` lines it brings.

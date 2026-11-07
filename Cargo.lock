@@ -1146,6 +1146,7 @@ name = "mind-body"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "cultcache-rs 0.2.0",
  "cultnet-rs 0.1.0",

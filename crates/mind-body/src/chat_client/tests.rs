@@ -7,7 +7,9 @@ use super::*;
 
 const REFUSAL_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_refusal.v1.msgpack");
 const ACK_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
-const PENDING_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_pending.v1.msgpack");
+const PENDING_V1_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_pending.v1.msgpack");
+const PENDING_NO_IMAGE_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v3/gamecult.persona.chat_pending.v2.no-image.msgpack");
+const PENDING_IMAGE_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v3/gamecult.persona.chat_pending.v2.image.msgpack");
 const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
 const SENT_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.sent.msgpack");
 const ROOM_MOVED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.room-moved.msgpack");
@@ -27,9 +29,8 @@ fn the_pending_request_and_ack_are_the_mouths_bytes() {
     golden(ACK_BYTES, &ChatAck { persona: "eureka".into(), through_seq: 7 });
 }
 
-#[test]
-fn a_pending_answer_is_the_mouths_bytes_with_its_context() {
-    let delivery = ChatDelivery {
+fn delivery(image: Option<ChatImage>) -> ChatDelivery {
+    ChatDelivery {
         seq: 7,
         room_alias: "#operator:gamecult.org".into(),
         room_id: "!abc:gamecult.org".into(),
@@ -41,8 +42,46 @@ fn a_pending_answer_is_the_mouths_bytes_with_its_context() {
         context: vec![ContextLine { sender: "@eureka:gamecult.org".into(), text: "earlier".into(), at_unix_ms: 1_761_699_999_000 }],
         mentions: vec!["@eureka:gamecult.org".into(), "@nova:gamecult.org".into()],
         is_direct: true,
-    };
-    golden(PENDING_BYTES, &ChatPending { persona: "eureka".into(), deliveries: vec![delivery] });
+        image,
+    }
+}
+
+fn image() -> ChatImage {
+    let sha256 = "ab".repeat(32);
+    ChatImage { path: format!("{}/{sha256}.png", "cd".repeat(32)), mime: "image/png".into(), size: 2048, sha256 }
+}
+
+#[test]
+fn a_v1_pending_answer_still_decodes_with_no_image() {
+    let pending: ChatPending = decode(PENDING_V1_BYTES).unwrap();
+    assert_eq!(pending, ChatPending { persona: "eureka".into(), deliveries: vec![delivery(None)] });
+    assert_eq!(PENDING_V1_BYTES[0] & 0xf0, 0x90, "a positional tuple");
+}
+
+#[test]
+fn a_v2_pending_answer_is_the_golden_bytes_with_the_image_at_tuple_index_11() {
+    golden(PENDING_NO_IMAGE_BYTES, &ChatPending { persona: "eureka".into(), deliveries: vec![delivery(None)] });
+    golden(PENDING_IMAGE_BYTES, &ChatPending { persona: "eureka".into(), deliveries: vec![delivery(Some(image()))] });
+    // Index 11 of the delivery tuple, by position: 12 elements, the last an array of [path, mime, size, sha256].
+    let value = shape::delivery_tuple(PENDING_IMAGE_BYTES);
+    assert_eq!(value, shape::Probe { delivery_len: 12, image_len: Some(4) });
+    assert_eq!(shape::delivery_tuple(PENDING_NO_IMAGE_BYTES), shape::Probe { delivery_len: 12, image_len: None });
+}
+
+/// Reads the tuple's shape from the raw bytes, independent of the serde types under test.
+mod shape {
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct Probe {
+        pub delivery_len: usize,
+        pub image_len: Option<usize>,
+    }
+
+    pub fn delivery_tuple(bytes: &[u8]) -> Probe {
+        let value: serde_json::Value = rmp_serde::from_slice(bytes).unwrap();
+        let delivery = &value[1][0];
+        let array = delivery.as_array().expect("a delivery is a tuple");
+        Probe { delivery_len: array.len(), image_len: array[11].as_array().map(Vec::len) }
+    }
 }
 
 #[test]
@@ -58,4 +97,13 @@ fn a_send_and_its_receipt_are_the_mouths_bytes() {
     golden(SINCE_ONLY_BYTES, &request(Some(SendBasis { seen_event_id: None, since_unix_ms: 1_793_698_425_998 })));
     golden(SENT_BYTES, &ChatSendReceipt { request_id: "req-1".into(), event_id: Some("$sent".into()), refusal: None, newer: vec![] });
     golden(ROOM_MOVED_BYTES, &ChatSendReceipt { request_id: "req-1".into(), event_id: None, refusal: Some(Refusal::RoomMoved), newer: vec!["$a".into(), "$b".into()] });
+}
+
+/// Writes the v2 fixtures; run once with `WRITE_CHAT_FIXTURES=1` when the wire changes.
+#[test]
+#[ignore = "regenerates the golden fixtures"]
+fn write_the_v2_pending_fixtures() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/persona-chat-v3/");
+    std::fs::write(format!("{dir}gamecult.persona.chat_pending.v2.no-image.msgpack"), encode(&ChatPending { persona: "eureka".into(), deliveries: vec![delivery(None)] }).unwrap()).unwrap();
+    std::fs::write(format!("{dir}gamecult.persona.chat_pending.v2.image.msgpack"), encode(&ChatPending { persona: "eureka".into(), deliveries: vec![delivery(Some(image()))] }).unwrap()).unwrap();
 }

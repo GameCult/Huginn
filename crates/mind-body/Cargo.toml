@@ -32,6 +32,7 @@ publish.workspace = true
 # `uuid`'s v5 makes a Self run's session id derivable from the run's id.
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 chrono = { version = "0.4.44", features = ["serde"] }
 cultcache-rs.workspace = true
 cultnet-rs.workspace = true
