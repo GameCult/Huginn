@@ -13,10 +13,12 @@
 //! 1 the mind said no (a refusal, a conflict, an absent document). Troubles go
 //! to stderr as `<Code>: <detail>`: 2 the call is wrong, 3 Unavailable, 4 no
 //! answer and a retry cannot help, 5 the read-back after a committed admission
-//! differs from what was sent.
+//! differs from what was sent, 6 `admit` held the batch once (`admit_hold`).
 
+mod admit_hold;
 mod config;
 mod door;
+mod near;
 mod recipes;
 mod render;
 mod schema;
@@ -52,7 +54,7 @@ const ADMIT_HELP: &str = "\
 The file is a JSON array of 1 to 64 documents, each {\"kind\": <kind>, \"value\": {...}}, or - for stdin; one document object alone is a batch of one. \
 `huginn schema` lists the kinds and `huginn schema <kind>` prints a value's JSON Schema. \
 Every key the schema does not know is refused (exit 2) with its path; nothing is sent. \
-After Committed or AlreadyAdmitted the batch is read back and compared with what was sent: `read back <n> equal`, or exit 5 with the ids and field paths that differ.";
+After Committed or AlreadyAdmitted the batch is read back and compared with what was sent: `read back <n> equal`, or exit 5 with the ids and field paths that differ. A batch whose rulings or questions have in-force neighbours is held once: exit 6, the neighbours printed with a token, nothing sent. Run the same command with --seen <token> to admit it; a batch or --agent that changed needs a new token (a wrong one is exit 2).";
 
 #[derive(Parser, Debug)]
 #[command(name = "huginn", about = "Huginn's mind: whoami, view, query, recipes, persona, admit, schema", arg_required_else_help = true)]
@@ -114,6 +116,9 @@ enum Command {
         /// The admitting session.
         #[arg(long)]
         session: String,
+        /// The token of the hold this exact batch got: admit it.
+        #[arg(long)]
+        seen: Option<String>,
         /// The documents file, or - for stdin.
         file: String,
     },
@@ -226,7 +231,7 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
             let ask = recipe.ask()?;
             query(settings, door::selection_value(&ask.selection)?, ask.semantic, ask.page.cursor, ask.page.documents)
         }
-        Command::Admit { faculty, agent, session, file } => admit(settings, faculty, agent, session, &file),
+        Command::Admit { faculty, agent, session, seen, file } => admit(settings, faculty, agent, session, seen, &file),
         Command::Persona { command: PersonaCommand::Get } => persona_get(settings),
         Command::Persona { command: PersonaCommand::Put { faculty, agent, session, expected_updated_at, file } } => {
             persona_put(settings, faculty, agent, session, expected_updated_at, &file)
@@ -414,10 +419,37 @@ fn show(page: &PipelineSelectionPage) {
     say(format_args!("matched {} as_of {} next {}", page.matched, page.as_of, page.next.as_deref().unwrap_or("-")));
 }
 
-fn admit(settings: &Settings, faculty: Faculty, agent: String, session: String, file: &str) -> Result<u8, Trouble> {
+fn admit(
+    settings: &Settings,
+    faculty: Faculty,
+    agent: String,
+    session: String,
+    seen: Option<String>,
+    file: &str,
+) -> Result<u8, Trouble> {
     let documents = door::documents(&door::file_or_stdin(file)?)?;
     if documents.is_empty() || documents.len() > BATCH_MAX {
         return Err(Trouble::invalid(format!("a batch is 1 to {BATCH_MAX} documents, this one has {}", documents.len())));
+    }
+    let token = admit_hold::token(&documents, &agent);
+    match seen {
+        Some(seen) if seen != token => {
+            return Err(Trouble::invalid("--seen is not the token of this batch and agent; run without it to get one"));
+        }
+        Some(_) => {}
+        None => {
+            let call = |selection, semantic| {
+                settings.ask(|instance| HuginnMindRequest::Query { instance: instance.clone(), selection, semantic: Some(semantic) })
+            };
+            match admit_hold::check(call, &documents, &token) {
+                Ok(Some(held)) => {
+                    say(held.trim_end());
+                    return Ok(6);
+                }
+                Ok(None) => {}
+                Err(trouble) => eprintln!("near-neighbour check did not run ({}); this admit was not held", trouble.code()),
+            }
+        }
     }
     let sent = documents.clone();
     let provenance = PipelineProvenance { faculty, agent: Short(agent), session: Short(session), tool: Short(TOOL.to_string()) };

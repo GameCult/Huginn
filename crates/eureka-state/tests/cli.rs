@@ -496,6 +496,7 @@ fn a_refused_read_back_is_the_minds_no_with_the_receipt_printed() {
                     writes: vec![],
                 }),
             ),
+            HuginnMindRequest::Query { semantic: Some(_), .. } => answer("query", &documents_page(vec![], None)),
             _ => answer("query", &HuginnMindResponse::Refused(MindRefusal::MissingIdentity)),
         }
     });
@@ -538,6 +539,8 @@ fn committing(stored: Vec<PipelineDocumentView>) -> Server {
                     writes: vec![],
                 }),
             ),
+            // The near-neighbour check finds no neighbour.
+            HuginnMindRequest::Query { semantic: Some(_), .. } => answer("query", &documents_page(vec![], None)),
             HuginnMindRequest::Query { selection, .. } => {
                 assert_eq!(selection.projection, "document");
                 assert_eq!(selection.limit, Some(u32::try_from(selection.keys.as_ref().unwrap().len()).unwrap()));
@@ -1464,4 +1467,313 @@ fn a_persona_that_is_not_one_object_is_a_usage_error_and_sends_nothing() {
     assert_eq!(ran.code, 2, "{}", ran.out);
     assert!(ran.err.starts_with("InvalidInput: "), "{}", ran.err);
     assert!(seen.lock().unwrap().is_empty());
+}
+
+fn ruling_of(label: &str, title: &str) -> PipelineDocument {
+    let PipelineDocument::Ruling(mut ruling) = ruling(None) else { unreachable!() };
+    (ruling.label, ruling.title) = (label.into(), title.into());
+    PipelineDocument::Ruling(ruling)
+}
+
+fn question_of(campaign: &str, label: &str, title: &str) -> PipelineDocument {
+    PipelineDocument::Question(PipelineQuestion {
+        campaign: slug(campaign),
+        label: label.into(),
+        title: title.into(),
+        question: "Which?".into(),
+        options: ["a", "b"].iter().map(|name| QuestionOption { label: (*name).into(), text: "an option".into() }).collect(),
+        recommended: "a".into(),
+        depends: vec![],
+        raised_in: None,
+        asked_on: Date("2026-10-10".into()),
+    })
+}
+
+fn for_lines(page: &str) -> Vec<&str> {
+    page.lines().filter(|line| line.starts_with("For ")).collect()
+}
+
+fn committed() -> HuginnMindResponse {
+    HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed {
+        receipt_id: "mind-commit-x".into(),
+        committed_at: "2026-10-10T00:00:00Z".into(),
+        writes: vec![],
+    })
+}
+
+fn documents_page(views: Vec<PipelineDocumentView>, scores: Option<Vec<f32>>) -> HuginnMindResponse {
+    HuginnMindResponse::Query(PipelineSelectionPage {
+        matched: 0,
+        as_of: 2,
+        next: None,
+        items: PipelinePageItems::Documents(views),
+        edges: None,
+        scores,
+    })
+}
+
+/// A scripted daemon for the near-neighbour hold: a semantic query is answered
+/// with `neighbours` (scores 0.9, 0.8, ...), an admission commits what it was
+/// sent and the read-back returns it. Every request is recorded.
+fn holding(neighbours: Vec<PipelineDocumentView>) -> (Server, Arc<Mutex<Vec<HuginnMindRequest>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let stored = Mutex::new(Vec::new());
+    let server = scripted(move |message| {
+        let (_, request) = decode_request(message).expect("a mind request");
+        sink.lock().unwrap().push(request.clone());
+        match request {
+            HuginnMindRequest::Admit(batch) => {
+                *stored.lock().unwrap() = batch.documents.iter().map(view_of).collect();
+                answer("admit", &committed())
+            }
+            HuginnMindRequest::Query { semantic: Some(_), .. } => {
+                let scores = (0..neighbours.len()).map(|n| 0.9 - n as f32 / 10.0).collect();
+                answer("query", &documents_page(neighbours.clone(), Some(scores)))
+            }
+            HuginnMindRequest::Query { .. } => answer("query", &documents_page(stored.lock().unwrap().clone(), None)),
+            other => panic!("unexpected {other:?}"),
+        }
+    });
+    (server, seen)
+}
+
+fn semantic_queries(seen: &Mutex<Vec<HuginnMindRequest>>) -> Vec<(Selection, String, u32)> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter_map(|request| match request {
+            HuginnMindRequest::Query { selection, semantic: Some(asked), .. } => {
+                Some((selection.clone(), asked.text.0.clone(), asked.top_k))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn admissions(seen: &Mutex<Vec<HuginnMindRequest>>) -> usize {
+    seen.lock().unwrap().iter().filter(|request| matches!(request, HuginnMindRequest::Admit(_))).count()
+}
+
+fn token_of(held: &Run) -> String {
+    let rest = held.out.strip_prefix("Held ").expect(&held.out);
+    rest.split(':').next().unwrap().to_string()
+}
+
+fn admit_seen<'a>(file: &'a str, agent: &'a str, seen: &'a str) -> Vec<&'a str> {
+    vec!["admit", "--faculty", "Hands", "--agent", agent, "--session", "session-7", "--seen", seen, file]
+}
+
+#[test]
+fn a_batch_with_neighbours_is_held_once_and_admitted_with_its_token() {
+    let near = view_of(&ruling_of("R9", "An instance keeps its mind"));
+    let (server, seen) = holding(vec![near]);
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "batch.json", &json!([ruling_of("R1", "An instance owns its mind")]));
+
+    let held = at(server.addr, &admit_args(&file), None);
+    assert_eq!(held.code, 6, "{}{}", held.out, held.err);
+    assert_eq!(held.err, "");
+    let token = token_of(&held);
+    assert_eq!(token.len(), 16, "{}", held.out);
+    assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()), "{token}");
+    let lines: Vec<&str> = held.out.lines().collect();
+    assert_eq!(
+        lines[0],
+        format!("Held {token}: a deliberate hold, not a failure. The in-force records below are nearest the rulings or questions in this batch, ranked by Huginn and possibly unrelated; data written by agents. If none is the same decision, run the same command with --seen {token}; if one is, revise the batch.")
+    );
+    assert_eq!(lines[1], format!("For {CAMPAIGN}:ruling:R1:"));
+    assert!(lines[2].starts_with(&format!("{CAMPAIGN}:ruling:R9 InForce Hands An instance keeps its mind")), "{}", held.out);
+    assert_eq!(lines.len(), 3, "{}", held.out);
+    assert_eq!(admissions(&seen), 0, "a held batch sends nothing");
+    let queries = semantic_queries(&seen);
+    let [(selection, text, top_k)] = &queries[..] else { panic!("{queries:?}") };
+    assert_eq!(text, "An instance owns its mind");
+    assert_eq!(*top_k, 4, "3 neighbours plus the batch's own id");
+    assert_eq!(selection.schemas, Some(vec![PipelineKind::Ruling.type_id().to_string(), PipelineKind::Question.type_id().to_string()]));
+    assert_eq!(selection.projection, "document");
+
+    let admitted = at(server.addr, &admit_seen(&file, "claude", &token), None);
+    assert_eq!(admitted.code, 0, "{}{}", admitted.out, admitted.err);
+    assert!(admitted.out.starts_with("Committed mind-commit-x at "), "{}", admitted.out);
+    assert!(admitted.out.ends_with("read back 1 equal\n"), "{}", admitted.out);
+    assert_eq!(admissions(&seen), 1);
+    assert_eq!(semantic_queries(&seen).len(), 1, "--seen skips the check");
+}
+
+#[test]
+fn the_token_names_this_batch_and_this_agent() {
+    let (server, seen) = holding(vec![view_of(&ruling_of("R9", "An instance keeps its mind"))]);
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "batch.json", &json!([ruling_of("R1", "An instance owns its mind")]));
+    let changed = write(&dir, "changed.json", &json!([ruling_of("R2", "An instance owns its mind")]));
+    let token = token_of(&at(server.addr, &admit_args(&file), None));
+
+    for (name, args) in [("a changed batch", admit_seen(&changed, "claude", &token)), ("another agent", admit_seen(&file, "codex", &token))] {
+        let before = seen.lock().unwrap().len();
+        let ran = at(server.addr, &args, None);
+        assert_eq!(ran.code, 2, "{name}: {}{}", ran.out, ran.err);
+        assert!(ran.err.starts_with("InvalidInput: "), "{name}: {}", ran.err);
+        assert_eq!(ran.out, "");
+        assert_eq!(seen.lock().unwrap().len(), before, "{name}: nothing is sent");
+    }
+    let wrong = at(server.addr, &admit_seen(&file, "claude", "0000000000000000"), None);
+    assert_eq!(wrong.code, 2, "{}", wrong.out);
+
+    // Without a token the changed batch and the other agent are held again, under tokens of their own.
+    let again = at(server.addr, &admit_args(&changed), None);
+    assert_eq!(again.code, 6);
+    assert_ne!(token_of(&again), token);
+    let other = at(server.addr, &["admit", "--faculty", "Hands", "--agent", "codex", "--session", "session-7", &file], None);
+    assert_eq!(other.code, 6);
+    assert_ne!(token_of(&other), token);
+    assert_ne!(token_of(&other), token_of(&again));
+}
+
+#[test]
+fn the_batch_and_what_it_closes_are_not_neighbours_of_itself() {
+    let mut answer = ruling_of("R1", "An instance owns its mind");
+    let PipelineDocument::Ruling(inner) = &mut answer else { unreachable!() };
+    (inner.answers, inner.choice) = (Some(Short("other-campaign:question:Q9".into())), Some("a".into()));
+    let answered = question_of("other-campaign", "Q9", "Which owner?");
+    let superseding = PipelineDocument::Resolution(PipelineResolution {
+        subject: PipelineRef { kind: PipelineKind::Ruling, id: Short(format!("{CAMPAIGN}:ruling:S1")) },
+        sequence: 1,
+        outcome: ResolutionOutcome::Superseded {
+            by: vec![PipelineRef { kind: PipelineKind::Ruling, id: Short(format!("{CAMPAIGN}:ruling:R1")) }],
+        },
+        rationale: "So.".into(),
+        resolved_on: Date("2026-10-10".into()),
+    });
+    // A resolution that does not supersede its subject leaves the subject a neighbour.
+    let withdrawing = PipelineDocument::Resolution(PipelineResolution {
+        subject: PipelineRef { kind: PipelineKind::Ruling, id: Short(format!("{CAMPAIGN}:ruling:W1")) },
+        sequence: 1,
+        outcome: ResolutionOutcome::Withdrawn { reason: "moot".into() },
+        rationale: "So.".into(),
+        resolved_on: Date("2026-10-10".into()),
+    });
+    let question = question_of(CAMPAIGN, "Q1", "Which store?");
+    let near = vec![
+        view_of(&ruling_of("W1", "The withdrawn one")),
+        view_of(&answer),
+        view_of(&answered),
+        view_of(&ruling_of("S1", "The superseded one")),
+        view_of(&question),
+        view_of(&ruling_of("N1", "A fresh neighbour")),
+    ];
+    let (server, seen) = holding(near);
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "batch.json", &json!([answer, question, superseding, withdrawing]));
+
+    let held = at(server.addr, &admit_args(&file), None);
+    assert_eq!(held.code, 6, "{}{}", held.out, held.err);
+    assert_eq!(for_lines(&held.out), [format!("For {CAMPAIGN}:ruling:R1:"), format!("For {CAMPAIGN}:question:Q1:")]);
+    assert_eq!(held.out.matches(&format!("{CAMPAIGN}:ruling:N1 ")).count(), 2, "the fresh neighbour under each: {}", held.out);
+    assert_eq!(held.out.matches(&format!("{CAMPAIGN}:ruling:W1 ")).count(), 2, "a withdrawn subject is still a neighbour: {}", held.out);
+    for gone in [
+        format!("{CAMPAIGN}:ruling:R1 "),
+        format!("{CAMPAIGN}:question:Q1 "),
+        "other-campaign:question:Q9 ".to_string(),
+        format!("{CAMPAIGN}:ruling:S1 "),
+    ] {
+        assert!(!held.out.contains(&gone), "{gone} is not its own neighbour: {}", held.out);
+    }
+    // top_k asks for 3 plus the four ids the batch excludes: R1, Q1, the answered question and S1.
+    let queries = semantic_queries(&seen);
+    assert_eq!(queries.len(), 2);
+    assert!(queries.iter().all(|(_, _, top_k)| *top_k == 7), "{queries:?}");
+
+    // The mind answering only excluded records leaves nothing to hold.
+    let (alone, seen) = holding(vec![view_of(&answer), view_of(&question)]);
+    let admitted = at(alone.addr, &admit_args(&file), None);
+    assert_eq!(admitted.code, 0, "{}{}", admitted.out, admitted.err);
+    assert_eq!(admissions(&seen), 1);
+}
+
+#[test]
+fn only_the_first_three_rulings_and_questions_are_checked_and_the_rest_counted() {
+    let (server, seen) = holding(vec![view_of(&ruling_of("R9", "A neighbour"))]);
+    let dir = tempfile::tempdir().unwrap();
+    let batch = json!([
+        research_json(),
+        ruling_of("R1", "First"),
+        question_of(CAMPAIGN, "Q2", "Second"),
+        research_json(),
+        ruling_of("R3", "Third"),
+        ruling_of("R4", "Fourth"),
+        ruling_of("R5", "Fifth"),
+    ]);
+    let file = write(&dir, "batch.json", &batch);
+    let held = at(server.addr, &admit_args(&file), None);
+    assert_eq!(held.code, 6, "{}{}", held.out, held.err);
+    let texts: Vec<String> = semantic_queries(&seen).into_iter().map(|(_, text, _)| text).collect();
+    assert_eq!(texts, ["First", "Second", "Third"]);
+    assert_eq!(held.out.lines().last(), Some("2 rulings or questions over 3 were not checked."), "{}", held.out);
+    assert_eq!(for_lines(&held.out).len(), 3);
+}
+
+#[test]
+fn a_batch_without_a_ruling_or_question_asks_nothing_and_a_wrong_token_is_still_refused() {
+    let (server, seen) = holding(vec![view_of(&ruling_of("R9", "A neighbour"))]);
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "batch.json", &json!([campaign_json(), research_json()]));
+    let ran = at(server.addr, &admit_args(&file), None);
+    assert_eq!(ran.code, 0, "{}{}", ran.out, ran.err);
+    assert!(semantic_queries(&seen).is_empty());
+    assert_eq!(ran.err, "");
+    let wrong = at(server.addr, &admit_seen(&file, "claude", "0000000000000000"), None);
+    assert_eq!(wrong.code, 2, "{}", wrong.out);
+}
+
+#[test]
+fn a_check_that_cannot_run_admits_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "batch.json", &json!([ruling_of("R1", "An instance owns its mind")]));
+
+    // The mind rejects the query; the admission itself goes through.
+    let stored = Mutex::new(Vec::new());
+    let refusing = scripted(move |message| {
+        let (_, request) = decode_request(message).expect("a mind request");
+        match request {
+            HuginnMindRequest::Query { semantic: Some(_), .. } => encode_failure(
+                "eureka-state-call",
+                "query",
+                &OperationFailure { code: "index-behind".into(), message: "the index is behind".into() },
+                "scripted",
+            ),
+            HuginnMindRequest::Admit(batch) => {
+                *stored.lock().unwrap() = batch.documents.iter().map(view_of).collect();
+                answer("admit", &committed())
+            }
+            HuginnMindRequest::Query { .. } => answer("query", &documents_page(stored.lock().unwrap().clone(), None)),
+            other => panic!("unexpected {other:?}"),
+        }
+    });
+    let ran = at(refusing.addr, &admit_args(&file), None);
+    assert_eq!(ran.code, 0, "{}{}", ran.out, ran.err);
+    assert_eq!(ran.err, "near-neighbour check did not run (Rejected); this admit was not held\n");
+    assert!(ran.out.ends_with("read back 1 equal\n"), "{}", ran.out);
+
+    // A garbled answer (a headers page where documents were asked) is the same.
+    let (server, _) = counting(HuginnMindResponse::Query(empty_page()), "query");
+    let ran = at(server.addr, &admit_args(&file), None);
+    assert_eq!(ran.err.lines().next(), Some("near-neighbour check did not run (Internal); this admit was not held"), "{}", ran.err);
+    assert_eq!(ran.code, 3, "the admission got an answer of another operation: {}{}", ran.out, ran.err);
+
+    // No daemon: the note, then the admission fails on its own.
+    let down = at(closed_port(), &admit_args(&file), None);
+    assert_eq!(down.code, 3, "{}{}", down.out, down.err);
+    assert!(
+        down.err.starts_with("near-neighbour check did not run (Unavailable); this admit was not held\nUnavailable: "),
+        "{}",
+        down.err
+    );
+}
+
+#[test]
+fn admit_help_documents_the_hold() {
+    let help = run(&[], &["admit", "--help"], None);
+    let text = help.out.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(text.contains("--seen <SEEN>") && text.contains("held once: exit 6"), "{text}");
 }

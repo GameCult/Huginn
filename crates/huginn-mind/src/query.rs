@@ -298,7 +298,8 @@ impl PipelineFacts {
 }
 
 impl PipelineDocumentSummary {
-    fn of(view: &PipelineDocumentView) -> Self {
+    /// The header of a view: what a `headers` projection answers for it.
+    pub fn of(view: &PipelineDocumentView) -> Self {
         Self {
             id: view.id.clone(),
             admission: view.admission.clone(),
