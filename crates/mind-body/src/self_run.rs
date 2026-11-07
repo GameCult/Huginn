@@ -605,6 +605,9 @@ struct SelfInbox<'a> {
     /// The `tool_use_id`s of task notifications whose turn has not yet ended in a result that took in no brief. While any is pending, a
     /// brief is written only when it is of the conversation the notification is attributed to.
     notified: Vec<String>,
+    /// A turn that took in no brief is open: a request came with nothing echoed, and no line of ours has joined it. Until its result, a brief
+    /// is written only when it is of the conversation that turn is attributed to (the notification'"'"'s task, else the turn before).
+    briefless_open: bool,
     /// The flush was written and the CLI has not yet taken it.
     flush_written: bool,
     /// The CLI took the flush and its result has not come: that result is the session's note to its successor, never a reply to a brief.
@@ -625,7 +628,7 @@ impl<'a> SelfInbox<'a> {
                 carried.push(brief.id.clone());
             }
         }
-        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), conversation, last_answers: Vec::new(), tasks: HashMap::new(), notified: Vec::new(), flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
+        Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), conversation, last_answers: Vec::new(), tasks: HashMap::new(), notified: Vec::new(), briefless_open: false, flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
     }
 
     /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps the reply and never ends the session.
@@ -647,6 +650,7 @@ impl<'a> SelfInbox<'a> {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         let text = result_text(&event);
         let flush = std::mem::take(&mut self.flushing);
+        let took = self.echoed.first().and_then(|id| self.conversation_of(id));
         // The flush result is the session's note to its successor, in the journal: it is no reply, so nothing ever points at it.
         if ok && !flush && !text.trim().is_empty() {
             self.replies += 1;
@@ -665,10 +669,12 @@ impl<'a> SelfInbox<'a> {
                 text: cut_text(text, REPLY_TEXT_LIMIT).as_str().into(),
             });
         }
-        // A turn that took in no brief has ended: it was the turn of the notifications pending, which are now answered.
-        if !flush && self.echoed.is_empty() {
+        // The turn has ended. A turn that took in no brief answered the notifications pending; one that took in the notification's own conversation's briefs
+        // took the notification in with them. A notification of another conversation stays pending: its turn is still to come.
+        if !flush && (took.is_none() || (ok && !text.trim().is_empty() && self.turn_conversation() == took)) {
             self.notified.clear();
         }
+        self.briefless_open = false;
         self.admit_unadmitted();
         self.conversation = self.carried.first().or(self.echoed.first()).and_then(|id| self.conversation_of(id));
     }
@@ -695,8 +701,8 @@ impl<'a> SelfInbox<'a> {
         answers
     }
 
-    /// The one conversation the pending notifications are attributed to; none when they name two, or one could not be attributed.
-    fn notified_conversation(&self) -> Option<Conversation> {
+    /// The one conversation the open turn is attributed to: its notifications' tasks', else the turn before. None when they name two, or one could not be attributed.
+    fn turn_conversation(&self) -> Option<Conversation> {
         let answers = self.briefless_answers();
         let mut conversations = answers.iter().map(|id| self.conversation_of(id));
         let first = conversations.next()??;
@@ -735,10 +741,16 @@ impl<'a> SelfInbox<'a> {
         self.told.iter().find(|brief| brief.id == id).map(|brief| brief.conversation.clone())
     }
 
+    /// Whether the open turn lets this brief in: while a task notification or another turn that took in no brief is open, only the conversation
+    /// it is attributed to (none when it cannot be placed), unless nothing has been told yet and no other conversation exists.
+    fn turn_allows(&self, brief: &Brief) -> bool {
+        (self.notified.is_empty() && (!self.briefless_open || self.told.is_empty())) || self.turn_conversation().as_ref() == Some(&brief.conversation)
+    }
+
     /// Whether a waiting brief may be told now: any when every brief told has been answered, else only the unanswered ones' conversation.
     /// While a task notification's turn is open, only the conversation the notification is attributed to may be told (none when it cannot be placed).
     fn may_tell(&self, brief: &Brief) -> bool {
-        (self.notified.is_empty() || self.notified_conversation().as_ref() == Some(&brief.conversation)) && self.conversation.as_ref().is_none_or(|conversation| *conversation == brief.conversation)
+        self.turn_allows(brief) && self.conversation.as_ref().is_none_or(|conversation| *conversation == brief.conversation)
     }
 }
 
@@ -777,9 +789,15 @@ impl SessionInbox for SelfInbox<'_> {
     fn line(&mut self, line: &str) {
         self.heard.hear(line);
         self.note_task(line);
+        if matches!(read_usage(line), Usage::Request { .. }) && self.echoed.is_empty() {
+            self.briefless_open = true;
+        }
     }
 
     fn echoed(&mut self) {
+        if !self.carried.is_empty() {
+            self.briefless_open = false;
+        }
         self.echoed.append(&mut self.carried);
         self.flushing |= std::mem::take(&mut self.flush_written);
     }

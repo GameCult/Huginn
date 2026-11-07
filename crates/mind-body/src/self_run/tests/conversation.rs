@@ -338,3 +338,41 @@ fn a_restart_with_a_resolved_claim_and_no_open_brief_holds_the_gate_for_the_clai
     assert!(ran.outcome.is_ok());
     assert_eq!((answered(&mind, 1), answered(&mind, 2)), (vec![id_of("a1")], vec![id_of("l1")]));
 }
+
+/// A turn that took in no brief is running (a request with nothing echoed) and the stream gave no notification event: it continues the turn
+/// before, so another conversation's brief is not written into it.
+#[test]
+fn another_conversations_brief_waits_for_any_turn_that_took_in_no_brief() {
+    let before = |mind: &Rc<TestMind>| {
+        vec![
+            Out(echo()),
+            Out(saying("nothing yet")),
+            briefed(mind, 31, vec![aqua("a1")]),
+            Out(echo()),
+            Out(saying("aqua turn: started a background task")),
+            Out(at("n1", 10)),
+            briefed(mind, 31, vec![libby("l1")]),
+            Idle(31),
+        ]
+    };
+    let mind = live_mind();
+    let ran = mind_run(&mind, before(&mind));
+    assert!(ran.outcome.is_ok());
+    assert!(!written_with(&ran, &id_of("l1")), "{:?}", ran.written());
+
+    let mind = live_mind();
+    let ran = mind_run(&mind, [before(&mind), vec![Out(saying("SYNTHETIC aqua task outcome")), Idle(31), Out(echo()), Out(saying("libby done"))]].concat());
+    assert!(ran.outcome.is_ok());
+    assert_eq!(answered(&mind, 3), vec![id_of("a1")], "the outcome continues aqua's turn, not libby's");
+    assert_eq!(answered(&mind, 4), vec![id_of("l1")]);
+}
+
+/// The start message states the routing rules her Self works under, in place of the old continuation sentence.
+#[test]
+fn the_start_message_states_the_routing_rules() {
+    let text = start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[], 0);
+    for rule in ["one conversation at a time", "the conversation of the turn that started it", "no other conversation's brief is told into that turn", "pointer to it by id, without its text"] {
+        assert!(text.contains(rule), "{rule}: {text}");
+    }
+    assert!(!text.contains("continues the one before"));
+}
