@@ -688,7 +688,7 @@ fn repo_activity_is_news_only_after_her_newest_thought_and_is_stamped_when_it_ha
 }
 
 #[test]
-fn a_capped_repo_is_news_only_beside_an_event_after_her_newest_thought() {
+fn a_capped_repo_is_news_only_beside_a_forge_event_after_her_newest_thoughts_label() {
     let mind = mind_with_thought(1000);
     let read = PersonaRead { state: state(), receipt_id: "r".into() };
     let mut quiet = Wrap::over(&mind, &[]).with_forge(vec![push(1, 500)]);

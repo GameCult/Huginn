@@ -34,7 +34,9 @@ use crate::recall::{self, Cue};
 
 pub const AGENT: &str = "mind-stream";
 
-/// No tick sooner than this after her newest thought, whatever has happened.
+/// No tick sooner than this after her newest thought, whatever has happened. The gap counts from the thought's label
+/// (the tick time it was made for), not from its admission: a model run of M seconds leaves `STREAM_MIN_GAP_S - M`
+/// seconds of quiet after the thought is admitted.
 pub const STREAM_MIN_GAP_S: i64 = 900;
 /// How often the stream process polls: the unit in which a poll "crosses" a `STREAM_MIN_GAP_S` mark.
 pub const STREAM_POLL_S: i64 = 60;
@@ -400,7 +402,7 @@ fn unbidden(mind: &dyn MindPort, instance: &Slug, now: DateTime<Utc>, pick: u64)
     }))
 }
 
-/// The seed, rebuilt from her mind and nothing else. `since` is her newest thought's admission and `fresh` what `news` found.
+/// The seed, rebuilt from her mind and nothing else. `since` is her newest thought's label tick time (never later than its admission) and `fresh` what `news` found.
 fn build_seed(mind: &dyn MindPort, persona: &PersonaRead, since: Option<DateTime<Utc>>, now: DateTime<Utc>, responsibilities: &Responsibilities, fresh: Vec<(String, Option<PipelineRef>)>) -> Result<Seed> {
     let instance = mind.instance().clone();
     let state = &persona.state;
