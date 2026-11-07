@@ -1,7 +1,7 @@
 """Drives the real claude CLI (stream-json, --replay-user-messages) against fake.py
 through one scenario and records its stdout and what was written to its stdin.
 
-  PROBE_SCENARIO  folded | queued | three-queued | serialized | ceiling-flush-folded |
+  PROBE_SCENARIO  bg-agent | bg-late | bg-monitor (FAKE_PLAN agent,text | bg:8,text | monitor,text) | folded | queued | three-queued | serialized | ceiling-flush-folded |
                   ceiling-flush-queued | api-error-first | blocking-limit | compaction-off-360k
                   (three-queued writes a second and a third line while the first request is in
                   flight: the CLI joins them into one echo. serialized is the actuator's policy
@@ -36,13 +36,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fake  # noqa: E402
 
 port = fake.start(int(os.environ.get("PROBE_PORT", "18611")))
-json.dump({}, open(f"{CFG}/settings.json", "w"))
+json.dump({"sandbox": {"enabled": False}}, open(f"{CFG}/settings.json", "w"))
 json.dump({"hasCompletedOnboarding": True}, open(f"{CFG}/.claude.json", "w"))
 T0 = time.time()
 CLAUDE = os.environ.get("CLAUDE", "/opt/claude-code/2.1.312/claude")
 args = [CLAUDE, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--session-id", str(uuid.uuid4()),
         "--max-turns", "20", "--permission-mode", "bypassPermissions", "--permission-prompts", "none", "--setting-sources", "user",
-        "--replay-user-messages", "--allowedTools", "Bash"]
+        "--replay-user-messages", "--allowedTools", "Bash,Agent,Monitor"] + (["--disallowedTools", os.environ["DENY"]] if os.environ.get("DENY") else [])
 env = {"PATH": f"{os.path.dirname(CLAUDE)}:/usr/local/bin:/usr/bin:/bin", "HOME": CFG, "CLAUDE_CONFIG_DIR": CFG,
        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": os.environ.get("SCRUB", "1"), "DISABLE_COMPACT": "1", "LANG": "C.UTF-8",
        "ANTHROPIC_API_KEY": "sk-ant-fake-probe", "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
@@ -181,6 +181,55 @@ elif SCENARIO == "compaction-off-360k":
     wait(lambda: results() >= 1)
     send("after 360 F.")
     wait(lambda: results() >= 2)
+elif SCENARIO == "bg-idle":
+    send("BGCMD turn A.")
+    wait(lambda: results() >= 1)
+    wait(lambda: results() >= 2, 40)
+    time.sleep(3)
+elif SCENARIO == "bg-race":
+    send("BGCMD turn A.")
+    wait(lambda: results() >= 1)
+    def notif_request():
+        try:
+            rows = [json.loads(l) for l in open(f"{OUT}/requests.jsonl")]
+        except Exception:
+            return False
+        return any(r.get("main") and "BGCMD" not in r.get("tail", "") and "RACE" not in r.get("tail", "") and "tool_result" not in r.get("tail", "") and r["n"] > 1 for r in rows)
+    wait(notif_request, 40)
+    time.sleep(1)
+    send("RACE line B.")
+    wait(lambda: results() >= 3, 60)
+    time.sleep(3)
+elif SCENARIO == "bg-fold":
+    send("PLAN turn A.")
+    wait(lambda: results() >= 1)
+    wait(lambda: results() >= 2, 20)
+    time.sleep(3)
+elif SCENARIO == "bg-notif-tool-race":
+    send("PLAN turn A.")
+    wait(lambda: results() >= 1)
+    def main_requests():
+        try:
+            return sum(1 for l in open(f"{OUT}/requests.jsonl") if json.loads(l).get("main"))
+        except Exception:
+            return 0
+    wait(lambda: main_requests() >= 3, 30)
+    time.sleep(1)
+    send("RACE line B.")
+    wait(lambda: results() >= 3, 40)
+    time.sleep(3)
+elif SCENARIO == "bg-other":
+    send("PLAN turn A.")
+    wait(lambda: results() >= 1)
+    send("PLAN turn B.")
+    wait(lambda: results() >= 2, 30)
+    wait(lambda: results() >= 3, 15)
+    time.sleep(3)
+elif SCENARIO in ("bg-agent", "bg-late", "bg-monitor"):
+    send("PLAN turn A.")
+    wait(lambda: results() >= 1)
+    wait(lambda: results() >= 2, 40)
+    time.sleep(3)
 else:
     sys.exit(f"unknown scenario {SCENARIO}")
 p.stdin.close()
