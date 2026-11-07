@@ -344,7 +344,8 @@ pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
         | D::HandOff(_)
         | D::Run(_)
         | D::Pulse(_)
-        | D::Reply(_) => None,
+        | D::Reply(_)
+        | D::Thought(_) => None,
     }
 }
 
@@ -394,10 +395,11 @@ pub enum CitationRole {
     RestsOn,
     Toward,
     Run,
+    Reads,
 }
 
 impl CitationRole {
-    pub const ALL: [CitationRole; 22] = [
+    pub const ALL: [CitationRole; 23] = [
         Self::RaisedIn,
         Self::Answers,
         Self::Rulings,
@@ -420,6 +422,7 @@ impl CitationRole {
         Self::RestsOn,
         Self::Toward,
         Self::Run,
+        Self::Reads,
     ];
 
     /// The wire spelling, equal to the referring field's name.
@@ -447,6 +450,7 @@ impl CitationRole {
             Self::RestsOn => "rests_on",
             Self::Toward => "toward",
             Self::Run => "run",
+            Self::Reads => "reads",
         }
     }
 
@@ -472,6 +476,7 @@ impl CitationRole {
             Self::Serves | Self::Sources => K::Research,
             Self::RestsOn | Self::Toward => K::Idea,
             Self::Run => K::Reply,
+            Self::Reads => K::Thought,
         }
     }
 
@@ -500,7 +505,8 @@ impl CitationRole {
             | Self::Serves
             | Self::Sources
             | Self::RestsOn
-            | Self::Toward => PipelineKind::ALL.to_vec(),
+            | Self::Toward
+            | Self::Reads => PipelineKind::ALL.to_vec(),
         }
     }
 }
@@ -573,6 +579,7 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
         ),
         D::Run(run) => edges.extend(run.claims.iter().map(|to| (R::Claims, to.clone()))),
         D::Reply(reply) => edges.push((R::Run, reply.run.clone())),
+        D::Thought(thought) => edges.extend(thought.reads.iter().map(|to| (R::Reads, to.clone()))),
         D::Memory(memory) => edges.extend(memory.consolidates.iter().map(|to| (R::Consolidates, to.clone()))),
         D::Research(research) => {
             edges.extend(research.serves.iter().map(|to| (R::Serves, to.clone())));

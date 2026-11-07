@@ -157,6 +157,7 @@ pub enum PipelineFacts {
     Run { label: Label, operated_by: RunOperator, turn: RunTurn, started_on: Date, claims: Vec<PipelineRef> },
     Pulse { label: Label, tempo_vote_beat_s: Option<u32>, #[serde(default)] tempo_vote_withdrawn: bool, urgency_permille: Option<u16> },
     Reply { label: Label, run: PipelineRef, answers: Vec<PipelineRef> },
+    Thought { label: Label, chosen: u8, nearest_permille: u16 },
     Memory { label: Label, sort: MemorySort, about: Vec<Short>, origin: MemoryOrigin, salience_permille: u16 },
     Research { pass: Label, label: Label, claim: Line, inferred: bool, observed_on: Date },
     Idea { pass: Label, label: Label, title: Title, proposed_on: Date },
@@ -267,6 +268,11 @@ impl PipelineFacts {
                 urgency_permille: value.urgency_permille,
             },
             D::Reply(value) => Self::Reply { label: value.label.clone(), run: value.run.clone(), answers: value.answers.clone() },
+            D::Thought(value) => Self::Thought {
+                label: value.label.clone(),
+                chosen: value.chosen,
+                nearest_permille: value.nearest_permille.get(usize::from(value.chosen)).copied().unwrap_or(1000),
+            },
             D::Memory(value) => Self::Memory {
                 label: value.label.clone(),
                 sort: value.sort,
@@ -1735,6 +1741,16 @@ mod tests {
     /// One edge list: every role's edge comes out of the hop, typed by the
     /// role and the ends' kinds.
     #[test]
+    fn a_thoughts_facts_carry_the_chosen_candidates_nearness() {
+        let D::Thought(mut thought) = crate::fixtures::thought("t1", "A.", &[]) else { unreachable!() };
+        thought.candidates.push("B.".into());
+        thought.nearest_permille = vec![300, 450];
+        thought.chosen = 1;
+        thought.text = "B.".into();
+        assert_eq!(PipelineFacts::of(&D::Thought(thought)), PipelineFacts::Thought { label: "t1".into(), chosen: 1, nearest_permille: 450 });
+    }
+
+    #[test]
     fn every_role_yields_its_edge() {
         let mut mind = seeded();
         let (q1, q2, r2) = (id("question", "Q1"), id("question", "Q2"), id("ruling", "R2"));
@@ -1774,6 +1790,8 @@ mod tests {
         committed(admit(&mut mind, vec![D::Reply(eureka_pipeline::PipelineReply {
             instance: INSTANCE.into(), label: "w1-r1".into(), run: r(K::Run, &run_id), answers: vec![r(K::FollowUp, &fu)], text: "Done.".into(),
         })]));
+        let thought_id = format!("{INSTANCE}:thought:t1");
+        committed(admit(&mut mind, vec![crate::fixtures::thought("t1", "A drift.", &[r(K::Finding, &f1), r(K::Question, &q1)])]));
         let (older, newer) = (format!("{INSTANCE}:memory:m1"), format!("{INSTANCE}:memory:m2"));
         committed(admit(&mut mind, vec![memory("m1", MemorySort::Idea, "one", &[])]));
         let D::Memory(mut consolidating) = memory("m2", MemorySort::Idea, "two", &[]) else { unreachable!() };
@@ -1824,13 +1842,15 @@ mod tests {
             (CitationRole::Claims, &run_id, &spec_r2),
             (CitationRole::Claims, &run_id, &fu),
             (CitationRole::Run, &reply_id, &run_id),
+            (CitationRole::Reads, &thought_id, &f1),
+            (CitationRole::Reads, &thought_id, &q1),
             (CitationRole::Consolidates, &newer, &older),
             (CitationRole::Serves, &note, &q1),
             (CitationRole::Sources, &note, &f1),
             (CitationRole::RestsOn, &way, &note),
             (CitationRole::Toward, &way, &q1),
         ];
-        assert_eq!(CitationRole::ALL.len(), 22);
+        assert_eq!(CitationRole::ALL.len(), 23);
         for role in CitationRole::ALL {
             let selection =
                 Selection { cited: Some(Incoming { role: role.name().into(), exists: true }), ..Selection::default() };

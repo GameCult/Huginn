@@ -222,6 +222,17 @@
       "path": "epiphany.pipeline.reply.v2.schema.json"
     },
     {
+      "schemaId": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.thought.v2.schema.json",
+      "kind": "document_payload",
+      "wireContracts": [
+        "cultnet.schema.v0"
+      ],
+      "schemaVersion": "epiphany.pipeline.thought.v2",
+      "documentType": "epiphany.pipeline.thought.v2",
+      "title": "Epiphany Pipeline Thought v2",
+      "path": "epiphany.pipeline.thought.v2.schema.json"
+    },
+    {
       "schemaId": "huginn.mind_request.v1",
       "kind": "wire_message",
       "wireContracts": [

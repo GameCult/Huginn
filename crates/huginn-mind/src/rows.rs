@@ -244,7 +244,7 @@ impl SelectionRow {
                 D::FollowUp(follow_up) => vec![follow_up.repo.identity()],
                 D::Stewardship(stewardship) => vec![stewardship.repo.identity()],
                 D::HandOff(hand_off) => vec![hand_off.repo.identity()],
-                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => {
+                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => {
                     Vec::new()
                 }
             },
@@ -329,7 +329,7 @@ impl Row for SelectionRow {
     }
 }
 
-/// The organ's closed lists: nineteen schemas, twenty aliases, twenty-two roles.
+/// The organ's closed lists: twenty schemas, twenty aliases, twenty-three roles.
 /// A schema's name is its id, so the substrate's alias matching resolves
 /// nothing beyond exact ids.
 pub(crate) struct Vocabulary;
@@ -375,7 +375,7 @@ fn invalid(field: impl Into<String>, value: &str, message: impl Into<String>) ->
 /// because `OrgRepo` identity is case-insensitive.
 ///
 /// Refuses, naming the field the client sent: a `schemas` entry that is not
-/// one of the nineteen ids; a `keys` entry that is not a full id whose kind
+/// one of the twenty ids; a `keys` entry that is not a full id whose kind
 /// segment reads and passes the leaf's ref grammar; an `any_of` value outside
 /// its alias's domain; and a `cites.target` whose key fails the ref grammar
 /// for its schema's kind (V24's rule, at this door). Whether the target
@@ -442,7 +442,7 @@ mod tests {
     /// refused at the substrate's door.
     #[test]
     fn each_kind_declares_exactly_its_aliases_and_none_is_numeric() {
-        let table: [(K, &[&str]); 19] = [
+        let table: [(K, &[&str]); 20] = [
             (K::Campaign, &["repo"]),
             (K::Target, &[]),
             (K::Question, &[]),
@@ -462,6 +462,7 @@ mod tests {
             (K::Research, &["pass"]),
             (K::Idea, &["pass"]),
             (K::Reply, &[]),
+            (K::Thought, &[]),
         ];
         for (kind, extra) in table {
             let want = [&["root", "in_force", "faculty"][..], extra].concat();
@@ -474,10 +475,10 @@ mod tests {
 
     /// Each role is declared by the one kind whose field carries it, and its
     /// targets are the kinds that field is typed to, "any" spelled as all
-    /// nineteen.
+    /// twenty.
     #[test]
     fn each_kind_declares_the_roles_it_carries_and_their_targets() {
-        let table: [(K, &[&str]); 19] = [
+        let table: [(K, &[&str]); 20] = [
             (K::Campaign, &[]),
             (K::Target, &[]),
             (K::Question, &["raised_in"]),
@@ -497,13 +498,14 @@ mod tests {
             (K::Research, &["serves", "sources"]),
             (K::Idea, &["rests_on", "toward"]),
             (K::Reply, &["run"]),
+            (K::Thought, &["reads"]),
         ];
         for (kind, roles) in table {
             assert_eq!(sorted(Vocabulary.declared_roles(kind.type_id())), strings(roles), "{kind:?}");
         }
         assert_eq!(Vocabulary.target_leaves("answers"), vec![K::Question.type_id().to_string()]);
         assert_eq!(Vocabulary.target_leaves("rulings"), vec![K::Ruling.type_id().to_string()]);
-        assert_eq!(Vocabulary.target_leaves("subject").len(), 19);
+        assert_eq!(Vocabulary.target_leaves("subject").len(), 20);
         assert_eq!(
             sorted(Vocabulary.target_leaves("claims")),
             sorted([K::CutSpec, K::Finding, K::FollowUp].iter().map(|kind| kind.type_id().to_string()).collect())
