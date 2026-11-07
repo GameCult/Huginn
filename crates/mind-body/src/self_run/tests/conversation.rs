@@ -376,3 +376,121 @@ fn the_start_message_states_the_routing_rules() {
     }
     assert!(!text.contains("continues the one before"));
 }
+
+/// The brief steps up to a notification of an aqua task: aqua's turn started the task and ended, then the notification arrived.
+fn after_aqua_started_a_task(mind: &Rc<TestMind>) -> Vec<Step> {
+    vec![Out(echo()), Out(saying("nothing yet")), briefed(mind, 31, vec![aqua("a1")]), Out(echo()), Out(task_started("toolu_aqua")), Out(saying("aqua turn: started a task"))]
+}
+
+/// A brief of the notification's own conversation joins its turn, and takes the notification in with it: the result answers that brief, the
+/// notification is no longer pending, and another conversation's brief is not starved.
+#[test]
+fn the_notified_conversations_brief_joins_its_turn_and_takes_the_notification_in() {
+    let steps = |mind: &Rc<TestMind>| [after_aqua_started_a_task(mind), vec![Out(task_notification("toolu_aqua")), briefed(mind, 31, vec![aqua("a2")]), Idle(31)]].concat();
+    let mind = live_mind();
+    let ran = mind_run(&mind, steps(&mind));
+    assert!(written_with(&ran, &id_of("a2")), "the notification's own conversation may be told into its turn: {:?}", ran.written());
+
+    let mind = live_mind();
+    let ran = mind_run(&mind, [steps(&mind), vec![Out(echo()), Out(saying("outcome and a2")), briefed(&mind, 31, vec![libby("l1")]), Idle(31), Out(echo()), Out(saying("libby done"))]].concat());
+    assert!(ran.outcome.is_ok());
+    assert_eq!(answered(&mind, 3), vec![id_of("a2")]);
+    assert_eq!(answered(&mind, 4), vec![id_of("l1")], "the notification was taken in, so libby's brief is told");
+}
+
+/// A notification of aqua's task arrives while libby's turn runs: libby's result does not answer it, so the turn that follows is still aqua's.
+#[test]
+fn a_notification_of_another_conversation_stays_pending_through_a_turn_that_took_in_briefs() {
+    let mind = live_mind();
+    let steps = [
+        after_aqua_started_a_task(&mind),
+        vec![briefed(&mind, 31, vec![libby("l1")]), Out(echo()), Out(task_notification("toolu_aqua")), Out(saying("libby turn")), Out(at("n1", 10)), Out(saying("the aqua task finished"))],
+    ]
+    .concat();
+    let ran = mind_run(&mind, steps);
+    assert!(ran.outcome.is_ok());
+    assert_eq!(answered(&mind, 3), vec![id_of("l1")]);
+    assert_eq!(answered(&mind, 4), vec![id_of("a1")], "the notification turn is aqua's, though libby was answered last");
+}
+
+/// Notifications of two conversations' tasks pending together cannot be placed: no brief is written into their turn and the result answers both, which her Persona places in no conversation.
+#[test]
+fn notifications_of_two_conversations_open_a_turn_no_brief_may_join() {
+    let steps = |mind: &Rc<TestMind>| {
+        vec![
+            Out(echo()),
+            Out(saying("nothing yet")),
+            briefed(mind, 31, vec![aqua("a1")]),
+            Out(echo()),
+            Out(task_started("toolu_aqua")),
+            Out(saying("aqua turn")),
+            briefed(mind, 31, vec![libby("l1")]),
+            Out(echo()),
+            Out(task_started("toolu_libby")),
+            Out(saying("libby turn")),
+            Out(task_notification("toolu_aqua")),
+            Out(task_notification("toolu_libby")),
+            briefed(mind, 31, vec![aqua("a2")]),
+            Idle(31),
+        ]
+    };
+    let mind = live_mind();
+    let ran = mind_run(&mind, steps(&mind));
+    assert!(!written_with(&ran, &id_of("a2")), "{:?}", ran.written());
+
+    let mind = live_mind();
+    let ran = mind_run(&mind, [steps(&mind), vec![Out(saying("both tasks finished")), Idle(31), Out(echo()), Out(saying("a2 done"))]].concat());
+    assert!(ran.outcome.is_ok());
+    assert_eq!(answered(&mind, 4), vec![id_of("a1"), id_of("l1")], "two conversations' work in one turn answers both: her Persona places it in neither and points at it");
+    assert_eq!(answered(&mind, 5), vec![id_of("a2")]);
+}
+
+/// A line that is no request, between turns, opens no turn: the next conversation's brief is told at once.
+#[test]
+fn a_line_between_turns_that_is_no_request_opens_no_turn() {
+    let mind = live_mind();
+    let steps = vec![
+        Out(echo()),
+        Out(saying("nothing yet")),
+        briefed(&mind, 31, vec![aqua("a1")]),
+        Out(echo()),
+        Out(saying("aqua done")),
+        Out(json!({"type": "system", "subtype": "status", "status": "idle"}).to_string()),
+        briefed(&mind, 31, vec![libby("l1")]),
+        Idle(31),
+        Out(echo()),
+        Out(saying("libby done")),
+    ];
+    let ran = mind_run(&mind, steps);
+    assert!(ran.outcome.is_ok());
+    assert_eq!(answered(&mind, 3), vec![id_of("l1")]);
+}
+
+/// The resolved claim is libby's and an aqua brief that was admitted before it is open: the claim's own conversation, read by its key, is the start line's.
+#[test]
+fn a_resolved_claims_conversation_is_read_by_its_own_key() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x"), run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    persona_commit(&mind, vec![aqua("a1")]);
+    persona_commit(&mind, vec![libby("l1")]);
+    mind.committed(vec![run("selfrun-a", RunTurn::SelfRun, RunOperator::Mind, &[brief_ref("l1")])]);
+    mind.committed(vec![close(brief_ref("l1"), recorded())]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(echo()), Out(saying("libby start done")), Idle(31), Out(echo()), Out(saying("aqua done"))], Some(0), false);
+    assert!(ran.outcome.is_ok());
+    let start = &ran.written()[0];
+    assert!(start.contains(&id_of("l1")) && !start.contains(&id_of("a1")), "{start}");
+    assert_eq!((answered(&mind, 1), answered(&mind, 2)), (vec![id_of("l1")], vec![id_of("a1")]));
+}
+
+/// A claimed cut spec is no brief and has no conversation: it stays on the start line beside the open briefs of any conversation.
+#[test]
+fn a_claimed_cut_spec_stays_on_the_start_line_beside_open_briefs() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x"), run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    persona_commit(&mind, vec![aqua("a1")]);
+    mind.committed(vec![run("selfrun-a", RunTurn::SelfRun, RunOperator::Mind, &[spec_ref("x")])]);
+    let ran = carry_with(&Seen::of(&mind), vec![Out(echo()), Out(saying("done"))], Some(0), false);
+    assert!(ran.outcome.is_ok());
+    let start = &ran.written()[0];
+    assert!(start.contains(&format!("claimed cut spec `{}`", spec_ref("x").id.0)) && start.contains(&id_of("a1")), "{start}");
+}

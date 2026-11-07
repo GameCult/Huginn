@@ -671,7 +671,7 @@ impl<'a> SelfInbox<'a> {
         }
         // The turn has ended. A turn that took in no brief answered the notifications pending; one that took in the notification's own conversation's briefs
         // took the notification in with them. A notification of another conversation stays pending: its turn is still to come.
-        if !flush && (took.is_none() || (ok && !text.trim().is_empty() && self.turn_conversation() == took)) {
+        if took.is_none() || self.turn_conversation() == took {
             self.notified.clear();
         }
         self.briefless_open = false;
@@ -718,20 +718,14 @@ impl<'a> SelfInbox<'a> {
         if event.get("type").and_then(Value::as_str) != Some("system") {
             return;
         }
-        let Some(tool_use) = event.get("tool_use_id").and_then(Value::as_str) else {
-            // A notification with no id cannot be placed: the sentinel finds no task, so the turn it opens answers none.
-            if event.get("subtype").and_then(Value::as_str) == Some("task_notification") {
-                self.notified.push(String::new());
-            }
-            return;
-        };
+        let Some(tool_use) = event.get("tool_use_id").and_then(Value::as_str) else { return };
         match event.get("subtype").and_then(Value::as_str) {
             Some("task_started") => {
                 // The turn that starts it is answering the briefs echoed, else what a briefless turn answers now.
                 let answers = if self.echoed.is_empty() { self.briefless_answers() } else { self.echoed.iter().take(64).cloned().collect() };
                 self.tasks.entry(tool_use.to_string()).or_insert(answers);
             }
-            Some("task_notification") if !self.notified.iter().any(|pending| pending == tool_use) => self.notified.push(tool_use.to_string()),
+            Some("task_notification") => self.notified.push(tool_use.to_string()),
             _ => {}
         }
     }
