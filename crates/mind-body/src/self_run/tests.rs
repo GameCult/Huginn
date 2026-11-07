@@ -1011,7 +1011,7 @@ mod process {
     #[test]
     fn interrupt_is_sigint_the_childs_own_handler_can_catch() {
         let dir = tempfile::tempdir().unwrap();
-        let program = script(&dir, "trap 'echo interrupted; exit 130' INT\necho ready\nwhile :; do sleep 0.05; done");
+        let program = script(&dir, "trap 'echo interrupted; exit 130' INT\necho ready\nwhile :; do read -t 0.05 -r _; [ $? -le 128 ] && break; done");
         let mut child = start(&program, &[]);
         assert_eq!(child.next(StdDuration::from_secs(20)), Read::Line("ready".into()));
         child.stop(Stop::Interrupt);
@@ -1154,7 +1154,7 @@ result subtype=success is_error=false: The answer.
     #[test]
     fn each_signal_reaches_a_child_that_ignores_the_weaker_ones_and_one_for_a_gone_child_is_not_delivered() {
         let dir = tempfile::tempdir().unwrap();
-        let program = script(&dir, "trap '' INT TERM\necho ready\nwhile :; do sleep 0.05; done");
+        let program = script(&dir, "trap '' INT TERM\necho ready\nwhile :; do read -t 0.05 -r _; [ $? -le 128 ] && break; done");
         let mut child = start(&program, &[]);
         assert_eq!(child.next(StdDuration::from_secs(20)), Read::Line("ready".into()));
         assert!(child.stop(Stop::Interrupt) && child.stop(Stop::Terminate), "delivered, and ignored");
