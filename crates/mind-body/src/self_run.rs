@@ -279,10 +279,10 @@ pub enum Usage {
     TurnBegan,
     /// The CLI's level of background tasks (`background_tasks_changed`): `live` the `task_id` of every entry, `main` those of entries with no
     /// parent task that nobody awaits.
-    BackgroundTasks { live: Vec<String>, main: Vec<String> },
+    BackgroundTasks { live: Vec<String>, main: Vec<String>, shell: Vec<String> },
     /// A task of the main session went to the background, by `task_id`: a `task_started` with `is_backgrounded` true and no parent task or
     /// awaiter, or a `task_updated` whose patch backgrounds it.
-    TaskBackgrounded { id: String },
+    TaskBackgrounded { id: String, shell: bool },
     /// A task notification, by `task_id`; `stopped`: its status is `stopped`.
     TaskNotified { id: String, stopped: bool },
     /// The CLI replayed a task notification as a user line, taking it into a turn; the `<task-id>` is the task's.
@@ -320,6 +320,8 @@ pub fn read_usage(line: &str) -> Usage {
             let task_id = |object: &serde_json::Map<String, Value>| object.get("task_id").and_then(Value::as_str).map(String::from);
             // A task of the main session that nobody awaits: no parent task, `awaited` not true.
             let main = |object: &serde_json::Map<String, Value>| object.get("parent_task_id").is_none_or(Value::is_null) && object.get("awaited").and_then(Value::as_bool) != Some(true);
+            // The kind the CLI gives a task, `task_type`: only `local_bash` (a Bash task or a Monitor) is captured to get no turn when we stop it.
+            let shell = |object: &serde_json::Map<String, Value>| object.get("task_type").and_then(Value::as_str) == Some("local_bash");
             match event.get("subtype").and_then(Value::as_str) {
                 Some("init") => Usage::TurnBegan,
                 Some("background_tasks_changed") => {
@@ -327,10 +329,11 @@ pub fn read_usage(line: &str) -> Usage {
                     Usage::BackgroundTasks {
                         live: entries.iter().copied().filter_map(task_id).collect(),
                         main: entries.iter().copied().filter(|entry| main(entry)).filter_map(task_id).collect(),
+                        shell: entries.iter().copied().filter(|entry| shell(entry)).filter_map(task_id).collect(),
                     }
                 }
-                Some("task_started") if event.get("is_backgrounded").and_then(Value::as_bool) == Some(true) && main(&event) => task_id(&event).map_or(Usage::Other, |id| Usage::TaskBackgrounded { id }),
-                Some("task_updated") if event.get("patch").and_then(|patch| patch.get("is_backgrounded")).and_then(Value::as_bool) == Some(true) => task_id(&event).map_or(Usage::Other, |id| Usage::TaskBackgrounded { id }),
+                Some("task_started") if event.get("is_backgrounded").and_then(Value::as_bool) == Some(true) && main(&event) => task_id(&event).map_or(Usage::Other, |id| Usage::TaskBackgrounded { id, shell: shell(&event) }),
+                Some("task_updated") if event.get("patch").and_then(|patch| patch.get("is_backgrounded")).and_then(Value::as_bool) == Some(true) => task_id(&event).map_or(Usage::Other, |id| Usage::TaskBackgrounded { id, shell: false }),
                 Some("task_notification") => task_id(&event).map_or(Usage::Other, |id| Usage::TaskNotified { id, stopped: event.get("status").and_then(Value::as_str) == Some("stopped") }),
                 _ => Usage::Other,
             }

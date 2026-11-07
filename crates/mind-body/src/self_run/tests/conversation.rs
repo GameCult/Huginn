@@ -13,6 +13,7 @@ const BG_RACE: &str = include_str!("../claude-2.1.312-live-session-bg-race.jsonl
 const BG_LATE: &str = include_str!("../claude-2.1.312-live-session-bg-late.jsonl");
 const BG_FGTO: &str = include_str!("../claude-2.1.312-live-session-bg-fgto.jsonl");
 const BG_KILL: &str = include_str!("../claude-2.1.312-live-session-bg-kill.jsonl");
+const BG_AGENTSTOP: &str = include_str!("../claude-2.1.312-live-session-bg-agentstop.jsonl");
 const BG_MONITOR: &str = include_str!("../claude-2.1.312-live-session-bg-monitor.jsonl");
 
 fn saying(text: &str) -> String {
@@ -427,6 +428,28 @@ fn a_stop_the_session_did_not_ask_for_owes_its_turn() {
     assert!(ran.outcome.is_ok());
     assert_eq!(tells(&ran).len(), 1, "{:?}", ran.written());
     assert_eq!((answered(&mind, 1), answered(&mind, 2), answered(&mind, 3)), (vec![id_of("a1")], vec![id_of("a1")], vec![id_of("l1")]), "the CLI's turn answers Aqua's brief, never Libby's");
+}
+
+/// A background Agent the session stops with TaskStop is notified inside the turn that stops it, and the CLI still begins a turn for that notice:
+/// Libby's brief waits for it, and the turn answers Aqua's.
+#[test]
+fn an_agent_the_session_stops_with_taskstop_owes_its_turn() {
+    let lines = stream(BG_AGENTSTOP);
+    let (request1, result1, init2) = (after(&lines, "request", 1), after(&lines, "result", 1), after(&lines, "init", 2));
+    let splices = |mind: &Rc<TestMind>| vec![(request1, vec![briefed(mind, 31, vec![libby("l1")])]), (result1, vec![Idle(31)])];
+    let mind = serving_aqua();
+    let ran = mind_run(&mind, script(&lines[..init2], splices(&mind)));
+    assert!(ran.outcome.is_ok());
+    assert!(!written_with(&ran, "@libby:chat") && !written_with(&ran, &id_of("l1")), "the CLI's turn for the stopped agent is queued: {:?}", ran.written());
+    let mind = serving_aqua();
+    let ran = mind_run(&mind, [script(&lines, splices(&mind)), vec![Idle(31), Out(echo()), Out(saying("libby done"))]].concat());
+    assert!(ran.outcome.is_ok());
+    assert_eq!(tells(&ran).len(), 1, "{:?}", ran.written());
+    let results = lines.iter().filter(|line| label_of(line) == "result").count();
+    for n in 1..=results {
+        assert_eq!(answered(&mind, u32::try_from(n).unwrap()), vec![id_of("a1")], "reply {n}: the CLI's turn for Aqua's agent is Aqua's");
+    }
+    assert_eq!(answered(&mind, u32::try_from(results + 1).unwrap()), vec![id_of("l1")]);
 }
 
 /// A persistent Monitor stays in the level through several notice turns the CLI begins; Libby's brief waits through all of them and the final turn

@@ -1575,8 +1575,8 @@ mod live_session {
                 Usage::Request { id, prefix, stops } => (format!("request:{prefix}"), Fact::Request { id, prefix, stops }),
                 Usage::Echo => ("echo".to_string(), Fact::Echo),
                 Usage::TurnBegan => ("turn".to_string(), Fact::TurnBegan),
-                Usage::BackgroundTasks { live, main } => ("level".to_string(), Fact::BackgroundTasks { live, main }),
-                Usage::TaskBackgrounded { id } => ("backgrounded".to_string(), Fact::TaskBackgrounded { id }),
+                Usage::BackgroundTasks { live, main, shell } => ("level".to_string(), Fact::BackgroundTasks { live, main, shell }),
+                Usage::TaskBackgrounded { id, shell } => ("backgrounded".to_string(), Fact::TaskBackgrounded { id, shell }),
                 Usage::TaskNotified { id, stopped } => ("notified".to_string(), Fact::TaskNotified { id, stopped }),
                 Usage::NotificationTaken { id } => ("taken".to_string(), Fact::NotificationTaken { id }),
                 Usage::Result { ok, blocked } => (format!("result:{}", if blocked { "blocked" } else if ok { "ok" } else { "error" }), Fact::Result { ok, blocked, ttl_1h }),
@@ -1738,14 +1738,14 @@ mod live_session {
         // A persistent monitor: notice turns the CLI begins while its task stays in the level, then the notification and the level's end.
         assert_eq!(significant(&replay(BG_MONITOR)).iter().filter(|kind| **kind == "level").count(), 2);
         let task = |usage: &Usage| match usage {
-            Usage::TaskBackgrounded { id } | Usage::TaskNotified { id, .. } | Usage::NotificationTaken { id } => Some(id.clone()),
+            Usage::TaskBackgrounded { id, .. } | Usage::TaskNotified { id, .. } | Usage::NotificationTaken { id } => Some(id.clone()),
             _ => None,
         };
         let fold = usages(BG_FOLD);
         let ids: Vec<String> = fold.iter().filter_map(task).collect();
         assert_eq!(ids.len(), 3, "backgrounded, notified, taken");
         assert!(ids.iter().all(|id| *id == ids[0]) && !ids[0].starts_with("toolu_"), "one task_id names the task at its three lines: {ids:?}");
-        assert!(fold.contains(&Usage::BackgroundTasks { live: vec![ids[0].clone()], main: vec![ids[0].clone()] }) && fold.contains(&Usage::BackgroundTasks { live: vec![], main: vec![] }));
+        assert!(fold.contains(&Usage::BackgroundTasks { live: vec![ids[0].clone()], main: vec![ids[0].clone()], shell: vec![ids[0].clone()] }) && fold.contains(&Usage::BackgroundTasks { live: vec![], main: vec![], shell: vec![] }));
         // A task that went to the background at its timeout was announced foreground and is backgrounded by the update that moved it: the start is no reading.
         let fgto = usages(BG_FGTO);
         let moved: Vec<&Usage> = fgto.iter().filter(|usage| matches!(usage, Usage::TaskBackgrounded { .. })).collect();
@@ -1753,19 +1753,21 @@ mod live_session {
         assert!(fgto.iter().any(|usage| matches!(usage, Usage::TaskNotified { stopped: false, .. })));
         // A stop is a notification whose status is stopped, and the TaskStop call on the request line names the task.
         let kill = usages(BG_KILL);
-        let Some(Usage::TaskBackgrounded { id: killed }) = kill.iter().find(|usage| matches!(usage, Usage::TaskBackgrounded { .. })) else { panic!("{kill:?}") };
+        let Some(Usage::TaskBackgrounded { id: killed, shell: true }) = kill.iter().find(|usage| matches!(usage, Usage::TaskBackgrounded { .. })) else { panic!("{kill:?}") };
         assert!(kill.contains(&Usage::TaskNotified { id: killed.clone(), stopped: true }));
         assert!(kill.iter().any(|usage| matches!(usage, Usage::Request { stops, .. } if stops == std::slice::from_ref(killed))), "{kill:?}");
         assert_eq!(kill.iter().filter(|usage| matches!(usage, Usage::Request { stops, .. } if !stops.is_empty())).count(), 1);
         // The level's `main` leaves out a subagent's and an awaited task; a start under a parent task, or awaited, or in the foreground, is no reading.
-        let changed = json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "m"}, {"task_id": "s", "parent_task_id": "p"}, {"task_id": "w", "awaited": true}, {"task_id": "n", "parent_task_id": null, "awaited": false}]}).to_string();
-        assert_eq!(read_usage(&changed), Usage::BackgroundTasks { live: vec!["m".into(), "s".into(), "w".into(), "n".into()], main: vec!["m".into(), "n".into()] });
+        let changed = json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "m", "task_type": "local_bash"}, {"task_id": "s", "parent_task_id": "p", "task_type": "local_agent"}, {"task_id": "w", "awaited": true}, {"task_id": "n", "parent_task_id": null, "awaited": false}]}).to_string();
+        assert_eq!(read_usage(&changed), Usage::BackgroundTasks { live: vec!["m".into(), "s".into(), "w".into(), "n".into()], main: vec!["m".into(), "n".into()], shell: vec!["m".into()] });
         let started = |extra: Value| {
             let mut line = json!({"type": "system", "subtype": "task_started", "task_id": "t", "is_backgrounded": true});
             line.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             read_usage(&line.to_string())
         };
-        assert_eq!(started(json!({})), Usage::TaskBackgrounded { id: "t".into() });
+        assert_eq!(started(json!({})), Usage::TaskBackgrounded { id: "t".into(), shell: false }, "no task_type is no shell");
+        assert_eq!(started(json!({"task_type": "local_bash"})), Usage::TaskBackgrounded { id: "t".into(), shell: true });
+        assert_eq!(started(json!({"task_type": "local_agent"})), Usage::TaskBackgrounded { id: "t".into(), shell: false });
         assert_eq!(started(json!({"is_backgrounded": false})), Usage::Other, "a foreground task is no reading");
         assert_eq!(started(json!({"parent_task_id": "p"})), Usage::Other);
         assert_eq!(started(json!({"awaited": true})), Usage::Other);
@@ -1792,7 +1794,7 @@ mod live_session {
         let usages = usages(BG_AGENT);
         // One task_id names the task at its start and at its notification.
         let ids: Vec<&Usage> = usages.iter().filter(|usage| matches!(usage, Usage::TaskBackgrounded { .. } | Usage::TaskNotified { .. })).collect();
-        assert!(matches!(ids[..], [Usage::TaskBackgrounded { id: started }, Usage::TaskNotified { id: ended, stopped: false }] if started == ended), "{ids:?}");
+        assert!(matches!(ids[..], [Usage::TaskBackgrounded { id: started, .. }, Usage::TaskNotified { id: ended, stopped: false }] if started == ended), "{ids:?}");
         assert!(usages.iter().position(|usage| matches!(usage, Usage::TaskBackgrounded { .. })) < usages.iter().position(|usage| matches!(usage, Usage::TaskNotified { .. })));
         let idle = idleness(BG_AGENT);
         let labels: Vec<&str> = idle.iter().map(|(label, _)| label.as_str()).collect();

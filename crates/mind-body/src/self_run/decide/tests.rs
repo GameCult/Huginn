@@ -517,11 +517,17 @@ fn a_flush_already_written_ends_the_session_by_itself_and_a_yield_does_not_cut_i
 /// The CLI's level after a background task of the main session came in: it is in the level and the session backgrounded it.
 fn level(ids: &[&str]) -> Event {
     let live: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-    Event::BackgroundTasks { main: live.clone(), live }
+    Event::BackgroundTasks { main: live.clone(), shell: live.clone(), live }
 }
 
+/// A shell task (the CLI's `task_type` `local_bash`) of the main session went to the background.
 fn backgrounded(id: &str) -> Event {
-    Event::TaskBackgrounded { id: id.to_string() }
+    Event::TaskBackgrounded { id: id.to_string(), shell: true }
+}
+
+/// A task of any other kind (an agent, a workflow, a remote one, or one whose kind the stream did not give).
+fn backgrounded_other(id: &str) -> Event {
+    Event::TaskBackgrounded { id: id.to_string(), shell: false }
 }
 
 fn notified(id: &str) -> Event {
@@ -620,7 +626,7 @@ fn the_level_is_replaced_whole_and_an_edge_line_never_edits_it() {
     assert!(running(vec![(backgrounded("t"), 1), (notified("t"), 2), (stopped("t"), 3)]).is_empty(), "nothing enters the level by an edge");
     assert_eq!(running(vec![(level(&["t"]), 1), (backgrounded("u"), 2), (notified("t"), 3), (stopped("u"), 3)]), ["t"], "nothing leaves it by an edge");
     // A subagent's or an awaited task is in the level (it holds idleness) but is not the main session's: it is never backgrounded.
-    let (state, _) = run(vec![(Event::BackgroundTasks { live: vec!["t".into(), "s".into()], main: vec!["t".into()] }, 1)]);
+    let (state, _) = run(vec![(Event::BackgroundTasks { live: vec!["t".into(), "s".into()], main: vec!["t".into()], shell: vec![] }, 1)]);
     assert_eq!(state.running.len(), 2);
     assert_eq!(state.backgrounded.into_iter().collect::<Vec<_>>(), ["t"]);
 }
@@ -631,12 +637,14 @@ fn a_notification_owes_a_turn_when_the_task_was_backgrounded_unless_the_session_
     assert!(owes(vec![(backgrounded("t"), 3), (notified("t"), 4)]), "a backgrounded task's notification owes its turn");
     assert!(owes(vec![(level(&["t"]), 3), (notified("t"), 4)]), "the level's main entry is backgrounded");
     assert!(!owes(vec![(notified("t"), 4)]), "a task never backgrounded (foreground, or unknown) owes nothing");
-    assert!(!owes(vec![(Event::BackgroundTasks { live: vec!["s".into()], main: vec![] }, 3), (notified("s"), 4)]), "a subagent's or an awaited task owes nothing");
+    assert!(!owes(vec![(Event::BackgroundTasks { live: vec!["s".into()], main: vec![], shell: vec![] }, 3), (notified("s"), 4)]), "a subagent's or an awaited task owes nothing");
     // A stop of ours: the model was told nothing but the call's result, so no turn follows.
     assert!(!owes(vec![(backgrounded("t"), 3), (stops_of("b", &["t"]), 3), (stopped("t"), 4)]), "a stop the session asked for owes nothing");
     // A stop the CLI made on its own, a stop of another task, and a task that finished before our stop took hold, owe their turns.
     assert!(owes(vec![(backgrounded("t"), 3), (stopped("t"), 4)]), "a stop the session did not ask for owes its turn");
     assert!(owes(vec![(backgrounded("t"), 3), (stops_of("b", &["other"]), 3), (stopped("t"), 4)]));
+    assert!(owes(vec![(backgrounded_other("t"), 3), (stops_of("b", &["t"]), 3), (stopped("t"), 4)]), "a stop of ours owes nothing only for a shell task: any other kind gets its turn");
+    assert!(owes(vec![(Event::BackgroundTasks { live: vec!["t".into()], main: vec!["t".into()], shell: vec![] }, 3), (stops_of("b", &["t"]), 3), (stopped("t"), 4)]), "a level entry of another or unread kind gets its turn");
     assert!(owes(vec![(backgrounded("t"), 3), (stops_of("b", &["t"]), 3), (notified("t"), 4)]), "a task that completed is told in its own turn: only a status of stopped is ours");
     // The stop is read from any line of the turn, including a request line already seen.
     let (state, _) = run(vec![(req("a", 10), 1), (stops_of("a", &["t"]), 1)]);

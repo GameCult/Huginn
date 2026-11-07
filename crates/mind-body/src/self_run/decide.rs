@@ -78,9 +78,9 @@ pub(super) enum Event {
     /// The CLI began a turn (its `system` init line).
     TurnBegan,
     /// The CLI's level of background tasks (`background_tasks_changed`): `live` every task in it, `main` those of the main session that nobody awaits.
-    BackgroundTasks { live: Vec<String>, main: Vec<String> },
+    BackgroundTasks { live: Vec<String>, main: Vec<String>, shell: Vec<String> },
     /// A task of the main session went to the background (`task_started` backgrounded, or a `task_updated` that backgrounded it), by `task_id`.
-    TaskBackgrounded { id: String },
+    TaskBackgrounded { id: String, shell: bool },
     /// A task notification came (`task_notification`), by `task_id`; `stopped`: its status says it was stopped.
     TaskNotified { id: String, stopped: bool },
     /// The CLI replayed a task notification as a user line: it took that notification into a turn, by `task_id`. Never one of our echoes.
@@ -155,6 +155,8 @@ pub(super) struct State {
     running: BTreeSet<String>,
     /// Tasks the main session ever backgrounded (the CLI's own SDK consumer's rule), by `task_id`: a monotone cache of the stream.
     backgrounded: BTreeSet<String>,
+    /// Tasks the CLI's `task_type` calls `local_bash` (a Bash task or a Monitor), by `task_id`: the only kinds captured to get no turn when we stop them.
+    shell: BTreeSet<String>,
     /// Tasks a `TaskStop` call of ours named: the CLI's stop tells the model nothing, so such a notification owes no turn.
     stopped_by_us: BTreeSet<String>,
     /// Notifications of backgrounded tasks that have not yet been given their turn, by `task_id`.
@@ -327,17 +329,21 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
     let mut action = Action::None;
     match event {
         Event::TurnBegan => state.open_turn(None),
-        Event::BackgroundTasks { live, main } => {
+        Event::BackgroundTasks { live, main, shell } => {
             state.running = live.into_iter().collect();
             state.backgrounded.extend(main);
+            state.shell.extend(shell);
         }
-        Event::TaskBackgrounded { id } => {
+        Event::TaskBackgrounded { id, shell } => {
+            if shell {
+                state.shell.insert(id.clone());
+            }
             state.backgrounded.insert(id);
         }
-        // The CLI's rule: a backgrounded task's notification is given a turn, except that of a stop the model asked for itself. A foreground,
+        // The CLI's rule: a backgrounded task's notification is given a turn, except that of a stop the model asked for itself of a shell task (any other kind, or an unread one, gets its turn when stopped as when ended). A foreground,
         // subagent-owned, awaited or unknown task owes nothing; a stop the CLI made on its own (a deadline, memory pressure) owes its turn.
         Event::TaskNotified { id, stopped } => {
-            if state.backgrounded.contains(&id) && !(stopped && state.stopped_by_us.contains(&id)) {
+            if state.backgrounded.contains(&id) && !(stopped && state.stopped_by_us.contains(&id) && state.shell.contains(&id)) {
                 let since = state.turns;
                 state.owed.insert(id, Owed { since, taken: false });
             }

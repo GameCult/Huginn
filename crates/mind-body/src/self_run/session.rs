@@ -80,8 +80,8 @@ pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dy
                         Event::Echo
                     }
                     Usage::TurnBegan => Event::TurnBegan,
-                    Usage::BackgroundTasks { live, main } => Event::BackgroundTasks { live, main },
-                    Usage::TaskBackgrounded { id } => Event::TaskBackgrounded { id },
+                    Usage::BackgroundTasks { live, main, shell } => Event::BackgroundTasks { live, main, shell },
+                    Usage::TaskBackgrounded { id, shell } => Event::TaskBackgrounded { id, shell },
                     Usage::TaskNotified { id, stopped } => Event::TaskNotified { id, stopped },
                     Usage::NotificationTaken { id } => Event::NotificationTaken { id },
                     Usage::Result { ok, blocked } => {
