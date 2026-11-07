@@ -544,6 +544,8 @@ fn a_requests_start_is_bounded_by_the_line_before_it_never_by_its_own_first_line
     assert_eq!(warm_after(working(), vec![(Event::Echo, 0), (req("a", 10), 500), (OK, 600)], Some(0)), Some(t(3600 - 60)));
     // The next request of the turn begins after the previous request's last line, not after its result.
     assert_eq!(warm_after(working(), vec![(Event::Echo, 0), (req("a", 10), 100), (req("a", 10), 200), (req("b", 10), 900), (OK, 950)], Some(0)), Some(t(200 + 3600 - 60)));
+    // A request with no echo before it (nothing was written) is bounded by the result before it.
+    assert_eq!(warm_after(working(), vec![(Event::Echo, 0), (req("a", 10), 10), (OK, 20), (req("b", 10), 900)], Some(0)), Some(t(20 + 3600 - 60)));
     // After a result, the next turn's echo is the bound.
     assert_eq!(warm_after(working(), vec![(Event::Echo, 0), (req("a", 10), 10), (OK, 20), (Event::Echo, 300), (req("b", 10), 900), (OK, 950)], Some(0)), Some(t(300 + 3600 - 60)));
 }
