@@ -418,6 +418,7 @@ pub(crate) mod tests {
                 sequence: 1,
                 assigned_on: Date("2026-09-16".into()),
                 note: "assigned".into(),
+                names: vec![],
             }),
             PipelineDocument::Campaign(PipelineCampaign {
                 slug: slug(CAMPAIGN),

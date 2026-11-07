@@ -132,6 +132,7 @@ pub(crate) fn stewardship_n(instance: &str, repo_name: &str, sequence: u32) -> P
         sequence,
         assigned_on: date(),
         note: "assigned".into(),
+        names: vec![],
     })
 }
 

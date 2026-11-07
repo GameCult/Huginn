@@ -152,7 +152,7 @@ pub enum PipelineFacts {
     },
     Resolution { subject: PipelineRef, sequence: u32, outcome: ResolutionOutcome, resolved_on: Date },
     Instance { instance: Slug, display_name: Short, host: Short, created_at: Date },
-    Stewardship { instance: Slug, repo: OrgRepo, sequence: u32, assigned_on: Date, note: Line },
+    Stewardship { instance: Slug, repo: OrgRepo, sequence: u32, assigned_on: Date, note: Line, #[serde(default)] names: Vec<Short> },
     HandOff { from_instance: Slug, to_instance: Slug, repo: OrgRepo, handed_on: Date },
     Run { label: Label, operated_by: RunOperator, turn: RunTurn, started_on: Date, claims: Vec<PipelineRef> },
     Pulse { label: Label, tempo_vote_beat_s: Option<u32>, #[serde(default)] tempo_vote_withdrawn: bool, urgency_permille: Option<u16> },
@@ -245,6 +245,7 @@ impl PipelineFacts {
                 sequence: value.sequence,
                 assigned_on: value.assigned_on.clone(),
                 note: value.note.clone(),
+                names: value.names.clone(),
             },
             D::HandOff(value) => Self::HandOff {
                 from_instance: value.from_instance.clone(),

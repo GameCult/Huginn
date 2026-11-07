@@ -141,7 +141,7 @@ mod lane {
         let date = || Date("2026-10-22".into());
         vec![
             PipelineDocument::Instance(PipelineInstance { instance: Slug(INSTANCE.into()), display_name: "test mind".into(), created_at: date(), host: "test".into() }),
-            PipelineDocument::Stewardship(PipelineStewardship { instance: Slug(INSTANCE.into()), repo: REPO.into(), sequence: 1, assigned_on: date(), note: "assigned".into() }),
+            PipelineDocument::Stewardship(PipelineStewardship { instance: Slug(INSTANCE.into()), repo: REPO.into(), sequence: 1, assigned_on: date(), note: "assigned".into(), names: vec![] }),
             PipelineDocument::Campaign(PipelineCampaign {
                 slug: Slug(CAMPAIGN.into()),
                 title: "Eureka body".into(),

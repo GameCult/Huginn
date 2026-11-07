@@ -434,6 +434,7 @@ fn derive(docs: &Docs<'_>, mind: &Slug) -> Vec<PipelineDocument> {
                         sequence: docs.derived_stewardship_sequence(mind, &hand_off.repo, &staged.key),
                         repo: hand_off.repo.clone(),
                         assigned_on: hand_off.handed_on.clone(),
+                        names: vec![],
                         note: Line(staged.key.clone()),
                     }));
                 }
@@ -1566,6 +1567,26 @@ mod tests {
         assert_eq!(taken.sequence, 2);
         assert_eq!(taken.assigned_on, eureka_pipeline::Date("2026-09-17".into()));
         assert!(mind.envelope(K::Stewardship, &first).is_some(), "the first assignment is still readable by key");
+    }
+
+    /// A steward revises her chat names the way she revises anything of hers: the next sequence, and a resolution of the last record
+    /// superseding it, in one batch. Without the resolution the old record is still in force and the new one is refused; with it the
+    /// new record is the one in force.
+    #[test]
+    fn a_steward_revises_her_names_by_the_next_sequence_superseding_the_last_in_one_batch() {
+        let mut mind = seeded();
+        let (first, second) = (format!("{INSTANCE}:stewardship:gamecult_-epiphany.n1"), format!("{INSTANCE}:stewardship:gamecult_-epiphany.n2"));
+        let named = |sequence: u32, names: &[&str]| {
+            let D::Stewardship(mut revised) = stewardship_n(INSTANCE, REPO, sequence) else { panic!() };
+            revised.names = names.iter().map(|name| (*name).into()).collect();
+            D::Stewardship(revised)
+        };
+        assert_eq!(refusal(admit(&mut mind, vec![named(2, &["BDS"])])), MindRefusal::AlreadyStewarded { repo: REPO.into() }, "the first record is still in force");
+        let supersede = |by: &str| resolution(r(K::Stewardship, &first), ResolutionOutcome::Superseded { by: vec![r(K::Stewardship, by)] });
+        committed(admit(&mut mind, vec![supersede(&second), named(2, &["BDS", "Bad Day Simulator"])]));
+        let Some(D::Stewardship(in_force)) = mind.get(K::Stewardship, &second).unwrap() else { panic!() };
+        assert_eq!(in_force.names, vec![eureka_pipeline::Short("BDS".into()), eureka_pipeline::Short("Bad Day Simulator".into())]);
+        assert_eq!(refusal(admit(&mut mind, vec![named(3, &["BDS"])])), MindRefusal::AlreadyStewarded { repo: REPO.into() }, "the second record is the one in force now");
     }
 
     /// Q19 A's rationale, which the cap alone does not carry: a withdrawal

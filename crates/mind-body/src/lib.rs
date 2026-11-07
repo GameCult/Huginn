@@ -30,6 +30,7 @@
 #![forbid(clippy::disallowed_methods)]
 #![forbid(unsafe_code)]
 
+mod address;
 pub mod chat_client;
 pub mod chat_rudp;
 pub mod cli;

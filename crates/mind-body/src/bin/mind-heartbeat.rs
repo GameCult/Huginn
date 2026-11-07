@@ -22,7 +22,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use eureka_state::HuginnClient;
 use mind_body::chat_rudp::{RudpChat, connection_id};
-use mind_body::heartbeat::{Config, FileControl, FileStore, Organs, PersonaId, Seat, TempoView, poll};
+use mind_body::heartbeat::{Config, FileControl, FileStore, Organs, PersonaId, Seat, HeartbeatView, poll};
 use mind_body::launch::{SystemClock, SystemdLauncher};
 use mind_body::queue::HuginnMind;
 

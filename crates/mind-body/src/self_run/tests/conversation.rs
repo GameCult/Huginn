@@ -628,7 +628,7 @@ fn a_switch_seeds_its_span_with_its_own_briefs_so_no_result_inherits_the_span_be
     let conversation = told.first().map(|brief| brief.conversation.clone()).unwrap();
     let (run, claims) = her_run(&*mind).unwrap().unwrap();
     let mut heard = Heard::default();
-    let mut live = SelfInbox::new(&*mind, (&run, &claims), "", (&[], 0), (&mut told, conversation), &mut heard);
+    let mut live = SelfInbox::new(&*mind, (&run, &claims), "", (&[], 0), (&mut told, conversation), &mut heard, false);
     live.echoed();
     live.result(&saying("libby done"), true, false).unwrap();
     persona_commit(&mind, vec![aqua("a1")]);

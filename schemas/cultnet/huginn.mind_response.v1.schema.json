@@ -3208,6 +3208,13 @@
                 "instance": {
                   "$ref": "#/$defs/Slug"
                 },
+                "names": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/Short"
+                  }
+                },
                 "note": {
                   "$ref": "#/$defs/Line"
                 },
@@ -4501,7 +4508,7 @@
       ]
     },
     "PipelineStewardship": {
-      "description": "Stewardship over a repo, as an assignment recorded in a mind. One\ninstance may steward several repos, so the repo is part of the key.\n`sequence` is per `(instance, repo)`, set by the writer, `1` for the\nfirst, so a repo transferred away and back is two records under one\nprefix rather than one document overwriting the other. `assigned_on`\nis a field, not a key part. As on a resolution, whether the sequence\nis the previous plus one, and which assignment is in force, are\nadmission's rules and not this crate's.",
+      "description": "Stewardship over a repo, as an assignment recorded in a mind. One\ninstance may steward several repos, so the repo is part of the key.\n`sequence` is per `(instance, repo)`, set by the writer, `1` for the\nfirst, so a repo transferred away and back is two records under one\nprefix rather than one document overwriting the other. `assigned_on`\nis a field, not a key part. As on a resolution, whether the sequence\nis the previous plus one, and which assignment is in force, are\nadmission's rules and not this crate's.\n`names` are the chat names that address her for this repo, matched exactly\nas written; none means the repo's own name, matched in any case.",
       "type": "object",
       "properties": {
         "assigned_on": {
@@ -4509,6 +4516,13 @@
         },
         "instance": {
           "$ref": "#/$defs/Slug"
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Short"
+          },
+          "maxItems": 8
         },
         "note": {
           "$ref": "#/$defs/Line"
