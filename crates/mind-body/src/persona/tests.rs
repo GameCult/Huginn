@@ -1187,7 +1187,7 @@ fn a_turn_shows_her_stewardships_follow_ups_and_the_rulings_they_cite() {
     let input = first_input(&rig);
     assert!(input.contains("What you are responsible for"), "{input}");
     assert!(input.contains("Open follow-ups, newest first:"), "{input}");
-    assert!(input.contains("- steward of GameCult/cinny (chat names, any case: cinny): the chat client; design law in eureka-body:ruling:client-first."), "{input}");
+    assert!(input.contains("- steward of GameCult/cinny (chat names, exactly as written: cinny): the chat client; design law in eureka-body:ruling:client-first."), "{input}");
     let (newer, older) = (input.find("eureka-body/newer").unwrap(), input.find("eureka-body/older").unwrap());
     assert!(newer < older, "{input}");
     assert!(input.contains("Ship the other thing.") && !input.contains("Second line."), "{input}");
@@ -1212,7 +1212,7 @@ fn her_responsibilities_show_each_stewardships_chat_names_and_the_line_on_changi
     let rig = Rig::new(vec![], &[]);
     rig.mind.committed(vec![steward_naming("GameCult/BadDaySimulator", &[]), steward_naming("GameCult/Thing", &["Thing"])]);
     let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
-    assert!(text.contains("- steward of GameCult/BadDaySimulator (chat names, any case: baddaysimulator, bad day simulator): the project"), "{text}");
+    assert!(text.contains("- steward of GameCult/BadDaySimulator (chat names, exactly as written: BadDaySimulator; any case: bad day simulator): the project"), "{text}");
     assert!(text.contains("- steward of GameCult/Thing (chat names, exactly as written: Thing): the project"), "{text}");
     assert_eq!(text.matches("These names address you in chat as a tag does. To change a project's names, admit its stewardship's next sequence with `names`").count(), 1, "{text}");
     let last_steward = text.rfind("- steward of").unwrap();
@@ -2229,7 +2229,8 @@ fn a_dm_memory_names_its_confidant_not_its_subject() {
 fn about_can_name_an_absent_mind() {
     let (libby, op) = ("@libby:chat", "@op:chat");
     let decided = reply(&[("!dm-op:chat", "ok")], json!([keeps("Decided", "Libby does the shaders for the Cinny fork", &[libby])]), json!([]), json!(null));
-    let rig = Rig::new(vec![direct(1, "!dm-op:chat", op, "Libby will do the shaders for the Cinny fork")], &[decided, says(&[("swarm", "go")])]);
+    let dm = ChatDelivery { is_direct: true, ..delivery_of(1, "!dm-op:chat", op, "Libby will do the shaders for the Cinny fork", "$dm-libby") };
+    let rig = Rig::new(vec![dm], &[decided, says(&[("swarm", "go")])]);
     assert_eq!(failure_of(rig.go()), None);
     assert_eq!(rig.sent_texts().len(), 1);
     assert_eq!(rig.chat.acked.borrow().len(), 1);
@@ -3789,7 +3790,7 @@ fn a_small_machine() -> Rig {
 
 /// What project-name-addresses-steward made of the base: the stewardship lines show their chat names and one line says what they do.
 fn with_chat_names(base: &str) -> String {
-    let mut lines: Vec<String> = base.lines().map(|line| line.replace("- steward of GameCult/Huginn: ", "- steward of GameCult/Huginn (chat names, any case: huginn): ").replace("- steward of GameCult/cinny: ", "- steward of GameCult/cinny (chat names, any case: cinny): ")).collect();
+    let mut lines: Vec<String> = base.lines().map(|line| line.replace("- steward of GameCult/Huginn: ", "- steward of GameCult/Huginn (chat names, exactly as written: Huginn): ").replace("- steward of GameCult/cinny: ", "- steward of GameCult/cinny (chat names, exactly as written: cinny): ")).collect();
     let last = lines.iter().rposition(|line| line.starts_with("- steward of")).unwrap();
     lines.insert(last + 1, "These names address you in chat as a tag does. To change a project's names, admit its stewardship's next sequence with `names` and a resolution superseding the previous record; names you list replace the derived ones and match exactly as you write them, so list each casing you want.".into());
     lines.join("\n") + "\n"

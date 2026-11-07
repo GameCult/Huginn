@@ -2169,9 +2169,14 @@ fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, names: &BTreeMa
     for steward in &stewards {
         if let PipelineFacts::Stewardship { repo, note, names: listed, .. } = &steward.facts {
             let chat = project_names(repo, listed);
-            let words = chat.iter().map(|name| name.text.as_str()).collect::<Vec<_>>().join(", ");
-            let how = if listed.is_empty() { "any case" } else { "exactly as written" };
-            out.push_str(&format!("- steward of {} (chat names, {how}: {words}): {}\n", repo.0, note.0));
+            let how: Vec<String> = [(true, "exactly as written"), (false, "any case")]
+                .into_iter()
+                .filter_map(|(exact, how)| {
+                    let words = chat.iter().filter(|name| name.exact == exact).map(|name| name.text.as_str()).collect::<Vec<_>>().join(", ");
+                    (!words.is_empty()).then(|| format!("{how}: {words}"))
+                })
+                .collect();
+            out.push_str(&format!("- steward of {} (chat names, {}): {}\n", repo.0, how.join("; "), note.0));
             chat_names.extend(chat);
             if !repos.contains(repo) {
                 repos.push(repo.clone());
