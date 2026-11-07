@@ -19,7 +19,7 @@ use huginn_mind::eureka_pipeline::{
 };
 use huginn_mind::{
     AdmissionFacts, HuginnMindRequest, HuginnMindResponse, IndexStatus, MindRefusal, MindStatus, PersonaStatus, PipelineAdmissionOutcome, PipelineDocumentView,
-    PipelinePageItems, PipelineProvenance, PipelineSelectionPage, PipelineStatus,
+    PersonaPutOutcome, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, PipelineStatus,
 };
 use huginn_daemon::{Daemon, Hits, IndexSink, SearchTicket};
 use huginn_mind::MindStore;
@@ -1374,4 +1374,94 @@ fn sources_refuses_naming_both_models_when_the_daemon_embeds_under_another() {
     let refused = at(server.addr, &["sources", "anything"], None);
     assert_eq!(refused.code, 1, "{}", refused.err);
     assert!(refused.out.contains("d1") && refused.out.contains("d2"), "{}", refused.out);
+}
+
+/// A scripted daemon that records each request and answers every one with `response`.
+fn replying(operation: &'static str, response: HuginnMindResponse) -> (Server, Arc<Mutex<Vec<HuginnMindRequest>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let server = scripted(move |message| {
+        let (_, request) = decode_request(message).expect("a mind request");
+        sink.lock().unwrap().push(request);
+        answer(operation, &response)
+    });
+    (server, seen)
+}
+
+fn persona_put_args<'a>(file: &'a str, expected: Option<&'a str>) -> Vec<&'a str> {
+    let mut args = vec!["persona", "put", "--faculty", "SelfFaculty", "--agent", "claude", "--session", "session-7"];
+    if let Some(expected) = expected {
+        args.extend(["--expected-updated-at", expected]);
+    }
+    args.push(file);
+    args
+}
+
+#[test]
+fn the_persona_commands_round_trip_against_a_live_daemon() {
+    const T1: &str = "2026-10-10T10:00:00Z";
+    const T2: &str = "2026-10-10T10:00:01Z";
+    let (root, daemon) = mind(vec![]);
+    let server = serve(root, daemon);
+    let dir = tempfile::tempdir().unwrap();
+    let first = write(&dir, "first.json", &persona(INSTANCE, T1));
+    let second = write(&dir, "second.json", &persona(INSTANCE, T2));
+
+    let ran = at(server.addr, &["persona", "get"], None);
+    assert_eq!((ran.code, ran.out.as_str(), ran.err.as_str()), (1, "absent\n", ""));
+
+    let ran = at(server.addr, &persona_put_args(&first, None), None);
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    let receipt = ran.out.strip_prefix("Committed ").and_then(|rest| rest.strip_suffix('\n')).expect(&ran.out).to_string();
+
+    let ran = at(server.addr, &["persona", "get"], None);
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    assert!(ran.out.ends_with(&format!("\nupdatedAt {T1} receipt {receipt}\n")), "{}", ran.out);
+    let (document, _) = ran.out.rsplit_once("\nupdatedAt").unwrap();
+    assert_eq!(serde_json::from_str::<Value>(document).unwrap(), persona(INSTANCE, T1));
+
+    // A put that did not read the stored document is refused, names the stored updatedAt, and writes nothing.
+    let stale = at(server.addr, &persona_put_args(&second, None), None);
+    assert_eq!(stale.code, 1, "{}", stale.err);
+    assert!(stale.out.starts_with("Refused PersonaStale") && stale.out.contains(T1), "{}", stale.out);
+    let ran = at(server.addr, &["persona", "get"], None);
+    assert!(ran.out.contains(&format!("updatedAt {T1} receipt {receipt}")), "{}", ran.out);
+
+    // The same document read from stdin, with the stored updatedAt, commits.
+    let ran = at(server.addr, &persona_put_args("-", Some(T1)), Some(&persona(INSTANCE, T2).to_string()));
+    assert_eq!(ran.code, 0, "{} {}", ran.out, ran.err);
+    let ran = at(server.addr, &["persona", "get"], None);
+    assert!(ran.out.contains(&format!("updatedAt {T2} receipt ")), "{}", ran.out);
+}
+
+#[test]
+fn persona_put_sends_the_whole_document_under_the_huginn_tool() {
+    let (server, seen) = replying("persona_put", HuginnMindResponse::PersonaPut(PersonaPutOutcome::Committed { receipt_id: "mind-commit-p".into() }));
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "persona.json", &persona(INSTANCE, "2026-10-10T10:00:00Z"));
+    let ran = at(server.addr, &persona_put_args(&file, Some("2026-10-09T00:00:00Z")), None);
+    assert_eq!((ran.code, ran.out.as_str()), (0, "Committed mind-commit-p\n"), "{}", ran.err);
+    let seen = seen.lock().unwrap();
+    let [HuginnMindRequest::PersonaPut { instance, provenance, state, expected_updated_at }] = &seen[..] else { panic!("{seen:?}") };
+    assert_eq!(instance.0, INSTANCE);
+    assert_eq!(
+        (provenance.faculty, provenance.agent.0.as_str(), provenance.session.0.as_str(), provenance.tool.0.as_str()),
+        (huginn_mind::Faculty::SelfFaculty, "claude", "session-7", "huginn")
+    );
+    assert_eq!(state, &persona(INSTANCE, "2026-10-10T10:00:00Z"));
+    assert_eq!(expected_updated_at.as_deref(), Some("2026-10-09T00:00:00Z"));
+}
+
+#[test]
+fn a_persona_that_is_not_one_object_is_a_usage_error_and_sends_nothing() {
+    let (server, seen) = replying("persona_put", HuginnMindResponse::PersonaPut(PersonaPutOutcome::Committed { receipt_id: "x".into() }));
+    let dir = tempfile::tempdir().unwrap();
+    let array = write(&dir, "array.json", &json!([persona(INSTANCE, "2026-10-10T10:00:00Z")]));
+    let ran = at(server.addr, &persona_put_args(&array, None), None);
+    assert_eq!(ran.code, 2, "{}", ran.out);
+    assert!(ran.err.starts_with("InvalidInput: "), "{}", ran.err);
+    let ran = at(server.addr, &persona_put_args("-", None), Some("not json"));
+    assert_eq!(ran.code, 2, "{}", ran.out);
+    assert!(ran.err.starts_with("InvalidInput: "), "{}", ran.err);
+    assert!(seen.lock().unwrap().is_empty());
 }

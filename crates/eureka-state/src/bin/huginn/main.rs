@@ -35,7 +35,7 @@ use huginn_mind::eureka_pipeline::{
 };
 use huginn_mind::{
     BATCH_MAX, Faculty, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionBatch, PipelineAdmissionOutcome,
-    PipelinePageItems, PipelineProvenance, PipelineSelectionPage, SemanticQuery, SourceQuery,
+    PersonaPutOutcome, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, SemanticQuery, SourceQuery,
 };
 use serde_json::Value;
 
@@ -55,7 +55,7 @@ Every key the schema does not know is refused (exit 2) with its path; nothing is
 After Committed or AlreadyAdmitted the batch is read back and compared with what was sent: `read back <n> equal`, or exit 5 with the ids and field paths that differ.";
 
 #[derive(Parser, Debug)]
-#[command(name = "huginn", about = "Huginn's mind: whoami, view, query, recipes, admit, schema", arg_required_else_help = true)]
+#[command(name = "huginn", about = "Huginn's mind: whoami, view, query, recipes, persona, admit, schema", arg_required_else_help = true)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -119,6 +119,33 @@ enum Command {
     },
     /// The JSON Schema of a document kind or of a selection; no name lists them.
     Schema { name: Option<String> },
+    /// The mind's persona document (gamecult.persona_state.v0).
+    Persona {
+        #[command(subcommand)]
+        command: PersonaCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PersonaCommand {
+    /// The stored document with its updatedAt and receipt; `absent` (exit 1) until the first put.
+    Get,
+    /// Replace the persona document whole.
+    Put {
+        #[arg(long, value_parser = faculty)]
+        faculty: Faculty,
+        /// The writing agent's name.
+        #[arg(long)]
+        agent: String,
+        /// The writing session.
+        #[arg(long)]
+        session: String,
+        /// The stored updatedAt this put replaces; omit for the first put.
+        #[arg(long)]
+        expected_updated_at: Option<String>,
+        /// The whole document file, or - for stdin.
+        file: String,
+    },
 }
 
 fn faculty(text: &str) -> Result<Faculty, String> {
@@ -200,6 +227,10 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
             query(settings, door::selection_value(&ask.selection)?, ask.semantic, ask.page.cursor, ask.page.documents)
         }
         Command::Admit { faculty, agent, session, file } => admit(settings, faculty, agent, session, &file),
+        Command::Persona { command: PersonaCommand::Get } => persona_get(settings),
+        Command::Persona { command: PersonaCommand::Put { faculty, agent, session, expected_updated_at, file } } => {
+            persona_put(settings, faculty, agent, session, expected_updated_at, &file)
+        }
         Command::Schema { name } => {
             let text = schema::text(name.as_deref())?;
             let _ = write!(std::io::stdout(), "{text}");
@@ -497,6 +528,49 @@ fn differences(sent: &Value, held: &Value, path: &str, out: &mut Vec<String>) {
 fn refused(refusal: &MindRefusal) -> u8 {
     say(format_args!("Refused {refusal:?}"));
     1
+}
+
+fn persona_get(settings: &Settings) -> Result<u8, Trouble> {
+    match settings.client()?.persona_get().map_err(Trouble::from)? {
+        HuginnMindResponse::Persona(Some(view)) => {
+            say(serde_json::to_string_pretty(&view.value).map_err(|error| Trouble::Internal(error.to_string()))?);
+            say(format_args!("updatedAt {} receipt {}", view.updated_at, view.receipt_id));
+            Ok(0)
+        }
+        HuginnMindResponse::Persona(None) => {
+            say("absent");
+            Ok(1)
+        }
+        HuginnMindResponse::Refused(refusal) => Ok(refused(&refusal)),
+        other => Err(unexpected(&other)),
+    }
+}
+
+fn persona_put(
+    settings: &Settings,
+    faculty: Faculty,
+    agent: String,
+    session: String,
+    expected_updated_at: Option<String>,
+    file: &str,
+) -> Result<u8, Trouble> {
+    let text = door::file_or_stdin(file)?;
+    let state: Value = serde_json::from_str(&text)
+        .map_err(|error| Trouble::invalid(format!("the persona document is not JSON: {error}")))?;
+    if !state.is_object() {
+        return Err(Trouble::invalid("the persona document is one JSON object, the whole gamecult.persona_state.v0"));
+    }
+    let provenance = PipelineProvenance { faculty, agent: Short(agent), session: Short(session), tool: Short(TOOL.to_string()) };
+    match settings.client()?.persona_put(provenance, state, expected_updated_at).map_err(Trouble::from)? {
+        HuginnMindResponse::PersonaPut(PersonaPutOutcome::Committed { receipt_id }) => {
+            say(format_args!("Committed {receipt_id}"));
+            Ok(0)
+        }
+        HuginnMindResponse::PersonaPut(PersonaPutOutcome::Refused(refusal)) | HuginnMindResponse::Refused(refusal) => {
+            Ok(refused(&refusal))
+        }
+        other => Err(unexpected(&other)),
+    }
 }
 
 fn unexpected(answer: &HuginnMindResponse) -> Trouble {
