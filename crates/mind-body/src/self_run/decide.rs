@@ -114,8 +114,10 @@ pub(super) struct State {
     /// An ok result has come: the session holds an answer worth its cache.
     answered_once: bool,
     last_result_at: Option<DateTime<Utc>>,
-    /// When the last new request of the main thread was read. The cache's lifetime runs from a request's start (research `cache-pricing`), so `warm_until` counts from here and never from the last result.
+    /// When the last new request of the main thread began, as far as the stream shows: the line before its first assistant line, never that line's own read time, which comes after the request started. The cache's lifetime runs from a request's start (research `cache-pricing`), so `warm_until` counts from here and never from the last result; a slow response only makes the window shorter than the cache's real life.
     last_request_at: Option<DateTime<Utc>>,
+    /// When the last line of the stream that matters (an echo, a result, or a request's line) was read: the earliest bound the stream gives on when the next request began, since a request starts after the line before it.
+    stream_at: Option<DateTime<Utc>>,
     /// The last result was not an error.
     last_ok: bool,
     /// The CLI refused a result as over its context limit; once seen, it stays seen.
@@ -187,10 +189,13 @@ pub(super) fn warm_until(state: &State) -> Option<DateTime<Utc>> {
 }
 
 /// Whether a kept conversation is resumed by a process starting at `now`: its
-/// cache is still warm and its seed is the one it was made under. Nothing else
-/// decides resume or fresh.
+/// cache is still warm, its seed is the one it was made under, and its record
+/// claims no more warmth than a cache has: a `warm_until` later than the record's
+/// write time plus the longest lifetime (one hour) is forged or wrong, and the
+/// conversation is cold (ruling `eureka-body:ruling:kept-session-ordinary-separation`).
+/// Nothing else decides resume or fresh.
 pub(super) fn resumes(kept: &Kept, now: DateTime<Utc>) -> bool {
-    kept.same_seed && now < kept.warm_until
+    kept.same_seed && now < kept.warm_until && kept.warm_until <= kept.written_at + Duration::seconds(TTL_1H_S)
 }
 
 /// How the run ended, by what was done to the child: the strongest signal delivered, else the flush, else nothing.
@@ -291,9 +296,11 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
     let mut action = Action::None;
     match event {
         Event::Request { id, prefix } => {
+            let began = state.stream_at.or(state.cap.map(|(at, _)| at)).unwrap_or(now);
+            state.stream_at = Some(now);
             if state.seen.insert(id) {
                 state.requests += 1;
-                state.last_request_at = Some(now);
+                state.last_request_at = Some(began);
                 state.prefix = prefix;
                 if let Some(flush) = state.flush.as_mut()
                     && flush.consumed
@@ -307,6 +314,7 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
             }
         }
         Event::Echo => {
+            state.stream_at = Some(now);
             state.consumed += 1;
             state.turn_open = true;
             let consumed = state.consumed;
@@ -319,6 +327,7 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
         Event::Result { ok, blocked, ttl_1h } => {
             state.turn_open = false;
             state.last_result_at = Some(now);
+            state.stream_at = Some(now);
             state.last_ok = ok;
             state.blocked |= blocked;
             state.ttl_s = if ttl_1h { TTL_1H_S } else { TTL_5M_S };

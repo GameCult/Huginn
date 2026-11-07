@@ -16,7 +16,7 @@ fn previous() -> Uuid {
 }
 
 fn kept_for(warm_for_s: i64, same_seed: bool) -> Kept {
-    Kept { session: previous(), transcript: PathBuf::from(format!("/state/session/{PREVIOUS}.jsonl")), warm_until: at_start() + ChronoDuration::seconds(warm_for_s), same_seed }
+    Kept { session: previous(), transcript: PathBuf::from(format!("/state/session/{PREVIOUS}.jsonl")), warm_until: at_start() + ChronoDuration::seconds(warm_for_s), written_at: at_start(), same_seed }
 }
 
 fn session_a() -> Uuid {
@@ -145,7 +145,7 @@ fn a_drive_that_fails_clears_the_conversation() {
     let ran = carry(&Seen::of(&mind), &*clock, &FakeLender::logging(log.clone(), Answer::Grant), &fake, TEST_CAP_S, &mut Refuses);
     assert!(ran.is_err());
     let keeps: Vec<_> = log.borrow().iter().filter(|event| matches!(event, Event::Kept(_))).cloned().collect();
-    assert_eq!(keeps, vec![Event::Kept(None)], "a resumed start keeps nothing, and the failed drive clears");
+    assert_eq!(keeps, vec![Event::Kept(Some((previous(), at_start()))), Event::Kept(None)], "a resumed start consumes the record, and the failed drive clears");
 }
 
 // ---- the files -----------------------------------------------------------------
@@ -192,7 +192,9 @@ fn the_configs_end_moves_the_main_transcripts_out_and_nothing_else_of_it() {
 }
 
 fn spawner_over(state: &Path, scratch: &Path, seed: Option<&Path>) -> ClaudeSpawner {
-    let mut environment = vec![(SCRATCH_VARIABLE.into(), scratch.into()), (STATE_DIRECTORY_VARIABLE.into(), state.into())];
+    // The unit's two state directories: her working directory, and the kept conversation's own beside it.
+    let directories = format!("{}:{}", state.join("work").display(), state.join("session").display());
+    let mut environment = vec![(SCRATCH_VARIABLE.into(), scratch.into()), (STATE_DIRECTORY_VARIABLE.into(), directories.into())];
     if let Some(seed) = seed {
         environment.push((SEED_VARIABLE.into(), seed.into()));
     }
@@ -217,7 +219,9 @@ fn keeping_one_conversation_removes_the_one_before_it_and_clearing_leaves_the_di
 
     spawner.keep(Some((newer, until))).unwrap();
     assert_eq!(names(&state.path().join("session")), [format!("{newer}.jsonl"), "kept.json".to_string()], "at most one transcript, and no stray");
-    assert_eq!(spawner.kept(), Some(Kept { session: newer, transcript: newer_path, warm_until: until, same_seed: true }));
+    let kept = spawner.kept().unwrap();
+    assert_eq!((kept.session, &kept.transcript, kept.warm_until, kept.same_seed), (newer, &newer_path, until, true));
+    assert!((chrono::Utc::now() - kept.written_at).num_seconds().abs() < 60, "the record says when it was written");
 
     spawner.keep(None).unwrap();
     assert!(names(&state.path().join("session")).is_empty());
@@ -238,11 +242,13 @@ fn a_record_that_is_missing_unreadable_or_names_a_missing_transcript_keeps_nothi
     assert_eq!(spawner.kept(), None, "a transcript with no record");
     write(&dir.join("kept.json"), "not json");
     assert_eq!(spawner.kept(), None, "unparseable");
-    write(&dir.join("kept.json"), &format!(r#"{{"session":"{PREVIOUS}","warm_until":"yesterday","seed":""}}"#));
+    write(&dir.join("kept.json"), &format!(r#"{{"session":"{PREVIOUS}","warm_until":"yesterday","written_at":"2026-10-09T13:00:00Z","seed":""}}"#));
     assert_eq!(spawner.kept(), None, "an unreadable instant");
-    write(&dir.join("kept.json"), &format!(r#"{{"session":"{}","warm_until":"2026-10-09T13:45:00Z","seed":""}}"#, session_a()));
+    write(&dir.join("kept.json"), &format!(r#"{{"session":"{}","warm_until":"2026-10-09T13:45:00Z","written_at":"2026-10-09T13:00:00Z","seed":""}}"#, session_a()));
     assert_eq!(spawner.kept(), None, "names a transcript that is not there");
     write(&dir.join("kept.json"), &format!(r#"{{"session":"{PREVIOUS}","warm_until":"2026-10-09T13:45:00Z","seed":""}}"#));
+    assert_eq!(spawner.kept(), None, "a record that does not say when it was written");
+    write(&dir.join("kept.json"), &format!(r#"{{"session":"{PREVIOUS}","warm_until":"2026-10-09T13:45:00Z","written_at":"2026-10-09T13:00:00Z","seed":""}}"#));
     assert!(spawner.kept().is_some_and(|kept| kept.same_seed));
 }
 
@@ -298,4 +304,68 @@ fn clearing_a_kept_directory_that_does_not_exist_is_nothing_and_one_that_cannot_
     spawner.keep(None).expect("no directory is already clear");
     write(&state.path().join("session"), "a file where the directory belongs");
     assert!(spawner.keep(None).is_err(), "a conversation that cannot be cleared is told, not swallowed");
+}
+
+/// Her files for `kept`/`keep`, a child that never starts: the process ends where a signal or a panic would end it, before the end keep.
+struct FilesThenDies {
+    files: ClaudeSpawner,
+    dies: Fake,
+}
+
+impl Spawner for FilesThenDies {
+    fn kept(&self) -> Option<Kept> {
+        self.files.kept()
+    }
+
+    fn keep(&self, keep: Option<(Uuid, chrono::DateTime<chrono::Utc>)>) -> Result<()> {
+        self.files.keep(keep)
+    }
+
+    fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
+        self.dies.spawn(args, token)
+    }
+}
+
+fn start_over_files(state: &Path, seen: &Seen) -> (String, ClaudeSpawner) {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let clock = Rc::new(Fixed(Cell::new(at_start())));
+    let spawner = FilesThenDies { files: spawner_over(state, state, None), dies: Fake::with(None, true) };
+    let mut out = Vec::new();
+    let _ = carry(seen, &*clock, &FakeLender::logging(log, Answer::Grant), &spawner, TEST_CAP_S, &mut out);
+    (String::from_utf8_lossy(&out).into_owned(), spawner.files)
+}
+
+#[test]
+fn a_process_killed_after_resuming_leaves_a_record_the_next_start_does_not_resume_from() {
+    let state = tempfile::tempdir().unwrap();
+    let files = spawner_over(state.path(), state.path(), None);
+    let path = transcript(state.path(), previous());
+    files.keep(Some((previous(), at_start() + ChronoDuration::seconds(1800)))).unwrap();
+    assert!(files.kept().is_some_and(|kept| decide::resumes(&kept, at_start())), "kept, warm");
+
+    // The next process resumes it; its child is gone before any end keep could run.
+    let mind = with_run();
+    let (out, files) = start_over_files(state.path(), &Seen::of(&mind));
+    assert!(out.contains(&format!("session resumed {PREVIOUS}")), "{out}");
+    let after = files.kept().expect("the transcript stays for --resume");
+    assert_eq!(after.transcript, path);
+    assert!(path.is_file());
+    assert!(!decide::resumes(&after, at_start() + ChronoDuration::seconds(1)), "the record no longer resumes");
+    assert!(!decide::resumes(&after, at_start()), "not even at the instant it was consumed");
+}
+
+#[test]
+fn a_forged_far_future_record_is_cold_and_cleared() {
+    let state = tempfile::tempdir().unwrap();
+    let files = spawner_over(state.path(), state.path(), None);
+    transcript(state.path(), previous());
+    write(
+        &state.path().join("session/kept.json"),
+        &format!(r#"{{"session":"{PREVIOUS}","warm_until":"2030-01-01T00:00:00Z","written_at":"2026-10-09T13:00:00Z","seed":""}}"#),
+    );
+    assert!(files.kept().is_some_and(|kept| kept.same_seed), "it parses, and it is the clock that refuses it");
+    let (out, files) = start_over_files(state.path(), &Seen::of(&with_run()));
+    assert!(out.contains("session fresh: cold"), "{out}");
+    assert_eq!(files.kept(), None);
+    assert!(names(&state.path().join("session")).is_empty());
 }

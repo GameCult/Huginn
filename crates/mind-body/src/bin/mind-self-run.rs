@@ -11,7 +11,8 @@
 //! `RUNTIME_DIRECTORY` (the unit's `RuntimeDirectory=`) holds each child's fresh
 //! configuration; `MIND_SELF_CONFIG_SEED` optionally names a root-owned directory copied into it.
 //! `STATE_DIRECTORY` (the unit's `StateDirectory=`) keeps her last clean
-//! conversation in `session/` for the next process; without it every start is fresh.
+//! conversation in its second directory, outside her working directory (the first), for the next
+//! process; with only one directory every start is fresh.
 //! The connector's lease socket is `CLAUDE_LEASE_SOCKET`: the token itself is
 //! never in this process's environment, only the descriptor the lease grants.
 
@@ -42,8 +43,8 @@ fn run() -> Result<i32> {
         .and_then(|seconds| seconds.parse().ok())
         .filter(|seconds| *seconds > 0)
         .ok_or_else(|| anyhow!("{RUN_CAP_VARIABLE} is not set to the unit's RuntimeMaxSec in seconds"))?;
-    if std::env::var_os(STATE_DIRECTORY_VARIABLE).is_none() {
-        println!("{STATE_DIRECTORY_VARIABLE} is not set: no conversation is kept and every start is fresh");
+    if std::env::var_os(STATE_DIRECTORY_VARIABLE).is_none_or(|directories| !directories.to_string_lossy().contains(':')) {
+        println!("{STATE_DIRECTORY_VARIABLE} names no second directory: no conversation is kept and every start is fresh");
     }
     let mind = HuginnMind::new(HuginnClient::new(address, instance, TIMEOUT));
     let outcome = carry(&mind, &SystemClock, &SocketLender::new(socket), &ClaudeSpawner::new(std::env::vars_os())?, run_cap_s, &mut std::io::stdout())?;

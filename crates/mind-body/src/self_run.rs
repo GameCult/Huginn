@@ -389,6 +389,8 @@ pub struct Kept {
     pub session: Uuid,
     pub transcript: PathBuf,
     pub warm_until: DateTime<Utc>,
+    /// When the record was written; `warm_until` may not lie more than the longest cache lifetime past it.
+    pub written_at: DateTime<Utc>,
     pub same_seed: bool,
 }
 
@@ -614,7 +616,14 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
     };
     // The one start decision: a kept conversation is resumed iff `decide::resumes`; any other is cleared before the child starts.
     let kept = spawner.kept();
-    let resume = kept.clone().filter(|kept| decide::resumes(kept, clock.now()));
+    let mut resume = kept.clone().filter(|kept| decide::resumes(kept, clock.now()));
+    if let Some(warm) = &resume {
+        // A resumed start consumes the record before the child exists: the same conversation, kept as already cold (its transcript stays for `--resume`),
+        // so a process that never reaches the end keep (a signal, a panic) cannot let the next resume from before the run it was killed in.
+        if spawner.keep(Some((warm.session, clock.now()))).is_err() {
+            resume = None;
+        }
+    }
     if resume.is_none() {
         let why = match &kept {
             None => "none kept",
@@ -814,7 +823,7 @@ pub struct ClaudeSpawner {
     seed: Option<PathBuf>,
     /// Her sandbox: with it the child runs under bubblewrap (`sandbox_args`), the Persona's; the Self passes none.
     sandbox: Option<PathBuf>,
-    /// Where her one kept conversation lives (`$STATE_DIRECTORY/session`); none keeps nothing, and every start is fresh.
+    /// Where her one kept conversation lives (the second of the unit's `STATE_DIRECTORY` entries, outside her working directory, the first); none keeps nothing, and every start is fresh.
     keep: Option<PathBuf>,
     /// The digest of the seed tree this process copies from (empty without a seed); none when the seed cannot be read, which no kept conversation matches.
     seed_digest: Option<String>,
@@ -826,11 +835,11 @@ impl ClaudeSpawner {
     /// without it every start is fresh, and the journal says so.
     pub fn new(unit_environment: impl IntoIterator<Item = (OsString, OsString)>) -> Result<Self> {
         let unit_environment: Vec<(OsString, OsString)> = unit_environment.into_iter().collect();
-        // systemd lists several state directories colon-separated; the unit names one.
+        // systemd lists several state directories colon-separated: the first is her working directory, the second the kept conversation's own, outside it.
         let keep = unit_environment
             .iter()
             .find(|(name, _)| name == STATE_DIRECTORY_VARIABLE)
-            .and_then(|(_, value)| value.to_string_lossy().split(':').next().filter(|first| !first.is_empty()).map(|first| Path::new(first).join(KEPT_DIR_NAME)));
+            .and_then(|(_, value)| value.to_string_lossy().split(':').nth(1).filter(|second| !second.is_empty()).map(PathBuf::from));
         let mut spawner = Self::in_sandbox(unit_environment, SEED_VARIABLE, None)?;
         spawner.seed_digest = match &spawner.seed {
             Some(seed) => seed_digest(seed).ok(),
@@ -851,10 +860,8 @@ impl ClaudeSpawner {
     }
 }
 
-/// The unit's `StateDirectory=`, which systemd names in the environment: where her kept conversation lives, in [`KEPT_DIR_NAME`].
+/// The unit's `StateDirectory=`, which systemd names in the environment, colon-separated: her working directory first, then the kept conversation's own directory (ruling `eureka-body:ruling:kept-session-ordinary-separation`).
 pub const STATE_DIRECTORY_VARIABLE: &str = "STATE_DIRECTORY";
-/// The directory of the kept conversation inside the state directory.
-const KEPT_DIR_NAME: &str = "session";
 /// The record of the kept conversation beside its transcript: `{"session", "warm_until", "seed"}`.
 const KEPT_RECORD: &str = "kept.json";
 
@@ -929,7 +936,8 @@ impl Spawner for ClaudeSpawner {
         let transcript = dir.join(format!("{session}.jsonl"));
         transcript.is_file().then_some(())?;
         let same_seed = self.seed_digest.as_deref() == Some(record.get("seed")?.as_str()?);
-        Some(Kept { session, transcript, warm_until, same_seed })
+        let written_at = DateTime::parse_from_rfc3339(record.get("written_at")?.as_str()?).ok()?.with_timezone(&Utc);
+        Some(Kept { session, transcript, warm_until, written_at, same_seed })
     }
 
     fn keep(&self, keep: Option<(Uuid, DateTime<Utc>)>) -> Result<()> {
@@ -940,7 +948,7 @@ impl Spawner for ClaudeSpawner {
             let _ = std::fs::remove_file(dir.join(KEPT_RECORD));
             return clear_kept_dir(dir, &[]).context("the kept conversation could not be cleared");
         };
-        let record = serde_json::json!({"session": session.to_string(), "warm_until": until.to_rfc3339_opts(SecondsFormat::Secs, true), "seed": seed});
+        let record = serde_json::json!({"session": session.to_string(), "warm_until": until.to_rfc3339_opts(SecondsFormat::Secs, true), "written_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true), "seed": seed});
         write_through_tmp(dir, KEPT_RECORD, record.to_string().as_bytes()).context("the kept conversation's record could not be written")?;
         clear_kept_dir(dir, &[KEPT_RECORD.to_string(), format!("{session}.jsonl")]).context("the conversation before it could not be removed")
     }

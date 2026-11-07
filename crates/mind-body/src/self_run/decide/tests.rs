@@ -531,18 +531,28 @@ fn near_cap() -> State {
 fn a_clean_end_is_kept_until_its_last_request_plus_its_cache_lifetime_less_the_margin() {
     // Two requests and a result at three different times: the base is the last request's.
     let events = |result: Event| vec![(Event::Echo, 0), (req("a", 10), 10), (req("b", 20), 50), (result, 90)];
-    assert_eq!(warm_after(working(), events(OK), Some(0)), Some(t(50 + 3600 - 60)));
-    assert_eq!(warm_after(working(), events(OK_SHORT), Some(0)), Some(t(50 + 300 - 60)));
+    assert_eq!(warm_after(working(), events(OK), Some(0)), Some(t(10 + 3600 - 60)));
+    assert_eq!(warm_after(working(), events(OK_SHORT), Some(0)), Some(t(10 + 300 - 60)));
     // A repeated request id is not a new request and moves nothing.
     let repeated = vec![(Event::Echo, 0), (req("a", 10), 10), (req("a", 10), 50), (OK, 90)];
-    assert_eq!(warm_after(working(), repeated, Some(0)), Some(t(10 + 3600 - 60)));
+    assert_eq!(warm_after(working(), repeated, Some(0)), Some(t(3600 - 60)));
+}
+
+#[test]
+fn a_requests_start_is_bounded_by_the_line_before_it_never_by_its_own_first_line() {
+    // The first assistant line arrives 500 s after the echo: the request began somewhere in between, and the earliest bound is the echo.
+    assert_eq!(warm_after(working(), vec![(Event::Echo, 0), (req("a", 10), 500), (OK, 600)], Some(0)), Some(t(3600 - 60)));
+    // The next request of the turn begins after the previous request's last line, not after its result.
+    assert_eq!(warm_after(working(), vec![(Event::Echo, 0), (req("a", 10), 100), (req("a", 10), 200), (req("b", 10), 900), (OK, 950)], Some(0)), Some(t(200 + 3600 - 60)));
+    // After a result, the next turn's echo is the bound.
+    assert_eq!(warm_after(working(), vec![(Event::Echo, 0), (req("a", 10), 10), (OK, 20), (Event::Echo, 300), (req("b", 10), 900), (OK, 950)], Some(0)), Some(t(300 + 3600 - 60)));
 }
 
 #[test]
 fn the_rotation_flush_keeps_its_conversation_and_every_other_end_clears_it() {
     let clean = vec![(Event::Echo, 0), (req("a", 10), 10), (OK, 20)];
     let with = |more: Vec<(Event, i64)>| [clean.clone(), more].concat();
-    assert_eq!(warm_after(working(), clean.clone(), Some(0)), Some(t(10 + 3600 - 60)));
+    assert_eq!(warm_after(working(), clean.clone(), Some(0)), Some(t(3600 - 60)));
     // The rotation: the flush is asked near the cap, answered, and the end is kept from that answer's request.
     let rotation = vec![(Event::Tick, 100), (Event::Echo, 101), (req("b", 20), 101), (OK, 102)];
     assert_eq!(warm_after(near_cap(), with(rotation.clone()), Some(0)), Some(t(101 + 3600 - 60)));
@@ -554,7 +564,7 @@ fn the_rotation_flush_keeps_its_conversation_and_every_other_end_clears_it() {
     let over_after_rotation = with(vec![(Event::Tick, 100), (Event::Echo, 101), (req("b", CEILING_TOKENS), 101), (OK, 102)]);
     assert_eq!(warm_after(near_cap(), over_after_rotation, Some(0)), None, "the prefix alone, under a rotation flush");
     assert_eq!(warm_after(working(), with(vec![(delivered(Stop::Interrupt), 30)]), Some(0)), None, "a delivered signal");
-    assert_eq!(warm_after(working(), with(vec![(Event::Signalled { how: Stop::Interrupt, delivered: false }, 30)]), Some(0)), Some(t(10 + 3600 - 60)), "a signal that never went out ended nothing");
+    assert_eq!(warm_after(working(), with(vec![(Event::Signalled { how: Stop::Interrupt, delivered: false }, 30)]), Some(0)), Some(t(3600 - 60)), "a signal that never went out ended nothing");
     let blocked_but_ok = vec![(Event::Echo, 0), (req("a", 10), 10), (Event::Result { ok: true, blocked: true, ttl_1h: true }, 20), (OK, 30)];
     assert_eq!(warm_after(working(), blocked_but_ok, Some(0)), None, "blocked is sticky");
     assert_eq!(warm_after(working(), with(vec![(Event::Echo, 30), (FAILED, 40)]), Some(0)), None, "the last result failed");
@@ -566,9 +576,18 @@ fn the_rotation_flush_keeps_its_conversation_and_every_other_end_clears_it() {
 
 #[test]
 fn a_kept_conversation_resumes_until_its_warm_until_and_not_after_and_never_across_a_seed_change() {
-    let kept = |same_seed| Kept { session: uuid::Uuid::nil(), transcript: "/state/session/x.jsonl".into(), warm_until: t(100), same_seed };
+    let kept = |same_seed| Kept { session: uuid::Uuid::nil(), transcript: "/state/session/x.jsonl".into(), warm_until: t(100), written_at: t(0), same_seed };
     assert!(resumes(&kept(true), t(99)));
     assert!(!resumes(&kept(true), t(100)));
     assert!(!resumes(&kept(true), t(101)));
     assert!(!resumes(&kept(false), t(0)));
+}
+
+#[test]
+fn a_record_claiming_more_warmth_than_a_cache_has_is_cold() {
+    let written = |warm_until, written_at| Kept { session: uuid::Uuid::nil(), transcript: "/state/session/x.jsonl".into(), warm_until, written_at, same_seed: true };
+    // One hour from the write is the longest a cache lives; a record may claim up to it and no more.
+    assert!(resumes(&written(t(1000 + 3600), t(1000)), t(1100)));
+    assert!(!resumes(&written(t(1000 + 3600 + 1), t(1000)), t(1100)), "a forged far-future warm_until");
+    assert!(!resumes(&written(t(1_000_000), t(1000)), t(1100)));
 }

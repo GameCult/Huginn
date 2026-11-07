@@ -226,7 +226,7 @@ mod lane {
     /// The binary with `bin` first on `PATH`, until the daemon answers (exit 2 before that
     /// has started nothing). `SELF_RUN_ENV_CANARY` is a variable of the unit's environment.
     fn ask(endpoint: &str, bin: &Path, socket: &Path) -> Output {
-        ask_in(endpoint, bin, socket, Some(&bin.join("state")))
+        ask_in(endpoint, bin, socket, Some(Path::new(&format!("{0}/state:{0}/kept", bin.display()))))
     }
 
     /// The same, in a unit whose `StateDirectory=` is `state_directory`.
@@ -419,9 +419,9 @@ echo '{request}'\necho '{echo}'\necho '{result}'\nexit 0",
         fake_claude(bin.path(), &body);
         let connector = fake_connector();
 
-        let first = ask_in(&endpoint, bin.path(), &connector.path, Some(units_state.path()));
+        let first = ask_in(&endpoint, bin.path(), &connector.path, Some(Path::new(&format!("{0}/work:{0}/kept", units_state.path().display()))));
         assert_eq!(first.status.code(), Some(0), "{}", all_output(&first));
-        let kept = units_state.path().join("session");
+        let kept = units_state.path().join("kept");
         let mut names: Vec<String> = std::fs::read_dir(&kept).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, [format!("{LANE_SESSION}.jsonl"), "kept.json".to_string()], "the first process kept its conversation");
@@ -433,7 +433,7 @@ echo '{request}'\necho '{echo}'\necho '{result}'\nexit 0",
         run.label = eureka_pipeline::Label("selfrun-lane-two".into());
         admit(state.path(), vec![second_run]);
         let (daemon, endpoint) = daemon_over(state.path());
-        let second = ask_in(&endpoint, bin.path(), &connector.path, Some(units_state.path()));
+        let second = ask_in(&endpoint, bin.path(), &connector.path, Some(Path::new(&format!("{0}/work:{0}/kept", units_state.path().display()))));
         drop(daemon);
         assert_eq!(second.status.code(), Some(0), "{}", all_output(&second));
 
