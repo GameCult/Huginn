@@ -323,9 +323,9 @@ mod tests {
 
     #[test]
     fn inert_writes_the_framing_characters_as_escapes() {
-        assert_eq!(inert("a \"b\" \\ <c>\n\u{202e}\u{a0}\u{7f}é"), r#""a \"b\" \\ <c>\n‮ \u007fé""#);
-        assert_eq!(inert("\u{1f600}\u{e000}"), r#""😀""#);
-        assert_eq!(inert("\u{ffff}\u{2028}"), r#""￿ ""#);
+        assert_eq!(inert("a \"b\" \\ <c>\n\u{202e}\u{a0}\u{7f}é"), r#""a \"b\" \\ \u003cc\u003e\n\u202e\u00a0\u007fé""#);
+        assert_eq!(inert("\u{1f600}\u{e000}"), r#""😀\ue000""#);
+        assert_eq!(inert("\u{ffff}\u{2028}"), r#""\uffff\u2028""#);
     }
 
     #[test]
