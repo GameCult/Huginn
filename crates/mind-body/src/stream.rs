@@ -415,17 +415,12 @@ fn build_seed(mind: &dyn MindPort, persona: &PersonaRead, since: Option<DateTime
     let fresh = news(mind, &instance, since, &responsibilities, now)?;
     let has_news = !fresh.is_empty();
     let stimulus = if has_news {
-        let mut lines = Vec::new();
-        let mut used = 0;
-        for (line, id) in fresh {
-            if used + line.len() + 1 > SECTION_MAX_BYTES {
-                break;
-            }
-            used += line.len() + 1;
-            lines.push(line);
-            id.into_iter().for_each(&mut cite);
-        }
-        format!("Since your last thought:\n{}", lines.join("\n"))
+        let body: Vec<&str> = fresh.iter().map(|(line, _)| line.as_str()).collect();
+        let kept = cap(&format!("Since your last thought:\n{}", body.join("\n")), SECTION_MAX_BYTES);
+        // Each line is one line (`quoted` escapes newlines), so the lines the bound kept are what the thought read.
+        let shown = kept.lines().count().saturating_sub(1);
+        fresh.into_iter().take(shown).filter_map(|(_, id)| id).for_each(&mut cite);
+        kept
     } else if let Some((line, id)) = unbidden(mind, &instance, now, u64::try_from(now.timestamp()).unwrap_or(0))? {
         cite(id);
         line
@@ -511,7 +506,7 @@ fn due(since: Option<DateTime<Utc>>, now: DateTime<Utc>, news: bool) -> bool {
 
 fn newest_thought(mind: &dyn MindPort) -> Result<Option<DateTime<Utc>>> {
     let newest = cultnet_rs::Selection { descending: true, limit: Some(1), ..mine(PipelineKind::Thought, mind.instance()) };
-    let found = headers(mind, &newest)?;
+    let PipelinePageItems::Headers(found) = mind.query(&newest)?.items else { bail!("the mind answered documents to a header selection") };
     Ok(found.iter().filter_map(|header| DateTime::parse_from_rfc3339(&header.admission.admitted_at).ok()).map(|at| at.with_timezone(&Utc)).max())
 }
 

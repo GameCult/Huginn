@@ -5,7 +5,7 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{MemorySort, PipelineDocument, PipelineKind, PipelineReply, PipelineThought, RunOperator, RunTurn, Slug};
 use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
@@ -575,6 +575,8 @@ fn a_flood_of_news_fills_the_stimulus_with_whole_lines_newest_first() {
     assert!(seed.stimulus.len() <= SECTION_MAX_BYTES && seed.stimulus.len() > SECTION_MAX_BYTES - 250, "{}", seed.stimulus.len());
     assert!(lines.iter().all(|line| line.starts_with("- You noted") && line.ends_with('"')), "a line was cut: {lines:?}");
     assert!(lines.len() > 10 && lines.len() < 30, "{}", lines.len());
+    let cited = seed.reads.iter().filter(|read| read.kind == PipelineKind::Memory).count();
+    assert!(cited >= lines.len() && cited <= lines.len() + 12, "the thought cites what its stimulus showed: {cited} reads for {} lines", lines.len());
     let newest = lines[0];
     assert!(newest.contains("\"29 ") || newest.contains("\"59 "), "newest first: {newest}");
 }
