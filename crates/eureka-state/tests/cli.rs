@@ -1819,12 +1819,12 @@ fn resolved(mut view: PipelineDocumentView) -> Viewing {
             resolved_on: Date("2026-10-10".into()),
         },
     };
-    Viewing::Doc(view)
+    Viewing::Doc(Box::new(view))
 }
 
 #[derive(Clone)]
 enum Viewing {
-    Doc(PipelineDocumentView),
+    Doc(Box<PipelineDocumentView>),
     Refused,
     /// The daemon rejects the call.
     Fails,
@@ -1853,7 +1853,7 @@ impl Scene {
     fn anchor(self, kind: &str, label: &str, text: &str) -> Self {
         let id = format!("t:{kind}:{label}");
         let view = held(kind, &id, text, None);
-        self.view(&id, Viewing::Doc(view))
+        self.view(&id, Viewing::Doc(Box::new(view)))
     }
     fn rank(mut self, text: &str, found: Vec<(PipelineDocumentView, f32)>) -> Self {
         self.ranks.insert(text.to_string(), found);
@@ -1881,7 +1881,7 @@ impl Scene {
                             "scripted",
                         )),
                         Some(Viewing::Refused) => Some(answer("view", &HuginnMindResponse::Refused(MindRefusal::MissingIdentity))),
-                        Some(Viewing::Doc(view)) => Some(answer("view", &HuginnMindResponse::View(Some(Box::new(view.clone()))))),
+                        Some(Viewing::Doc(view)) => Some(answer("view", &HuginnMindResponse::View(Some(view.clone())))),
                         None => Some(answer("view", &HuginnMindResponse::View(None))),
                     }
                 }
