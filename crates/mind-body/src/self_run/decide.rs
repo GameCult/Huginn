@@ -155,7 +155,7 @@ pub(super) struct State {
     running: BTreeSet<String>,
     /// Tasks the main session ever backgrounded (the CLI's own SDK consumer's rule), by `task_id`: a monotone cache of the stream.
     backgrounded: BTreeSet<String>,
-    /// Tasks the CLI's `task_type` calls `local_bash` (a Bash task or a Monitor), by `task_id`: the only kinds captured to get no turn when we stop them.
+    /// Tasks of a kind whose stop by the session queues nothing for the model (`SILENT_STOP_KINDS`), by `task_id`: the only kinds that owe no turn when we stop them.
     shell: BTreeSet<String>,
     /// Tasks a `TaskStop` call of ours named: the CLI's stop tells the model nothing, so such a notification owes no turn.
     stopped_by_us: BTreeSet<String>,
@@ -340,7 +340,7 @@ pub(super) fn decide(mut state: State, event: Event, now: DateTime<Utc>) -> (Sta
             }
             state.backgrounded.insert(id);
         }
-        // The CLI's rule: a backgrounded task's notification is given a turn, except that of a stop the model asked for itself of a shell task (any other kind, or an unread one, gets its turn when stopped as when ended). A foreground,
+        // The CLI's rule: a backgrounded task's notification is given a turn, except that of a stop the model asked for itself of a silent-stop kind (any other kind, or an unread one, gets its turn when stopped as when ended). A foreground,
         // subagent-owned, awaited or unknown task owes nothing; a stop the CLI made on its own (a deadline, memory pressure) owes its turn.
         Event::TaskNotified { id, stopped } => {
             if state.backgrounded.contains(&id) && !(stopped && state.stopped_by_us.contains(&id) && state.shell.contains(&id)) {

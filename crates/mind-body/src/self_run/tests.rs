@@ -1616,6 +1616,8 @@ mod live_session {
     const BG_FGTO: &str = include_str!("claude-2.1.312-live-session-bg-fgto.jsonl");
     const BG_KILL: &str = include_str!("claude-2.1.312-live-session-bg-kill.jsonl");
     const BG_MONITOR: &str = include_str!("claude-2.1.312-live-session-bg-monitor.jsonl");
+    const BG_KILLSHELL: &str = include_str!("claude-2.1.312-live-session-bg-killshell.jsonl");
+    const BG_DEADLINE_RACE: &str = include_str!("claude-2.1.312-live-session-bg-deadline-race.jsonl");
 
     #[test]
     fn a_line_written_during_a_tool_call_is_folded_one_result_and_its_echo_before_the_request_that_carries_it() {
@@ -1768,6 +1770,16 @@ mod live_session {
         assert_eq!(started(json!({})), Usage::TaskBackgrounded { id: "t".into(), shell: false }, "no task_type is no shell");
         assert_eq!(started(json!({"task_type": "local_bash"})), Usage::TaskBackgrounded { id: "t".into(), shell: true });
         assert_eq!(started(json!({"task_type": "local_agent"})), Usage::TaskBackgrounded { id: "t".into(), shell: false });
+        // Every kind the CLI source shows queues nothing for the model when the session stops it is silent; the kinds that queue a message, and any unknown one, are not.
+        for kind in ["local_bash", "local_workflow", "remote_agent", "mcp_task", "in_process_teammate", "dream", "auto_mode_scan", "local_memory_import"] {
+            assert_eq!(started(json!({"task_type": kind})), Usage::TaskBackgrounded { id: "t".into(), shell: true }, "{kind}");
+        }
+        for kind in ["local_agent", "monitor_mcp", "monitor_ws", "some_new_kind"] {
+            assert_eq!(started(json!({"task_type": kind})), Usage::TaskBackgrounded { id: "t".into(), shell: false }, "{kind}");
+        }
+        // The move to the background read from `task_updated` names no kind, so it claims no silence.
+        let updated = json!({"type": "system", "subtype": "task_updated", "task_id": "t", "patch": {"is_backgrounded": true}}).to_string();
+        assert_eq!(read_usage(&updated), Usage::TaskBackgrounded { id: "t".into(), shell: false });
         assert_eq!(started(json!({"is_backgrounded": false})), Usage::Other, "a foreground task is no reading");
         assert_eq!(started(json!({"parent_task_id": "p"})), Usage::Other);
         assert_eq!(started(json!({"awaited": true})), Usage::Other);
@@ -1787,6 +1799,17 @@ mod live_session {
             assert_eq!(call(alias, json!({"shell_id": "u"})), ["u"], "{alias} is the same stop under another name");
         }
         assert!(call("Bash", json!({"task_id": "t"})).is_empty());
+    }
+
+    #[test]
+    fn a_shell_task_stopped_by_killshell_or_by_a_deadline_that_beat_our_taskstop_gives_no_cli_turn_and_leaves_the_session_idle() {
+        for capture in [BG_KILLSHELL, BG_DEADLINE_RACE] {
+            let usages = usages(capture);
+            assert!(usages.iter().any(|usage| matches!(usage, Usage::TaskNotified { stopped: true, .. })), "{usages:?}");
+            assert!(usages.iter().any(|usage| matches!(usage, Usage::Request { stops, .. } if !stops.is_empty())), "{usages:?}");
+            assert_eq!(kinds(&replay(capture)).iter().filter(|kind| **kind == "turn").count(), 1, "no turn begins after ours");
+            assert!(idleness(capture).last().unwrap().1, "nothing is owed after the stop");
+        }
     }
 
     #[test]

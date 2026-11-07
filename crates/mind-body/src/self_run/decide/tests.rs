@@ -644,6 +644,7 @@ fn a_notification_owes_a_turn_when_the_task_was_backgrounded_unless_the_session_
     assert!(owes(vec![(backgrounded("t"), 3), (stopped("t"), 4)]), "a stop the session did not ask for owes its turn");
     assert!(owes(vec![(backgrounded("t"), 3), (stops_of("b", &["other"]), 3), (stopped("t"), 4)]));
     assert!(owes(vec![(backgrounded_other("t"), 3), (stops_of("b", &["t"]), 3), (stopped("t"), 4)]), "a stop of ours owes nothing only for a shell task: any other kind gets its turn");
+    assert!(!owes(vec![(Event::BackgroundTasks { live: vec!["t".into()], main: vec!["t".into()], shell: vec!["t".into()] }, 3), (stops_of("b", &["t"]), 3), (stopped("t"), 4)]), "a kind read only from the level's entry is as silent as one read from the start line");
     assert!(owes(vec![(Event::BackgroundTasks { live: vec!["t".into()], main: vec!["t".into()], shell: vec![] }, 3), (stops_of("b", &["t"]), 3), (stopped("t"), 4)]), "a level entry of another or unread kind gets its turn");
     assert!(owes(vec![(backgrounded("t"), 3), (stops_of("b", &["t"]), 3), (notified("t"), 4)]), "a task that completed is told in its own turn: only a status of stopped is ours");
     // The stop is read from any line of the turn, including a request line already seen.

@@ -266,6 +266,10 @@ const STOP_TOOLS: [&str; 3] = ["TaskStop", "KillShell", "KillBash"];
 /// The model name on the CLI's own assistant lines, which no request produced.
 const SYNTHETIC_MODEL: &str = "<synthetic>";
 
+/// The kinds (`task_type`) whose stop by the session queues nothing for the model, so their stopped notification owes no turn: `local_bash` (a Bash task or a Monitor) is captured, the rest are read from the bundle's kill code
+/// (Soul verdict `eureka-body:verdict:cut-self-reply-conversation.s6`). `local_agent`, `monitor_mcp`, `monitor_ws` and any kind not listed or unread queue a message when stopped, so they owe their turn.
+const SILENT_STOP_KINDS: [&str; 8] = ["local_bash", "local_workflow", "remote_agent", "mcp_task", "in_process_teammate", "dream", "auto_mode_scan", "local_memory_import"];
+
 /// One line of the child's stream, as far as the actuator reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Usage {
@@ -320,8 +324,8 @@ pub fn read_usage(line: &str) -> Usage {
             let task_id = |object: &serde_json::Map<String, Value>| object.get("task_id").and_then(Value::as_str).map(String::from);
             // A task of the main session that nobody awaits: no parent task, `awaited` not true.
             let main = |object: &serde_json::Map<String, Value>| object.get("parent_task_id").is_none_or(Value::is_null) && object.get("awaited").and_then(Value::as_bool) != Some(true);
-            // The kind the CLI gives a task, `task_type`: only `local_bash` (a Bash task or a Monitor) is captured to get no turn when we stop it.
-            let shell = |object: &serde_json::Map<String, Value>| object.get("task_type").and_then(Value::as_str) == Some("local_bash");
+            // The kind the CLI gives a task, `task_type`: only a kind in `SILENT_STOP_KINDS` is known to get no turn when we stop it.
+            let shell = |object: &serde_json::Map<String, Value>| object.get("task_type").and_then(Value::as_str).is_some_and(|kind| SILENT_STOP_KINDS.contains(&kind));
             match event.get("subtype").and_then(Value::as_str) {
                 Some("init") => Usage::TurnBegan,
                 Some("background_tasks_changed") => {
