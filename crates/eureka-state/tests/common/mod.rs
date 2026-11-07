@@ -165,6 +165,11 @@ pub fn serve<I: IndexSink<OwnedRedbMessagePackBackingStore> + Send + 'static>(
 
 /// A server that answers each schema message with whatever `script` says.
 pub fn scripted(mut script: impl FnMut(&CultNetMessage) -> CultNetMessage + Send + 'static) -> Server {
+    scripted_or_silent(move |message| Some(script(message)))
+}
+
+/// `scripted`, where `None` leaves that request unanswered.
+pub fn scripted_or_silent(mut script: impl FnMut(&CultNetMessage) -> Option<CultNetMessage> + Send + 'static) -> Server {
     let mut hub = bind("127.0.0.1:0".parse().unwrap(), "scripted").unwrap();
     let addr = hub.local_addr().unwrap();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -181,7 +186,9 @@ pub fn scripted(mut script: impl FnMut(&CultNetMessage) -> CultNetMessage + Send
                 let CultNetRudpServerEvent::Frame { session, frame } = event else { continue };
                 let message =
                     decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0).unwrap();
-                hub.send_schema_message(&session, &script(&message)).unwrap();
+                if let Some(reply) = script(&message) {
+                    hub.send_schema_message(&session, &reply).unwrap();
+                }
             }
             std::thread::sleep(Duration::from_millis(2));
         }
