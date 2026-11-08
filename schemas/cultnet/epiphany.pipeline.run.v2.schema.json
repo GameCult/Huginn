@@ -61,7 +61,8 @@
     "RunTurn": {
       "enum": [
         "PersonaTurn",
-        "SelfRun"
+        "SelfRun",
+        "Sleep"
       ],
       "type": "string"
     },

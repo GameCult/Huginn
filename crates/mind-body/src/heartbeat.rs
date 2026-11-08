@@ -33,7 +33,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Timelike, Utc};
 use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
 use cultnet_rs::Selection;
 use eureka_pipeline::{PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
@@ -104,11 +104,68 @@ pub struct Config {
     pub personas: Vec<PersonaId>,
     /// Sender ids that are the operator.
     pub operators: Vec<String>,
+    /// The nightly window and the Minds that sleep in it; none, no one sleeps.
+    pub night: Option<Night>,
+}
+
+/// The heartbeat's night: a daily window in UTC minutes (it may wrap midnight) and the Minds that sleep in it.
+/// The heartbeat alone decides who sleeps and when: one Sleep run per Mind per window, never made up if the window
+/// passes without one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Night {
+    pub from_min: u32,
+    pub to_min: u32,
+    pub minds: Vec<Slug>,
+}
+
+impl Night {
+    /// The nightly sleep from the two settings that name it: both or neither, so a half-set deploy fails at start
+    /// instead of quietly never sleeping, or sleeping no one.
+    pub fn from_settings(window: Option<&str>, minds: Option<&str>) -> Result<Option<Self>> {
+        match (window, minds) {
+            (Some(window), Some(minds)) => Self::parse(window, minds).map(Some),
+            (None, None) => Ok(None),
+            _ => bail!("HEARTBEAT_SLEEP_UTC and HEARTBEAT_SLEEP_MINDS are set together or not at all"),
+        }
+    }
+
+    /// `window` is `HH:MM-HH:MM` in UTC, `minds` the slugs comma-separated.
+    pub fn parse(window: &str, minds: &str) -> Result<Self> {
+        let minute = |text: &str| -> Result<u32> {
+            let (hour, minute) = text.trim().split_once(':').ok_or_else(|| anyhow!("the night window is HH:MM-HH:MM"))?;
+            let (hour, minute) = (hour.parse::<u32>()?, minute.parse::<u32>()?);
+            if hour > 23 || minute > 59 {
+                bail!("the night window is HH:MM-HH:MM");
+            }
+            Ok(hour * 60 + minute)
+        };
+        let (from, to) = window.split_once('-').ok_or_else(|| anyhow!("the night window is HH:MM-HH:MM"))?;
+        let (from_min, to_min) = (minute(from)?, minute(to)?);
+        if from_min == to_min {
+            bail!("the night window is empty");
+        }
+        let minds: Vec<Slug> = minds.split(',').map(|slug| Slug(slug.trim().to_string())).filter(|slug| !slug.0.is_empty()).collect();
+        if minds.is_empty() {
+            bail!("no Mind is listed to sleep");
+        }
+        Ok(Self { from_min, to_min, minds })
+    }
+
+    /// When the window `now` is inside opened, or none outside it.
+    fn opened(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let minute = now.hour() * 60 + now.minute();
+        let inside = if self.from_min < self.to_min { (self.from_min..self.to_min).contains(&minute) } else { minute >= self.from_min || minute < self.to_min };
+        if !inside {
+            return None;
+        }
+        let day = if minute >= self.from_min { now.date_naive() } else { now.date_naive().pred_opt()? };
+        Some(day.and_hms_opt(self.from_min / 60, self.from_min % 60, 0)?.and_utc())
+    }
 }
 
 impl Config {
     /// Refuses no Persona, or a Persona twice.
-    pub fn new(personas: Vec<PersonaId>, operators: Vec<String>) -> Result<Self> {
+    pub fn new(personas: Vec<PersonaId>, operators: Vec<String>, night: Option<Night>) -> Result<Self> {
         if personas.is_empty() {
             bail!("no persona is configured");
         }
@@ -124,6 +181,7 @@ impl Config {
         Ok(Self {
             personas,
             operators,
+            night,
         })
     }
 }
@@ -430,6 +488,13 @@ fn last_turn(mind: &dyn MindPort, instance: &Slug) -> Result<Option<PipelineDocu
     newest(mind, runs)
 }
 
+/// When her newest Sleep run was admitted, whatever became of it: a night that failed still counts.
+fn last_sleep(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime<Utc>>> {
+    let operator = format!("{:?}", RunOperator::Mind);
+    let runs = any_of(any_of(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]), "turn", &["Sleep"]), "operated_by", &[&operator]);
+    newest(mind, runs)?.map(|header| parse_time(&header.admission.admitted_at)).transpose()
+}
+
 /// The newest document a selection holds, by admission ordinal: one query.
 fn newest(mind: &dyn MindPort, selection: Selection) -> Result<Option<PipelineDocumentSummary>> {
     let asking = Selection { descending: true, limit: Some(1), ..selection };
@@ -527,6 +592,8 @@ struct MindRead {
     /// The urgency she declared and no turn has consumed.
     urgency: u16,
     self_end: Option<DateTime<Utc>>,
+    /// When her newest Sleep run was admitted.
+    last_sleep: Option<DateTime<Utc>>,
 }
 
 fn read_mind(organs: &Organs, mind: &dyn MindPort, slug: &Slug) -> Result<MindRead> {
@@ -540,6 +607,7 @@ fn read_mind(organs: &Organs, mind: &dyn MindPort, slug: &Slug) -> Result<MindRe
         vote: standing_vote(mind, slug)?,
         urgency: pending_urgency(mind, slug, turn.as_ref())?,
         self_end: last_self_end(mind, slug)?,
+        last_sleep: last_sleep(mind, slug)?,
     })
 }
 
@@ -757,6 +825,30 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
             }
             Launched::Busy => row.busy = true,
             Launched::Refused(why) => row.note = why,
+        }
+    }
+
+    // The night: inside the window, one Sleep run for a listed Mind who is idle and released and has not slept
+    // since the window opened (a failed night counts). The operator's mention went first above: she is busy then.
+    // A window that passes without a night is not made up.
+    if let Some(night) = &config.night
+        && let Some(opened) = night.opened(now)
+    {
+        for row in &mut rows {
+            if !row.idle() || !night.minds.contains(row.slug()) || row.read.as_ref().is_some_and(|read| read.last_sleep.is_some_and(|slept| slept >= opened)) {
+                continue;
+            }
+            match launch(organs, row, RunTurn::Sleep, vec![])? {
+                Launched::Run(label) => {
+                    row.note = format!("asleep {label}");
+                    row.busy = true;
+                    launched.push(row.slug().clone());
+                    launches.push(label);
+                    break;
+                }
+                Launched::Busy => row.busy = true,
+                Launched::Refused(why) => row.note = why,
+            }
         }
     }
 

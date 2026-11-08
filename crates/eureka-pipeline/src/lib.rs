@@ -736,8 +736,27 @@ unit_enums! {
     RulingAuthority { Operator, Standing, Defaulted, Mind }
     FindingOrigin { Introduced, PreExisting }
     RunOperator { Operator, Mind }
-    RunTurn { PersonaTurn, SelfRun }
+    RunTurn { PersonaTurn, SelfRun, Sleep }
     MemorySort { Asked, Decided, Committed, Learned, Did, Idea, Rapport }
+}
+
+/// The slots of a Mind's runs: one live run of hers per instance and slot. A
+/// Persona session and her Sleep run share the Persona slot (unit
+/// `mind-persona@`); a Self run holds the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunSlot {
+    Persona,
+    SelfRun,
+}
+
+impl RunTurn {
+    /// The slot this turn holds while live; admission and launch both read it here.
+    pub fn slot(self) -> RunSlot {
+        match self {
+            Self::PersonaTurn | Self::Sleep => RunSlot::Persona,
+            Self::SelfRun => RunSlot::SelfRun,
+        }
+    }
 }
 
 value_types! {
@@ -1004,6 +1023,8 @@ pub enum MemoryOrigin {
     Wake,
     /// A Self run of hers, by its label.
     SelfRun { run: Short },
+    /// Her Sleep run, by its label: a memory she formed in her night.
+    Sleep { run: Short },
 }
 
 impl Bounded for MemoryOrigin {
@@ -1018,7 +1039,7 @@ impl Bounded for MemoryOrigin {
                 list(&format!("{field}.with"), with, 8)
             }
             Self::Wake => Ok(()),
-            Self::SelfRun { run } => run.validate(&format!("{field}.run")),
+            Self::SelfRun { run } | Self::Sleep { run } => run.validate(&format!("{field}.run")),
         }
     }
 }
@@ -1075,6 +1096,9 @@ pub enum ResolutionOutcome {
     Deferred { to: PipelineRef },
     Recorded { reason: Line },
     Withdrawn { reason: Line },
+    /// How a Sleep run ended when the ledger took her reply: `line` is her one line, `day_through` the last memory
+    /// of her day she was shown (none when the day was empty). It is the one place a night's cut line is kept.
+    Slept { line: Line, day_through: Option<PipelineRef> },
 }
 
 impl Bounded for ResolutionOutcome {
@@ -1088,6 +1112,10 @@ impl Bounded for ResolutionOutcome {
             }
             Self::Deferred { to } => to.validate(&format!("{field}.to")),
             Self::Recorded { reason } | Self::Withdrawn { reason } => reason.validate(&format!("{field}.reason")),
+            Self::Slept { line, day_through } => {
+                line.validate(&format!("{field}.line"))?;
+                day_through.validate(&format!("{field}.day_through"))
+            }
         }
     }
 }
@@ -1871,6 +1899,7 @@ mod tests {
         out.push(("resolution.deferred".into(), resolution(ResolutionOutcome::Deferred { to: by(PipelineKind::FollowUp, "follow_up", "FU-4") })));
         out.push(("resolution.recorded".into(), resolution(ResolutionOutcome::Recorded { reason: "Noted.".into() })));
         out.push(("resolution.withdrawn".into(), resolution(ResolutionOutcome::Withdrawn { reason: "Mistaken.".into() })));
+        out.push(("resolution.slept".into(), resolution(ResolutionOutcome::Slept { line: "Let the rest go.".into(), day_through: Some(by(PipelineKind::Memory, "memory", "m-1")) })));
         for (name, authority) in [("standing", RulingAuthority::Standing), ("defaulted", RulingAuthority::Defaulted)] {
             let mut r = ruling_sample();
             r.authority = authority;
@@ -3048,6 +3077,16 @@ mod tests {
                 Err(PipelineRefusal::FieldBound { field: "resolution.outcome.reason".into(), limit: 1000, actual: 1001 })
             );
         }
+
+        // A night's closing is bounded on both of its fields: her line like any `Line`, and the memory it names
+        // like any referent.
+        let run = PipelineRef { kind: PipelineKind::Run, id: id("run", "night") };
+        let memory = PipelineRef { kind: PipelineKind::Memory, id: id("memory", "m-1") };
+        let slept = |line: Line, day_through: Option<PipelineRef>| resolved(run.clone(), ResolutionOutcome::Slept { line, day_through });
+        assert_eq!(slept("ok".into(), Some(memory.clone())), Ok(()));
+        assert_eq!(slept("ok".into(), None), Ok(()));
+        assert_eq!(slept(Line("a".repeat(1001)), None), Err(PipelineRefusal::FieldBound { field: "resolution.outcome.line".into(), limit: 1000, actual: 1001 }));
+        refused("resolution.outcome.day_through.id", slept("ok".into(), Some(PipelineRef { kind: PipelineKind::Memory, id: id("ruling", "R8") })));
     }
 
     /// Ruling B: a fix names the tree where the finding stopped being true,

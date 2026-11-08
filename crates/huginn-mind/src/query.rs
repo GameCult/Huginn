@@ -1795,9 +1795,11 @@ mod tests {
         committed(admit(&mut mind, vec![crate::fixtures::thought("t1", "A drift.", &[r(K::Finding, &f1), r(K::Question, &q1)])]));
         let (older, newer) = (format!("{INSTANCE}:memory:m1"), format!("{INSTANCE}:memory:m2"));
         committed(admit(&mut mind, vec![memory("m1", MemorySort::Idea, "one", &[])]));
-        let D::Memory(mut consolidating) = memory("m2", MemorySort::Idea, "two", &[]) else { unreachable!() };
-        consolidating.consolidates = vec![r(K::Memory, &older)];
-        committed(admit(&mut mind, vec![D::Memory(consolidating)]));
+        committed(admit(&mut mind, crate::fixtures::consolidation("m2", &["m1"])));
+        let night_id = format!("{INSTANCE}:run:night");
+        committed(admit(&mut mind, vec![crate::fixtures::mind_run("night", eureka_pipeline::RunTurn::Sleep, &[])]));
+        committed(admit(&mut mind, vec![resolution(r(K::Run, &night_id), ResolutionOutcome::Slept { line: "ok".into(), day_through: Some(r(K::Memory, &older)) })]));
+        let night_closed = format!("{INSTANCE}:resolution:run.night.n1");
         let (note, way) = (id("research", "p.a"), id("idea", "p.i"));
         let D::Research(mut note_document) = research("p", "a", "A fact.") else { unreachable!() };
         note_document.serves = vec![r(K::Question, &q1)];
@@ -1816,6 +1818,7 @@ mod tests {
             id("resolution", &format!("finding.{}.n1", f2.rsplit(':').next().unwrap())),
         );
         let spec_closed = id("resolution", "cut_spec.cut-1.r1.n1");
+        let older_closed = format!("{INSTANCE}:resolution:memory.m1.n1");
         let spec_r2 = id("cut_spec", "cut-1.r2");
         let r1 = id("ruling", "R1");
         let expected: Vec<(CitationRole, &str, &str)> = vec![
@@ -1835,7 +1838,10 @@ mod tests {
             (CitationRole::Subject, &f1_closed, &f1),
             (CitationRole::Subject, &f2_closed, &f2),
             (CitationRole::Subject, &spec_closed, &spec),
+            (CitationRole::Subject, &older_closed, &older),
+            (CitationRole::Subject, &night_closed, &night_id),
             (CitationRole::SupersededBy, &spec_closed, &spec_r2),
+            (CitationRole::SupersededBy, &older_closed, &newer),
             (CitationRole::ResolvedBy, &n1, &r1),
             (CitationRole::ResolvedBy, &f1_closed, &report),
             (CitationRole::DeferredTo, &f2_closed, &fu),
@@ -1843,6 +1849,7 @@ mod tests {
             (CitationRole::Claims, &run_id, &spec_r2),
             (CitationRole::Claims, &run_id, &fu),
             (CitationRole::Run, &reply_id, &run_id),
+            (CitationRole::DayThrough, &night_closed, &older),
             (CitationRole::Reads, &thought_id, &f1),
             (CitationRole::Reads, &thought_id, &q1),
             (CitationRole::Consolidates, &newer, &older),
@@ -1851,7 +1858,7 @@ mod tests {
             (CitationRole::RestsOn, &way, &note),
             (CitationRole::Toward, &way, &q1),
         ];
-        assert_eq!(CitationRole::ALL.len(), 23);
+        assert_eq!(CitationRole::ALL.len(), 24);
         for role in CitationRole::ALL {
             let selection =
                 Selection { cited: Some(Incoming { role: role.name().into(), exists: true }), ..Selection::default() };

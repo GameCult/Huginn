@@ -255,8 +255,9 @@ impl<'i> Docs<'i> {
     }
 
     /// The in-force run of hers, other than `run_key`, that holds the slot of
-    /// the turn `run` is of: ruling one-live-self-run's one live run per
-    /// instance and turn, asked by a run's opening and by the withdrawal that
+    /// the turn `run` is of (a Persona session and a Sleep run share the
+    /// Persona slot): ruling one-live-self-run's one live run per
+    /// instance and slot, asked by a run's opening and by the withdrawal that
     /// would put a closed run back in force. An operator's run neither holds
     /// the slot nor is refused for it.
     pub(crate) fn live_holder(&self, run_key: &str, run: &PipelineRun) -> Option<&str> {
@@ -267,7 +268,7 @@ impl<'i> Docs<'i> {
             PipelineDocument::Run(other)
                 if other_key != run_key
                     && other.instance == run.instance
-                    && other.turn == run.turn
+                    && other.turn.slot() == run.turn.slot()
                     && other.operated_by == RunOperator::Mind
                     && self.in_force(PipelineKind::Run, other_key) =>
             {
@@ -396,10 +397,11 @@ pub enum CitationRole {
     Toward,
     Run,
     Reads,
+    DayThrough,
 }
 
 impl CitationRole {
-    pub const ALL: [CitationRole; 23] = [
+    pub const ALL: [CitationRole; 24] = [
         Self::RaisedIn,
         Self::Answers,
         Self::Rulings,
@@ -423,6 +425,7 @@ impl CitationRole {
         Self::Toward,
         Self::Run,
         Self::Reads,
+        Self::DayThrough,
     ];
 
     /// The wire spelling, equal to the referring field's name.
@@ -451,6 +454,7 @@ impl CitationRole {
             Self::Toward => "toward",
             Self::Run => "run",
             Self::Reads => "reads",
+            Self::DayThrough => "day_through",
         }
     }
 
@@ -469,7 +473,7 @@ impl CitationRole {
             Self::CutReport | Self::Findings => K::Verdict,
             Self::Verdict => K::Finding,
             Self::Source => K::FollowUp,
-            Self::Subject | Self::SupersededBy | Self::ResolvedBy | Self::DeferredTo => K::Resolution,
+            Self::Subject | Self::SupersededBy | Self::ResolvedBy | Self::DeferredTo | Self::DayThrough => K::Resolution,
             Self::Documents => K::HandOff,
             Self::Claims => K::Run,
             Self::Consolidates => K::Memory,
@@ -493,7 +497,7 @@ impl CitationRole {
             Self::Findings => vec![K::Finding],
             Self::Verdict => vec![K::Verdict],
             Self::Claims => vec![K::CutSpec, K::Finding, K::FollowUp],
-            Self::Consolidates => vec![K::Memory],
+            Self::Consolidates | Self::DayThrough => vec![K::Memory],
             Self::Run => vec![K::Run],
             Self::RaisedIn
             | Self::Source
@@ -529,6 +533,7 @@ pub(crate) fn outcome_citations(outcome: &ResolutionOutcome) -> Vec<(CitationRol
         ResolutionOutcome::Answered { by } => vec![(CitationRole::ResolvedBy, by.clone())],
         ResolutionOutcome::Fixed { by: Some(by), .. } => vec![(CitationRole::ResolvedBy, by.clone())],
         ResolutionOutcome::Deferred { to } => vec![(CitationRole::DeferredTo, to.clone())],
+        ResolutionOutcome::Slept { day_through, .. } => day_through.iter().map(|memory| (CitationRole::DayThrough, memory.clone())).collect(),
         ResolutionOutcome::Fixed { by: None, .. } | ResolutionOutcome::Recorded { .. } | ResolutionOutcome::Withdrawn { .. } => {
             vec![]
         }

@@ -88,12 +88,12 @@ use crate::chat_client::{Chat, ChatDelivery, ChatSendRequest, ContextLine, Refus
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
 use crate::heartbeat::{HeartbeatView, PollTrace};
-use crate::lease_client::{LeaseRequest, Lender, Lent};
+use crate::lease_client::{Lease, LeaseRequest, Lender, Lent};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
 use crate::queue::{MindPort, any_of, citing, headers, in_force, live_claims, of_kind};
 use crate::recall;
 use crate::self_run::session::{Polled, SessionInbox, drive};
-use crate::self_run::{MAX_TURNS, ROTATE_MARGIN_S, SESSION_NAMESPACE, Spawner, Why};
+use crate::self_run::{Child, MAX_TURNS, ROTATE_MARGIN_S, SESSION_NAMESPACE, Spawner, Why};
 
 /// The admitting agent's name on everything this organ admits.
 pub const AGENT: &str = "mind-persona";
@@ -162,18 +162,18 @@ const FOR_ITEM_FAULT: &str = "start_self_run.for_item: not an open item shown, o
 const REMEMBER_MAX: usize = 8;
 const SETTLE_MAX: usize = 8;
 /// A memory's text in bytes, the people it is about, and a settle's reason in characters.
-const REMEMBER_TEXT_MAX_BYTES: usize = 1000;
-const ABOUT_MAX: usize = 8;
-const WHY_MAX_CHARS: usize = 300;
+pub(crate) const REMEMBER_TEXT_MAX_BYTES: usize = 1000;
+pub(crate) const ABOUT_MAX: usize = 8;
+pub(crate) const WHY_MAX_CHARS: usize = 300;
 /// The longest id or alias the kind's `Short` holds, in bytes.
-const SHORT_MAX_BYTES: usize = 200;
+pub(crate) const SHORT_MAX_BYTES: usize = 200;
 /// The most bytes each open-item list of the responsibilities section carries, outside `GOALS_MAX_BYTES`.
 const OPEN_COMMITTED_MAX_BYTES: usize = 4 * 1024;
 const OPEN_ASKED_MAX_BYTES: usize = 4 * 1024;
 /// The most open items one list fetches; the rest are counted.
 const OPEN_FETCH: u32 = 64;
 /// The most event ids a Persona memory cites as its sources.
-const SOURCES_MAX: usize = 8;
+pub(crate) const SOURCES_MAX: usize = 8;
 /// The longest raw reply a trace keeps.
 const TRACE_RAW_MAX: usize = 2000;
 
@@ -407,22 +407,27 @@ const SETTLE_DESCRIPTION: &str = "Close an open item shown under 'You committed 
 const START_SELF_RUN_DESCRIPTION: &str = "A brief for your Self: it reaches your live Self within a minute, or starts one. It is also how you answer a `reply` line; your Self's replies to your briefs come back as `reply` lines.";
 const FOR_ITEM_DESCRIPTION: &str = "The open commitment or ask this Self run answers: null, an open item id shown in this session, or new:<i> for remember[i] (sort Asked or Committed) written in this same reply. An item taken on leaves the open lists.";
 
+/// One thing she remembers, as a schema: the shape her waking reply and her night share.
+pub(crate) fn remember_item_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sort", "text", "about", "salience_permille"],
+        "properties": {
+            "sort": { "type": "string", "enum": MemorySort::NAMES },
+            "text": { "type": "string", "minLength": 1, "description": format!("At most {REMEMBER_TEXT_MAX_BYTES} bytes.") },
+            "about": { "type": "array", "maxItems": ABOUT_MAX, "uniqueItems": true, "items": { "type": "string" } },
+            "salience_permille": { "type": "integer", "minimum": 0, "maximum": SALIENCE_MAX_PERMILLE, "description": "How much it matters, in thousandths; with how recent it is, it decides which memories you see when not all fit." }
+        }
+    })
+}
+
 pub fn reply_schema(rooms: &[String], campaigns: &[String]) -> String {
     let remember = json!({
         "description": REMEMBER_DESCRIPTION,
         "type": "array",
         "maxItems": REMEMBER_MAX,
-        "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["sort", "text", "about", "salience_permille"],
-            "properties": {
-                "sort": { "type": "string", "enum": MemorySort::NAMES },
-                "text": { "type": "string", "minLength": 1, "description": format!("At most {REMEMBER_TEXT_MAX_BYTES} bytes.") },
-                "about": { "type": "array", "maxItems": ABOUT_MAX, "uniqueItems": true, "items": { "type": "string" } },
-                "salience_permille": { "type": "integer", "minimum": 0, "maximum": SALIENCE_MAX_PERMILLE, "description": "How much it matters, in thousandths; with how recent it is, it decides which memories you see when not all fit." }
-            }
-        }
+        "items": remember_item_schema()
     });
     let settle = json!({
         "description": SETTLE_DESCRIPTION,
@@ -774,19 +779,19 @@ struct Refused {
 }
 
 /// The instance brake and the swarm store read once: what they allow.
-fn read(control: &impl ControlSource, swarm: &impl ControlSource, instance: &Slug) -> Effective {
+pub(crate) fn read(control: &impl ControlSource, swarm: &impl ControlSource, instance: &Slug) -> Effective {
     derive(control, swarm, instance)
 }
 
-fn label_of(run: &PipelineRef) -> &str {
+pub(crate) fn label_of(run: &PipelineRef) -> &str {
     run.id.0.rsplit(':').next().unwrap_or_default()
 }
 
-fn date(now: DateTime<Utc>) -> Date {
+pub(crate) fn date(now: DateTime<Utc>) -> Date {
     Date(now.format("%Y-%m-%d").to_string())
 }
 
-fn unix_ms(at: DateTime<Utc>) -> u64 {
+pub(crate) fn unix_ms(at: DateTime<Utc>) -> u64 {
     u64::try_from(at.timestamp_millis()).unwrap_or(0)
 }
 
@@ -816,10 +821,14 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
         Effective::Held { reason } => return Ok(Outcome::Dead(reason)),
         Effective::Released(_) => {}
     }
-    // The run is the one the heartbeat opened for this unit; none held, none run.
+    // The run is the one the heartbeat opened for this unit, a waking session's or her night's; none held, none run.
     let Some(holder) = holders(organs.mind, &instance, RunTurn::PersonaTurn)?.into_iter().next() else { return Ok(Outcome::NoRun) };
+    let night = matches!(holder.facts, PipelineFacts::Run { turn: RunTurn::Sleep, .. });
     let run = holder.id;
     make_sandbox(organs.sandbox)?;
+    if night {
+        return crate::sleep::carry_night(organs, control, swarm, config, &run);
+    }
     let mut progress = Progress::default();
     let started = organs.clock.now();
     // The replies a session opened alone for, this start: a reply that cannot be resolved never loops processes.
@@ -880,43 +889,60 @@ fn one_process(
     remaining_s: u64,
     progress: &mut Progress,
 ) -> Result<()> {
-    let Ok(persona) = organs.persona.instructions() else {
-        progress.failure = Some(Failure::Persona);
-        return Ok(());
-    };
-    let doctrine = match read_doctrine(&config.doctrine) {
-        Ok(doctrine) => doctrine,
+    let session_id = Uuid::new_v5(&SESSION_NAMESPACE, format!("{}:p{process}", run.id.0).as_bytes());
+    let rooms = reply_rooms(config, &session.conversation);
+    let schema_of = |campaigns: &[(String, String)]| reply_schema(&rooms, &campaigns.iter().map(|(slug, _)| slug.clone()).collect::<Vec<_>>());
+    let Started { child, lease, started_ms } = match start_session(organs, config, session_id, remaining_s, schema_of)? {
+        Ok(started) => started,
         Err(why) => {
             progress.failure = Some(why);
             return Ok(());
         }
-    };
-    let campaigns = campaigns_in_force(organs.mind)?;
-    let rooms = reply_rooms(config, &session.conversation);
-    let schema = reply_schema(&rooms, &campaigns.iter().map(|(slug, _)| slug.clone()).collect::<Vec<_>>());
-    let prompt = organs.scratch.join(INSTRUCTIONS_FILE);
-    if std::fs::write(&prompt, format!("{doctrine}{persona}\n\n{}", render_campaigns(&campaigns))).is_err() {
-        progress.failure = Some(Failure::Session);
-        return Ok(());
-    }
-    let started_ms = unix_ms(organs.clock.now());
-    let lease = match organs.lender.lend(&LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(remaining_s.saturating_mul(1000)) }) {
-        Ok(Lent::Granted(lease)) => lease,
-        Ok(Lent::Refused(_)) | Err(_) => {
-            progress.failure = Some(Failure::Lease);
-            return Ok(());
-        }
-    };
-    let session_id = Uuid::new_v5(&SESSION_NAMESPACE, format!("{}:p{process}", run.id.0).as_bytes());
-    let Ok(child) = organs.spawner.spawn(&persona_args(session_id, &config.model, &schema, &prompt), lease.token()) else {
-        progress.failure = Some(Failure::Session);
-        return Ok(());
     };
     let mut inbox = PersonaInbox::new(organs, control, swarm, config, run, progress, session, started_ms, render_plan(lease.plan_quota(), started_ms));
     let driven = drive(organs.clock, child, &mut inbox, remaining_s, &mut std::io::stdout());
     inbox.settle_replies();
     driven?;
     Ok(())
+}
+
+/// A session started: her process, the lease its token came from (held until the session ends) and when it began.
+pub(crate) struct Started {
+    pub(crate) child: Box<dyn Child>,
+    pub(crate) lease: Box<dyn Lease>,
+    pub(crate) started_ms: u64,
+}
+
+/// The one prelude of a session, her waking process's and her night's alike: her persona and doctrine and the
+/// campaigns in force written as the instructions file, a lease for the time left, and her `claude` under
+/// `session_id` with the schema `schema_of` makes of the campaigns. The fault is the `Failure` the start earned.
+pub(crate) fn start_session(
+    organs: &Organs,
+    config: &Config,
+    session_id: Uuid,
+    remaining_s: u64,
+    schema_of: impl FnOnce(&[(String, String)]) -> String,
+) -> Result<std::result::Result<Started, Failure>> {
+    let Ok(persona) = organs.persona.instructions() else { return Ok(Err(Failure::Persona)) };
+    let doctrine = match read_doctrine(&config.doctrine) {
+        Ok(doctrine) => doctrine,
+        Err(why) => return Ok(Err(why)),
+    };
+    let campaigns = campaigns_in_force(organs.mind)?;
+    let schema = schema_of(&campaigns);
+    let prompt = organs.scratch.join(INSTRUCTIONS_FILE);
+    if std::fs::write(&prompt, format!("{doctrine}{persona}
+
+{}", render_campaigns(&campaigns))).is_err() {
+        return Ok(Err(Failure::Session));
+    }
+    let started_ms = unix_ms(organs.clock.now());
+    let lease = match organs.lender.lend(&LeaseRequest { expires_at_unix_ms: started_ms.saturating_add(remaining_s.saturating_mul(1000)) }) {
+        Ok(Lent::Granted(lease)) => lease,
+        Ok(Lent::Refused(_)) | Err(_) => return Ok(Err(Failure::Lease)),
+    };
+    let Ok(child) = organs.spawner.spawn(&persona_args(session_id, &config.model, &schema, &prompt), lease.token()) else { return Ok(Err(Failure::Session)) };
+    Ok(Ok(Started { child, lease, started_ms }))
 }
 
 /// What her session is started with: the Self's argument list is the model for it, with her
@@ -1717,7 +1743,7 @@ fn refused_note(why: Failure) -> String {
 }
 
 /// The structured output of a result line, as the text `decode_reply` reads; none when it has none.
-fn structured_output(line: &str) -> Option<String> {
+pub(crate) fn structured_output(line: &str) -> Option<String> {
     let event: Value = serde_json::from_str(line).ok()?;
     event.get("structured_output").filter(|output| !output.is_null()).map(Value::to_string)
 }
@@ -2115,7 +2141,7 @@ fn close_run(organs: &Organs, run: &PipelineRef, answered: u32, last_intent: Opt
 }
 
 /// The next resolution sequence of a subject: the writer's, one past the latest record of it.
-fn next_sequence(mind: &dyn MindPort, subject: &PipelineRef) -> Result<u32> {
+pub(crate) fn next_sequence(mind: &dyn MindPort, subject: &PipelineRef) -> Result<u32> {
     let closures = Selection { cites: Some(citing(subject, Some("subject"))), ..of_kind(PipelineKind::Resolution) };
     let latest = headers(mind, &closures)?
         .iter()
@@ -2612,6 +2638,7 @@ pub(crate) fn outcome_words(outcome: &ResolutionOutcome) -> String {
         ResolutionOutcome::Answered { by } => format!("answered by {}", by.id.0),
         ResolutionOutcome::Fixed { commit, .. } => format!("fixed by {}", commit.0),
         ResolutionOutcome::Deferred { to } => format!("deferred to {}", to.id.0),
+        ResolutionOutcome::Slept { line, .. } => format!("slept: {}", line.0),
     }
 }
 

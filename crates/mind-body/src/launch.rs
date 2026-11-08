@@ -25,7 +25,7 @@ use chrono::{DateTime, Duration, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{
     Date, Label, PipelineDocument, PipelineKind, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRun, QuestionOption, ResolutionOutcome,
-    RunOperator, RunTurn, Slug, pipeline_key,
+    RunOperator, RunSlot, RunTurn, Slug, pipeline_key,
 };
 use huginn_mind::{
     MindRefusal, PipelineAdmissionOutcome, PipelineDocumentSummary, PipelineFacts,
@@ -115,12 +115,12 @@ impl Default for SystemdLauncher {
     }
 }
 
-/// The unit template of one turn, named only through `unit()`, which start,
+/// The unit template of one slot, named only through `unit()`, which start,
 /// alive and stop all call.
 fn template(turn: RunTurn) -> &'static str {
-    match turn {
-        RunTurn::PersonaTurn => "mind-persona",
-        RunTurn::SelfRun => "mind-self",
+    match turn.slot() {
+        RunSlot::Persona => "mind-persona",
+        RunSlot::SelfRun => "mind-self",
     }
 }
 
@@ -340,7 +340,7 @@ pub(crate) fn holders(mind: &dyn MindPort, instance: &Slug, turn: RunTurn) -> Re
     let runs = headers(mind, &in_force(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0])))?;
     Ok(runs
         .into_iter()
-        .filter(|run| matches!(run.facts, PipelineFacts::Run { turn: held, operated_by: RunOperator::Mind, .. } if held == turn))
+        .filter(|run| matches!(run.facts, PipelineFacts::Run { turn: held, operated_by: RunOperator::Mind, .. } if held.slot() == turn.slot()))
         .collect())
 }
 
@@ -384,7 +384,7 @@ pub fn open_and_launch(ports: &Ports, request: LaunchRequest) -> Result<LaunchOu
     if grant.instance() != &instance {
         return Ok(LaunchOutcome::Refused(Declined::GrantForOtherInstance));
     }
-    if turn == RunTurn::PersonaTurn && !claims.is_empty() {
+    if turn != RunTurn::SelfRun && !claims.is_empty() {
         return Ok(LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims));
     }
     let now = ports.clock.now();
@@ -629,6 +629,32 @@ mod tests {
         assert_eq!(view.admission.provenance.agent.0, "agent-x");
         assert_eq!(view.admission.provenance.session.0, "mind-20261009T131500000Z");
         assert_eq!(*rig.launcher.started.borrow(), vec![(Slug(INSTANCE.into()), RunTurn::SelfRun)]);
+    }
+
+    /// A Sleep run and a Persona session are one slot of hers: one unit, one live holder, in either order.
+    #[test]
+    fn a_sleep_run_and_a_persona_run_share_one_slot() {
+        let rig = Rig::new();
+        let LaunchOutcome::Launched { run } = rig.launch(RunTurn::Sleep, &[]) else { panic!("not launched") };
+        rig.at(1);
+        assert_eq!(rig.launch(RunTurn::PersonaTurn, &[]), LaunchOutcome::Busy { run: run.clone() }, "a live Sleep holds the Persona slot");
+        assert_eq!(rig.launch(RunTurn::Sleep, &[]), LaunchOutcome::Busy { run: run.clone() });
+        assert!(matches!(rig.launch(RunTurn::SelfRun, &[]), LaunchOutcome::Launched { .. }), "a Self run is the other slot");
+        let ports = Ports { mind: &rig.mind, launcher: &rig.launcher, clock: &rig.clock, host: "yggdrasil-host" };
+        assert!(slot(&ports, rig.mind.instance(), RunTurn::PersonaTurn, rig.clock.now()).unwrap().live.is_some());
+        assert_eq!(unit(&eureka(), RunTurn::Sleep).unwrap(), "mind-persona@eureka.service", "the night runs in the Persona unit");
+        rig.mind.committed(vec![close(run, recorded())]);
+        rig.at(2);
+        let LaunchOutcome::Launched { run: persona } = rig.launch(RunTurn::PersonaTurn, &[]) else { panic!("not launched") };
+        rig.at(3);
+        assert_eq!(rig.launch(RunTurn::Sleep, &[]), LaunchOutcome::Busy { run: persona }, "a live Persona session holds the slot a night needs");
+    }
+
+    #[test]
+    fn a_sleep_run_takes_no_claims() {
+        let rig = Rig::new();
+        assert_eq!(rig.launch(RunTurn::Sleep, &[spec_ref("x")]), LaunchOutcome::Refused(Declined::PersonaRunTakesNoClaims));
+        assert_eq!(rig.runs(), 0);
     }
 
     #[test]

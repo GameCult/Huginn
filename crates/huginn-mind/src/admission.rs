@@ -31,8 +31,8 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use cultcache_rs::{CultCache, CultCacheEnvelope};
 use eureka_pipeline::{
-    ClaimOutcome, FindingConfidence, Line, PipelineDocument, PipelineKind, PipelineRef, PipelineRefusal,
-    PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome, RulingAuthority, Short, Slug, pipeline_key,
+    ClaimOutcome, FindingConfidence, Line, PipelineDocument, PipelineKind, PipelineMemory, PipelineRef, PipelineRefusal,
+    PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome, RulingAuthority, RunTurn, Short, Slug, pipeline_key,
     validate_pipeline_write_envelope,
 };
 use schemars::JsonSchema;
@@ -626,7 +626,8 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusa
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
             run_rule(docs, key, run, replay)
         }
-        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => Ok(()),
+        D::Memory(memory) => consolidation_rule(docs, key, memory),
+        D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Research(_) | D::Idea(_) => Ok(()),
     }
 }
 
@@ -644,6 +645,26 @@ fn run_rule(docs: &Docs<'_>, run_key: &str, run: &PipelineRun, replay: bool) -> 
     }
     if !replay && docs.in_force(PipelineKind::Run, run_key) && let Some(holder) = docs.live_holder(run_key, run) {
         return Err(MindRefusal::AlreadyLive { run: RunId::held(holder) });
+    }
+    Ok(())
+}
+
+/// A consolidation is a pair: each memory it names is Superseded by it, in
+/// this batch. `consolidates` is a citation, never standing; the resolution
+/// is what takes the consumed memory out of force, so a consolidation whose
+/// resolution is missing would leave both standing. The other direction is
+/// `resolution_rule`'s: a memory is Superseded only by memories that name it.
+fn consolidation_rule(docs: &Docs<'_>, key: &str, memory: &PipelineMemory) -> Result<(), MindRefusal> {
+    for consumed in &memory.consolidates {
+        let paired = docs.batch.iter().any(|staged| {
+            matches!(&staged.document, PipelineDocument::Resolution(resolution)
+                if resolution.subject == *consumed
+                    && matches!(&resolution.outcome, ResolutionOutcome::Superseded { by }
+                        if by.iter().any(|supersessor| supersessor.kind == PipelineKind::Memory && supersessor.id.0 == key)))
+        });
+        if !paired {
+            return Err(MindRefusal::UnpairedConsolidation { memory: key.into(), consumed: consumed.id.0.clone() });
+        }
     }
     Ok(())
 }
@@ -688,6 +709,7 @@ fn outcome_name(outcome: &ResolutionOutcome) -> &'static str {
         ResolutionOutcome::Deferred { .. } => "Deferred",
         ResolutionOutcome::Recorded { .. } => "Recorded",
         ResolutionOutcome::Withdrawn { .. } => "Withdrawn",
+        ResolutionOutcome::Slept { .. } => "Slept",
     }
 }
 
@@ -722,6 +744,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Stewardship, O::Superseded { by }) => all(by, K::Stewardship),
         (K::Stewardship, O::Withdrawn { .. }) => true,
         (K::Run, O::Recorded { .. } | O::Withdrawn { .. }) => true,
+        (K::Run, O::Slept { day_through, .. }) => day_through.as_ref().is_none_or(|memory| memory.kind == K::Memory),
         (K::Memory, O::Deferred { to }) => to.kind == K::FollowUp,
         (K::Memory, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::Memory, O::Superseded { by }) => all(by, K::Memory),
@@ -812,8 +835,9 @@ fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(
     {
         run_rule(docs, &reinstating.subject.id.0, run, false)?;
     }
-    for (_, referent) in outcome_citations(&resolution.outcome) {
-        if !docs.in_force(referent.kind, &referent.id.0) {
+    for (role, referent) in outcome_citations(&resolution.outcome) {
+        // The last memory a night was shown may have been consumed by that night's own batches.
+        if role != CitationRole::DayThrough && !docs.in_force(referent.kind, &referent.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: referent.kind, id: referent.id.0 });
         }
     }
@@ -827,11 +851,30 @@ fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(
                 {
                     return Err(incompatible());
                 }
+                // A memory leaves force by consolidation only: the memory that
+                // supersedes it must name it (`consolidation_rule` is the other half).
+                if subject_kind == K::Memory
+                    && !matches!(docs.find(K::Memory, &supersessor.id.0), Some(D::Memory(next)) if next.consolidates.contains(&resolution.subject))
+                {
+                    return Err(MindRefusal::UnpairedConsolidation { memory: supersessor.id.0.clone(), consumed: subject_id.into() });
+                }
             }
         }
         ResolutionOutcome::Answered { by } => {
             let Some(D::Ruling(ruling)) = docs.find(K::Ruling, &by.id.0) else { return Ok(()) };
             if ruling.answers.as_ref().map(|answers| answers.0.as_str()) != Some(subject_id) {
+                return Err(incompatible());
+            }
+        }
+        ResolutionOutcome::Slept { day_through, .. } => {
+            // A night's closing is a Sleep run's, and the memory it names was admitted before this batch (every
+            // memory in the image is hers: A5).
+            if !matches!(docs.find(K::Run, subject_id), Some(D::Run(run)) if run.turn == RunTurn::Sleep) {
+                return Err(incompatible());
+            }
+            if let Some(memory) = day_through
+                && docs.in_image(K::Memory, &memory.id.0).is_none()
+            {
                 return Err(incompatible());
             }
         }
@@ -2598,10 +2641,10 @@ mod tests {
             ResolutionOutcome::Deferred { to: follow() },
             ResolutionOutcome::Recorded { reason: "done".into() },
             withdrawn(),
-            superseded(&[r(K::Memory, &memory_key("m2"))]),
         ] {
             committed(admit(&mut open(), vec![resolution(subject(), outcome)]));
         }
+        committed(admit(&mut open(), consolidation("m3", &["m1"])));
         let refused = [
             (ResolutionOutcome::Deferred { to: r(K::CutSpec, &id("cut_spec", "cut-1.r1")) }, "Deferred"),
             (ResolutionOutcome::Fixed { commit: sha(), by: None }, "Fixed"),
@@ -2633,7 +2676,102 @@ mod tests {
             refusal(admit(&mut mind, vec![consolidating(r(K::Memory, &elsewhere))])),
             MindRefusal::MissingReference { kind: K::Memory, id: elsewhere }
         );
-        committed(admit(&mut mind, vec![consolidating(r(K::Memory, &memory_key("m1")))]));
+        let mut paired = vec![consolidating(r(K::Memory, &memory_key("m1")))];
+        paired.push(resolution(r(K::Memory, &memory_key("m1")), superseded(&[r(K::Memory, &memory_key("m2"))])));
+        committed(admit(&mut mind, paired));
+    }
+
+    /// A consolidation is a pair: the memory that names a consumed memory and the Superseded
+    /// resolution of that memory by it come in one batch, and neither half stands alone.
+    #[test]
+    fn a_consolidation_is_paired_both_ways() {
+        let key = |label: &str| memory_key(label);
+        let m = |label: &str| r(K::Memory, &key(label));
+        let open = || {
+            let mut mind = with_specs();
+            committed(admit(&mut mind, vec![memory("m1", MemorySort::Idea, "One.", &[]), memory("m2", MemorySort::Idea, "Two.", &[])]));
+            mind
+        };
+        let unpaired = |consumed: &str| MindRefusal::UnpairedConsolidation { memory: key("m3"), consumed: key(consumed) };
+        // The consolidating memory without the resolution of what it consumes.
+        let mut lone = consolidation("m3", &["m1"]);
+        lone.pop();
+        assert_eq!(refusal(admit(&mut open(), lone)), unpaired("m1"));
+        // One of two consumed memories left standing.
+        let mut half = consolidation("m3", &["m1", "m2"]);
+        half.pop();
+        assert_eq!(refusal(admit(&mut open(), half)), unpaired("m2"));
+        // A resolution naming a consolidation that does not name the memory back.
+        let D::Memory(mut stranger) = memory("m3", MemorySort::Idea, "Not a consolidation.", &[]) else { unreachable!() };
+        stranger.consolidates = vec![];
+        let refused = refusal(admit(&mut open(), vec![D::Memory(stranger), resolution(m("m1"), superseded(&[m("m3")]))]));
+        assert_eq!(refused, MindRefusal::UnpairedConsolidation { memory: key("m3"), consumed: key("m1") });
+        // A resolution by a consolidation of other memories is no pairing for this one.
+        let mut other = consolidation("m3", &["m2"]);
+        other.push(resolution(m("m1"), superseded(&[m("m3")])));
+        assert_eq!(refusal(admit(&mut open(), other)), unpaired("m1"));
+        // The pair commits: the consumed memories out of force, the consolidation in.
+        let mut mind = open();
+        committed(admit(&mut mind, consolidation("m3", &["m1", "m2"])));
+        // A consumed memory already resolved cannot be consumed again.
+        let mut again = consolidation("m4", &["m1"]);
+        again.pop();
+        again.push(resolution_n(m("m1"), 2, superseded(&[m("m4")])));
+        assert_eq!(refusal(admit(&mut mind, again)), MindRefusal::AlreadyResolved { subject: key("m1") });
+    }
+
+    /// A Sleep run and a Persona run are one slot of hers; a Self run is the other.
+    #[test]
+    fn a_sleep_run_and_a_persona_run_share_one_slot() {
+        let live = |label: &str| MindRefusal::AlreadyLive { run: crate::refusal::RunId::held(&format!("{INSTANCE}:run:{label}")) };
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![mind_run("p", RunTurn::PersonaTurn, &[])]));
+        assert_eq!(refusal(admit(&mut mind, vec![mind_run("s", RunTurn::Sleep, &[])])), live("p"), "a night while she is awake");
+        committed(admit(&mut mind, vec![mind_run("self", RunTurn::SelfRun, &[])]));
+        committed(admit(&mut mind, vec![recorded("p")]));
+        committed(admit(&mut mind, vec![mind_run("s", RunTurn::Sleep, &[])]));
+        assert_eq!(refusal(admit(&mut mind, vec![mind_run("p2", RunTurn::PersonaTurn, &[])])), live("s"), "a session while she sleeps");
+        assert_eq!(refusal(admit(&mut mind, vec![mind_run("s2", RunTurn::Sleep, &[])])), live("s"), "one night at a time");
+    }
+
+    /// A Slept closing ends a Sleep run, and only that; the memory it names was admitted before it, and may have
+    /// been consumed since.
+    #[test]
+    fn a_slept_closing_is_a_sleep_runs_and_names_an_earlier_memory_of_hers() {
+        let incompatible = |subject_kind: K| MindRefusal::IncompatibleResolution { subject_kind, outcome: "Slept".into() };
+        let m = |label: &str| r(K::Memory, &memory_key(label));
+        let slept = |subject: PipelineRef, through: Option<PipelineRef>| resolution(subject, ResolutionOutcome::Slept { line: "ok".into(), day_through: through });
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), memory("m1", MemorySort::Idea, "one", &[]), memory("m2", MemorySort::Idea, "two", &[])]));
+        committed(admit(&mut mind, vec![mind_run("p", RunTurn::PersonaTurn, &[])]));
+        assert_eq!(refusal(admit(&mut mind, vec![slept(r(K::Run, &run_key("p")), None)])), incompatible(K::Run), "a persona run is not a night");
+        committed(admit(&mut mind, vec![recorded("p")]));
+        committed(admit(&mut mind, vec![mind_run("self", RunTurn::SelfRun, &[])]));
+        assert_eq!(refusal(admit(&mut mind, vec![slept(r(K::Run, &run_key("self")), None)])), incompatible(K::Run), "a Self run is not a night");
+        committed(admit(&mut mind, vec![recorded("self")]));
+        committed(admit(&mut mind, vec![mind_run("s", RunTurn::Sleep, &[])]));
+        let night = || r(K::Run, &run_key("s"));
+        assert_eq!(refusal(admit(&mut mind, vec![slept(m("m1"), None)])), incompatible(K::Memory), "a memory is not slept");
+        let ruling_ref = r(K::Ruling, &id("ruling", "R1"));
+        assert_eq!(refusal(admit(&mut mind, vec![slept(night(), Some(ruling_ref))])), incompatible(K::Run), "the cut line is a memory");
+        let same_batch = vec![memory("m3", MemorySort::Idea, "three", &[]), slept(night(), Some(m("m3")))];
+        assert_eq!(refusal(admit(&mut mind, same_batch)), incompatible(K::Run), "a memory of this very batch was not shown");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![slept(night(), Some(m("nope")))])),
+            MindRefusal::MissingReference { kind: K::Memory, id: memory_key("nope") },
+            "a memory that does not exist"
+        );
+        // A memory the night itself consumed is still the last it was shown.
+        committed(admit(&mut mind, consolidation("m4", &["m1"])));
+        committed(admit(&mut mind, vec![slept(night(), Some(m("m1")))]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution_n(night(), 2, ResolutionOutcome::Slept { line: "again".into(), day_through: None })])),
+            MindRefusal::AlreadyResolved { subject: run_key("s") },
+            "the first closing in force is the only one"
+        );
+        // An empty day names no memory.
+        committed(admit(&mut mind, vec![mind_run("s2", RunTurn::Sleep, &[])]));
+        committed(admit(&mut mind, vec![slept(r(K::Run, &run_key("s2")), None)]));
     }
 
     fn research_key(pass: &str, label: &str) -> String {
