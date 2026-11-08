@@ -240,6 +240,16 @@ impl Rig {
         self.minds[who].committed(vec![close(reference(K::Run, &format!("{}:run:{label}", NAMES[who])), recorded())]);
     }
 
+    /// A Self run of `who` whose unit did not start: withdrawn `ago` seconds before now.
+    fn self_run_withdrawn(&self, who: usize, ago: i64) {
+        let label = format!("self-{}", self.labels.get());
+        self.labels.set(self.labels.get() + 1);
+        self.minds[who].admit_at(self.now() - Duration::seconds(ago + 5));
+        self.minds[who].committed(vec![run_in(NAMES[who], &label, RunTurn::SelfRun, RunOperator::Mind, &[])]);
+        self.minds[who].admit_at(self.now() - Duration::seconds(ago));
+        self.minds[who].committed(vec![close(reference(K::Run, &format!("{}:run:{label}", NAMES[who])), crate::testkit::withdrawn())]);
+    }
+
     /// `who` admits a pulse, `ago` seconds before now.
     fn pulse(&self, who: usize, ago: i64, beat: Option<u32>, urgency: Option<u16>) {
         let label = format!("p{}", self.labels.get());
@@ -665,6 +675,16 @@ fn a_self_run_that_ended_since_her_last_turn_lets_her_start_the_next_at_once() {
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] }, "off the beat, for the Mind whose Self run ended");
     rig.end_run(ANN);
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "her new turn is after the Self run: it was consumed");
+}
+
+#[test]
+fn a_self_run_withdrawn_because_its_unit_did_not_start_does_not_wake_her_persona() {
+    let rig = Rig::new();
+    rig.turn(ANN, 500);
+    rig.turn(BOB, 500);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig.self_run_withdrawn(ANN, 100);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "a run that never ran is no Self end: a failing start must not re-wake her every poll");
 }
 
 #[test]

@@ -494,7 +494,7 @@ fn pending_urgency(mind: &dyn MindPort, instance: &Slug, last_turn: Option<&Pipe
     Ok(if last_turn.is_none_or(|turn| header.admission.ordinal > turn.admission.ordinal) { urgency } else { 0 })
 }
 
-/// When her Self runs last ended: the latest resolution among her recent Self runs.
+/// When her Self runs last ended: the latest resolution among her recent Self runs, a withdrawn one excepted.
 fn last_self_end(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime<Utc>>> {
     let turn = format!("{:?}", RunTurn::SelfRun);
     let operator = format!("{:?}", RunOperator::Mind);
@@ -503,7 +503,10 @@ fn last_self_end(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime
     let PipelinePageItems::Headers(runs) = mind.query(&selection)?.items else { bail!("the mind answered documents to a header selection") };
     let mut newest = None;
     for run in runs {
-        if let Some((ended, _)) = latest_resolution(mind, &run.id)? {
+        // A run withdrawn never ran (its unit did not start): it is no Self end, or a failing start would wake her Persona again at once.
+        if let Some((ended, outcome)) = latest_resolution(mind, &run.id)?
+            && !matches!(outcome, ResolutionOutcome::Withdrawn { .. })
+        {
             newest = newest.max(Some(ended));
         }
     }

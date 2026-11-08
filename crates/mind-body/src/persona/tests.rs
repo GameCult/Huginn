@@ -7103,5 +7103,46 @@ fn a_self_unit_that_will_not_start_leaves_the_brief_open_and_says_so_in_the_turn
     rig.launcher.fail.set(true);
     assert!(matches!(rig.start_with(&config()), Outcome::Served { .. }), "her Self's start does not end her turn");
     assert_eq!(rig.mind.ids(K::FollowUp).len(), 1);
-    assert!(closing_reasons(&rig).iter().any(|reason| reason.contains("briefs left open")), "{:?}", closing_reasons(&rig));
+    let reasons = closing_reasons(&rig);
+    assert!(reasons.iter().any(|reason| reason.contains("briefs left open") && reason.contains("StartFailed")), "{reasons:?}");
+    assert!(reasons.iter().all(|reason| reason.chars().count() < 400), "the note is one capped line: {reasons:?}");
+}
+
+#[test]
+fn a_turn_with_no_brief_opens_no_self_run() {
+    let rig = Rig::new(vec![], &[]);
+    rig.open_the_run();
+    rig.start_with(&config());
+    assert!(rig.launcher.started.borrow().is_empty());
+    assert!(self_run_claims(&rig).is_empty());
+}
+
+#[test]
+fn a_brief_an_open_question_holds_is_not_claimed_and_the_free_one_beside_it_is() {
+    let rig = Rig::new(vec![], &[]);
+    let run = turn_with_a_brief(&rig, "held");
+    let held = rig.mind.ids(K::FollowUp).remove(0);
+    rig.mind.committed(vec![question_in("hold-it", &reference(K::FollowUp, &held))]);
+    let PipelineDocument::FollowUp(mut free) = follow_up("free", &run) else { unreachable!() };
+    free.owner = "self-run".into();
+    rig.mind.admit(AGENT, "session-a", vec![PipelineDocument::FollowUp(free)]).unwrap();
+    rig.start_with(&config());
+    let claims = self_run_claims(&rig);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].len(), 1, "{claims:?}");
+    assert!(!claims[0].contains(&held), "the held brief stays with its question");
+}
+
+#[test]
+fn a_brief_whose_self_run_died_is_claimed_again_by_one_run_never_two() {
+    let rig = Rig::new(vec![], &[]);
+    turn_with_a_brief(&rig, "waiting");
+    rig.start_with(&config());
+    rig.launcher.kill(RunTurn::SelfRun);
+    rig.clock.now.set(rig.clock.now.get() + 600_000);
+    rig.open_the_run();
+    rig.start_with(&config());
+    let live: Vec<_> = crate::launch::holders(&rig.mind, &Slug(INSTANCE.into()), RunTurn::SelfRun).unwrap();
+    assert_eq!(live.len(), 1, "the dead run is closed and one successor claims the brief");
+    assert_eq!(rig.launcher.started.borrow().iter().filter(|(_, turn)| *turn == RunTurn::SelfRun).count(), 2);
 }

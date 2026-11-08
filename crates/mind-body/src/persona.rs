@@ -157,6 +157,9 @@ const INTENT_FAULT: &str = "intent: blank or over its length bound";
 /// The most briefs one Self run claims.
 const BRIEFS_PER_SELF_RUN: usize = 64;
 
+/// The most characters of what `claim_briefs` could not do that the Persona run's closing reason carries.
+const BRIEF_NOTE_MAX: usize = 200;
+
 const START_FAULT: &str = "start_self_run: its brief, repo or campaign is out of bounds";
 const VOTE_FAULT: &str = "tempo_vote_beat_s or urgency_permille: outside its range";
 const ABOUT_FAULT: &str = "remember.about: every entry must be an id copied exactly from a line of this session";
@@ -880,10 +883,12 @@ fn claim_briefs(organs: &Organs, control: &impl ControlSource, swarm: &impl Cont
         Ok(match open_and_launch(&ports, LaunchRequest { turn: RunTurn::SelfRun, claims, agent: AGENT.into(), grant })? {
             LaunchOutcome::Launched { .. } | LaunchOutcome::Busy { .. } => None,
             LaunchOutcome::Tripped { question, .. } => Some(format!("briefs held by the breaker question {}", question.id.0)),
-            _ => Some("briefs left open: the Self run was refused".into()),
+            LaunchOutcome::NotQueued { item } => Some(format!("briefs left open: {} is held or already reported", item.id.0)),
+            LaunchOutcome::Refused(why) => Some(format!("briefs left open: the Self run was refused ({why:?})")),
         })
     })();
-    outcome.unwrap_or_else(|error| Some(format!("briefs left open: {error}")))
+    // The closing reason is a record, not a log: one capped line.
+    outcome.unwrap_or_else(|error| Some(format!("briefs left open: {error}"))).map(|note| note.chars().take(BRIEF_NOTE_MAX).collect())
 }
 
 /// Her sandbox, owner-only, if it is not there yet.
