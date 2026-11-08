@@ -538,6 +538,9 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
     use PipelineKind as K;
     let key = staged.key.as_str();
     let external: &[PipelineRef] = import.map_or(&[], |source| source.external.as_slice());
+    // An import replays a batch its source admitted at its own ordinal: a referent's status here may
+    // have moved on since (another campaign's import carried the resolution), so no rule judges it.
+    let historic = import.is_some();
     if let D::Resolution(resolution) = &staged.document
         && matches!(resolution.outcome, ResolutionOutcome::Withdrawn { .. })
         && resolution.subject.kind == K::Resolution
@@ -627,7 +630,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
                 return Err(MindRefusal::RepoNotInCampaign { repo: spec.repo.0.clone() });
             }
             for ruling in &spec.rulings {
-                if !docs.in_force(K::Ruling, &ruling.0) {
+                if !historic && !docs.in_force(K::Ruling, &ruling.0) {
                     return Err(MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: ruling.0.clone() });
                 }
             }
@@ -653,7 +656,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
                 }
                 return Err(MindRefusal::CutReportWithoutSpec { report: key.into() });
             };
-            if !docs.in_force(K::CutSpec, &report.cut_spec.0) {
+            if !historic && !docs.in_force(K::CutSpec, &report.cut_spec.0) {
                 return Err(MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: report.cut_spec.0.clone() });
             }
             if report.repo != spec.repo {
@@ -717,7 +720,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
             Ok(())
         }
         D::Resolution(resolution) => {
-            resolution_rule(docs, resolution)?;
+            resolution_rule(docs, resolution, historic)?;
             match &resolution.outcome {
                 ResolutionOutcome::Moved { to } if to == mind => Err(MindRefusal::MoveToSelf),
                 // The campaign's root and the mind's own instance root are one namespace: the freeze would
@@ -762,7 +765,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
         // rule.
         D::Run(run) => {
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
-            run_rule(docs, key, run, replay)
+            run_rule(docs, key, run, replay, historic)
         }
         D::Memory(memory) => consolidation_rule(docs, key, memory),
         D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Research(_) | D::Idea(_) => Ok(()),
@@ -772,9 +775,9 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
 /// The one rule for a run opening or reinstated by withdrawing its close: every
 /// claim in force (a replay of an admitted run owes none) and held by no other
 /// live run, then at most one live run of hers per instance and turn.
-fn run_rule(docs: &Docs<'_>, run_key: &str, run: &PipelineRun, replay: bool) -> Result<(), MindRefusal> {
+fn run_rule(docs: &Docs<'_>, run_key: &str, run: &PipelineRun, replay: bool, historic: bool) -> Result<(), MindRefusal> {
     for claim in &run.claims {
-        if !replay && !docs.in_force(claim.kind, &claim.id.0) {
+        if !replay && !historic && !docs.in_force(claim.kind, &claim.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: claim.kind, id: claim.id.0.clone() });
         }
         if let Some(holder) = docs.claim_holder(run_key, claim) {
@@ -907,7 +910,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
 /// every referent in force, and the two
 /// coherence rules (an `Answered` ruling answers this question; a cut spec is
 /// superseded within its cut).
-fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(), MindRefusal> {
+fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution, historic: bool) -> Result<(), MindRefusal> {
     use PipelineDocument as D;
     use PipelineKind as K;
     let subject_kind = resolution.subject.kind;
@@ -973,11 +976,11 @@ fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(
         && reinstating.subject.kind == K::Run
         && let Some(D::Run(run)) = docs.find(K::Run, &reinstating.subject.id.0)
     {
-        run_rule(docs, &reinstating.subject.id.0, run, false)?;
+        run_rule(docs, &reinstating.subject.id.0, run, false, historic)?;
     }
     for (role, referent) in outcome_citations(&resolution.outcome) {
         // The last memory a night was shown may have been consumed by that night's own batches.
-        if role != CitationRole::DayThrough && !docs.in_force(referent.kind, &referent.id.0) {
+        if role != CitationRole::DayThrough && !historic && !docs.in_force(referent.kind, &referent.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: referent.kind, id: referent.id.0 });
         }
     }
