@@ -783,15 +783,6 @@ fn receiver_with_superseded(root: &str, opening: Vec<D>, closing: Vec<D>, old: P
 }
 
 #[test]
-fn an_imported_report_may_cite_another_campaigns_spec_superseded_since() {
-    let (old, new) = (spec_ref(OTHER_ROOT, 1), spec_ref(OTHER_ROOT, 2));
-    let mut mind = receiver_with_superseded(OTHER_ROOT, vec![spec_of(OTHER_ROOT, 1)], vec![spec_of(OTHER_ROOT, 2)], old.clone(), new);
-    committed(import(&mut mind, vec![campaign(&[REPO])], vec![]));
-    let (_, writes) = committed(import(&mut mind, vec![report_citing(&old)], vec![]));
-    assert_eq!(writes.len(), 1);
-}
-
-#[test]
 fn an_imported_report_citing_its_own_campaigns_superseded_spec_is_refused() {
     let (old, new) = (spec_ref(CAMPAIGN, 1), spec_ref(CAMPAIGN, 2));
     let mut mind = receiver_with_superseded(CAMPAIGN, vec![spec_of(CAMPAIGN, 1)], vec![spec_of(CAMPAIGN, 2)], old.clone(), new);

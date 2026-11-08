@@ -657,7 +657,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
                 }
                 return Err(MindRefusal::CutReportWithoutSpec { report: key.into() });
             };
-            if !(historic && root_and_local(&report.cut_spec.0).0 != root) && !docs.in_force(K::CutSpec, &report.cut_spec.0) {
+            if !docs.in_force(K::CutSpec, &report.cut_spec.0) {
                 return Err(MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: report.cut_spec.0.clone() });
             }
             if report.repo != spec.repo {
