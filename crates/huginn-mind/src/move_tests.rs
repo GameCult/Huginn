@@ -632,6 +632,15 @@ fn an_import_never_cites_or_resolves_a_follow_up_the_receiver_wrote() {
         refusal(import_from_kiko(&mut recv, vec![follow_up("FU-I", native_ref.clone())])),
         MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() }
     );
+    // Nor may a closing of its own point at it: an imported follow-up superseded by her native one.
+    let own_fu = follow_up("FU-I2", r(K::Question, &q1));
+    let own_fu_ref = r(K::FollowUp, &pipeline_key(&own_fu).unwrap());
+    committed(import_from_kiko(&mut recv, vec![own_fu]));
+    let before = head(&recv);
+    assert_eq!(
+        refusal(import_from_kiko(&mut recv, vec![resolution(own_fu_ref, ResolutionOutcome::Superseded { by: vec![native_ref.clone()] })])),
+        MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() }
+    );
     assert_eq!(head(&recv), before);
     // Her follow-up still closes natively.
     committed(admit(&mut recv, vec![resolution(native_ref, ResolutionOutcome::Withdrawn { reason: "x".into() })]));
