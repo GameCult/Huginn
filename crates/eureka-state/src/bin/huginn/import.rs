@@ -398,7 +398,7 @@ mod tests {
         let Err(Stop::Trouble(trouble)) = verify(&wrong, &plan, &source) else { panic!("a difference is exit 5") };
         assert_eq!(trouble.exit(), 5);
         let said = trouble.to_string();
-        for named in ["c:ruling:b: title", "c:ruling:c: imported_from", "c:ruling:x: not in the plan"] {
+        for named in ["c:ruling:b: value.title", "c:ruling:c: imported_from", "c:ruling:x: not in the plan"] {
             assert!(said.contains(named), "{named} in {said}");
         }
         assert!(!said.contains("c:ruling:a:"), "{said}");
