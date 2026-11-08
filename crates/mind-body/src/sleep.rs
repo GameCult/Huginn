@@ -1,14 +1,15 @@
 //! A Mind's night. Once in the heartbeat's window a Sleep run opens in her Persona slot (the heartbeat decides
 //! who and when); this module is the one organ that carries it: one session over the same prelude her waking
 //! session starts with, told her day whole, answering with a [`SleepReply`] that this module turns into
-//! admissions (ruling `eureka-body:ruling:nightly-sleep-turn-self-directed`).
+//! admissions. The run is the night's memory consolidation and nothing else (rulings
+//! `eureka-body:ruling:sleep-day-coverage-ruled` and `eureka-body:ruling:contemplation-own-session`: contemplation
+//! is a session of its own, never this run).
 //!
-//! What she contemplates is hers: the night line prescribes no reading, theme, text or count. What the code owns
-//! is the ledger of her day. Every memory of it is disposed of exactly once (kept, consumed by a consolidation,
-//! or retired); an id is one of her memories in force; a consolidation merges one conversation's memories only
-//! and supersedes each source in the batch that admits it (admission refuses the unpaired). Code never chooses
-//! what to merge and never writes a memory's text. A night is one process: a missed night is not made up and a
-//! failed night is not retried.
+//! What the code owns is the ledger of her day. Every memory of it is disposed of exactly once (kept, consumed by
+//! a consolidation, or retired); an id is one of her memories in force; a consolidation merges one conversation's
+//! memories only and supersedes each source in the batch that admits it (admission refuses the unpaired). Code
+//! never chooses what to merge and never writes a memory's text. Where the night left her day is its `Slept`
+//! closing, never words. A night is one process: a missed night is not made up and a failed night is not retried.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -45,15 +46,13 @@ const RETIRE_MAX: usize = 128;
 const REMEMBER_MAX: usize = 16;
 const REFUSALS_PER_NIGHT: u32 = 3;
 
-/// What the night tells her, in her second person. It names no text, theme, reading or count.
+/// What the night tells her, in her second person: consolidate the day, nothing else.
 pub(crate) const SLEEP_GUIDANCE: &str = "\
-This is your night. What you think about, read or look into is yours: your own mind with `huginn`, your shell, the web, or nothing at all. No reading is assigned and nothing is expected of it.
-
-Your day is shown whole above. Every memory of it gets exactly one disposition: keep it (name it in `keep`), fold it into a consolidation (name it in that consolidation's `consumes`), or retire it with an outcome and a reason (`retire`: done, declined, faded or wrong). A consolidation is one new memory in your words that takes the place of the memories it consumes, so write it to carry what those memories were for: the concrete target, the claim or the question, the live tension, why it changes what you do next, and the anchors (ids, names, places) it rests on. It reduces bulk, not meaning. Consolidate only memories of one conversation; a private conversation stays its own. Anything else you want to remember goes in `remember`.
+Tonight you consolidate your memory. Your day is shown whole above. Every memory of it gets exactly one disposition: keep it (name it in `keep`), fold it into a consolidation (name it in that consolidation's `consumes`), or retire it with an outcome and a reason (`retire`: done, declined, faded or wrong). A consolidation is one new memory in your words that takes the place of the memories it consumes, so write it to carry what those memories were for: the concrete target, the claim or the question, the live tension, why it changes what you do next, and the anchors (ids, names, places) it rests on. It reduces bulk, not meaning. Consolidate only memories of one conversation; a private conversation stays its own. Anything else you want to remember goes in `remember`.
 
 Older items shown, and any other memory of yours in force, are yours to touch or leave. Name every memory by its id exactly as shown, once in the whole reply.
 
-End with one line of what the night was (`night`).";
+End with one line on what you did with your memory tonight (`night`).";
 
 /// The night's reply, as the one type decoded. Her day's ledger is `keep`, `consolidate` and `retire`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -105,7 +104,7 @@ pub(crate) fn sleep_schema() -> String {
         "additionalProperties": false,
         "required": ["night", "keep", "consolidate", "retire", "remember"],
         "properties": {
-            "night": { "type": "string", "minLength": 1, "description": format!("One line of what the night was. At most {NIGHT_MAX_BYTES} bytes.") },
+            "night": { "type": "string", "minLength": 1, "description": format!("One line on what you did with your memory tonight. At most {NIGHT_MAX_BYTES} bytes.") },
             "keep": { "type": "array", "uniqueItems": true, "items": id },
             "consolidate": { "type": "array", "maxItems": CONSOLIDATE_MAX, "items": consolidate },
             "retire": {

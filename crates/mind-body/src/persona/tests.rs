@@ -7156,6 +7156,20 @@ fn the_night_line_holds_the_day_whole_and_prescribes_nothing() {
     assert!(!SLEEP_GUIDANCE.contains("theme") && !SLEEP_GUIDANCE.contains("topic"), "nor a theme");
 }
 
+/// The night is memory consolidation and nothing else (ruling contemplation-own-session): it opens on the
+/// consolidation, and neither the guidance nor the reply's line invites her to think, read or look into anything.
+#[test]
+fn the_night_invites_no_contemplation() {
+    assert!(SLEEP_GUIDANCE.starts_with("Tonight you consolidate your memory. Your day is shown whole above."), "{SLEEP_GUIDANCE}");
+    assert_eq!(SLEEP_GUIDANCE.split("\n\n").count(), 3, "the dispositions, what is older, the closing line");
+    for invitation in ["This is your night", "think about", "the web", "huginn", "expected of it", "read or look"] {
+        assert!(!SLEEP_GUIDANCE.contains(invitation), "{invitation}");
+    }
+    let schema = sleep_schema();
+    assert!(schema.contains("One line on what you did with your memory tonight."), "{schema}");
+    assert!(!schema.contains("what the night was"), "{schema}");
+}
+
 #[test]
 fn an_uncovered_night_is_told_back_by_id_and_the_third_refusal_ends_it_with_nothing_admitted() {
     let uncovered = night_reply("A night.", &["d1"], json!([]), json!([]), json!([]));
@@ -7254,5 +7268,5 @@ fn a_sleep_holder_opens_one_process_with_the_night_schema_and_her_tools_never_a_
     assert_eq!(after("--json-schema"), sleep_schema());
     assert_eq!(after("--tools"), "Bash,WebFetch,WebSearch");
     assert_eq!(rig.chat.pending_calls.get(), 0);
-    assert!(rig.model.requests.borrow()[0].input.contains("This is your night."));
+    assert!(rig.model.requests.borrow()[0].input.contains("Tonight you consolidate your memory."));
 }
