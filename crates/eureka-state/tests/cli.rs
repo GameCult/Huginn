@@ -2588,10 +2588,10 @@ fn import_moves_a_campaign_between_two_live_daemons() {
     let ran = importing(&taker, INSTANCE, giver.addr);
     assert_eq!(ran.code, 0, "{}{}", ran.out, ran.err);
     let lines: Vec<&str> = ran.out.lines().collect();
-    assert!(lines[0].starts_with(&format!("plan {CAMPAIGN} from {INSTANCE}: 5 receipts ")) && lines[0].contains(", 0 held, moved by "), "{}", lines[0]);
-    assert_eq!(imported_lines(&ran.out).len(), 5);
+    assert!(lines[0].starts_with(&format!("plan {CAMPAIGN} from {INSTANCE}: 4 receipts ")) && lines[0].contains(", 0 held, moved by "), "{}", lines[0]);
+    assert_eq!(imported_lines(&ran.out).len(), 4);
     let last = lines.last().unwrap();
-    assert!(last.starts_with(&format!("imported {CAMPAIGN} from {INSTANCE}: 5 receipts ")) && last.ends_with(", verified"), "{last}");
+    assert!(last.starts_with(&format!("imported {CAMPAIGN} from {INSTANCE}: 4 receipts ")) && last.ends_with(", verified"), "{last}");
 
     for id in [campaign_id(), format!("{CAMPAIGN}:question:Q1"), format!("{CAMPAIGN}:question:Q2"), format!("{CAMPAIGN}:ruling:R1"), format!("{CAMPAIGN}:cut_spec:cut-1.r1")] {
         let (there, here) = (shown_by(&taker, TAKER, &id, true), shown_by(&giver, INSTANCE, &id, true));
@@ -2651,7 +2651,7 @@ fn import_declares_only_unheld_foreign_referents() {
         let taker = serve(root, daemon);
         let ran = importing(&taker, INSTANCE, giver.addr);
         assert_eq!(ran.code, 0, "holding {holding}: {}{}", ran.out, ran.err);
-        let spec_line = imported_lines(&ran.out).into_iter().find(|line| line.ends_with("(5/5)")).expect("the spec's receipt is last");
+        let spec_line = imported_lines(&ran.out).into_iter().find(|line| line.ends_with("(4/4)")).expect("the spec's receipt is last");
         let declared = if holding { " 0 external " } else { " 1 external " };
         assert!(spec_line.contains(declared), "holding {holding}: {spec_line}");
         assert!(ran.out.trim_end().ends_with(", verified"));

@@ -112,7 +112,7 @@ fn a_tell_names_each_brief_the_plan_and_how_she_resolves_it() {
 #[test]
 fn imported_briefs_are_not_her_briefs() {
     // A campaign moved to her: the giver's Persona admitted this brief, and her Self run imports it.
-    let mind = TestMind::seeded_as("heimdall");
+    let mind = TestMind::seeded();
     let persona = run_ref("persona");
     let source = huginn_mind::ImportSource {
         instance: "eureka".into(),
@@ -126,7 +126,7 @@ fn imported_briefs_are_not_her_briefs() {
         external: vec![persona.clone()],
     };
     let batch = huginn_mind::PipelineAdmissionBatch {
-        instance: "heimdall".into(),
+        instance: crate::testkit::INSTANCE.into(),
         provenance: huginn_mind::PipelineProvenance {
             faculty: huginn_mind::Faculty::SelfFaculty,
             agent: SELF_RUN.into(),
