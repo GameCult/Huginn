@@ -396,8 +396,14 @@ fn a_night_that_failed_or_never_ran_covers_nothing_so_its_day_comes_back() {
     mind.admit_at(at(T0 + 4600));
     close_night(&mind, &third, &slept_over(&owed));
     remember_at(&mind, "g1", wake(), 5000);
-    let (_, fourth) = next_night(&mind, "fourth", 6000);
-    assert_eq!(day_ids(&fourth), vec![id("g0"), id("g1")], "g0 arrived while the third night was open and is still owed; f0 to f3 are covered");
+    let (fourth, owed_again) = next_night(&mind, "fourth", 6000);
+    assert_eq!(day_ids(&owed_again), vec![id("g0"), id("g1")], "g0 arrived while the third night was open and is still owed; f0 to f3 are covered");
+    // A failure after a night that slept leaves that night's cover standing: only the nights' own closings are read.
+    remember_at(&mind, "g2", wake(), 6500);
+    mind.admit_at(at(T0 + 6600));
+    close_night(&mind, &fourth, &failed());
+    let (_, fifth) = next_night(&mind, "fifth", 7000);
+    assert_eq!(day_ids(&fifth), vec![id("g0"), id("g1"), id("g2")]);
 }
 
 #[test]
