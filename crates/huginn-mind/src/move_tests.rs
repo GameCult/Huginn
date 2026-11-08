@@ -54,6 +54,13 @@ fn other_follow_up(label: &str, question: &str) -> D {
     follow_up
 }
 
+/// The campaign of `OTHER_ROOT`, which a ruling of that root belongs to.
+fn other_campaign() -> D {
+    let D::Campaign(mut value) = campaign(&[REPO]) else { unreachable!() };
+    value.slug = slug(OTHER_ROOT);
+    D::Campaign(value)
+}
+
 fn view_of(mind: &Mind<MemoryStore>, kind: K, key: &str) -> crate::query::PipelineDocumentView {
     mind.view(&r(kind, key)).unwrap().unwrap_or_else(|| panic!("{key} is not held"))
 }
@@ -301,6 +308,7 @@ fn import_replays_a_receipt_without_derivation() {
     // receiver does not derive it back.
     let q1 = id("question", "Q1");
     let ruling = answering(OTHER_ROOT, "R1", &q1);
+    committed(import(&mut mind, vec![other_campaign()], vec![]));
     let before = head(&mind);
     let (_, writes) = committed(import(&mut mind, vec![ruling.clone()], vec![r(K::Question, &q1)]));
     assert_eq!(writes, vec![r(K::Ruling, &pipeline_key(&ruling).unwrap())], "only what the source wrote");
@@ -317,7 +325,7 @@ fn import_replays_a_receipt_without_derivation() {
 #[test]
 fn import_admits_a_declared_external_and_refuses_an_undeclared_one() {
     let mut mind = receiver();
-    committed(admit(&mut mind, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-1", r(K::Question, &id("question", "Q1")))]));
+    committed(import(&mut mind, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-1", r(K::Question, &id("question", "Q1")))], vec![]));
     let report = r(K::CutReport, &format!("{OTHER_ROOT}:cut_report:cut-3.h1"));
     let fixed = resolution(
         r(K::FollowUp, &id("follow_up", "FU-1")),
@@ -334,7 +342,7 @@ fn import_admits_a_declared_external_and_refuses_an_undeclared_one() {
 
     // A listing names the referent it stands in for and no other of its kind.
     let mut elsewhere = receiver();
-    committed(admit(&mut elsewhere, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-1", r(K::Question, &id("question", "Q1")))]));
+    committed(import(&mut elsewhere, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-1", r(K::Question, &id("question", "Q1")))], vec![]));
     let other = r(K::CutReport, &format!("{OTHER_ROOT}:cut_report:cut-4.h1"));
     assert_eq!(
         refusal(import(&mut elsewhere, vec![fixed.clone()], vec![other])),
@@ -350,7 +358,7 @@ fn import_admits_a_declared_external_and_refuses_an_undeclared_one() {
 #[test]
 fn import_refuses_a_present_external_a_moved_outcome_and_its_own_instance() {
     let mut mind = receiver();
-    committed(admit(&mut mind, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A")]));
+    committed(import(&mut mind, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A")], vec![]));
     let held = r(K::Question, &id("question", "Q1"));
     let stray = follow_up("FU-1", held.clone());
     // Held in the image.
@@ -518,4 +526,59 @@ fn a_moved_resolution_lands_alone_under_its_root() {
         assert!(matches!(refused, MindRefusal::CampaignMoved { .. } | MindRefusal::IncompatibleResolution { .. }), "{refused:?}");
     }
     assert!(recv.view(&r(K::FollowUp, &id("follow_up", "FU-C"))).unwrap().is_none());
+}
+
+fn import_from_kiko(mind: &mut Mind<MemoryStore>, documents: Vec<D>) -> PipelineAdmissionOutcome {
+    import_as(mind, source_of("kiko", vec![]), documents)
+}
+
+fn stewardship_status(mind: &Mind<MemoryStore>, instance: &str) -> PipelineStatus {
+    view_of(mind, K::Stewardship, &pipeline_key(&stewardship(instance, REPO)).unwrap()).status
+}
+
+#[test]
+fn an_import_refuses_instance_rooted_records() {
+    // A hand-off from this mind, imported, would leave her stewardship in force beside its own hand-off:
+    // import mode derives nothing, so the call that resolves a stewardship is not one it may carry.
+    let mut mind = seeded();
+    let before = head(&mind);
+    let handing = hand_off(INSTANCE, OTHER_INSTANCE, REPO, &[]);
+    assert_eq!(refusal(import_from_kiko(&mut mind, vec![handing.clone()])), MindRefusal::ImportOutsideCampaign { root: INSTANCE.into() });
+    assert_eq!(
+        refusal(import_from_kiko(&mut mind, vec![thought("T1", "an import", &[])])),
+        MindRefusal::ImportOutsideCampaign { root: INSTANCE.into() }
+    );
+    assert_eq!(head(&mind), before, "nothing landed");
+    assert!(matches!(stewardship_status(&mind, INSTANCE), PipelineStatus::InForce));
+    // The same hand-off, admitted natively, resolves the stewardship.
+    committed(admit(&mut mind, vec![handing]));
+    assert!(matches!(stewardship_status(&mind, INSTANCE), PipelineStatus::Resolved { .. }));
+}
+
+#[test]
+fn an_import_lands_only_under_a_root_that_only_imports_have_written() {
+    // This mind wrote Q1 and the campaign itself: a ruling imported beside them would answer Q1
+    // without the Answered a native ruling derives, and a native ruling could then answer it again.
+    let mut mind = seeded();
+    committed(admit(&mut mind, vec![question("Q1", &["A", "B"], "A")]));
+    let before = head(&mind);
+    let q1 = id("question", "Q1");
+    let first = answering(CAMPAIGN, "R1", &q1);
+    assert_eq!(refusal(import_from_kiko(&mut mind, vec![first])), MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() });
+    assert_eq!(head(&mind), before);
+    assert!(matches!(view_of(&mind, K::Question, &q1).status, PipelineStatus::InForce));
+
+    // A root only imports have written takes more imports, and a retry of one is no second write.
+    let mut recv = receiver();
+    let history = vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A")];
+    committed(import_from_kiko(&mut recv, history.clone()));
+    committed(import_from_kiko(&mut recv, vec![question("Q2", &["A", "B"], "A")]));
+    assert!(matches!(import_from_kiko(&mut recv, history), PipelineAdmissionOutcome::AlreadyAdmitted { .. }));
+
+    // A root that names no campaign, held or carried, is not a campaign's history.
+    let mut bare = receiver();
+    assert_eq!(
+        refusal(import_from_kiko(&mut bare, vec![question("Q1", &["A", "B"], "A")])),
+        MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() }
+    );
 }

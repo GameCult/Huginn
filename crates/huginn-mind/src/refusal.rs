@@ -66,6 +66,8 @@ pub enum MindRefusal {
     MoveIsFinal,
     /// An import names this mind as its source.
     ImportFromSelf,
+    /// An import carries a document of `root`, which is no campaign this mind holds or the batch carries, or which this mind holds a native write under.
+    ImportOutsideCampaign { root: String },
     /// An import lists `id` as external, but this mind (or the batch) holds it.
     ExternalPresent { id: String },
     /// The persona document fails the published schema: `path` is the

@@ -143,6 +143,16 @@ impl Image {
         self.closers.get(&kind).and_then(|named| named.get(id)).into_iter().flat_map(|keyed| keyed.iter().map(|(key, id)| (key.as_str(), *id)))
     }
 
+    /// Whether any document under `root` was admitted natively rather than imported.
+    pub(crate) fn root_holds_native_write(&self, root: &str) -> bool {
+        PipelineKind::ALL.iter().any(|kind| {
+            self.posting(*kind, Alias::Root.name(), root)
+                .into_iter()
+                .flatten()
+                .any(|id| self.row(*id).view.admission.provenance.imported_from.is_none())
+        })
+    }
+
     /// Every root with the newest row under it.
     pub(crate) fn roots(&self) -> impl Iterator<Item = (&str, &SelectionRow)> {
         self.roots.iter().map(|(root, id)| (root.as_str(), self.row(*id)))

@@ -1677,6 +1677,27 @@
           "const": "ImportFromSelf"
         },
         {
+          "description": "An import carries a document of `root`, which is no campaign this mind holds or the batch carries, or which this mind holds a native write under.",
+          "type": "object",
+          "properties": {
+            "ImportOutsideCampaign": {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "root"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ImportOutsideCampaign"
+          ]
+        },
+        {
           "description": "An import lists `id` as external, but this mind (or the batch) holds it.",
           "type": "object",
           "properties": {

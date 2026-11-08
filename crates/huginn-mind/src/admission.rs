@@ -176,6 +176,9 @@ impl<S: MindStore> Mind<S> {
         }
         let candidate = receipt::candidate(&mind, provenance, &strong_reads, &writes, receipt::head(self)? + 1, now)?;
         // A8
+        if import.is_some() {
+            refuse_unscoped_import(&docs)?;
+        }
         for staged in &docs.batch {
             check(&docs, staged, &mind, import.as_ref())?;
         }
@@ -501,6 +504,22 @@ fn derive(docs: &Docs<'_>, mind: &Slug) -> Vec<PipelineDocument> {
     }
     derived.retain(|document| !docs.batch.iter().any(|staged| staged.document == *document));
     derived
+}
+
+/// An import replays a campaign's history: every document is rooted at a campaign this mind holds
+/// or the batch carries, and the mind holds no native write under that root, so the source's own
+/// derivations stand alone and no native rule is bypassed for a record the mind could have written.
+/// Instance-rooted records (hand-offs, stewardships, runs, memories, thoughts) are never history
+/// to replay.
+fn refuse_unscoped_import(docs: &Docs<'_>) -> Result<(), MindRefusal> {
+    for staged in &docs.batch {
+        let root = root_and_local(&staged.key).0;
+        let campaign = format!("{root}:campaign:self");
+        if docs.find(PipelineKind::Campaign, &campaign).is_none() || docs.root_holds_native_write(root) {
+            return Err(MindRefusal::ImportOutsideCampaign { root: root.into() });
+        }
+    }
+    Ok(())
 }
 
 fn is_external(external: &[PipelineRef], kind: PipelineKind, id: &str) -> bool {

@@ -68,6 +68,11 @@ impl<'i> Docs<'i> {
         self.in_batch(kind, id).or_else(|| self.in_image(kind, id))
     }
 
+    /// Whether this mind holds a native write under `root` (the batch is not asked).
+    pub(crate) fn root_holds_native_write(&self, root: &str) -> bool {
+        self.image.root_holds_native_write(root)
+    }
+
     pub(crate) fn of_kind(&self, kind: PipelineKind) -> impl Iterator<Item = (&str, &PipelineDocument)> {
         let batch = self.batch.iter().filter(move |staged| staged.kind == kind).map(|staged| (staged.key.as_str(), &staged.document));
         let image = self
