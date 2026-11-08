@@ -375,33 +375,37 @@ fn what_the_cap_left_waits_for_the_next_night_and_is_not_dropped_to_the_backlog(
 }
 
 #[test]
-fn a_night_that_failed_or_never_closed_covers_nothing_so_its_day_comes_back() {
+fn a_night_that_failed_or_never_ran_covers_nothing_so_its_day_comes_back() {
     let days: Vec<_> = (0..3).map(|n| (format!("f{n}"), MemorySort::Learned, wake(), 10 + n as i64)).collect();
     let (mind, first) = night_over(0, &days);
     let shown = context(&mind, &first, at(T0 + 5000)).unwrap();
     assert_eq!(day_ids(&shown).len(), 3);
+    // Her first night was withdrawn unrun: the day is still the 24 hours before that first night opened.
     mind.admit_at(at(T0 + 2000));
-    close_night(&mind, &first, &failed());
+    mind.committed(vec![crate::testkit::close(first.clone(), crate::testkit::withdrawn())]);
     let (second, again) = next_night(&mind, "second", 3000);
-    assert_eq!(day_ids(&again), vec![id("f0"), id("f1"), id("f2")], "a failed first night: the day is still the 24 hours before the first night opened");
-    // The second night never closes (a crash); a third night still owes the same day.
+    assert_eq!(day_ids(&again), vec![id("f0"), id("f1"), id("f2")]);
+    // The second night failed, and f3 arrived while it was open: the third owes all four.
     remember_at(&mind, "f3", wake(), 3500);
-    let (_, third) = next_night(&mind, "third", 4000);
-    assert_eq!(day_ids(&third), vec![id("f0"), id("f1"), id("f2"), id("f3")]);
-    // Once a night sleeps through what it was shown, that is covered and the next day begins after it.
-    mind.admit_at(at(T0 + 4500));
-    close_night(&mind, &second, &slept_over(&again));
-    remember_at(&mind, "g0", wake(), 5000);
+    mind.admit_at(at(T0 + 3600));
+    close_night(&mind, &second, &failed());
+    let (third, owed) = next_night(&mind, "third", 4000);
+    assert_eq!(day_ids(&owed), vec![id("f0"), id("f1"), id("f2"), id("f3")]);
+    // The third slept through what it was shown; the next day begins after it.
+    remember_at(&mind, "g0", wake(), 4500);
+    mind.admit_at(at(T0 + 4600));
+    close_night(&mind, &third, &slept_over(&owed));
+    remember_at(&mind, "g1", wake(), 5000);
     let (_, fourth) = next_night(&mind, "fourth", 6000);
-    assert_eq!(day_ids(&fourth), vec![id("f3"), id("g0")], "the night that slept covered f0 to f2; f3 arrived while it was open and is still owed");
+    assert_eq!(day_ids(&fourth), vec![id("g0"), id("g1")], "g0 arrived while the third night was open and is still owed; f0 to f3 are covered");
 }
 
 #[test]
-fn the_first_nights_day_is_the_twenty_four_hours_before_it_opened_to_the_millisecond() {
+fn the_first_nights_day_is_the_twenty_four_hours_before_it_opened_to_the_second() {
     let hour = 3_600_000;
     let memories = vec![
         ("on_the_line".to_string(), MemorySort::Learned, wake(), 1000 - 24 * hour),
-        ("just_after".to_string(), MemorySort::Learned, wake(), 1001 - 24 * hour),
+        ("just_after".to_string(), MemorySort::Learned, wake(), 2000 - 24 * hour),
     ];
     let (mind, run) = night_over(0, &memories);
     let night = context(&mind, &run, at(T0 + 5000)).unwrap();
