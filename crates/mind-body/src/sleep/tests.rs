@@ -239,22 +239,66 @@ fn retirements_and_remembered_things_become_resolutions_and_sleep_memories() {
     assert_eq!((remembered.label.0.as_str(), &remembered.origin), ("mind-night-r0", &MemoryOrigin::Sleep { run: "mind-night".into() }));
 }
 
-/// Her mind with a Sleep run opened at `T0 + 1000` (and `earlier` Sleep runs before it), and `memories`
-/// admitted at the given offsets.
+/// Her mind with a Sleep run opened at `T0 + 1000` (and `earlier` Sleep runs, slept, a hundred hours before it),
+/// and `memories` admitted at the given offsets: everything admitted in the order of its time.
 fn night_over(earlier: usize, memories: &[(String, MemorySort, MemoryOrigin, i64)]) -> (TestMind, PipelineRef) {
     let mind = TestMind::seeded();
+    let mut events: Vec<(i64, Vec<Vec<PipelineDocument>>)> = Vec::new();
     for n in 0..earlier {
-        mind.admit_at(at(T0 - 100 * 3_600_000 + n as i64));
-        mind.committed(vec![run(&format!("before{n}"), RunTurn::Sleep, RunOperator::Mind, &[])]);
-        mind.committed(vec![crate::testkit::close(run_ref(&format!("before{n}")), crate::testkit::recorded())]);
+        let label = format!("before{n}");
+        let closed = crate::testkit::close(run_ref(&label), ResolutionOutcome::Recorded { reason: "slept: ok".into() });
+        events.push((T0 - 100 * 3_600_000 + n as i64, vec![vec![run(&label, RunTurn::Sleep, RunOperator::Mind, &[])], vec![closed]]));
     }
     for (label, sort, origin, offset) in memories {
-        mind.admit_at(at(T0 + offset));
-        mind.committed(vec![memory_from(label, *sort, "Text.", &[], origin.clone(), 500)]);
+        events.push((T0 + offset, vec![vec![memory_from(label, *sort, "Text.", &[], origin.clone(), 500)]]));
     }
-    mind.admit_at(at(T0 + 1000));
-    mind.committed(vec![run("tonight", RunTurn::Sleep, RunOperator::Mind, &[])]);
+    events.push((T0 + 1000, vec![vec![run("tonight", RunTurn::Sleep, RunOperator::Mind, &[])]]));
+    events.sort_by_key(|(when, _)| *when);
+    for (when, commits) in events {
+        mind.admit_at(at(when));
+        for commit in commits {
+            mind.committed(commit);
+        }
+    }
     (mind, run_ref("tonight"))
+}
+
+/// A night's own ending, admitted: slept through what it was shown, or failed.
+fn close_night(mind: &TestMind, run: &PipelineRef, finish: &Finish) {
+    let (reason, rationale) = closing(finish);
+    mind.committed(vec![PipelineDocument::Resolution(PipelineResolution {
+        subject: run.clone(),
+        sequence: 1,
+        outcome: ResolutionOutcome::Recorded { reason: reason.as_str().into() },
+        rationale: rationale.as_str().into(),
+        resolved_on: eureka_pipeline::Date("2026-10-09".into()),
+    })]);
+}
+
+fn slept_over(context: &Context) -> Finish {
+    Finish::Slept { reply: SleepReply { night: "n".into(), keep: vec![], consolidate: vec![], retire: vec![], remember: vec![] }, through: context.day.last().map(|held| held.ordinal) }
+}
+
+fn failed() -> Finish {
+    Finish::Failed { refusals: 3, why: "no reply the ledger took".into() }
+}
+
+/// Opens another night of hers at `when` and reads its day.
+fn next_night(mind: &TestMind, label: &str, when: i64) -> (PipelineRef, Context) {
+    mind.admit_at(at(T0 + when));
+    mind.committed(vec![run(label, RunTurn::Sleep, RunOperator::Mind, &[])]);
+    let next = run_ref(label);
+    let context = context(mind, &next, at(T0 + when + 5000)).unwrap();
+    (next, context)
+}
+
+fn day_ids(context: &Context) -> Vec<String> {
+    context.day.iter().map(|held| held.id.clone()).collect()
+}
+
+fn remember_at(mind: &TestMind, label: &str, origin: MemoryOrigin, when: i64) {
+    mind.admit_at(at(T0 + when));
+    mind.committed(vec![memory_from(label, MemorySort::Learned, "Text.", &[], origin, 500)]);
 }
 
 #[test]
@@ -313,4 +357,72 @@ fn the_night_schema_states_the_reply_the_decoder_takes() {
     assert_eq!(schema["properties"]["retire"]["maxItems"], json!(128));
     assert_eq!(schema["properties"]["remember"]["maxItems"], json!(16));
     assert_eq!(schema["properties"]["retire"]["items"]["properties"]["outcome"]["enum"], json!(["done", "declined", "faded", "wrong"]));
+}
+
+#[test]
+fn what_the_cap_left_waits_for_the_next_night_and_is_not_dropped_to_the_backlog() {
+    let days: Vec<_> = (0..100).map(|n| (format!("day{n:03}"), MemorySort::Learned, wake(), 10 + n as i64)).collect();
+    let (mind, tonight) = night_over(0, &days);
+    let shown = context(&mind, &tonight, at(T0 + 5000)).unwrap();
+    assert_eq!(shown.day.len(), DAY_MAX);
+    assert!(shown.tide.is_empty() && shown.open.is_empty(), "what waits is neither tide nor open");
+    mind.admit_at(at(T0 + 2000));
+    close_night(&mind, &tonight, &slept_over(&shown));
+    let (_, next) = next_night(&mind, "tomorrow", 3000);
+    assert_eq!(day_ids(&next), (96..100).map(|n| id(&format!("day{n:03}"))).collect::<Vec<_>>(), "the four past the cap are tomorrow's day, and only they");
+    assert_eq!(next.tide.len(), 32, "the ninety-six she was shown are backlog now");
+    assert!(next.tide.iter().all(|held| !day_ids(&next).contains(&held.id)), "a day memory is not also in the tide");
+}
+
+#[test]
+fn a_night_that_failed_or_never_closed_covers_nothing_so_its_day_comes_back() {
+    let days: Vec<_> = (0..3).map(|n| (format!("f{n}"), MemorySort::Learned, wake(), 10 + n as i64)).collect();
+    let (mind, first) = night_over(0, &days);
+    let shown = context(&mind, &first, at(T0 + 5000)).unwrap();
+    assert_eq!(day_ids(&shown).len(), 3);
+    mind.admit_at(at(T0 + 2000));
+    close_night(&mind, &first, &failed());
+    let (second, again) = next_night(&mind, "second", 3000);
+    assert_eq!(day_ids(&again), vec![id("f0"), id("f1"), id("f2")], "a failed first night: the day is still the 24 hours before the first night opened");
+    // The second night never closes (a crash); a third night still owes the same day.
+    remember_at(&mind, "f3", wake(), 3500);
+    let (_, third) = next_night(&mind, "third", 4000);
+    assert_eq!(day_ids(&third), vec![id("f0"), id("f1"), id("f2"), id("f3")]);
+    // Once a night sleeps through what it was shown, that is covered and the next day begins after it.
+    mind.admit_at(at(T0 + 4500));
+    close_night(&mind, &second, &slept_over(&again));
+    remember_at(&mind, "g0", wake(), 5000);
+    let (_, fourth) = next_night(&mind, "fourth", 6000);
+    assert_eq!(day_ids(&fourth), vec![id("f3"), id("g0")], "the night that slept covered f0 to f2; f3 arrived while it was open and is still owed");
+}
+
+#[test]
+fn the_first_nights_day_is_the_twenty_four_hours_before_it_opened_to_the_millisecond() {
+    let hour = 3_600_000;
+    let memories = vec![
+        ("on_the_line".to_string(), MemorySort::Learned, wake(), 1000 - 24 * hour),
+        ("just_after".to_string(), MemorySort::Learned, wake(), 1001 - 24 * hour),
+    ];
+    let (mind, run) = night_over(0, &memories);
+    let night = context(&mind, &run, at(T0 + 5000)).unwrap();
+    assert_eq!(day_ids(&night), vec![id("just_after")]);
+    assert!(night.tide.iter().any(|held| held.id == id("on_the_line")), "the older one is backlog");
+}
+
+#[test]
+fn a_consolidation_a_night_made_is_not_the_next_days_memory_whatever_its_origin() {
+    let (mind, tonight) = night_over(0, &[("d1".to_string(), MemorySort::Learned, dm("!a:chat", &["@a:chat"]), 10)]);
+    let shown = context(&mind, &tonight, at(T0 + 5000)).unwrap();
+    // The night consolidates the DM memory: the consolidation keeps the room, so its origin is Direct, admitted after the night opened.
+    mind.admit_at(at(T0 + 2000));
+    let PipelineDocument::Memory(mut merged) = memory_from("dm-merged", MemorySort::Learned, "Merged.", &[], dm("!a:chat", &["@a:chat"]), 500) else { unreachable!() };
+    merged.consolidates = vec![crate::testkit::reference(eureka_pipeline::PipelineKind::Memory, &id("d1"))];
+    let by = crate::testkit::reference(eureka_pipeline::PipelineKind::Memory, &id("dm-merged"));
+    mind.committed(vec![PipelineDocument::Memory(merged), crate::testkit::close(crate::testkit::reference(eureka_pipeline::PipelineKind::Memory, &id("d1")), ResolutionOutcome::Superseded { by: vec![by] })]);
+    mind.admit_at(at(T0 + 2500));
+    close_night(&mind, &tonight, &slept_over(&shown));
+    remember_at(&mind, "fresh", wake(), 2800);
+    let (_, next) = next_night(&mind, "tomorrow", 3000);
+    assert_eq!(day_ids(&next), vec![id("fresh")], "the consolidation is not shown as her day");
+    assert!(next.tide.iter().all(|held| held.id != id("dm-merged")), "nor does it come round as backlog");
 }

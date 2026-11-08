@@ -25,7 +25,7 @@ use crate::persona::{
     ABOUT_MAX, AGENT, Config, Conversation, Failure, Organs, Outcome, PERSONA_POLL_S, REMEMBER_TEXT_MAX_BYTES, Remember, SOURCES_MAX, Started, WHY_MAX_CHARS, date, label_of, next_sequence, remember_item_schema, start_session,
     structured_output,
 };
-use crate::queue::{MindPort, any_of, headers, in_force, of_kind};
+use crate::queue::{MindPort, any_of, citing, headers, in_force, of_kind};
 use crate::recall;
 use crate::self_run::session::{Polled, SessionInbox, drive};
 use crate::self_run::{SESSION_NAMESPACE, Why};
@@ -153,60 +153,106 @@ fn parse_time(at: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(at).map_err(|_| anyhow!("an admission time could not be read"))?.with_timezone(&Utc))
 }
 
-/// Her memories in force, oldest admitted first: the one read of what she holds.
-fn memories_in_force(mind: &dyn MindPort) -> Result<Vec<Held>> {
+/// Every document a selection holds, paged whole.
+fn documents(mind: &dyn MindPort, selection: &Selection) -> Result<Vec<huginn_mind::PipelineDocumentView>> {
     let mut found = Vec::new();
-    let mut asking = Selection { projection: "document".into(), ..in_force(of_kind(PipelineKind::Memory)) };
+    let mut asking = Selection { projection: "document".into(), ..selection.clone() };
     loop {
         let page = mind.query(&asking)?;
         let PipelinePageItems::Documents(views) = page.items else { bail!("the mind answered headers to a document selection") };
-        for view in views {
-            if let PipelineDocument::Memory(memory) = view.document {
-                found.push(Held { id: view.id.id.0, memory, at: parse_time(&view.admission.admitted_at)?, ordinal: view.admission.ordinal });
-            }
-        }
+        found.extend(views);
         match page.next {
             Some(cursor) => asking.cursor = Some(cursor),
             None => break,
+        }
+    }
+    Ok(found)
+}
+
+/// Her memories in force, oldest admitted first: the one read of what she holds.
+fn memories_in_force(mind: &dyn MindPort) -> Result<Vec<Held>> {
+    let mut found = Vec::new();
+    for view in documents(mind, &in_force(of_kind(PipelineKind::Memory)))? {
+        if let PipelineDocument::Memory(memory) = view.document {
+            found.push(Held { id: view.id.id.0, memory, at: parse_time(&view.admission.admitted_at)?, ordinal: view.admission.ordinal });
         }
     }
     found.sort_by_key(|held| held.ordinal);
     Ok(found)
 }
 
-/// Her Sleep runs, any status, oldest first, with when each was admitted.
-fn sleeps(mind: &dyn MindPort) -> Result<Vec<(PipelineRef, DateTime<Utc>)>> {
+/// One of her Sleep runs: which, when it was admitted, and its admission ordinal.
+struct Night {
+    run: PipelineRef,
+    at: DateTime<Utc>,
+    ordinal: u64,
+}
+
+/// Her Sleep runs, any status, oldest first.
+fn sleeps(mind: &dyn MindPort) -> Result<Vec<Night>> {
     let runs = any_of(any_of(any_of(of_kind(PipelineKind::Run), "root", &[&mind.instance().0]), "turn", &["Sleep"]), "operated_by", &["Mind"]);
-    let mut found = headers(mind, &runs)?.into_iter().map(|run| Ok((run.id, run.admission.ordinal, parse_time(&run.admission.admitted_at)?))).collect::<Result<Vec<_>>>()?;
-    found.sort_by_key(|(_, ordinal, _)| *ordinal);
-    Ok(found.into_iter().map(|(id, _, at)| (id, at)).collect())
+    let mut found = headers(mind, &runs)?.into_iter().map(|run| Ok(Night { run: run.id, ordinal: run.admission.ordinal, at: parse_time(&run.admission.admitted_at)? })).collect::<Result<Vec<_>>>()?;
+    found.sort_by_key(|night| night.ordinal);
+    Ok(found)
+}
+
+const SLEPT: &str = "slept: ";
+const THROUGH: &str = "; day through ordinal ";
+
+/// Where the newest of `earlier` that closed `slept:` left her day: the admission ordinal of the last memory of
+/// the day it was shown (its own run's ordinal when it was shown none). A night that failed, or whose run never
+/// closed, left its day uncovered, so it is not an anchor.
+fn covered_through(mind: &dyn MindPort, earlier: &[&Night]) -> Result<Option<u64>> {
+    for night in earlier.iter().rev() {
+        let closings = Selection { cites: Some(citing(&night.run, Some("subject"))), ..of_kind(PipelineKind::Resolution) };
+        let latest = documents(mind, &closings)?
+            .into_iter()
+            .filter_map(|view| match view.document {
+                PipelineDocument::Resolution(resolution) => Some(resolution),
+                _ => None,
+            })
+            .max_by_key(|resolution| resolution.sequence);
+        if let Some(resolution) = latest
+            && let ResolutionOutcome::Recorded { reason } = &resolution.outcome
+            && reason.as_str().starts_with(SLEPT)
+        {
+            let through = resolution.rationale.0.rsplit_once(THROUGH).and_then(|(_, ordinal)| ordinal.trim().parse().ok());
+            return Ok(Some(through.unwrap_or(night.ordinal)));
+        }
+    }
+    Ok(None)
 }
 
 fn is_open_sort(sort: MemorySort) -> bool {
     matches!(sort, MemorySort::Asked | MemorySort::Committed)
 }
 
+/// Made by a night, not lived in the day: formed in sleep, or a consolidation (a DM's keeps its room and voices,
+/// so its origin is not Sleep).
 fn is_sleep_made(held: &Held) -> bool {
-    matches!(held.memory.origin, MemoryOrigin::Sleep { .. })
+    matches!(held.memory.origin, MemoryOrigin::Sleep { .. }) || !held.memory.consolidates.is_empty()
 }
 
-/// The night, derived. Her day: her memories in force admitted after her previous Sleep run opened (else in the
-/// 24 hours before this run opened), formed otherwise than in sleep, oldest first, at most `DAY_MAX`. Her open
-/// Asked and Committed items older than the day. A tide of `TIDE` older memories of other sorts, from an offset
-/// that moves by `TIDE` with each earlier Sleep run of hers.
+/// The night, derived. Her day: her memories in force admitted after what her newest night that closed `slept:`
+/// covered (a night that failed covered nothing), else in the 24 hours before her first night opened; formed
+/// otherwise than in sleep, oldest first, at most `DAY_MAX`, the rest waiting for the next night. Her open Asked
+/// and Committed items older than the day. A tide of `TIDE` older memories of other sorts, from an offset that
+/// moves by `TIDE` with each earlier Sleep run of hers.
 pub(crate) fn context(mind: &dyn MindPort, run: &PipelineRef, now: DateTime<Utc>) -> Result<Context> {
     let nights = sleeps(mind)?;
-    let run_at = nights.iter().find(|(other, _)| other == run).map(|(_, at)| *at).ok_or_else(|| anyhow!("the night's run is not in her mind"))?;
-    let earlier: Vec<&(PipelineRef, DateTime<Utc>)> = nights.iter().filter(|(other, _)| other != run).collect();
-    let day_start = earlier.last().map_or(run_at - Duration::hours(24), |(_, at)| *at);
+    let tonight = nights.iter().find(|night| &night.run == run).ok_or_else(|| anyhow!("the night's run is not in her mind"))?;
+    let earlier: Vec<&Night> = nights.iter().filter(|night| night.ordinal < tonight.ordinal).collect();
+    let covered = covered_through(mind, &earlier)?;
+    let first_at = earlier.first().map_or(tonight.at, |night| night.at);
+    let in_day = |held: &Held| covered.map_or(held.at > first_at - Duration::hours(24), |through| held.ordinal > through);
     let memories = memories_in_force(mind)?;
     let mut counts = BTreeMap::new();
     for held in &memories {
         *counts.entry(format!("{:?}", held.memory.sort)).or_insert(0) += 1;
     }
-    let day: Vec<Held> = memories.iter().filter(|held| held.at > day_start && !is_sleep_made(held)).take(DAY_MAX).cloned().collect();
-    let open: Vec<Held> = memories.iter().filter(|held| held.at <= day_start && is_open_sort(held.memory.sort)).take(OPEN_MAX).cloned().collect();
-    let backlog: Vec<&Held> = memories.iter().filter(|held| held.at <= day_start && !is_open_sort(held.memory.sort) && !is_sleep_made(held)).collect();
+    let day: Vec<Held> = memories.iter().filter(|held| in_day(held) && !is_sleep_made(held)).take(DAY_MAX).cloned().collect();
+    let open: Vec<Held> = memories.iter().filter(|held| !in_day(held) && is_open_sort(held.memory.sort)).take(OPEN_MAX).cloned().collect();
+    let backlog: Vec<&Held> = memories.iter().filter(|held| !in_day(held) && !is_open_sort(held.memory.sort) && !is_sleep_made(held)).collect();
     let tide: Vec<Held> = if backlog.is_empty() {
         Vec::new()
     } else {
@@ -429,7 +475,8 @@ pub(crate) fn pack(units: Vec<Vec<PipelineDocument>>) -> Vec<Vec<PipelineDocumen
 
 /// How a night ended.
 enum Finish {
-    Slept { reply: SleepReply },
+    /// `through` is the ordinal of the last memory of the day the night was shown, if it was shown any.
+    Slept { reply: SleepReply, through: Option<u64> },
     Failed { refusals: u32, why: String },
 }
 
@@ -505,7 +552,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for SleepInbox<'_, C, S> {
         match decode(&text, self.context) {
             Ok(reply) => match self.admit(&reply) {
                 Ok(()) => {
-                    self.finish = Some(Finish::Slept { reply });
+                    self.finish = Some(Finish::Slept { reply, through: self.context.day.last().map(|held| held.ordinal) });
                     Ok((true, false))
                 }
                 Err(error) => {
@@ -518,22 +565,29 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for SleepInbox<'_, C, S> {
     }
 }
 
-/// Closes the night's run Recorded with her line and the counts, or the failure.
-fn close(organs: &Organs, run: &PipelineRef, finish: &Finish) -> Result<()> {
-    let (reason, rationale) = match finish {
-        Finish::Slept { reply } => (
-            format!("slept: {}", reply.night),
+/// What a night closes with: the reason (her line, or the failure) and the rationale (the counts, and where her
+/// day was covered through).
+fn closing(finish: &Finish) -> (String, String) {
+    match finish {
+        Finish::Slept { reply, through } => (
+            format!("{SLEPT}{}", reply.night),
             format!(
-                "kept {}, consolidated {} from {}, retired {}, formed {}",
+                "kept {}, consolidated {} from {}, retired {}, formed {}{}",
                 reply.keep.len(),
                 reply.consolidate.len(),
                 reply.consolidate.iter().map(|consolidation| consolidation.consumes.len()).sum::<usize>(),
                 reply.retire.len(),
-                reply.remember.len()
+                reply.remember.len(),
+                through.map_or(String::new(), |ordinal| format!("{THROUGH}{ordinal}"))
             ),
         ),
         Finish::Failed { refusals, why } => (format!("failed after {refusals} refusals: {why}"), "The night ended without a reply the ledger took.".to_string()),
-    };
+    }
+}
+
+/// Closes the night's run Recorded with her line and the counts, or the failure.
+fn close(organs: &Organs, run: &PipelineRef, finish: &Finish) -> Result<()> {
+    let (reason, rationale) = closing(finish);
     let resolution = PipelineResolution {
         subject: run.clone(),
         sequence: next_sequence(organs.mind, run)?,

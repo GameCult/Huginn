@@ -7120,7 +7120,7 @@ fn the_night_line_holds_the_day_whole_and_prescribes_nothing() {
     // An earlier night of hers, opened 30 hours before this one, closed.
     rig.mind.admit_at(at(NIGHT_AT_MS - 30 * HOUR_MS));
     rig.mind.committed(vec![crate::testkit::run("slept-before", RunTurn::Sleep, RunOperator::Mind, &[])]);
-    rig.mind.committed(vec![crate::testkit::close(crate::testkit::run_ref("slept-before"), crate::testkit::recorded())]);
+    rig.mind.committed(vec![crate::testkit::close(crate::testkit::run_ref("slept-before"), ResolutionOutcome::Recorded { reason: "slept: ok".into() })]);
     // Her day: after that night opened. A Sleep-origin memory of it is not part of it.
     rig.remembered("d1", MemorySort::Decided, "Ship on Friday.", &["@op:chat"], room(), 20, &["$e1"]);
     rig.remembered("d2", MemorySort::Learned, "A private thing.", &["@kiko:chat"], dm("!dm:chat", &["@kiko:chat"]), 10, &[]);

@@ -1458,6 +1458,37 @@ fn the_window_wraps_midnight_and_names_when_it_opened() {
 }
 
 #[test]
+fn a_window_keeps_its_minutes_and_its_bounds_are_the_clock() {
+    let on = |hour, minute| Utc.with_ymd_and_hms(2026, 10, 9, hour, minute, 0).unwrap();
+    let night = Night::parse("22:30-04:15", "ann").unwrap();
+    assert_eq!((night.from_min, night.to_min), (22 * 60 + 30, 4 * 60 + 15));
+    assert_eq!(night.opened(on(22, 29)), None);
+    assert_eq!(night.opened(on(22, 30)), Some(on(22, 30)));
+    assert_eq!(night.opened(on(4, 14)), Some(on(22, 30) - Duration::days(1)));
+    assert_eq!(night.opened(on(4, 15)), None);
+    // The last minute of the day is a time, and the first one past it is not.
+    let late = Night::parse("23:59-00:00", "ann").unwrap();
+    assert_eq!((late.from_min, late.to_min), (23 * 60 + 59, 0));
+    assert_eq!(Night::parse("00:00-23:00", "ann").unwrap().to_min, 23 * 60);
+    assert_eq!(Night::parse("12:00-12:59", "ann").unwrap().to_min, 12 * 60 + 59);
+    for bad in ["24:00-03:00", "22:00-24:00", "22:60-03:00", "22:00-03:60", "22:00", "22-03", "aa:bb-03:00"] {
+        assert!(Night::parse(bad, "ann").is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn the_nightly_sleep_is_both_settings_or_neither() {
+    assert_eq!(Night::from_settings(None, None).unwrap(), None);
+    let night = Night::from_settings(Some("22:30-04:00"), Some("ann, bob")).unwrap().unwrap();
+    assert_eq!((night.from_min, night.to_min, night.minds), (22 * 60 + 30, 4 * 60, vec![Slug("ann".into()), Slug("bob".into())]));
+    for only in [Night::from_settings(Some("22:30-04:00"), None), Night::from_settings(None, Some("ann"))] {
+        let fault = only.expect_err("a half-set night is refused at start").to_string();
+        assert!(fault.contains("HEARTBEAT_SLEEP_UTC") && fault.contains("HEARTBEAT_SLEEP_MINDS"), "{fault}");
+    }
+    assert!(Night::from_settings(Some("nonsense"), Some("ann")).is_err(), "both set, but not a window");
+}
+
+#[test]
 fn a_listed_idle_mind_sleeps_once_per_window_and_a_missed_night_is_not_made_up() {
     let rig = nights("13:00-14:00", "ann");
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
@@ -1466,6 +1497,8 @@ fn a_listed_idle_mind_sleeps_once_per_window_and_a_missed_night_is_not_made_up()
     // Busy while the night lasts: nothing more. Then her night ends (failed or slept, it counts) and the window is spent for her.
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
     end_launched(&rig, ANN);
+    // Her unit is gone as well, so she is idle and only her last Sleep run says the window is spent.
+    rig.launcher.kill_as(&Slug("ann".into()), RunTurn::Sleep);
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "one night per window, whatever became of it");
     assert_eq!(started_turns(&rig).len(), 1);
     // The next window opens a day later and she sleeps again.

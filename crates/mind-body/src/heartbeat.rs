@@ -119,6 +119,16 @@ pub struct Night {
 }
 
 impl Night {
+    /// The nightly sleep from the two settings that name it: both or neither, so a half-set deploy fails at start
+    /// instead of quietly never sleeping, or sleeping no one.
+    pub fn from_settings(window: Option<&str>, minds: Option<&str>) -> Result<Option<Self>> {
+        match (window, minds) {
+            (Some(window), Some(minds)) => Self::parse(window, minds).map(Some),
+            (None, None) => Ok(None),
+            _ => bail!("HEARTBEAT_SLEEP_UTC and HEARTBEAT_SLEEP_MINDS are set together or not at all"),
+        }
+    }
+
     /// `window` is `HH:MM-HH:MM` in UTC, `minds` the slugs comma-separated.
     pub fn parse(window: &str, minds: &str) -> Result<Self> {
         let minute = |text: &str| -> Result<u32> {

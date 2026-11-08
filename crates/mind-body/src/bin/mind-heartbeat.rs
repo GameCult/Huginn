@@ -61,12 +61,7 @@ fn config() -> Result<Config> {
         .map(PersonaId::parse)
         .collect::<Result<Vec<_>>>()?;
     let operators = required("MIND_PERSONA_OPERATOR")?.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect();
-    // The nightly sleep is both settings or neither.
-    let night = match (setting("HEARTBEAT_SLEEP_UTC"), setting("HEARTBEAT_SLEEP_MINDS")) {
-        (Some(window), Some(minds)) => Some(Night::parse(&window, &minds)?),
-        (None, None) => None,
-        _ => bail!("HEARTBEAT_SLEEP_UTC and HEARTBEAT_SLEEP_MINDS are set together or not at all"),
-    };
+    let night = Night::from_settings(setting("HEARTBEAT_SLEEP_UTC").as_deref(), setting("HEARTBEAT_SLEEP_MINDS").as_deref())?;
     Config::new(personas, operators, night)
 }
 
