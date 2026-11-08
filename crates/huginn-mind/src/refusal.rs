@@ -58,6 +58,16 @@ pub enum MindRefusal {
     FindingWithoutEvidence,
     UnknownInvariant { label: String },
     NotStewarded { repo: String },
+    /// `campaign` moved to mind `to`: nothing is written under its root here any more, whoever asks.
+    CampaignMoved { campaign: String, to: String },
+    /// A campaign moves to another mind, never to the one that gives it up.
+    MoveToSelf,
+    /// A Moved resolution is final; withdrawing it would leave two minds keeping the campaign.
+    MoveIsFinal,
+    /// An import names this mind as its source.
+    ImportFromSelf,
+    /// An import lists `id` as external, but this mind (or the batch) holds it.
+    ExternalPresent { id: String },
     /// The persona document fails the published schema: `path` is the
     /// document location (a key the schema does not declare is `*`) and
     /// `message` the schema keyword that failed. Never the offending value.

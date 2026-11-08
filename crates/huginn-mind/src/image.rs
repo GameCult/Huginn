@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use cultcache_rs::DatabaseEntry;
 use cultnet_rs::Selection;
-use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, Short};
+use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, Short};
 
 use crate::docs::{Docs, citations, kind_of_id, kind_of_type};
 use crate::mind::Envelopes;
@@ -201,6 +201,22 @@ impl Image {
                 current = subject;
             }
         }
+        // A Moved closes every document under its campaign's root, none of which it names.
+        let moved: Vec<String> = (first..self.rows.len() as u32)
+            .filter_map(|id| match &self.row(id).view.document {
+                PipelineDocument::Resolution(resolution)
+                    if resolution.subject.kind == PipelineKind::Campaign && matches!(resolution.outcome, ResolutionOutcome::Moved { .. }) =>
+                {
+                    Some(root_and_local(&resolution.subject.id.0).0.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        for root in &moved {
+            for kind in PipelineKind::ALL {
+                touched.extend(self.posting(*kind, Alias::Root.name(), root).into_iter().flatten().copied());
+            }
+        }
         for id in touched {
             self.rebuild(id, id >= first, facts.ordinal);
         }
@@ -368,6 +384,7 @@ impl Image {
                     agent: Short("claude".into()),
                     session: Short("session-1".into()),
                     tool: Short("admit".into()),
+                    imported_from: None,
                 },
                 ordinal: n as u64 + 1,
             };

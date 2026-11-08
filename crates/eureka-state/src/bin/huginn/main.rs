@@ -485,7 +485,7 @@ fn admit(
         }
     }
     let sent = documents.clone();
-    let provenance = PipelineProvenance { faculty, agent: Short(agent), session: Short(session), tool: Short(TOOL.to_string()) };
+    let provenance = PipelineProvenance { faculty, agent: Short(agent), session: Short(session), tool: Short(TOOL.to_string()), imported_from: None };
     let request = |instance: &Slug| {
         HuginnMindRequest::Admit(PipelineAdmissionBatch { instance: instance.clone(), provenance, documents })
     };
@@ -625,7 +625,7 @@ fn persona_put(
     if !state.is_object() {
         return Err(Trouble::invalid("the persona document is one JSON object, the whole gamecult.persona_state.v0"));
     }
-    let provenance = PipelineProvenance { faculty, agent: Short(agent), session: Short(session), tool: Short(TOOL.to_string()) };
+    let provenance = PipelineProvenance { faculty, agent: Short(agent), session: Short(session), tool: Short(TOOL.to_string()), imported_from: None };
     match settings.client()?.persona_put(provenance, state, expected_updated_at).map_err(Trouble::from)? {
         HuginnMindResponse::PersonaPut(PersonaPutOutcome::Committed { receipt_id }) => {
             say(format_args!("Committed {receipt_id}"));

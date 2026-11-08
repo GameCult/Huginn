@@ -121,7 +121,7 @@ impl MindPort for HuginnMind<'_> {
     fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
         let batch = PipelineAdmissionBatch {
             instance: self.instance().clone(),
-            provenance: PipelineProvenance { faculty: Faculty::SelfFaculty, agent: agent.into(), session: session.into(), tool: "mind-body".into() },
+            provenance: PipelineProvenance { faculty: Faculty::SelfFaculty, agent: agent.into(), session: session.into(), tool: "mind-body".into(), imported_from: None },
             documents,
         };
         match (self.call)(HuginnMindRequest::Admit(batch)).map_err(|error| anyhow!("the mind could not be asked: {}", client_error_code(&error)))? {

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::image::Image;
 use crate::refusal::MindRefusal;
+use crate::rows::root_and_local;
 
 /// A batch document after A3 and A5: decoded, keyed, and its envelope.
 pub(crate) struct Staged {
@@ -203,9 +204,36 @@ impl<'i> Docs<'i> {
     }
 
     /// The resolution that closes the document, if any: the views' status,
-    /// derived where admission derives whether there is one at all.
+    /// derived where admission derives whether there is one at all. A document
+    /// with no in-force closer of its own reads closed by the Moved resolution of
+    /// the campaign it is rooted at, the Moved resolution itself excepted. The
+    /// fallback is the status's alone: a rule asks `in_force`, which does not
+    /// have it, so a moved campaign's own closures keep their standing.
     pub(crate) fn closing_resolution(&self, kind: PipelineKind, id: &str) -> Option<(&str, &PipelineResolution)> {
-        self.closing_resolution_unless(kind, id, |_| false)
+        self.closing_resolution_unless(kind, id, |_| false).or_else(|| {
+            let moved = self.moved_campaign(root_and_local(id).0)?;
+            (kind != PipelineKind::Resolution || id != moved.0).then_some(moved)
+        })
+    }
+
+    /// The Moved resolution in force over the campaign rooted at `root`, among the held documents
+    /// visible at `as_of`: the one fact that freezes a root and closes everything under it. The
+    /// batch is not asked, so a Moved and the writes it lands beside are one receipt.
+    pub(crate) fn moved_campaign(&self, root: &str) -> Option<(&'i str, &'i PipelineResolution)> {
+        let image: &'i Image = self.image;
+        image
+            .of_kind(PipelineKind::Campaign)
+            .filter(|(key, _)| root_and_local(key).0 == root)
+            .flat_map(|(key, _)| image.closers_of(PipelineKind::Campaign, key))
+            .filter(|(_, row)| self.visible(*row))
+            .find_map(|(key, row)| match &image.row(row).view.document {
+                PipelineDocument::Resolution(resolution)
+                    if matches!(resolution.outcome, ResolutionOutcome::Moved { .. }) && self.in_force(PipelineKind::Resolution, key) =>
+                {
+                    Some((key, resolution))
+                }
+                _ => None,
+            })
     }
 
     /// Every in-force stewardship of `(mind, repo)`, ignoring the withdrawal
@@ -534,7 +562,10 @@ pub(crate) fn outcome_citations(outcome: &ResolutionOutcome) -> Vec<(CitationRol
         ResolutionOutcome::Fixed { by: Some(by), .. } => vec![(CitationRole::ResolvedBy, by.clone())],
         ResolutionOutcome::Deferred { to } => vec![(CitationRole::DeferredTo, to.clone())],
         ResolutionOutcome::Slept { day_through, .. } => day_through.iter().map(|memory| (CitationRole::DayThrough, memory.clone())).collect(),
-        ResolutionOutcome::Fixed { by: None, .. } | ResolutionOutcome::Recorded { .. } | ResolutionOutcome::Withdrawn { .. } => {
+        ResolutionOutcome::Fixed { by: None, .. }
+        | ResolutionOutcome::Recorded { .. }
+        | ResolutionOutcome::Withdrawn { .. }
+        | ResolutionOutcome::Moved { .. } => {
             vec![]
         }
     }

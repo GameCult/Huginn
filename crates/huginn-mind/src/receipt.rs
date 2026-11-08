@@ -50,7 +50,32 @@ pub struct PipelineProvenance {
     pub agent: eureka_pipeline::Short,
     pub session: eureka_pipeline::Short,
     pub tool: eureka_pipeline::Short,
+    /// Set when the batch replays another mind's receipt: the source it quotes. Absent on every
+    /// other admission, and then absent from the stored receipt too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<ImportSource>,
 }
+
+/// The receipt a batch replays and the mind it came from: a quotation of the source receipt, which
+/// stays the primary record. `faculty`, `agent`, `session` and `tool` are the source's, the batch's
+/// own being the importer's. `external` lists the referents the batch cites that this mind does not
+/// hold and does not import: each is treated as in force and nothing reads its content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImportSource {
+    pub instance: eureka_pipeline::Slug,
+    pub receipt_id: eureka_pipeline::Short,
+    pub ordinal: u64,
+    pub committed_at: eureka_pipeline::Short,
+    pub faculty: Faculty,
+    pub agent: eureka_pipeline::Short,
+    pub session: eureka_pipeline::Short,
+    pub tool: eureka_pipeline::Short,
+    #[schemars(extend("maxItems" = 256))]
+    pub external: Vec<PipelineRef>,
+}
+
+/// The most external referents one import may declare.
+pub const IMPORT_EXTERNAL_MAX: usize = 256;
 
 /// The exact bytes of one stored document, as read or as written.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

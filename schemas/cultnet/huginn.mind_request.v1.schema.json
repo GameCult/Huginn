@@ -551,6 +551,56 @@
       "type": "string",
       "maxLength": 40
     },
+    "ImportSource": {
+      "description": "The receipt a batch replays and the mind it came from: a quotation of the source receipt, which\nstays the primary record. `faculty`, `agent`, `session` and `tool` are the source's, the batch's\nown being the importer's. `external` lists the referents the batch cites that this mind does not\nhold and does not import: each is treated as in force and nothing reads its content.",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/Short"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Short"
+        },
+        "external": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PipelineRef"
+          },
+          "maxItems": 256
+        },
+        "faculty": {
+          "$ref": "#/$defs/Faculty"
+        },
+        "instance": {
+          "$ref": "#/$defs/Slug"
+        },
+        "ordinal": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/Short"
+        },
+        "session": {
+          "$ref": "#/$defs/Short"
+        },
+        "tool": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "instance",
+        "receipt_id",
+        "ordinal",
+        "committed_at",
+        "faculty",
+        "agent",
+        "session",
+        "tool",
+        "external"
+      ]
+    },
     "Label": {
       "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
       "type": "string",
@@ -1701,6 +1751,17 @@
         "faculty": {
           "$ref": "#/$defs/Faculty"
         },
+        "imported_from": {
+          "description": "Set when the batch replays another mind's receipt: the source it quotes. Absent on every\nother admission, and then absent from the stored receipt too.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImportSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "session": {
           "$ref": "#/$defs/Short"
         },
@@ -2639,6 +2700,27 @@
           "additionalProperties": false,
           "required": [
             "Slept"
+          ]
+        },
+        {
+          "description": "A campaign's history left this mind for `to`, the mind that now keeps it. Final: the campaign and every\ndocument under its root read resolved by this and take no further writes here.",
+          "type": "object",
+          "properties": {
+            "Moved": {
+              "type": "object",
+              "properties": {
+                "to": {
+                  "$ref": "#/$defs/Slug"
+                }
+              },
+              "required": [
+                "to"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Moved"
           ]
         }
       ]

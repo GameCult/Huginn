@@ -149,7 +149,7 @@ impl TestMind {
         self.now.set(self.now.get() + Duration::seconds(1));
         let batch = PipelineAdmissionBatch {
             instance: self.instance.clone(),
-            provenance: PipelineProvenance { faculty, agent: "test".into(), session: "test".into(), tool: "test".into() },
+            provenance: PipelineProvenance { faculty, agent: "test".into(), session: "test".into(), tool: "test".into(), imported_from: None },
             documents,
         };
         self.mind.borrow_mut().admit(batch, self.now.get())
@@ -231,7 +231,7 @@ impl MindPort for TestMind {
         self.now.set(self.now.get() + Duration::seconds(1));
         let batch = PipelineAdmissionBatch {
             instance: self.instance.clone(),
-            provenance: PipelineProvenance { faculty: Faculty::SelfFaculty, agent: agent.into(), session: session.into(), tool: "mind-body".into() },
+            provenance: PipelineProvenance { faculty: Faculty::SelfFaculty, agent: agent.into(), session: session.into(), tool: "mind-body".into(), imported_from: None },
             documents,
         };
         Ok(self.mind.borrow_mut().admit(batch, self.now.get()))

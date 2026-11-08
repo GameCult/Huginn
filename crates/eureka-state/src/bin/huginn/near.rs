@@ -82,6 +82,7 @@ mod tests {
                     agent: Short("a".into()),
                     session: Short("s".into()),
                     tool: Short("huginn".into()),
+                    imported_from: None,
                 },
                 ordinal: 1,
             },

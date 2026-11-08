@@ -48,6 +48,9 @@ pub(crate) mod fixtures;
 #[cfg(test)]
 mod read_tests;
 
+#[cfg(test)]
+mod move_tests;
+
 pub use docs::CitationRole;
 pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
@@ -57,7 +60,7 @@ pub use query::{
     AdmissionFacts, PipelineDocumentSummary, PipelineDocumentView, PipelineEdge, PipelineFacts, PipelinePageItems,
     Members, PipelineSelectionPage, PipelineStatus, PipelineStatusSummary, Ranked, RootTouched, SUMMARY_MAX_BYTES, SemanticQuery,
 };
-pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
+pub use receipt::{DocumentVersion, Faculty, HuginnCommitReceipt, IMPORT_EXTERNAL_MAX, ImportSource, PipelineProvenance, RECEIPT_SCHEMA_VERSION};
 pub use refusal::{MindRefusal, RunId};
 pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{

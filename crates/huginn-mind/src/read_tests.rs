@@ -250,6 +250,31 @@ fn views_and_status_agree_with_the_oracle_at_every_snapshot() {
     assert_eq!(reopened.persona().unwrap(), mind.persona().unwrap());
 }
 
+/// A Moved resolution closes every document under its campaign's root and names none of them: the
+/// held image's fan-out and the oracle's scan are two derivations of the same status, at every snapshot.
+#[test]
+fn a_moved_campaign_reads_the_same_held_and_fresh_at_every_snapshot() {
+    let mut mind = history_mind();
+    let moved = resolution(r(K::Campaign, &id("campaign", "self")), eureka_pipeline::ResolutionOutcome::Moved { to: slug("heimdall") });
+    committed(admit(&mut mind, vec![moved]));
+    held_equals_fresh(&mind);
+    let head = mind.image().unwrap().head;
+    let every = oracle_ids(&mind, head).unwrap();
+    for as_of in 1..=head {
+        let reader = Reader::at(&mind, as_of).unwrap();
+        for id in &every {
+            assert_eq!(reader.view(id).unwrap(), oracle_view(&mind, id, as_of).unwrap(), "{} at {as_of}", id.id.0);
+        }
+    }
+    let closed = mind.view(&r(K::Question, &id("question", "Q2"))).unwrap().unwrap().status;
+    assert!(matches!(closed, crate::query::PipelineStatus::Resolved { .. }), "the history's open question reads closed: {closed:?}");
+    for selection in corpus(&mind) {
+        for as_of in [head - 1, head] {
+            let _ = agree(&mind, &selection, as_of);
+        }
+    }
+}
+
 #[test]
 fn a_restart_answers_what_the_held_image_answered() {
     let dir = tempfile::tempdir().unwrap();

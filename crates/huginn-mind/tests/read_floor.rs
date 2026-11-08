@@ -154,7 +154,7 @@ fn read_floor() {
         tempo_vote_withdrawn: false,
         urgency_permille: Some(1),
     });
-    let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: Short("floor".into()), session: Short("floor".into()), tool: Short("floor".into()) };
+    let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: Short("floor".into()), session: Short("floor".into()), tool: Short("floor".into()), imported_from: None };
     let started = Instant::now();
     let outcome = mind.admit(PipelineAdmissionBatch { instance: instance.clone(), provenance, documents: vec![pulse] }, Utc::now());
     let admit = started.elapsed();
