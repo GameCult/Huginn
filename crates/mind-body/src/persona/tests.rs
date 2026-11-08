@@ -2943,10 +2943,30 @@ fn a_wake_after_a_self_run_today_has_no_ask_but_still_the_work_question() {
 
 #[test]
 fn the_work_question_sends_her_to_her_own_mind_and_a_self_run() {
-    for needle in ["huginn campaigns", "huginn open <campaign>", "huginn unreported <campaign>", "start_self_run", "Put what you are building in `intent` first", "Silence in chat costs nothing", "Do not ask again someone you have already asked", "Answer the messages here as part of that work"] {
+    for needle in ["huginn campaigns", "huginn open <campaign>", "huginn unreported <campaign>", "start_self_run", "Put what you are building in `intent` first", "Silence in chat costs nothing", "Do not ask again someone you have already asked", "start_self_run"] {
         assert!(WORK_QUESTION.contains(needle), "{needle}");
     }
     assert!(WORK_TAIL.contains("huginn open <campaign>") && WORK_TAIL.contains("what are you building"));
+}
+
+#[test]
+fn the_work_question_names_the_search_over_her_plans_and_frames_what_she_finds_as_candidates() {
+    assert!(WORK_QUESTION.contains(r#"huginn query '{}' --near "<project> roadmap" --documents"#), "{WORK_QUESTION}");
+    assert!(WORK_QUESTION.contains("a roadmap you hold is work as much as an open follow-up") && WORK_QUESTION.contains("candidates you weigh") && WORK_QUESTION.contains("does not outrank a plan you hold"));
+    assert!(WORK_QUESTION.contains("pages through") && WORK_QUESTION.contains("`--cursor`") && !WORK_QUESTION.contains("every open follow-up"), "open pages and does not list every item");
+    assert!(WORK_QUESTION.contains("whoever filed it, imported ones included") && !WORK_QUESTION.contains("your own Self filed"));
+    assert!(TURN_INSTRUCTION.contains("huginn query '{}' --near"));
+}
+
+#[test]
+fn only_a_line_with_messages_asks_for_them_to_be_answered() {
+    let with = input_for(&[], "Aqua");
+    assert!(with.contains(ANSWER_MESSAGES) && with.find(ANSWER_MESSAGES) < with.find(WORK_QUESTION) && with.trim_end().ends_with(WORK_QUESTION), "{with}");
+    assert!(!WORK_QUESTION.contains("messages") && !WORK_QUESTION.contains("Answer these"), "the shared tail speaks of no messages");
+    let rig = Rig::new(vec![], &[says(&[])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let bare_wake = &told(&rig)[0];
+    assert!(!bare_wake.contains(ANSWER_MESSAGES) && !bare_wake.contains("Answer these messages"), "{bare_wake}");
 }
 
 #[test]
@@ -3909,7 +3929,9 @@ earlier room="swarm" sender="@op:chat" role=operator text="before"
 earlier room="swarm" sender="@eureka:chat" role=persona text="I said it"
 message room="swarm" sender="@libby:chat" role=member name="libby" text="status of the fork?"
 
-What are you building right now? Check your own mind before you answer: `huginn campaigns` lists your campaigns, `huginn open <campaign>` lists every open follow-up and question of one (the list above shows only the newest), and `huginn unreported <campaign>` lists its specs that no run has carried out. Put what you are building in `intent` first. If none of your latest runs above is a Self run still open, start one with `start_self_run` that continues the open work you found, at its full size; a follow-up your own Self filed is yours to take up by naming its id in the brief. Answer the messages here as part of that work: chat is how you work with the others. If what matters most waits on someone else's decision, name it and do what you still can. Do not ask again someone you have already asked. Silence in chat costs nothing.
+Answer these messages as part of the work you name below: chat is how you work with the others.
+
+What are you building right now? Check your own mind before you answer. Your plans and commitments are there: `huginn query '{}' --near "<project> roadmap" --documents` finds what you remember planning, and a roadmap you hold is work as much as an open follow-up. `huginn campaigns` lists your campaigns, `huginn open <campaign>` pages through the open follow-ups and questions of one (the list above shows only the newest; `--cursor` takes the `next` of the previous page), and `huginn unreported <campaign>` lists its specs that no run has carried out. Every follow-up in your campaigns is yours to take up, whoever filed it, imported ones included. What you find are candidates you weigh: being listed does not outrank a plan you hold. Put what you are building in `intent` first. If none of your latest runs above is a Self run still open, start one with `start_self_run` that continues the work you chose, at its full size; take up a follow-up by naming its id in the brief. If what matters most waits on someone else's decision, name it and do what you still can. Do not ask again someone you have already asked. Silence in chat costs nothing.
 "###;
 const BASE_BARE_WAKE: &str = r###"
 
@@ -3933,7 +3955,7 @@ People you may name in a memory's about: @op:chat, @libby:chat.
 
 No new messages. Before your open work, consider what does not exist yet in what you steward, that someone outside would come to use and that you would be excited to build this week. Not a cleanup. If it beats what your mind holds open, start it as a Self run with its brief at the idea's full size, and say why in `intent`.
 
-What are you building right now? Check your own mind before you answer: `huginn campaigns` lists your campaigns, `huginn open <campaign>` lists every open follow-up and question of one (the list above shows only the newest), and `huginn unreported <campaign>` lists its specs that no run has carried out. Put what you are building in `intent` first. If none of your latest runs above is a Self run still open, start one with `start_self_run` that continues the open work you found, at its full size; a follow-up your own Self filed is yours to take up by naming its id in the brief. Answer the messages here as part of that work: chat is how you work with the others. If what matters most waits on someone else's decision, name it and do what you still can. Do not ask again someone you have already asked. Silence in chat costs nothing.
+What are you building right now? Check your own mind before you answer. Your plans and commitments are there: `huginn query '{}' --near "<project> roadmap" --documents` finds what you remember planning, and a roadmap you hold is work as much as an open follow-up. `huginn campaigns` lists your campaigns, `huginn open <campaign>` pages through the open follow-ups and questions of one (the list above shows only the newest; `--cursor` takes the `next` of the previous page), and `huginn unreported <campaign>` lists its specs that no run has carried out. Every follow-up in your campaigns is yours to take up, whoever filed it, imported ones included. What you find are candidates you weigh: being listed does not outrank a plan you hold. Put what you are building in `intent` first. If none of your latest runs above is a Self run still open, start one with `start_self_run` that continues the work you chose, at its full size; take up a follow-up by naming its id in the brief. If what matters most waits on someone else's decision, name it and do what you still can. Do not ask again someone you have already asked. Silence in chat costs nothing.
 "###;
 
 /// Each echo delivers the next of `arriving` and lets a poll fall due while the turn runs, so each is told as its own line of one process.
@@ -4056,7 +4078,7 @@ fn a_flush_opens_with_the_reminder_alone_or_beside_a_tell() {
 }
 
 #[test]
-fn a_wake_first_line_says_messages_are_data_before_a_tell_comes_bare() {
+fn a_wake_first_line_says_messages_are_data_before_a_tell_comes_without_the_frame() {
     let rig = Rig::new(vec![], &[says(&[]), says(&[("swarm", "one")])]);
     rig.clock.step.set(0);
     one_line_each(&rig, vec![delivery(1, "swarm", "@libby:chat", "one")]);
