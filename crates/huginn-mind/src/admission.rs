@@ -183,7 +183,11 @@ impl<S: MindStore> Mind<S> {
             check(&docs, staged, &mind, import.as_ref())?;
         }
         // A9
-        if let Some(existing) = receipt::replay(self, &candidate)? {
+        // The same batch under another source (or none) is no replay: the first writer's attribution
+        // stands, so the later asker meets the identities it collides with at A10.
+        if let Some(existing) = receipt::replay(self, &candidate)?
+            && existing.provenance.imported_from == candidate.provenance.imported_from
+        {
             return Ok(PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: existing.receipt_id });
         }
         // A10

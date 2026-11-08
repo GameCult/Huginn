@@ -582,3 +582,35 @@ fn an_import_lands_only_under_a_root_that_only_imports_have_written() {
         MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() }
     );
 }
+
+#[test]
+fn a_replay_under_another_source_is_no_replay() {
+    let mut recv = receiver();
+    let history = vec![campaign(&[REPO]), question("Q7", &["A", "B"], "A")];
+    let q7 = id("question", "Q7");
+    committed(import_from_kiko(&mut recv, history.clone()));
+    let recorded = |mind: &Mind<MemoryStore>| view_of(mind, K::Question, &q7).admission.provenance.imported_from.map(|source| source.instance.0);
+    assert_eq!(recorded(&recv).as_deref(), Some("kiko"));
+    let before = head(&recv);
+
+    // The native writer of the same batch is not told it was already admitted, and the record
+    // keeps naming the source that wrote it.
+    assert!(matches!(refusal(admit(&mut recv, history.clone())), MindRefusal::IdentityCollision { .. }));
+    // Nor does another source take the first one's place.
+    let other = import_as(&mut recv, source_of("nibu", vec![]), history);
+    assert!(matches!(refusal(other), MindRefusal::IdentityCollision { .. }));
+    assert_eq!(recorded(&recv).as_deref(), Some("kiko"));
+    assert_eq!(head(&recv), before);
+}
+
+#[test]
+fn an_import_naming_a_case_variant_of_this_mind_names_another_mind() {
+    // Two minds whose names differ only in case are two minds (fixtures::CASED_INSTANCE).
+    let mut mind = opened(MemoryStore::new(), INSTANCE);
+    committed(admit(&mut mind, vec![instance(INSTANCE)]));
+    committed(import_as(&mut mind, source_of(CASED_INSTANCE, vec![]), vec![campaign(&[REPO])]));
+    assert_eq!(
+        refusal(import_as(&mut mind, source_of(INSTANCE, vec![]), vec![question("Q1", &["A", "B"], "A")])),
+        MindRefusal::ImportFromSelf
+    );
+}
