@@ -6,18 +6,22 @@
 //! first failing step is the outcome:
 //!
 //! - A1 the batch names this mind, and attributes itself to a named agent and
-//!   session (`refuse_provenance`); A2 one to sixty-four envelopes;
+//!   session (`refuse_provenance`); a batch that names a source (`imported_from`)
+//!   replays another mind's receipt, never this mind's own; A2 one to sixty-four
+//!   envelopes;
 //! - A3 every envelope passes the leaf's bounds, formats and key
 //!   recomputation; A4 identities are unique in the batch; A5 every document
 //!   carrying an instance names this mind;
 //! - A6 an empty mind's first batch carries exactly one `instance` document,
 //!   and a batch carrying one derives the epoch record;
 //! - A7 every reference names a document present in the image or the batch,
-//!   looked up by `(kind, id)`; the ones resolved in the image become the
-//!   receipt's strong reads;
+//!   looked up by `(kind, id)`, or, in an import, listed as external and held
+//!   by neither; the ones resolved in the image become the receipt's strong
+//!   reads;
 //! - the derived writes (a ruling's `Answered` resolution, a hand-off's
-//!   stewardship withdrawal or assignment) are appended and pass A3-A7;
-//! - A8 the per-kind rules, below; A9 an exact replay answers with the stored
+//!   stewardship withdrawal or assignment) are appended and pass A3-A7; an
+//!   import derives none, the source's riding in the batch as written;
+//! - A8 the per-kind rules, below, after the two that concern a move; A9 an exact replay answers with the stored
 //!   receipt, after validation and never before it (ruling 20); A10 no write
 //!   collides with the image; A11 the commit.
 //!
@@ -40,9 +44,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::docs::{CitationRole, Docs, Staged, citations, kind_of_id, line_of, outcome_citations};
+use crate::rows::root_and_local;
 use crate::mind::{HuginnMindEpoch, Mind, unavailable};
 use crate::persona::{self, HuginnPersonaEntry, PersonaPutOutcome};
-use crate::receipt::{self, CommitOutcome, PipelineProvenance};
+use crate::receipt::{self, CommitOutcome, IMPORT_EXTERNAL_MAX, ImportSource, PipelineProvenance};
 use crate::refusal::{MindRefusal, RunId};
 use crate::store::MindStore;
 
@@ -119,6 +124,10 @@ impl<S: MindStore> Mind<S> {
         // A1
         self.require_instance(instance)?;
         refuse_provenance(&provenance)?;
+        let import = provenance.imported_from.clone();
+        if import.as_ref().is_some_and(|source| source.instance == *self.instance()) {
+            return Err(MindRefusal::ImportFromSelf);
+        }
         // A2
         if envelopes.is_empty() || envelopes.len() > BATCH_MAX {
             return Err(MindRefusal::BatchSize { actual: envelopes.len() as u32 });
@@ -136,19 +145,25 @@ impl<S: MindStore> Mind<S> {
             return Err(MindRefusal::MissingIdentity);
         }
         // A7
+        let external: &[PipelineRef] = import.as_ref().map_or(&[], |source| source.external.as_slice());
+        if let Some(held) = external.iter().find(|referent| docs.find(referent.kind, &referent.id.0).is_some()) {
+            return Err(MindRefusal::ExternalPresent { id: held.id.0.clone() });
+        }
         let mut strong = BTreeSet::new();
         for staged in &docs.batch {
-            resolve(&docs, staged, &mind, &mut strong)?;
+            resolve(&docs, staged, &mind, external, &mut strong)?;
         }
-        // Derived writes pass A3-A7 themselves.
+        // Derived writes pass A3-A7 themselves. An import derives none: the source's rode in its batch.
         let originals = docs.batch.len();
-        for document in derive(&docs, &mind) {
-            document.validate()?;
-            let envelope = prepare(&document, self.cache())?;
-            docs.push(stage(envelope, &mind)?)?;
+        if import.is_none() {
+            for document in derive(&docs, &mind) {
+                document.validate()?;
+                let envelope = prepare(&document, self.cache())?;
+                docs.push(stage(envelope, &mind)?)?;
+            }
         }
         for staged in &docs.batch[originals..] {
-            resolve(&docs, staged, &mind, &mut strong)?;
+            resolve(&docs, staged, &mind, external, &mut strong)?;
         }
         // The pins: cited image bytes, and every write.
         let strong_reads = strong
@@ -161,11 +176,18 @@ impl<S: MindStore> Mind<S> {
         }
         let candidate = receipt::candidate(&mind, provenance, &strong_reads, &writes, receipt::head(self)? + 1, now)?;
         // A8
+        if import.is_some() {
+            refuse_unscoped_import(&docs)?;
+        }
         for staged in &docs.batch {
-            check(&docs, staged, &mind)?;
+            check(&docs, staged, &mind, import.as_ref())?;
         }
         // A9
-        if let Some(existing) = receipt::replay(self, &candidate)? {
+        // The same batch under another source (or none) is no replay: the first writer's attribution
+        // stands, so the later asker meets the identities it collides with at A10.
+        if let Some(existing) = receipt::replay(self, &candidate)?
+            && existing.provenance.imported_from == candidate.provenance.imported_from
+        {
             return Ok(PipelineAdmissionOutcome::AlreadyAdmitted { receipt_id: existing.receipt_id });
         }
         // A10
@@ -280,11 +302,33 @@ fn refuse_provenance(provenance: &PipelineProvenance) -> Result<(), MindRefusal>
         matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
     };
     let control = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
-    for (field, value) in [
+    let mut texts = vec![
         ("provenance.agent", &provenance.agent),
         ("provenance.session", &provenance.session),
         ("provenance.tool", &provenance.tool),
-    ] {
+    ];
+    if let Some(source) = &provenance.imported_from {
+        source.instance.validate_slug().map_err(|refusal| relocate(refusal, "provenance.imported_from.instance"))?;
+        if source.external.len() > IMPORT_EXTERNAL_MAX {
+            return Err(PipelineRefusal::FieldBound {
+                field: "provenance.imported_from.external".into(),
+                limit: IMPORT_EXTERNAL_MAX as u32,
+                actual: source.external.len() as u32,
+            }
+            .into());
+        }
+        for referent in &source.external {
+            referent.validate_ref().map_err(|refusal| relocate(refusal, "provenance.imported_from.external"))?;
+        }
+        texts.extend([
+            ("provenance.imported_from.receipt_id", &source.receipt_id),
+            ("provenance.imported_from.committed_at", &source.committed_at),
+            ("provenance.imported_from.agent", &source.agent),
+            ("provenance.imported_from.session", &source.session),
+            ("provenance.imported_from.tool", &source.tool),
+        ]);
+    }
+    for (field, value) in texts {
         let text = value.0.as_str();
         if !text.chars().any(char::is_alphanumeric) || text.contains(control) || text.contains(bidi) {
             return Err(PipelineRefusal::InvalidFormat { field: field.into(), value: text.into() }.into());
@@ -294,6 +338,16 @@ fn refuse_provenance(provenance: &PipelineProvenance) -> Result<(), MindRefusal>
         }
     }
     Ok(())
+}
+
+/// The leaf's refusal of a bare value, named at the provenance field that held it.
+fn relocate(refusal: PipelineRefusal, field: &str) -> MindRefusal {
+    match refusal {
+        PipelineRefusal::InvalidFormat { value, .. } => PipelineRefusal::InvalidFormat { field: field.into(), value },
+        PipelineRefusal::FieldBound { limit, actual, .. } => PipelineRefusal::FieldBound { field: field.into(), limit, actual },
+        other => other,
+    }
+    .into()
 }
 
 /// A3 through the leaf, then A5.
@@ -339,7 +393,7 @@ struct Reference {
 /// A7's field list is `docs::citations`: every `PipelineRef` and every
 /// full-id `Short` field, each carrying the refusal its absence earns. A
 /// hand-off's documents are cited on the source side only, and each must read
-/// as an id of a kind; the receiving side imports them afterwards (Cut 12).
+/// as an id of a kind.
 fn references(staged: &Staged, mind: &Slug) -> Result<Vec<Reference>, MindRefusal> {
     if let PipelineDocument::HandOff(hand_off) = &staged.document {
         if hand_off.from_instance != *mind {
@@ -367,15 +421,24 @@ fn references(staged: &Staged, mind: &Slug) -> Result<Vec<Reference>, MindRefusa
         .collect())
 }
 
-/// A7: every referent is in the batch or the image; the image ones are the
-/// receipt's strong reads.
-fn resolve(docs: &Docs<'_>, staged: &Staged, mind: &Slug, strong: &mut BTreeSet<(String, String)>) -> Result<(), MindRefusal> {
+/// A7: every referent is in the batch or the image, or is an import's declared external; the image
+/// ones are the receipt's strong reads.
+fn resolve(
+    docs: &Docs<'_>,
+    staged: &Staged,
+    mind: &Slug,
+    external: &[PipelineRef],
+    strong: &mut BTreeSet<(String, String)>,
+) -> Result<(), MindRefusal> {
     for reference in references(staged, mind)? {
         if docs.in_batch(reference.kind, &reference.id).is_some() {
             continue;
         }
         if docs.in_image(reference.kind, &reference.id).is_some() {
             strong.insert((reference.kind.type_id().to_string(), reference.id));
+            continue;
+        }
+        if is_external(external, reference.kind, &reference.id) {
             continue;
         }
         return Err(match reference.missing {
@@ -447,11 +510,61 @@ fn derive(docs: &Docs<'_>, mind: &Slug) -> Vec<PipelineDocument> {
     derived
 }
 
-/// A8: the per-kind rules.
-fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusal> {
+/// An import replays a campaign's history: every document is rooted at a campaign this mind holds
+/// or the batch carries, and the mind holds no native write under that root, so the source's own
+/// derivations stand alone and no native rule is bypassed for a record the mind could have written.
+/// Instance-rooted records (hand-offs, stewardships, runs, memories, thoughts) are never history
+/// to replay.
+fn refuse_unscoped_import(docs: &Docs<'_>) -> Result<(), MindRefusal> {
+    for staged in &docs.batch {
+        let root = root_and_local(&staged.key).0;
+        let campaign = format!("{root}:campaign:self");
+        if docs.find(PipelineKind::Campaign, &campaign).is_none() || docs.root_holds_native_write(root) {
+            return Err(MindRefusal::ImportOutsideCampaign { root: root.into() });
+        }
+    }
+    Ok(())
+}
+
+fn is_external(external: &[PipelineRef], kind: PipelineKind, id: &str) -> bool {
+    external.iter().any(|referent| referent.kind == kind && referent.id.0 == id)
+}
+
+/// A8: the per-kind rules, after the two that concern a move: a Moved resolution is final, and a
+/// campaign it closed takes no write under its root. An import's listed externals stand in force
+/// wherever a rule looks a referent up, and no rule reads their content.
+fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSource>) -> Result<(), MindRefusal> {
     use PipelineDocument as D;
     use PipelineKind as K;
     let key = staged.key.as_str();
+    let external: &[PipelineRef] = import.map_or(&[], |source| source.external.as_slice());
+    if let D::Resolution(resolution) = &staged.document
+        && matches!(resolution.outcome, ResolutionOutcome::Withdrawn { .. })
+        && resolution.subject.kind == K::Resolution
+        && matches!(
+            docs.find(K::Resolution, &resolution.subject.id.0),
+            Some(D::Resolution(subject)) if matches!(subject.outcome, ResolutionOutcome::Moved { .. })
+        )
+    {
+        return Err(MindRefusal::MoveIsFinal);
+    }
+    if let Some((moved, PipelineResolution { outcome: ResolutionOutcome::Moved { to }, .. })) = docs.moved_campaign(root_and_local(key).0) {
+        return Err(MindRefusal::CampaignMoved { campaign: root_and_local(moved).0.into(), to: to.0.clone() });
+    }
+    // A Moved lands alone under its root: a sibling beside it would freeze with the campaign and
+    // never reach the receiver, whose replay stops before the Moved.
+    let root = root_and_local(key).0;
+    let alongside = docs.batch.iter().find_map(|other| match &other.document {
+        D::Resolution(PipelineResolution { outcome: ResolutionOutcome::Moved { to }, .. })
+            if other.key != staged.key && root_and_local(&other.key).0 == root =>
+        {
+            Some(to)
+        }
+        _ => None,
+    });
+    if let Some(to) = alongside {
+        return Err(MindRefusal::CampaignMoved { campaign: root.into(), to: to.0.clone() });
+    }
     match &staged.document {
         D::Campaign(campaign) => {
             if campaign.repos.is_empty() {
@@ -485,6 +598,9 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusa
             }
             let Some(question_id) = &ruling.answers else { return Ok(()) };
             let Some(D::Question(question)) = docs.find(K::Question, &question_id.0) else {
+                if is_external(external, K::Question, &question_id.0) {
+                    return Ok(());
+                }
                 return Err(MindRefusal::MissingReference { kind: K::Question, id: question_id.0.clone() });
             };
             let own = |resolution: &PipelineResolution| {
@@ -532,6 +648,9 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusa
         }
         D::CutReport(report) => {
             let Some(D::CutSpec(spec)) = docs.find(K::CutSpec, &report.cut_spec.0) else {
+                if is_external(external, K::CutSpec, &report.cut_spec.0) {
+                    return Ok(());
+                }
                 return Err(MindRefusal::CutReportWithoutSpec { report: key.into() });
             };
             if !docs.in_force(K::CutSpec, &report.cut_spec.0) {
@@ -550,6 +669,9 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusa
         }
         D::Verdict(verdict) => {
             let Some(D::CutReport(report)) = docs.find(K::CutReport, &verdict.cut_report.0) else {
+                if is_external(external, K::CutReport, &verdict.cut_report.0) {
+                    return Ok(());
+                }
                 return Err(MindRefusal::MissingReference { kind: K::CutReport, id: verdict.cut_report.0.clone() });
             };
             for claim in &verdict.claims {
@@ -594,7 +716,23 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug) -> Result<(), MindRefusa
             }
             Ok(())
         }
-        D::Resolution(resolution) => resolution_rule(docs, resolution),
+        D::Resolution(resolution) => {
+            resolution_rule(docs, resolution)?;
+            match &resolution.outcome {
+                ResolutionOutcome::Moved { to } if to == mind => Err(MindRefusal::MoveToSelf),
+                // The campaign's root and the mind's own instance root are one namespace: the freeze would
+                // close the instance's memories, thoughts and stewardships with the campaign.
+                ResolutionOutcome::Moved { .. } if root_and_local(&resolution.subject.id.0).0 == mind.0 => {
+                    Err(MindRefusal::MoveOfInstanceRoot { root: mind.0.clone() })
+                }
+                // The giver's resolution: the receiver replays the history the move froze, never the move.
+                ResolutionOutcome::Moved { .. } if import.is_some() => Err(MindRefusal::IncompatibleResolution {
+                    subject_kind: resolution.subject.kind,
+                    outcome: outcome_name(&resolution.outcome).into(),
+                }),
+                _ => Ok(()),
+            }
+        }
         D::Stewardship(stewardship) => {
             let expected = docs.latest_stewardship(&stewardship.instance, &stewardship.repo, Some(stewardship)) + 1;
             if stewardship.sequence != expected {
@@ -710,6 +848,7 @@ fn outcome_name(outcome: &ResolutionOutcome) -> &'static str {
         ResolutionOutcome::Recorded { .. } => "Recorded",
         ResolutionOutcome::Withdrawn { .. } => "Withdrawn",
         ResolutionOutcome::Slept { .. } => "Slept",
+        ResolutionOutcome::Moved { .. } => "Moved",
     }
 }
 
@@ -758,6 +897,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Thought, O::Answered { by }) => by.kind == K::FollowUp,
         (K::Thought, O::Recorded { .. }) => true,
         (K::Resolution, O::Withdrawn { .. }) => true,
+        (K::Campaign, O::Moved { .. }) => true,
         _ => false,
     }
 }
@@ -951,7 +1091,7 @@ mod tests {
 
     fn admit_signed(agent: &str, session: &str, tool: &str) -> (Mind<MemoryStore>, PipelineAdmissionOutcome) {
         let mut mind = opened(MemoryStore::new(), INSTANCE);
-        let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: s(agent), session: s(session), tool: s(tool) };
+        let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: s(agent), session: s(session), tool: s(tool), imported_from: None };
         let batch = PipelineAdmissionBatch { instance: slug(INSTANCE), provenance, documents: vec![instance(INSTANCE), stewardship(INSTANCE, REPO)] };
         let outcome = mind.admit(batch, now());
         (mind, outcome)
@@ -1073,7 +1213,7 @@ mod tests {
             D::Campaign(campaign).validate().is_ok()
         };
         let mine_accepts = |text: &str| {
-            let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: s(text), session: s("s"), tool: s("t") };
+            let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: s(text), session: s("s"), tool: s("t"), imported_from: None };
             refuse_provenance(&provenance).is_ok()
         };
         for text in [

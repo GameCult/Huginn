@@ -198,7 +198,7 @@ mod lane {
             let mut mind = Mind::open(state, &slug).unwrap();
             let batch = PipelineAdmissionBatch {
                 instance: slug.clone(),
-                provenance: PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into() },
+                provenance: PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into(), imported_from: None },
                 documents,
             };
             assert!(matches!(mind.admit(batch, Utc::now()), PipelineAdmissionOutcome::Committed { .. }));

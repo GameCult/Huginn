@@ -2499,6 +2499,7 @@ mod tests {
             agent: s(&long("a", 200)),
             session: s(&long("s", 200)),
             tool: s(&long("t", 200)),
+            imported_from: None,
         };
         let batch = crate::admission::PipelineAdmissionBatch {
             instance: slug(INSTANCE),

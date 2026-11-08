@@ -45,6 +45,7 @@ pub fn provenance() -> PipelineProvenance {
         agent: Short("claude".into()),
         session: Short("session-1".into()),
         tool: Short("admit".into()),
+        imported_from: None,
     }
 }
 

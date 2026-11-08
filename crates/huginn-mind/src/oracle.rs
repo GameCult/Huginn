@@ -110,8 +110,25 @@ fn closing<'a>(visible: &[&'a Doc], kind: PipelineKind, key: &str) -> Option<(&'
     })
 }
 
+/// The Moved resolution in force over the campaign `key` is rooted at, unless `key` is that resolution.
+fn moved_over<'a>(visible: &[&'a Doc], kind: PipelineKind, key: &str) -> Option<(&'a str, &'a PipelineResolution)> {
+    let root = key.split(':').next();
+    visible.iter().find_map(|doc| match &doc.document {
+        PipelineDocument::Resolution(resolution)
+            if matches!(resolution.outcome, ResolutionOutcome::Moved { .. })
+                && resolution.subject.kind == PipelineKind::Campaign
+                && resolution.subject.id.0.split(':').next() == root
+                && closing(visible, PipelineKind::Resolution, &doc.key).is_none()
+                && !(kind == PipelineKind::Resolution && key == doc.key) =>
+        {
+            Some((doc.key.as_str(), resolution))
+        }
+        _ => None,
+    })
+}
+
 fn view_of(visible: &[&Doc], doc: &Doc) -> PipelineDocumentView {
-    let status = match closing(visible, doc.kind, &doc.key) {
+    let status = match closing(visible, doc.kind, &doc.key).or_else(|| moved_over(visible, doc.kind, &doc.key)) {
         Some((key, record)) => PipelineStatus::Resolved {
             resolution: PipelineRef { kind: PipelineKind::Resolution, id: Short(key.to_string()) },
             record: record.clone(),
@@ -278,6 +295,7 @@ pub fn synth_history<S: MindStore>(store: &S, instance: &Slug, factor: u32, spre
         agent: Short("synth".into()),
         session: Short("synth".into()),
         tool: Short("synth".into()),
+        imported_from: None,
     };
     let now = Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0).unwrap();
     let mut pending: Vec<Vec<CultCacheEnvelope>> = Vec::new();

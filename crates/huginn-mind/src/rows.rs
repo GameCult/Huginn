@@ -64,7 +64,7 @@ pub(crate) enum Alias {
 }
 
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
-const OUTCOMES: [&str; 7] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn", "Slept"];
+const OUTCOMES: [&str; 8] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn", "Slept", "Moved"];
 const BOOLEANS: [&str; 2] = ["true", "false"];
 const MEMORY_ORIGINS: [&str; 5] = ["Room", "Direct", "Wake", "SelfRun", "Sleep"];
 /// The one value a presence alias answers with; a row without it answers nothing.
@@ -200,6 +200,7 @@ fn outcome_name(outcome: &ResolutionOutcome) -> &'static str {
         ResolutionOutcome::Recorded { .. } => "Recorded",
         ResolutionOutcome::Withdrawn { .. } => "Withdrawn",
         ResolutionOutcome::Slept { .. } => "Slept",
+        ResolutionOutcome::Moved { .. } => "Moved",
     }
 }
 

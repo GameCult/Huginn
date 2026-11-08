@@ -1099,6 +1099,9 @@ pub enum ResolutionOutcome {
     /// How a Sleep run ended when the ledger took her reply: `line` is her one line, `day_through` the last memory
     /// of her day she was shown (none when the day was empty). It is the one place a night's cut line is kept.
     Slept { line: Line, day_through: Option<PipelineRef> },
+    /// A campaign's history left this mind for `to`, the mind that now keeps it. Final: the campaign and every
+    /// document under its root read resolved by this and take no further writes here.
+    Moved { to: Slug },
 }
 
 impl Bounded for ResolutionOutcome {
@@ -1116,6 +1119,7 @@ impl Bounded for ResolutionOutcome {
                 line.validate(&format!("{field}.line"))?;
                 day_through.validate(&format!("{field}.day_through"))
             }
+            Self::Moved { to } => to.validate(&format!("{field}.to")),
         }
     }
 }
@@ -1948,6 +1952,7 @@ mod tests {
         let mut stewardship = stewardship_sample();
         stewardship.names = vec![s("BDS"), s("Bad Day Simulator")];
         out.push(("stewardship.names".into(), D::Stewardship(stewardship)));
+        out.push(("resolution.moved".into(), resolution(ResolutionOutcome::Moved { to: Slug("heimdall".into()) })));
         out
     }
 
@@ -3087,6 +3092,13 @@ mod tests {
         assert_eq!(slept("ok".into(), None), Ok(()));
         assert_eq!(slept(Line("a".repeat(1001)), None), Err(PipelineRefusal::FieldBound { field: "resolution.outcome.line".into(), limit: 1000, actual: 1001 }));
         refused("resolution.outcome.day_through.id", slept("ok".into(), Some(PipelineRef { kind: PipelineKind::Memory, id: id("ruling", "R8") })));
+
+        // A move names the receiving mind as any other slug is named, and refuses one that is not a slug.
+        let campaign = PipelineRef { kind: PipelineKind::Campaign, id: id("campaign", "self") };
+        let moved = |to: &str| resolved(campaign.clone(), ResolutionOutcome::Moved { to: Slug(to.into()) });
+        assert_eq!(moved("heimdall"), Ok(()));
+        refused("resolution.outcome.to", moved("Not A Slug!"));
+        refused("resolution.outcome.to", moved(""));
     }
 
     /// Ruling B: a fix names the tree where the finding stopped being true,

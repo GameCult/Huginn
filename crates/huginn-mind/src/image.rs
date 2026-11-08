@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use cultcache_rs::DatabaseEntry;
 use cultnet_rs::Selection;
-use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, Short};
+use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, Short};
 
 use crate::docs::{Docs, citations, kind_of_id, kind_of_type};
 use crate::mind::Envelopes;
@@ -143,6 +143,16 @@ impl Image {
         self.closers.get(&kind).and_then(|named| named.get(id)).into_iter().flat_map(|keyed| keyed.iter().map(|(key, id)| (key.as_str(), *id)))
     }
 
+    /// Whether any document under `root` was admitted natively rather than imported.
+    pub(crate) fn root_holds_native_write(&self, root: &str) -> bool {
+        PipelineKind::ALL.iter().any(|kind| {
+            self.posting(*kind, Alias::Root.name(), root)
+                .into_iter()
+                .flatten()
+                .any(|id| self.row(*id).view.admission.provenance.imported_from.is_none())
+        })
+    }
+
     /// Every root with the newest row under it.
     pub(crate) fn roots(&self) -> impl Iterator<Item = (&str, &SelectionRow)> {
         self.roots.iter().map(|(root, id)| (root.as_str(), self.row(*id)))
@@ -199,6 +209,20 @@ impl Image {
                 let Some(subject) = self.id_of(resolution.subject.kind, &resolution.subject.id.0) else { break };
                 touched.insert(subject);
                 current = subject;
+            }
+        }
+        // A Moved closes every document under its campaign's root, none of which it names.
+        let moved: Vec<String> = (first..self.rows.len() as u32)
+            .filter_map(|id| match &self.row(id).view.document {
+                PipelineDocument::Resolution(PipelineResolution { subject, outcome: ResolutionOutcome::Moved { .. }, .. }) => {
+                    Some(root_and_local(&subject.id.0).0.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        for root in &moved {
+            for kind in PipelineKind::ALL {
+                touched.extend(self.posting(*kind, Alias::Root.name(), root).into_iter().flatten().copied());
             }
         }
         for id in touched {
@@ -368,6 +392,7 @@ impl Image {
                     agent: Short("claude".into()),
                     session: Short("session-1".into()),
                     tool: Short("admit".into()),
+                    imported_from: None,
                 },
                 ordinal: n as u64 + 1,
             };

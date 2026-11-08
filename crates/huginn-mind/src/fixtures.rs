@@ -439,7 +439,7 @@ pub(crate) fn idea(pass: &str, label: &str, text: &str) -> PipelineDocument {
 }
 
 pub(crate) fn provenance(faculty: Faculty) -> PipelineProvenance {
-    PipelineProvenance { faculty, agent: s("claude"), session: s("session-1"), tool: s("admit") }
+    PipelineProvenance { faculty, agent: s("claude"), session: s("session-1"), tool: s("admit"), imported_from: None }
 }
 
 pub(crate) fn now() -> DateTime<Utc> {

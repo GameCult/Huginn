@@ -279,6 +279,7 @@ impl EurekaState {
                     agent: input.agent,
                     session: input.session,
                     tool: Short(TOOL.into()),
+                    imported_from: None,
                 },
                 documents,
             })
@@ -319,6 +320,7 @@ impl EurekaState {
             agent: input.agent,
             session: input.session,
             tool: Short(TOOL.into()),
+            imported_from: None,
         };
         Self::replied(
             self.ask(move |client| client.persona_put(provenance, input.state, input.expected_updated_at)).await,
