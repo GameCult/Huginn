@@ -214,7 +214,7 @@ fn covered_through(mind: &dyn MindPort, earlier: &[&Night]) -> Result<Option<u64
             .max_by_key(|resolution| resolution.sequence);
         if let Some(resolution) = latest
             && let ResolutionOutcome::Recorded { reason } = &resolution.outcome
-            && reason.as_str().starts_with(SLEPT)
+            && reason.0.as_str().starts_with(SLEPT)
         {
             let through = resolution.rationale.0.rsplit_once(THROUGH).and_then(|(_, ordinal)| ordinal.trim().parse().ok());
             return Ok(Some(through.unwrap_or(night.ordinal)));
