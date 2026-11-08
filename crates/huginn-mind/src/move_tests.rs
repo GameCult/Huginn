@@ -771,19 +771,21 @@ fn spec_citing(ruling: &PipelineRef) -> D {
 }
 
 /// A receiver holding `root` whole, in which `old` is superseded by `new` (both of that root).
-fn receiver_with_superseded(root: &str, opening: Vec<D>, old: PipelineRef, new: PipelineRef) -> Mind<MemoryStore> {
+fn receiver_with_superseded(root: &str, opening: Vec<D>, closing: Vec<D>, old: PipelineRef, new: PipelineRef) -> Mind<MemoryStore> {
     let mut mind = receiver();
     let mut first = vec![if root == CAMPAIGN { campaign(&[REPO]) } else { other_campaign() }];
     first.extend(opening);
     committed(import(&mut mind, first, vec![]));
-    committed(import(&mut mind, vec![resolution(old, superseded(&[new]))], vec![]));
+    let mut second = closing;
+    second.push(resolution(old, superseded(&[new])));
+    committed(import(&mut mind, second, vec![]));
     mind
 }
 
 #[test]
 fn an_imported_report_may_cite_another_campaigns_spec_superseded_since() {
     let (old, new) = (spec_ref(OTHER_ROOT, 1), spec_ref(OTHER_ROOT, 2));
-    let mut mind = receiver_with_superseded(OTHER_ROOT, vec![spec_of(OTHER_ROOT, 1), spec_of(OTHER_ROOT, 2)], old.clone(), new);
+    let mut mind = receiver_with_superseded(OTHER_ROOT, vec![spec_of(OTHER_ROOT, 1)], vec![spec_of(OTHER_ROOT, 2)], old.clone(), new);
     committed(import(&mut mind, vec![campaign(&[REPO])], vec![]));
     let (_, writes) = committed(import(&mut mind, vec![report_citing(&old)], vec![]));
     assert_eq!(writes.len(), 1);
@@ -792,7 +794,7 @@ fn an_imported_report_may_cite_another_campaigns_spec_superseded_since() {
 #[test]
 fn an_imported_report_citing_its_own_campaigns_superseded_spec_is_refused() {
     let (old, new) = (spec_ref(CAMPAIGN, 1), spec_ref(CAMPAIGN, 2));
-    let mut mind = receiver_with_superseded(CAMPAIGN, vec![spec_of(CAMPAIGN, 1), spec_of(CAMPAIGN, 2)], old.clone(), new);
+    let mut mind = receiver_with_superseded(CAMPAIGN, vec![spec_of(CAMPAIGN, 1)], vec![spec_of(CAMPAIGN, 2)], old.clone(), new);
     assert_eq!(
         refusal(import(&mut mind, vec![report_citing(&old)], vec![])),
         MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: old.id.0 }
@@ -802,7 +804,7 @@ fn an_imported_report_citing_its_own_campaigns_superseded_spec_is_refused() {
 #[test]
 fn an_imported_spec_may_cite_another_campaigns_ruling_superseded_since() {
     let (old, new) = (ruling_ref(OTHER_ROOT, "R1"), ruling_ref(OTHER_ROOT, "R2"));
-    let mut mind = receiver_with_superseded(OTHER_ROOT, vec![ruling_of(OTHER_ROOT, "R1"), ruling_of(OTHER_ROOT, "R2")], old.clone(), new);
+    let mut mind = receiver_with_superseded(OTHER_ROOT, vec![ruling_of(OTHER_ROOT, "R1"), ruling_of(OTHER_ROOT, "R2")], vec![], old.clone(), new);
     committed(import(&mut mind, vec![campaign(&[REPO])], vec![]));
     let (_, writes) = committed(import(&mut mind, vec![spec_citing(&old)], vec![]));
     assert_eq!(writes.len(), 1);
@@ -811,7 +813,7 @@ fn an_imported_spec_may_cite_another_campaigns_ruling_superseded_since() {
 #[test]
 fn an_imported_spec_citing_its_own_campaigns_superseded_ruling_is_refused() {
     let (old, new) = (ruling_ref(CAMPAIGN, "R1"), ruling_ref(CAMPAIGN, "R2"));
-    let mut mind = receiver_with_superseded(CAMPAIGN, vec![ruling_of(CAMPAIGN, "R1"), ruling_of(CAMPAIGN, "R2")], old.clone(), new);
+    let mut mind = receiver_with_superseded(CAMPAIGN, vec![ruling_of(CAMPAIGN, "R1"), ruling_of(CAMPAIGN, "R2")], vec![], old.clone(), new);
     assert_eq!(
         refusal(import(&mut mind, vec![spec_citing(&old)], vec![])),
         MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: old.id.0 }
