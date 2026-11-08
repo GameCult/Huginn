@@ -720,6 +720,11 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
             resolution_rule(docs, resolution)?;
             match &resolution.outcome {
                 ResolutionOutcome::Moved { to } if to == mind => Err(MindRefusal::MoveToSelf),
+                // The campaign's root and the mind's own instance root are one namespace: the freeze would
+                // close the instance's memories, thoughts and stewardships with the campaign.
+                ResolutionOutcome::Moved { .. } if root_and_local(&resolution.subject.id.0).0 == mind.0 => {
+                    Err(MindRefusal::MoveOfInstanceRoot { root: mind.0.clone() })
+                }
                 // The giver's resolution: the receiver replays the history the move froze, never the move.
                 ResolutionOutcome::Moved { .. } if import.is_some() => Err(MindRefusal::IncompatibleResolution {
                     subject_kind: resolution.subject.kind,

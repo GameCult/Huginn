@@ -614,3 +614,28 @@ fn an_import_naming_a_case_variant_of_this_mind_names_another_mind() {
         MindRefusal::ImportFromSelf
     );
 }
+
+#[test]
+fn a_campaign_cannot_be_moved_out_of_its_minds_own_instance_root() {
+    // A campaign slugged like this mind shares a root with the instance, its stewardships and its
+    // thoughts: the Moved would freeze all of them.
+    let mut mind = seeded();
+    let D::Campaign(mut named_for_the_mind) = campaign(&[REPO]) else { unreachable!() };
+    named_for_the_mind.slug = slug(INSTANCE);
+    committed(admit(&mut mind, vec![D::Campaign(named_for_the_mind)]));
+    let before = head(&mind);
+    let moving = resolution(r(K::Campaign, &format!("{INSTANCE}:campaign:self")), ResolutionOutcome::Moved { to: slug(RECEIVER) });
+    assert_eq!(refusal(admit(&mut mind, vec![moving])), MindRefusal::MoveOfInstanceRoot { root: INSTANCE.into() });
+    assert_eq!(head(&mind), before);
+    committed(admit(&mut mind, vec![thought("T1", "still writable", &[])]));
+    assert!(matches!(stewardship_status(&mind, INSTANCE), PipelineStatus::InForce));
+
+    // The same campaign cannot arrive by import either: the instance's records are native writes under its root.
+    let mut recv = receiver();
+    let D::Campaign(mut named_for_recv) = campaign(&[REPO]) else { unreachable!() };
+    named_for_recv.slug = slug(RECEIVER);
+    assert_eq!(
+        refusal(import_from_kiko(&mut recv, vec![D::Campaign(named_for_recv)])),
+        MindRefusal::ImportOutsideCampaign { root: RECEIVER.into() }
+    );
+}

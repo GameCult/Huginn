@@ -1698,6 +1698,27 @@
           ]
         },
         {
+          "description": "A move names `root`, this mind's own instance: an instance's records are not a campaign's to freeze.",
+          "type": "object",
+          "properties": {
+            "MoveOfInstanceRoot": {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "root"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "MoveOfInstanceRoot"
+          ]
+        },
+        {
           "description": "An import lists `id` as external, but this mind (or the batch) holds it.",
           "type": "object",
           "properties": {
