@@ -1499,6 +1499,8 @@ fn a_listed_idle_mind_sleeps_once_per_window_and_a_missed_night_is_not_made_up()
     end_launched(&rig, ANN);
     // Her unit is gone as well, so she is idle and only her last Sleep run says the window is spent.
     rig.launcher.kill_as(&Slug("ann".into()), RunTurn::Sleep);
+    rig.advance(60);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "one night per window, whatever became of it");
     assert_eq!(started_turns(&rig).len(), 1);
     // The next window opens a day later and she sleeps again.
