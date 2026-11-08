@@ -737,3 +737,95 @@ fn replay_root(giver: &Mind<MemoryStore>, receiver: &mut Mind<MemoryStore>, root
         })
         .collect()
 }
+
+fn ruling_of(root: &str, label: &str) -> D {
+    let mut value = ruling(label);
+    value.campaign = slug(root);
+    D::Ruling(value)
+}
+
+fn ruling_ref(root: &str, label: &str) -> PipelineRef {
+    r(K::Ruling, &format!("{root}:ruling:{label}"))
+}
+
+fn spec_ref(root: &str, revision: u32) -> PipelineRef {
+    r(K::CutSpec, &format!("{root}:cut_spec:cut-1.r{revision}"))
+}
+
+fn spec_of(root: &str, revision: u32) -> D {
+    let mut value = cut_spec("1", revision);
+    value.campaign = slug(root);
+    D::CutSpec(value)
+}
+
+fn report_citing(spec: &PipelineRef) -> D {
+    let mut value = cut_report("1", 1);
+    value.cut_spec = spec.id.clone();
+    D::CutReport(value)
+}
+
+fn spec_citing(ruling: &PipelineRef) -> D {
+    let mut value = cut_spec("2", 1);
+    value.rulings = vec![ruling.id.clone()];
+    D::CutSpec(value)
+}
+
+/// A receiver holding `root` whole, in which `old` is superseded by `new` (both of that root).
+fn receiver_with_superseded(root: &str, opening: Vec<D>, old: PipelineRef, new: PipelineRef) -> Mind<MemoryStore> {
+    let mut mind = receiver();
+    let mut first = vec![if root == CAMPAIGN { campaign(&[REPO]) } else { other_campaign() }];
+    first.extend(opening);
+    committed(import(&mut mind, first, vec![]));
+    committed(import(&mut mind, vec![resolution(old, superseded(&[new]))], vec![]));
+    mind
+}
+
+#[test]
+fn an_imported_report_may_cite_another_campaigns_spec_superseded_since() {
+    let (old, new) = (spec_ref(OTHER_ROOT, 1), spec_ref(OTHER_ROOT, 2));
+    let mut mind = receiver_with_superseded(OTHER_ROOT, vec![spec_of(OTHER_ROOT, 1), spec_of(OTHER_ROOT, 2)], old.clone(), new);
+    committed(import(&mut mind, vec![campaign(&[REPO])], vec![]));
+    let (_, writes) = committed(import(&mut mind, vec![report_citing(&old)], vec![]));
+    assert_eq!(writes.len(), 1);
+}
+
+#[test]
+fn an_imported_report_citing_its_own_campaigns_superseded_spec_is_refused() {
+    let (old, new) = (spec_ref(CAMPAIGN, 1), spec_ref(CAMPAIGN, 2));
+    let mut mind = receiver_with_superseded(CAMPAIGN, vec![spec_of(CAMPAIGN, 1), spec_of(CAMPAIGN, 2)], old.clone(), new);
+    assert_eq!(
+        refusal(import(&mut mind, vec![report_citing(&old)], vec![])),
+        MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: old.id.0 }
+    );
+}
+
+#[test]
+fn an_imported_spec_may_cite_another_campaigns_ruling_superseded_since() {
+    let (old, new) = (ruling_ref(OTHER_ROOT, "R1"), ruling_ref(OTHER_ROOT, "R2"));
+    let mut mind = receiver_with_superseded(OTHER_ROOT, vec![ruling_of(OTHER_ROOT, "R1"), ruling_of(OTHER_ROOT, "R2")], old.clone(), new);
+    committed(import(&mut mind, vec![campaign(&[REPO])], vec![]));
+    let (_, writes) = committed(import(&mut mind, vec![spec_citing(&old)], vec![]));
+    assert_eq!(writes.len(), 1);
+}
+
+#[test]
+fn an_imported_spec_citing_its_own_campaigns_superseded_ruling_is_refused() {
+    let (old, new) = (ruling_ref(CAMPAIGN, "R1"), ruling_ref(CAMPAIGN, "R2"));
+    let mut mind = receiver_with_superseded(CAMPAIGN, vec![ruling_of(CAMPAIGN, "R1"), ruling_of(CAMPAIGN, "R2")], old.clone(), new);
+    assert_eq!(
+        refusal(import(&mut mind, vec![spec_citing(&old)], vec![])),
+        MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: old.id.0 }
+    );
+}
+
+#[test]
+fn an_imported_follow_up_may_not_be_superseded_by_its_own_campaigns_closed_follow_up() {
+    let q1 = r(K::Question, &id("question", "Q1"));
+    let mut mind = receiver();
+    committed(import(&mut mind, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-A", q1.clone()), follow_up("FU-B", q1)], vec![]));
+    committed(import(&mut mind, vec![resolution(fu(CAMPAIGN, "FU-A"), ResolutionOutcome::Recorded { reason: "noted".into() })], vec![]));
+    assert_eq!(
+        refusal(import(&mut mind, vec![resolution(fu(CAMPAIGN, "FU-B"), superseded(&[fu(CAMPAIGN, "FU-A")]))], vec![])),
+        MindRefusal::CitesResolvedDocument { kind: K::FollowUp, id: fu(CAMPAIGN, "FU-A").id.0 }
+    );
+}

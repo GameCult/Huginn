@@ -538,8 +538,9 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
     use PipelineKind as K;
     let key = staged.key.as_str();
     let external: &[PipelineRef] = import.map_or(&[], |source| source.external.as_slice());
-    // An import replays a batch its source admitted at its own ordinal: a referent's status here may
-    // have moved on since (another campaign's import carried the resolution), so no rule judges it.
+    // An import replays the giver's order within a campaign, so a same-campaign referent has its status at
+    // the source ordinal. Only a citation into another campaign drifts (that campaign's import may have
+    // carried a later resolution), so only a cross-campaign citation is not judged by current status.
     let historic = import.is_some();
     if let D::Resolution(resolution) = &staged.document
         && matches!(resolution.outcome, ResolutionOutcome::Withdrawn { .. })
@@ -630,7 +631,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
                 return Err(MindRefusal::RepoNotInCampaign { repo: spec.repo.0.clone() });
             }
             for ruling in &spec.rulings {
-                if !historic && !docs.in_force(K::Ruling, &ruling.0) {
+                if !(historic && root_and_local(&ruling.0).0 != root) && !docs.in_force(K::Ruling, &ruling.0) {
                     return Err(MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: ruling.0.clone() });
                 }
             }
@@ -656,7 +657,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
                 }
                 return Err(MindRefusal::CutReportWithoutSpec { report: key.into() });
             };
-            if !historic && !docs.in_force(K::CutSpec, &report.cut_spec.0) {
+            if !(historic && root_and_local(&report.cut_spec.0).0 != root) && !docs.in_force(K::CutSpec, &report.cut_spec.0) {
                 return Err(MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: report.cut_spec.0.clone() });
             }
             if report.repo != spec.repo {
@@ -765,7 +766,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
         // rule.
         D::Run(run) => {
             let replay = docs.in_image(K::Run, key) == Some(&staged.document);
-            run_rule(docs, key, run, replay, historic)
+            run_rule(docs, key, run, replay)
         }
         D::Memory(memory) => consolidation_rule(docs, key, memory),
         D::FollowUp(_) | D::Instance(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Research(_) | D::Idea(_) => Ok(()),
@@ -775,9 +776,9 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
 /// The one rule for a run opening or reinstated by withdrawing its close: every
 /// claim in force (a replay of an admitted run owes none) and held by no other
 /// live run, then at most one live run of hers per instance and turn.
-fn run_rule(docs: &Docs<'_>, run_key: &str, run: &PipelineRun, replay: bool, historic: bool) -> Result<(), MindRefusal> {
+fn run_rule(docs: &Docs<'_>, run_key: &str, run: &PipelineRun, replay: bool) -> Result<(), MindRefusal> {
     for claim in &run.claims {
-        if !replay && !historic && !docs.in_force(claim.kind, &claim.id.0) {
+        if !replay && !docs.in_force(claim.kind, &claim.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: claim.kind, id: claim.id.0.clone() });
         }
         if let Some(holder) = docs.claim_holder(run_key, claim) {
@@ -976,11 +977,11 @@ fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution, historic: b
         && reinstating.subject.kind == K::Run
         && let Some(D::Run(run)) = docs.find(K::Run, &reinstating.subject.id.0)
     {
-        run_rule(docs, &reinstating.subject.id.0, run, false, historic)?;
+        run_rule(docs, &reinstating.subject.id.0, run, false)?;
     }
     for (role, referent) in outcome_citations(&resolution.outcome) {
         // The last memory a night was shown may have been consumed by that night's own batches.
-        if role != CitationRole::DayThrough && !historic && !docs.in_force(referent.kind, &referent.id.0) {
+        if role != CitationRole::DayThrough && !(historic && root_and_local(&referent.id.0).0 != root_and_local(subject_id).0) && !docs.in_force(referent.kind, &referent.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: referent.kind, id: referent.id.0 });
         }
     }
