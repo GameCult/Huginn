@@ -237,7 +237,24 @@ impl Rig {
         self.minds[who].admit_at(self.now() - Duration::seconds(ago + 5));
         self.minds[who].committed(vec![run_in(NAMES[who], &label, RunTurn::SelfRun, RunOperator::Mind, &[])]);
         self.minds[who].admit_at(self.now() - Duration::seconds(ago));
-        self.minds[who].committed(vec![close(reference(K::Run, &format!("{}:run:{label}", NAMES[who])), recorded())]);
+        self.close_as(crate::self_run::AGENT, who, &label, recorded());
+    }
+
+    /// `agent` admits the closing of `who`'s run `label`, at the clock's present admission time.
+    fn close_as(&self, agent: &str, who: usize, label: &str, outcome: eureka_pipeline::ResolutionOutcome) {
+        let closing = close(reference(K::Run, &format!("{}:run:{label}", NAMES[who])), outcome);
+        let admitted = self.minds[who].admit(agent, "session-a", vec![closing]).unwrap();
+        assert!(matches!(admitted, huginn_mind::PipelineAdmissionOutcome::Committed { .. }), "{admitted:?}");
+    }
+
+    /// A Self run of `who` the launch path closed because its unit was gone, `ago` seconds before now: the closing is the Persona organ's, not the Self's.
+    fn self_run_found_dead(&self, who: usize, ago: i64) {
+        let label = format!("self-{}", self.labels.get());
+        self.labels.set(self.labels.get() + 1);
+        self.minds[who].admit_at(self.now() - Duration::seconds(ago + 5));
+        self.minds[who].committed(vec![run_in(NAMES[who], &label, RunTurn::SelfRun, RunOperator::Mind, &[])]);
+        self.minds[who].admit_at(self.now() - Duration::seconds(ago));
+        self.close_as(crate::persona::AGENT, who, &label, eureka_pipeline::ResolutionOutcome::Recorded { reason: "unit not active".into() });
     }
 
     /// A Self run of `who` whose unit did not start: withdrawn `ago` seconds before now.
@@ -247,7 +264,7 @@ impl Rig {
         self.minds[who].admit_at(self.now() - Duration::seconds(ago + 5));
         self.minds[who].committed(vec![run_in(NAMES[who], &label, RunTurn::SelfRun, RunOperator::Mind, &[])]);
         self.minds[who].admit_at(self.now() - Duration::seconds(ago));
-        self.minds[who].committed(vec![close(reference(K::Run, &format!("{}:run:{label}", NAMES[who])), crate::testkit::withdrawn())]);
+        self.close_as(crate::persona::AGENT, who, &label, crate::testkit::withdrawn());
     }
 
     /// `who` admits a pulse, `ago` seconds before now.
@@ -685,6 +702,16 @@ fn a_self_run_withdrawn_because_its_unit_did_not_start_does_not_wake_her_persona
     rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
     rig.self_run_withdrawn(ANN, 100);
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "a run that never ran is no Self end: a failing start must not re-wake her every poll");
+}
+
+#[test]
+fn a_dead_self_run_the_launch_path_closed_does_not_wake_her_persona_off_the_beat() {
+    let rig = Rig::new();
+    rig.turn(ANN, 500);
+    rig.turn(BOB, 500);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig.self_run_found_dead(ANN, 100);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "a Self that keeps dying must not chain Persona turns until the breaker trips");
 }
 
 #[test]

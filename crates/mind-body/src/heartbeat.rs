@@ -30,7 +30,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
 use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
 use cultnet_rs::Selection;
-use eureka_pipeline::{PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
+use eureka_pipeline::{PipelineKind, PipelineRef, RunOperator, RunTurn, Slug};
 use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 
 use crate::address::{Addressee, Name, addresses, project_names};
@@ -372,20 +372,18 @@ fn parse_time(text: &str) -> Result<DateTime<Utc>> {
         .map_err(|_| anyhow!("the mind gave a time that is not a timestamp"))
 }
 
-/// When a run was last resolved and how: its resolution of the highest sequence.
+/// When a run was last resolved and by whom: its resolution of the highest sequence, and the agent that admitted it.
 fn latest_resolution(
     mind: &dyn MindPort,
     run: &PipelineRef,
-) -> Result<Option<(DateTime<Utc>, ResolutionOutcome)>> {
+) -> Result<Option<(DateTime<Utc>, String)>> {
     let closures = Selection {
         cites: Some(citing(run, Some("subject"))),
         ..of_kind(PipelineKind::Resolution)
     };
-    let mut ending: Option<(u32, DateTime<Utc>, ResolutionOutcome)> = None;
+    let mut ending: Option<(u32, DateTime<Utc>, String)> = None;
     for header in headers(mind, &closures)? {
-        if let PipelineFacts::Resolution {
-            sequence, outcome, ..
-        } = header.facts
+        if let PipelineFacts::Resolution { sequence, .. } = header.facts
             && ending
                 .as_ref()
                 .is_none_or(|(latest, ..)| sequence >= *latest)
@@ -393,11 +391,11 @@ fn latest_resolution(
             ending = Some((
                 sequence,
                 parse_time(&header.admission.admitted_at)?,
-                outcome,
+                header.admission.provenance.agent.0,
             ));
         }
     }
-    Ok(ending.map(|(_, at, outcome)| (at, outcome)))
+    Ok(ending.map(|(_, at, agent)| (at, agent)))
 }
 
 /// When her newest Persona turn that actually ran was admitted: one bounded read
@@ -494,7 +492,7 @@ fn pending_urgency(mind: &dyn MindPort, instance: &Slug, last_turn: Option<&Pipe
     Ok(if last_turn.is_none_or(|turn| header.admission.ordinal > turn.admission.ordinal) { urgency } else { 0 })
 }
 
-/// When her Self runs last ended: the latest resolution among her recent Self runs, a withdrawn one excepted.
+/// When her Self runs last ended: the latest resolution among her recent Self runs that the Self itself admitted.
 fn last_self_end(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime<Utc>>> {
     let turn = format!("{:?}", RunTurn::SelfRun);
     let operator = format!("{:?}", RunOperator::Mind);
@@ -503,9 +501,11 @@ fn last_self_end(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime
     let PipelinePageItems::Headers(runs) = mind.query(&selection)?.items else { bail!("the mind answered documents to a header selection") };
     let mut newest = None;
     for run in runs {
-        // A run withdrawn never ran (its unit did not start): it is no Self end, or a failing start would wake her Persona again at once.
-        if let Some((ended, outcome)) = latest_resolution(mind, &run.id)?
-            && !matches!(outcome, ResolutionOutcome::Withdrawn { .. })
+        // Only the Self's own closing is its end. A run the launch path closed for her (withdrawn because its unit did not start,
+        // or Recorded because its unit was gone) never ended itself: counting it would wake her Persona again at once, whose
+        // launch fails again, and so on until the breaker trips.
+        if let Some((ended, agent)) = latest_resolution(mind, &run.id)?
+            && agent == crate::self_run::AGENT
         {
             newest = newest.max(Some(ended));
         }

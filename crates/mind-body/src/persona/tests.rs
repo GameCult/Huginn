@@ -7146,3 +7146,54 @@ fn a_brief_whose_self_run_died_is_claimed_again_by_one_run_never_two() {
     assert_eq!(live.len(), 1, "the dead run is closed and one successor claims the brief");
     assert_eq!(rig.launcher.started.borrow().iter().filter(|(_, turn)| *turn == RunTurn::SelfRun).count(), 2);
 }
+
+/// Answers every read but the first one for follow-ups, which fails with a long message.
+struct LosesFollowUps<'a>(&'a TestMind, Cell<bool>);
+
+impl MindPort for LosesFollowUps<'_> {
+    fn instance(&self) -> &Slug {
+        self.0.instance()
+    }
+
+    fn query(&self, selection: &cultnet_rs::Selection) -> Result<huginn_mind::PipelineSelectionPage> {
+        if selection.schemas.iter().flatten().any(|schema| schema == K::FollowUp.type_id()) && !self.1.replace(true) {
+            bail!("{}", "the mind lost the read ".repeat(100));
+        }
+        self.0.query(selection)
+    }
+
+    fn query_near(&self, selection: &cultnet_rs::Selection, text: &str, top_k: u32) -> Result<huginn_mind::PipelineSelectionPage> {
+        self.0.query_near(selection, text, top_k)
+    }
+
+    fn admit(&self, agent: &str, session: &str, documents: Vec<PipelineDocument>) -> Result<AdmissionOutcome> {
+        self.0.admit(agent, session, documents)
+    }
+}
+
+#[test]
+fn what_claim_briefs_could_not_do_reaches_the_closing_reason_as_one_capped_line() {
+    let rig = Rig::new(vec![], &[]);
+    rig.open_the_run();
+    rig.start_over(&LosesFollowUps(&rig.mind, Cell::new(false)), &config());
+    let reasons = closing_reasons(&rig);
+    let note = reasons.iter().find(|reason| reason.contains("briefs left open")).unwrap_or_else(|| panic!("{reasons:?}"));
+    let after = &note[note.find("briefs left open").unwrap()..];
+    assert_eq!(after.chars().count(), BRIEF_NOTE_MAX, "the long error is cut at the cap, not carried whole: {after}");
+}
+
+#[test]
+fn one_self_run_claims_at_most_the_cap_of_free_briefs_and_the_rest_wait() {
+    let rig = Rig::new(vec![], &[]);
+    let run = turn_with_a_brief(&rig, "b000");
+    for n in 1..BRIEFS_PER_SELF_RUN + 6 {
+        let PipelineDocument::FollowUp(mut document) = follow_up(&format!("b{n:03}"), &run) else { unreachable!() };
+        document.owner = "self-run".into();
+        rig.mind.admit(AGENT, "session-a", vec![PipelineDocument::FollowUp(document)]).unwrap();
+    }
+    rig.start_with(&config());
+    let claims = self_run_claims(&rig);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].len(), BRIEFS_PER_SELF_RUN);
+    assert_eq!(rig.mind.ids(K::FollowUp).len(), BRIEFS_PER_SELF_RUN + 6, "the briefs beyond the cap stay open for the next Self run");
+}
