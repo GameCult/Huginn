@@ -204,10 +204,8 @@ impl Image {
         // A Moved closes every document under its campaign's root, none of which it names.
         let moved: Vec<String> = (first..self.rows.len() as u32)
             .filter_map(|id| match &self.row(id).view.document {
-                PipelineDocument::Resolution(resolution)
-                    if resolution.subject.kind == PipelineKind::Campaign && matches!(resolution.outcome, ResolutionOutcome::Moved { .. }) =>
-                {
-                    Some(root_and_local(&resolution.subject.id.0).0.to_string())
+                PipelineDocument::Resolution(PipelineResolution { subject, outcome: ResolutionOutcome::Moved { .. }, .. }) => {
+                    Some(root_and_local(&subject.id.0).0.to_string())
                 }
                 _ => None,
             })

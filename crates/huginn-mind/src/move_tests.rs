@@ -332,6 +332,15 @@ fn import_admits_a_declared_external_and_refuses_an_undeclared_one() {
     assert!(matches!(view_of(&mind, K::FollowUp, &id("follow_up", "FU-1")).status, PipelineStatus::Resolved { .. }));
     assert!(mind.view(&report).unwrap().is_none(), "an external is stored nowhere");
 
+    // A listing names the referent it stands in for and no other of its kind.
+    let mut elsewhere = receiver();
+    committed(admit(&mut elsewhere, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-1", r(K::Question, &id("question", "Q1")))]));
+    let other = r(K::CutReport, &format!("{OTHER_ROOT}:cut_report:cut-4.h1"));
+    assert_eq!(
+        refusal(import(&mut elsewhere, vec![fixed.clone()], vec![other])),
+        MindRefusal::MissingReference { kind: K::CutReport, id: report.id.0.clone() }
+    );
+
     // Outside an import, the same document is refused: externals are an import's alone.
     let mut plain = receiver();
     committed(admit(&mut plain, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-1", r(K::Question, &id("question", "Q1")))]));

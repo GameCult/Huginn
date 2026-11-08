@@ -216,9 +216,11 @@ impl<'i> Docs<'i> {
         })
     }
 
-    /// The Moved resolution in force over the campaign rooted at `root`, among the held documents
-    /// visible at `as_of`: the one fact that freezes a root and closes everything under it. The
-    /// batch is not asked, so a Moved and the writes it lands beside are one receipt.
+    /// The Moved resolution over the campaign rooted at `root`, among the held documents visible at
+    /// `as_of`: the one fact that freezes a root and closes everything under it. A campaign takes no
+    /// other resolution and a Moved cannot be withdrawn (admission refuses both), so a campaign's
+    /// closers are this one alone and it is always in force. The batch is not asked, so a Moved and
+    /// the writes it lands beside are one receipt.
     pub(crate) fn moved_campaign(&self, root: &str) -> Option<(&'i str, &'i PipelineResolution)> {
         let image: &'i Image = self.image;
         image
@@ -227,11 +229,7 @@ impl<'i> Docs<'i> {
             .flat_map(|(key, _)| image.closers_of(PipelineKind::Campaign, key))
             .filter(|(_, row)| self.visible(*row))
             .find_map(|(key, row)| match &image.row(row).view.document {
-                PipelineDocument::Resolution(resolution)
-                    if matches!(resolution.outcome, ResolutionOutcome::Moved { .. }) && self.in_force(PipelineKind::Resolution, key) =>
-                {
-                    Some((key, resolution))
-                }
+                PipelineDocument::Resolution(resolution @ PipelineResolution { outcome: ResolutionOutcome::Moved { .. }, .. }) => Some((key, resolution)),
                 _ => None,
             })
     }
