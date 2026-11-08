@@ -638,3 +638,39 @@ fn a_campaign_cannot_be_moved_out_of_its_minds_own_instance_root() {
         MindRefusal::ImportOutsideCampaign { root: RECEIVER.into() }
     );
 }
+
+/// The giver cited another root's follow-up while it stood open and that follow-up closed later;
+/// the receiver imported the other root first, so it holds the follow-up already closed. The
+/// replay of this root's citation is not refused for that. A follow-up of the root itself is
+/// replayed in the giver's order and is still judged in force, and a native write meets the rule.
+#[test]
+fn import_replays_a_cite_of_another_roots_follow_up_that_closed_since() {
+    let mut mind = receiver();
+    committed(admit(&mut mind, vec![other_question("Q5"), other_follow_up("FU-9", "Q5")]));
+    let foreign = r(K::FollowUp, &format!("{OTHER_ROOT}:follow_up:FU-9"));
+    committed(admit(&mut mind, vec![resolution(foreign.clone(), ResolutionOutcome::Recorded { reason: "done".into() })]));
+    assert!(matches!(view_of(&mind, K::FollowUp, &foreign.id.0).status, PipelineStatus::Resolved { .. }));
+
+    let note = idea("p", "note", "an idea");
+    let note_ref = r(K::Idea, &pipeline_key(&note).unwrap());
+    let own = follow_up("FU-1", r(K::Question, &id("question", "Q1")));
+    let own_ref = r(K::FollowUp, &pipeline_key(&own).unwrap());
+    committed(import(&mut mind, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), own.clone(), note.clone()], vec![]));
+    committed(import(&mut mind, vec![resolution(own_ref.clone(), ResolutionOutcome::Recorded { reason: "done".into() })], vec![]));
+
+    let defer = |to: &PipelineRef| resolution(note_ref.clone(), ResolutionOutcome::Deferred { to: to.clone() });
+    // The same-root referent is closed in this receiver as it was in the giver: still refused.
+    assert_eq!(
+        refusal(import(&mut mind, vec![defer(&own_ref)], vec![])),
+        MindRefusal::CitesResolvedDocument { kind: K::FollowUp, id: own_ref.id.0.clone() }
+    );
+    // A native write is not a replay, and meets the rule.
+    assert_eq!(
+        refusal(admit(&mut mind, vec![defer(&foreign)])),
+        MindRefusal::CitesResolvedDocument { kind: K::FollowUp, id: foreign.id.0.clone() }
+    );
+    // The replay of the foreign cite lands, and the follow-up it cites is untouched.
+    let (_, writes) = committed(import(&mut mind, vec![defer(&foreign)], vec![]));
+    assert_eq!(writes.len(), 1);
+    assert!(matches!(view_of(&mind, K::Idea, &note_ref.id.0).status, PipelineStatus::Resolved { .. }));
+}

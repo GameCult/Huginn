@@ -717,7 +717,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
             Ok(())
         }
         D::Resolution(resolution) => {
-            resolution_rule(docs, resolution)?;
+            resolution_rule(docs, resolution, import.is_some())?;
             match &resolution.outcome {
                 ResolutionOutcome::Moved { to } if to == mind => Err(MindRefusal::MoveToSelf),
                 // The campaign's root and the mind's own instance root are one namespace: the freeze would
@@ -907,7 +907,13 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
 /// every referent in force, and the two
 /// coherence rules (an `Answered` ruling answers this question; a cut spec is
 /// superseded within its cut).
-fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(), MindRefusal> {
+///
+/// An import replays the giver's judgement of the cite as the giver made it, and the receiver may
+/// hold a referent of another root whose closing it imported earlier (`replay`): that referent was
+/// in force when the giver cited it, and the replay of this root cannot reorder another root's
+/// history. The referent must still be held (A7); only its force is not asked. A referent of the
+/// subject's own root replays in the giver's order and is judged as ever.
+fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution, replay: bool) -> Result<(), MindRefusal> {
     use PipelineDocument as D;
     use PipelineKind as K;
     let subject_kind = resolution.subject.kind;
@@ -977,7 +983,8 @@ fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(
     }
     for (role, referent) in outcome_citations(&resolution.outcome) {
         // The last memory a night was shown may have been consumed by that night's own batches.
-        if role != CitationRole::DayThrough && !docs.in_force(referent.kind, &referent.id.0) {
+        let foreign_replay = replay && root_and_local(&referent.id.0).0 != root_and_local(subject_id).0;
+        if role != CitationRole::DayThrough && !foreign_replay && !docs.in_force(referent.kind, &referent.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: referent.kind, id: referent.id.0 });
         }
     }
