@@ -939,344 +939,16 @@ fn every_newest_read_asks_for_exactly_one_header() {
     assert!(queries >= 3, "the poll did read her mind ({queries} queries)");
 }
 
-// ---- the beat gives a Self run to a Mind whose Self holds briefs ----------------------
+// ---- the heartbeat never starts a Self run -------------------------------------------
 
 use eureka_pipeline::PipelineDocument;
 
-/// A self-run follow-up for `who`, admitted under `agent`'s receipt.
-fn brief_by(rig: &Rig, who: usize, agent: &str, label: &str, source: &PipelineRef) {
+/// A self-run follow-up for ann (a brief), admitted under the Persona's receipt.
+fn brief(rig: &Rig, label: &str, source: &PipelineRef) {
     let PipelineDocument::FollowUp(mut document) = crate::testkit::follow_up(label, source) else { unreachable!() };
     document.owner = "self-run".into();
-    let outcome = rig.minds[who].admit(agent, "session-a", vec![PipelineDocument::FollowUp(document)]).unwrap();
+    let outcome = rig.minds[ANN].admit(crate::persona::AGENT, "session-a", vec![PipelineDocument::FollowUp(document)]).unwrap();
     assert!(matches!(outcome, huginn_mind::PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
-}
-
-/// Two Minds that have both acted, ann longest ago, and a Persona turn of hers to cite.
-fn rig_with_a_persona_turn() -> (Box<Rig>, PipelineRef) {
-    let rig = Rig::new();
-    let label = rig.turn(ANN, 3000);
-    rig.turn(BOB, 1000);
-    let source = reference(K::Run, &format!("ann:run:{label}"));
-    (rig, source)
-}
-
-fn self_runs(rig: &Rig, who: usize) -> Vec<eureka_pipeline::PipelineRun> {
-    rig.minds[who]
-        .ids(K::Run)
-        .iter()
-        .filter_map(|id| match rig.minds[who].view(K::Run, id)?.document {
-            PipelineDocument::Run(run) if run.turn == RunTurn::SelfRun => Some(run),
-            _ => None,
-        })
-        .collect()
-}
-
-#[test]
-fn the_beat_won_by_a_mind_whose_self_holds_briefs_is_one_self_run_claiming_them_and_the_outcome_says_so() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::persona::AGENT, "first", &source);
-    brief_by(&rig, ANN, crate::persona::AGENT, "second", &source);
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] }, "the launch is in the outcome, not only the trace");
-    let runs = self_runs(&rig, ANN);
-    assert_eq!(runs.len(), 1, "one Self run for both briefs");
-    let claimed: Vec<String> = runs[0].claims.iter().map(|claim| claim.id.0.clone()).collect();
-    assert_eq!(claimed, vec!["eureka-body:follow_up:first".to_string(), "eureka-body:follow_up:second".to_string()]);
-    assert_eq!(rig.launcher.started.borrow().iter().filter(|(_, turn)| *turn == RunTurn::SelfRun).count(), 1);
-    assert!(self_runs(&rig, BOB).is_empty(), "bob holds no brief");
-    let trace = rig.store.traces.borrow().last().cloned().unwrap();
-    assert_eq!(trace.launches.len(), 1);
-    assert!(!trace.instances[ANN].busy, "a Self run is not her Persona's turn: she is not busy");
-}
-
-#[test]
-fn a_beat_won_by_a_mind_with_no_brief_is_a_persona_turn_and_marks_her_busy() {
-    let (rig, _source) = rig_with_a_persona_turn();
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
-    assert!(self_runs(&rig, ANN).is_empty());
-    assert!(rig.store.traces.borrow().last().unwrap().instances[ANN].busy);
-}
-
-#[test]
-fn a_self_run_waits_for_the_beat_like_any_launch() {
-    let (rig, source) = rig_with_a_persona_turn();
-    rig.poll();
-    brief_by(&rig, ANN, crate::persona::AGENT, "waiting", &source);
-    rig.end_run(ANN);
-    rig.advance(60);
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "the beat has not passed: no Self run starts");
-    assert!(self_runs(&rig, ANN).is_empty());
-    rig.advance(900);
-    let Outcome::Polled { launched } = rig.poll() else { panic!("held") };
-    assert_eq!(launched.len(), 1, "one launch for the beat");
-}
-
-#[test]
-fn a_live_self_run_holds_the_briefs_and_the_beat_is_a_persona_turn() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::persona::AGENT, "taken", &source);
-    rig.poll();
-    assert_eq!(self_runs(&rig, ANN).len(), 1);
-    rig.advance(1000);
-    rig.poll();
-    assert_eq!(self_runs(&rig, ANN).len(), 1, "a live Self run is never given a second");
-}
-
-#[test]
-fn a_follow_up_her_persona_did_not_admit_launches_no_self_run_whatever_source_it_names() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::self_run::AGENT, "hers", &source);
-    brief_by(&rig, ANN, "test", "by-hand", &source);
-    rig.poll();
-    assert!(self_runs(&rig, ANN).is_empty());
-}
-
-#[test]
-fn a_braked_mind_launches_no_self_run() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::persona::AGENT, "waiting", &source);
-    rig.control.braked.borrow_mut().push("ann".into());
-    rig.poll();
-    assert!(self_runs(&rig, ANN).is_empty());
-}
-
-#[test]
-fn a_brief_that_keeps_failing_trips_once_and_a_trip_is_a_stop_until_the_question_is_answered() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::persona::AGENT, "stuck", &source);
-    let item = reference(K::FollowUp, "eureka-body:follow_up:stuck");
-    // Three Self runs have ended on it, each leaving nothing.
-    for n in 0..3 {
-        let label = format!("failed-{n}");
-        rig.minds[ANN].committed(vec![run_in("ann", &label, RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(&item))]);
-        rig.minds[ANN].committed(vec![close(reference(K::Run, &format!("ann:run:{label}")), recorded())]);
-    }
-    let before = self_runs(&rig, ANN).len();
-    // Beat after beat, whoever launches: no new Self run on the brief, and the breaker asks once.
-    for _ in 0..8 {
-        rig.advance(1000);
-        rig.poll();
-        for who in [ANN, BOB] {
-            if rig.minds[who].ids(K::Run).last().is_some_and(|id| rig.minds[who].view(K::Run, id).is_some_and(|view| matches!(view.status, huginn_mind::PipelineStatus::InForce))) {
-                rig.end_run(who);
-            }
-        }
-    }
-    assert_eq!(self_runs(&rig, ANN).len(), before, "no Self run after the trip");
-    assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "the breaker asked once; an open question is not asked again nor a fresh count");
-}
-
-/// Three Self runs that each claimed every one of `items` and ended leaving nothing.
-fn fail_bundle(rig: &Rig, items: &[PipelineRef]) {
-    for n in 0..3 {
-        let label = format!("failed-{n}");
-        rig.minds[ANN].committed(vec![run_in("ann", &label, RunTurn::SelfRun, RunOperator::Mind, items)]);
-        rig.minds[ANN].committed(vec![close(reference(K::Run, &format!("ann:run:{label}")), recorded())]);
-    }
-}
-
-/// Beats on which every live run ends at once; the Self runs and questions the Mind has after them.
-fn beats(rig: &Rig, count: usize) {
-    for _ in 0..count {
-        rig.advance(1000);
-        rig.poll();
-        for who in [ANN, BOB] {
-            if rig.minds[who].ids(K::Run).last().is_some_and(|id| rig.minds[who].view(K::Run, id).is_some_and(|view| matches!(view.status, huginn_mind::PipelineStatus::InForce))) {
-                rig.end_run(who);
-            }
-        }
-    }
-}
-
-#[test]
-fn one_cause_failing_a_bundle_of_briefs_is_one_question_not_one_per_brief() {
-    let (rig, source) = rig_with_a_persona_turn();
-    let labels = ["a", "b", "c", "d", "e"];
-    let items: Vec<PipelineRef> = labels.iter().map(|label| reference(K::FollowUp, &format!("eureka-body:follow_up:{label}"))).collect();
-    for label in labels {
-        brief_by(&rig, ANN, crate::persona::AGENT, label, &source);
-    }
-    fail_bundle(&rig, &items);
-    let before = self_runs(&rig, ANN).len();
-    beats(&rig, 10);
-    assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "five briefs, one cause, one question on the desk");
-    assert_eq!(self_runs(&rig, ANN).len(), before, "and no Self run launches while it is open");
-    assert!(rig.minds[BOB].ids(K::Question).is_empty(), "another Mind is not stopped");
-    let question = rig.minds[ANN].ids(K::Question).pop().unwrap();
-    assert_eq!(question_raised_in(&rig, &question), Some(reference(K::Run, "ann:run:failed-2")), "raised in the run whose end tripped it, not in a brief");
-}
-
-/// Five briefs a..e of ann's Self, and the three Self runs that each claimed all of them and ended empty.
-fn failed_bundle(rig: &Rig, source: &PipelineRef) -> Vec<PipelineRef> {
-    let items: Vec<PipelineRef> = ["a", "b", "c", "d", "e"].iter().map(|label| brief_ref(label)).collect();
-    for label in ["a", "b", "c", "d", "e"] {
-        brief_by(rig, ANN, crate::persona::AGENT, label, source);
-    }
-    fail_bundle(rig, &items);
-    items
-}
-
-fn brief_ref(label: &str) -> PipelineRef {
-    reference(K::FollowUp, &format!("eureka-body:follow_up:{label}"))
-}
-
-fn question_raised_in(rig: &Rig, question: &str) -> Option<PipelineRef> {
-    let PipelineDocument::Question(asked) = rig.minds[ANN].view(K::Question, question)?.document else { return None };
-    asked.raised_in
-}
-
-fn claims_of_run(run: &eureka_pipeline::PipelineRun) -> Vec<String> {
-    run.claims.iter().map(|claim| claim.id.0.clone()).collect()
-}
-
-/// Beats until `done`, at most `limit`; which beat a Mind wins is not the test's business.
-fn beats_until(rig: &Rig, limit: usize, done: impl Fn() -> bool) {
-    for _ in 0..limit {
-        if done() {
-            return;
-        }
-        beats(rig, 1);
-    }
-}
-
-/// Answers a breaker question of ann by a ruling, or closes it Withdrawn.
-fn lift(rig: &Rig, question: &str, withdraw: bool) {
-    let outcome = if withdraw {
-        close(reference(K::Question, question), crate::testkit::withdrawn())
-    } else {
-        crate::testkit::ruling("answer", Some((question, "reopen")))
-    };
-    rig.minds[ANN].committed(vec![outcome]);
-}
-
-#[test]
-fn an_answer_or_a_withdrawal_reopens_the_whole_bundle_with_a_fresh_count() {
-    for withdraw in [false, true] {
-        let (rig, source) = rig_with_a_persona_turn();
-        let items = failed_bundle(&rig, &source);
-        beats(&rig, 3);
-        let question = rig.minds[ANN].ids(K::Question).pop().expect("the trip asked");
-        assert_eq!(self_runs(&rig, ANN).len(), 3, "the trip launched nothing");
-        lift(&rig, &question, withdraw);
-        // The next Self run claims all five; three empty ones after the boundary trip once more, never before.
-        beats_until(&rig, 12, || self_runs(&rig, ANN).len() == 4);
-        let runs = self_runs(&rig, ANN);
-        assert_eq!(runs.len(), 4, "one Self run after the answer (withdrawn: {withdraw})");
-        assert_eq!(claims_of_run(&runs[3]), items.iter().map(|item| item.id.0.clone()).collect::<Vec<_>>(), "all five in one run");
-        beats_until(&rig, 24, || self_runs(&rig, ANN).len() == 6);
-        assert_eq!((self_runs(&rig, ANN).len(), rig.minds[ANN].ids(K::Question).len()), (6, 1), "three empty runs since the answer, and no second question yet");
-        beats_until(&rig, 24, || rig.minds[ANN].ids(K::Question).len() == 2);
-        beats(&rig, 6);
-        assert_eq!((self_runs(&rig, ANN).len(), rig.minds[ANN].ids(K::Question).len()), (6, 2), "the fourth launch trips once more, once, and launches nothing");
-    }
-}
-
-#[test]
-fn an_open_question_raised_elsewhere_stops_no_brief() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::persona::AGENT, "b1", &source);
-    brief_by(&rig, ANN, crate::persona::AGENT, "b2", &source);
-    // A follow-up that is no brief, a cut spec, and a run that claimed only other items.
-    rig.minds[ANN].committed(vec![crate::testkit::follow_up("plain", &source), crate::testkit::spec("c1")]);
-    rig.minds[ANN].committed(vec![run_in("ann", "other", RunTurn::SelfRun, RunOperator::Mind, &[crate::testkit::spec_ref("c1")])]);
-    rig.minds[ANN].committed(vec![close(reference(K::Run, "ann:run:other"), recorded())]);
-    for (label, place) in [("q1", reference(K::FollowUp, "eureka-body:follow_up:plain")), ("q2", crate::testkit::spec_ref("c1")), ("q3", reference(K::Run, "ann:run:other"))] {
-        rig.minds[ANN].committed(vec![crate::testkit::question_in(label, &place)]);
-    }
-    let before = self_runs(&rig, ANN).len();
-    beats_until(&rig, 6, || self_runs(&rig, ANN).len() > before);
-    let runs = self_runs(&rig, ANN);
-    assert_eq!(runs.len(), before + 1, "the successor launches as usual");
-    assert_eq!(claims_of_run(runs.last().unwrap()), vec![brief_ref("b1").id.0, brief_ref("b2").id.0], "both briefs");
-}
-
-#[test]
-fn a_question_raised_in_one_brief_holds_only_that_brief() {
-    let (rig, source) = rig_with_a_persona_turn();
-    for label in ["b1", "b2", "b3"] {
-        brief_by(&rig, ANN, crate::persona::AGENT, label, &source);
-    }
-    rig.minds[ANN].committed(vec![crate::testkit::question_in("fork", &brief_ref("b2"))]);
-    let told: Vec<String> = inbox::derive(&rig.minds[ANN], &HashSet::new()).unwrap().into_iter().map(|brief| brief.id).collect();
-    assert_eq!(told, vec![brief_ref("b1").id.0, brief_ref("b3").id.0], "derive omits b2");
-    beats_until(&rig, 6, || !self_runs(&rig, ANN).is_empty());
-    assert_eq!(claims_of_run(&self_runs(&rig, ANN)[0]), vec![brief_ref("b1").id.0, brief_ref("b3").id.0]);
-}
-
-#[test]
-fn a_resolved_tripped_brief_drops_out_and_the_question_holds_the_rest_and_nothing_new() {
-    let (rig, source) = rig_with_a_persona_turn();
-    let items = failed_bundle(&rig, &source);
-    beats(&rig, 3);
-    assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1);
-    rig.minds[ANN].committed(vec![close(items[0].clone(), recorded())]);
-    assert!(inbox::derive(&rig.minds[ANN], &HashSet::new()).unwrap().is_empty(), "the rest stay held and untold");
-    for item in &items[1..] {
-        rig.minds[ANN].committed(vec![close(item.clone(), recorded())]);
-    }
-    brief_by(&rig, ANN, crate::persona::AGENT, "new", &source);
-    beats_until(&rig, 6, || self_runs(&rig, ANN).len() > 3);
-    let runs = self_runs(&rig, ANN);
-    assert_eq!(runs.len(), 4, "a new brief launched");
-    assert_eq!(claims_of_run(&runs[3]), vec![brief_ref("new").id.0], "no Self run claims any of the five");
-    beats(&rig, 2);
-    assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "the question stays in force and no second is asked");
-}
-
-#[test]
-fn a_brief_admitted_while_a_question_is_open_is_claimed_and_told_alone() {
-    let (rig, source) = rig_with_a_persona_turn();
-    failed_bundle(&rig, &source);
-    beats(&rig, 3);
-    brief_by(&rig, ANN, crate::persona::AGENT, "fresh", &source);
-    let told: Vec<String> = inbox::derive(&rig.minds[ANN], &HashSet::new()).unwrap().into_iter().map(|brief| brief.id).collect();
-    assert_eq!(told, vec![brief_ref("fresh").id.0], "the start tell and the mid-session tells read this: none of the held briefs");
-    beats_until(&rig, 6, || self_runs(&rig, ANN).len() > 3);
-    let runs = self_runs(&rig, ANN);
-    assert_eq!(runs.len(), 4);
-    assert_eq!(claims_of_run(&runs[3]), vec![brief_ref("fresh").id.0], "claimed alone");
-}
-
-#[test]
-fn a_trip_and_a_wait_say_so_in_the_trace() {
-    let (rig, source) = rig_with_a_persona_turn();
-    failed_bundle(&rig, &source);
-    let notes = || rig.store.traces.borrow().iter().flat_map(|trace| trace.instances.iter().map(|instance| instance.note.clone())).collect::<Vec<_>>();
-    beats_until(&rig, 6, || !rig.minds[ANN].ids(K::Question).is_empty());
-    let question = rig.minds[ANN].ids(K::Question).pop().unwrap();
-    let expected = format!("tripped: {question} holds the 5 claims of ann:run:failed-2");
-    assert!(notes().contains(&expected), "{:?}", notes());
-    let waiting = "5 briefs held by open questions".to_string();
-    beats_until(&rig, 12, || notes().contains(&waiting));
-    assert!(notes().contains(&waiting), "{:?}", notes());
-}
-
-#[test]
-fn a_beat_with_no_held_brief_writes_no_held_note() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::persona::AGENT, "free", &source);
-    rig.poll();
-    let notes: Vec<String> = rig.store.traces.borrow().iter().flat_map(|trace| trace.instances.iter().map(|instance| instance.note.clone())).collect();
-    assert!(notes.iter().all(|note| !note.contains("held") && !note.contains("closing")), "{notes:?}: a free brief and no dead holder write no note");
-}
-
-/// Her Self run in force whose unit is gone, claiming `claims`, admitted `ago` seconds before now.
-fn crashed_self_run(rig: &Rig, claims: &[PipelineRef], ago: i64) {
-    rig.minds[ANN].admit_at(rig.now() - Duration::seconds(ago));
-    rig.minds[ANN].committed(vec![run_in(
-        "ann",
-        "crashed",
-        RunTurn::SelfRun,
-        RunOperator::Mind,
-        claims,
-    )]);
-}
-
-/// Polls on, a beat apart, leaving every run to its unit: nothing here ends one.
-fn polls(rig: &Rig, count: usize) {
-    for _ in 0..count {
-        rig.advance(1000);
-        rig.poll();
-    }
 }
 
 fn notes_of(rig: &Rig) -> Vec<String> {
@@ -1288,100 +960,31 @@ fn notes_of(rig: &Rig) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn a_self_run_left_in_force_by_a_crash_is_closed_by_the_next_beat_and_the_successor_launches() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::persona::AGENT, "orphan", &source);
-    crashed_self_run(&rig, &[brief_ref("orphan")], 3600);
-    assert_eq!(self_runs(&rig, ANN).len(), 1);
-    polls(&rig, 8);
-    let runs = self_runs(&rig, ANN);
-    assert_eq!(runs.len(), 2, "one successor, once");
-    assert!(
-        matches!(
-            rig.minds[ANN]
-                .view(K::Run, "ann:run:crashed")
-                .unwrap()
-                .status,
-            huginn_mind::PipelineStatus::Resolved { .. }
-        ),
-        "the dead holder was closed by the launch"
-    );
-    assert_eq!(
-        claims_of_run(&runs[1]),
-        vec![brief_ref("orphan").id.0],
-        "claiming the brief the dead run left"
-    );
-    assert!(
-        notes_of(&rig)
-            .contains(&"closing the Self run whose unit is gone: ann:run:crashed".to_string()),
-        "{:?}",
-        notes_of(&rig)
-    );
+fn self_runs(rig: &Rig) -> usize {
+    rig.minds[ANN]
+        .ids(K::Run)
+        .iter()
+        .filter(|id| matches!(rig.minds[ANN].view(K::Run, id).map(|view| view.document), Some(PipelineDocument::Run(run)) if run.turn == RunTurn::SelfRun))
+        .count()
 }
 
 #[test]
-fn a_self_run_whose_unit_may_still_be_starting_or_is_running_gets_no_successor() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::persona::AGENT, "orphan", &source);
-    crashed_self_run(&rig, &[brief_ref("orphan")], 30);
-    rig.advance(10);
-    rig.poll();
-    assert_eq!(
-        self_runs(&rig, ANN).len(),
-        1,
-        "inside the start grace the unit may still be starting"
-    );
-    rig.launcher
-        .revive_as(&Slug("ann".into()), RunTurn::SelfRun);
-    rig.advance(3600);
-    rig.poll();
-    polls(&rig, 4);
-    assert_eq!(
-        self_runs(&rig, ANN).len(),
-        1,
-        "a run whose unit is active holds the briefs however old it is"
-    );
-    assert!(matches!(
-        rig.minds[ANN]
-            .view(K::Run, "ann:run:crashed")
-            .unwrap()
-            .status,
-        huginn_mind::PipelineStatus::InForce
-    ));
-}
-
-#[test]
-fn one_held_brief_says_so_in_the_trace() {
-    let (rig, source) = rig_with_a_persona_turn();
-    brief_by(&rig, ANN, crate::persona::AGENT, "solo", &source);
-    fail_bundle(&rig, &[brief_ref("solo")]);
-    beats_until(&rig, 12, || {
-        notes_of(&rig).contains(&"1 briefs held by open questions".to_string())
-    });
-    assert!(
-        notes_of(&rig).contains(&"1 briefs held by open questions".to_string()),
-        "{:?}",
-        notes_of(&rig)
-    );
-}
-
-#[test]
-fn an_answer_of_retire_resolves_nothing_and_the_hold_stays_until_the_answerer_resolves() {
-    let (rig, source) = rig_with_a_persona_turn();
-    let items = failed_bundle(&rig, &source);
-    beats(&rig, 3);
-    let question = rig.minds[ANN].ids(K::Question).pop().expect("the trip asked");
-    assert_eq!(self_runs(&rig, ANN).len(), 3);
-    rig.minds[ANN].committed(vec![crate::testkit::ruling("answer", Some((&question, "retire")))]);
-    beats(&rig, 6);
-    assert_eq!(self_runs(&rig, ANN).len(), 3, "no Self run after the answer: retire does not relaunch");
-    for item in &items {
-        let view = rig.minds[ANN].view(K::FollowUp, &item.id.0).unwrap();
-        assert!(matches!(view.status, huginn_mind::PipelineStatus::InForce), "{item:?}: the heartbeat resolves nothing on an answer");
+fn a_mind_whose_self_holds_briefs_gets_a_persona_turn_and_no_self_run_ever_opens_or_starts() {
+    let rig = Rig::new();
+    let label = rig.turn(ANN, 3000);
+    rig.turn(BOB, 1000);
+    let source = reference(K::Run, &format!("ann:run:{label}"));
+    brief(&rig, "first", &source);
+    brief(&rig, "second", &source);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] }, "the beat gives her Persona the turn");
+    assert!(rig.store.traces.borrow().last().unwrap().instances[ANN].busy);
+    for _ in 0..3 {
+        rig.advance(1000);
+        rig.poll();
     }
-    assert_eq!(rig.minds[ANN].ids(K::Question).len(), 1, "and no second question");
-    assert!(inbox::derive(&rig.minds[ANN], &HashSet::new()).unwrap().is_empty(), "the retired claims stay held and untold");
+    assert_eq!(self_runs(&rig), 0, "no Self run is opened, so none can be withdrawn when polkit denies its unit");
+    assert!(rig.launcher.started.borrow().iter().all(|(_, turn)| *turn == RunTurn::PersonaTurn), "no Self unit is started");
+    assert_eq!(rig.minds[ANN].ids(K::FollowUp).len(), 2, "the briefs stay open for her Persona to hand to a Self run");
 }
 
 /// Bob's Persona turn admitted `ago` seconds back and left in force; the operator names him.
