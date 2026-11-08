@@ -11,10 +11,11 @@ use std::time::Duration as StdDuration;
 
 use anyhow::Result;
 use chrono::Duration as ChronoDuration;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::decide::{Action, Event, State, Why, decide, next_deadline};
 use super::{Child, Read, SelfRunOutcome, Usage, read_usage, write_result, writes_hour_cache};
+use crate::chat_image::Image;
 use crate::launch::Clock;
 
 /// What one poll of an inbox found.
@@ -40,6 +41,10 @@ pub(crate) trait SessionInbox {
     /// The text of what waits, which is thereby told. `switch`: the session is idle and the text is another conversation's, the oldest waiting; else it is the served conversation's.
     fn tell(&mut self, switch: bool) -> Result<String>;
     fn flush_text(&mut self, why: Why) -> String;
+    /// The images of the line `start_line` or `tell` just returned, taken once: they ride beside its text in the same user message.
+    fn images(&mut self) -> Vec<Image> {
+        Vec::new()
+    }
     /// Every line of the child's stream, before it is read.
     fn line(&mut self, _line: &str) {}
     /// The CLI took one of our lines into a request.
@@ -50,10 +55,21 @@ pub(crate) trait SessionInbox {
     }
 }
 
+/// One user message for the CLI's stream-json input. With no image its content is the text, as ever; with images it is a text block
+/// then one base64 image block each.
+pub(super) fn user_line(text: &str, images: Vec<Image>) -> String {
+    if images.is_empty() {
+        return json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
+    }
+    let blocks: Vec<Value> = std::iter::once(json!({"type": "text", "text": text}))
+        .chain(images.into_iter().map(|image| json!({"type": "image", "source": {"type": "base64", "media_type": image.media_type, "data": image.base64}})))
+        .collect();
+    json!({"type": "user", "message": {"role": "user", "content": blocks}}).to_string()
+}
+
 /// The loop: facts in, one clock read per fact, actions out. The one writer into the session.
 pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dyn SessionInbox, run_cap_s: u64, out: &mut dyn Write) -> Result<SelfRunOutcome> {
-    let user_line = |text: &str| json!({"type": "user", "message": {"role": "user", "content": text}}).to_string();
-    child.write_line(&user_line(&inbox.start_line()?));
+    child.write_line(&user_line(&inbox.start_line()?, inbox.images()));
 
     let poll_every = ChronoDuration::seconds(inbox.poll_every_s());
     let longest = StdDuration::from_secs(u64::try_from(inbox.poll_every_s()).unwrap_or(1));
@@ -128,7 +144,7 @@ pub(crate) fn drive(clock: &dyn Clock, mut child: Box<dyn Child>, inbox: &mut dy
                     if let Some(why) = *flush {
                         parts.push(inbox.flush_text(why));
                     }
-                    child.write_line(&user_line(&parts.join("\n\n")));
+                    child.write_line(&user_line(&parts.join("\n\n"), inbox.images()));
                 }
                 Action::CloseStdin => {
                     child.close_input();

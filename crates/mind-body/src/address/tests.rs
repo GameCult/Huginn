@@ -9,6 +9,7 @@ fn said(text: &str, mentions: &[&str]) -> ChatDelivery {
         room_id: "!r:chat".into(),
         room_alias: "swarm".into(),
         is_direct: false,
+        image: None,
         sender: "@op:chat".into(),
         sender_display: "Op".into(),
         at_unix_ms: 0,

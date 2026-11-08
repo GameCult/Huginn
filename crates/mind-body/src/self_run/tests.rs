@@ -1911,3 +1911,32 @@ mod sandbox {
         assert!(!seen.contains("canary") && !seen.contains("UNLISTED"), "the child's environment is the allow-list: {seen}");
     }
 }
+
+#[test]
+fn a_user_line_with_images_is_a_text_block_then_one_base64_image_block_each_and_without_them_is_the_bare_text() {
+    use super::session::user_line;
+    use crate::chat_image::Image;
+    let bare: serde_json::Value = serde_json::from_str(&user_line("hello", vec![])).unwrap();
+    assert_eq!(bare, json!({"type": "user", "message": {"role": "user", "content": "hello"}}));
+    let images = vec![Image { media_type: "image/png", base64: "QUJD".into() }, Image { media_type: "image/jpeg", base64: "REVG".into() }];
+    let with: serde_json::Value = serde_json::from_str(&user_line("hello", images)).unwrap();
+    assert_eq!(
+        with,
+        json!({"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "hello"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "REVG"}},
+        ]}})
+    );
+}
+
+#[test]
+fn a_replayed_line_with_images_is_still_our_echo_and_a_tool_result_is_not() {
+    let replayed = json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": [
+        {"type": "text", "text": "hello"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+    ]}}).to_string();
+    assert_eq!(read_usage(&replayed), Usage::Echo);
+    let tool_result = json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "x"}]}}).to_string();
+    assert_eq!(read_usage(&tool_result), Usage::Other);
+}

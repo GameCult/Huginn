@@ -152,6 +152,7 @@ fn delivery(seq: u64, sender: &str, text: &str, mentions: &[&str]) -> ChatDelive
         context: vec![],
         mentions: mentions.iter().map(|id| (*id).to_string()).collect(),
         is_direct: false,
+        image: None,
     }
 }
 

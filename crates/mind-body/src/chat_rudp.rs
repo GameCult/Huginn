@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::chat_client::{
-    ACK, Chat, ChatAck, ChatDelivery, ChatPending, ChatPendingRequest, ChatRefusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, REFUSAL, SEND_RECEIPT,
+    ACK, Chat, ChatAck, ChatDelivery, ChatPending, ChatPendingRequest, ChatRefusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, REFUSAL, SEND_RECEIPT,
     SEND_REQUEST, decode, encode,
 };
 
@@ -160,7 +160,7 @@ impl RudpChat {
 impl Chat for RudpChat {
     fn pending(&self, after_seq: u64) -> Result<Vec<ChatDelivery>> {
         let request = ChatPendingRequest { persona: self.persona.clone(), after_seq };
-        let kinds: &[&str] = &[PENDING, REFUSAL];
+        let kinds: &[&str] = &[PENDING, PENDING_V1, REFUSAL];
         let (kind, payload) = self.exchange(PENDING_REQUEST, &self.persona, &request, Some((kinds, self.persona.as_str())))?.ok_or_else(|| anyhow!("no answer payload"))?;
         if kind == REFUSAL {
             let refusal: ChatRefusal = decode(&payload)?;

@@ -36,6 +36,7 @@
 
 mod address;
 pub mod chat_client;
+mod chat_image;
 pub mod chat_rudp;
 pub mod cli;
 pub mod connector;
