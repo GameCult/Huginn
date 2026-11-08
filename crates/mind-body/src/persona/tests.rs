@@ -2943,10 +2943,10 @@ fn a_wake_after_a_self_run_today_has_no_ask_but_still_the_work_question() {
 
 #[test]
 fn the_work_question_sends_her_to_her_own_mind_and_a_self_run() {
-    for needle in ["huginn campaigns", "huginn open <campaign>", "huginn unreported <campaign>", "start_self_run", "Put what you are building in `intent` first", "Silence in chat costs nothing", "Do not ask again someone you have already asked", "start_self_run"] {
+    for needle in ["huginn campaigns", "huginn open <campaign>", "huginn unreported <campaign>", "start_self_run", "Put what you are building in `intent` first", "Silence in chat costs nothing", "Do not ask again someone you have already asked", "Every follow-up in your campaigns is yours to take up"] {
         assert!(WORK_QUESTION.contains(needle), "{needle}");
     }
-    assert!(WORK_TAIL.contains("huginn open <campaign>") && WORK_TAIL.contains("what are you building"));
+    assert!(WORK_TAIL.contains("huginn open <campaign>") && WORK_TAIL.contains(r#"huginn query '{}' --near "<project> roadmap" --documents"#) && WORK_TAIL.contains("what are you building"));
 }
 
 #[test]

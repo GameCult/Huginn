@@ -3109,7 +3109,7 @@ const ANSWER_MESSAGES: &str = "Answer these messages as part of the work you nam
 /// The opener of a no-message first line on a day she has started no Self run of her own: it asks for the work that does not exist yet.
 const WAKE_ASK: &str = "No new messages. Before your open work, consider what does not exist yet in what you steward, that someone outside would come to use and that you would be excited to build this week. Not a cleanup. If it beats what your mind holds open, start it as a Self run with its brief at the idea's full size, and say why in `intent`.";
 /// The last text of every later line (plain, refused and stale alike), after the lines.
-const WORK_TAIL: &str = "Still: what are you building? If no Self run of yours is open, start or continue one from your mind (`huginn open <campaign>`), and answer these as part of that work.";
+const WORK_TAIL: &str = "Still: what are you building? If no Self run of yours is open, start or continue one from your plans and your mind (`huginn query '{}' --near \"<project> roadmap\" --documents`, `huginn open <campaign>`), and answer these as part of that work.";
 
 /// How much of a line's text its key holds: the mouth clips a message's copy in a later context at 1000 bytes and the message
 /// itself at 4000, so a long message and its copy agree only on their head. 200 chars are at most 800 bytes.
