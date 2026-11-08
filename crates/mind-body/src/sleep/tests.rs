@@ -246,7 +246,7 @@ fn night_over(earlier: usize, memories: &[(String, MemorySort, MemoryOrigin, i64
     let mut events: Vec<(i64, Vec<Vec<PipelineDocument>>)> = Vec::new();
     for n in 0..earlier {
         let label = format!("before{n}");
-        let closed = crate::testkit::close(run_ref(&label), ResolutionOutcome::Recorded { reason: "slept: ok".into() });
+        let closed = crate::testkit::close(run_ref(&label), ResolutionOutcome::Slept { line: "ok".into(), day_through: None });
         events.push((T0 - 100 * 3_600_000 + n as i64, vec![vec![run(&label, RunTurn::Sleep, RunOperator::Mind, &[])], vec![closed]]));
     }
     for (label, sort, origin, offset) in memories {
@@ -265,18 +265,29 @@ fn night_over(earlier: usize, memories: &[(String, MemorySort, MemoryOrigin, i64
 
 /// A night's own ending, admitted: slept through what it was shown, or failed.
 fn close_night(mind: &TestMind, run: &PipelineRef, finish: &Finish) {
-    let (reason, rationale) = closing(finish);
+    let (outcome, rationale) = closing(finish);
     mind.committed(vec![PipelineDocument::Resolution(PipelineResolution {
         subject: run.clone(),
         sequence: 1,
-        outcome: ResolutionOutcome::Recorded { reason: reason.as_str().into() },
+        outcome,
         rationale: rationale.as_str().into(),
         resolved_on: eureka_pipeline::Date("2026-10-09".into()),
     })]);
 }
 
 fn slept_over(context: &Context) -> Finish {
-    Finish::Slept { reply: SleepReply { night: "n".into(), keep: vec![], consolidate: vec![], retire: vec![], remember: vec![] }, through: context.day.last().map(|held| held.ordinal) }
+    Finish::Slept { reply: SleepReply { night: "n".into(), keep: vec![], consolidate: vec![], retire: vec![], remember: vec![] }, through: context.day.last().map(|held| reference(&held.id)) }
+}
+
+/// A closing someone other than the organ wrote: a Recorded one, whatever its words say.
+fn closed_by_hand(mind: &TestMind, run: &PipelineRef, reason: &str, rationale: &str) {
+    mind.committed(vec![PipelineDocument::Resolution(PipelineResolution {
+        subject: run.clone(),
+        sequence: 1,
+        outcome: ResolutionOutcome::Recorded { reason: reason.into() },
+        rationale: rationale.into(),
+        resolved_on: eureka_pipeline::Date("2026-10-09".into()),
+    })]);
 }
 
 fn failed() -> Finish {
@@ -404,6 +415,73 @@ fn a_night_that_failed_or_never_ran_covers_nothing_so_its_day_comes_back() {
     close_night(&mind, &fourth, &failed());
     let (_, fifth) = next_night(&mind, "fifth", 7000);
     assert_eq!(day_ids(&fifth), vec![id("g0"), id("g1"), id("g2")]);
+}
+
+#[test]
+fn a_hand_written_closing_moves_no_cut_line() {
+    // Closed Recorded with the words and the numbers the old reader trusted: the day is owed all the same.
+    let days: Vec<_> = (0..3).map(|n| (format!("g{n}"), MemorySort::Learned, wake(), 10 + n as i64)).collect();
+    let (mind, first) = night_over(0, &days);
+    mind.admit_at(at(T0 + 2000));
+    closed_by_hand(&mind, &first, "slept: closed by hand", "kept 0; day through ordinal 999999999");
+    let (_, next) = next_night(&mind, "second", 3000);
+    assert_eq!(day_ids(&next), vec![id("g0"), id("g1"), id("g2")], "nothing was shown, so nothing is dropped");
+
+    // A hundred-memory day closed by hand covers none of it; a Slept close over what was then shown covers it.
+    let days: Vec<_> = (0..100).map(|n| (format!("day{n:03}"), MemorySort::Learned, wake(), 10 + n as i64)).collect();
+    let (mind, first) = night_over(0, &days);
+    mind.admit_at(at(T0 + 2000));
+    closed_by_hand(&mind, &first, "slept: closed by hand", "kept 96 (by hand)");
+    let (second, owed) = next_night(&mind, "second", 3000);
+    assert_eq!(day_ids(&owed), (0..96).map(|n| id(&format!("day{n:03}"))).collect::<Vec<_>>(), "the overflow is not dropped by a hand");
+    mind.admit_at(at(T0 + 3600));
+    close_night(&mind, &second, &slept_over(&owed));
+    let (_, third) = next_night(&mind, "third", 4000);
+    assert_eq!(day_ids(&third), (96..100).map(|n| id(&format!("day{n:03}"))).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_slept_nights_closing_names_the_last_memory_it_was_shown_even_when_that_night_consumed_it() {
+    let days: Vec<_> = (0..100).map(|n| (format!("day{n:03}"), MemorySort::Learned, wake(), 10 + n as i64)).collect();
+    let (mind, tonight) = night_over(0, &days);
+    let shown = context(&mind, &tonight, at(T0 + 5000)).unwrap();
+    let (outcome, rationale) = closing(&slept_over(&shown));
+    assert_eq!(outcome, ResolutionOutcome::Slept { line: "n".into(), day_through: Some(crate::testkit::reference(eureka_pipeline::PipelineKind::Memory, &id("day095"))) });
+    assert_eq!(rationale, "kept 0, consolidated 0 from 0, retired 0, formed 0", "the rationale is the counts and says nothing of the cut line");
+    // The night folds the last memory it was shown into a consolidation, so day095 leaves force.
+    mind.admit_at(at(T0 + 2000));
+    let PipelineDocument::Memory(mut merged) = memory_from("merged", MemorySort::Learned, "Merged.", &[], wake(), 500) else { unreachable!() };
+    let consumed = crate::testkit::reference(eureka_pipeline::PipelineKind::Memory, &id("day095"));
+    merged.consolidates = vec![consumed.clone()];
+    let by = crate::testkit::reference(eureka_pipeline::PipelineKind::Memory, &id("merged"));
+    mind.committed(vec![PipelineDocument::Memory(merged), crate::testkit::close(consumed, ResolutionOutcome::Superseded { by: vec![by] })]);
+    mind.admit_at(at(T0 + 2500));
+    close_night(&mind, &tonight, &slept_over(&shown));
+    let (_, next) = next_night(&mind, "tomorrow", 3000);
+    assert_eq!(day_ids(&next), (96..100).map(|n| id(&format!("day{n:03}"))).collect::<Vec<_>>(), "the cut line is read from the memory that is no longer in force");
+}
+
+#[test]
+fn a_slept_closing_that_was_withdrawn_covers_nothing() {
+    let days: Vec<_> = (0..3).map(|n| (format!("f{n}"), MemorySort::Learned, wake(), 10 + n as i64)).collect();
+    let (mind, first) = night_over(0, &days);
+    let shown = context(&mind, &first, at(T0 + 5000)).unwrap();
+    mind.admit_at(at(T0 + 2000));
+    close_night(&mind, &first, &slept_over(&shown));
+    // The closing is withdrawn (the run is live again) and the run ends in failure: no Slept closing stands.
+    mind.admit_at(at(T0 + 2100));
+    let closing_ref = crate::testkit::reference(eureka_pipeline::PipelineKind::Resolution, &format!("{INSTANCE}:resolution:run.tonight.n1"));
+    mind.committed(vec![crate::testkit::close(closing_ref, crate::testkit::withdrawn())]);
+    mind.admit_at(at(T0 + 2200));
+    mind.committed(vec![PipelineDocument::Resolution(PipelineResolution {
+        subject: first.clone(),
+        sequence: 2,
+        outcome: ResolutionOutcome::Recorded { reason: "failed after 3 refusals: no reply the ledger took".into() },
+        rationale: "The night ended without a reply the ledger took.".into(),
+        resolved_on: eureka_pipeline::Date("2026-10-09".into()),
+    })]);
+    let (_, next) = next_night(&mind, "second", 3000);
+    assert_eq!(day_ids(&next), vec![id("f0"), id("f1"), id("f2")], "a withdrawn Slept closing leaves its day owed");
 }
 
 #[test]

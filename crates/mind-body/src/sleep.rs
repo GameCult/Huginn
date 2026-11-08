@@ -196,29 +196,22 @@ fn sleeps(mind: &dyn MindPort) -> Result<Vec<Night>> {
     Ok(found)
 }
 
-const SLEPT: &str = "slept: ";
-const THROUGH: &str = "; day through ordinal ";
-
-/// Where the newest of `earlier` that closed `slept:` left her day: the admission ordinal of the last memory of
-/// the day it was shown (its own run's ordinal when it was shown none). A night that failed, or whose run never
-/// closed, left its day uncovered, so it is not an anchor.
+/// Where the newest of `earlier` whose closing in force is `Slept` left her day: the admission ordinal of the
+/// memory it names as the last of the day it was shown, in force or not (its own run's ordinal when it was shown
+/// none). A night with no such closing (it failed, its run never closed, a hand closed it, or its `Slept` closing
+/// was withdrawn) left its day uncovered, so it is not an anchor.
 fn covered_through(mind: &dyn MindPort, earlier: &[&Night]) -> Result<Option<u64>> {
     for night in earlier.iter().rev() {
-        let closings = Selection { cites: Some(citing(&night.run, Some("subject"))), ..of_kind(PipelineKind::Resolution) };
-        let latest = documents(mind, &closings)?
-            .into_iter()
-            .filter_map(|view| match view.document {
-                PipelineDocument::Resolution(resolution) => Some(resolution),
-                _ => None,
-            })
-            .max_by_key(|resolution| resolution.sequence);
-        if let Some(resolution) = latest
-            && let ResolutionOutcome::Recorded { reason } = &resolution.outcome
-            && reason.0.as_str().starts_with(SLEPT)
-        {
-            let through = resolution.rationale.0.rsplit_once(THROUGH).and_then(|(_, ordinal)| ordinal.trim().parse().ok());
-            return Ok(Some(through.unwrap_or(night.ordinal)));
-        }
+        let closings = in_force(any_of(Selection { cites: Some(citing(&night.run, Some("subject"))), ..of_kind(PipelineKind::Resolution) }, "outcome", &["Slept"]));
+        let slept = documents(mind, &closings)?.into_iter().find_map(|view| match view.document {
+            PipelineDocument::Resolution(PipelineResolution { outcome: ResolutionOutcome::Slept { day_through, .. }, .. }) => Some(day_through),
+            _ => None,
+        });
+        let Some(through) = slept else { continue };
+        let Some(memory) = through else { return Ok(Some(night.ordinal)) };
+        let named = Selection { keys: Some(vec![memory.id.0.clone()]), ..of_kind(PipelineKind::Memory) };
+        let held = headers(mind, &named)?.into_iter().next().ok_or_else(|| anyhow!("the last memory a night was shown could not be read"))?;
+        return Ok(Some(held.admission.ordinal));
     }
     Ok(None)
 }
@@ -233,7 +226,7 @@ fn is_sleep_made(held: &Held) -> bool {
     matches!(held.memory.origin, MemoryOrigin::Sleep { .. }) || !held.memory.consolidates.is_empty()
 }
 
-/// The night, derived. Her day: her memories in force admitted after what her newest night that closed `slept:`
+/// The night, derived. Her day: her memories in force admitted after what her newest night whose closing in force is `Slept`
 /// covered (a night that failed covered nothing), else in the 24 hours before her first night opened; formed
 /// otherwise than in sleep, oldest first, at most `DAY_MAX`, the rest waiting for the next night. Her open Asked
 /// and Committed items older than the day. A tide of `TIDE` older memories of other sorts, from an offset that
@@ -475,8 +468,8 @@ pub(crate) fn pack(units: Vec<Vec<PipelineDocument>>) -> Vec<Vec<PipelineDocumen
 
 /// How a night ended.
 enum Finish {
-    /// `through` is the ordinal of the last memory of the day the night was shown, if it was shown any.
-    Slept { reply: SleepReply, through: Option<u64> },
+    /// `through` is the last memory of the day the night was shown, if it was shown any.
+    Slept { reply: SleepReply, through: Option<PipelineRef> },
     Failed { refusals: u32, why: String },
 }
 
@@ -552,7 +545,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for SleepInbox<'_, C, S> {
         match decode(&text, self.context) {
             Ok(reply) => match self.admit(&reply) {
                 Ok(()) => {
-                    self.finish = Some(Finish::Slept { reply, through: self.context.day.last().map(|held| held.ordinal) });
+                    self.finish = Some(Finish::Slept { reply, through: self.context.day.last().map(|held| reference(&held.id)) });
                     Ok((true, false))
                 }
                 Err(error) => {
@@ -565,33 +558,35 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for SleepInbox<'_, C, S> {
     }
 }
 
-/// What a night closes with: the reason (her line, or the failure) and the rationale (the counts, and where her
-/// day was covered through).
-fn closing(finish: &Finish) -> (String, String) {
+/// What a night closes with: the outcome (`Slept` with her line and where her day was covered through, or
+/// `Recorded` with the failure) and the rationale (the counts, display only: nothing reads it).
+fn closing(finish: &Finish) -> (ResolutionOutcome, String) {
     match finish {
         Finish::Slept { reply, through } => (
-            format!("{SLEPT}{}", reply.night),
+            ResolutionOutcome::Slept { line: reply.night.as_str().into(), day_through: through.clone() },
             format!(
-                "kept {}, consolidated {} from {}, retired {}, formed {}{}",
+                "kept {}, consolidated {} from {}, retired {}, formed {}",
                 reply.keep.len(),
                 reply.consolidate.len(),
                 reply.consolidate.iter().map(|consolidation| consolidation.consumes.len()).sum::<usize>(),
                 reply.retire.len(),
-                reply.remember.len(),
-                through.map_or(String::new(), |ordinal| format!("{THROUGH}{ordinal}"))
+                reply.remember.len()
             ),
         ),
-        Finish::Failed { refusals, why } => (format!("failed after {refusals} refusals: {why}"), "The night ended without a reply the ledger took.".to_string()),
+        Finish::Failed { refusals, why } => (
+            ResolutionOutcome::Recorded { reason: format!("failed after {refusals} refusals: {why}").as_str().into() },
+            "The night ended without a reply the ledger took.".to_string(),
+        ),
     }
 }
 
-/// Closes the night's run Recorded with her line and the counts, or the failure.
+/// Closes the night's run: `Slept` with her line and the cut line, or `Recorded` with the failure.
 fn close(organs: &Organs, run: &PipelineRef, finish: &Finish) -> Result<()> {
-    let (reason, rationale) = closing(finish);
+    let (outcome, rationale) = closing(finish);
     let resolution = PipelineResolution {
         subject: run.clone(),
         sequence: next_sequence(organs.mind, run)?,
-        outcome: ResolutionOutcome::Recorded { reason: reason.as_str().into() },
+        outcome,
         rationale: rationale.as_str().into(),
         resolved_on: date(organs.clock.now()),
     };

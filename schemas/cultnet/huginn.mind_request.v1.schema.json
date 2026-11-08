@@ -2609,6 +2609,37 @@
           "required": [
             "Withdrawn"
           ]
+        },
+        {
+          "description": "How a Sleep run ended when the ledger took her reply: `line` is her one line, `day_through` the last memory\nof her day she was shown (none when the day was empty). It is the one place a night's cut line is kept.",
+          "type": "object",
+          "properties": {
+            "Slept": {
+              "type": "object",
+              "properties": {
+                "day_through": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PipelineRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "line": {
+                  "$ref": "#/$defs/Line"
+                }
+              },
+              "required": [
+                "line"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Slept"
+          ]
         }
       ]
     },

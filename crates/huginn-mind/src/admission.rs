@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use cultcache_rs::{CultCache, CultCacheEnvelope};
 use eureka_pipeline::{
     ClaimOutcome, FindingConfidence, Line, PipelineDocument, PipelineKind, PipelineMemory, PipelineRef, PipelineRefusal,
-    PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome, RulingAuthority, Short, Slug, pipeline_key,
+    PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome, RulingAuthority, RunTurn, Short, Slug, pipeline_key,
     validate_pipeline_write_envelope,
 };
 use schemars::JsonSchema;
@@ -709,6 +709,7 @@ fn outcome_name(outcome: &ResolutionOutcome) -> &'static str {
         ResolutionOutcome::Deferred { .. } => "Deferred",
         ResolutionOutcome::Recorded { .. } => "Recorded",
         ResolutionOutcome::Withdrawn { .. } => "Withdrawn",
+        ResolutionOutcome::Slept { .. } => "Slept",
     }
 }
 
@@ -743,6 +744,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Stewardship, O::Superseded { by }) => all(by, K::Stewardship),
         (K::Stewardship, O::Withdrawn { .. }) => true,
         (K::Run, O::Recorded { .. } | O::Withdrawn { .. }) => true,
+        (K::Run, O::Slept { day_through, .. }) => day_through.as_ref().is_none_or(|memory| memory.kind == K::Memory),
         (K::Memory, O::Deferred { to }) => to.kind == K::FollowUp,
         (K::Memory, O::Recorded { .. } | O::Withdrawn { .. }) => true,
         (K::Memory, O::Superseded { by }) => all(by, K::Memory),
@@ -833,8 +835,9 @@ fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(
     {
         run_rule(docs, &reinstating.subject.id.0, run, false)?;
     }
-    for (_, referent) in outcome_citations(&resolution.outcome) {
-        if !docs.in_force(referent.kind, &referent.id.0) {
+    for (role, referent) in outcome_citations(&resolution.outcome) {
+        // The last memory a night was shown may have been consumed by that night's own batches.
+        if role != CitationRole::DayThrough && !docs.in_force(referent.kind, &referent.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: referent.kind, id: referent.id.0 });
         }
     }
@@ -860,6 +863,18 @@ fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(
         ResolutionOutcome::Answered { by } => {
             let Some(D::Ruling(ruling)) = docs.find(K::Ruling, &by.id.0) else { return Ok(()) };
             if ruling.answers.as_ref().map(|answers| answers.0.as_str()) != Some(subject_id) {
+                return Err(incompatible());
+            }
+        }
+        ResolutionOutcome::Slept { day_through, .. } => {
+            // A night's closing is a Sleep run's, and the memory it names was admitted before this batch (every
+            // memory in the image is hers: A5).
+            if !matches!(docs.find(K::Run, subject_id), Some(D::Run(run)) if run.turn == RunTurn::Sleep) {
+                return Err(incompatible());
+            }
+            if let Some(memory) = day_through
+                && docs.in_image(K::Memory, &memory.id.0).is_none()
+            {
                 return Err(incompatible());
             }
         }
@@ -2717,6 +2732,46 @@ mod tests {
         committed(admit(&mut mind, vec![mind_run("s", RunTurn::Sleep, &[])]));
         assert_eq!(refusal(admit(&mut mind, vec![mind_run("p2", RunTurn::PersonaTurn, &[])])), live("s"), "a session while she sleeps");
         assert_eq!(refusal(admit(&mut mind, vec![mind_run("s2", RunTurn::Sleep, &[])])), live("s"), "one night at a time");
+    }
+
+    /// A Slept closing ends a Sleep run, and only that; the memory it names was admitted before it, and may have
+    /// been consumed since.
+    #[test]
+    fn a_slept_closing_is_a_sleep_runs_and_names_an_earlier_memory_of_hers() {
+        let incompatible = |subject_kind: K| MindRefusal::IncompatibleResolution { subject_kind, outcome: "Slept".into() };
+        let m = |label: &str| r(K::Memory, &memory_key(label));
+        let slept = |subject: PipelineRef, through: Option<PipelineRef>| resolution(subject, ResolutionOutcome::Slept { line: "ok".into(), day_through: through });
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), memory("m1", MemorySort::Idea, "one", &[]), memory("m2", MemorySort::Idea, "two", &[])]));
+        committed(admit(&mut mind, vec![mind_run("p", RunTurn::PersonaTurn, &[])]));
+        assert_eq!(refusal(admit(&mut mind, vec![slept(r(K::Run, &run_key("p")), None)])), incompatible(K::Run), "a persona run is not a night");
+        committed(admit(&mut mind, vec![recorded("p")]));
+        committed(admit(&mut mind, vec![mind_run("self", RunTurn::SelfRun, &[])]));
+        assert_eq!(refusal(admit(&mut mind, vec![slept(r(K::Run, &run_key("self")), None)])), incompatible(K::Run), "a Self run is not a night");
+        committed(admit(&mut mind, vec![recorded("self")]));
+        committed(admit(&mut mind, vec![mind_run("s", RunTurn::Sleep, &[])]));
+        let night = || r(K::Run, &run_key("s"));
+        assert_eq!(refusal(admit(&mut mind, vec![slept(m("m1"), None)])), incompatible(K::Memory), "a memory is not slept");
+        let ruling_ref = r(K::Ruling, &id("ruling", "R1"));
+        assert_eq!(refusal(admit(&mut mind, vec![slept(night(), Some(ruling_ref))])), incompatible(K::Run), "the cut line is a memory");
+        let same_batch = vec![memory("m3", MemorySort::Idea, "three", &[]), slept(night(), Some(m("m3")))];
+        assert_eq!(refusal(admit(&mut mind, same_batch)), incompatible(K::Run), "a memory of this very batch was not shown");
+        assert_eq!(
+            refusal(admit(&mut mind, vec![slept(night(), Some(m("nope")))])),
+            MindRefusal::MissingReference { kind: K::Memory, id: memory_key("nope") },
+            "a memory that does not exist"
+        );
+        // A memory the night itself consumed is still the last it was shown.
+        committed(admit(&mut mind, consolidation("m4", &["m1"])));
+        committed(admit(&mut mind, vec![slept(night(), Some(m("m1")))]));
+        assert_eq!(
+            refusal(admit(&mut mind, vec![resolution_n(night(), 2, ResolutionOutcome::Slept { line: "again".into(), day_through: None })])),
+            MindRefusal::AlreadyResolved { subject: run_key("s") },
+            "the first closing in force is the only one"
+        );
+        // An empty day names no memory.
+        committed(admit(&mut mind, vec![mind_run("s2", RunTurn::Sleep, &[])]));
+        committed(admit(&mut mind, vec![slept(r(K::Run, &run_key("s2")), None)]));
     }
 
     fn research_key(pass: &str, label: &str) -> String {

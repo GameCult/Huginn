@@ -64,7 +64,7 @@ pub(crate) enum Alias {
 }
 
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
-const OUTCOMES: [&str; 6] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn"];
+const OUTCOMES: [&str; 7] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn", "Slept"];
 const BOOLEANS: [&str; 2] = ["true", "false"];
 const MEMORY_ORIGINS: [&str; 5] = ["Room", "Direct", "Wake", "SelfRun", "Sleep"];
 /// The one value a presence alias answers with; a row without it answers nothing.
@@ -199,6 +199,7 @@ fn outcome_name(outcome: &ResolutionOutcome) -> &'static str {
         ResolutionOutcome::Deferred { .. } => "Deferred",
         ResolutionOutcome::Recorded { .. } => "Recorded",
         ResolutionOutcome::Withdrawn { .. } => "Withdrawn",
+        ResolutionOutcome::Slept { .. } => "Slept",
     }
 }
 
@@ -330,7 +331,7 @@ impl Row for SelectionRow {
     }
 }
 
-/// The organ's closed lists: twenty schemas, twenty aliases, twenty-three roles.
+/// The organ's closed lists: twenty schemas, twenty aliases, twenty-four roles.
 /// A schema's name is its id, so the substrate's alias matching resolves
 /// nothing beyond exact ids.
 pub(crate) struct Vocabulary;
@@ -489,7 +490,7 @@ mod tests {
             (K::Verdict, &["cut_report", "findings"]),
             (K::Finding, &["verdict"]),
             (K::FollowUp, &["source"]),
-            (K::Resolution, &["subject", "superseded_by", "resolved_by", "deferred_to"]),
+            (K::Resolution, &["subject", "superseded_by", "resolved_by", "deferred_to", "day_through"]),
             (K::Instance, &[]),
             (K::Stewardship, &[]),
             (K::HandOff, &["documents"]),

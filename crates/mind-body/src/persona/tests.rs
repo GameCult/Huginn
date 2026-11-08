@@ -7089,8 +7089,15 @@ impl Rig {
         let label = label_of(run);
         let view = self.mind.view(K::Resolution, &format!("{INSTANCE}:resolution:run.{label}.n1")).expect("the night is closed");
         let PipelineDocument::Resolution(resolution) = view.document else { unreachable!() };
-        let ResolutionOutcome::Recorded { reason } = resolution.outcome else { panic!("a night is closed Recorded") };
-        reason.0
+        outcome_words(&resolution.outcome)
+    }
+
+    /// The memory the Sleep run's closing names as the last of her day she was shown.
+    fn night_through(&self, run: &PipelineRef) -> Option<String> {
+        let view = self.mind.view(K::Resolution, &format!("{INSTANCE}:resolution:run.{}.n1", label_of(run))).expect("the night is closed");
+        let PipelineDocument::Resolution(resolution) = view.document else { unreachable!() };
+        let ResolutionOutcome::Slept { day_through, .. } = resolution.outcome else { panic!("a night that slept closes Slept") };
+        day_through.map(|memory| memory.id.0)
     }
 
     fn the_night(&self) -> Outcome {
@@ -7120,7 +7127,7 @@ fn the_night_line_holds_the_day_whole_and_prescribes_nothing() {
     // An earlier night of hers, opened 30 hours before this one, closed.
     rig.mind.admit_at(at(NIGHT_AT_MS - 30 * HOUR_MS));
     rig.mind.committed(vec![crate::testkit::run("slept-before", RunTurn::Sleep, RunOperator::Mind, &[])]);
-    rig.mind.committed(vec![crate::testkit::close(crate::testkit::run_ref("slept-before"), ResolutionOutcome::Recorded { reason: "slept: ok".into() })]);
+    rig.mind.committed(vec![crate::testkit::close(crate::testkit::run_ref("slept-before"), ResolutionOutcome::Slept { line: "ok".into(), day_through: None })]);
     // Her day: after that night opened. A Sleep-origin memory of it is not part of it.
     rig.remembered("d1", MemorySort::Decided, "Ship on Friday.", &["@op:chat"], room(), 20, &["$e1"]);
     rig.remembered("d2", MemorySort::Learned, "A private thing.", &["@kiko:chat"], dm("!dm:chat", &["@kiko:chat"]), 10, &[]);
@@ -7228,6 +7235,7 @@ fn a_decoded_night_admits_whole_operations_and_the_run_closes_with_her_line() {
     assert_eq!(rig.the_memory(&format!("{tag}-c0")).origin, MemoryOrigin::Sleep { run: tag.as_str().into() }, "a public consolidation is formed in sleep");
     assert_eq!(rig.the_memory(&format!("{tag}-r0")).origin, MemoryOrigin::Sleep { run: tag.as_str().into() });
     assert_eq!(rig.night_closing(&run), "slept: I looked at the release again and let the rest go.");
+    assert_eq!(rig.night_through(&run), Some(memory_id("wrong")), "the closing names the last memory of her day she was shown");
     // She reads it on waking, as the line of her last runs.
     let lines = recent_runs(&rig.mind, &Slug(INSTANCE.into())).unwrap();
     assert!(lines[0].starts_with(&format!("{tag} Sleep: slept: I looked")), "{lines:?}");

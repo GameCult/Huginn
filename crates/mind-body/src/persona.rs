@@ -2638,6 +2638,7 @@ pub(crate) fn outcome_words(outcome: &ResolutionOutcome) -> String {
         ResolutionOutcome::Answered { by } => format!("answered by {}", by.id.0),
         ResolutionOutcome::Fixed { commit, .. } => format!("fixed by {}", commit.0),
         ResolutionOutcome::Deferred { to } => format!("deferred to {}", to.id.0),
+        ResolutionOutcome::Slept { line, .. } => format!("slept: {}", line.0),
     }
 }
 
