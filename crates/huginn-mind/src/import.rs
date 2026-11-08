@@ -87,7 +87,7 @@ pub fn plan(campaign: &Slug, source: &Slug, receiver: &Slug, views: Vec<Pipeline
             return Err(ImportFault::BatchTooLarge { ordinal, documents: group.len() });
         }
         let in_batch: BTreeSet<&str> = group.iter().map(|view| view.id.id.0.as_str()).collect();
-        let mut foreign: BTreeMap<&str, PipelineRef> = BTreeMap::new();
+        let mut foreign: BTreeMap<String, PipelineRef> = BTreeMap::new();
         for view in &group {
             for (_, target) in cited(&view.document, receiver) {
                 let key = target.id.0.as_str();
@@ -97,7 +97,7 @@ pub fn plan(campaign: &Slug, source: &Slug, receiver: &Slug, views: Vec<Pipeline
                 if root_and_local(key).0 == campaign.0 {
                     return Err(ImportFault::Unordered { ordinal, id: Short(key.to_string()) });
                 }
-                foreign.entry(key).or_insert_with(|| target.clone());
+                foreign.entry(key.to_string()).or_insert_with(|| target.clone());
             }
         }
         if foreign.len() > IMPORT_EXTERNAL_MAX {
