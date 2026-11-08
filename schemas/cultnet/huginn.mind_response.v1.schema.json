@@ -1677,7 +1677,7 @@
           "const": "ImportFromSelf"
         },
         {
-          "description": "An import carries a document of `root`, which is no campaign this mind holds or the batch carries, or which this mind holds a native write under.",
+          "description": "An import carries a document of `root`, which is no campaign this mind holds or the batch carries, or under which this mind holds a native write that is not a follow-up or idea admitted after the import began, or which cites or resolves one of its own native documents.",
           "type": "object",
           "properties": {
             "ImportOutsideCampaign": {

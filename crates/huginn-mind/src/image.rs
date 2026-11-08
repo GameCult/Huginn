@@ -143,13 +143,17 @@ impl Image {
         self.closers.get(&kind).and_then(|named| named.get(id)).into_iter().flat_map(|keyed| keyed.iter().map(|(key, id)| (key.as_str(), *id)))
     }
 
-    /// Whether any document under `root` was admitted natively rather than imported.
+    /// Whether this mind holds a native write under `root` that an import must not meet: one admitted
+    /// before the first imported document of the root, or after it and not `inert_in_window`.
     pub(crate) fn root_holds_native_write(&self, root: &str) -> bool {
-        PipelineKind::ALL.iter().any(|kind| {
-            self.posting(*kind, Alias::Root.name(), root)
-                .into_iter()
-                .flatten()
-                .any(|id| self.row(*id).view.admission.provenance.imported_from.is_none())
+        let rows: Vec<(PipelineKind, &SelectionRow)> = PipelineKind::ALL
+            .iter()
+            .flat_map(|kind| self.posting(*kind, Alias::Root.name(), root).into_iter().flatten().map(move |id| (*kind, self.row(*id))))
+            .collect();
+        let began = rows.iter().filter(|(_, row)| row.view.admission.provenance.imported_from.is_some()).map(|(_, row)| row.view.admission.ordinal).min();
+        rows.iter().any(|(kind, row)| {
+            row.view.admission.provenance.imported_from.is_none()
+                && !(crate::import::inert_in_window(*kind) && began.is_some_and(|began| row.view.admission.ordinal > began))
         })
     }
 

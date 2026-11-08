@@ -1490,6 +1490,20 @@ fn question_of(campaign: &str, label: &str, title: &str) -> PipelineDocument {
     })
 }
 
+fn idea_of(campaign: &str, label: &str) -> PipelineDocument {
+    PipelineDocument::Idea(huginn_mind::eureka_pipeline::PipelineIdea {
+        campaign: slug(campaign),
+        pass: label.into(),
+        label: label.into(),
+        title: huginn_mind::eureka_pipeline::Title(label.into()),
+        idea: "A note.".into(),
+        tradeoffs: "".into(),
+        rests_on: vec![],
+        toward: vec![],
+        proposed_on: Date("2026-10-10".into()),
+    })
+}
+
 fn for_lines(page: &str) -> Vec<&str> {
     page.lines().filter(|line| line.starts_with("For ")).collect()
 }
@@ -2624,6 +2638,41 @@ fn import_resumes_after_a_stop() {
     let again = importing(&taker, INSTANCE, giver.addr);
     assert_eq!(again.code, 0, "{}{}", again.out, again.err);
     assert!(imported_lines(&again.out).is_empty() && again.out.lines().next().unwrap().contains(&format!(", {} held,", plan.batches.len())), "{}", again.out);
+}
+
+#[test]
+fn import_resumes_past_a_record_the_receiver_admitted_after_it_began() {
+    let (root, mut giver_daemon) = giver_history(Some(TAKER));
+    let plan = plan_from(&mut giver_daemon);
+    let giver = serve(root, giver_daemon);
+    let (root, mut daemon) = taker_mind(false);
+    half_imported(&mut daemon, &plan, 2, 0);
+    let own = answered(daemon.handle(HuginnMindRequest::Admit(batch(TAKER, vec![idea_of(CAMPAIGN, "Mine")])), chrono::Utc::now()));
+    assert!(matches!(own, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })));
+    let taker = serve(root, daemon);
+
+    let ran = importing(&taker, INSTANCE, giver.addr);
+    assert_eq!(ran.code, 0, "{}{}", ran.out, ran.err);
+    assert!(ran.out.contains(&format!("left in place, admitted by the receiver after the import began: {CAMPAIGN}:idea:Mine.Mine")), "{}", ran.out);
+    assert_eq!(imported_lines(&ran.out).len(), plan.batches.len() - 2, "{}", ran.out);
+    assert!(ran.out.trim_end().ends_with(", verified"), "{}", ran.out);
+}
+
+#[test]
+fn import_still_refuses_a_native_question_admitted_after_it_began() {
+    let (root, mut giver_daemon) = giver_history(Some(TAKER));
+    let plan = plan_from(&mut giver_daemon);
+    let giver = serve(root, giver_daemon);
+    let (root, mut daemon) = taker_mind(false);
+    half_imported(&mut daemon, &plan, 2, 0);
+    let own = answered(daemon.handle(HuginnMindRequest::Admit(batch(TAKER, vec![question_of(CAMPAIGN, "Mine", "Hers")])), chrono::Utc::now()));
+    assert!(matches!(own, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })));
+    let taker = serve(root, daemon);
+
+    let ran = importing(&taker, INSTANCE, giver.addr);
+    assert_eq!(ran.code, 1, "{}{}", ran.out, ran.err);
+    assert!(ran.out.contains(&format!("{CAMPAIGN}:question:Mine")), "{}", ran.out);
+    assert!(imported_lines(&ran.out).is_empty(), "nothing is sent past a question the receiver wrote: {}", ran.out);
 }
 
 #[test]

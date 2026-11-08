@@ -12,10 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cultnet_rs::{LIMIT_MAX, PROJECTION_DOCUMENT, Selection};
 use eureka_state::hold;
-use huginn_mind::eureka_pipeline::{PipelineDocument, PipelineRef, Short, Slug};
+use huginn_mind::eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, Short, Slug};
 use huginn_mind::{
-    Faculty, HuginnMindRequest, HuginnMindResponse, ImportBatch, ImportFault, ImportPlan, PipelineAdmissionBatch, PipelineAdmissionOutcome,
-    PipelineDocumentSummary, PipelineDocumentView, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, plan,
+    AdmissionFacts, Faculty, HuginnMindRequest, HuginnMindResponse, ImportBatch, ImportFault, ImportPlan, PipelineAdmissionBatch, PipelineAdmissionOutcome,
+    PipelineDocumentSummary, PipelineDocumentView, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, inert_in_window, plan,
 };
 
 use crate::config::{Settings, TOOL};
@@ -71,7 +71,12 @@ fn import(settings: &Settings, flags: Flags) -> Step<()> {
     let ask_receiver = |selection: Selection| {
         settings.ask(|instance| HuginnMindRequest::Query { instance: instance.clone(), selection, semantic: None })
     };
-    let held = resume(&plan, &headers(&ask_receiver, &campaign)?, giver.instance())?;
+    let root = headers(&ask_receiver, &campaign)?;
+    let held = resume(&plan, &root, giver.instance())?;
+    let window = window_writes(root.iter().map(|header| (header.id.kind, header.id.id.0.as_str(), &header.admission)), &planned_keys(&plan), giver.instance());
+    if !window.is_empty() {
+        say(format_args!("left in place, admitted by the receiver after the import began: {}", window.iter().copied().collect::<Vec<_>>().join(", ")));
+    }
     let (receipts, total) = (plan.batches.len(), plan.batches.iter().map(|batch| batch.documents.len()).sum::<usize>());
     say(format_args!(
         "plan {campaign} from {giver}: {receipts} receipts {total} documents, {held} held, moved by {moved}",
@@ -198,9 +203,27 @@ fn headers(ask: &dyn Fn(Selection) -> Result<HuginnMindResponse, Trouble>, campa
     Ok(headers)
 }
 
+/// The receiver's own records under the root that were admitted after the first receipt imported
+/// from this source and are no planned document: writes in the import window (ruling
+/// `import-window-writes-ruled`: the import stops at a collision, and only a collision). They are
+/// left where they are; they cannot be a planned document's key, and the admission of each later
+/// batch still refuses any replay that meets one.
+fn window_writes<'a>(root: impl Iterator<Item = (PipelineKind, &'a str, &'a AdmissionFacts)> + Clone, planned: &BTreeSet<&str>, source: &Slug) -> BTreeSet<&'a str> {
+    let began = root.clone().filter(|(_, _, admission)| admission.provenance.imported_from.as_ref().is_some_and(|from| from.instance == *source)).map(|(_, _, admission)| admission.ordinal).min();
+    root.filter(|(kind, key, admission)| inert_in_window(*kind) && admission.provenance.imported_from.is_none() && !planned.contains(key) && began.is_some_and(|began| admission.ordinal > began))
+        .map(|(_, key, _)| key)
+        .collect()
+}
+
+/// The plan's document keys.
+fn planned_keys(plan: &ImportPlan) -> BTreeSet<&str> {
+    plan.batches.iter().flat_map(|batch| batch.documents.iter().map(|(id, _)| id.id.0.as_str())).collect()
+}
+
 /// Which batches the receiver already holds whole. A document under the root that is not one of
 /// the plan's, imported from the plan's receipt of the source, is her own record and refuses the
-/// import; a batch held in part cannot be resumed, only repaired.
+/// import, unless she admitted it after the import began (`window_writes`); a batch held in part
+/// cannot be resumed, only repaired.
 fn resume(plan: &ImportPlan, root: &[PipelineDocumentSummary], source: &Slug) -> Step<Vec<bool>> {
     let planned: BTreeMap<&str, (usize, &str)> = plan
         .batches
@@ -210,8 +233,12 @@ fn resume(plan: &ImportPlan, root: &[PipelineDocumentSummary], source: &Slug) ->
         .collect();
     let mut held: Vec<BTreeSet<&str>> = vec![BTreeSet::new(); plan.batches.len()];
     let mut own = Vec::new();
+    let window = window_writes(root.iter().map(|header| (header.id.kind, header.id.id.0.as_str(), &header.admission)), &planned_keys(plan), source);
     for header in root {
         let key = header.id.id.0.as_str();
+        if window.contains(key) {
+            continue;
+        }
         let imported = header.admission.provenance.imported_from.as_ref();
         match planned.get(key) {
             Some((index, receipt)) if imported.is_some_and(|from| from.instance == *source && from.receipt_id.0 == *receipt) => {
@@ -261,8 +288,9 @@ fn verify(root: &[PipelineDocumentView], plan: &ImportPlan, source: &Slug) -> St
             }
         }
     }
-    let planned: BTreeSet<&str> = plan.batches.iter().flat_map(|batch| batch.documents.iter().map(|(id, _)| id.id.0.as_str())).collect();
-    differing.extend(held.keys().filter(|key| !planned.contains(*key)).map(|key| format!("{key}: not in the plan")));
+    let planned = planned_keys(plan);
+    let window = window_writes(root.iter().map(|view| (view.id.kind, view.id.id.0.as_str(), &view.admission)), &planned, source);
+    differing.extend(held.keys().filter(|key| !planned.contains(*key) && !window.contains(*key)).map(|key| format!("{key}: not in the plan")));
     if differing.is_empty() {
         Ok(())
     } else {
@@ -334,6 +362,16 @@ mod tests {
         }
     }
 
+    fn at(mut held: PipelineDocumentSummary, ordinal: u64) -> PipelineDocumentSummary {
+        held.admission.ordinal = ordinal;
+        held
+    }
+
+    fn note(mut held: PipelineDocumentSummary, kind: PipelineKind) -> PipelineDocumentSummary {
+        held.id.kind = kind;
+        held
+    }
+
     fn two() -> ImportPlan {
         plan_of(vec![batch(3, &["a", "b"]), batch(5, &["c"])])
     }
@@ -375,6 +413,62 @@ mod tests {
             let said = stopped(resume(&two(), &[own], &source));
             assert!(said.starts_with("no: Refused the receiver already holds records under the root"), "{said}");
         }
+    }
+
+    /// Nibu's case: her import stopped after its first receipt, her own run then admitted a
+    /// follow-up under the root, and the rerun was refused for it.
+    #[test]
+    fn a_record_the_receiver_admitted_after_the_import_began_does_not_block_the_resume() {
+        let source = slug("eureka");
+        let root = [at(header("a", Some(("eureka", 3))), 10), at(header("b", Some(("eureka", 3))), 10), at(note(header("zz", None), PipelineKind::FollowUp), 20)];
+        assert_eq!(resume(&two(), &root, &source).ok().unwrap(), vec![true, false]);
+        let window = window_writes(root.iter().map(|held| (held.id.kind, held.id.id.0.as_str(), &held.admission)), &planned_keys(&two()), &source);
+        assert_eq!(window.into_iter().collect::<Vec<_>>(), vec!["c:ruling:zz"]);
+    }
+
+    #[test]
+    fn only_a_native_unplanned_record_after_the_import_began_is_left_in_place() {
+        let source = slug("eureka");
+        let began = [at(header("a", Some(("eureka", 3))), 10), at(header("b", Some(("eureka", 3))), 12)];
+        for refused in [
+            // admitted before the first imported receipt, however many came after
+            at(note(header("zz", None), PipelineKind::FollowUp), 9),
+            // a kind that could answer or resolve a planned document
+            at(header("zz", None), 20),
+            at(note(header("zz", None), PipelineKind::Resolution), 20),
+            // a planned key the receiver took first
+            at(note(header("c", None), PipelineKind::FollowUp), 20),
+            // another source's import, or this source's receipt for a document the plan lacks
+            at(note(header("zz", Some(("kiko", 3))), PipelineKind::FollowUp), 20),
+            at(note(header("zz", Some(("eureka", 9))), PipelineKind::FollowUp), 20),
+        ] {
+            let said = stopped(resume(&two(), &[began.as_slice(), &[refused]].concat(), &source));
+            assert!(said.starts_with("no: Refused the receiver already holds records under the root"), "{said}");
+        }
+        // the import is dated by its first receipt: a record between two imported ones is in the window
+        let between = [began.as_slice(), &[at(note(header("zz", None), PipelineKind::Idea), 11)]].concat();
+        assert_eq!(resume(&two(), &between, &source).ok().unwrap(), vec![true, false]);
+    }
+
+    #[test]
+    fn the_verification_walk_leaves_a_window_write_out_and_still_names_an_earlier_stranger() {
+        let source = slug("eureka");
+        let plan = plan_of(vec![batch(3, &["a", "b"]), batch(5, &["c"])]);
+        let ours = |local: &str, ordinal, at: u64| {
+            let mut view = viewed(local, question(local), Some(("eureka", ordinal)));
+            view.admission.ordinal = at;
+            view
+        };
+        let native = |local: &str, at: u64| {
+            let mut view = viewed(local, question(local), None);
+            view.id.kind = PipelineKind::FollowUp;
+            view.admission.ordinal = at;
+            view
+        };
+        let whole = vec![ours("a", 3, 10), ours("b", 3, 10), ours("c", 5, 11)];
+        assert!(verify(&[whole.as_slice(), &[native("zz", 20)]].concat(), &plan, &source).is_ok());
+        let Err(Stop::Trouble(trouble)) = verify(&[whole.as_slice(), &[native("zz", 4)]].concat(), &plan, &source) else { panic!("a record before the import is not the window's") };
+        assert!(trouble.to_string().contains("c:ruling:zz: not in the plan"), "{trouble}");
     }
 
     fn viewed(local: &str, document: PipelineDocument, from: Option<(&str, u64)>) -> PipelineDocumentView {
