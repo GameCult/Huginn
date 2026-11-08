@@ -90,9 +90,10 @@ use crate::control::{ControlSource, Effective, HeldReason, derive};
 use crate::heartbeat::{HeartbeatView, PollTrace};
 use crate::lease_client::{LeaseRequest, Lender, Lent};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
-use crate::queue::{MindPort, any_of, citing, headers, in_force, live_claims, of_kind};
+use crate::queue::{MindPort, any_of, citing, headers, in_force, live_claims, of_kind, on_hold};
 use crate::recall;
 use crate::self_run::session::{Polled, SessionInbox, drive};
+use crate::self_run::inbox;
 use crate::self_run::{MAX_TURNS, ROTATE_MARGIN_S, SESSION_NAMESPACE, Spawner, Why};
 
 /// The admitting agent's name on everything this organ admits.
@@ -153,6 +154,9 @@ const GOALS_RULINGS_RESERVE: usize = 1024;
 const GOALS_RULINGS_MAX: usize = 12;
 /// What a refusal tells her about the fields she can be asked to correct most often.
 const INTENT_FAULT: &str = "intent: blank or over its length bound";
+/// The most briefs one Self run claims.
+const BRIEFS_PER_SELF_RUN: usize = 64;
+
 const START_FAULT: &str = "start_self_run: its brief, repo or campaign is out of bounds";
 const VOTE_FAULT: &str = "tempo_vote_beat_s or urgency_permille: outside its range";
 const ABOUT_FAULT: &str = "remember.about: every entry must be an id copied exactly from a line of this session";
@@ -819,6 +823,7 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
     // The run is the one the heartbeat opened for this unit; none held, none run.
     let Some(holder) = holders(organs.mind, &instance, RunTurn::PersonaTurn)?.into_iter().next() else { return Ok(Outcome::NoRun) };
     let run = holder.id;
+    let brief_note = claim_briefs(organs, control, swarm);
     make_sandbox(organs.sandbox)?;
     let mut progress = Progress::default();
     let started = organs.clock.now();
@@ -853,8 +858,32 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
             break;
         }
     }
-    close_run(organs, &run, progress.answered, progress.last_intent.as_deref(), progress.failure, noted.failures.get())?;
+    close_run(organs, &run, progress.answered, progress.last_intent.as_deref(), progress.failure, noted.failures.get(), brief_note.as_deref())?;
     Ok(Outcome::Served { run, answered: progress.answered, failure: progress.failure, self_run: progress.self_run })
+}
+
+/// The Self run for her free briefs: the briefs in force that no open question holds go to one Self run
+/// through `open_and_launch`, the only opener, which answers `Busy` while her Self lives (the briefs
+/// wait for the next turn, nothing is withdrawn), trips the repetition breaker (its question holds
+/// the briefs) and withdraws a run whose unit would not start. The heartbeat cannot start a Self unit
+/// (polkit gives it Persona units only); her own user can. Whatever the start could not do is returned
+/// as a note for the run's closing, and the briefs stay open for the next turn.
+fn claim_briefs(organs: &Organs, control: &impl ControlSource, swarm: &impl ControlSource) -> Option<String> {
+    let outcome = (|| -> Result<Option<String>> {
+        let Effective::Released(grant) = read(control, swarm, organs.mind.instance()) else { return Ok(None) };
+        let (free, _held) = inbox::derive_counting_held(organs.mind, &on_hold(organs.mind)?, &Default::default())?;
+        if free.is_empty() {
+            return Ok(None);
+        }
+        let claims = free.into_iter().take(BRIEFS_PER_SELF_RUN).map(|brief| PipelineRef { kind: PipelineKind::FollowUp, id: brief.id.as_str().into() }).collect();
+        let ports = Ports { mind: organs.mind, launcher: organs.launcher, clock: organs.clock, host: organs.host };
+        Ok(match open_and_launch(&ports, LaunchRequest { turn: RunTurn::SelfRun, claims, agent: AGENT.into(), grant })? {
+            LaunchOutcome::Launched { .. } | LaunchOutcome::Busy { .. } => None,
+            LaunchOutcome::Tripped { question, .. } => Some(format!("briefs held by the breaker question {}", question.id.0)),
+            _ => Some("briefs left open: the Self run was refused".into()),
+        })
+    })();
+    outcome.unwrap_or_else(|error| Some(format!("briefs left open: {error}")))
 }
 
 /// Her sandbox, owner-only, if it is not there yet.
@@ -2093,13 +2122,16 @@ fn start_self_run(
 }
 
 /// The run's closing: Recorded, with how the start went.
-fn close_run(organs: &Organs, run: &PipelineRef, answered: u32, last_intent: Option<&str>, failure: Option<Failure>, trace_failures: u32) -> Result<()> {
+fn close_run(organs: &Organs, run: &PipelineRef, answered: u32, last_intent: Option<&str>, failure: Option<Failure>, trace_failures: u32, brief_note: Option<&str>) -> Result<()> {
     let mut reason = match failure {
         Some(why) => format!("failed after {answered} answered: {why}"),
         None => format!("answered {answered}"),
     };
     if trace_failures > 0 {
         reason.push_str(&format!("; {trace_failures} trace writes failed"));
+    }
+    if let Some(note) = brief_note {
+        reason.push_str(&format!("; {note}"));
     }
     let resolution = PipelineResolution {
         subject: run.clone(),

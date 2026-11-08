@@ -7035,3 +7035,73 @@ fn a_flush_after_an_image_line_carries_no_image() {
     assert!(flush.images.is_empty(), "the flush does not repeat the image");
     assert_eq!(requests.iter().filter(|told| !told.images.is_empty()).count(), 1);
 }
+
+// ---- a Persona turn claims her free briefs for a Self run ------------------------------------
+
+/// The Persona turn the heartbeat opens, and one brief of her Self admitted under her receipt.
+fn turn_with_a_brief(rig: &Rig, label: &str) -> PipelineRef {
+    rig.open_the_run();
+    let run = crate::launch::holders(&rig.mind, &Slug(INSTANCE.into()), RunTurn::PersonaTurn).unwrap().remove(0).id;
+    let PipelineDocument::FollowUp(mut document) = follow_up(label, &run) else { unreachable!() };
+    document.owner = "self-run".into();
+    let outcome = rig.mind.admit(AGENT, "session-a", vec![PipelineDocument::FollowUp(document)]).unwrap();
+    assert!(matches!(outcome, AdmissionOutcome::Committed { .. }), "{outcome:?}");
+    run
+}
+
+fn closing_reasons(rig: &Rig) -> Vec<String> {
+    rig.mind
+        .ids(K::Resolution)
+        .iter()
+        .filter_map(|id| match rig.mind.view(K::Resolution, id)?.document {
+            PipelineDocument::Resolution(resolution) => match resolution.outcome {
+                ResolutionOutcome::Recorded { reason } => Some(reason.0),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn self_run_claims(rig: &Rig) -> Vec<Vec<String>> {
+    crate::launch::holders(&rig.mind, &Slug(INSTANCE.into()), RunTurn::SelfRun)
+        .unwrap()
+        .into_iter()
+        .map(|run| match run.facts {
+            PipelineFacts::Run { claims, .. } => claims.into_iter().map(|claim| claim.id.0).collect(),
+            _ => panic!("a run"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_free_brief_gets_a_self_run_at_the_start_of_the_persona_turn_without_the_persona_asking() {
+    let rig = Rig::new(vec![], &[]);
+    turn_with_a_brief(&rig, "waiting");
+    rig.start_with(&config());
+    assert_eq!(rig.launcher.started.borrow().as_slice(), &[(Slug(INSTANCE.into()), RunTurn::SelfRun)]);
+    assert_eq!(self_run_claims(&rig), vec![rig.mind.ids(K::FollowUp)]);
+}
+
+#[test]
+fn a_live_self_run_leaves_the_brief_open_and_a_later_turn_opens_no_second_run() {
+    let rig = Rig::new(vec![], &[]);
+    turn_with_a_brief(&rig, "waiting");
+    rig.start_with(&config());
+    // The next turn finds her Self alive: Busy, nothing withdrawn, nothing duplicated.
+    turn_with_a_brief(&rig, "second");
+    rig.start_with(&config());
+    assert_eq!(self_run_claims(&rig).len(), 1, "one live Self run of hers");
+    assert_eq!(rig.launcher.started.borrow().len(), 1);
+    assert_eq!(rig.mind.ids(K::FollowUp).len(), 2, "both briefs stay open for the live Self or the next turn");
+}
+
+#[test]
+fn a_self_unit_that_will_not_start_leaves_the_brief_open_and_says_so_in_the_turns_closing() {
+    let rig = Rig::new(vec![], &[]);
+    turn_with_a_brief(&rig, "waiting");
+    rig.launcher.fail.set(true);
+    assert!(matches!(rig.start_with(&config()), Outcome::Served { .. }), "her Self's start does not end her turn");
+    assert_eq!(rig.mind.ids(K::FollowUp).len(), 1);
+    assert!(closing_reasons(&rig).iter().any(|reason| reason.contains("briefs left open")), "{:?}", closing_reasons(&rig));
+}
