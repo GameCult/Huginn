@@ -97,9 +97,7 @@ pub(crate) fn load(store: Option<&Path>, room_id: &str, image: &ChatImage) -> Re
     if meta.len() > MAX_BYTES {
         return Err(Skip::TooLarge);
     }
-    let mut bytes = Vec::new();
-    // A file that grew since the check reads as another size than the declared one.
-    File::open(&wanted).map_err(|_| Skip::Missing)?.take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|_| Skip::Missing)?;
+    let bytes = read_bounded(&wanted).map_err(|_| Skip::Missing)?;
     if bytes.len() as u64 != image.size {
         return Err(Skip::SizeMismatch);
     }
@@ -111,6 +109,14 @@ pub(crate) fn load(store: Option<&Path>, room_id: &str, image: &ChatImage) -> Re
         return Err(Skip::MimeMismatch);
     }
     Ok(Image { media_type, base64: STANDARD.encode(&bytes) })
+}
+
+/// At most `MAX_BYTES + 1` bytes of `path`: a file that grew since the length check reads as another size than the
+/// declared one, and never as an unbounded allocation.
+fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    File::open(path)?.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// The media type the first bytes say, among the four a model takes.

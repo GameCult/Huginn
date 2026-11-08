@@ -221,3 +221,15 @@ fn a_fifo_where_the_file_should_be_is_refused_without_opening_it() {
     std::thread::spawn(move || tx.send(load(Some(&root), ROOM, &image)).ok());
     assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).expect("load returned without waiting on the FIFO"), Err(Skip::Missing));
 }
+
+#[test]
+fn a_file_that_outgrew_its_length_check_is_read_no_further_than_one_byte_past_the_cap() {
+    // `load` refuses an oversize file on its length first, so only a file that grows after that check reaches the
+    // read; the read itself must stop at MAX_BYTES + 1 (enough to disagree with any declared size, never unbounded).
+    let store = Store::new();
+    let path = store.root().join("grew");
+    std::fs::write(&path, vec![0u8; MAX_BYTES as usize + 4096]).unwrap();
+    assert_eq!(read_bounded(&path).unwrap().len() as u64, MAX_BYTES + 1);
+    std::fs::write(&path, PNG).unwrap();
+    assert_eq!(read_bounded(&path).unwrap(), PNG, "a file within the cap is read whole");
+}
