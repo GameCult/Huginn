@@ -97,6 +97,7 @@ mind_body::heartbeat: impl FileStore: fn check (& self) -> Result < () >
 mind_body::heartbeat: impl FileStore: fn new (path : impl Into < PathBuf >) -> Self
 mind_body::heartbeat: impl HeartbeatView for FileStore
 mind_body::heartbeat: impl Night
+mind_body::heartbeat: impl Night: fn from_settings (window : Option < & str > , minds : Option < & str >) -> Result < Option < Self > >
 mind_body::heartbeat: impl Night: fn parse (window : & str , minds : & str) -> Result < Self >
 mind_body::heartbeat: impl PersonaId
 mind_body::heartbeat: impl PersonaId: fn parse (spec : & str) -> Result < Self >
