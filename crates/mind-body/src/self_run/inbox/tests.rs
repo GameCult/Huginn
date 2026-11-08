@@ -134,7 +134,7 @@ fn imported_briefs_are_not_her_briefs() {
             tool: "huginn".into(),
             imported_from: Some(source),
         },
-        documents: vec![crate::testkit::campaign(), brief_doc("moved", OWNER, &persona)],
+        documents: vec![crate::testkit::campaign_named(crate::testkit::CAMPAIGN, "Eureka body"), brief_doc("moved", OWNER, &persona)],
     };
     let huginn_mind::HuginnMindResponse::Admit(outcome) = mind.answer(huginn_mind::HuginnMindRequest::Admit(batch)) else { panic!("an admit answers an admit") };
     assert!(matches!(outcome, huginn_mind::PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
