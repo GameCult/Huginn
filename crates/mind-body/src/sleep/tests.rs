@@ -462,6 +462,24 @@ fn a_slept_nights_closing_names_the_last_memory_it_was_shown_even_when_that_nigh
 }
 
 #[test]
+fn the_newest_slept_nights_closing_decides_not_an_older_ones() {
+    let days: Vec<_> = (0..2).map(|n| (format!("f{n}"), MemorySort::Learned, wake(), 10 + n as i64)).collect();
+    let (mind, first) = night_over(0, &days);
+    let shown = context(&mind, &first, at(T0 + 5000)).unwrap();
+    mind.admit_at(at(T0 + 2000));
+    close_night(&mind, &first, &slept_over(&shown));
+    remember_at(&mind, "f2", wake(), 2500);
+    remember_at(&mind, "f3", wake(), 2600);
+    let (second, owed) = next_night(&mind, "second", 3000);
+    assert_eq!(day_ids(&owed), vec![id("f2"), id("f3")]);
+    mind.admit_at(at(T0 + 3600));
+    close_night(&mind, &second, &slept_over(&owed));
+    remember_at(&mind, "g0", wake(), 3800);
+    let (_, third) = next_night(&mind, "third", 4000);
+    assert_eq!(day_ids(&third), vec![id("g0")], "both nights slept; the second's cover is the one that counts");
+}
+
+#[test]
 fn a_slept_closing_that_was_withdrawn_covers_nothing() {
     let days: Vec<_> = (0..3).map(|n| (format!("f{n}"), MemorySort::Learned, wake(), 10 + n as i64)).collect();
     let (mind, first) = night_over(0, &days);
