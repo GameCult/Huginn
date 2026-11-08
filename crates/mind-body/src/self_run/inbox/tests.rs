@@ -108,3 +108,43 @@ fn a_tell_names_each_brief_the_plan_and_how_she_resolves_it() {
     assert!(text.ends_with("Plan: 5h at 40%."), "{text}");
     assert!(!render(&[], "").contains("brief"), "no brief, no plan, nothing");
 }
+
+#[test]
+fn imported_briefs_are_not_her_briefs() {
+    // A campaign moved to her: the giver's Persona admitted this brief, and her Self run imports it.
+    let mind = TestMind::seeded_as("heimdall");
+    let persona = run_ref("persona");
+    let source = huginn_mind::ImportSource {
+        instance: "eureka".into(),
+        receipt_id: "mind-commit-giver".into(),
+        ordinal: 7,
+        committed_at: "2026-11-08T16:00:00Z".into(),
+        faculty: huginn_mind::Faculty::SelfFaculty,
+        agent: PERSONA.into(),
+        session: "giver-persona-session".into(),
+        tool: "huginn".into(),
+        external: vec![persona.clone()],
+    };
+    let batch = huginn_mind::PipelineAdmissionBatch {
+        instance: "heimdall".into(),
+        provenance: huginn_mind::PipelineProvenance {
+            faculty: huginn_mind::Faculty::SelfFaculty,
+            agent: SELF_RUN.into(),
+            session: "import-1".into(),
+            tool: "huginn".into(),
+            imported_from: Some(source),
+        },
+        documents: vec![brief_doc("moved", OWNER, &persona)],
+    };
+    let huginn_mind::HuginnMindResponse::Admit(outcome) = mind.answer(huginn_mind::HuginnMindRequest::Admit(batch)) else { panic!("an admit answers an admit") };
+    assert!(matches!(outcome, huginn_mind::PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+
+    let in_force_ids: Vec<String> = headers(&mind, &in_force(of_kind(K::FollowUp))).unwrap().into_iter().map(|header| header.id.id.0).collect();
+    assert_eq!(in_force_ids, vec![brief_ref("moved").id.0.clone()], "the imported follow-up stands in her mind");
+    assert!(derive(&mind, &HashSet::new()).unwrap().is_empty(), "the giver's Persona's brief is not her Persona's brief");
+
+    // The same document admitted by her own Persona turn is a brief.
+    mind.committed(vec![run("persona", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    admitted_by(&mind, PERSONA, vec![brief_doc("hers", OWNER, &persona)]);
+    assert_eq!(ids(derive(&mind, &HashSet::new()).unwrap()), vec![brief_ref("hers").id.0]);
+}
