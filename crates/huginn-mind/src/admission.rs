@@ -528,6 +528,20 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
     if let Some((moved, PipelineResolution { outcome: ResolutionOutcome::Moved { to }, .. })) = docs.moved_campaign(root_and_local(key).0) {
         return Err(MindRefusal::CampaignMoved { campaign: root_and_local(moved).0.into(), to: to.0.clone() });
     }
+    // A Moved lands alone under its root: a sibling beside it would freeze with the campaign and
+    // never reach the receiver, whose replay stops before the Moved.
+    let root = root_and_local(key).0;
+    let alongside = docs.batch.iter().find_map(|other| match &other.document {
+        D::Resolution(PipelineResolution { outcome: ResolutionOutcome::Moved { to }, .. })
+            if other.key != staged.key && root_and_local(&other.key).0 == root =>
+        {
+            Some(to)
+        }
+        _ => None,
+    });
+    if let Some(to) = alongside {
+        return Err(MindRefusal::CampaignMoved { campaign: root.into(), to: to.0.clone() });
+    }
     match &staged.document {
         D::Campaign(campaign) => {
             if campaign.repos.is_empty() {

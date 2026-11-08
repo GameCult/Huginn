@@ -491,3 +491,31 @@ fn an_imports_source_is_bounded_like_the_rest_of_provenance() {
     let exact = with(&|source| source.external = (0..IMPORT_EXTERNAL_MAX).map(|n| r(K::Question, &id("question", &format!("Q{n}")))).collect());
     committed(import_as(&mut mind, exact, documents));
 }
+
+#[test]
+fn a_moved_resolution_lands_alone_under_its_root() {
+    let frozen = |outcome: PipelineAdmissionOutcome| {
+        assert_eq!(refusal(outcome), MindRefusal::CampaignMoved { campaign: CAMPAIGN.into(), to: RECEIVER.into() });
+    };
+    let mut mind = seeded();
+    let head_before = head(&mind);
+    let sibling = || follow_up("FU-C", campaign_ref());
+    // The giver refuses a Moved with a sibling under its root, whichever order they come in.
+    frozen(admit(&mut mind, vec![moved_to(RECEIVER), sibling()]));
+    frozen(admit(&mut mind, vec![sibling(), moved_to(RECEIVER)]));
+    assert_eq!(head(&mind), head_before, "nothing landed");
+    // A second Moved is a sibling of the first.
+    let second = resolution_n(campaign_ref(), 2, ResolutionOutcome::Moved { to: slug(RECEIVER) });
+    frozen(admit(&mut mind, vec![moved_to(RECEIVER), second]));
+    // A document of another root rides beside it.
+    committed(admit(&mut mind, vec![moved_to(RECEIVER), other_question("QO")]));
+
+    // An import refuses the pairing too: its own sibling never lands beside a Moved.
+    let mut recv = receiver();
+    committed(import(&mut recv, vec![campaign(&[REPO])], vec![]));
+    for documents in [vec![moved_to("kiko"), sibling()], vec![sibling(), moved_to("kiko")]] {
+        let refused = refusal(import(&mut recv, documents, vec![]));
+        assert!(matches!(refused, MindRefusal::CampaignMoved { .. } | MindRefusal::IncompatibleResolution { .. }), "{refused:?}");
+    }
+    assert!(recv.view(&r(K::FollowUp, &id("follow_up", "FU-C"))).unwrap().is_none());
+}
