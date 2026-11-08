@@ -697,7 +697,7 @@ fn a_campaign_imported_after_the_one_it_cites_resumes_and_matches_its_giver() {
         assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
     }
     let outcomes = replay_root(&giver, &mut mind, OTHER_ROOT);
-    assert!(outcomes.len() >= 3);
+    assert_eq!(outcomes.len(), 2, "B lands as its own opening and the citing receipt");
     for outcome in &outcomes {
         assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
     }
