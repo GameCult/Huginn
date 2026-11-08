@@ -51,6 +51,15 @@ pub enum ImportFault {
     Unordered { ordinal: u64, id: Short },
 }
 
+/// Whether a native write of this kind, admitted after an import under its root began, cannot touch
+/// the status or derivation of any document the import will still replay: a follow-up or an idea
+/// has no referent a replay resolves and derives nothing. Ruling `import-window-writes-ruled`
+/// stops an import at a collision; this is the writes that cannot collide. Every other kind may
+/// answer, supersede or resolve a planned document, and still refuses the import.
+pub fn inert_in_window(kind: PipelineKind) -> bool {
+    matches!(kind, PipelineKind::FollowUp | PipelineKind::Idea)
+}
+
 /// The plan for `receiver` to import `campaign` from `source`, given every document the source
 /// holds under the campaign's root.
 pub fn plan(campaign: &Slug, source: &Slug, receiver: &Slug, views: Vec<PipelineDocumentView>) -> Result<ImportPlan, ImportFault> {

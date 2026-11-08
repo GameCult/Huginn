@@ -583,6 +583,37 @@ fn an_import_lands_only_under_a_root_that_only_imports_have_written() {
 }
 
 #[test]
+fn an_import_resumes_past_a_follow_up_or_idea_the_receiver_wrote_after_it_began() {
+    let q1 = id("question", "Q1");
+    let begun = || {
+        let mut recv = receiver();
+        committed(import_from_kiko(&mut recv, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A")]));
+        recv
+    };
+    for native in [follow_up("FU-N", r(K::Question, &q1)), idea("p", "note", "a note")] {
+        let mut recv = begun();
+        committed(admit(&mut recv, vec![native]));
+        committed(import_from_kiko(&mut recv, vec![question("Q2", &["A", "B"], "A")]));
+        committed(import_from_kiko(&mut recv, vec![answering(CAMPAIGN, "R1", &q1)]));
+    }
+
+    // Before the first imported document the same record is the receiver's own, as ever.
+    let mut early = receiver();
+    committed(admit(&mut early, vec![idea("p", "note", "a note")]));
+    assert_eq!(
+        refusal(import_from_kiko(&mut early, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A")])),
+        MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() }
+    );
+
+    // A kind that could answer, supersede or resolve a replayed document still refuses, after the import began.
+    for native in [question("Q9", &["A", "B"], "A"), resolution(r(K::Question, &q1), ResolutionOutcome::Withdrawn { reason: "native".into() })] {
+        let mut recv = begun();
+        committed(admit(&mut recv, vec![native]));
+        assert_eq!(refusal(import_from_kiko(&mut recv, vec![question("Q2", &["A", "B"], "A")])), MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() });
+    }
+}
+
+#[test]
 fn a_replay_under_another_source_is_no_replay() {
     let mut recv = receiver();
     let history = vec![campaign(&[REPO]), question("Q7", &["A", "B"], "A")];

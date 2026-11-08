@@ -55,7 +55,7 @@ mod move_tests;
 pub use docs::CitationRole;
 pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
-pub use import::{ImportBatch, ImportFault, ImportPlan, plan};
+pub use import::{ImportBatch, ImportFault, ImportPlan, inert_in_window, plan};
 pub use mind::{HuginnMindEpoch, Mind};
 pub use persona::{PersonaPutOutcome, PersonaStateView};
 pub use query::{
