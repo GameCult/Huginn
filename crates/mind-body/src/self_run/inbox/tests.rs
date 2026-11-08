@@ -112,7 +112,7 @@ fn a_tell_names_each_brief_the_plan_and_how_she_resolves_it() {
 #[test]
 fn imported_briefs_are_not_her_briefs() {
     // A campaign moved to her: the giver's Persona admitted this brief, and her Self run imports it.
-    let mind = TestMind::seeded();
+    let mind = TestMind::without_campaigns();
     let persona = run_ref("persona");
     let source = huginn_mind::ImportSource {
         instance: "eureka".into(),
@@ -134,7 +134,7 @@ fn imported_briefs_are_not_her_briefs() {
             tool: "huginn".into(),
             imported_from: Some(source),
         },
-        documents: vec![brief_doc("moved", OWNER, &persona)],
+        documents: vec![crate::testkit::campaign(), brief_doc("moved", OWNER, &persona)],
     };
     let huginn_mind::HuginnMindResponse::Admit(outcome) = mind.answer(huginn_mind::HuginnMindRequest::Admit(batch)) else { panic!("an admit answers an admit") };
     assert!(matches!(outcome, huginn_mind::PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
