@@ -224,6 +224,27 @@
             "Slept"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A campaign's history left this mind for `to`, the mind that now keeps it. Final: the campaign and every\ndocument under its root read resolved by this and take no further writes here.",
+          "properties": {
+            "Moved": {
+              "properties": {
+                "to": {
+                  "$ref": "#/$defs/Slug"
+                }
+              },
+              "required": [
+                "to"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Moved"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -235,6 +256,11 @@
     "Short": {
       "description": "Text of at most 200 UTF-8 bytes.",
       "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
       "type": "string"
     }
   },
