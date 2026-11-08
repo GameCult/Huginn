@@ -89,7 +89,7 @@ pub fn plan(campaign: &Slug, source: &Slug, receiver: &Slug, views: Vec<Pipeline
         let in_batch: BTreeSet<&str> = group.iter().map(|view| view.id.id.0.as_str()).collect();
         let mut foreign: BTreeMap<String, PipelineRef> = BTreeMap::new();
         for view in &group {
-            for (_, target) in cited(&view.document, receiver) {
+            for (_, target) in citations(&view.document) {
                 let key = target.id.0.as_str();
                 if in_batch.contains(key) || written.contains(key) {
                     continue;
@@ -122,15 +122,6 @@ pub fn plan(campaign: &Slug, source: &Slug, receiver: &Slug, views: Vec<Pipeline
         written.extend(in_batch);
     }
     Ok(ImportPlan { moved, batches })
-}
-
-/// What admission requires a document's referents to be. A hand-off cites its documents on its
-/// source side only (`admission::references`), so one from another mind cites nothing here.
-fn cited(document: &PipelineDocument, receiver: &Slug) -> Vec<(crate::CitationRole, PipelineRef)> {
-    match document {
-        PipelineDocument::HandOff(hand_off) if hand_off.from_instance != *receiver => Vec::new(),
-        _ => citations(document),
-    }
 }
 
 #[cfg(test)]
@@ -271,14 +262,5 @@ mod tests {
         spec.rulings.pop();
         views[1] = view(PipelineDocument::CutSpec(spec), 6);
         assert_eq!(plan_of(views).unwrap().batches[0].foreign.len(), IMPORT_EXTERNAL_MAX, "the limit itself is declarable");
-    }
-
-    #[test]
-    fn plan_ignores_a_hand_off_cited_from_another_mind() {
-        let q9 = id("question", "Q9");
-        let from_libby = view(hand_off("libby", RECEIVER, REPO, &[&q9]), 3);
-        assert!(plan_of(vec![moved(RECEIVER, 20), from_libby]).unwrap().batches[0].foreign.is_empty(), "the receiving side cites nothing");
-        let from_receiver = view(hand_off(RECEIVER, "libby", REPO, &[&q9]), 3);
-        assert_eq!(plan_of(vec![moved(RECEIVER, 20), from_receiver]), Err(ImportFault::Unordered { ordinal: 3, id: s(&q9) }));
     }
 }
