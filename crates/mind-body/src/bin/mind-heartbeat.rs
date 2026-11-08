@@ -22,7 +22,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use eureka_state::HuginnClient;
 use mind_body::chat_rudp::{RudpChat, connection_id};
-use mind_body::heartbeat::{Config, FileControl, FileStore, Organs, PersonaId, Seat, HeartbeatView, poll};
+use mind_body::heartbeat::{Config, FileControl, FileStore, HeartbeatView, Night, Organs, PersonaId, Seat, poll};
 use mind_body::launch::{SystemClock, SystemdLauncher};
 use mind_body::queue::HuginnMind;
 
@@ -61,7 +61,13 @@ fn config() -> Result<Config> {
         .map(PersonaId::parse)
         .collect::<Result<Vec<_>>>()?;
     let operators = required("MIND_PERSONA_OPERATOR")?.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect();
-    Config::new(personas, operators)
+    // The nightly sleep is both settings or neither.
+    let night = match (setting("HEARTBEAT_SLEEP_UTC"), setting("HEARTBEAT_SLEEP_MINDS")) {
+        (Some(window), Some(minds)) => Some(Night::parse(&window, &minds)?),
+        (None, None) => None,
+        _ => bail!("HEARTBEAT_SLEEP_UTC and HEARTBEAT_SLEEP_MINDS are set together or not at all"),
+    };
+    Config::new(personas, operators, night)
 }
 
 fn store() -> Result<FileStore> {

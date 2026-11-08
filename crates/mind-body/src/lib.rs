@@ -48,6 +48,7 @@ pub mod persona;
 pub mod queue;
 mod recall;
 pub mod self_run;
+mod sleep;
 pub mod stream;
 pub mod tempo;
 

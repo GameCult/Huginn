@@ -7035,3 +7035,216 @@ fn a_flush_after_an_image_line_carries_no_image() {
     assert!(flush.images.is_empty(), "the flush does not repeat the image");
     assert_eq!(requests.iter().filter(|told| !told.images.is_empty()).count(), 1);
 }
+
+// ---- the night ----
+
+use crate::sleep::{SLEEP_GUIDANCE, context, night_line, sleep_schema};
+
+const HOUR_MS: i64 = 3_600_000;
+const NIGHT_AT_MS: i64 = 48 * HOUR_MS;
+
+fn memory_id(label: &str) -> String {
+    format!("{INSTANCE}:memory:{label}")
+}
+
+fn dm(room: &str, with: &[&str]) -> MemoryOrigin {
+    MemoryOrigin::Direct { room: room.into(), with: with.iter().map(|who| (*who).into()).collect() }
+}
+
+impl Rig {
+    /// One of her memories, admitted `hours_ago` hours before the night opens, with sources.
+    #[allow(clippy::too_many_arguments, reason = "a fixture states every field of a memory")]
+    fn remembered(&self, label: &str, sort: MemorySort, text: &str, about: &[&str], origin: MemoryOrigin, hours_ago: i64, sources: &[&str]) {
+        self.mind.admit_at(at(NIGHT_AT_MS - hours_ago * HOUR_MS));
+        let PipelineDocument::Memory(mut memory) = memory_from(label, sort, text, about, origin, 500) else { unreachable!() };
+        memory.sources = sources.iter().map(|source| (*source).into()).collect();
+        self.mind.committed(vec![PipelineDocument::Memory(memory)]);
+    }
+
+    /// The heartbeat's part for a night: the Sleep run opens at `NIGHT_AT_MS`, and the clock stands ten minutes on.
+    fn open_the_night(&self) -> PipelineRef {
+        self.mind.admit_at(at(NIGHT_AT_MS));
+        self.clock.now.set(NIGHT_AT_MS + 600_000);
+        let effective = read(&FileSource::new(self.store()), &FileSource::new(self.swarm_store()), self.mind.instance());
+        let Effective::Released(grant) = effective else { panic!("released") };
+        let ports = Ports { mind: &self.mind, launcher: &Recording::default(), clock: &self.clock, host: "yggdrasil-host" };
+        let request = LaunchRequest { turn: RunTurn::Sleep, claims: vec![], agent: "mind-heartbeat".into(), grant };
+        let LaunchOutcome::Launched { run } = open_and_launch(&ports, request).unwrap() else { panic!("not launched") };
+        run
+    }
+
+    fn memory_in_force(&self, label: &str) -> bool {
+        let id = memory_id(label);
+        self.mind.view(K::Memory, &id).is_some_and(|view| matches!(view.status, huginn_mind::PipelineStatus::InForce))
+    }
+
+    fn the_memory(&self, label: &str) -> PipelineMemory {
+        let Some(view) = self.mind.view(K::Memory, &memory_id(label)) else { panic!("{label} is not in her mind") };
+        let PipelineDocument::Memory(memory) = view.document else { unreachable!() };
+        memory
+    }
+
+    /// How the Sleep run was closed.
+    fn night_closing(&self, run: &PipelineRef) -> String {
+        let label = label_of(run);
+        let view = self.mind.view(K::Resolution, &format!("{INSTANCE}:resolution:run.{label}.n1")).expect("the night is closed");
+        let PipelineDocument::Resolution(resolution) = view.document else { unreachable!() };
+        let ResolutionOutcome::Recorded { reason } = resolution.outcome else { panic!("a night is closed Recorded") };
+        reason.0
+    }
+
+    fn the_night(&self) -> Outcome {
+        self.start_with(&config())
+    }
+}
+
+fn night_reply(night: &str, keep: &[&str], consolidate: serde_json::Value, retire: serde_json::Value, remember: serde_json::Value) -> String {
+    let keep: Vec<String> = keep.iter().map(|label| memory_id(label)).collect();
+    json!({"night": night, "keep": keep, "consolidate": consolidate, "retire": retire, "remember": remember}).to_string()
+}
+
+fn consolidating(consumes: &[&str], text: &str) -> serde_json::Value {
+    let consumes: Vec<String> = consumes.iter().map(|label| memory_id(label)).collect();
+    json!({"consumes": consumes, "sort": "Learned", "text": text, "about": [], "salience_permille": 700})
+}
+
+#[test]
+fn the_night_line_holds_the_day_whole_and_prescribes_nothing() {
+    let rig = Rig::new(vec![], &[]);
+    let room = || MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec!["@op:chat".into()] };
+    // Before the day: an open ask, and forty older memories (the backlog the tide moves through).
+    rig.remembered("ask", MemorySort::Asked, "Find the release owner.", &["@op:chat"], room(), 60, &[]);
+    for n in 0..40 {
+        rig.remembered(&format!("old{n:02}"), MemorySort::Learned, &format!("Older fact {n}."), &[], room(), 50, &[]);
+    }
+    // An earlier night of hers, opened 30 hours before this one, closed.
+    rig.mind.admit_at(at(NIGHT_AT_MS - 30 * HOUR_MS));
+    rig.mind.committed(vec![crate::testkit::run("slept-before", RunTurn::Sleep, RunOperator::Mind, &[])]);
+    rig.mind.committed(vec![crate::testkit::close(crate::testkit::run_ref("slept-before"), crate::testkit::recorded())]);
+    // Her day: after that night opened. A Sleep-origin memory of it is not part of it.
+    rig.remembered("d1", MemorySort::Decided, "Ship on Friday.", &["@op:chat"], room(), 20, &["$e1"]);
+    rig.remembered("d2", MemorySort::Learned, "A private thing.", &["@kiko:chat"], dm("!dm:chat", &["@kiko:chat"]), 10, &[]);
+    rig.remembered("formed", MemorySort::Idea, "Formed in sleep.", &[], MemoryOrigin::Sleep { run: "slept-before".into() }, 5, &[]);
+    let run = rig.open_the_night();
+    let now = at(NIGHT_AT_MS + HOUR_MS);
+    let night = context(&rig.mind, &run, now).unwrap();
+    let ids = |held: &[crate::sleep::Held]| held.iter().map(|held| held.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&night.day), vec![memory_id("d1"), memory_id("d2")], "oldest first, the Sleep-origin memory left out");
+    assert_eq!(ids(&night.open), vec![memory_id("ask")]);
+    let tide = ids(&night.tide);
+    assert_eq!(tide.len(), 32);
+    assert_eq!((tide[0].as_str(), tide[8].as_str()), (memory_id("old32").as_str(), memory_id("old00").as_str()), "one earlier night moves the tide 32 on and it wraps the backlog");
+    let line = night_line(&night);
+    let expected_day = format!(
+        "Your day, whole, oldest first (2 memories):\n- {} [Decided, 21h ago, salience 500] in #swarm, with \"@op:chat\"; about @op:chat; sources $e1\n  Ship on Friday.\n- {} [Learned, 11h ago, salience 500] privately, with \"@kiko:chat\"; about @kiko:chat\n  A private thing.\n\n",
+        memory_id("d1"),
+        memory_id("d2")
+    );
+    assert!(line.starts_with("It is night, 2026-10-11 14:15 UTC.\n\nYour memories in force: Asked 1, Decided 1, Idea 1, Learned 41.\n\n"), "{line}");
+    assert!(line.contains(&expected_day), "{line}");
+    assert!(line.contains("Your open asks and commitments from before your day, oldest first (1):\n"), "{line}");
+    assert!(line.ends_with(SLEEP_GUIDANCE), "the guidance closes the line");
+    assert!(!line.contains("Formed in sleep."));
+    assert!(!SLEEP_GUIDANCE.chars().any(|c| c.is_ascii_digit()), "the night names no count");
+    assert!(!SLEEP_GUIDANCE.contains("theme") && !SLEEP_GUIDANCE.contains("topic"), "nor a theme");
+}
+
+#[test]
+fn an_uncovered_night_is_told_back_by_id_and_the_third_refusal_ends_it_with_nothing_admitted() {
+    let uncovered = night_reply("A night.", &["d1"], json!([]), json!([]), json!([]));
+    let rig = Rig::new(vec![operator_says(1, "do not read me")], &[uncovered.clone(), uncovered.clone(), uncovered]);
+    rig.remembered("d1", MemorySort::Learned, "One.", &[], MemoryOrigin::Wake, 5, &[]);
+    rig.remembered("d2", MemorySort::Learned, "Two.", &[], MemoryOrigin::Wake, 4, &[]);
+    let run = rig.open_the_night();
+    let before = rig.mind.ids(K::Memory).len();
+    assert!(matches!(rig.the_night(), Outcome::Served { failure: Some(_), .. }));
+    let told = rig.model.requests.borrow();
+    assert_eq!(told.len(), 3, "the start line and two retells");
+    assert!(told[1].input.contains(&format!("in keep, consumes or retire: {}", memory_id("d2"))), "{}", told[1].input);
+    drop(told);
+    let reason = rig.night_closing(&run);
+    assert!(reason.starts_with("failed after 3 refusals: ") && reason.contains(&memory_id("d2")), "{reason}");
+    assert_eq!(rig.mind.ids(K::Memory).len(), before, "nothing was admitted");
+    assert!(rig.memory_in_force("d1") && rig.memory_in_force("d2"));
+    assert_eq!((rig.chat.pending_calls.get(), rig.chat.acked.borrow().len()), (0, 0), "a night neither reads nor acks chat");
+}
+
+#[test]
+fn a_consolidation_keeps_the_conversation() {
+    let mixed = night_reply("Tried to mix.", &[], json!([consolidating(&["a", "b"], "Mixed.")]), json!([]), json!([]));
+    let kept = night_reply("Kept apart.", &["b"], json!([consolidating(&["a", "c"], "What kiko and the other member settled.")]), json!([]), json!([]));
+    let rig = Rig::new(vec![], &[mixed, kept]);
+    rig.model.linger.set(true);
+    rig.remembered("a", MemorySort::Learned, "Private one.", &[], dm("!dm:chat", &["@kiko:chat"]), 6, &["$a1", "$a2"]);
+    rig.remembered("b", MemorySort::Learned, "Public.", &[], MemoryOrigin::Wake, 5, &[]);
+    rig.remembered("c", MemorySort::Learned, "Private two.", &[], dm("!dm:chat", &["@libby:chat", "@kiko:chat"]), 4, &["$a2", "$c1"]);
+    let run = rig.open_the_night();
+    let served = rig.the_night();
+    assert!(matches!(served, Outcome::Served { failure: None, .. }), "{}", rig.night_closing(&run));
+    let told = rig.model.requests.borrow();
+    assert!(told[1].input.contains("one conversation only") && told[1].input.contains(&memory_id("a")), "{}", told[1].input);
+    drop(told);
+    let formed = rig.the_memory(&format!("{}-c0", label_of(&run)));
+    assert_eq!(formed.origin, dm("!dm:chat", &["@kiko:chat", "@libby:chat"]), "the DM stays its own, the union of who spoke in it");
+    assert_eq!(formed.sources.iter().map(|source| source.0.as_str()).collect::<Vec<_>>(), vec!["$c1", "$a2", "$a1"], "the consumed memories' sources, newest first, once each");
+    assert_eq!(formed.consolidates.iter().map(|consumed| consumed.id.0.clone()).collect::<Vec<_>>(), vec![memory_id("a"), memory_id("c")]);
+    assert!(!rig.memory_in_force("a") && !rig.memory_in_force("c") && rig.memory_in_force("b"));
+}
+
+#[test]
+fn a_decoded_night_admits_whole_operations_and_the_run_closes_with_her_line() {
+    let reply = night_reply(
+        "I looked at the release again and let the rest go.",
+        &["keep"],
+        json!([consolidating(&["m1", "m2"], "The release owner is unknown; ask the operator Friday.")]),
+        json!([
+            {"item": memory_id("done"), "outcome": "done", "why": "It shipped."},
+            {"item": memory_id("faded"), "outcome": "faded", "why": "Nobody asked again."},
+            {"item": memory_id("declined"), "outcome": "declined", "why": "Not mine."},
+            {"item": memory_id("wrong"), "outcome": "wrong", "why": "It was mistaken."}
+        ]),
+        json!([{"sort": "Idea", "text": "Try the other index.", "about": [], "salience_permille": 400}]),
+    );
+    let rig = Rig::new(vec![operator_says(1, "pending, never read")], &[reply]);
+    for (n, label) in ["m1", "m2", "keep", "done", "faded", "declined", "wrong"].iter().enumerate() {
+        let sort = if ["done", "faded", "declined", "wrong"].contains(label) { MemorySort::Committed } else { MemorySort::Learned };
+        rig.remembered(label, sort, &format!("About {label}."), &[], MemoryOrigin::Wake, 7 - n as i64, &[]);
+    }
+    let run = rig.open_the_night();
+    assert!(matches!(rig.the_night(), Outcome::Served { failure: None, .. }));
+    let tag = label_of(&run).to_string();
+    assert!(rig.memory_in_force("keep") && rig.memory_in_force(&format!("{tag}-c0")) && rig.memory_in_force(&format!("{tag}-r0")));
+    for label in ["m1", "m2", "done", "faded", "declined", "wrong"] {
+        assert!(!rig.memory_in_force(label), "{label} left force");
+    }
+    let outcome = |label: &str| {
+        let view = rig.mind.view(K::Resolution, &format!("{INSTANCE}:resolution:memory.{label}.n1")).unwrap();
+        let PipelineDocument::Resolution(resolution) = view.document else { unreachable!() };
+        resolution.outcome
+    };
+    assert!(matches!(outcome("m1"), ResolutionOutcome::Superseded { ref by } if by[0].id.0 == memory_id(&format!("{tag}-c0"))));
+    assert!(matches!(outcome("done"), ResolutionOutcome::Recorded { .. }) && matches!(outcome("faded"), ResolutionOutcome::Recorded { .. }));
+    assert!(matches!(outcome("declined"), ResolutionOutcome::Withdrawn { .. }) && matches!(outcome("wrong"), ResolutionOutcome::Withdrawn { .. }));
+    assert_eq!(rig.the_memory(&format!("{tag}-c0")).origin, MemoryOrigin::Sleep { run: tag.as_str().into() }, "a public consolidation is formed in sleep");
+    assert_eq!(rig.the_memory(&format!("{tag}-r0")).origin, MemoryOrigin::Sleep { run: tag.as_str().into() });
+    assert_eq!(rig.night_closing(&run), "slept: I looked at the release again and let the rest go.");
+    // She reads it on waking, as the line of her last runs.
+    let lines = recent_runs(&rig.mind, &Slug(INSTANCE.into())).unwrap();
+    assert!(lines[0].starts_with(&format!("{tag} Sleep: slept: I looked")), "{lines:?}");
+    assert_eq!((rig.chat.pending_calls.get(), rig.chat.acked.borrow().len(), rig.sent_texts().len()), (0, 0, 0), "pending chat was neither read into the night nor acked");
+}
+
+#[test]
+fn a_sleep_holder_opens_one_process_with_the_night_schema_and_her_tools_never_a_conversation() {
+    let reply = night_reply("Nothing to do.", &[], json!([]), json!([]), json!([]));
+    let rig = Rig::new(vec![operator_says(1, "hello, wake up")], &[reply]);
+    rig.open_the_night();
+    rig.the_night();
+    let spawns = rig.model.spawns.borrow();
+    assert_eq!(spawns.len(), 1);
+    let after = |flag: &str| spawns[0].iter().position(|arg| arg == flag).map(|at| spawns[0][at + 1].clone()).unwrap();
+    assert_eq!(after("--json-schema"), sleep_schema());
+    assert_eq!(after("--tools"), "Bash,WebFetch,WebSearch");
+    assert_eq!(rig.chat.pending_calls.get(), 0);
+    assert!(rig.model.requests.borrow()[0].input.contains("This is your night."));
+}

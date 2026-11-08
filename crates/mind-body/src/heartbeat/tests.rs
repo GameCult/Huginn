@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use chrono::Duration;
+use chrono::{Duration, TimeZone};
 use eureka_pipeline::PipelineKind as K;
 use huginn_mind::PipelineSelectionPage;
 use tempfile::TempDir;
@@ -192,7 +192,7 @@ impl Rig {
             launcher: Recording::default(),
             clock: Fixed(Cell::new(at(1_000_000))),
             store: MemStore::default(),
-            config: Config::new(vec![persona("ann", "Ann"), persona("bob", "Bob")], vec!["@op:chat".into()]).unwrap(),
+            config: Config::new(vec![persona("ann", "Ann"), persona("bob", "Bob")], vec!["@op:chat".into()], None).unwrap(),
             labels: Cell::new(0),
         })
     }
@@ -1423,4 +1423,93 @@ fn the_file_store_reads_back_the_addressing_it_wrote_to_the_view() {
     store.save_addressing(&table).unwrap();
     assert_eq!(store.addressing().unwrap(), Some(table.clone()));
     assert_eq!(store.load_addressing().unwrap(), Some(table));
+}
+
+/// A night over the rig's clock, 13:31 UTC: the window holds it, `ann` sleeps.
+fn nights(window: &str, minds: &str) -> Box<Rig> {
+    let mut rig = Rig::new();
+    rig.config.night = Some(Night::parse(window, minds).unwrap());
+    rig.turn(ANN, 10);
+    rig.turn(BOB, 10);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig
+}
+
+/// Ends the run the heartbeat launched for `who` (the newest by admission, not by key).
+fn end_launched(rig: &Rig, who: usize) {
+    let launched = rig.minds[who].ids(K::Run).into_iter().find(|id| id.contains(":run:mind-")).expect("a launched run");
+    rig.minds[who].committed(vec![close(reference(K::Run, &launched), recorded())]);
+}
+
+fn started_turns(rig: &Rig) -> Vec<(String, RunTurn)> {
+    rig.launcher.started.borrow().iter().map(|(slug, turn)| (slug.0.clone(), *turn)).collect()
+}
+
+#[test]
+fn the_window_wraps_midnight_and_names_when_it_opened() {
+    let night = Night::parse("22:00-04:00", "ann").unwrap();
+    let on = |hour, minute| Utc.with_ymd_and_hms(2026, 10, 9, hour, minute, 0).unwrap();
+    assert_eq!(night.opened(on(23, 0)), Some(on(22, 0)));
+    assert_eq!(night.opened(on(2, 0)), Some(on(22, 0) - Duration::days(1)), "after midnight it opened yesterday");
+    assert_eq!(night.opened(on(4, 0)), None, "the end is outside");
+    assert_eq!(night.opened(on(13, 0)), None);
+    assert_eq!(Night::parse("13:00-14:00", "ann").unwrap().opened(on(13, 0)), Some(on(13, 0)), "the start is inside");
+    assert!(Night::parse("13:00-13:00", "ann").is_err() && Night::parse("25:00-03:00", "ann").is_err() && Night::parse("13:00-14:00", " , ").is_err());
+}
+
+#[test]
+fn a_listed_idle_mind_sleeps_once_per_window_and_a_missed_night_is_not_made_up() {
+    let rig = nights("13:00-14:00", "ann");
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
+    assert_eq!(started_turns(&rig), vec![("ann".to_string(), RunTurn::Sleep)], "bob is not listed, and the beat has just fallen");
+    assert!(rig.minds[ANN].view(K::Run, rig.minds[ANN].ids(K::Run).last().unwrap()).is_some());
+    // Busy while the night lasts: nothing more. Then her night ends (failed or slept, it counts) and the window is spent for her.
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
+    end_launched(&rig, ANN);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "one night per window, whatever became of it");
+    assert_eq!(started_turns(&rig).len(), 1);
+    // The next window opens a day later and she sleeps again.
+    rig.advance(24 * 3600);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
+}
+
+#[test]
+fn no_night_outside_the_window_for_an_unlisted_mind_or_after_the_window_passed_busy() {
+    let outside = nights("22:00-04:00", "ann,bob");
+    assert_eq!(outside.poll(), Outcome::Polled { launched: vec![] });
+    assert!(started_turns(&outside).is_empty());
+    // She is awake (a live Persona turn) when the window opens and until it closes: the night is not made up after.
+    let rig = nights("13:00-14:00", "ann");
+    rig.minds[ANN].committed(vec![run_in("ann", "awake", RunTurn::PersonaTurn, RunOperator::Mind, &[])]);
+    rig.launcher.revive_as(&Slug("ann".into()), RunTurn::PersonaTurn);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
+    rig.advance(3600);
+    rig.launcher.kill_as(&Slug("ann".into()), RunTurn::PersonaTurn);
+    rig.end_run(ANN);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
+    assert!(started_turns(&rig).is_empty());
+}
+
+#[test]
+fn the_operator_goes_first_and_the_night_waits_for_her_to_be_idle() {
+    let rig = nights("13:00-14:00", "ann");
+    rig.say(ANN, delivery(1, "@op:chat", "Ann, a word", &[]));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
+    assert_eq!(started_turns(&rig), vec![("ann".to_string(), RunTurn::PersonaTurn)], "the mention is answered awake, no Sleep that poll");
+    end_launched(&rig, ANN);
+    rig.chats[ANN].deliveries.borrow_mut().clear();
+    rig.advance(60);
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
+    assert_eq!(started_turns(&rig).last(), Some(&("ann".to_string(), RunTurn::Sleep)));
+}
+
+#[test]
+fn a_sleeping_mind_is_not_eligible_for_the_beat() {
+    let rig = nights("13:00-14:00", "ann");
+    rig.store.save(&HeartbeatState { last_beat_at: DateTime::<Utc>::UNIX_EPOCH, handled_mentions: vec![] }).unwrap();
+    rig.pulse(ANN, 5, None, Some(1000));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into()), Slug("bob".into())] });
+    assert_eq!(started_turns(&rig), vec![("ann".to_string(), RunTurn::Sleep), ("bob".to_string(), RunTurn::PersonaTurn)], "the beat went to the Mind who was awake, though ann's urgency was the higher");
 }

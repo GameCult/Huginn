@@ -90,12 +90,14 @@ mind_body::heartbeat: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Outco
 mind_body::heartbeat: const AGENT : & str
 mind_body::heartbeat: fn poll (organs : & Organs , config : & Config) -> Result < Outcome >
 mind_body::heartbeat: impl Config
-mind_body::heartbeat: impl Config: fn new (personas : Vec < PersonaId > , operators : Vec < String >) -> Result < Self >
+mind_body::heartbeat: impl Config: fn new (personas : Vec < PersonaId > , operators : Vec < String > , night : Option < Night >) -> Result < Self >
 mind_body::heartbeat: impl Control for FileControl
 mind_body::heartbeat: impl FileStore
 mind_body::heartbeat: impl FileStore: fn check (& self) -> Result < () >
 mind_body::heartbeat: impl FileStore: fn new (path : impl Into < PathBuf >) -> Self
 mind_body::heartbeat: impl HeartbeatView for FileStore
+mind_body::heartbeat: impl Night
+mind_body::heartbeat: impl Night: fn parse (window : & str , minds : & str) -> Result < Self >
 mind_body::heartbeat: impl PersonaId
 mind_body::heartbeat: impl PersonaId: fn parse (spec : & str) -> Result < Self >
 mind_body::heartbeat: impl Row < '_ >
@@ -106,11 +108,12 @@ mind_body::heartbeat: pub trait Control { fn envelope (& self) -> SwarmEffective
 mind_body::heartbeat: pub trait HeartbeatView { fn latest (& self) -> Result < Option < PollTrace > > ; fn addressing (& self) -> Result < Option < Addressing > > ; }
 mind_body::heartbeat: pub trait Store { fn load (& self) -> Result < Option < HeartbeatState > > ; fn save (& self , state : & HeartbeatState) -> Result < () > ; fn record (& self , trace : & PollTrace) -> Result < () > ; fn load_addressing (& self) -> Result < Option < Addressing > > ; fn save_addressing (& self , addressing : & Addressing) -> Result < () > ; }
 mind_body::heartbeat: struct Addressing # [derive (Clone , Debug , Default , PartialEq , Eq , DatabaseEntry)] pub-fields[minds: Vec < Addressee >]
-mind_body::heartbeat: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[personas: Vec < PersonaId >, operators: Vec < String >]
+mind_body::heartbeat: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[personas: Vec < PersonaId >, operators: Vec < String >, night: Option < Night >]
 mind_body::heartbeat: struct FileControl  pub-fields[]
 mind_body::heartbeat: struct FileStore  pub-fields[]
 mind_body::heartbeat: struct HeartbeatState # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[last_beat_at: DateTime < Utc >, handled_mentions: Vec < String >]
 mind_body::heartbeat: struct InstanceTrace # [derive (Clone , Debug , PartialEq , Eq , serde :: Serialize , serde :: Deserialize)] pub-fields[instance: String, vote_beat_s: Option < u32 >, urgency_permille: u16, addressed: bool, busy: bool, released: bool, idle_s: i64, score: String, note: String]
+mind_body::heartbeat: struct Night # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[from_min: u32, to_min: u32, minds: Vec < Slug >]
 mind_body::heartbeat: struct Organs< 'a >  pub-fields[seats: & 'a [Seat < 'a >], control: & 'a dyn Control, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, store: & 'a dyn Store]
 mind_body::heartbeat: struct PersonaId # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[slug: Slug, public_name: String, handle: String, matrix_id: String, huginn: SocketAddr]
 mind_body::heartbeat: struct PollTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[at: DateTime < Utc >, tempo_s: u32, instances: Vec < InstanceTrace >, launches: Vec < String >]
@@ -286,6 +289,8 @@ mind_body::self_run::inbox: fn derive_counting_held (mind : & dyn MindPort , hol
 mind_body::self_run::inbox: fn render (briefs : & [Brief] , plan : & str) -> String
 mind_body::self_run::inbox: fn resolving_sentence (id : & str) -> String
 mind_body::self_run::inbox: struct Brief # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[id: String, campaign: String, repo: String, item: String, ordinal: u64]
+mind_body::sleep: impl< C : ControlSource , S : ControlSource > SessionInbox for SleepInbox < '_ , C , S >
+mind_body::sleep: impl< C : ControlSource , S : ControlSource > SleepInbox < '_ , C , S >
 mind_body::stream: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Mode { Live , DryRun , }
 mind_body::stream: # [derive (Clone , Debug , PartialEq)] pub enum Outcome { Held (crate :: control :: HeldReason) , NotDue , Blank , Thought { thought : Box < PipelineThought > , admitted : bool } , }
 mind_body::stream: const AGENT : & str
