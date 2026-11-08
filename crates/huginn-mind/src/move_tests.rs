@@ -822,3 +822,44 @@ fn an_imported_follow_up_may_not_be_superseded_by_its_own_campaigns_closed_follo
         MindRefusal::CitesResolvedDocument { kind: K::FollowUp, id: fu(CAMPAIGN, "FU-A").id.0 }
     );
 }
+
+/// The real cases (thing2 ordinal 1815, aetheria-release ordinal 2247): a Finding of the imported
+/// root deferred to another root's follow-up that the receiver holds already closed.
+#[test]
+fn import_replays_a_finding_deferred_to_another_roots_closed_follow_up() {
+    let mut mind = receiver();
+    committed(admit(&mut mind, vec![other_question("Q5"), other_follow_up("FU-9", "Q5")]));
+    let foreign = r(K::FollowUp, &format!("{OTHER_ROOT}:follow_up:FU-9"));
+    committed(admit(&mut mind, vec![resolution(foreign.clone(), ResolutionOutcome::Fixed { commit: sha(), by: None })]));
+    let q1 = id("question", "Q1");
+    let finding = id("finding", "cut-1.s1.F1");
+    committed(import(&mut mind, vec![campaign(&[REPO]), target(1, &[INVARIANT]), question("Q1", &["A", "B"], "A"), answering(CAMPAIGN, "R1", &q1)], vec![]));
+    committed(import(&mut mind, vec![D::CutSpec(cut_spec("1", 1))], vec![]));
+    committed(import(&mut mind, vec![D::CutReport(cut_report("1", 1))], vec![]));
+    committed(import(
+        &mut mind,
+        vec![verdict("1", 1, vec![claim(ClaimOutcome::Falsified, &[&finding], Some("P1"), &["M1"])]), D::Finding(finding_doc())],
+        vec![],
+    ));
+    let (_, writes) = committed(import(&mut mind, vec![resolution(r(K::Finding, &finding), ResolutionOutcome::Deferred { to: foreign })], vec![]));
+    assert_eq!(writes.len(), 1);
+    assert!(matches!(view_of(&mind, K::Finding, &finding).status, PipelineStatus::Resolved { .. }));
+}
+
+/// The replay does not ask a cited referent of another root to be open, whatever its kind or how
+/// it closed: an idea superseded by another root's idea that is already recorded.
+#[test]
+fn import_replays_a_cite_of_another_roots_closed_document_of_any_kind() {
+    let mut mind = receiver();
+    let mut other = idea("p", "other", "x");
+    let D::Idea(value) = &mut other else { unreachable!() };
+    value.campaign = slug(OTHER_ROOT);
+    let other_ref = r(K::Idea, &pipeline_key(&other).unwrap());
+    committed(admit(&mut mind, vec![other]));
+    committed(admit(&mut mind, vec![resolution(other_ref.clone(), ResolutionOutcome::Recorded { reason: "x".into() })]));
+    let note = idea("p", "note", "an idea");
+    let note_ref = r(K::Idea, &pipeline_key(&note).unwrap());
+    committed(import(&mut mind, vec![campaign(&[REPO]), note], vec![]));
+    committed(import(&mut mind, vec![resolution(note_ref.clone(), ResolutionOutcome::Superseded { by: vec![other_ref] })], vec![]));
+    assert!(matches!(view_of(&mind, K::Idea, &note_ref.id.0).status, PipelineStatus::Resolved { .. }));
+}
