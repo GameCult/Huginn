@@ -638,3 +638,187 @@ fn a_campaign_cannot_be_moved_out_of_its_minds_own_instance_root() {
         MindRefusal::ImportOutsideCampaign { root: RECEIVER.into() }
     );
 }
+
+fn fu(root: &str, label: &str) -> PipelineRef {
+    r(K::FollowUp, &format!("{root}:follow_up:{label}"))
+}
+
+/// The receiver after campaign A (`CAMPAIGN`) came in whole: its follow-up FU-1 is open there, and
+/// FU-A is recorded.
+fn receiver_holding_a_resolved_follow_up() -> Mind<MemoryStore> {
+    let mut mind = receiver();
+    let q1 = r(K::Question, &id("question", "Q1"));
+    committed(import(&mut mind, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-A", q1)], vec![]));
+    committed(import(&mut mind, vec![resolution(fu(CAMPAIGN, "FU-A"), ResolutionOutcome::Recorded { reason: "noted".into() })], vec![]));
+    mind
+}
+
+/// Campaign B's receipt, admitted by its giver while FU-A was still open: FU-B superseded by FU-A.
+fn b_supersedes_a() -> Vec<D> {
+    vec![resolution(fu(OTHER_ROOT, "FU-B"), ResolutionOutcome::Superseded { by: vec![fu(CAMPAIGN, "FU-A")] })]
+}
+
+fn b_campaign() -> Vec<D> {
+    vec![other_campaign(), other_question("Q9"), other_follow_up("FU-B", "Q9")]
+}
+
+#[test]
+fn an_import_may_cite_a_document_the_receiver_resolved_after_the_source_ordinal() {
+    let mut mind = receiver_holding_a_resolved_follow_up();
+    committed(import(&mut mind, b_campaign(), vec![]));
+    let (_, writes) = committed(import(&mut mind, b_supersedes_a(), vec![]));
+    assert_eq!(writes.len(), 1);
+    let view = view_of(&mind, K::FollowUp, &fu(OTHER_ROOT, "FU-B").id.0);
+    assert!(matches!(view.status, PipelineStatus::Resolved { .. }), "{:?}", view.status);
+}
+
+#[test]
+fn a_native_admission_citing_a_resolved_document_is_still_refused() {
+    let mut mind = receiver();
+    let q1 = r(K::Question, &id("question", "Q1"));
+    committed(admit(&mut mind, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-A", q1.clone()), follow_up("FU-B", q1)]));
+    committed(admit(&mut mind, vec![resolution(fu(CAMPAIGN, "FU-A"), ResolutionOutcome::Recorded { reason: "noted".into() })]));
+    let superseded = resolution(fu(CAMPAIGN, "FU-B"), ResolutionOutcome::Superseded { by: vec![fu(CAMPAIGN, "FU-A")] });
+    assert_eq!(refusal(admit(&mut mind, vec![superseded])), MindRefusal::CitesResolvedDocument { kind: K::FollowUp, id: fu(CAMPAIGN, "FU-A").id.0 });
+}
+
+#[test]
+fn a_campaign_imported_after_the_one_it_cites_resumes_and_matches_its_giver() {
+    let (mut giver, _) = giver();
+    committed(admit(&mut giver, b_campaign()));
+    // B's receipt cites FU-1 while it is open; A resolves it afterwards.
+    committed(admit(&mut giver, vec![resolution(fu(OTHER_ROOT, "FU-B"), ResolutionOutcome::Superseded { by: vec![fu(CAMPAIGN, "FU-1")] })]));
+    committed(admit(&mut giver, vec![resolution(fu(CAMPAIGN, "FU-1"), ResolutionOutcome::Recorded { reason: "noted".into() })]));
+    committed(admit(&mut giver, vec![moved_to(RECEIVER)]));
+    committed(admit(&mut giver, vec![resolution(r(K::Campaign, &format!("{OTHER_ROOT}:campaign:self")), ResolutionOutcome::Moved { to: slug(RECEIVER) })]));
+
+    let mut mind = receiver();
+    for outcome in replay_root(&giver, &mut mind, CAMPAIGN) {
+        assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+    }
+    let outcomes = replay_root(&giver, &mut mind, OTHER_ROOT);
+    assert_eq!(outcomes.len(), 2, "B lands as its own opening and the citing receipt");
+    for outcome in &outcomes {
+        assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+    }
+    let key = fu(OTHER_ROOT, "FU-B").id.0;
+    assert_eq!(view_of(&mind, K::FollowUp, &key).status, Reader::at(&giver, head(&giver) - 2).unwrap().view(&r(K::FollowUp, &key)).unwrap().unwrap().status);
+
+    // A run stopped partway runs again from the top: what landed answers AlreadyAdmitted.
+    for outcome in replay_root(&giver, &mut mind, OTHER_ROOT) {
+        assert!(matches!(outcome, PipelineAdmissionOutcome::AlreadyAdmitted { .. }), "{outcome:?}");
+    }
+}
+
+/// `replay` for any root, declaring external only what the receiver does not hold, as the verb does.
+fn replay_root(giver: &Mind<MemoryStore>, receiver: &mut Mind<MemoryStore>, root: &str) -> Vec<PipelineAdmissionOutcome> {
+    let mut selection = Selection {
+        fields: Some(vec![FieldPredicate { index: "root".into(), op: "any_of".into(), values: Some(vec![root.into()]), number: None }]),
+        projection: "document".into(),
+        limit: Some(cultnet_rs::LIMIT_MAX),
+        ..Selection::default()
+    };
+    let mut views = Vec::new();
+    loop {
+        let page = giver.query(&selection).unwrap();
+        let PipelinePageItems::Documents(found) = page.items else { panic!("the document projection answers documents") };
+        views.extend(found);
+        match page.next {
+            Some(next) => selection.cursor = Some(next),
+            None => break,
+        }
+    }
+    let plan = crate::import::plan(&slug(root), giver.instance(), receiver.instance(), views).unwrap();
+    plan.batches
+        .into_iter()
+        .map(|mut batch| {
+            batch.source.external.retain(|referent| receiver.view(referent).unwrap().is_none());
+            import_as(receiver, batch.source, batch.documents.into_iter().map(|(_, document)| document).collect())
+        })
+        .collect()
+}
+
+fn ruling_of(root: &str, label: &str) -> D {
+    let mut value = ruling(label);
+    value.campaign = slug(root);
+    D::Ruling(value)
+}
+
+fn ruling_ref(root: &str, label: &str) -> PipelineRef {
+    r(K::Ruling, &format!("{root}:ruling:{label}"))
+}
+
+fn spec_ref(root: &str, revision: u32) -> PipelineRef {
+    r(K::CutSpec, &format!("{root}:cut_spec:cut-1.r{revision}"))
+}
+
+fn spec_of(root: &str, revision: u32) -> D {
+    let mut value = cut_spec("1", revision);
+    value.campaign = slug(root);
+    D::CutSpec(value)
+}
+
+fn report_citing(spec: &PipelineRef) -> D {
+    let mut value = cut_report("1", 1);
+    value.cut_spec = spec.id.clone();
+    D::CutReport(value)
+}
+
+fn spec_citing(ruling: &PipelineRef) -> D {
+    let mut value = cut_spec("2", 1);
+    value.rulings = vec![ruling.id.clone()];
+    D::CutSpec(value)
+}
+
+/// A receiver holding `root` whole, in which `old` is superseded by `new` (both of that root).
+fn receiver_with_superseded(root: &str, opening: Vec<D>, closing: Vec<D>, old: PipelineRef, new: PipelineRef) -> Mind<MemoryStore> {
+    let mut mind = receiver();
+    let mut first = vec![if root == CAMPAIGN { campaign(&[REPO]) } else { other_campaign() }];
+    first.extend(opening);
+    committed(import(&mut mind, first, vec![]));
+    let mut second = closing;
+    second.push(resolution(old, superseded(&[new])));
+    committed(import(&mut mind, second, vec![]));
+    mind
+}
+
+#[test]
+fn an_imported_report_citing_its_own_campaigns_superseded_spec_is_refused() {
+    let (old, new) = (spec_ref(CAMPAIGN, 1), spec_ref(CAMPAIGN, 2));
+    let mut mind = receiver_with_superseded(CAMPAIGN, vec![spec_of(CAMPAIGN, 1)], vec![spec_of(CAMPAIGN, 2)], old.clone(), new);
+    assert_eq!(
+        refusal(import(&mut mind, vec![report_citing(&old)], vec![])),
+        MindRefusal::CitesResolvedDocument { kind: K::CutSpec, id: old.id.0 }
+    );
+}
+
+#[test]
+fn an_imported_spec_may_cite_another_campaigns_ruling_superseded_since() {
+    let (old, new) = (ruling_ref(OTHER_ROOT, "R1"), ruling_ref(OTHER_ROOT, "R2"));
+    let mut mind = receiver_with_superseded(OTHER_ROOT, vec![ruling_of(OTHER_ROOT, "R1"), ruling_of(OTHER_ROOT, "R2")], vec![], old.clone(), new);
+    committed(import(&mut mind, vec![campaign(&[REPO])], vec![]));
+    let (_, writes) = committed(import(&mut mind, vec![spec_citing(&old)], vec![]));
+    assert_eq!(writes.len(), 1);
+}
+
+#[test]
+fn an_imported_spec_citing_its_own_campaigns_superseded_ruling_is_refused() {
+    let (old, new) = (ruling_ref(CAMPAIGN, "R1"), ruling_ref(CAMPAIGN, "R2"));
+    let mut mind = receiver_with_superseded(CAMPAIGN, vec![ruling_of(CAMPAIGN, "R1"), ruling_of(CAMPAIGN, "R2")], vec![], old.clone(), new);
+    assert_eq!(
+        refusal(import(&mut mind, vec![spec_citing(&old)], vec![])),
+        MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: old.id.0 }
+    );
+}
+
+#[test]
+fn an_imported_follow_up_may_not_be_superseded_by_its_own_campaigns_closed_follow_up() {
+    let q1 = r(K::Question, &id("question", "Q1"));
+    let mut mind = receiver();
+    committed(import(&mut mind, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A"), follow_up("FU-A", q1.clone()), follow_up("FU-B", q1)], vec![]));
+    committed(import(&mut mind, vec![resolution(fu(CAMPAIGN, "FU-A"), ResolutionOutcome::Recorded { reason: "noted".into() })], vec![]));
+    assert_eq!(
+        refusal(import(&mut mind, vec![resolution(fu(CAMPAIGN, "FU-B"), superseded(&[fu(CAMPAIGN, "FU-A")]))], vec![])),
+        MindRefusal::CitesResolvedDocument { kind: K::FollowUp, id: fu(CAMPAIGN, "FU-A").id.0 }
+    );
+}

@@ -538,6 +538,10 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
     use PipelineKind as K;
     let key = staged.key.as_str();
     let external: &[PipelineRef] = import.map_or(&[], |source| source.external.as_slice());
+    // An import replays the giver's order within a campaign, so a same-campaign referent has its status at
+    // the source ordinal. Only a citation into another campaign drifts (that campaign's import may have
+    // carried a later resolution), so only a cross-campaign citation is not judged by current status.
+    let historic = import.is_some();
     if let D::Resolution(resolution) = &staged.document
         && matches!(resolution.outcome, ResolutionOutcome::Withdrawn { .. })
         && resolution.subject.kind == K::Resolution
@@ -627,7 +631,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
                 return Err(MindRefusal::RepoNotInCampaign { repo: spec.repo.0.clone() });
             }
             for ruling in &spec.rulings {
-                if !docs.in_force(K::Ruling, &ruling.0) {
+                if !(historic && root_and_local(&ruling.0).0 != root) && !docs.in_force(K::Ruling, &ruling.0) {
                     return Err(MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: ruling.0.clone() });
                 }
             }
@@ -717,7 +721,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
             Ok(())
         }
         D::Resolution(resolution) => {
-            resolution_rule(docs, resolution)?;
+            resolution_rule(docs, resolution, historic)?;
             match &resolution.outcome {
                 ResolutionOutcome::Moved { to } if to == mind => Err(MindRefusal::MoveToSelf),
                 // The campaign's root and the mind's own instance root are one namespace: the freeze would
@@ -907,7 +911,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
 /// every referent in force, and the two
 /// coherence rules (an `Answered` ruling answers this question; a cut spec is
 /// superseded within its cut).
-fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(), MindRefusal> {
+fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution, historic: bool) -> Result<(), MindRefusal> {
     use PipelineDocument as D;
     use PipelineKind as K;
     let subject_kind = resolution.subject.kind;
@@ -977,7 +981,7 @@ fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution) -> Result<(
     }
     for (role, referent) in outcome_citations(&resolution.outcome) {
         // The last memory a night was shown may have been consumed by that night's own batches.
-        if role != CitationRole::DayThrough && !docs.in_force(referent.kind, &referent.id.0) {
+        if role != CitationRole::DayThrough && !(historic && root_and_local(&referent.id.0).0 != root_and_local(subject_id).0) && !docs.in_force(referent.kind, &referent.id.0) {
             return Err(MindRefusal::CitesResolvedDocument { kind: referent.kind, id: referent.id.0 });
         }
     }
