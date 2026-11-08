@@ -66,7 +66,7 @@ pub enum MindRefusal {
     MoveIsFinal,
     /// An import names this mind as its source.
     ImportFromSelf,
-    /// An import carries a document of `root`, which is no campaign this mind holds or the batch carries, or which this mind holds a native write under.
+    /// An import carries a document of `root`, which is no campaign this mind holds or the batch carries, or under which this mind holds a native write that is not a follow-up or idea admitted after the import began, or which cites or resolves one of its own native documents.
     ImportOutsideCampaign { root: String },
     /// A move names `root`, this mind's own instance: an instance's records are not a campaign's to freeze.
     MoveOfInstanceRoot { root: String },

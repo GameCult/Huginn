@@ -60,6 +60,11 @@ impl<'i> Docs<'i> {
         self.batch.iter().find(|staged| staged.kind == kind && staged.key == id).map(|staged| &staged.document)
     }
 
+    /// Whether the mind holds this document as its own write rather than an import.
+    pub(crate) fn is_native(&self, kind: PipelineKind, id: &str) -> bool {
+        self.image.id_of(kind, id).filter(|row| self.visible(*row)).is_some_and(|row| self.image.row(row).view.admission.provenance.imported_from.is_none())
+    }
+
     pub(crate) fn in_image(&self, kind: PipelineKind, id: &str) -> Option<&PipelineDocument> {
         self.image.id_of(kind, id).filter(|row| self.visible(*row)).map(|row| &self.image.row(row).view.document)
     }
@@ -68,7 +73,7 @@ impl<'i> Docs<'i> {
         self.in_batch(kind, id).or_else(|| self.in_image(kind, id))
     }
 
-    /// Whether this mind holds a native write under `root` (the batch is not asked).
+    /// Whether this mind holds a native write under `root` that an import must not meet (the batch is not asked).
     pub(crate) fn root_holds_native_write(&self, root: &str) -> bool {
         self.image.root_holds_native_write(root)
     }

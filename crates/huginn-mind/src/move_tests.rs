@@ -614,6 +614,30 @@ fn an_import_resumes_past_a_follow_up_or_idea_the_receiver_wrote_after_it_began(
 }
 
 #[test]
+fn an_import_never_cites_or_resolves_a_follow_up_the_receiver_wrote() {
+    let q1 = id("question", "Q1");
+    let mut recv = receiver();
+    committed(import_from_kiko(&mut recv, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A")]));
+    let native = follow_up("FU-N", r(K::Question, &q1));
+    let native_ref = r(K::FollowUp, &pipeline_key(&native).unwrap());
+    committed(admit(&mut recv, vec![native]));
+    let before = head(&recv);
+    // An imported record that withdraws the receiver's own follow-up mixes a replay into her work.
+    assert_eq!(
+        refusal(import_from_kiko(&mut recv, vec![resolution(native_ref.clone(), ResolutionOutcome::Withdrawn { reason: "x".into() })])),
+        MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() }
+    );
+    // Nor may one cite it.
+    assert_eq!(
+        refusal(import_from_kiko(&mut recv, vec![follow_up("FU-I", native_ref.clone())])),
+        MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() }
+    );
+    assert_eq!(head(&recv), before);
+    // Her follow-up still closes natively.
+    committed(admit(&mut recv, vec![resolution(native_ref, ResolutionOutcome::Withdrawn { reason: "x".into() })]));
+}
+
+#[test]
 fn a_replay_under_another_source_is_no_replay() {
     let mut recv = receiver();
     let history = vec![campaign(&[REPO]), question("Q7", &["A", "B"], "A")];
