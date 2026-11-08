@@ -39,6 +39,20 @@ impl Settings {
         self.client.as_ref().map_err(|detail| Trouble::Misconfigured(detail.clone()))
     }
 
+    /// A client for another mind, read from: `instance` at `endpoint` (`rudp://<ip>:<port>`), both
+    /// given as arguments. It refuses this process's own instance before any call, so the one
+    /// mind a verb writes is never also its source. Every request through it declares `instance`,
+    /// so an endpoint that holds a different mind answers ForeignInstance.
+    pub fn source(&self, instance: &str, endpoint: &str) -> Result<HuginnClient, Trouble> {
+        let slug = Slug(instance.to_string());
+        slug.validate_slug().map_err(|refusal| Trouble::invalid(format!("--from is not a valid instance name: {refusal:?}")))?;
+        if self.instance.as_deref() == Some(instance) {
+            return Err(Trouble::invalid(format!("--from {instance} is this process's own instance (EUREKA_INSTANCE)")));
+        }
+        let address = address(endpoint).ok_or_else(|| Trouble::invalid(format!("--from-endpoint is not rudp://<ip>:<port>: {endpoint}")))?;
+        Ok(HuginnClient::new(address, slug, TIMEOUT))
+    }
+
     /// One wire call for the configured instance. The request is built from
     /// that instance, never from anything the caller sent. No retry.
     pub fn ask(&self, request: impl FnOnce(&Slug) -> HuginnMindRequest) -> Result<HuginnMindResponse, Trouble> {
@@ -78,9 +92,11 @@ fn client(instance: Result<Option<String>, String>, endpoint: Result<Option<Stri
     let slug = Slug(instance);
     slug.validate_slug().map_err(|refusal| format!("EUREKA_INSTANCE is not a valid instance name: {refusal:?}"))?;
     let endpoint = endpoint?.ok_or("HUGINN_ENDPOINT is not set")?;
-    let address = endpoint
-        .strip_prefix("rudp://")
-        .and_then(|address| address.parse::<SocketAddr>().ok())
-        .ok_or_else(|| format!("HUGINN_ENDPOINT is not rudp://<ip>:<port>: {endpoint}"))?;
+    let address = address(&endpoint).ok_or_else(|| format!("HUGINN_ENDPOINT is not rudp://<ip>:<port>: {endpoint}"))?;
     Ok(HuginnClient::new(address, slug, TIMEOUT))
+}
+
+/// The socket address of a `rudp://<ip>:<port>` endpoint.
+fn address(endpoint: &str) -> Option<SocketAddr> {
+    endpoint.strip_prefix("rudp://").and_then(|address| address.parse::<SocketAddr>().ok())
 }

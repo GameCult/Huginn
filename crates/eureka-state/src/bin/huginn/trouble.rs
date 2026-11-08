@@ -2,7 +2,8 @@
 //!
 //! Exit codes: 2 the call is wrong (usage, InvalidInput, TooLarge,
 //! Misconfigured); 3 Unavailable (retry once); 4 no answer and a retry cannot
-//! help (Rejected, Unencodable, Internal); 5 ReadBackDiffers. Exit 0 and 1 are
+//! help (Rejected, Unencodable, Internal, Integrity); 5 ReadBackDiffers, the read-back after an
+//! admission or the verification walk of an import. Exit 0 and 1 are
 //! answers (the mind said yes, the mind said no) and are not troubles.
 
 use std::fmt;
@@ -19,6 +20,8 @@ pub enum Trouble {
     Rejected(String),
     Unencodable(String),
     Internal(String),
+    /// What an import found cannot be replayed whole, however often it is rerun.
+    Integrity(String),
     ReadBackDiffers(String),
 }
 
@@ -32,6 +35,7 @@ impl Trouble {
             Self::Rejected(_) => "Rejected",
             Self::Unencodable(_) => "Unencodable",
             Self::Internal(_) => "Internal",
+            Self::Integrity(_) => "Integrity",
             Self::ReadBackDiffers(_) => "ReadBackDiffers",
         }
     }
@@ -40,7 +44,7 @@ impl Trouble {
         match self {
             Self::Misconfigured(_) | Self::InvalidInput(_) | Self::TooLarge { .. } => 2,
             Self::Unavailable(_) => 3,
-            Self::Rejected(_) | Self::Unencodable(_) | Self::Internal(_) => 4,
+            Self::Rejected(_) | Self::Unencodable(_) | Self::Internal(_) | Self::Integrity(_) => 4,
             Self::ReadBackDiffers(_) => 5,
         }
     }
@@ -60,6 +64,7 @@ impl fmt::Display for Trouble {
             | Self::Rejected(detail)
             | Self::Unencodable(detail)
             | Self::Internal(detail)
+            | Self::Integrity(detail)
             | Self::ReadBackDiffers(detail) => f.write_str(detail),
             Self::TooLarge { bytes, limit } => {
                 write!(f, "the request encodes to {bytes} bytes and one send carries at most {limit}")

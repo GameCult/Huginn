@@ -13,11 +13,13 @@
 //! 1 the mind said no (a refusal, a conflict, an absent document). Troubles go
 //! to stderr as `<Code>: <detail>`: 2 the call is wrong, 3 Unavailable, 4 no
 //! answer and a retry cannot help, 5 the read-back after a committed admission
-//! differs from what was sent, 6 `admit` held the batch once (`admit_hold`).
+//! differs from what was sent or the verification walk of `import` finds a difference, 6 `admit` held the batch once (`admit_hold`). `import` also
+//! exits 1 when the campaign is not moved to this mind or this mind holds records of its own under it, and 4 when the history cannot be replayed whole.
 
 mod admit_hold;
 mod config;
 mod door;
+mod import;
 mod near;
 mod recall;
 mod recipes;
@@ -60,8 +62,10 @@ The file is a JSON array of 1 to 64 documents, each {\"kind\": <kind>, \"value\"
 Every key the schema does not know is refused (exit 2) with its path; nothing is sent. \
 After Committed or AlreadyAdmitted the batch is read back and compared with what was sent: `read back <n> equal`, or exit 5 with the ids and field paths that differ. A batch whose rulings or questions have in-force neighbours is held once: exit 6, the neighbours printed with a token, nothing sent. Run the same command with --seen <token> to admit it; a batch or --agent that changed needs a new token (a wrong one is exit 2).";
 
+const IMPORT_HELP: &str = "Reads the giver's mind (it sends Query alone) and admits its receipts for the campaign into this one, one batch per source receipt, in order, each naming the giver's receipt in imported_from. It refuses unless the campaign is moved to this mind (exit 1), and when this mind already holds records under the campaign that it did not import from the giver (exit 1). A rerun after any stop resumes at the first batch this mind does not hold; it prints `imported <campaign> from <instance>: ... verified` only after comparing every document it holds with the giver's (exit 5 if one differs). Until it prints imported, this mind writes nothing else under the campaign; a write that collides stops the import with the refusal (exit 1). Exit 3 Unavailable (rerun), 4 the history cannot be replayed whole (a receipt over 64 documents, too many external referents, a receipt held in part). Only a Self run can run it: a Persona's traffic to a peer's huginn port is fenced.";
+
 #[derive(Parser, Debug)]
-#[command(name = "huginn", about = "Huginn's mind: whoami, view, query, recipes, persona, admit, recall, schema", arg_required_else_help = true)]
+#[command(name = "huginn", about = "Huginn's mind: whoami, view, query, recipes, persona, admit, import, recall, schema", arg_required_else_help = true)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -128,6 +132,26 @@ enum Command {
     },
     /// The JSON Schema of a document kind or of a selection; no name lists them.
     Schema { name: Option<String> },
+    /// Replay a moved campaign's history from the giver's mind into this one.
+    #[command(after_help = IMPORT_HELP)]
+    Import {
+        /// The campaign's name: the root of its ids.
+        campaign: String,
+        /// The giver's instance.
+        #[arg(long = "from")]
+        from: String,
+        /// The giver's daemon, rudp://<ip>:<port>.
+        #[arg(long)]
+        from_endpoint: String,
+        #[arg(long, value_parser = faculty)]
+        faculty: Faculty,
+        /// The importing agent's name.
+        #[arg(long)]
+        agent: String,
+        /// The importing session.
+        #[arg(long)]
+        session: String,
+    },
     /// Recall into a dispatched brief.
     Recall {
         #[command(subcommand)]
@@ -260,6 +284,9 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
             query(settings, door::selection_value(&ask.selection)?, ask.semantic, ask.page.cursor, ask.page.documents)
         }
         Command::Admit { faculty, agent, session, seen, file } => admit(settings, faculty, agent, session, seen, &file),
+        Command::Import { campaign, from, from_endpoint, faculty, agent, session } => {
+            import::run(settings, import::Flags { campaign, from, from_endpoint, faculty, agent, session })
+        }
         Command::Persona { command: PersonaCommand::Get } => persona_get(settings),
         Command::Persona { command: PersonaCommand::Put { faculty, agent, session, expected_updated_at, file } } => {
             persona_put(settings, faculty, agent, session, expected_updated_at, &file)

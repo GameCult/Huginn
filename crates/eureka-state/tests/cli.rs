@@ -2468,3 +2468,256 @@ fn the_whole_hold_check_is_bounded_at_ten_seconds_and_fails_open() {
     assert!(ran.out.ends_with("read back 3 equal\n"), "{}", ran.out);
     assert!((9.5..15.0).contains(&took), "{took} s");
 }
+
+
+// ---- huginn import: a moved campaign replayed between two live daemons ----
+
+const TAKER: &str = "heimdall";
+const ABROAD: &str = "other-campaign";
+
+fn moving_to(mind: &str) -> PipelineDocument {
+    PipelineDocument::Resolution(PipelineResolution {
+        subject: PipelineRef { kind: PipelineKind::Campaign, id: Short(format!("{CAMPAIGN}:campaign:self")) },
+        sequence: 1,
+        outcome: ResolutionOutcome::Moved { to: slug(mind) },
+        rationale: "So.".into(),
+        resolved_on: Date("2026-11-08".into()),
+    })
+}
+
+fn answering_ruling(label: &str, campaign: &str, question: Option<String>) -> PipelineDocument {
+    let PipelineDocument::Ruling(mut inner) = ruling_of(label, "A ruling") else { unreachable!() };
+    inner.campaign = slug(campaign);
+    inner.choice = question.as_ref().map(|_| "a".into());
+    inner.answers = question.map(Short);
+    PipelineDocument::Ruling(inner)
+}
+
+/// A spec of the campaign citing the given rulings.
+fn spec_citing(cited: &[&str]) -> PipelineDocument {
+    let mut value = spec("1");
+    value["value"]["rulings"] = json!(cited);
+    serde_json::from_value(value).unwrap()
+}
+
+/// The giver's whole history: the campaign, two questions, a ruling answering one (two documents
+/// in one receipt), another campaign's ruling and a spec citing both rulings.
+fn giver_history(moved_to: Option<&str>) -> (TempDir, TestDaemon) {
+    let q1 = format!("{CAMPAIGN}:question:Q1");
+    let mut seed = vec![
+        vec![campaign(), stewardship()],
+        vec![question_of(CAMPAIGN, "Q1", "One"), question_of(CAMPAIGN, "Q2", "Two")],
+        vec![answering_ruling("R1", CAMPAIGN, Some(q1))],
+        vec![answering_ruling("X9", ABROAD, None)],
+        vec![spec_citing(&[&format!("{CAMPAIGN}:ruling:R1"), &format!("{ABROAD}:ruling:X9")])],
+    ];
+    seed.extend(moved_to.map(|to| vec![moving_to(to)]));
+    mind(seed)
+}
+
+fn taker_mind(holding_abroad: bool) -> (TempDir, TestDaemon) {
+    let mut seed = vec![vec![stewardship_of(TAKER)]];
+    if holding_abroad {
+        seed.push(vec![answering_ruling("X9", ABROAD, None)]);
+    }
+    mind_as(TAKER, seed)
+}
+
+fn plan_from(giver: &mut TestDaemon) -> huginn_mind::ImportPlan {
+    let mut selection = Selection {
+        fields: Some(vec![cultnet_rs::FieldPredicate { index: "root".into(), op: "any_of".into(), values: Some(vec![CAMPAIGN.into()]), number: None }]),
+        projection: "document".into(),
+        limit: Some(200),
+        ..Selection::default()
+    };
+    let mut views = Vec::new();
+    loop {
+        let request = HuginnMindRequest::Query { instance: slug(INSTANCE), selection: selection.clone(), semantic: None };
+        let HuginnMindResponse::Query(page) = answered(giver.handle(request, chrono::Utc::now())) else { panic!("a query answers a page") };
+        let PipelinePageItems::Documents(found) = page.items else { panic!("documents") };
+        views.extend(found);
+        match page.next {
+            Some(next) => selection.cursor = Some(next),
+            None => return huginn_mind::plan(&slug(CAMPAIGN), &slug(INSTANCE), &slug(TAKER), views).unwrap(),
+        }
+    }
+}
+
+/// What an interrupted import left in the receiver: the first `whole` batches, then the last `part` documents of the next.
+fn half_imported(taker: &mut TestDaemon, plan: &huginn_mind::ImportPlan, whole: usize, part: usize) {
+    for (index, batch) in plan.batches.iter().enumerate().take(whole + usize::from(part > 0)) {
+        let skip = if index < whole { 0 } else { batch.documents.len() - part };
+        let documents = batch.documents.iter().skip(skip).map(|(_, document)| document.clone()).collect();
+        let mut provenance = provenance();
+        provenance.imported_from = Some(batch.source.clone());
+        let batch = huginn_mind::PipelineAdmissionBatch { instance: slug(TAKER), provenance, documents };
+        let outcome = answered(taker.handle(HuginnMindRequest::Admit(batch), chrono::Utc::now()));
+        assert!(matches!(outcome, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })), "{outcome:?}");
+    }
+}
+
+fn importing(taker: &Server, from: &str, from_endpoint: SocketAddr) -> Run {
+    let endpoint = format!("rudp://{from_endpoint}");
+    run(
+        &[("EUREKA_INSTANCE", TAKER), ("HUGINN_ENDPOINT", &format!("rudp://{}", taker.addr))],
+        &["import", CAMPAIGN, "--from", from, "--from-endpoint", &endpoint, "--faculty", "SelfFaculty", "--agent", "mind-self-run", "--session", "import-1"],
+        None,
+    )
+}
+
+fn shown_by(server: &Server, instance: &str, id: &str, raw: bool) -> Run {
+    let env = [("EUREKA_INSTANCE", instance), ("HUGINN_ENDPOINT", &format!("rudp://{}", server.addr))];
+    if raw { run(&env, &["view", id, "--raw"], None) } else { run(&env, &["view", id], None) }
+}
+
+fn campaign_id() -> String {
+    format!("{CAMPAIGN}:campaign:self")
+}
+
+fn imported_lines(out: &str) -> Vec<&str> {
+    out.lines().filter(|line| line.starts_with("imported ordinal")).collect()
+}
+
+#[test]
+fn import_moves_a_campaign_between_two_live_daemons() {
+    let (root, daemon) = giver_history(Some(TAKER));
+    let giver = serve(root, daemon);
+    let (root, daemon) = taker_mind(false);
+    let taker = serve(root, daemon);
+
+    let ran = importing(&taker, INSTANCE, giver.addr);
+    assert_eq!(ran.code, 0, "{}{}", ran.out, ran.err);
+    let lines: Vec<&str> = ran.out.lines().collect();
+    assert!(lines[0].starts_with(&format!("plan {CAMPAIGN} from {INSTANCE}: 4 receipts ")) && lines[0].contains(", 0 held, moved by "), "{}", lines[0]);
+    assert_eq!(imported_lines(&ran.out).len(), 4);
+    let last = lines.last().unwrap();
+    assert!(last.starts_with(&format!("imported {CAMPAIGN} from {INSTANCE}: 4 receipts ")) && last.ends_with(", verified"), "{last}");
+
+    for id in [campaign_id(), format!("{CAMPAIGN}:question:Q1"), format!("{CAMPAIGN}:question:Q2"), format!("{CAMPAIGN}:ruling:R1"), format!("{CAMPAIGN}:cut_spec:cut-1.r1")] {
+        let (there, here) = (shown_by(&taker, TAKER, &id, true), shown_by(&giver, INSTANCE, &id, true));
+        assert_eq!((there.code, here.code), (0, 0), "{id}");
+        assert_eq!(there.out, here.out, "{id} is the giver's document");
+        let shown = shown_by(&taker, TAKER, &id, false).out;
+        assert!(shown.starts_with(&format!("{id} ")) && shown.contains(&format!("imported from {INSTANCE} ordinal")), "{shown}");
+    }
+    assert!(shown_by(&taker, TAKER, &campaign_id(), false).out.starts_with(&format!("{} InForce", campaign_id())), "the receiver keeps the campaign");
+    let moved = shown_by(&giver, INSTANCE, &campaign_id(), false).out;
+    assert!(moved.starts_with(&format!("{} Resolved", campaign_id())) && moved.contains("Moved"), "{moved}");
+}
+
+#[test]
+fn import_resumes_after_a_stop() {
+    let (root, mut giver_daemon) = giver_history(Some(TAKER));
+    let plan = plan_from(&mut giver_daemon);
+    let giver = serve(root, giver_daemon);
+    let (root, mut daemon) = taker_mind(false);
+    half_imported(&mut daemon, &plan, 2, 0);
+    let taker = serve(root, daemon);
+
+    let ran = importing(&taker, INSTANCE, giver.addr);
+    assert_eq!(ran.code, 0, "{}{}", ran.out, ran.err);
+    assert!(ran.out.lines().next().unwrap().contains(", 2 held, moved by "), "{}", ran.out);
+    assert_eq!(imported_lines(&ran.out).len(), plan.batches.len() - 2, "the held receipts are not sent again: {}", ran.out);
+    assert!(imported_lines(&ran.out)[0].contains(&format!("ordinal {} ", plan.batches[2].source.ordinal)), "resumes at the first unheld: {}", ran.out);
+    assert!(ran.out.trim_end().ends_with(", verified"));
+
+    let again = importing(&taker, INSTANCE, giver.addr);
+    assert_eq!(again.code, 0, "{}{}", again.out, again.err);
+    assert!(imported_lines(&again.out).is_empty() && again.out.lines().next().unwrap().contains(&format!(", {} held,", plan.batches.len())), "{}", again.out);
+}
+
+#[test]
+fn import_refuses_a_receipt_the_receiver_holds_only_part_of() {
+    let (root, mut giver_daemon) = giver_history(Some(TAKER));
+    let plan = plan_from(&mut giver_daemon);
+    let giver = serve(root, giver_daemon);
+    let two = plan.batches.iter().position(|batch| batch.documents.len() > 1).expect("a receipt of two documents");
+    let (root, mut daemon) = taker_mind(false);
+    half_imported(&mut daemon, &plan, two, 1);
+    let taker = serve(root, daemon);
+
+    let ran = importing(&taker, INSTANCE, giver.addr);
+    assert_eq!(ran.code, 4, "{}{}", ran.out, ran.err);
+    assert!(ran.err.starts_with("Integrity: source ordinal ") && ran.err.contains("is held in part (1 of 2"), "{}", ran.err);
+    assert!(imported_lines(&ran.out).is_empty(), "nothing is sent over a receipt held in part: {}", ran.out);
+}
+
+#[test]
+fn import_declares_only_unheld_foreign_referents() {
+    for holding in [false, true] {
+        let (root, daemon) = giver_history(Some(TAKER));
+        let giver = serve(root, daemon);
+        let (root, daemon) = taker_mind(holding);
+        let taker = serve(root, daemon);
+        let ran = importing(&taker, INSTANCE, giver.addr);
+        assert_eq!(ran.code, 0, "holding {holding}: {}{}", ran.out, ran.err);
+        let spec_line = imported_lines(&ran.out).into_iter().find(|line| line.ends_with("(4/4)")).expect("the spec's receipt is last");
+        let declared = if holding { " 0 external " } else { " 1 external " };
+        assert!(spec_line.contains(declared), "holding {holding}: {spec_line}");
+        assert!(ran.out.trim_end().ends_with(", verified"));
+    }
+}
+
+#[test]
+fn import_refuses_when_not_moved_to_her() {
+    for (moved, said) in [(None, "Refused NotMoved"), (Some("kiko"), "Refused MovedElsewhere")] {
+        let (root, daemon) = giver_history(moved);
+        let giver = serve(root, daemon);
+        let (root, daemon) = taker_mind(false);
+        let taker = serve(root, daemon);
+        let ran = importing(&taker, INSTANCE, giver.addr);
+        assert_eq!(ran.code, 1, "{moved:?}: {}{}", ran.out, ran.err);
+        assert!(ran.out.starts_with(said), "{}", ran.out);
+        assert_eq!(shown_by(&taker, TAKER, &campaign_id(), false).code, 1, "nothing was written");
+    }
+}
+
+#[test]
+fn import_refuses_her_own_records_under_the_root() {
+    let (root, daemon) = giver_history(Some(TAKER));
+    let giver = serve(root, daemon);
+    let (root, mut daemon) = taker_mind(false);
+    let own = answered(daemon.handle(HuginnMindRequest::Admit(batch(TAKER, vec![question_of(CAMPAIGN, "Mine", "Hers")])), chrono::Utc::now()));
+    assert!(matches!(own, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })));
+    let taker = serve(root, daemon);
+
+    let ran = importing(&taker, INSTANCE, giver.addr);
+    assert_eq!(ran.code, 1, "{}{}", ran.out, ran.err);
+    assert!(ran.out.starts_with("Refused the receiver already holds records under the root") && ran.out.contains(&format!("{CAMPAIGN}:question:Mine")), "{}", ran.out);
+    assert_eq!(shown_by(&taker, TAKER, &campaign_id(), false).code, 1, "nothing was written");
+}
+
+#[test]
+fn import_refuses_a_history_with_a_receipt_over_the_batch_limit() {
+    // 33 rulings each answering a question: 33 documents admitted, 66 written in one receipt.
+    let questions: Vec<PipelineDocument> = (0..33).map(|n| question_of(CAMPAIGN, &format!("Q{n}"), "A fork")).collect();
+    let rulings: Vec<PipelineDocument> = (0..33).map(|n| answering_ruling(&format!("R{n}"), CAMPAIGN, Some(format!("{CAMPAIGN}:question:Q{n}")))).collect();
+    let (root, daemon) = mind(vec![vec![campaign(), stewardship()], questions, rulings, vec![moving_to(TAKER)]]);
+    let giver = serve(root, daemon);
+    let (root, daemon) = taker_mind(false);
+    let taker = serve(root, daemon);
+
+    let ran = importing(&taker, INSTANCE, giver.addr);
+    assert_eq!(ran.code, 4, "{}{}", ran.out, ran.err);
+    assert!(ran.err.starts_with("Integrity: BatchTooLarge { ordinal: ") && ran.err.contains("documents: 66 }"), "{}", ran.err);
+    assert_eq!(shown_by(&taker, TAKER, &campaign_id(), false).code, 1, "refused before the first write");
+}
+
+#[test]
+fn import_wrong_endpoint_is_foreign_instance() {
+    let (root, daemon) = giver_history(Some(TAKER));
+    let _giver = serve(root, daemon);
+    let (root, daemon) = taker_mind(false);
+    let taker = serve(root, daemon);
+
+    // The giver's name at the receiver's own endpoint: her daemon refuses a read declared for another mind.
+    let ran = importing(&taker, INSTANCE, taker.addr);
+    assert_eq!(ran.code, 1, "{}{}", ran.out, ran.err);
+    assert!(ran.out.starts_with("Refused ") && ran.out.contains("ForeignInstance"), "{}", ran.out);
+    assert_eq!(shown_by(&taker, TAKER, &campaign_id(), false).code, 1, "nothing was written");
+
+    // Her own name as the source is a wrong call before any send.
+    let own = importing(&taker, TAKER, taker.addr);
+    assert_eq!(own.code, 2, "{}{}", own.out, own.err);
+    assert!(own.err.starts_with("InvalidInput: --from heimdall is this process's own instance"), "{}", own.err);
+}

@@ -120,10 +120,15 @@ pub fn answered(handled: Handled) -> HuginnMindResponse {
 /// A daemon over a temporary mind whose identity is admitted, and whatever
 /// else `seed` admits.
 pub fn mind(seed: Vec<Vec<PipelineDocument>>) -> (TempDir, TestDaemon) {
+    mind_as(INSTANCE, seed)
+}
+
+/// `mind` for another instance.
+pub fn mind_as(instance: &str, seed: Vec<Vec<PipelineDocument>>) -> (TempDir, TestDaemon) {
     let root = tempfile::tempdir().unwrap();
-    let mut daemon = Daemon::new(Mind::open(root.path(), &slug(INSTANCE)).unwrap(), Inert);
-    for documents in std::iter::once(vec![identity(INSTANCE)]).chain(seed) {
-        let outcome = answered(daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), Utc::now()));
+    let mut daemon = Daemon::new(Mind::open(root.path(), &slug(instance)).unwrap(), Inert);
+    for documents in std::iter::once(vec![identity(instance)]).chain(seed) {
+        let outcome = answered(daemon.handle(HuginnMindRequest::Admit(batch(instance, documents)), Utc::now()));
         assert!(matches!(outcome, HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })), "{outcome:?}");
     }
     (root, daemon)
@@ -220,8 +225,12 @@ pub fn campaign() -> PipelineDocument {
 }
 
 pub fn stewardship() -> PipelineDocument {
+    stewardship_of(INSTANCE)
+}
+
+pub fn stewardship_of(instance: &str) -> PipelineDocument {
     PipelineDocument::Stewardship(PipelineStewardship {
-        instance: slug(INSTANCE),
+        instance: slug(instance),
         repo: OrgRepo(REPO.into()),
         sequence: 1,
         assigned_on: Date("2026-09-29".into()),
