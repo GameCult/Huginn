@@ -30,6 +30,7 @@ pub mod admission;
 mod docs;
 mod image;
 pub mod envelope;
+pub mod import;
 pub mod index;
 pub mod mind;
 pub mod persona;
@@ -54,6 +55,7 @@ mod move_tests;
 pub use docs::CitationRole;
 pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
+pub use import::{ImportBatch, ImportFault, ImportPlan, plan};
 pub use mind::{HuginnMindEpoch, Mind};
 pub use persona::{PersonaPutOutcome, PersonaStateView};
 pub use query::{

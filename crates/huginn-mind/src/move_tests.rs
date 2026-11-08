@@ -12,7 +12,7 @@ use crate::admission::{PipelineAdmissionBatch, PipelineAdmissionOutcome};
 use crate::fixtures::*;
 use crate::mind::Mind;
 use crate::query::{PipelinePageItems, PipelineStatus, Reader};
-use crate::receipt::{Faculty, HuginnCommitReceipt, IMPORT_EXTERNAL_MAX, ImportSource, PipelineProvenance};
+use crate::receipt::{Faculty, IMPORT_EXTERNAL_MAX, ImportSource, PipelineProvenance};
 use crate::refusal::MindRefusal;
 use crate::store::test_stores::MemoryStore;
 
@@ -157,36 +157,35 @@ fn root_of(key: &str) -> &str {
     key.split(':').next().unwrap()
 }
 
-/// Replays the giver's receipts up to `through`, in ordinal order, each filtered to the campaign's
-/// root, into the receiver as imports that name their source receipt.
-fn replay(giver: &Mind<MemoryStore>, receiver: &mut Mind<MemoryStore>, through: u64) -> Vec<PipelineAdmissionOutcome> {
-    let mut receipts: Vec<HuginnCommitReceipt> = giver.receipts().unwrap();
-    receipts.sort_by_key(|receipt| receipt.ordinal);
-    let mut outcomes = Vec::new();
-    for receipt in receipts.into_iter().filter(|receipt| receipt.ordinal <= through) {
-        let documents: Vec<D> = receipt
-            .writes
-            .iter()
-            .filter(|write| crate::docs::kind_of_type(&write.document_type).is_some() && root_of(&write.document_key) == CAMPAIGN)
-            .map(|write| giver.get(crate::docs::kind_of_type(&write.document_type).unwrap(), &write.document_key).unwrap().unwrap())
-            .collect();
-        if documents.is_empty() {
-            continue;
+/// Every document the giver holds under the campaign's root, as the verb reads them: one cursor
+/// walk of the document projection.
+fn giver_views(giver: &Mind<MemoryStore>) -> Vec<crate::query::PipelineDocumentView> {
+    let mut selection = Selection {
+        fields: Some(vec![FieldPredicate { index: "root".into(), op: "any_of".into(), values: Some(vec![CAMPAIGN.into()]), number: None }]),
+        projection: "document".into(),
+        limit: Some(cultnet_rs::LIMIT_MAX),
+        ..Selection::default()
+    };
+    let mut views = Vec::new();
+    loop {
+        let page = giver.query(&selection).unwrap();
+        let PipelinePageItems::Documents(found) = page.items else { panic!("the document projection answers documents") };
+        views.extend(found);
+        match page.next {
+            Some(next) => selection.cursor = Some(next),
+            None => return views,
         }
-        let source = ImportSource {
-            instance: giver.instance().clone(),
-            receipt_id: s(&receipt.receipt_id),
-            ordinal: receipt.ordinal,
-            committed_at: s(&receipt.committed_at),
-            faculty: receipt.provenance.faculty,
-            agent: receipt.provenance.agent.clone(),
-            session: receipt.provenance.session.clone(),
-            tool: receipt.provenance.tool.clone(),
-            external: vec![],
-        };
-        outcomes.push(import_as(receiver, source, documents));
     }
-    outcomes
+}
+
+/// Replays the giver's campaign into the receiver as `import::plan` lays it out: one import per
+/// source receipt, each naming its source.
+fn replay(giver: &Mind<MemoryStore>, receiver: &mut Mind<MemoryStore>) -> Vec<PipelineAdmissionOutcome> {
+    let plan = crate::import::plan(&slug(CAMPAIGN), giver.instance(), receiver.instance(), giver_views(giver)).unwrap();
+    plan.batches
+        .into_iter()
+        .map(|batch| import_as(receiver, batch.source, batch.documents.into_iter().map(|(_, document)| document).collect()))
+        .collect()
 }
 
 #[test]
@@ -390,7 +389,7 @@ fn replaying_a_whole_campaign_reproduces_it() {
     assert_eq!(moved_at, last + 1);
 
     let mut mind = receiver();
-    let outcomes = replay(&giver, &mut mind, last);
+    let outcomes = replay(&giver, &mut mind);
     assert!(outcomes.len() >= 8, "{} receipts replayed", outcomes.len());
     for outcome in &outcomes {
         assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
