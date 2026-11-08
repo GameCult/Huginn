@@ -193,7 +193,7 @@ pub(crate) fn people_of(memory: &eureka_pipeline::PipelineMemory) -> Vec<String>
     let origin: &[eureka_pipeline::Short] = match &memory.origin {
         MemoryOrigin::Room { heard_from, .. } => heard_from,
         MemoryOrigin::Direct { with, .. } => with,
-        MemoryOrigin::Wake | MemoryOrigin::SelfRun { .. } => &[],
+        MemoryOrigin::Wake | MemoryOrigin::SelfRun { .. } | MemoryOrigin::Sleep { .. } => &[],
     };
     memory.about.iter().chain(origin).map(|id| id.0.clone()).collect()
 }
@@ -206,6 +206,7 @@ pub(crate) fn origin_phrase(origin: &MemoryOrigin, names: &BTreeMap<&str, &str>)
         MemoryOrigin::Direct { with, .. } => format!("privately, with {}", who(with.iter().map(|id| id.0.as_str()), names)),
         MemoryOrigin::Wake => "on a wake".to_string(),
         MemoryOrigin::SelfRun { run } => format!("in your Self run {}", run.0),
+        MemoryOrigin::Sleep { run } => format!("in your sleep {}", run.0),
     }
 }
 

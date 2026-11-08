@@ -791,6 +791,27 @@
           "required": [
             "SelfRun"
           ]
+        },
+        {
+          "description": "Her Sleep run, by its label: a memory she formed in her night.",
+          "type": "object",
+          "properties": {
+            "Sleep": {
+              "type": "object",
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "run"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Sleep"
+          ]
         }
       ]
     },
@@ -1182,6 +1203,31 @@
           "additionalProperties": false,
           "required": [
             "UnknownSupersessor"
+          ]
+        },
+        {
+          "description": "A consolidation and the supersession of the memory it consumes come together: `memory` consolidates `consumed`, or is named as superseding it, without the other half in the batch.",
+          "type": "object",
+          "properties": {
+            "UnpairedConsolidation": {
+              "type": "object",
+              "properties": {
+                "consumed": {
+                  "type": "string"
+                },
+                "memory": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "memory",
+                "consumed"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "UnpairedConsolidation"
           ]
         },
         {
@@ -5335,7 +5381,8 @@
       "type": "string",
       "enum": [
         "PersonaTurn",
-        "SelfRun"
+        "SelfRun",
+        "Sleep"
       ]
     },
     "Sha": {

@@ -55,12 +55,17 @@ pub(crate) struct Recording {
     pub(crate) fail: Cell<bool>,
     /// One named instance whose unit never starts.
     pub(crate) fail_for: RefCell<Option<Slug>>,
-    running: RefCell<Vec<(Slug, RunTurn)>>,
+    running: RefCell<Vec<(Slug, eureka_pipeline::RunSlot)>>,
 }
 
 impl Recording {
     pub(crate) fn kill(&self, turn: RunTurn) {
-        self.running.borrow_mut().retain(|unit| *unit != (Slug(INSTANCE.into()), turn));
+        self.running.borrow_mut().retain(|unit| *unit != (Slug(INSTANCE.into()), turn.slot()));
+    }
+
+    /// `kill` for a named instance.
+    pub(crate) fn kill_as(&self, instance: &Slug, turn: RunTurn) {
+        self.running.borrow_mut().retain(|unit| *unit != (instance.clone(), turn.slot()));
     }
 
     pub(crate) fn revive(&self, turn: RunTurn) {
@@ -69,7 +74,7 @@ impl Recording {
 
     /// `revive` for a named instance.
     pub(crate) fn revive_as(&self, instance: &Slug, turn: RunTurn) {
-        self.running.borrow_mut().push((instance.clone(), turn));
+        self.running.borrow_mut().push((instance.clone(), turn.slot()));
     }
 }
 
@@ -79,12 +84,12 @@ impl Launcher for Recording {
             return Err(anyhow!("refused"));
         }
         self.started.borrow_mut().push((instance.clone(), turn));
-        self.running.borrow_mut().push((instance.clone(), turn));
+        self.running.borrow_mut().push((instance.clone(), turn.slot()));
         Ok(())
     }
 
     fn alive(&self, instance: &Slug, turn: RunTurn) -> bool {
-        self.running.borrow().contains(&(instance.clone(), turn))
+        self.running.borrow().contains(&(instance.clone(), turn.slot()))
     }
 }
 

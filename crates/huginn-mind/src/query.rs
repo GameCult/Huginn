@@ -1795,9 +1795,7 @@ mod tests {
         committed(admit(&mut mind, vec![crate::fixtures::thought("t1", "A drift.", &[r(K::Finding, &f1), r(K::Question, &q1)])]));
         let (older, newer) = (format!("{INSTANCE}:memory:m1"), format!("{INSTANCE}:memory:m2"));
         committed(admit(&mut mind, vec![memory("m1", MemorySort::Idea, "one", &[])]));
-        let D::Memory(mut consolidating) = memory("m2", MemorySort::Idea, "two", &[]) else { unreachable!() };
-        consolidating.consolidates = vec![r(K::Memory, &older)];
-        committed(admit(&mut mind, vec![D::Memory(consolidating)]));
+        committed(admit(&mut mind, crate::fixtures::consolidation("m2", &["m1"])));
         let (note, way) = (id("research", "p.a"), id("idea", "p.i"));
         let D::Research(mut note_document) = research("p", "a", "A fact.") else { unreachable!() };
         note_document.serves = vec![r(K::Question, &q1)];
@@ -1816,6 +1814,7 @@ mod tests {
             id("resolution", &format!("finding.{}.n1", f2.rsplit(':').next().unwrap())),
         );
         let spec_closed = id("resolution", "cut_spec.cut-1.r1.n1");
+        let older_closed = format!("{INSTANCE}:resolution:memory.m1.n1");
         let spec_r2 = id("cut_spec", "cut-1.r2");
         let r1 = id("ruling", "R1");
         let expected: Vec<(CitationRole, &str, &str)> = vec![
@@ -1835,7 +1834,9 @@ mod tests {
             (CitationRole::Subject, &f1_closed, &f1),
             (CitationRole::Subject, &f2_closed, &f2),
             (CitationRole::Subject, &spec_closed, &spec),
+            (CitationRole::Subject, &older_closed, &older),
             (CitationRole::SupersededBy, &spec_closed, &spec_r2),
+            (CitationRole::SupersededBy, &older_closed, &newer),
             (CitationRole::ResolvedBy, &n1, &r1),
             (CitationRole::ResolvedBy, &f1_closed, &report),
             (CitationRole::DeferredTo, &f2_closed, &fu),

@@ -66,7 +66,7 @@ pub(crate) enum Alias {
 const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
 const OUTCOMES: [&str; 6] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn"];
 const BOOLEANS: [&str; 2] = ["true", "false"];
-const MEMORY_ORIGINS: [&str; 4] = ["Room", "Direct", "Wake", "SelfRun"];
+const MEMORY_ORIGINS: [&str; 5] = ["Room", "Direct", "Wake", "SelfRun", "Sleep"];
 /// The one value a presence alias answers with; a row without it answers nothing.
 const PRESENT: [&str; 1] = ["true"];
 
@@ -288,6 +288,7 @@ impl SelectionRow {
                     MemoryOrigin::Direct { .. } => "Direct",
                     MemoryOrigin::Wake => "Wake",
                     MemoryOrigin::SelfRun { .. } => "SelfRun",
+                    MemoryOrigin::Sleep { .. } => "Sleep",
                 }.to_string()]);
             }
             D::Research(research) => put(Alias::Pass, vec![research.pass.0.clone()]),

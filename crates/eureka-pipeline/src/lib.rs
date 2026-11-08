@@ -736,8 +736,27 @@ unit_enums! {
     RulingAuthority { Operator, Standing, Defaulted, Mind }
     FindingOrigin { Introduced, PreExisting }
     RunOperator { Operator, Mind }
-    RunTurn { PersonaTurn, SelfRun }
+    RunTurn { PersonaTurn, SelfRun, Sleep }
     MemorySort { Asked, Decided, Committed, Learned, Did, Idea, Rapport }
+}
+
+/// The slots of a Mind's runs: one live run of hers per instance and slot. A
+/// Persona session and her Sleep run share the Persona slot (unit
+/// `mind-persona@`); a Self run holds the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunSlot {
+    Persona,
+    SelfRun,
+}
+
+impl RunTurn {
+    /// The slot this turn holds while live; admission and launch both read it here.
+    pub fn slot(self) -> RunSlot {
+        match self {
+            Self::PersonaTurn | Self::Sleep => RunSlot::Persona,
+            Self::SelfRun => RunSlot::SelfRun,
+        }
+    }
 }
 
 value_types! {
@@ -1004,6 +1023,8 @@ pub enum MemoryOrigin {
     Wake,
     /// A Self run of hers, by its label.
     SelfRun { run: Short },
+    /// Her Sleep run, by its label: a memory she formed in her night.
+    Sleep { run: Short },
 }
 
 impl Bounded for MemoryOrigin {
@@ -1018,7 +1039,7 @@ impl Bounded for MemoryOrigin {
                 list(&format!("{field}.with"), with, 8)
             }
             Self::Wake => Ok(()),
-            Self::SelfRun { run } => run.validate(&format!("{field}.run")),
+            Self::SelfRun { run } | Self::Sleep { run } => run.validate(&format!("{field}.run")),
         }
     }
 }

@@ -96,6 +96,27 @@
             "SelfRun"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Her Sleep run, by its label: a memory she formed in her night.",
+          "properties": {
+            "Sleep": {
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "run"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Sleep"
+          ],
+          "type": "object"
         }
       ]
     },

@@ -36,6 +36,8 @@ pub enum MindRefusal {
     CitesResolvedDocument { kind: PipelineKind, id: String },
     EmptySupersession,
     UnknownSupersessor { id: String },
+    /// A consolidation and the supersession of the memory it consumes come together: `memory` consolidates `consumed`, or is named as superseding it, without the other half in the batch.
+    UnpairedConsolidation { memory: String, consumed: String },
     RevisionWithoutSupersession { kind: PipelineKind, revision: u32 },
     DuplicateLabel { field: String, label: String },
     InvalidOptions { question: String },

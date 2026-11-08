@@ -255,8 +255,9 @@ impl<'i> Docs<'i> {
     }
 
     /// The in-force run of hers, other than `run_key`, that holds the slot of
-    /// the turn `run` is of: ruling one-live-self-run's one live run per
-    /// instance and turn, asked by a run's opening and by the withdrawal that
+    /// the turn `run` is of (a Persona session and a Sleep run share the
+    /// Persona slot): ruling one-live-self-run's one live run per
+    /// instance and slot, asked by a run's opening and by the withdrawal that
     /// would put a closed run back in force. An operator's run neither holds
     /// the slot nor is refused for it.
     pub(crate) fn live_holder(&self, run_key: &str, run: &PipelineRun) -> Option<&str> {
@@ -267,7 +268,7 @@ impl<'i> Docs<'i> {
             PipelineDocument::Run(other)
                 if other_key != run_key
                     && other.instance == run.instance
-                    && other.turn == run.turn
+                    && other.turn.slot() == run.turn.slot()
                     && other.operated_by == RunOperator::Mind
                     && self.in_force(PipelineKind::Run, other_key) =>
             {

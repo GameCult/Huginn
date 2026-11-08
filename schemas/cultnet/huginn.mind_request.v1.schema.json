@@ -663,6 +663,27 @@
           "required": [
             "SelfRun"
           ]
+        },
+        {
+          "description": "Her Sleep run, by its label: a memory she formed in her night.",
+          "type": "object",
+          "properties": {
+            "Sleep": {
+              "type": "object",
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "run"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Sleep"
+          ]
         }
       ]
     },
@@ -2611,7 +2632,8 @@
       "type": "string",
       "enum": [
         "PersonaTurn",
-        "SelfRun"
+        "SelfRun",
+        "Sleep"
       ]
     },
     "SemanticQuery": {

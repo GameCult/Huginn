@@ -397,6 +397,17 @@ pub(crate) fn memory(label: &str, sort: MemorySort, text: &str, about: &[&str]) 
     })
 }
 
+/// A consolidation as it is admitted: the memory `label` consolidating the memories `consumed`, and a
+/// Superseded resolution of each by it. The pair is one batch.
+pub(crate) fn consolidation(label: &str, consumed: &[&str]) -> Vec<PipelineDocument> {
+    let key = |label: &str| PipelineRef { kind: PipelineKind::Memory, id: Short(format!("{INSTANCE}:memory:{label}")) };
+    let PipelineDocument::Memory(mut memory) = memory(label, MemorySort::Idea, "Consolidated.", &[]) else { unreachable!() };
+    memory.consolidates = consumed.iter().map(|consumed| key(consumed)).collect();
+    std::iter::once(PipelineDocument::Memory(memory))
+        .chain(consumed.iter().map(|consumed| resolution(key(consumed), superseded(&[key(label)]))))
+        .collect()
+}
+
 /// One research note of pass `pass`: a claim standing on one observed source, serving nothing.
 pub(crate) fn research(pass: &str, label: &str, claim: &str) -> PipelineDocument {
     PipelineDocument::Research(eureka_pipeline::PipelineResearch {
