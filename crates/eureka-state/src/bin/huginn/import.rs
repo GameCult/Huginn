@@ -273,7 +273,7 @@ fn verify(root: &[PipelineDocumentView], plan: &ImportPlan, source: &Slug) -> St
 #[cfg(test)]
 mod tests {
     use huginn_mind::eureka_pipeline::{Date, PipelineKind, PipelineRuling, RulingAuthority};
-    use huginn_mind::{AdmissionFacts, ImportSource, PipelineFacts, PipelineStatusSummary};
+    use huginn_mind::{AdmissionFacts, ImportSource, PipelineFacts, PipelineStatus, PipelineStatusSummary};
 
     use super::*;
 
@@ -375,5 +375,36 @@ mod tests {
             let said = stopped(resume(&two(), &[own], &source));
             assert!(said.starts_with("no: Refused the receiver already holds records under the root"), "{said}");
         }
+    }
+
+    fn viewed(local: &str, document: PipelineDocument, from: Option<(&str, u64)>) -> PipelineDocumentView {
+        let held = header(local, from);
+        PipelineDocumentView { id: held.id, document, admission: held.admission, status: PipelineStatus::InForce }
+    }
+
+    #[test]
+    fn the_verification_walk_names_every_difference() {
+        let source = slug("eureka");
+        let plan = plan_of(vec![batch(3, &["a", "b"]), batch(5, &["c"])]);
+        let ours = |local: &str, ordinal| viewed(local, question(local), Some(("eureka", ordinal)));
+        let right = vec![ours("a", 3), ours("b", 3), ours("c", 5)];
+        assert!(verify(&right, &plan, &source).is_ok());
+
+        let mut changed = question("b");
+        if let PipelineDocument::Ruling(ruling) = &mut changed {
+            ruling.title = "Reworded".into();
+        }
+        let wrong = vec![ours("a", 3), viewed("b", changed, Some(("eureka", 3))), viewed("c", question("c"), Some(("eureka", 3))), ours("x", 5)];
+        let Err(Stop::Trouble(trouble)) = verify(&wrong, &plan, &source) else { panic!("a difference is exit 5") };
+        assert_eq!(trouble.exit(), 5);
+        let said = trouble.to_string();
+        for named in ["c:ruling:b: title", "c:ruling:c: imported_from", "c:ruling:x: not in the plan"] {
+            assert!(said.contains(named), "{named} in {said}");
+        }
+        assert!(!said.contains("c:ruling:a:"), "{said}");
+
+        let missing = vec![ours("a", 3), ours("b", 3)];
+        let Err(Stop::Trouble(trouble)) = verify(&missing, &plan, &source) else { panic!() };
+        assert!(trouble.to_string().contains("c:ruling:c: missing from the receiver"), "{trouble}");
     }
 }
