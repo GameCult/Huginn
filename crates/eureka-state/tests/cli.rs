@@ -2565,7 +2565,7 @@ fn importing(taker: &Server, from: &str, from_endpoint: SocketAddr) -> Run {
     )
 }
 
-fn viewed(server: &Server, instance: &str, id: &str, raw: bool) -> Run {
+fn shown_by(server: &Server, instance: &str, id: &str, raw: bool) -> Run {
     let env = [("EUREKA_INSTANCE", instance), ("HUGINN_ENDPOINT", &format!("rudp://{}", server.addr))];
     if raw { run(&env, &["view", id, "--raw"], None) } else { run(&env, &["view", id], None) }
 }
@@ -2594,14 +2594,14 @@ fn import_moves_a_campaign_between_two_live_daemons() {
     assert!(last.starts_with(&format!("imported {CAMPAIGN} from {INSTANCE}: 5 receipts ")) && last.ends_with(", verified"), "{last}");
 
     for id in [campaign_id(), format!("{CAMPAIGN}:question:Q1"), format!("{CAMPAIGN}:question:Q2"), format!("{CAMPAIGN}:ruling:R1"), format!("{CAMPAIGN}:cut_spec:cut-1.r1")] {
-        let (there, here) = (viewed(&taker, TAKER, &id, true), viewed(&giver, INSTANCE, &id, true));
+        let (there, here) = (shown_by(&taker, TAKER, &id, true), shown_by(&giver, INSTANCE, &id, true));
         assert_eq!((there.code, here.code), (0, 0), "{id}");
         assert_eq!(there.out, here.out, "{id} is the giver's document");
-        let shown = viewed(&taker, TAKER, &id, false).out;
+        let shown = shown_by(&taker, TAKER, &id, false).out;
         assert!(shown.starts_with(&format!("{id} ")) && shown.contains(&format!("imported from {INSTANCE} ordinal")), "{shown}");
     }
-    assert!(viewed(&taker, TAKER, &campaign_id(), false).out.starts_with(&format!("{} InForce", campaign_id())), "the receiver keeps the campaign");
-    let moved = viewed(&giver, INSTANCE, &campaign_id(), false).out;
+    assert!(shown_by(&taker, TAKER, &campaign_id(), false).out.starts_with(&format!("{} InForce", campaign_id())), "the receiver keeps the campaign");
+    let moved = shown_by(&giver, INSTANCE, &campaign_id(), false).out;
     assert!(moved.starts_with(&format!("{} Resolved", campaign_id())) && moved.contains("Moved"), "{moved}");
 }
 
@@ -2668,7 +2668,7 @@ fn import_refuses_when_not_moved_to_her() {
         let ran = importing(&taker, INSTANCE, giver.addr);
         assert_eq!(ran.code, 1, "{moved:?}: {}{}", ran.out, ran.err);
         assert!(ran.out.starts_with(said), "{}", ran.out);
-        assert_eq!(viewed(&taker, TAKER, &campaign_id(), false).code, 1, "nothing was written");
+        assert_eq!(shown_by(&taker, TAKER, &campaign_id(), false).code, 1, "nothing was written");
     }
 }
 
@@ -2684,7 +2684,7 @@ fn import_refuses_her_own_records_under_the_root() {
     let ran = importing(&taker, INSTANCE, giver.addr);
     assert_eq!(ran.code, 1, "{}{}", ran.out, ran.err);
     assert!(ran.out.starts_with("Refused the receiver already holds records under the root") && ran.out.contains(&format!("{CAMPAIGN}:question:Mine")), "{}", ran.out);
-    assert_eq!(viewed(&taker, TAKER, &campaign_id(), false).code, 1, "nothing was written");
+    assert_eq!(shown_by(&taker, TAKER, &campaign_id(), false).code, 1, "nothing was written");
 }
 
 #[test]
@@ -2700,7 +2700,7 @@ fn import_refuses_a_history_with_a_receipt_over_the_batch_limit() {
     let ran = importing(&taker, INSTANCE, giver.addr);
     assert_eq!(ran.code, 4, "{}{}", ran.out, ran.err);
     assert!(ran.err.starts_with("Integrity: BatchTooLarge { ordinal: ") && ran.err.contains("documents: 66 }"), "{}", ran.err);
-    assert_eq!(viewed(&taker, TAKER, &campaign_id(), false).code, 1, "refused before the first write");
+    assert_eq!(shown_by(&taker, TAKER, &campaign_id(), false).code, 1, "refused before the first write");
 }
 
 #[test]
@@ -2714,7 +2714,7 @@ fn import_wrong_endpoint_is_foreign_instance() {
     let ran = importing(&taker, INSTANCE, taker.addr);
     assert_eq!(ran.code, 1, "{}{}", ran.out, ran.err);
     assert!(ran.out.starts_with("Refused ") && ran.out.contains("ForeignInstance"), "{}", ran.out);
-    assert_eq!(viewed(&taker, TAKER, &campaign_id(), false).code, 1, "nothing was written");
+    assert_eq!(shown_by(&taker, TAKER, &campaign_id(), false).code, 1, "nothing was written");
 
     // Her own name as the source is a wrong call before any send.
     let own = importing(&taker, TAKER, taker.addr);
