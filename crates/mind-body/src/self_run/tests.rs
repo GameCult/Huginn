@@ -237,7 +237,7 @@ fn go(steps: Vec<Step>) -> Ran {
 type Seed = Box<dyn Fn(&TestMind)>;
 
 fn flushes(ran: &Ran) -> usize {
-    ran.written().iter().filter(|text| text.starts_with(FLUSH_MESSAGE)).count()
+    ran.written().iter().filter(|text| text.contains(FLUSH_MESSAGE)).count()
 }
 
 // ---- who is carried -----------------------------------------------------
@@ -1398,7 +1398,7 @@ fn a_brief_derived_while_a_turn_runs_is_written_at_once_counted_at_its_echo_and_
     let told = tells(&ran);
     assert_eq!(told.len(), 1, "{:?}", ran.written());
     assert!(told[0].contains(&brief_ref("b1").id.0) && told[0].contains("Survey the noise functions."), "{}", told[0]);
-    assert!(told[0].contains("resolve follow-up") && told[0].contains("Recorded"), "she is told how to close it: {}", told[0]);
+    assert!(told[0].contains(&inbox::resolving_sentence(&brief_ref("b1").id.0)) && !told[0].contains(inbox::CLOSING_RULE), "she is reminded of the closing rule, not told it again: {}", told[0]);
     // The plan line is restated under every brief for the run's life, so it names the instant of the reading, never an age that stops being true.
     assert!(told[0].contains("read at 2026-10-29T20:33Z") && !told[0].contains(" ago"), "{}", told[0]);
     assert_eq!(ran.written().len(), 2, "the start message and one tell: {:?}", ran.written());
@@ -1420,13 +1420,55 @@ fn a_brief_derived_while_the_session_is_idle_is_written_and_the_session_is_busy_
 }
 
 #[test]
+fn the_start_message_carries_the_closing_rule_once_and_names_what_closes_a_change() {
+    let text = start_message(&Slug("yggdrasil".into()), &run_ref("selfrun-a"), &[], 0);
+    assert_eq!(text.matches(inbox::CLOSING_RULE).count(), 1, "{text}");
+    for word in ["default branch", "Recorded", "Fixed", "Superseded", "Withdrawn", "merge-gate-own-soul", "An open PR, a pushed branch or a local commit is not done"] {
+        assert!(text.contains(word), "{word}: {text}");
+    }
+}
+
+#[test]
+fn the_flush_keeps_a_brief_whose_change_has_not_landed_open() {
+    for why in [Why::Ceiling, Why::Rotation, Why::Idle] {
+        let text = flush_text(why);
+        assert!(text.contains(FLUSH_MESSAGE), "{text}");
+        assert_eq!(text.contains("context ceiling"), why == Why::Ceiling, "each flush names its own reason: {text}");
+        assert!(text.contains("stays open") && text.contains("default branch") && text.contains("closing rule"), "{text}");
+        assert!(!text.contains("Recorded, your answer"), "{text}");
+    }
+}
+
+#[test]
+fn the_closing_rule_covers_an_act_without_a_commit_and_names_the_commit_fixed_takes() {
+    let rule = inbox::CLOSING_RULE;
+    for word in ["no commit", "Recorded with what you did and where it can be seen", "merge or squash commit", "not the PR head"] {
+        assert!(rule.contains(word), "{word}: {rule}");
+    }
+    let reminder = inbox::resolving_sentence("x");
+    for word in ["Recorded only if it asked just for an answer", "an act with no commit", "a pushed branch or a local commit is not done"] {
+        assert!(reminder.contains(word), "{word}: {reminder}");
+    }
+}
+
+#[test]
+fn no_source_of_the_actuator_tells_her_a_brief_closes_by_recorded_with_her_answer() {
+    for source in [include_str!("../self_run.rs"), include_str!("inbox.rs")] {
+        for old in ["Recorded with your answer", "Recorded, your answer", "Resolve each brief you answered"] {
+            assert!(!source.contains(old), "{old}");
+        }
+    }
+}
+
+#[test]
 fn a_brief_open_at_start_is_in_the_start_message_with_how_to_resolve_it_and_is_not_told_again() {
     let mind = live_mind();
     persona_commit(&mind, vec![brief("p1", "Still open.")]);
     let ran = mind_run(&mind, vec![Out(echo()), Idle(31), Idle(31)]);
     let start = &ran.written()[0];
     assert!(start.contains("Also open for you") && start.contains(&brief_ref("p1").id.0) && start.contains("Still open."), "{start}");
-    assert!(start.contains(&format!("resolve follow-up {} Recorded", brief_ref("p1").id.0)), "{start}");
+    assert!(start.contains(&inbox::resolving_sentence(&brief_ref("p1").id.0)), "{start}");
+    assert_eq!(start.matches(inbox::CLOSING_RULE).count(), 1, "the rule is told once, beside the reminder: {start}");
     assert_eq!(ran.written().len(), 1, "never told again: {:?}", ran.written());
 }
 
@@ -1493,7 +1535,7 @@ fn the_session_ends_where_the_cache_would_be_evicted_with_a_flush_and_a_waiting_
     let closed_at = hour.events.iter().position(|event| *event == Event::InputClosed).unwrap();
     assert!(flush_at < closed_at && hour.count(&Event::InputClosed) == 1, "{:?}", hour.events);
     assert!(hour.out.contains("decision Write { tells: false, switch: false, flush: Some(Idle) } prefix 10 ttl_s 3600 idle_s 3540 inbox false written 2 consumed 1\n"), "{}", hour.out);
-    assert!(hour.written().iter().any(|text| text.contains("nothing is waiting and its cache would lapse") && text.contains("Resolve each brief you answered")), "{:?}", hour.written());
+    assert!(hour.written().iter().any(|text| text.contains("nothing is waiting and its cache would lapse") && text.contains("by the closing rule")), "{:?}", hour.written());
     // Five minutes' cache: the flush at 240 s.
     let short = go(vec![Out(echo()), Out(five_minute_request("m1", 10)), Out(ok_result()), Idle(239), Idle(1), Out(echo()), Out(ok_result()), Idle(1)]);
     assert_eq!(flushes(&short), 1);
@@ -1540,7 +1582,7 @@ fn no_stdin_line_is_written_after_the_flush_and_nothing_but_the_writer_writes() 
     let ran = mind_run(&mind, steps);
     let written = ran.written();
     assert_eq!(written.len(), 2, "{written:?}");
-    assert!(written[1].starts_with(FLUSH_MESSAGE), "{}", written[1]);
+    assert!(written[1].contains(FLUSH_MESSAGE), "{}", written[1]);
     assert_eq!(ran.spawns.len(), 1);
     assert!(ran.spawns[0].iter().all(|arg| arg != "--settings"), "no hooks on argv: {:?}", ran.spawns[0]);
 }
@@ -1568,7 +1610,7 @@ mod live_session {
             let entry: Value = serde_json::from_str(entry).unwrap();
             let at = crate::testkit::at((entry["t"].as_f64().unwrap() * 1000.0) as i64);
             if let Some(text) = entry.get("want").and_then(Value::as_str) {
-                let (label, fact) = if text.starts_with(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true, other: false, other_first: false }) };
+                let (label, fact) = if text.contains(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true, other: false, other_first: false }) };
                 let (next, action) = decide(state, fact, at);
                 state = next;
                 trace.push((label.to_string(), action));
