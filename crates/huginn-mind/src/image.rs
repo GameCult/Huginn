@@ -151,9 +151,17 @@ impl Image {
             .flat_map(|kind| self.posting(*kind, Alias::Root.name(), root).into_iter().flatten().map(move |id| (*kind, self.row(*id))))
             .collect();
         let began = rows.iter().filter(|(_, row)| row.view.admission.provenance.imported_from.is_some()).map(|(_, row)| row.view.admission.ordinal).min();
+        // What the import replays is what this mind holds from it already or will be handed; a
+        // subject this mind wrote itself is never in the plan.
+        let replayed = |kind: PipelineKind, id: &str| self.id_of(kind, id).is_some_and(|row| self.row(row).view.admission.provenance.imported_from.is_some());
         rows.iter().any(|(kind, row)| {
+            let resolves = match &row.view.document {
+                PipelineDocument::Resolution(resolution) => Some((resolution.subject.kind, resolution.subject.id.0.as_str())),
+                _ => None,
+            };
             row.view.admission.provenance.imported_from.is_none()
-                && !(crate::import::inert_in_window(*kind) && began.is_some_and(|began| row.view.admission.ordinal > began))
+                && !(crate::import::inert_in_window(*kind, resolves, |id| resolves.is_some_and(|(subject, _)| replayed(subject, id)))
+                    && began.is_some_and(|began| row.view.admission.ordinal > began))
         })
     }
 

@@ -53,11 +53,14 @@ pub enum ImportFault {
 
 /// Whether a native write of this kind, admitted after an import under its root began, cannot touch
 /// the status or derivation of any document the import will still replay: a follow-up or an idea
-/// has no referent a replay resolves and derives nothing. Ruling `import-window-writes-ruled`
-/// stops an import at a collision; this is the writes that cannot collide. Every other kind may
-/// answer, supersede or resolve a planned document, and still refuses the import.
-pub fn inert_in_window(kind: PipelineKind) -> bool {
-    matches!(kind, PipelineKind::FollowUp | PipelineKind::Idea)
+/// has no referent a replay resolves and derives nothing, and neither has the resolution of one
+/// (`resolves`: the subject's kind and id) that the import does not replay (`planned`). Ruling
+/// `import-window-writes-ruled` stops an import at a collision; this is the writes that cannot
+/// collide. Every other kind may answer, supersede or resolve a planned document, and still refuses
+/// the import.
+pub fn inert_in_window(kind: PipelineKind, resolves: Option<(PipelineKind, &str)>, planned: impl Fn(&str) -> bool) -> bool {
+    let harmless = |kind| matches!(kind, PipelineKind::FollowUp | PipelineKind::Idea);
+    harmless(kind) || (kind == PipelineKind::Resolution && resolves.is_some_and(|(subject, id)| harmless(subject) && !planned(id)))
 }
 
 /// The plan for `receiver` to import `campaign` from `source`, given every document the source
