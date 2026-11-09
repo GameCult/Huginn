@@ -15,7 +15,7 @@ use eureka_state::hold;
 use huginn_mind::eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, Short, Slug};
 use huginn_mind::{
     AdmissionFacts, Faculty, HuginnMindRequest, HuginnMindResponse, ImportBatch, ImportFault, ImportPlan, PipelineAdmissionBatch, PipelineAdmissionOutcome,
-    PipelineDocumentSummary, PipelineFacts, PipelineDocumentView, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, inert_in_window, plan,
+    PipelineDocumentSummary, PipelineDocumentView, PipelineFacts, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, inert_in_window, plan,
 };
 
 use crate::config::{Settings, TOOL};
@@ -207,7 +207,9 @@ fn headers(ask: &dyn Fn(Selection) -> Result<HuginnMindResponse, Trouble>, campa
 /// from this source and are no planned document: writes in the import window (ruling
 /// `import-window-writes-ruled`: the import stops at a collision, and only a collision). They are
 /// left where they are; they cannot be a planned document's key, and the admission of each later
-/// batch still refuses any replay that meets one.
+/// batch still refuses any replay that meets one. A record whose key a later batch carries is no window write: the
+/// tool keeps it planned and refuses the resume, and the daemon, which cannot see the later batch,
+/// refuses that batch as an identity collision when it arrives.
 fn window_writes<'a>(root: impl Iterator<Item = (PipelineKind, &'a str, &'a AdmissionFacts, Option<&'a PipelineRef>)> + Clone, planned: &BTreeSet<&str>, source: &Slug) -> BTreeSet<&'a str> {
     let began = root.clone().filter(|(_, _, admission, _)| admission.provenance.imported_from.as_ref().is_some_and(|from| from.instance == *source)).map(|(_, _, admission, _)| admission.ordinal).min();
     root.filter(|(kind, key, admission, subject)| inert_in_window(*kind, subject.map(|subject| (subject.kind, subject.id.0.as_str())), |id| planned.contains(id)) && admission.provenance.imported_from.is_none() && !planned.contains(key) && began.is_some_and(|began| admission.ordinal > began))

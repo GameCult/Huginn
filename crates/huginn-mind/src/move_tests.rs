@@ -638,6 +638,23 @@ fn an_import_resumes_past_the_resolution_of_a_follow_up_the_receiver_wrote_after
     assert_eq!(refusal(import_from_kiko(&mut recv, vec![question("Q2", &["A", "B"], "A")])), MindRefusal::ImportOutsideCampaign { root: CAMPAIGN.into() });
 }
 
+/// The daemon cannot see a later batch: a follow-up the receiver wrote natively and closed, whose
+/// key a later batch replays, is inert to it now. The batch then meets the key and is refused as a
+/// collision, so the window never reaches the receiver's own record.
+#[test]
+fn a_native_follow_up_a_later_batch_replays_is_refused_when_that_batch_arrives() {
+    let q1 = id("question", "Q1");
+    let mut recv = receiver();
+    committed(import_from_kiko(&mut recv, vec![campaign(&[REPO]), question("Q1", &["A", "B"], "A")]));
+    let native = follow_up("FU-L", r(K::Question, &q1));
+    let native_ref = r(K::FollowUp, &pipeline_key(&native).unwrap());
+    committed(admit(&mut recv, vec![native.clone()]));
+    committed(admit(&mut recv, vec![resolution(native_ref, ResolutionOutcome::Recorded { reason: "done".into() })]));
+    let before = head(&recv);
+    assert!(matches!(refusal(import_from_kiko(&mut recv, vec![native])), MindRefusal::IdentityCollision { .. }));
+    assert_eq!(head(&recv), before);
+}
+
 #[test]
 fn an_import_never_cites_or_resolves_a_follow_up_the_receiver_wrote() {
     let q1 = id("question", "Q1");
