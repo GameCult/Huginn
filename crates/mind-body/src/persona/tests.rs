@@ -1298,7 +1298,7 @@ fn the_responsibilities_hold_their_bound_and_mark_what_they_drop() {
     rig.mind.committed(vec![ruling("src", None)]);
     let source = reference(K::Ruling, &id("ruling", "src"));
     let long = "w".repeat(400);
-    for n in 0..30 {
+    for n in 0..60 {
         rig.mind.committed(vec![open_follow_up(&format!("fu-{n:02}"), &source, &long)]);
     }
     let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
@@ -1307,9 +1307,9 @@ fn the_responsibilities_hold_their_bound_and_mark_what_they_drop() {
     assert!(text.contains("fu-00") && !text.contains("fu-29"), "the oldest show and the newest are dropped: {text}");
     let listed_ids: Vec<usize> = text.match_indices("- eureka-body/fu-").map(|(at, found)| text[at + found.len()..][..2].parse().unwrap()).collect();
     assert_eq!(listed_ids, (0..listed_ids.len()).collect::<Vec<_>>(), "ascending by admission, no gap: {text}");
-    let said: usize = text.split('(').find_map(|part| part.split_once(" more open follow-ups not shown: `huginn open <campaign>` lists them all.)").and_then(|(n, _)| n.parse().ok())).unwrap();
+    let said: usize = text.split('(').find_map(|part| part.split_once(" more open follow-ups not shown: eureka-body").and_then(|(n, _)| n.parse().ok())).unwrap();
     assert!(said > 0 && !text.contains("older open follow-ups"), "{text}");
-    assert_eq!(listed_ids.len() + said, 30, "{text}");
+    assert_eq!(listed_ids.len() + said, 60, "{text}");
     let held = text.split("Rulings these cite").next().unwrap().len();
     assert!(held <= GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE && held + 420 > GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE, "{held}");
 }
@@ -2391,7 +2391,7 @@ fn each_open_list_holds_its_own_bound_exactly_and_counts_what_it_drops() {
     // Both lists full and a follow-up still has its room: the open lists are outside the goals bound.
     let mind = TestMind::seeded();
     mind.committed(vec![spec("x")]);
-    for index in 0..6 {
+    for index in 0..20 {
         mind.committed(vec![
             crate::testkit::memory(&format!("c{index}"), MemorySort::Committed, &"c".repeat(900), &[]),
             crate::testkit::memory(&format!("a{index}"), MemorySort::Asked, &"a".repeat(900), &[]),
@@ -7390,7 +7390,7 @@ fn an_imported_item_sorts_by_its_origin_time_not_its_import() {
         mind.committed_imported(born, batch);
     }
     let text = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
-    assert_eq!(listed_follow_ups(&text), ["imported-old", "native", "imported-new"], "{text}");
+    assert_eq!(listed_follow_ups(&text), ["imp-old", "native", "imp-new"], "{text}");
     let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} in {text}"));
     assert!(at("m-imported") < at("m-native"), "{text}");
     assert!(text.contains("(2020-01-01, "), "an imported memory shows the date it began: {text}");
