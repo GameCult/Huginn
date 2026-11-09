@@ -15,7 +15,7 @@ use eureka_state::hold;
 use huginn_mind::eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, Short, Slug};
 use huginn_mind::{
     AdmissionFacts, Faculty, HuginnMindRequest, HuginnMindResponse, ImportBatch, ImportFault, ImportPlan, PipelineAdmissionBatch, PipelineAdmissionOutcome,
-    PipelineDocumentSummary, PipelineDocumentView, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, inert_in_window, plan,
+    PipelineDocumentSummary, PipelineFacts, PipelineDocumentView, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, inert_in_window, plan,
 };
 
 use crate::config::{Settings, TOOL};
@@ -73,7 +73,7 @@ fn import(settings: &Settings, flags: Flags) -> Step<()> {
     };
     let root = headers(&ask_receiver, &campaign)?;
     let held = resume(&plan, &root, giver.instance())?;
-    let window = window_writes(root.iter().map(|header| (header.id.kind, header.id.id.0.as_str(), &header.admission)), &planned_keys(&plan), giver.instance());
+    let window = window_writes(root.iter().map(|header| (header.id.kind, header.id.id.0.as_str(), &header.admission, resolved_by_facts(&header.facts))), &planned_keys(&plan), giver.instance());
     if !window.is_empty() {
         say(format_args!("left in place, admitted by the receiver after the import began: {}", window.iter().copied().collect::<Vec<_>>().join(", ")));
     }
@@ -208,11 +208,27 @@ fn headers(ask: &dyn Fn(Selection) -> Result<HuginnMindResponse, Trouble>, campa
 /// `import-window-writes-ruled`: the import stops at a collision, and only a collision). They are
 /// left where they are; they cannot be a planned document's key, and the admission of each later
 /// batch still refuses any replay that meets one.
-fn window_writes<'a>(root: impl Iterator<Item = (PipelineKind, &'a str, &'a AdmissionFacts)> + Clone, planned: &BTreeSet<&str>, source: &Slug) -> BTreeSet<&'a str> {
-    let began = root.clone().filter(|(_, _, admission)| admission.provenance.imported_from.as_ref().is_some_and(|from| from.instance == *source)).map(|(_, _, admission)| admission.ordinal).min();
-    root.filter(|(kind, key, admission)| inert_in_window(*kind) && admission.provenance.imported_from.is_none() && !planned.contains(key) && began.is_some_and(|began| admission.ordinal > began))
-        .map(|(_, key, _)| key)
+fn window_writes<'a>(root: impl Iterator<Item = (PipelineKind, &'a str, &'a AdmissionFacts, Option<&'a PipelineRef>)> + Clone, planned: &BTreeSet<&str>, source: &Slug) -> BTreeSet<&'a str> {
+    let began = root.clone().filter(|(_, _, admission, _)| admission.provenance.imported_from.as_ref().is_some_and(|from| from.instance == *source)).map(|(_, _, admission, _)| admission.ordinal).min();
+    root.filter(|(kind, key, admission, subject)| inert_in_window(*kind, subject.map(|subject| (subject.kind, subject.id.0.as_str())), |id| planned.contains(id)) && admission.provenance.imported_from.is_none() && !planned.contains(key) && began.is_some_and(|began| admission.ordinal > began))
+        .map(|(_, key, _, _)| key)
         .collect()
+}
+
+/// What a resolution resolves, from a header.
+fn resolved_by_facts(facts: &PipelineFacts) -> Option<&PipelineRef> {
+    match facts {
+        PipelineFacts::Resolution { subject, .. } => Some(subject),
+        _ => None,
+    }
+}
+
+/// What a resolution resolves, from a whole document.
+fn resolved_by_document(document: &PipelineDocument) -> Option<&PipelineRef> {
+    match document {
+        PipelineDocument::Resolution(resolution) => Some(&resolution.subject),
+        _ => None,
+    }
 }
 
 /// The plan's document keys.
@@ -233,7 +249,7 @@ fn resume(plan: &ImportPlan, root: &[PipelineDocumentSummary], source: &Slug) ->
         .collect();
     let mut held: Vec<BTreeSet<&str>> = vec![BTreeSet::new(); plan.batches.len()];
     let mut own = Vec::new();
-    let window = window_writes(root.iter().map(|header| (header.id.kind, header.id.id.0.as_str(), &header.admission)), &planned_keys(plan), source);
+    let window = window_writes(root.iter().map(|header| (header.id.kind, header.id.id.0.as_str(), &header.admission, resolved_by_facts(&header.facts))), &planned_keys(plan), source);
     for header in root {
         let key = header.id.id.0.as_str();
         if window.contains(key) {
@@ -289,7 +305,7 @@ fn verify(root: &[PipelineDocumentView], plan: &ImportPlan, source: &Slug) -> St
         }
     }
     let planned = planned_keys(plan);
-    let window = window_writes(root.iter().map(|view| (view.id.kind, view.id.id.0.as_str(), &view.admission)), &planned, source);
+    let window = window_writes(root.iter().map(|view| (view.id.kind, view.id.id.0.as_str(), &view.admission, resolved_by_document(&view.document))), &planned, source);
     differing.extend(held.keys().filter(|key| !planned.contains(*key) && !window.contains(*key)).map(|key| format!("{key}: not in the plan")));
     if differing.is_empty() {
         Ok(())
@@ -300,8 +316,8 @@ fn verify(root: &[PipelineDocumentView], plan: &ImportPlan, source: &Slug) -> St
 
 #[cfg(test)]
 mod tests {
-    use huginn_mind::eureka_pipeline::{Date, PipelineKind, PipelineRuling, RulingAuthority};
-    use huginn_mind::{AdmissionFacts, ImportSource, PipelineFacts, PipelineStatus, PipelineStatusSummary};
+    use huginn_mind::eureka_pipeline::{Date, PipelineKind, PipelineRuling, ResolutionOutcome, RulingAuthority};
+    use huginn_mind::{AdmissionFacts, ImportSource, PipelineStatus, PipelineStatusSummary};
 
     use super::*;
 
@@ -422,7 +438,7 @@ mod tests {
         let source = slug("eureka");
         let root = [at(header("a", Some(("eureka", 3))), 10), at(header("b", Some(("eureka", 3))), 10), at(note(header("zz", None), PipelineKind::FollowUp), 20)];
         assert_eq!(resume(&two(), &root, &source).ok().unwrap(), vec![true, false]);
-        let window = window_writes(root.iter().map(|held| (held.id.kind, held.id.id.0.as_str(), &held.admission)), &planned_keys(&two()), &source);
+        let window = window_writes(root.iter().map(|held| (held.id.kind, held.id.id.0.as_str(), &held.admission, resolved_by_facts(&held.facts))), &planned_keys(&two()), &source);
         assert_eq!(window.into_iter().collect::<Vec<_>>(), vec!["c:ruling:zz"]);
     }
 
@@ -448,6 +464,39 @@ mod tests {
         // the import is dated by its first receipt: a record between two imported ones is in the window
         let between = [began.as_slice(), &[at(note(header("zz", None), PipelineKind::Idea), 11)]].concat();
         assert_eq!(resume(&two(), &between, &source).ok().unwrap(), vec![true, false]);
+    }
+
+    /// Void's case: the import stopped after its first receipt, her Persona then admitted
+    /// follow-ups under the root and resolved them. A resolution of a window follow-up the plan
+    /// lacks touches nothing planned, so it stays in place like the follow-up.
+    #[test]
+    fn a_resolution_of_a_window_follow_up_does_not_block_the_resume() {
+        let source = slug("eureka");
+        let began = [at(header("a", Some(("eureka", 3))), 10), at(header("b", Some(("eureka", 3))), 10)];
+        let resolving = |subject_kind: PipelineKind, subject: &str, ordinal| {
+            let mut held = note(header("zz.n1", None), PipelineKind::Resolution);
+            held.facts = PipelineFacts::Resolution {
+                subject: PipelineRef { kind: subject_kind, id: Short(subject.into()) },
+                sequence: 1,
+                outcome: ResolutionOutcome::Recorded { reason: "done".into() },
+                resolved_on: Date("2026-11-09".into()),
+            };
+            at(held, ordinal)
+        };
+        for (kind, subject) in [(PipelineKind::FollowUp, "c:follow_up:zz"), (PipelineKind::Idea, "c:idea:zz")] {
+            let root = [began.as_slice(), &[resolving(kind, subject, 20)]].concat();
+            assert_eq!(resume(&two(), &root, &source).ok().unwrap(), vec![true, false], "{kind:?}");
+        }
+        for refused in [
+            // a resolution of a planned document, or of a kind that derives status
+            resolving(PipelineKind::FollowUp, "c:ruling:a", 20),
+            resolving(PipelineKind::Ruling, "c:ruling:zz", 20),
+            // admitted before the import began
+            resolving(PipelineKind::FollowUp, "c:follow_up:zz", 9),
+        ] {
+            let said = stopped(resume(&two(), &[began.as_slice(), &[refused]].concat(), &source));
+            assert!(said.starts_with("no: Refused the receiver already holds records under the root"), "{said}");
+        }
     }
 
     #[test]
