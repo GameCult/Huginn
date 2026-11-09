@@ -2320,7 +2320,7 @@ fn ruling_ids_in(text: &str) -> Vec<String> {
 }
 
 /// What she is responsible for, from her own mind: her stewardships in force,
-/// always whole, with each record's note; her open commitments, then her open asks, each newest first with
+/// always whole, with each record's note; her open commitments, then her open asks, each oldest first with
 /// its id and its own bound; her follow-ups in force, oldest
 /// first, until the bound; and the rulings those cite, so she knows which to
 /// `huginn view`. Her open runs are the recent-runs section's. Anything the
@@ -2367,11 +2367,11 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
     let mut open_people: Vec<String> = Vec::new();
     let open_start = out.len();
     for (sort, heading, noun, budget) in [
-        (MemorySort::Committed, "You committed to:", "commitments", OPEN_COMMITTED_MAX_BYTES),
-        (MemorySort::Asked, "Asked of you, not yet taken on:", "asks", OPEN_ASKED_MAX_BYTES),
+        (MemorySort::Committed, "You committed to, oldest first:", "commitments", OPEN_COMMITTED_MAX_BYTES),
+        (MemorySort::Asked, "Asked of you, not yet taken on, oldest first:", "asks", OPEN_ASKED_MAX_BYTES),
     ] {
+        // Ascending, which is admission order: the oldest open items first, the newest left to the count.
         let selection = Selection {
-            descending: true,
             limit: Some(OPEN_FETCH),
             projection: "document".into(),
             ..any_of(in_force(of_kind(PipelineKind::Memory)), "sort", &[format!("{sort:?}").as_str()])
@@ -2398,7 +2398,7 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
             out.push_str(&section);
         }
         if matched > shown {
-            out.push_str(&format!("({} older {noun} not shown: settle what is finished and they come back into view.)\n", matched - shown));
+            out.push_str(&format!("({} more {noun} not shown: settle what is finished and they come back into view.)\n", matched - shown));
         }
     }
     // The open_ids items are outside the follow-ups' and rulings' bound.
@@ -2439,7 +2439,7 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
         out.push_str("- no follow-up is open in your mind.\n");
     }
     if dropped > 0 {
-        out.push_str(&format!("({dropped} newer open follow-ups not shown: `huginn open <campaign>` lists them all.)\n"));
+        out.push_str(&format!("({dropped} more open follow-ups not shown: `huginn open <campaign>` lists them all.)\n"));
     }
     let mut dropped_rulings = cited.len().saturating_sub(GOALS_RULINGS_MAX);
     cited.truncate(GOALS_RULINGS_MAX);

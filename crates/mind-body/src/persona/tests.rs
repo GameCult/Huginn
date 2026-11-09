@@ -1307,7 +1307,7 @@ fn the_responsibilities_hold_their_bound_and_mark_what_they_drop() {
     assert!(text.contains("fu-00") && !text.contains("fu-29"), "the oldest show and the newest are dropped: {text}");
     let listed_ids: Vec<usize> = text.match_indices("- eureka-body/fu-").map(|(at, found)| text[at + found.len()..][..2].parse().unwrap()).collect();
     assert_eq!(listed_ids, (0..listed_ids.len()).collect::<Vec<_>>(), "ascending by admission, no gap: {text}");
-    let said: usize = text.split('(').find_map(|part| part.split_once(" newer open follow-ups not shown: `huginn open <campaign>` lists them all.)").and_then(|(n, _)| n.parse().ok())).unwrap();
+    let said: usize = text.split('(').find_map(|part| part.split_once(" more open follow-ups not shown: `huginn open <campaign>` lists them all.)").and_then(|(n, _)| n.parse().ok())).unwrap();
     assert!(said > 0 && !text.contains("older open follow-ups"), "{text}");
     assert_eq!(listed_ids.len() + said, 30, "{text}");
     let held = text.split("Rulings these cite").next().unwrap().len();
@@ -1787,7 +1787,7 @@ fn an_ask_survives_a_lost_context() {
     rig.chat.deliveries.borrow_mut().push(delivery(2, "swarm", "@op:chat", "how did it go"));
     assert_eq!(failure_of(rig.go()), None);
     let second = input_of(&rig, 1);
-    let at = second.find("Asked of you, not yet taken on:").expect("the open ask is shown");
+    let at = second.find("Asked of you, not yet taken on, oldest first:").expect("the open ask is shown");
     let shown = &second[at..];
     assert!(shown.contains(&kept[0].0) && shown.contains("2026-10-09") && shown.contains("in #swarm") && shown.contains("\"op\""), "{shown}");
     assert!(shown.contains("Put the Cinny client fork first"));
@@ -1818,7 +1818,7 @@ fn parts_ideas_and_rapport_survive_and_come_back_about_their_people() {
         assert_eq!(second.matches(text).count(), 1, "{text} once: {second}");
     }
     assert!(second.contains("Idea about \"libby\"") && second.contains("Rapport about \"libby\""), "{second}");
-    assert!(under(responsibilities_of(&second), "You committed to:").contains("I integrate the Cinny fork"), "the commitment is in front of her, not recalled: {second}");
+    assert!(under(responsibilities_of(&second), "You committed to, oldest first:").contains("I integrate the Cinny fork"), "the commitment is in front of her, not recalled: {second}");
     assert_eq!(second.matches("I integrate the Cinny fork").count(), 1);
 }
 
@@ -2164,7 +2164,7 @@ fn commitments_stay_in_front_of_her_off_cue() {
     for turn in [message_turn, wake_turn] {
         let input = input_of(&rig, turn);
         let section = responsibilities_of(&input);
-        let shown = under(section, "You committed to:");
+        let shown = under(section, "You committed to, oldest first:");
         assert!(shown.contains(&commitment) && shown.contains("I integrate the Cinny fork; Libby owns the shaders"), "turn {turn}: {section}");
         assert!(settle_enum(&rig, turn).contains(&commitment), "turn {turn}: the commitment can be settled");
         assert!(!input.contains("I take shaders, you integrate"), "no message text of turn 1 is in turn {turn}");
@@ -2188,7 +2188,7 @@ fn settling_and_taking_on_a_commitment() {
     assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "integrated".into() }));
     rig.chat.deliveries.borrow_mut().push(delivery(3, "swarm", libby, "again"));
     assert_eq!(failure_of(rig.go()), None);
-    assert!(!input_of(&rig, 2).contains("You committed to:"), "a settled commitment is gone");
+    assert!(!input_of(&rig, 2).contains("You committed to, oldest first:"), "a settled commitment is gone");
     // Taking on a shown commitment defers it to the follow-up, which the next turn lists in its place.
     let rig = Rig::new(vec![delivery(1, "swarm", libby, "plan")], &[plan()]);
     assert_eq!(failure_of(rig.go()), None);
@@ -2202,7 +2202,7 @@ fn settling_and_taking_on_a_commitment() {
     rig.chat.deliveries.borrow_mut().push(delivery(3, "swarm", libby, "status"));
     assert_eq!(failure_of(rig.go()), None);
     let after = input_of(&rig, 2);
-    assert!(!after.contains("You committed to:") && after.contains("Open follow-ups") && after.contains("Fork the Cinny client"), "{after}");
+    assert!(!after.contains("You committed to, oldest first:") && after.contains("Open follow-ups") && after.contains("Fork the Cinny client"), "{after}");
     // new:<i> names a commitment she writes now, as it names an ask.
     let rig = Rig::new(vec![delivery(1, "swarm", libby, "fork")], &[reply(&[("swarm", "on it")], json!([keeps("Committed", "I fork the client", &[libby])]), json!([]), starting(json!("new:0")))]);
     assert_eq!(failure_of(rig.go()), None);
@@ -2310,10 +2310,12 @@ fn caps_count_what_they_leave_out() {
     assert_eq!(failure_of(rig.go()), None);
     let input = input_of(&rig, 0);
     // The asks: shown with ids, the rest counted exactly, and the settle enum is exactly what was shown.
-    let asked = under(responsibilities_of(&input), "Asked of you, not yet taken on:");
+    let asked = under(responsibilities_of(&input), "Asked of you, not yet taken on, oldest first:");
     let shown_ids: Vec<String> = asked.lines().filter(|line| line.starts_with("- ") && line.contains(":memory:")).map(|line| line[2..].split(' ').next().unwrap().to_string()).collect();
     assert!(!shown_ids.is_empty() && shown_ids.len() < 12, "{} shown: {asked}", shown_ids.len());
-    assert!(asked.contains(&format!("({} older asks not shown", 12 - shown_ids.len())), "{} shown, ids {shown_ids:?}", shown_ids.len());
+    let expected_oldest: Vec<String> = (0..shown_ids.len()).map(|index| format!("eureka-body:memory:ask-{index:02}")).collect();
+    assert_eq!(shown_ids, expected_oldest, "the oldest asks show, in admission order, and the newest are counted");
+    assert!(asked.contains(&format!("({} more asks not shown", 12 - shown_ids.len())), "{} shown, ids {shown_ids:?}", shown_ids.len());
     let mut enum_ids = settle_enum(&rig, 0);
     enum_ids.sort();
     let mut expected = shown_ids.clone();
@@ -2344,7 +2346,7 @@ fn nine_short_asks_are_all_shown_with_ids_and_the_oldest_can_be_settled() {
     rig.chat.deliveries.borrow_mut().push(delivery(3, "swarm", "@op:chat", "status"));
     assert_eq!(failure_of(rig.go()), None);
     let input = input_of(&rig, 2);
-    let asked = under(responsibilities_of(&input), "Asked of you, not yet taken on:");
+    let asked = under(responsibilities_of(&input), "Asked of you, not yet taken on, oldest first:");
     for id in &ids {
         assert!(asked.contains(id.as_str()), "{id} is shown with its id: {asked}");
     }
@@ -2362,8 +2364,8 @@ fn each_open_list_holds_its_own_bound_exactly_and_counts_what_it_drops() {
     let names = BTreeMap::new();
     let slug = Slug(INSTANCE.into());
     for (sort, heading, noun, bound) in [
-        (MemorySort::Committed, "You committed to:", "commitments", OPEN_COMMITTED_MAX_BYTES),
-        (MemorySort::Asked, "Asked of you, not yet taken on:", "asks", OPEN_ASKED_MAX_BYTES),
+        (MemorySort::Committed, "You committed to, oldest first:", "commitments", OPEN_COMMITTED_MAX_BYTES),
+        (MemorySort::Asked, "Asked of you, not yet taken on, oldest first:", "asks", OPEN_ASKED_MAX_BYTES),
     ] {
         let render = |adjustable: usize| {
             let mind = TestMind::seeded();
@@ -2381,7 +2383,7 @@ fn each_open_list_holds_its_own_bound_exactly_and_counts_what_it_drops() {
         assert!(!fits.contains("not shown"), "{fits}");
         let over = render(fit + 1);
         assert_eq!(lines(&over), 3, "{over}");
-        assert!(over.contains(&format!("(1 older {noun} not shown: settle what is finished and they come back into view.)")), "{over}");
+        assert!(over.contains(&format!("(1 more {noun} not shown: settle what is finished and they come back into view.)")), "{over}");
     }
     // Both lists full and a follow-up still has its room: the open lists are outside the goals bound.
     let mind = TestMind::seeded();
@@ -2398,13 +2400,30 @@ fn each_open_list_holds_its_own_bound_exactly_and_counts_what_it_drops() {
     assert!(goals.text.contains("eureka-body/later"), "{}", goals.text);
     assert!(goals.text.contains("- eureka-body:ruling:R1: A ruling"), "the cited ruling still has its room: {}", goals.text);
     assert!(goals.text.len() > GOALS_MAX_BYTES, "the open lists sit outside the goals bound");
-    assert!(goals.text.contains("older commitments not shown") && goals.text.contains("older asks not shown"));
+    assert!(goals.text.contains("more commitments not shown") && goals.text.contains("more asks not shown"));
     assert!(goals.open.len() < 12 && goals.open.iter().all(|id| goals.text.contains(id.as_str())), "open is exactly what was shown");
     assert!(goals.listed.iter().all(|id| !goals.open.contains(id)), "listed (follow-ups, rulings) and open stay apart");
 }
 
+/// Over a section's bound the oldest open items show in admission order and the newest are the ones counted, commitments and asks alike.
 #[test]
-fn newest_open_items_come_first_with_their_commitments_before_their_asks_and_after_the_stewardships() {
+fn a_full_open_section_shows_the_oldest_and_counts_the_newest() {
+    for (sort, heading) in [(MemorySort::Committed, "You committed to, oldest first:"), (MemorySort::Asked, "Asked of you, not yet taken on, oldest first:")] {
+        let mind = TestMind::seeded();
+        for index in 0..10 {
+            mind.committed(vec![crate::testkit::memory(&format!("m{index:02}"), sort, &format!("M{index:02} {}", "x".repeat(900)), &[])]);
+        }
+        let text = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
+        let section = under(&text, heading);
+        let shown: Vec<usize> = section.match_indices(":memory:m").map(|(at, found)| section[at + found.len()..][..2].parse().unwrap()).collect();
+        assert!(!shown.is_empty() && shown.len() < 10, "{text}");
+        assert_eq!(shown, (0..shown.len()).collect::<Vec<_>>(), "ascending by admission, no gap: {text}");
+        assert!(section.contains(&format!("({} more", 10 - shown.len())), "{text}");
+    }
+}
+
+#[test]
+fn oldest_open_items_come_first_with_their_commitments_before_their_asks_and_after_the_stewardships() {
     let rig = Rig::new(vec![], &[]);
     rig.mind.committed(vec![steward_of("GameCult/cinny", "the chat client")]);
     rig.mind.committed(vec![crate::testkit::memory("a-old", MemorySort::Asked, "older ask", &[])]);
@@ -2415,8 +2434,8 @@ fn newest_open_items_come_first_with_their_commitments_before_their_asks_and_aft
     rig.mind.committed(vec![open_follow_up("later", &spec_ref("x"), "Wire it.")]);
     let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
     let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} in {text}"));
-    assert!(at("steward of") < at("You committed to:") && at("You committed to:") < at("Asked of you, not yet taken on:") && at("Asked of you, not yet taken on:") < at("Open follow-ups"), "{text}");
-    assert!(at("newer part") < at("older part") && at("newer ask") < at("older ask"), "{text}");
+    assert!(at("steward of") < at("You committed to, oldest first:") && at("You committed to, oldest first:") < at("Asked of you, not yet taken on, oldest first:") && at("Asked of you, not yet taken on, oldest first:") < at("Open follow-ups"), "{text}");
+    assert!(at("older part") < at("newer part") && at("older ask") < at("newer ask"), "{text}");
 }
 
 #[test]
@@ -3903,9 +3922,9 @@ Your latest runs:
 What you are responsible for (from your own mind; `huginn view <id>` reads a record):
 - steward of GameCult/Huginn: assigned
 - steward of GameCult/cinny: the chat client; design law in eureka-body:ruling:client-first.
-You committed to:
+You committed to, oldest first:
 - yggdrasil:memory:mine (2026-10-09, in #swarm, committed, with "libby"): "I integrate the fork"
-Asked of you, not yet taken on:
+Asked of you, not yet taken on, oldest first:
 - yggdrasil:memory:hers (2026-10-09, in #swarm, asked by "libby"): "Review the shaders"
 Open follow-ups, oldest first:
 - eureka-body/ship (GameCult/Huginn): Ship the fork.
@@ -5755,7 +5774,7 @@ fn a_follow_up_the_goals_bound_hides_still_counts_as_open_work() {
     hidden.item = Line("x".repeat(900));
     mind.committed(vec![PipelineDocument::FollowUp(hidden)]);
     let goals = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap();
-    assert!(goals.text.contains("newer open follow-ups not shown") && !goals.text.contains("hidden-in/newest"), "the bound hid it: {} bytes", goals.text.len());
+    assert!(goals.text.contains("more open follow-ups not shown") && !goals.text.contains("hidden-in/newest"), "the bound hid it: {} bytes", goals.text.len());
     assert_eq!(goals.open_roots, ["eureka-body", "hidden-in"], "{:?}", goals.open_roots);
 }
 
