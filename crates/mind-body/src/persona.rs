@@ -170,8 +170,8 @@ pub(crate) const SHORT_MAX_BYTES: usize = 200;
 /// The most bytes each open-item list of the responsibilities section carries, outside `GOALS_MAX_BYTES`.
 const OPEN_COMMITTED_MAX_BYTES: usize = 4 * 1024;
 const OPEN_ASKED_MAX_BYTES: usize = 4 * 1024;
-/// The page size of an open-item fetch. It bounds the cost of one read, not what shows: every page is read, because the
-/// order is the item's origin time and a page of admission order is not that order.
+/// The most open items one list fetches. It bounds the cost of a read only: the byte bounds above show fewer than this on any
+/// line a memory can make, and `matched` still counts every item.
 const OPEN_FETCH: u32 = 64;
 /// The most event ids a Persona memory cites as its sources.
 pub(crate) const SOURCES_MAX: usize = 8;
@@ -2320,6 +2320,14 @@ fn ruling_ids_in(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The sort key of oldest first: when the document began, then the mind's own admission ordinal for equal times. An imported
+/// document began when the giver's receipt committed (`imported_from.committed_at`, the same RFC 3339 spelling as an admission
+/// time), any other when it was admitted here.
+fn origin_order(admission: &huginn_mind::AdmissionFacts) -> (&str, u64) {
+    let began = admission.provenance.imported_from.as_ref().map_or(admission.admitted_at.as_str(), |source| source.committed_at.0.as_str());
+    (began, admission.ordinal)
+}
+
 /// The campaigns whose dropped follow-ups the note names; the rest are counted together.
 const DROPPED_CAMPAIGNS_NAMED: usize = 6;
 
@@ -2387,24 +2395,15 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
         (MemorySort::Committed, "You committed to, oldest first:", "commitments", OPEN_COMMITTED_MAX_BYTES),
         (MemorySort::Asked, "Asked of you, not yet taken on, oldest first:", "asks", OPEN_ASKED_MAX_BYTES),
     ] {
-        let mut asking = Selection {
+        // Ascending is admission order. A memory is instance-rooted, so an import never carries one: its admission is its origin.
+        let selection = Selection {
             limit: Some(OPEN_FETCH),
             projection: "document".into(),
             ..any_of(in_force(of_kind(PipelineKind::Memory)), "sort", &[format!("{sort:?}").as_str()])
         };
-        let mut views = Vec::new();
-        loop {
-            let page = mind.query(&asking)?;
-            let PipelinePageItems::Documents(items) = page.items else { bail!("the mind answered headers to a document selection") };
-            views.extend(items);
-            match page.next {
-                Some(cursor) => asking.cursor = Some(cursor),
-                None => break,
-            }
-        }
-        // Oldest first by origin: an imported item is as old as it was in the giver, not as its import.
-        views.sort_by(|a, b| recall::origin_order(&a.admission).cmp(&recall::origin_order(&b.admission)));
-        let matched = views.len();
+        let page = mind.query(&selection)?;
+        let matched = page.matched as usize;
+        let PipelinePageItems::Documents(views) = page.items else { bail!("the mind answered headers to a document selection") };
         let (mut section, mut shown) = (String::new(), 0usize);
         for view in &views {
             let Some(line) = recall::memory_line(view, names, true) else { continue };
@@ -2429,10 +2428,10 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
     }
     // The open_ids items are outside the follow-ups' and rulings' bound.
     let open_len = out.len() - open_start;
-    // Oldest first by origin: an imported follow-up is as old as it was in the giver, not as its import. Work that has waited
-    // longest leads, and the bound drops the newest.
+    // Oldest first by origin: an imported follow-up is as old as it was in the giver, not as its import. The work that has
+    // waited longest leads, and the bound drops the newest.
     let mut follow_ups = headers(mind, &in_force(of_kind(PipelineKind::FollowUp)))?;
-    follow_ups.sort_by(|a, b| recall::origin_order(&a.admission).cmp(&recall::origin_order(&b.admission)));
+    follow_ups.sort_by(|a, b| origin_order(&a.admission).cmp(&origin_order(&b.admission)));
     let mut dropped: BTreeMap<String, usize> = BTreeMap::new();
     // Every open follow-up counts as open work for its campaign, whether or not the bound below lets its line show.
     let mut open_roots: Vec<String> = Vec::new();

@@ -2370,7 +2370,7 @@ fn each_open_list_holds_its_own_bound_exactly_and_counts_what_it_drops() {
         // Short fillers make the lines fine-grained; the oldest item's text (under the clip) tunes the total to the byte.
         let render = |fillers: usize, adjustable: usize| {
             let mind = TestMind::seeded();
-            mind.committed(vec![crate::testkit::memory("m0", sort, &"w".repeat(adjustable), &[])]);
+            mind.committed(vec![crate::testkit::memory("m0", sort, &"w".repeat(adjustable + 1), &[])]);
             for index in 1..=fillers {
                 mind.committed(vec![crate::testkit::memory(&format!("m{index:02}"), sort, "f", &[])]);
             }
@@ -2413,15 +2413,15 @@ fn each_open_list_holds_its_own_bound_exactly_and_counts_what_it_drops() {
 fn a_full_open_section_shows_the_oldest_and_counts_the_newest() {
     for (sort, heading) in [(MemorySort::Committed, "You committed to, oldest first:"), (MemorySort::Asked, "Asked of you, not yet taken on, oldest first:")] {
         let mind = TestMind::seeded();
-        for index in 0..10 {
+        for index in 0..40 {
             mind.committed(vec![crate::testkit::memory(&format!("m{index:02}"), sort, &format!("M{index:02} {}", "x".repeat(900)), &[])]);
         }
         let text = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
         let section = under(&text, heading);
         let shown: Vec<usize> = section.match_indices(":memory:m").map(|(at, found)| section[at + found.len()..][..2].parse().unwrap()).collect();
-        assert!(!shown.is_empty() && shown.len() < 10, "{text}");
+        assert!(!shown.is_empty() && shown.len() < 40, "{text}");
         assert_eq!(shown, (0..shown.len()).collect::<Vec<_>>(), "ascending by admission, no gap: {text}");
-        assert!(section.contains(&format!("({} more", 10 - shown.len())), "{text}");
+        assert!(section.contains(&format!("({} more", 40 - shown.len())), "{text}");
     }
 }
 
@@ -5767,7 +5767,7 @@ fn a_follow_up_the_goals_bound_hides_still_counts_as_open_work() {
     mind.committed(campaign_on("hidden-in", &[REPO]));
     mind.committed(chain("hidden-in", "src", REPO));
     mind.committed(chain(CAMPAIGN, "src", REPO));
-    for n in 0..12 {
+    for n in 0..60 {
         let PipelineDocument::FollowUp(mut long) = follow_up(&format!("long{n}"), &spec_ref("src")) else { unreachable!("a follow-up") };
         long.item = Line("x".repeat(900));
         mind.committed(vec![PipelineDocument::FollowUp(long)]);
@@ -7383,10 +7383,12 @@ fn an_imported_item_sorts_by_its_origin_time_not_its_import() {
     let mind = TestMind::seeded();
     mind.committed(chain(CAMPAIGN, "src", REPO));
     mind.committed(vec![follow_up_in(CAMPAIGN, "native", "Native, admitted first of the two.")]);
-    mind.committed_imported("2020-01-01T00:00:00Z", vec![follow_up_in(CAMPAIGN, "imported-old", "Imported, born in the giver long ago.")]);
-    mind.committed_imported("2999-01-01T00:00:00Z", vec![follow_up_in(CAMPAIGN, "imported-new", "Imported, born in the giver later than anything.")]);
-    mind.committed(vec![crate::testkit::memory("m-native", MemorySort::Asked, "native ask", &[])]);
-    mind.committed_imported("2020-01-01T00:00:00Z", vec![crate::testkit::memory("m-imported", MemorySort::Asked, "imported ask", &[])]);
+    for (campaign, born) in [("imp-old", "2020-01-01T00:00:00Z"), ("imp-new", "2999-01-01T00:00:00Z")] {
+        let mut batch = campaign_on(campaign, &[REPO]);
+        batch.extend(chain(campaign, "src", REPO));
+        batch.push(follow_up_in(campaign, campaign, "Imported."));
+        mind.committed_imported(born, batch);
+    }
     let text = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
     assert_eq!(listed_follow_ups(&text), ["imported-old", "native", "imported-new"], "{text}");
     let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} in {text}"));
@@ -7422,7 +7424,7 @@ fn a_line_that_does_not_fit_is_skipped_and_a_later_short_one_shows() {
         for index in 0..fillers {
             mind.committed(vec![follow_up_in(CAMPAIGN, &format!("fill{index:03}"), "filler")]);
         }
-        mind.committed(vec![follow_up_in(CAMPAIGN, &format!("big{}", "g".repeat(190)), &"b".repeat(160))]);
+        mind.committed(vec![follow_up_in(CAMPAIGN, &format!("big{}", "g".repeat(57)), &"b".repeat(160))]);
         if with_short {
             mind.committed(vec![follow_up_in(CAMPAIGN, "short", "s")]);
         }

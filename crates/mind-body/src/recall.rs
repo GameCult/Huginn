@@ -29,7 +29,7 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{MemoryOrigin, MemorySort, PipelineDocument, PipelineKind};
-use huginn_mind::{AdmissionFacts, PipelineDocumentView, PipelinePageItems};
+use huginn_mind::{PipelineDocumentView, PipelinePageItems};
 
 use crate::persona::quoted;
 use crate::queue::{MindPort, any_of, in_force, of_kind};
@@ -217,8 +217,7 @@ pub(crate) fn origin_phrase(origin: &MemoryOrigin, names: &BTreeMap<&str, &str>)
 pub(crate) fn memory_line(view: &PipelineDocumentView, names: &BTreeMap<&str, &str>, with_id: bool) -> Option<String> {
     // An open item of the responsibilities (the one caller that leads with the id) shows a clipped text; recall shows it whole.
     let PipelineDocument::Memory(memory) = &view.document else { return None };
-    let when = origin_time(&view.admission);
-    let date = when.get(..10).unwrap_or(when);
+    let date = view.admission.admitted_at.get(..10).unwrap_or(&view.admission.admitted_at);
     let origin = origin_phrase(&memory.origin, names);
     let about = who(memory.about.iter().map(|id| id.0.as_str()), names);
     let sort = match (memory.sort, memory.about.is_empty()) {
@@ -242,17 +241,6 @@ pub(crate) fn clipped(text: &str) -> String {
     }
     let cut = (0..=LINE_TEXT_MAX_BYTES).rev().find(|at| text.is_char_boundary(*at)).unwrap_or(0);
     format!("{}…", &text[..cut])
-}
-
-/// When a document first stood, as the time it was admitted where it began: an imported document carries the source
-/// receipt's time, any other its own admission.
-pub(crate) fn origin_time(admission: &AdmissionFacts) -> &str {
-    admission.provenance.imported_from.as_ref().map_or(admission.admitted_at.as_str(), |source| source.committed_at.0.as_str())
-}
-
-/// The sort key of oldest first: origin time, then the mind's own admission ordinal for equal times.
-pub(crate) fn origin_order(admission: &AdmissionFacts) -> (&str, u64) {
-    (origin_time(admission), admission.ordinal)
 }
 
 /// One recalled document as its line, or None for a kind recall does not show.
