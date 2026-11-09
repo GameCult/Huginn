@@ -215,6 +215,7 @@ pub(crate) fn origin_phrase(origin: &MemoryOrigin, names: &BTreeMap<&str, &str>)
 /// recall and for the open items the responsibilities section shows, which pass
 /// `with_id` to lead with the id she settles it by. `about` is never the place.
 pub(crate) fn memory_line(view: &PipelineDocumentView, names: &BTreeMap<&str, &str>, with_id: bool) -> Option<String> {
+    // An open item of the responsibilities (the one caller that leads with the id) shows a clipped text; recall shows it whole.
     let PipelineDocument::Memory(memory) = &view.document else { return None };
     let date = view.admission.admitted_at.get(..10).unwrap_or(&view.admission.admitted_at);
     let origin = origin_phrase(&memory.origin, names);
@@ -227,7 +228,19 @@ pub(crate) fn memory_line(view: &PipelineDocumentView, names: &BTreeMap<&str, &s
         (sort, false) => format!("{sort:?} about {about}"),
     };
     let lead = if with_id { format!("{} ", view.id.id.0) } else { String::new() };
-    Some(format!("- {lead}({date}, {origin}, {sort}): {}\n", quoted(&memory.text.0)))
+    Some(format!("- {lead}({date}, {origin}, {sort}): {}\n", quoted(&if with_id { clipped(&memory.text.0) } else { memory.text.0.clone() })))
+}
+
+/// The most bytes of an item's text a listed line carries; the rest is one `huginn view` away.
+pub(crate) const LINE_TEXT_MAX_BYTES: usize = 160;
+
+/// `text` cut to about `LINE_TEXT_MAX_BYTES` on a character boundary, with an ellipsis where it was cut.
+pub(crate) fn clipped(text: &str) -> String {
+    if text.len() <= LINE_TEXT_MAX_BYTES {
+        return text.to_owned();
+    }
+    let cut = (0..=LINE_TEXT_MAX_BYTES).rev().find(|at| text.is_char_boundary(*at)).unwrap_or(0);
+    format!("{}…", &text[..cut])
 }
 
 /// One recalled document as its line, or None for a kind recall does not show.
