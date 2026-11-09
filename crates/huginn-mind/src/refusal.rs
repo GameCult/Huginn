@@ -27,7 +27,8 @@ pub enum MindRefusal {
     BatchSize { actual: u32 },
     IdentityCollision { kind: PipelineKind, id: String },
     MissingReference { kind: PipelineKind, id: String },
-    AlreadyResolved { subject: String },
+    /// `closed_by` is the resolution in force: to correct the closure, withdraw it (a resolution of `closed_by`), then resolve `subject` again at the next sequence.
+    AlreadyResolved { subject: String, closed_by: String },
     ResolutionOutOfSequence { subject: String, expected: u32, actual: u32 },
     AlreadyStewarded { repo: String },
     StewardshipOutOfSequence { repo: String, expected: u32, actual: u32 },
