@@ -836,7 +836,10 @@ in-force `operated_by Mind` Self run of its instance, which admission keeps uniq
   echo; the grace interrupt (earlier of 15 min after the ask and the cap less the ladder) is the
   backstop. A brief is an in-force `self-run` follow-up her Persona turn admitted (the receipt's
   agent, not the source the writer named); the actuator closes none, and a brief left open is
-  told to the next session. Compaction is
+  told to the next session. Briefs close by
+  `inbox::CLOSING_RULE`, told once at start (Recorded for answers, Fixed by a default-branch commit for
+  changes, Superseded by her own follow-up while a change waits on someone else); each told brief and
+  the flush carry a reminder that points at it. Compaction is
   off in the CLI (`DISABLE_COMPACT=1` in the child environment).
 - With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` set the CLI forces the permission mode to default:
   `--permission-mode bypassPermissions` has no effect there and only the seed's allow list decides

@@ -104,7 +104,12 @@ fn a_tell_names_each_brief_the_plan_and_how_she_resolves_it() {
     let brief = Brief { id: "eureka-body:follow_up:b1".into(), campaign: "eureka-body".into(), repo: "GameCult/Huginn".into(), item: "Wire the thing.".into(), ordinal: 1, conversation: persona::Conversation::Public };
     let text = render(&[brief], "Plan: 5h at 40%.");
     assert!(text.contains("eureka-body:follow_up:b1") && text.contains("Wire the thing."), "{text}");
-    assert!(text.contains("resolve follow-up eureka-body:follow_up:b1 Recorded") && text.contains("Withdrawn"), "she is told to resolve it: {text}");
+    let reminder = resolving_sentence("eureka-body:follow_up:b1");
+    assert!(text.contains(&reminder), "{text}");
+    for word in ["eureka-body:follow_up:b1", "Recorded", "Fixed", "default branch", "Superseded", "Withdrawn", "An open PR is not done"] {
+        assert!(reminder.contains(word), "{word}: {reminder}");
+    }
+    assert!(!text.contains(CLOSING_RULE), "the rule is told once, at start: {text}");
     assert!(text.ends_with("Plan: 5h at 40%."), "{text}");
     assert!(!render(&[], "").contains("brief"), "no brief, no plan, nothing");
 }

@@ -121,9 +121,13 @@ pub fn render(briefs: &[Brief], plan: &str) -> String {
     blocks.join("\n\n")
 }
 
-/// What her Self does when she answers or declines a brief.
+/// How a brief closes: the one owner of what done means for her Self. The start message tells it
+/// once; every told brief and the flush point back to it.
+pub(crate) const CLOSING_RULE: &str = "A brief is done when what it asks for exists. A brief that asks for an answer, a review or a read is done when you answer it: resolve it Recorded with the answer as rationale. A brief that asks for a change is done when the change is on its repo's default branch, and live where the brief asks for a deploy: resolve it Fixed with that commit. An open PR, a pushed branch or a local commit is not done, and the brief stays open. In a repo you steward the merge is yours and needs no one's leave: have your Soul check the work, then merge it, then resolve the brief (rulings steward-is-maintainer and merge-gate-own-soul). Land what you have open before you start more. When what is left waits on someone else (a review in a repo you do not steward, a ruling, a deploy you do not hold), admit a follow-up of your own whose item names the PR or branch and whom it waits on, resolve the brief Superseded by it, and say so in your reply. If you decline a brief, resolve it Withdrawn with why.";
+
+/// The reminder under each told brief: the closing rule in short, for this brief's id.
 pub fn resolving_sentence(id: &str) -> String {
-    format!("When you answer this brief, resolve follow-up {id} Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why.")
+    format!("Close follow-up {id} by the closing rule: Recorded with your answer, Fixed by its commit on the default branch, Superseded by your own follow-up while it waits on someone else, or Withdrawn with why. An open PR is not done.")
 }
 
 #[cfg(test)]

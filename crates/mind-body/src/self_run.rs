@@ -158,8 +158,9 @@ pub const SESSION_NAMESPACE: Uuid = Uuid::NAMESPACE_OID;
 /// What the child is told at the start. The contract with the `eureka`
 /// skill: it names the skill, the instance and the run id.
 pub fn start_message(instance: &Slug, run: &PipelineRef, plan_quota: &[PlanQuota], now_ms: u64) -> String {
+    let closing_rule = inbox::CLOSING_RULE;
     format!(
-        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. When you answer a brief, resolve follow-up <its id> Recorded with your answer as rationale; if you decline it, resolve it Withdrawn with why. Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs. Briefs reach you one conversation at a time. More briefs of the conversation you are serving may arrive while you work; another conversation's brief is told only once you are idle, with no turn running and no background task of yours still running or waiting for its turn. What you say ending any turn, the turns that report your background tasks included, reaches your Persona in the conversation you are serving, so a long background task keeps other members waiting.\n\n{}",
+        "Use the eureka skill. You are Self for the instance `{}`; your run is `{}`. Admit as faculty SelfFaculty, agent {AGENT}.\n\nThis session stays open after you answer: briefs from your Persona arrive while you work and between tasks. {closing_rule} Work you take on beyond an answer is a follow-up of your own. What you say when you end a turn reaches your Persona as a reply, and your Persona's answers come as briefs. Briefs reach you one conversation at a time. More briefs of the conversation you are serving may arrive while you work; another conversation's brief is told only once you are idle, with no turn running and no background task of yours still running or waiting for its turn. What you say ending any turn, the turns that report your background tasks included, reaches your Persona in the conversation you are serving, so a long background task keeps other members waiting.\n\n{}",
         instance.0,
         run.id.0,
         render_plan(plan_quota, now_ms)
@@ -223,7 +224,7 @@ fn flush_text(why: Why) -> String {
         Why::Rotation => " (This process ends soon: the unit's time is nearly up. If your next brief comes within the hour, the next process continues this conversation.)",
         Why::Idle => " (This session ends because nothing is waiting and its cache would lapse.)",
     };
-    format!("{FLUSH_MESSAGE}{cause} Resolve each brief you answered (Recorded, your answer as rationale); a brief you are still working stays open and the next session continues it.")
+    format!("{FLUSH_MESSAGE}{cause} Close each brief that is done by the closing rule; a brief whose change is not on its default branch stays open, or is superseded by your own follow-up when it waits on someone else, and the next session continues it.")
 }
 
 /// The session id of a run: UUIDv5 over the run's id. Derived, never stored.
