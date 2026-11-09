@@ -2403,8 +2403,8 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
     }
     // The open_ids items are outside the follow-ups' and rulings' bound.
     let open_len = out.len() - open_start;
-    // Oldest first, by admission: the order is the reminder of work she has carried longest, and the bound drops the newest.
-    let open = Selection { descending: false, ..in_force(of_kind(PipelineKind::FollowUp)) };
+    // Ascending, which is admission order: oldest first is the reminder of work she has carried longest, and the bound drops the newest.
+    let open = in_force(of_kind(PipelineKind::FollowUp));
     let follow_ups = headers(mind, &open)?;
     let mut dropped = 0;
     // Every open follow-up counts as open work for its campaign, whether or not the bound below lets its line show.
