@@ -2313,7 +2313,7 @@ fn caps_count_what_they_leave_out() {
     let asked = under(responsibilities_of(&input), "Asked of you, not yet taken on, oldest first:");
     let shown_ids: Vec<String> = asked.lines().filter(|line| line.starts_with("- ") && line.contains(":memory:")).map(|line| line[2..].split(' ').next().unwrap().to_string()).collect();
     assert!(!shown_ids.is_empty() && shown_ids.len() < 12, "{} shown: {asked}", shown_ids.len());
-    let expected_oldest: Vec<String> = (0..shown_ids.len()).map(|index| format!("eureka-body:memory:ask-{index:02}")).collect();
+    let expected_oldest: Vec<String> = (0..shown_ids.len()).map(|index| format!("yggdrasil:memory:ask-{index:02}")).collect();
     assert_eq!(shown_ids, expected_oldest, "the oldest asks show, in admission order, and the newest are counted");
     assert!(asked.contains(&format!("({} more asks not shown", 12 - shown_ids.len())), "{} shown, ids {shown_ids:?}", shown_ids.len());
     let mut enum_ids = settle_enum(&rig, 0);
