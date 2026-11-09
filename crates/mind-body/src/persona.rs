@@ -170,7 +170,8 @@ pub(crate) const SHORT_MAX_BYTES: usize = 200;
 /// The most bytes each open-item list of the responsibilities section carries, outside `GOALS_MAX_BYTES`.
 const OPEN_COMMITTED_MAX_BYTES: usize = 4 * 1024;
 const OPEN_ASKED_MAX_BYTES: usize = 4 * 1024;
-/// The most open items one list fetches; the rest are counted.
+/// The page size of an open-item fetch. It bounds the cost of one read, not what shows: every page is read, because the
+/// order is the item's origin time and a page of admission order is not that order.
 const OPEN_FETCH: u32 = 64;
 /// The most event ids a Persona memory cites as its sources.
 pub(crate) const SOURCES_MAX: usize = 8;
@@ -2319,6 +2320,22 @@ fn ruling_ids_in(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The campaigns whose dropped follow-ups the note names; the rest are counted together.
+const DROPPED_CAMPAIGNS_NAMED: usize = 6;
+
+/// The note that counts the open follow-ups the bound left out and says where they are, the biggest campaigns first.
+fn dropped_note(dropped: &BTreeMap<String, usize>) -> String {
+    let mut by_campaign: Vec<(&String, &usize)> = dropped.iter().collect();
+    by_campaign.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let total: usize = dropped.values().sum();
+    let mut where_: Vec<String> = by_campaign.iter().take(DROPPED_CAMPAIGNS_NAMED).map(|(campaign, count)| format!("{campaign} {count}")).collect();
+    if by_campaign.len() > DROPPED_CAMPAIGNS_NAMED {
+        let rest: usize = by_campaign[DROPPED_CAMPAIGNS_NAMED..].iter().map(|(_, count)| **count).sum();
+        where_.push(format!("{} more campaigns {rest}", by_campaign.len() - DROPPED_CAMPAIGNS_NAMED));
+    }
+    format!("({total} more open follow-ups not shown: {}; `huginn open <campaign>` lists them.)\n", where_.join(", "))
+}
+
 /// What she is responsible for, from her own mind: her stewardships in force,
 /// always whole, with each record's note; her open commitments, then her open asks, each oldest first with
 /// its id and its own bound; her follow-ups in force, oldest
@@ -2370,15 +2387,24 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
         (MemorySort::Committed, "You committed to, oldest first:", "commitments", OPEN_COMMITTED_MAX_BYTES),
         (MemorySort::Asked, "Asked of you, not yet taken on, oldest first:", "asks", OPEN_ASKED_MAX_BYTES),
     ] {
-        // Ascending, which is admission order: the oldest open items first, the newest left to the count.
-        let selection = Selection {
+        let mut asking = Selection {
             limit: Some(OPEN_FETCH),
             projection: "document".into(),
             ..any_of(in_force(of_kind(PipelineKind::Memory)), "sort", &[format!("{sort:?}").as_str()])
         };
-        let page = mind.query(&selection)?;
-        let matched = page.matched as usize;
-        let PipelinePageItems::Documents(views) = page.items else { bail!("the mind answered headers to a document selection") };
+        let mut views = Vec::new();
+        loop {
+            let page = mind.query(&asking)?;
+            let PipelinePageItems::Documents(items) = page.items else { bail!("the mind answered headers to a document selection") };
+            views.extend(items);
+            match page.next {
+                Some(cursor) => asking.cursor = Some(cursor),
+                None => break,
+            }
+        }
+        // Oldest first by origin: an imported item is as old as it was in the giver, not as its import.
+        views.sort_by(|a, b| recall::origin_order(&a.admission).cmp(&recall::origin_order(&b.admission)));
+        let matched = views.len();
         let (mut section, mut shown) = (String::new(), 0usize);
         for view in &views {
             let Some(line) = recall::memory_line(view, names, true) else { continue };
@@ -2403,10 +2429,11 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
     }
     // The open_ids items are outside the follow-ups' and rulings' bound.
     let open_len = out.len() - open_start;
-    // Ascending, which is admission order: oldest first is the reminder of work she has carried longest, and the bound drops the newest.
-    let open = in_force(of_kind(PipelineKind::FollowUp));
-    let follow_ups = headers(mind, &open)?;
-    let mut dropped = 0;
+    // Oldest first by origin: an imported follow-up is as old as it was in the giver, not as its import. Work that has waited
+    // longest leads, and the bound drops the newest.
+    let mut follow_ups = headers(mind, &in_force(of_kind(PipelineKind::FollowUp)))?;
+    follow_ups.sort_by(|a, b| recall::origin_order(&a.admission).cmp(&recall::origin_order(&b.admission)));
+    let mut dropped: BTreeMap<String, usize> = BTreeMap::new();
     // Every open follow-up counts as open work for its campaign, whether or not the bound below lets its line show.
     let mut open_roots: Vec<String> = Vec::new();
     for follow_up in &follow_ups {
@@ -2423,9 +2450,9 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
         let asked = origin.as_ref().map_or_else(String::new, |origin| format!(", {}", recall::origin_phrase(origin, names)));
         let campaign = follow_up.id.id.0.split_once(":follow_up:").map_or("", |(campaign, _)| campaign);
         let held = if claimed.contains(&follow_up.id) { " [claimed by a run]" } else { "" };
-        let line = format!("- {campaign}/{} ({}{asked}){held}: {}\n", label.0, repo.0, item.0.lines().next().unwrap_or(""));
+        let line = format!("- {campaign}/{} ({}{asked}){held}: {}\n", label.0, repo.0, recall::clipped(item.0.lines().next().unwrap_or("")));
         if out.len() - open_len + line.len() > GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE {
-            dropped += 1;
+            *dropped.entry(campaign.to_owned()).or_default() += 1;
             continue;
         }
         if source.kind == PipelineKind::Ruling {
@@ -2438,8 +2465,8 @@ pub(crate) fn render_responsibilities(mind: &dyn MindPort, instance: &Slug, name
     if follow_ups.is_empty() {
         out.push_str("- no follow-up is open in your mind.\n");
     }
-    if dropped > 0 {
-        out.push_str(&format!("({dropped} more open follow-ups not shown: `huginn open <campaign>` lists them all.)\n"));
+    if !dropped.is_empty() {
+        out.push_str(&dropped_note(&dropped));
     }
     let mut dropped_rulings = cited.len().saturating_sub(GOALS_RULINGS_MAX);
     cited.truncate(GOALS_RULINGS_MAX);

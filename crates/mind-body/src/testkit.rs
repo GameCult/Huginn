@@ -18,7 +18,7 @@ use eureka_pipeline::{
     PipelineTarget, QuestionOption, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Slug, StructuralDelta, TargetInvariant,
 };
 use huginn_mind::{
-    Faculty, HuginnMindRequest, HuginnMindResponse, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome,
+    Faculty, HuginnMindRequest, ImportSource, ImportSource, HuginnMindResponse, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome,
     PipelineDocumentView, PipelineProvenance, PipelineSelectionPage,
 };
 use tempfile::TempDir;
@@ -153,6 +153,46 @@ impl TestMind {
             documents,
         };
         self.mind.borrow_mut().admit(batch, self.now.get())
+    }
+
+    /// Admits as an import of a giver's receipt committed at `committed_at`, one second after the last admission here.
+    pub(crate) fn committed_imported(&self, committed_at: &str, documents: Vec<PipelineDocument>) {
+        self.now.set(self.now.get() + Duration::seconds(1));
+        let source = ImportSource {
+            instance: Slug("giver".into()),
+            receipt_id: format!("giver-{committed_at}").as_str().into(),
+            ordinal: 1,
+            committed_at: committed_at.into(),
+            faculty: Faculty::Hands,
+            agent: "test".into(),
+            session: "test".into(),
+            tool: "test".into(),
+            external: vec![],
+        };
+        let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into(), imported_from: Some(source) };
+        let batch = PipelineAdmissionBatch { instance: self.instance.clone(), provenance, documents };
+        let outcome = self.mind.borrow_mut().admit(batch, self.now.get());
+        assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+    }
+
+    /// Admits as an import of a giver's receipt committed at `committed_at`, one second after the last admission here.
+    pub(crate) fn committed_imported(&self, committed_at: &str, documents: Vec<PipelineDocument>) {
+        self.now.set(self.now.get() + Duration::seconds(1));
+        let source = ImportSource {
+            instance: Slug("giver".into()),
+            receipt_id: format!("giver-{committed_at}").as_str().into(),
+            ordinal: 1,
+            committed_at: committed_at.into(),
+            faculty: Faculty::Hands,
+            agent: "test".into(),
+            session: "test".into(),
+            tool: "test".into(),
+            external: vec![],
+        };
+        let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into(), imported_from: Some(source) };
+        let batch = PipelineAdmissionBatch { instance: self.instance.clone(), provenance, documents };
+        let outcome = self.mind.borrow_mut().admit(batch, self.now.get());
+        assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
     }
 
     pub(crate) fn committed(&self, documents: Vec<PipelineDocument>) {

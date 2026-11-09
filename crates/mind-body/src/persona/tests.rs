@@ -2289,13 +2289,13 @@ fn a_long_sender_id_stays_out_of_the_schema_and_never_poisons_a_turn() {
     assert!(input_of(&rig, 0).contains("hello there"));
 }
 
-/// Twelve open asks of about 900 bytes, heavy memories about the sender and matching the words, and a few short deeds.
+/// Twenty open asks of about 900 bytes (each listed clipped), heavy memories about the sender and matching the words, and a few short deeds.
 #[test]
 fn caps_count_what_they_leave_out() {
     let (libby, op) = ("@libby:chat", "@op:chat");
     let heavy = |tag: &str| format!("{tag} hello {}", "x".repeat(880));
     let rig = Rig::new(vec![delivery(1, "swarm", op, "hello")], &[says(&[("swarm", "hi")])]);
-    for index in 0..12 {
+    for index in 0..20 {
         rig.mind.committed(vec![crate::testkit::memory(&format!("ask-{index:02}"), MemorySort::Asked, &heavy(&format!("ASK{index:02}")), &[libby])]);
     }
     for index in 0..6 {
@@ -2312,10 +2312,10 @@ fn caps_count_what_they_leave_out() {
     // The asks: shown with ids, the rest counted exactly, and the settle enum is exactly what was shown.
     let asked = under(responsibilities_of(&input), "Asked of you, not yet taken on, oldest first:");
     let shown_ids: Vec<String> = asked.lines().filter(|line| line.starts_with("- ") && line.contains(":memory:")).map(|line| line[2..].split(' ').next().unwrap().to_string()).collect();
-    assert!(!shown_ids.is_empty() && shown_ids.len() < 12, "{} shown: {asked}", shown_ids.len());
+    assert!(!shown_ids.is_empty() && shown_ids.len() < 20, "{} shown: {asked}", shown_ids.len());
     let expected_oldest: Vec<String> = (0..shown_ids.len()).map(|index| format!("yggdrasil:memory:ask-{index:02}")).collect();
     assert_eq!(shown_ids, expected_oldest, "the oldest asks show, in admission order, and the newest are counted");
-    assert!(asked.contains(&format!("({} more asks not shown", 12 - shown_ids.len())), "{} shown, ids {shown_ids:?}", shown_ids.len());
+    assert!(asked.contains(&format!("({} more asks not shown", 20 - shown_ids.len())), "{} shown, ids {shown_ids:?}", shown_ids.len());
     let mut enum_ids = settle_enum(&rig, 0);
     enum_ids.sort();
     let mut expected = shown_ids.clone();
@@ -2367,22 +2367,25 @@ fn each_open_list_holds_its_own_bound_exactly_and_counts_what_it_drops() {
         (MemorySort::Committed, "You committed to, oldest first:", "commitments", OPEN_COMMITTED_MAX_BYTES),
         (MemorySort::Asked, "Asked of you, not yet taken on, oldest first:", "asks", OPEN_ASKED_MAX_BYTES),
     ] {
-        let render = |adjustable: usize| {
+        // Short fillers make the lines fine-grained; the oldest item's text (under the clip) tunes the total to the byte.
+        let render = |fillers: usize, adjustable: usize| {
             let mind = TestMind::seeded();
             mind.committed(vec![crate::testkit::memory("m0", sort, &"w".repeat(adjustable), &[])]);
-            for index in 1..4 {
-                mind.committed(vec![crate::testkit::memory(&format!("m{index}"), sort, &"f".repeat(1000), &[])]);
+            for index in 1..=fillers {
+                mind.committed(vec![crate::testkit::memory(&format!("m{index:02}"), sort, "f", &[])]);
             }
             render_responsibilities(&mind, &slug, &names).unwrap().text
         };
         let used = |text: &str| under(text, heading).lines().filter(|line| line.starts_with("- ") && line.contains(":memory:")).map(|line| line.len() + 1).sum::<usize>();
         let lines = |text: &str| under(text, heading).lines().filter(|line| line.starts_with("- ") && line.contains(":memory:")).count();
-        let fit = 100 + bound - used(&render(100));
-        let fits = render(fit);
-        assert_eq!((used(&fits), lines(&fits)), (bound, 4), "an exact fit is shown: {fits}");
+        let fillers = (1..100).take_while(|count| lines(&render(*count, 0)) == count + 1).last().unwrap();
+        let fit = bound - used(&render(fillers, 0));
+        assert!(fit < 150, "{fit}");
+        let fits = render(fillers, fit);
+        assert_eq!((used(&fits), lines(&fits)), (bound, fillers + 1), "an exact fit is shown: {fits}");
         assert!(!fits.contains("not shown"), "{fits}");
-        let over = render(fit + 1);
-        assert_eq!(lines(&over), 3, "{over}");
+        let over = render(fillers, fit + 1);
+        assert_eq!(lines(&over), fillers, "{over}");
         assert!(over.contains(&format!("(1 more {noun} not shown: settle what is finished and they come back into view.)")), "{over}");
     }
     // Both lists full and a follow-up still has its room: the open lists are outside the goals bound.
@@ -7354,4 +7357,130 @@ fn a_sleep_holder_opens_one_process_with_the_night_schema_and_her_tools_never_a_
     assert_eq!(after("--tools"), "Bash,WebFetch,WebSearch");
     assert_eq!(rig.chat.pending_calls.get(), 0);
     assert!(rig.model.requests.borrow()[0].input.contains("Tonight you consolidate your memory."));
+}
+
+/// A follow-up of `campaign` (whose spec `src` and campaign the caller has admitted), with its item text.
+fn follow_up_in(campaign: &str, label: &str, item: &str) -> PipelineDocument {
+    let PipelineDocument::FollowUp(mut follow_up) = follow_up(label, &reference(K::CutSpec, &format!("{campaign}:cut_spec:cut-src.r1"))) else { unreachable!("a follow-up") };
+    follow_up.campaign = Slug(campaign.into());
+    follow_up.item = Line(item.into());
+    PipelineDocument::FollowUp(follow_up)
+}
+
+/// The labels of the follow-up lines `text` lists, in order.
+fn listed_follow_ups(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .filter(|line| line.contains(" (GameCult/"))
+        .filter_map(|line| line.split(' ').next())
+        .map(|id| id.rsplit('/').next().unwrap().to_owned())
+        .collect()
+}
+
+/// An imported item is as old as it was in the giver: it sorts by that time, not by when it was imported.
+#[test]
+fn an_imported_item_sorts_by_its_origin_time_not_its_import() {
+    let mind = TestMind::seeded();
+    mind.committed(chain(CAMPAIGN, "src", REPO));
+    mind.committed(vec![follow_up_in(CAMPAIGN, "native", "Native, admitted first of the two.")]);
+    mind.committed_imported("2020-01-01T00:00:00Z", vec![follow_up_in(CAMPAIGN, "imported-old", "Imported, born in the giver long ago.")]);
+    mind.committed_imported("2999-01-01T00:00:00Z", vec![follow_up_in(CAMPAIGN, "imported-new", "Imported, born in the giver later than anything.")]);
+    mind.committed(vec![crate::testkit::memory("m-native", MemorySort::Asked, "native ask", &[])]);
+    mind.committed_imported("2020-01-01T00:00:00Z", vec![crate::testkit::memory("m-imported", MemorySort::Asked, "imported ask", &[])]);
+    let text = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
+    assert_eq!(listed_follow_ups(&text), ["imported-old", "native", "imported-new"], "{text}");
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} in {text}"));
+    assert!(at("m-imported") < at("m-native"), "{text}");
+    assert!(text.contains("(2020-01-01, "), "an imported memory shows the date it began: {text}");
+}
+
+/// A listed line carries about 160 bytes of the item's text, cut on a character boundary with an ellipsis; the whole stays one `huginn view` away.
+#[test]
+fn a_listed_line_clips_the_item_text() {
+    assert_eq!(recall::clipped(&"w".repeat(160)), "w".repeat(160));
+    assert_eq!(recall::clipped(&"w".repeat(161)), format!("{}…", "w".repeat(160)));
+    let accents = "é".repeat(100);
+    assert_eq!(recall::clipped(&accents), format!("{}…", "é".repeat(80)), "a cut inside a character backs up to its start");
+    let mind = TestMind::seeded();
+    mind.committed(chain(CAMPAIGN, "src", REPO));
+    mind.committed(vec![follow_up_in(CAMPAIGN, "long", &"w".repeat(500))]);
+    mind.committed(vec![crate::testkit::memory("m-long", MemorySort::Committed, &"v".repeat(500), &[])]);
+    let text = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
+    assert!(text.contains(&format!("{}…", "w".repeat(160))) && !text.contains(&"w".repeat(161)), "{text}");
+    assert!(text.contains(&format!("{}…", "v".repeat(160))) && !text.contains(&"v".repeat(161)), "{text}");
+    let whole = recall::memory_line(&mind.view(K::Memory, &format!("{INSTANCE}:memory:m-long")).unwrap(), &BTreeMap::new(), false).unwrap();
+    assert!(whole.contains(&"v".repeat(500)), "recall shows a memory whole: {whole}");
+}
+
+/// A line that does not fit is skipped and a later short one may still show, in the follow-ups and in the open memories.
+#[test]
+fn a_line_that_does_not_fit_is_skipped_and_a_later_short_one_shows() {
+    // Follow-ups: fill the bound, then an older long-labelled line that cannot fit, then a newer short one.
+    let build = |fillers: usize, with_short: bool| {
+        let mind = TestMind::seeded();
+        mind.committed(chain(CAMPAIGN, "src", REPO));
+        for index in 0..fillers {
+            mind.committed(vec![follow_up_in(CAMPAIGN, &format!("fill{index:03}"), "filler")]);
+        }
+        mind.committed(vec![follow_up_in(CAMPAIGN, &format!("big{}", "g".repeat(190)), &"b".repeat(160))]);
+        if with_short {
+            mind.committed(vec![follow_up_in(CAMPAIGN, "short", "s")]);
+        }
+        render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text
+    };
+    let fillers = (1..200).find(|count| !build(*count, false).contains("big")).expect("the bound is reached");
+    let text = build(fillers, true);
+    assert!(!text.contains("big") && listed_follow_ups(&text).last().map(String::as_str) == Some("short"), "{text}");
+    assert!(text.contains("(1 more open follow-ups not shown: eureka-body 1;"), "{text}");
+    // Open memories: the same.
+    for sort in [MemorySort::Committed, MemorySort::Asked] {
+        let build = |fillers: usize, with_short: bool| {
+            let mind = TestMind::seeded();
+            for index in 0..fillers {
+                mind.committed(vec![crate::testkit::memory(&format!("fill{index:03}"), sort, "filler", &[])]);
+            }
+            let about: Vec<String> = (0..8).map(|index| format!("{index}{}", "p".repeat(190))).collect();
+            let about: Vec<&str> = about.iter().map(String::as_str).collect();
+            mind.committed(vec![crate::testkit::memory("big", sort, &"b".repeat(160), &about)]);
+            if with_short {
+                mind.committed(vec![crate::testkit::memory("short", sort, "s", &[])]);
+            }
+            render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text
+        };
+        let fillers = (1..200).find(|count| !build(*count, false).contains(":memory:big")).expect("the bound is reached");
+        let text = build(fillers, true);
+        assert!(!text.contains(":memory:big") && text.contains(":memory:short"), "{sort:?}: {text}");
+    }
+}
+
+/// The note that counts the dropped follow-ups says where they are, the biggest campaign first, and stays bounded.
+#[test]
+fn the_dropped_follow_ups_note_names_their_campaigns() {
+    let mind = TestMind::seeded();
+    for campaign in [CAMPAIGN, "hidden-in", "third"] {
+        if campaign != CAMPAIGN {
+            mind.committed(campaign_on(campaign, &[REPO]));
+        }
+        mind.committed(chain(campaign, "src", REPO));
+    }
+    let long = "w".repeat(400);
+    for index in 0..30 {
+        mind.committed(vec![follow_up_in(CAMPAIGN, &format!("fu-{index:02}"), &long)]);
+    }
+    for index in 0..5 {
+        mind.committed(vec![follow_up_in("hidden-in", &format!("h{index}"), &long)]);
+    }
+    for index in 0..7 {
+        mind.committed(vec![follow_up_in("third", &format!("t{index}"), &long)]);
+    }
+    let text = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
+    let listed = listed_follow_ups(&text).len();
+    let note = text.lines().find(|line| line.contains("more open follow-ups not shown")).unwrap_or_else(|| panic!("{text}"));
+    let native_dropped = 30 - listed;
+    assert_eq!(note, format!("({} more open follow-ups not shown: eureka-body {native_dropped}, third 7, hidden-in 5; `huginn open <campaign>` lists them.)", native_dropped + 12), "{text}");
+    let many: BTreeMap<String, usize> = (0..9).map(|index| (format!("c{index}"), 10 - index)).collect();
+    assert_eq!(
+        dropped_note(&many),
+        "(54 more open follow-ups not shown: c0 10, c1 9, c2 8, c3 7, c4 6, c5 5, 3 more campaigns 9; `huginn open <campaign>` lists them.)\n"
+    );
 }
