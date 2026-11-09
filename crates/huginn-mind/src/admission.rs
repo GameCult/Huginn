@@ -1656,9 +1656,12 @@ mod tests {
         committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), follow_up("FU1", r(K::Ruling, &id("ruling", "R1")))]));
         let subject = r(K::FollowUp, &id("follow_up", "FU1"));
         committed(admit(&mut mind, vec![resolution(subject.clone(), ResolutionOutcome::Recorded { reason: "done".into() })]));
-        let first = id("resolution", "follow_up.FU1.n1");
+        // The refusal alone names the closure to withdraw: the correction takes `closed_by` from it.
+        let MindRefusal::AlreadyResolved { closed_by, .. } = refusal(admit(&mut mind, vec![resolution_n(subject.clone(), 2, ResolutionOutcome::Fixed { commit: sha(), by: None })])) else {
+            panic!("a second closing is refused as AlreadyResolved");
+        };
         committed(admit(&mut mind, vec![
-            resolution(r(K::Resolution, &first), withdrawn()),
+            resolution(r(K::Resolution, &closed_by), withdrawn()),
             resolution_n(subject.clone(), 2, ResolutionOutcome::Fixed { commit: sha(), by: None }),
         ]));
         assert!(matches!(mind.get(K::Resolution, &id("resolution", "follow_up.FU1.n2")).unwrap(), Some(D::Resolution(_))));
