@@ -7483,3 +7483,36 @@ fn the_dropped_follow_ups_note_names_their_campaigns() {
         "(54 more open follow-ups not shown: c0 10, c1 9, c2 8, c3 7, c4 6, c5 5, 3 more campaigns 9; `huginn open <campaign>` lists them.)\n"
     );
 }
+
+/// A follow-up line that exactly fills the follow-ups' bound is shown; one byte more is counted.
+#[test]
+fn an_exact_fit_follow_up_shows_and_one_byte_more_is_counted() {
+    let bound = GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE;
+    let render = |fillers: usize, adjustable: usize| {
+        let mind = TestMind::seeded();
+        mind.committed(chain(CAMPAIGN, "src", REPO));
+        mind.committed(vec![follow_up_in(CAMPAIGN, "tuned", &"w".repeat(adjustable + 1))]);
+        for index in 0..fillers {
+            mind.committed(vec![follow_up_in(CAMPAIGN, &format!("f{index:03}"), "f")]);
+        }
+        render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text
+    };
+    let fillers = (1..200).take_while(|count| listed_follow_ups(&render(*count, 0)).len() == count + 1).last().unwrap();
+    let base = render(fillers, 0);
+    let fit = bound - base.len();
+    assert!(fit < 150, "{fit}");
+    let fits = render(fillers, fit);
+    assert_eq!((fits.len(), listed_follow_ups(&fits).len()), (bound, fillers + 1), "an exact fit is shown: {fits}");
+    assert!(!fits.contains("not shown"), "{fits}");
+    let over = render(fillers, fit + 1);
+    assert_eq!(listed_follow_ups(&over).len(), fillers, "{over}");
+    assert!(over.contains("(1 more open follow-ups not shown: eureka-body 1;"), "{over}");
+}
+
+/// The note names at most six campaigns; a seventh and beyond are counted together, and exactly six leave no tail.
+#[test]
+fn the_dropped_note_names_six_campaigns_and_counts_the_rest_together() {
+    let counts = |campaigns: usize| -> BTreeMap<String, usize> { (0..campaigns).map(|index| (format!("c{index}"), 1)).collect() };
+    assert_eq!(dropped_note(&counts(6)), "(6 more open follow-ups not shown: c0 1, c1 1, c2 1, c3 1, c4 1, c5 1; `huginn open <campaign>` lists them.)\n");
+    assert_eq!(dropped_note(&counts(7)), "(7 more open follow-ups not shown: c0 1, c1 1, c2 1, c3 1, c4 1, c5 1, 1 more campaigns 1; `huginn open <campaign>` lists them.)\n");
+}
