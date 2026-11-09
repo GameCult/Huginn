@@ -616,8 +616,8 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
             let own = |resolution: &PipelineResolution| {
                 matches!(&resolution.outcome, ResolutionOutcome::Answered { by } if by.kind == K::Ruling && by.id.0 == key)
             };
-            if !docs.in_force_unless(K::Question, &question_id.0, own) {
-                return Err(MindRefusal::AlreadyResolved { subject: question_id.0.clone() });
+            if let Some((closed_by, _)) = docs.closing_resolution_unless(K::Question, &question_id.0, own) {
+                return Err(MindRefusal::AlreadyResolved { subject: question_id.0.clone(), closed_by: closed_by.into() });
             }
             let choice = ruling.choice.as_ref().map_or("", |choice| choice.0.as_str());
             if !question.options.iter().any(|option| option.label.0 == choice) {
@@ -938,8 +938,8 @@ fn resolution_rule(docs: &Docs<'_>, resolution: &PipelineResolution, historic: b
     }
     // A8: a subject with a resolution still in force is closed. A withdrawn
     // one is not in force, so the subject is open and this is its next record.
-    if !docs.in_force_unless(subject_kind, subject_id, |other| other == resolution) {
-        return Err(MindRefusal::AlreadyResolved { subject: subject_id.into() });
+    if let Some((closed_by, _)) = docs.closing_resolution_unless(subject_kind, subject_id, |other| other == resolution) {
+        return Err(MindRefusal::AlreadyResolved { subject: subject_id.into(), closed_by: closed_by.into() });
     }
     let incompatible = || MindRefusal::IncompatibleResolution { subject_kind, outcome: outcome_name(&resolution.outcome).into() };
     if !matrix(subject_kind, &resolution.outcome) {
@@ -1580,7 +1580,7 @@ mod tests {
         committed(admit(&mut mind, vec![resolution(subject.clone(), withdrawn())]));
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution_n(subject.clone(), 2, ResolutionOutcome::Withdrawn { reason: "again".into() })])),
-            MindRefusal::AlreadyResolved { subject: id("question", "Q1") }
+            MindRefusal::AlreadyResolved { subject: id("question", "Q1"), closed_by: id("resolution", "question.Q1.n1") }
         );
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution(subject.clone(), ResolutionOutcome::Withdrawn { reason: "again".into() })])),
@@ -1591,7 +1591,7 @@ mod tests {
         answering.choice = Some(l("A"));
         assert_eq!(
             refusal(admit(&mut mind, vec![D::Ruling(answering)])),
-            MindRefusal::AlreadyResolved { subject: id("question", "Q1") }
+            MindRefusal::AlreadyResolved { subject: id("question", "Q1"), closed_by: id("resolution", "question.Q1.n1") }
         );
     }
 
@@ -1624,7 +1624,7 @@ mod tests {
         // itself be withdrawn to re-raise `n1` over it (Q19 A).
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution_n(subject, 3, withdrawn())])),
-            MindRefusal::AlreadyResolved { subject: id("question", "Q1") }
+            MindRefusal::AlreadyResolved { subject: id("question", "Q1"), closed_by: id("resolution", "question.Q1.n2") }
         );
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution(r(K::Resolution, &withdrawal), withdrawn())])),
@@ -1645,6 +1645,26 @@ mod tests {
             r(K::Ruling, &id("ruling", "R1")),
             r(K::Resolution, &id("resolution", "question.Q1.n2")),
         ]);
+    }
+
+    /// A closure recorded wrongly is corrected in one batch: withdraw the
+    /// resolution, then resolve its subject again at the next sequence. The
+    /// batch is read as one image, so the second record sees the subject open.
+    #[test]
+    fn a_closure_is_corrected_by_withdrawing_it_and_resolving_again_in_one_batch() {
+        let mut mind = with_specs();
+        committed(admit(&mut mind, vec![D::Ruling(ruling("R1")), follow_up("FU1", r(K::Ruling, &id("ruling", "R1")))]));
+        let subject = r(K::FollowUp, &id("follow_up", "FU1"));
+        committed(admit(&mut mind, vec![resolution(subject.clone(), ResolutionOutcome::Recorded { reason: "done".into() })]));
+        // The refusal alone names the closure to withdraw: the correction takes `closed_by` from it.
+        let MindRefusal::AlreadyResolved { closed_by, .. } = refusal(admit(&mut mind, vec![resolution_n(subject.clone(), 2, ResolutionOutcome::Fixed { commit: sha(), by: None })])) else {
+            panic!("a second closing is refused as AlreadyResolved");
+        };
+        committed(admit(&mut mind, vec![
+            resolution(r(K::Resolution, &closed_by), withdrawn()),
+            resolution_n(subject.clone(), 2, ResolutionOutcome::Fixed { commit: sha(), by: None }),
+        ]));
+        assert!(matches!(mind.get(K::Resolution, &id("resolution", "follow_up.FU1.n2")).unwrap(), Some(D::Resolution(_))));
     }
 
     /// The sequence is exactly the previous plus one: a gap refuses as loudly
@@ -2187,7 +2207,7 @@ mod tests {
         let mut again = ruling("R2");
         again.answers = Some(s(&id("question", "Q1")));
         again.choice = Some(l("B"));
-        assert_eq!(refusal(admit(&mut mind, vec![D::Ruling(again)])), MindRefusal::AlreadyResolved { subject: id("question", "Q1") });
+        assert_eq!(refusal(admit(&mut mind, vec![D::Ruling(again)])), MindRefusal::AlreadyResolved { subject: id("question", "Q1"), closed_by: id("resolution", "question.Q1.n1") });
 
         // An explicit `Answered` must name the ruling that actually answers
         // its subject: a ruling answering Q1 does not resolve Q2.
@@ -2867,7 +2887,7 @@ mod tests {
         let mut again = consolidation("m4", &["m1"]);
         again.pop();
         again.push(resolution_n(m("m1"), 2, superseded(&[m("m4")])));
-        assert_eq!(refusal(admit(&mut mind, again)), MindRefusal::AlreadyResolved { subject: key("m1") });
+        assert_eq!(refusal(admit(&mut mind, again)), MindRefusal::AlreadyResolved { subject: key("m1"), closed_by: format!("{INSTANCE}:resolution:memory.m1.n1") });
     }
 
     /// A Sleep run and a Persona run are one slot of hers; a Self run is the other.
@@ -2916,7 +2936,7 @@ mod tests {
         committed(admit(&mut mind, vec![slept(night(), Some(m("m1")))]));
         assert_eq!(
             refusal(admit(&mut mind, vec![resolution_n(night(), 2, ResolutionOutcome::Slept { line: "again".into(), day_through: None })])),
-            MindRefusal::AlreadyResolved { subject: run_key("s") },
+            MindRefusal::AlreadyResolved { subject: run_key("s"), closed_by: run_key("s").replace(":run:", ":resolution:run.") + ".n1" },
             "the first closing in force is the only one"
         );
         // An empty day names no memory.

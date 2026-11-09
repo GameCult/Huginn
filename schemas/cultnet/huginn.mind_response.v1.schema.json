@@ -1061,17 +1061,22 @@
           ]
         },
         {
+          "description": "`closed_by` is the resolution in force: to correct the closure, withdraw it (a resolution of `closed_by`), then resolve `subject` again at the next sequence.",
           "type": "object",
           "properties": {
             "AlreadyResolved": {
               "type": "object",
               "properties": {
+                "closed_by": {
+                  "type": "string"
+                },
                 "subject": {
                   "type": "string"
                 }
               },
               "required": [
-                "subject"
+                "subject",
+                "closed_by"
               ]
             }
           },
