@@ -237,7 +237,7 @@ fn go(steps: Vec<Step>) -> Ran {
 type Seed = Box<dyn Fn(&TestMind)>;
 
 fn flushes(ran: &Ran) -> usize {
-    ran.written().iter().filter(|text| text.starts_with(FLUSH_MESSAGE)).count()
+    ran.written().iter().filter(|text| text.contains(FLUSH_MESSAGE)).count()
 }
 
 // ---- who is carried -----------------------------------------------------
@@ -1432,9 +1432,31 @@ fn the_start_message_carries_the_closing_rule_once_and_names_what_closes_a_chang
 fn the_flush_keeps_a_brief_whose_change_has_not_landed_open() {
     for why in [Why::Ceiling, Why::Rotation, Why::Idle] {
         let text = flush_text(why);
-        assert!(text.starts_with(FLUSH_MESSAGE), "{text}");
+        assert!(text.contains(FLUSH_MESSAGE), "{text}");
+        assert_eq!(text.contains("context ceiling"), why == Why::Ceiling, "each flush names its own reason: {text}");
         assert!(text.contains("stays open") && text.contains("default branch") && text.contains("closing rule"), "{text}");
         assert!(!text.contains("Recorded, your answer"), "{text}");
+    }
+}
+
+#[test]
+fn the_closing_rule_covers_an_act_without_a_commit_and_names_the_commit_fixed_takes() {
+    let rule = inbox::CLOSING_RULE;
+    for word in ["no commit", "Recorded with what you did and where it can be seen", "merge or squash commit", "not the PR head"] {
+        assert!(rule.contains(word), "{word}: {rule}");
+    }
+    let reminder = inbox::resolving_sentence("x");
+    for word in ["Recorded only if it asked just for an answer", "an act with no commit", "a pushed branch or a local commit is not done"] {
+        assert!(reminder.contains(word), "{word}: {reminder}");
+    }
+}
+
+#[test]
+fn no_source_of_the_actuator_tells_her_a_brief_closes_by_recorded_with_her_answer() {
+    for source in [include_str!("../self_run.rs"), include_str!("inbox.rs")] {
+        for old in ["Recorded with your answer", "Recorded, your answer", "Resolve each brief you answered"] {
+            assert!(!source.contains(old), "{old}");
+        }
     }
 }
 
@@ -1560,7 +1582,7 @@ fn no_stdin_line_is_written_after_the_flush_and_nothing_but_the_writer_writes() 
     let ran = mind_run(&mind, steps);
     let written = ran.written();
     assert_eq!(written.len(), 2, "{written:?}");
-    assert!(written[1].starts_with(FLUSH_MESSAGE), "{}", written[1]);
+    assert!(written[1].contains(FLUSH_MESSAGE), "{}", written[1]);
     assert_eq!(ran.spawns.len(), 1);
     assert!(ran.spawns[0].iter().all(|arg| arg != "--settings"), "no hooks on argv: {:?}", ran.spawns[0]);
 }
@@ -1588,7 +1610,7 @@ mod live_session {
             let entry: Value = serde_json::from_str(entry).unwrap();
             let at = crate::testkit::at((entry["t"].as_f64().unwrap() * 1000.0) as i64);
             if let Some(text) = entry.get("want").and_then(Value::as_str) {
-                let (label, fact) = if text.starts_with(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true, other: false, other_first: false }) };
+                let (label, fact) = if text.contains(FLUSH_MESSAGE) { ("flush-asked", Fact::Tick) } else { ("want", Fact::Inbox { pending: true, other: false, other_first: false }) };
                 let (next, action) = decide(state, fact, at);
                 state = next;
                 trace.push((label.to_string(), action));

@@ -106,7 +106,7 @@ fn a_tell_names_each_brief_the_plan_and_how_she_resolves_it() {
     assert!(text.contains("eureka-body:follow_up:b1") && text.contains("Wire the thing."), "{text}");
     let reminder = resolving_sentence("eureka-body:follow_up:b1");
     assert!(text.contains(&reminder), "{text}");
-    for word in ["eureka-body:follow_up:b1", "Recorded", "Fixed", "default branch", "Superseded", "Withdrawn", "An open PR is not done"] {
+    for word in ["eureka-body:follow_up:b1", "Recorded", "Fixed", "default branch", "Superseded", "Withdrawn", "An open PR, a pushed branch or a local commit is not done"] {
         assert!(reminder.contains(word), "{word}: {reminder}");
     }
     assert!(!text.contains(CLOSING_RULE), "the rule is told once, at start: {text}");

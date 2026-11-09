@@ -214,17 +214,17 @@ The run claims `{id}`, which the mind does not hold: its task is unknown.")),
     Ok(task)
 }
 
-/// What the child is told once, when its session must end: the ceiling, the cap or the cache.
-pub const FLUSH_MESSAGE: &str = "The context ceiling is reached. Admit to the mind what it lacks, close your run, and end.";
+/// What the child is told once, when its session must end, after the reason the flush names for itself.
+pub const FLUSH_MESSAGE: &str = "Admit to the mind what it lacks, close your run, and end.";
 
 /// The flush as written: the one message, and what she does with the briefs she holds.
 fn flush_text(why: Why) -> String {
     let cause = match why {
-        Why::Ceiling => "",
-        Why::Rotation => " (This process ends soon: the unit's time is nearly up. If your next brief comes within the hour, the next process continues this conversation.)",
-        Why::Idle => " (This session ends because nothing is waiting and its cache would lapse.)",
+        Why::Ceiling => "The context ceiling is reached.",
+        Why::Rotation => "This process ends soon: the unit's time is nearly up. If your next brief comes within the hour, the next process continues this conversation.",
+        Why::Idle => "This session ends because nothing is waiting and its cache would lapse.",
     };
-    format!("{FLUSH_MESSAGE}{cause} Close each brief that is done by the closing rule; a brief whose change is not on its default branch stays open, or is superseded by your own follow-up when it waits on someone else, and the next session continues it.")
+    format!("{cause} {FLUSH_MESSAGE} Close each brief that is done by the closing rule; a brief whose change is not on its default branch stays open, or is superseded by your own follow-up when it waits on someone else, and the next session continues it.")
 }
 
 /// The session id of a run: UUIDv5 over the run's id. Derived, never stored.
