@@ -1202,10 +1202,10 @@ fn a_turn_shows_her_stewardships_follow_ups_and_the_rulings_they_cite() {
     rig.mind.committed(vec![open_follow_up("newer", &ruling_ref, "Ship the other thing.\nSecond line.")]);
     let input = first_input(&rig);
     assert!(input.contains("What you are responsible for"), "{input}");
-    assert!(input.contains("Open follow-ups, newest first:"), "{input}");
+    assert!(input.contains("Open follow-ups, oldest first:"), "{input}");
     assert!(input.contains("- steward of GameCult/cinny (chat names, exactly as written: cinny): the chat client; design law in eureka-body:ruling:client-first."), "{input}");
     let (newer, older) = (input.find("eureka-body/newer").unwrap(), input.find("eureka-body/older").unwrap());
-    assert!(newer < older, "{input}");
+    assert!(older < newer, "{input}");
     assert!(input.contains("Ship the other thing.") && !input.contains("Second line."), "{input}");
     assert!(input.contains("- eureka-body:ruling:client-first: A ruling"), "{input}");
     assert!(input.find("What you are responsible for").unwrap() < input.find("No new messages").unwrap());
@@ -1215,7 +1215,7 @@ fn a_turn_shows_her_stewardships_follow_ups_and_the_rulings_they_cite() {
 fn a_mind_with_nothing_to_answer_for_says_so() {
     let text = render_responsibilities(&TestMind::bare(), &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
     assert!(text.contains("no stewardship is in force") && text.contains("no follow-up is open"), "{text}");
-    assert!(!text.contains("Rulings these cite") && !text.contains("Open follow-ups, newest first:"), "{text}");
+    assert!(!text.contains("Rulings these cite") && !text.contains("Open follow-ups, oldest first:"), "{text}");
 }
 fn steward_naming(repo: &str, names: &[&str]) -> PipelineDocument {
     let PipelineDocument::Stewardship(mut stewardship) = steward_of(repo, "the project") else { unreachable!() };
@@ -1303,11 +1303,13 @@ fn the_responsibilities_hold_their_bound_and_mark_what_they_drop() {
     }
     let text = render_responsibilities(&rig.mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap().text;
     assert!(text.len() <= GOALS_MAX_BYTES, "{}", text.len());
-    assert!(text.contains("older open follow-ups not shown"), "{text}");
-    assert!(text.contains("fu-29") && !text.contains("fu-00"), "{text}");
-    let listed = text.matches("- eureka-body/fu-").count();
-    let said: usize = text.split('(').find_map(|part| part.split_once(" older open").and_then(|(n, _)| n.parse().ok())).unwrap();
-    assert_eq!(listed + said, 30, "{text}");
+    assert!(text.contains("Open follow-ups, oldest first:"), "{text}");
+    assert!(text.contains("fu-00") && !text.contains("fu-29"), "the oldest show and the newest are dropped: {text}");
+    let listed_ids: Vec<usize> = text.match_indices("- eureka-body/fu-").map(|(at, found)| text[at + found.len()..][..2].parse().unwrap()).collect();
+    assert_eq!(listed_ids, (0..listed_ids.len()).collect::<Vec<_>>(), "ascending by admission, no gap: {text}");
+    let said: usize = text.split('(').find_map(|part| part.split_once(" newer open follow-ups not shown: `huginn open <campaign>` lists them all.)").and_then(|(n, _)| n.parse().ok())).unwrap();
+    assert!(said > 0 && !text.contains("older open follow-ups"), "{text}");
+    assert_eq!(listed_ids.len() + said, 30, "{text}");
     let held = text.split("Rulings these cite").next().unwrap().len();
     assert!(held <= GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE && held + 420 > GOALS_MAX_BYTES - GOALS_RULINGS_RESERVE, "{held}");
 }
@@ -3905,7 +3907,7 @@ You committed to:
 - yggdrasil:memory:mine (2026-10-09, in #swarm, committed, with "libby"): "I integrate the fork"
 Asked of you, not yet taken on:
 - yggdrasil:memory:hers (2026-10-09, in #swarm, asked by "libby"): "Review the shaders"
-Open follow-ups, newest first:
+Open follow-ups, oldest first:
 - eureka-body/ship (GameCult/Huginn): Ship the fork.
 Rulings these cite:
 - eureka-body:ruling:client-first: A ruling
@@ -3931,7 +3933,7 @@ message room="swarm" sender="@libby:chat" role=member name="libby" text="status 
 
 Answer these messages as part of the work you name below: chat is how you work with the others.
 
-What are you building right now? Check your own mind before you answer. Your plans and commitments are there: `huginn query '{}' --near "<project> roadmap" --documents` finds what you remember planning, and a roadmap you hold is work as much as an open follow-up. `huginn campaigns` lists your campaigns, `huginn open <campaign>` pages through the open follow-ups and questions of one (the list above shows only the newest; `--cursor` takes the `next` of the previous page), and `huginn unreported <campaign>` lists its specs that no run has carried out. Every follow-up in your campaigns is yours to take up, whoever filed it, imported ones included. What you find are candidates you weigh: being listed does not outrank a plan you hold. Put what you are building in `intent` first. If none of your latest runs above is a Self run still open, start one with `start_self_run` that continues the work you chose, at its full size; take up a follow-up by naming its id in the brief. If what matters most waits on someone else's decision, name it and do what you still can. Do not ask again someone you have already asked. Silence in chat costs nothing.
+What are you building right now? Check your own mind before you answer. Your plans and commitments are there: `huginn query '{}' --near "<project> roadmap" --documents` finds what you remember planning, and a roadmap you hold is work as much as an open follow-up. `huginn campaigns` lists your campaigns, `huginn open <campaign>` pages through the open follow-ups and questions of one (the list above shows only the oldest; `--cursor` takes the `next` of the previous page), and `huginn unreported <campaign>` lists its specs that no run has carried out. Every follow-up in your campaigns is yours to take up, whoever filed it, imported ones included. What you find are candidates you weigh: being listed does not outrank a plan you hold. Put what you are building in `intent` first. If none of your latest runs above is a Self run still open, start one with `start_self_run` that continues the work you chose, at its full size; take up a follow-up by naming its id in the brief. If what matters most waits on someone else's decision, name it and do what you still can. Do not ask again someone you have already asked. Silence in chat costs nothing.
 "###;
 const BASE_BARE_WAKE: &str = r###"
 
@@ -3955,7 +3957,7 @@ People you may name in a memory's about: @op:chat, @libby:chat.
 
 No new messages. Before your open work, consider what does not exist yet in what you steward, that someone outside would come to use and that you would be excited to build this week. Not a cleanup. If it beats what your mind holds open, start it as a Self run with its brief at the idea's full size, and say why in `intent`.
 
-What are you building right now? Check your own mind before you answer. Your plans and commitments are there: `huginn query '{}' --near "<project> roadmap" --documents` finds what you remember planning, and a roadmap you hold is work as much as an open follow-up. `huginn campaigns` lists your campaigns, `huginn open <campaign>` pages through the open follow-ups and questions of one (the list above shows only the newest; `--cursor` takes the `next` of the previous page), and `huginn unreported <campaign>` lists its specs that no run has carried out. Every follow-up in your campaigns is yours to take up, whoever filed it, imported ones included. What you find are candidates you weigh: being listed does not outrank a plan you hold. Put what you are building in `intent` first. If none of your latest runs above is a Self run still open, start one with `start_self_run` that continues the work you chose, at its full size; take up a follow-up by naming its id in the brief. If what matters most waits on someone else's decision, name it and do what you still can. Do not ask again someone you have already asked. Silence in chat costs nothing.
+What are you building right now? Check your own mind before you answer. Your plans and commitments are there: `huginn query '{}' --near "<project> roadmap" --documents` finds what you remember planning, and a roadmap you hold is work as much as an open follow-up. `huginn campaigns` lists your campaigns, `huginn open <campaign>` pages through the open follow-ups and questions of one (the list above shows only the oldest; `--cursor` takes the `next` of the previous page), and `huginn unreported <campaign>` lists its specs that no run has carried out. Every follow-up in your campaigns is yours to take up, whoever filed it, imported ones included. What you find are candidates you weigh: being listed does not outrank a plan you hold. Put what you are building in `intent` first. If none of your latest runs above is a Self run still open, start one with `start_self_run` that continues the work you chose, at its full size; take up a follow-up by naming its id in the brief. If what matters most waits on someone else's decision, name it and do what you still can. Do not ask again someone you have already asked. Silence in chat costs nothing.
 "###;
 
 /// Each echo delivers the next of `arriving` and lets a poll fall due while the turn runs, so each is told as its own line of one process.
@@ -5742,18 +5744,18 @@ fn a_follow_up_the_goals_bound_hides_still_counts_as_open_work() {
     let mind = TestMind::seeded();
     mind.committed(campaign_on("hidden-in", &[REPO]));
     mind.committed(chain("hidden-in", "src", REPO));
-    let PipelineDocument::FollowUp(mut hidden) = follow_up("old", &reference(K::CutSpec, "hidden-in:cut_spec:cut-src.r1")) else { unreachable!("a follow-up") };
-    hidden.campaign = Slug("hidden-in".into());
-    hidden.item = Line("x".repeat(900));
-    mind.committed(vec![PipelineDocument::FollowUp(hidden)]);
     mind.committed(chain(CAMPAIGN, "src", REPO));
     for n in 0..12 {
         let PipelineDocument::FollowUp(mut long) = follow_up(&format!("long{n}"), &spec_ref("src")) else { unreachable!("a follow-up") };
         long.item = Line("x".repeat(900));
         mind.committed(vec![PipelineDocument::FollowUp(long)]);
     }
+    let PipelineDocument::FollowUp(mut hidden) = follow_up("newest", &reference(K::CutSpec, "hidden-in:cut_spec:cut-src.r1")) else { unreachable!("a follow-up") };
+    hidden.campaign = Slug("hidden-in".into());
+    hidden.item = Line("x".repeat(900));
+    mind.committed(vec![PipelineDocument::FollowUp(hidden)]);
     let goals = render_responsibilities(&mind, &Slug(INSTANCE.into()), &BTreeMap::new()).unwrap();
-    assert!(goals.text.contains("older open follow-ups not shown") && !goals.text.contains("hidden-in/old"), "the bound hid it: {} bytes", goals.text.len());
+    assert!(goals.text.contains("newer open follow-ups not shown") && !goals.text.contains("hidden-in/newest"), "the bound hid it: {} bytes", goals.text.len());
     assert_eq!(goals.open_roots, ["eureka-body", "hidden-in"], "{:?}", goals.open_roots);
 }
 
