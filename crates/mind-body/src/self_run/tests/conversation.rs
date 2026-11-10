@@ -580,6 +580,28 @@ fn every_result_of_a_span_answers_the_spans_briefs() {
     assert!(answered(&mind, 1).is_empty() && answered(&mind, 2).is_empty());
 }
 
+/// A long result is several replies; each answers the briefs, and a piece of only whitespace is no reply.
+#[test]
+fn every_piece_of_a_long_result_answers_the_briefs_and_a_whitespace_tail_is_no_piece() {
+    let mind = live_mind();
+    persona_commit(&mind, vec![libby("l1")]);
+    let long = "z".repeat(REPLY_TEXT_LIMIT * 2 + 1);
+    let ran = mind_run(&mind, vec![Out(echo()), Out(saying(&long))]);
+    assert!(ran.outcome.is_ok());
+    for n in 1..=3 {
+        assert_eq!(answered(&mind, n), vec![id_of("l1")], "piece {n}");
+    }
+    assert!(reply_of(&mind, 4).is_none());
+
+    let mind = live_mind();
+    persona_commit(&mind, vec![libby("l1")]);
+    let text = format!("{}\n \n", "y".repeat(REPLY_TEXT_LIMIT));
+    let ran = mind_run(&mind, vec![Out(echo()), Out(saying(&text))]);
+    assert!(ran.outcome.is_ok());
+    assert_eq!(answered(&mind, 1), vec![id_of("l1")]);
+    assert!(reply_of(&mind, 2).is_none(), "the whitespace tail is no reply");
+}
+
 /// The same conversation's new brief is written at once, whatever runs; another conversation's waits for the turn to end.
 #[test]
 fn the_served_conversations_briefs_drop_in_mid_turn_and_another_conversations_wait() {

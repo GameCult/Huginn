@@ -823,8 +823,9 @@ impl<'a> SelfInbox<'a> {
             if !answered.is_empty() {
                 self.last_answers = answered;
             }
-            // A reply holds a bounded text, so a long result is delivered whole as consecutive replies, in order.
-            for chunk in chunks(text, REPLY_TEXT_LIMIT) {
+            // A reply holds a bounded text, so a long result is delivered whole as consecutive replies, in order,
+            // each carrying the answers. A piece of only whitespace (the tail after a cut) is no reply.
+            for chunk in chunks(text, REPLY_TEXT_LIMIT).filter(|chunk| !chunk.trim().is_empty()) {
                 self.replies += 1;
                 self.unadmitted.push(PipelineReply {
                     instance: self.mind.instance().clone(),
