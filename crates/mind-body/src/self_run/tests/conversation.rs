@@ -600,6 +600,11 @@ fn every_piece_of_a_long_result_answers_the_briefs_and_a_whitespace_tail_is_no_p
     assert!(ran.outcome.is_ok());
     assert_eq!(answered(&mind, 1), vec![id_of("l1")]);
     assert!(reply_of(&mind, 2).is_none(), "the whitespace tail is no reply");
+    // Nor is it ever offered to the mind (an admission refused as empty would be retried for the rest of the run).
+    let mind = live_mind();
+    persona_commit(&mind, vec![libby("l1")]);
+    let bare = mind_run(&mind, vec![Out(echo()), Out(saying(&"y".repeat(REPLY_TEXT_LIMIT)))]);
+    assert_eq!(ran.admits, bare.admits, "the tail cost an admission");
 }
 
 /// The same conversation's new brief is written at once, whatever runs; another conversation's waits for the turn to end.
