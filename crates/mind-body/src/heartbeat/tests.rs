@@ -96,6 +96,10 @@ impl Chat for FakeChat {
         panic!("the heartbeat sends nothing")
     }
 
+    fn open_direct(&self, _: &crate::chat_client::ChatOpenDirectRequest) -> Result<crate::chat_client::ChatOpenDirectReceipt> {
+        panic!("the heartbeat opens nothing")
+    }
+
     fn ack(&self, _: u64) -> Result<()> {
         panic!("the heartbeat never acks a delivery")
     }

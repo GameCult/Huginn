@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::chat_client::{
-    ACK, Chat, ChatAck, ChatDelivery, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
+    ACK, Chat, ChatAck, ChatDelivery, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
     SEND_REQUEST, decode, encode,
 };
 
@@ -177,6 +177,14 @@ impl Chat for RudpChat {
         let receipt: ChatSendReceipt = self.call(SEND_REQUEST, &request.request_id, request, (SEND_RECEIPT, &request.request_id))?;
         if receipt.request_id != request.request_id {
             bail!("the mouth answered another send");
+        }
+        Ok(receipt)
+    }
+
+    fn open_direct(&self, request: &ChatOpenDirectRequest) -> Result<ChatOpenDirectReceipt> {
+        let receipt: ChatOpenDirectReceipt = self.call(OPEN_DIRECT_REQUEST, &request.request_id, request, (OPEN_DIRECT_RECEIPT, &request.request_id))?;
+        if receipt.request_id != request.request_id {
+            bail!("the mouth answered another open");
         }
         Ok(receipt)
     }
