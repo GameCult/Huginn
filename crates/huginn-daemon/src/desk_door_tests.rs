@@ -289,6 +289,23 @@ mod desk_door {
         assert_eq!(counted(response.unwrap()), ("n1".to_string(), Some("n1".to_string())));
     }
 
+    /// A header over the request bound is refused on the header alone: the transport reads the four
+    /// bytes, sees the claim exceed the profile's maximum and never reads for the payload.
+    #[test]
+    fn an_oversize_header_is_refused_before_the_payload_is_read() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = seeded(root.path());
+        let registry = desk_registry().unwrap();
+        for length in [65537_u32, u32::MAX] {
+            let (mut client, server, reads, writes) = pair();
+            client.write_all(&length.to_be_bytes()).unwrap();
+            let served = serve_connection(server, my_uid(), &mut daemon, &registry, now(), |_| Ok(()));
+            let Served::Dropped(why) = served else { panic!("{served:?}") };
+            assert!(why.contains("exceeds"), "{why}");
+            assert_eq!((reads.load(Ordering::Relaxed), writes.load(Ordering::Relaxed)), (1, 0), "the header was the only read");
+        }
+    }
+
     /// The pure core answers the catalog with the two desk schemas and nothing else, and a
     /// reply past the response bound is a typed refusal that still names the request.
     #[test]
@@ -335,6 +352,27 @@ mod door_smoke {
             id: short(&seen[0].0[0]),
         };
         assert!(rig.daemon.mind().view(&stored).unwrap().is_some(), "the ref the index was given is the stored answer");
+    }
+
+    /// A pass takes at most `DESK_ACCEPTS_PER_PASS` waiting connections and says how many it took.
+    #[test]
+    fn a_pass_takes_four_connections_and_the_rest_wait() {
+        let mut rig = rig(my_uid());
+        let hash = rig.hash.clone();
+        let mut clients: Vec<UnixStream> = (0..6)
+            .map(|n| {
+                let mut stream = connect(&rig.path);
+                let request = answer("x", DeskAuthority::Member, &["x"], wire(&hash, &format!("00000000-0000-4000-8000-0000000001{n:02}")));
+                stream.write_all(&framed(&message(&format!("m-{n}"), &request))).unwrap();
+                stream
+            })
+            .collect();
+        assert_eq!(rig.door.serve_ready(&mut rig.daemon, now()), 4);
+        assert_eq!(rig.door.serve_ready(&mut rig.daemon, now()), 2);
+        assert_eq!(rig.door.serve_ready(&mut rig.daemon, now()), 0, "an empty queue ends the pass");
+        for client in &mut clients {
+            assert!(read_reply(client).is_some());
+        }
     }
 
     #[test]
@@ -567,6 +605,20 @@ mod door_smoke {
         assert!(path.exists(), "the live server's socket was not unlinked");
         drop(door);
         assert!(!path.exists(), "drop unlinks the path");
+        // A socket the door cannot probe is neither stale nor free: it is left alone.
+        let guarded = dir.path().join("guarded.sock");
+        let _held = UnixListener::bind(&guarded).unwrap();
+        std::fs::set_permissions(&guarded, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let error = format!("{:#}", bind_desk(&guarded, my_uid()).err().expect("an unprobeable socket refuses"));
+        assert!(error.contains("probing"), "{error}");
+        assert!(guarded.exists());
+        // A path the door cannot even look at is not a free path.
+        let sealed = dir.path().join("sealed");
+        std::fs::create_dir(&sealed).unwrap();
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let error = format!("{:#}", bind_desk(&sealed.join("desk.sock"), my_uid()).err().expect("an unreadable path refuses"));
+        assert!(error.contains("reading"), "{error}");
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o700)).unwrap();
         // A regular file is not a socket.
         std::fs::write(&path, b"x").unwrap();
         assert!(bind_desk(&path, my_uid()).is_err());
