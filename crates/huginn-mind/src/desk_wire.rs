@@ -48,6 +48,12 @@ pub enum RefusalSchema {
     V0,
 }
 
+/// A nullable key her schema lists as required: it must be sent, as null if it has no value.
+/// (serde would otherwise read a missing `Option` key as `None`.)
+fn required<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(deserializer)
+}
+
 /// `gamecult.fork.answer_request.v0`: closed, her field order. The wire types hold text; the
 /// shape step of `Mind::answer_desk` judges it. The subject and the attribution are the
 /// door's context and are no field here.
@@ -58,8 +64,12 @@ pub struct ForkAnswerRequest {
     pub schema_version: RequestSchema,
     pub fork_id: String,
     pub options_hash: String,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
     pub answer: Option<ForkAnswer>,
     pub retracted: bool,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
     pub retracts: Option<String>,
     pub answered_at: String,
     pub request_id: String,
@@ -69,7 +79,11 @@ pub struct ForkAnswerRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ForkAnswer {
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
     pub choice: Option<String>,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
     pub note: Option<String>,
 }
 
@@ -109,11 +123,21 @@ pub struct ForkDeskAnswer {
     pub answer_id: String,
     pub fork_id: String,
     pub outcome: String,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
     pub of: Option<String>,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
     pub retracts: Option<String>,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
     pub code: Option<ForkAnswerCode>,
     pub options_hash: String,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
     pub choice: Option<String>,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
     pub note: Option<String>,
     pub answered_at: String,
     pub received_at: String,
@@ -1007,6 +1031,55 @@ mod tests {
         let mut wrong = base.clone();
         wrong["schemaVersion"] = Value::String("gamecult.fork.answer_request.v1".into());
         assert!(decode(&wrong).is_err());
+    }
+
+    /// Her schema lists every nullable key as required: a key left out refuses, the same key sent
+    /// as null decodes.
+    #[test]
+    fn nullable_keys_must_be_present() {
+        fn without(message: &Value, path: &[&str], key: &str) -> Value {
+            let mut copy = message.clone();
+            let mut at = &mut copy;
+            for step in path {
+                at = &mut at[*step];
+            }
+            at.as_object_mut().unwrap().remove(key).unwrap_or_else(|| panic!("{key} is not in the message"));
+            copy
+        }
+        fn nulled(message: &Value, path: &[&str], key: &str) -> Value {
+            let mut copy = message.clone();
+            let mut at = &mut copy;
+            for step in path {
+                at = &mut at[*step];
+            }
+            at[key] = Value::Null;
+            copy
+        }
+        fn decodes<T: serde::de::DeserializeOwned>(value: &Value) -> bool {
+            rmp_serde::from_slice::<T>(&rmp_serde::to_vec_named(value).unwrap()).is_ok()
+        }
+        let file = vectors();
+        // A request that sends an answer object (both words) and no target.
+        let request = file["request"]["valid"].as_array().unwrap().iter().map(|row| row["message"].clone()).find(|message| message["answer"]["choice"].is_string() && message["answer"]["note"].is_string()).unwrap();
+        assert!(decodes::<ForkAnswerRequest>(&request));
+        for key in ["answer", "retracts"] {
+            assert!(!decodes::<ForkAnswerRequest>(&without(&request, &[], key)), "request without {key}");
+        }
+        assert!(decodes::<ForkAnswerRequest>(&nulled(&request, &[], "answer")));
+        assert!(decodes::<ForkAnswerRequest>(&nulled(&request, &[], "retracts")));
+        for key in ["choice", "note"] {
+            assert!(!decodes::<ForkAnswerRequest>(&without(&request, &["answer"], key)), "answer without {key}");
+        }
+        assert!(decodes::<ForkAnswerRequest>(&nulled(&nulled(&request, &["answer"], "note"), &[], "retracts")));
+        // Every key of every valid desk answer, null or not, is required.
+        let valid = rows(&file["deskAnswer"]["valid"]);
+        for (name, message, _) in &valid {
+            assert!(decodes::<ForkDeskAnswer>(message), "{name}");
+            for key in message.as_object().unwrap().keys() {
+                assert!(!decodes::<ForkDeskAnswer>(&without(message, &[], key)), "{name} without {key}");
+            }
+        }
+        assert!(decodes::<ForkDeskAnswer>(&nulled(&valid[0].1, &[], "of")));
     }
 
     // ---- Libby's scenarios through Mind::desk_answer ----
