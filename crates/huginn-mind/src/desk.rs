@@ -253,7 +253,7 @@ impl<S: MindStore> Mind<S> {
             Ok(at) if at.offset().local_minus_utc() == 0 => at.with_timezone(&Utc),
             _ => return Err(invalid("answered_at")),
         };
-        // A choice is any non-empty text of at most 200 bytes. It is stored only when it reads as
+        // A choice is any non-empty text of at most a Short (200 bytes). It is stored only when it reads as
         // a label (the record's field is a Label); a refused one that does not keeps no choice.
         let choice_shape = |choice: &Short| if choice.0.is_empty() || choice.0.len() > 200 { Err(invalid("desk_answer.choice")) } else { Ok(()) };
         let label_of = |choice: &Short| Some(Label(choice.0.clone())).filter(|label| label.validate_label().is_ok());
@@ -297,16 +297,14 @@ impl<S: MindStore> Mind<S> {
             authority: stamp.authority,
             outcome,
         };
-        let probe = PipelineDocument::DeskAnswer(answer(1, shape_outcome, true));
-        probe.validate().map_err(shape_fault)?;
-        eureka_pipeline::pipeline_key(&probe).map_err(shape_fault)?;
-
         let image = self.image()?;
         let docs = Docs::at(image, image.head);
         let fork = request.fork.0.as_str();
 
-        // The retry lookup: after the shape, before the fork is read, so a retry gets its stored
-        // outcome even if the card has since changed. The key is (answerer, request_id).
+        // The retry lookup: after the cheap shape and the body digest, before the probe and before
+        // the fork is read, so a retry gets its stored outcome without re-validating and even if the
+        // card has since changed. A malformed request_id binds no record and meets the probe below.
+        // The key is (answerer, request_id).
         let bound = docs.of_kind(PipelineKind::DeskAnswer).find_map(|(key, document)| match document {
             PipelineDocument::DeskAnswer(held) if held.answerer == stamp.answerer && held.request_id == request.request_id => Some((key, held)),
             _ => None,
@@ -317,6 +315,10 @@ impl<S: MindStore> Mind<S> {
             }
             return Ok(DeskAnswerOutcome::Replayed { answer: Short(key.to_string()), outcome: held.outcome.clone() });
         }
+
+        let probe = PipelineDocument::DeskAnswer(answer(1, shape_outcome, true));
+        probe.validate().map_err(shape_fault)?;
+        eureka_pipeline::pipeline_key(&probe).map_err(shape_fault)?;
 
         // Rules 3 and the moved campaign: nothing is stored.
         let Some(PipelineDocument::Question(question)) = docs.find(PipelineKind::Question, fork) else {
@@ -1086,6 +1088,35 @@ mod tests {
         stored(ask(&mut mind, &decider("x"), request.clone()));
         committed(admit(&mut mind, vec![resolution(r(K::Campaign, "eureka-state:campaign:self"), ResolutionOutcome::Moved { to: slug("thought-cage") })]));
         assert_eq!(replayed(ask(&mut mind, &decider("x"), request)), (key("Q1", 1), DeskOutcome::Counted));
+    }
+
+    /// The lookup precedes the probe: a bound id replays its stored outcome without the probe's
+    /// validation. The stored answerer is rewritten past a Short, which no door can store but a
+    /// fresh probe refuses; a retry of it must still replay, and an unbound id must meet the probe.
+    #[test]
+    fn q1_the_lookup_comes_before_the_probe_validates() {
+        let long = "w".repeat(201);
+        let request = with_id(pick(FORK, "Q1", "A", AT), R1);
+        let mut first = desk();
+        stored(ask(&mut first, &decider("x"), request.clone()));
+        let store = MemoryStore::new();
+        first.store().rows().into_iter().for_each(|row| store.plant(row));
+        let cache = crate::mind::schema_cache().unwrap();
+        let image = first.image().unwrap();
+        let found = Docs::at(image, image.head).find(K::DeskAnswer, &key("Q1", 1)).cloned();
+        let Some(PipelineDocument::DeskAnswer(mut held)) = found else { panic!("stored") };
+        held.answerer = s(&long);
+        store.plant(PipelineDocument::DeskAnswer(held).prepare(&cache).unwrap());
+        let mut mind = opened(store, INSTANCE);
+        let stamp = stamp_as(&long, DeskAuthority::Member, &LIST);
+        let before = head(&mind);
+        assert_eq!(replayed(ask(&mut mind, &stamp, request)), (key("Q1", 1), DeskOutcome::Counted));
+        assert_eq!(head(&mind), before);
+        let unbound = with_id(pick(FORK, "Q1", "A", AT), R2);
+        assert_eq!(
+            ask(&mut mind, &stamp, unbound),
+            DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: "desk_answer.answerer".into() })
+        );
     }
 
     /// V13 (Q2): the same id with any other part of the body is request_id_conflict and the store is unchanged.
