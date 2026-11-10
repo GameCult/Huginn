@@ -294,10 +294,15 @@ fn project(key: &str, stored: &PipelineDeskAnswer) -> Result<ForkDeskAnswer, Min
 /// question id, or whose id is over the 200-byte bound, names no fork), a body the shape step
 /// refused and a reused request id store nothing and have codes of their own; anything else,
 /// `Unavailable` included, passes through unchanged.
+/// The Mind's `DeskRequestInvalid` fields that come from the fork id alone.
+const FORK_FIELDS: [&str; 4] = ["fork", "desk_answer.fork", "desk_answer.key", "desk_answer.campaign"];
+
 fn door_refusal(refused: MindRefusal) -> DeskResponse {
     match refused {
         MindRefusal::MissingReference { .. } | MindRefusal::CampaignMoved { .. } => DeskResponse::NotStored(fork_unknown()),
-        MindRefusal::DeskRequestInvalid { field } if field == "fork" || field == "desk_answer.fork" => DeskResponse::NotStored(fork_unknown()),
+        // Any bad fork id is `fork_unknown`. The Mind derives these four fields from the fork id alone
+        // (the id's shape, its campaign root, the record key built from it), so each one is the fork.
+        MindRefusal::DeskRequestInvalid { field } if FORK_FIELDS.contains(&field.as_str()) => DeskResponse::NotStored(fork_unknown()),
         MindRefusal::DeskRequestInvalid { field } => DeskResponse::NotStored(body_invalid(&field)),
         MindRefusal::DeskRequestIdConflict { .. } => {
             DeskResponse::NotStored(fork_refusal(ForkRefusalCode::RequestIdConflict, "request_id_conflict: this request_id was used for a different body".into()))
@@ -924,12 +929,40 @@ mod tests {
         }
         assert_eq!(head(&mind), before);
         // The mapping is by exact field: a field that merely ends in "fork" is a bad body.
-        for field in ["desk_answer.fork", "fork"] {
+        for field in ["desk_answer.fork", "fork", "desk_answer.key", "desk_answer.campaign"] {
             assert_eq!(not_stored(door_refusal(MindRefusal::DeskRequestInvalid { field: field.into() })).code, ForkRefusalCode::ForkUnknown, "{field}");
         }
         for field in ["notfork", "desk_answer.forks", "desk_answer.fork.x", "request"] {
             assert_eq!(not_stored(door_refusal(MindRefusal::DeskRequestInvalid { field: field.into() })).code, ForkRefusalCode::BodyInvalid, "{field}");
         }
+    }
+
+    /// Any bad fork id is `fork_unknown`, whichever field the Mind faults: the id's shape, its
+    /// campaign root or the record key built from it. A bad field that is not the fork stays `body_invalid`.
+    #[test]
+    fn every_bad_fork_id_is_unknown_and_other_bad_fields_are_not() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let before = head(&mind);
+        let forks = [
+            "",                                  // fork
+            "eureka-state:epic:Q1",              // fork: not a question id
+            "eureka-state:question:Q 1",         // desk_answer.fork
+            ":question:Q1",                      // desk_answer.campaign
+            "Bad Root:question:Q1",              // desk_answer.campaign
+            "a:question:Q1.2",                   // desk_answer.key
+            "eureka-state:question:Q99",         // a well-formed id nothing holds
+        ];
+        for fork in forks {
+            let refusal = not_stored(ask(&mut mind, "x", wire(fork, &hash)).0);
+            assert_eq!(refusal, fork_unknown(), "{fork:?}");
+            assert_eq!(head(&mind), before, "{fork:?}");
+        }
+        let bad_choice = ForkAnswerRequest { answer: Some(ForkAnswer { choice: Some(String::new()), note: None }), ..wire(FORK, &hash) };
+        let refusal = not_stored(ask(&mut mind, "x", bad_choice).0);
+        assert_eq!(refusal.code, ForkRefusalCode::BodyInvalid);
+        assert!(refusal.error.contains("desk_answer.choice"), "{refusal:?}");
+        assert_eq!(head(&mind), before);
     }
 
     #[test]
@@ -1046,6 +1079,27 @@ mod tests {
         let fresh = wire(FORK, &hash);
         assert_eq!(not_stored(ask_as(&mut mind, "x", &[], fresh).0).code, ForkRefusalCode::ForkUnknown);
         assert_eq!((head(&mind), stored_count(&mind, FORK)), (before, 1));
+        // A stored refusal and a stored revision replay the same way: a stale hash is stored as a
+        // refusal, a second answer by the same subject as a revision.
+        let stale = wire(FORK, "0".repeat(hash.len()).as_str());
+        let (refused, replayed) = ask(&mut mind, "x", stale.clone());
+        assert!(!replayed);
+        assert_eq!(answered(refused.clone()).0.outcome, "Refused");
+        let revision = wire(FORK, &hash);
+        let (revised, replayed) = ask(&mut mind, "x", revision.clone());
+        assert!(!replayed);
+        assert_eq!(answered(revised.clone()).0.outcome, "Revision");
+        let before = head(&mind);
+        for (request, stored) in [(stale, refused), (revision, revised)] {
+            let (again, replayed) = ask_as(&mut mind, "x", &[], request.clone());
+            assert!(replayed);
+            // `as_of` is the head the replay was read at, so the stored answer is what is compared.
+            assert_eq!(encode(&answered(again).0), encode(&answered(stored).0));
+            assert_eq!(head(&mind), before);
+            let (other, replayed) = ask_as(&mut mind, "w", &[], request);
+            assert_eq!((not_stored(other).code, replayed), (ForkRefusalCode::ForkUnknown, false));
+            assert_eq!(head(&mind), before);
+        }
     }
 
     #[test]
