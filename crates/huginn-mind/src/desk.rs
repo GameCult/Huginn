@@ -620,6 +620,13 @@ mod tests {
         let after = head(&mind);
         assert!(after > before);
         assert_eq!(refusal(admit(&mut mind, vec![doc.clone()])), MindRefusal::DeskAnswerOutsideDesk { id: id.clone() });
+        // The door is refused before references are read: a forged answer to a fork nobody holds is
+        // still the door's refusal.
+        let D::DeskAnswer(mut orphan) = doc.clone() else { unreachable!() };
+        orphan.fork = s("eureka-state:question:nobody");
+        orphan.sequence = 1;
+        let orphan_id = "eureka-state:desk_answer:nobody.n1".to_string();
+        assert_eq!(refusal(admit(&mut mind, vec![D::DeskAnswer(orphan)])), MindRefusal::DeskAnswerOutsideDesk { id: orphan_id });
         // Beside a legitimate document, still refused whole.
         assert_eq!(refusal(admit(&mut mind, vec![question_n(9), doc.clone()])), MindRefusal::DeskAnswerOutsideDesk { id: id.clone() });
         // An import carrying one.
