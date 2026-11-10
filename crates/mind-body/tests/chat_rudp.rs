@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cultnet_rs::{CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions};
-use mind_body::chat_client::{self, ACK, Chat, ChatAck, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, READ, SEND_RECEIPT, SEND_REQUEST};
+use mind_body::chat_client::{self, ACK, Chat, ChatAck, ChatOpenDirectReceipt, ChatOpenDirectRequest, DirectOutcome, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, READ, SEND_RECEIPT, SEND_REQUEST};
 use mind_body::chat_rudp::{RudpChat, connection_id};
 
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
@@ -22,6 +22,8 @@ const PENDING_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v3/gamecult.p
 const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
 const SEND_RECEIPT_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.sent.msgpack");
 const SEND_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.nil-basis.msgpack");
+const OPEN_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_request.v1.msgpack");
+const OPENED_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_receipt.v1.opened.msgpack");
 
 const KEY: &str = "connection-key-for-test";
 const TAG: &str = "cultnet.transport.rudp.v0";
@@ -96,6 +98,7 @@ fn serve(key: &str, bind: &str, pending_kind: &'static str, pending_bytes: &'sta
             let reply = match document.schema_id.as_str() {
                 PENDING_REQUEST if for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => Some(answer(pending_kind, "eureka", pending_bytes)),
                 SEND_REQUEST if for_eureka(&chat_client::decode::<ChatSendRequest>(&document.payload).unwrap().persona) => Some(answer(SEND_RECEIPT, &document.record_key, SEND_RECEIPT_BYTES)),
+                OPEN_DIRECT_REQUEST if for_eureka(&chat_client::decode::<ChatOpenDirectRequest>(&document.payload).unwrap().persona) => Some(answer(OPEN_DIRECT_RECEIPT, &document.record_key, OPENED_BYTES)),
                 _ => None,
             };
             if let Some(reply) = reply {
@@ -212,4 +215,19 @@ fn a_v1_mouths_pending_answer_still_reads_with_no_image_and_a_v2_one_carries_it(
     let new = client(&current, KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap();
     assert_eq!(new[0].image.as_ref().map(|image| (image.mime.as_str(), image.size)), Some(("image/png", 2048)));
     assert_eq!(new[0].text, old[0].text, "the same message, with its attachment");
+}
+
+#[test]
+fn an_open_crosses_a_real_rudp_session_in_the_mouths_bytes_and_a_receipt_for_another_open_is_refused() {
+    let mouth = mouth(KEY);
+    let chat = client(&mouth, KEY, "eureka", Duration::from_secs(5));
+    let request = chat_client::decode::<ChatOpenDirectRequest>(OPEN_REQUEST_BYTES).unwrap();
+    let receipt = chat.open_direct(&request).unwrap();
+    assert_eq!(receipt, chat_client::decode::<ChatOpenDirectReceipt>(OPENED_BYTES).unwrap());
+    assert_eq!(receipt.outcome, DirectOutcome::Opened);
+
+    let another = ChatOpenDirectRequest { request_id: "req-other".into(), ..request };
+    assert!(chat.open_direct(&another).is_err(), "the answer names req-1, not req-other");
+    let seen = mouth.seen.lock().unwrap().clone();
+    assert_eq!(seen[0], (OPEN_DIRECT_REQUEST.to_string(), OPEN_REQUEST_BYTES.to_vec()));
 }

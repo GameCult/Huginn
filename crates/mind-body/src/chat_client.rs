@@ -26,6 +26,9 @@ pub const ACK: &str = "gamecult.persona.chat_ack.v1";
 pub const READ: &str = "gamecult.persona.chat_read.v1";
 pub const SEND_REQUEST: &str = "gamecult.persona.chat_send_request.v2";
 pub const SEND_RECEIPT: &str = "gamecult.persona.chat_send_receipt.v2";
+/// Her request that the mouth open a DM with a person, and its answer.
+pub const OPEN_DIRECT_REQUEST: &str = "gamecult.persona.chat_open_direct_request.v1";
+pub const OPEN_DIRECT_RECEIPT: &str = "gamecult.persona.chat_open_direct_receipt.v1";
 pub const REFUSAL: &str = "gamecult.persona.chat_refusal.v1";
 
 /// One earlier line of a room, delivered with a message for its context.
@@ -112,6 +115,8 @@ pub enum Refusal {
     UnknownPersona,
     /// A send with a basis found the room had moved past it: the receipt names what moved it.
     RoomMoved,
+    /// The mouth does not serve this document kind. Answers an open-direct request only: a send receipt never carries it.
+    UnknownKind,
 }
 
 impl Refusal {
@@ -125,6 +130,7 @@ impl Refusal {
             Self::SendFailed => "SendFailed",
             Self::UnknownPersona => "UnknownPersona",
             Self::RoomMoved => "RoomMoved",
+            Self::UnknownKind => "UnknownKind",
         }
     }
 }
@@ -138,7 +144,7 @@ impl Serialize for Refusal {
 impl<'de> Deserialize<'de> for Refusal {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let name = String::deserialize(deserializer)?;
-        [Self::Brake, Self::PersonaMismatch, Self::UnknownRoom, Self::EmptyText, Self::SendFailed, Self::UnknownPersona, Self::RoomMoved]
+        [Self::Brake, Self::PersonaMismatch, Self::UnknownRoom, Self::EmptyText, Self::SendFailed, Self::UnknownPersona, Self::RoomMoved, Self::UnknownKind]
             .into_iter()
             .find(|refusal| refusal.name() == name)
             .ok_or_else(|| serde::de::Error::custom("the mouth named a refusal this side does not know"))
@@ -183,6 +189,117 @@ pub struct ChatSendReceipt {
     pub newer: Vec<String>,
 }
 
+/// A request that the mouth open a DM with `user_id`, `text` being the invite: the ask, and the first line of the room.
+/// `request_id` is the mouth's transaction id, so a repeat of the same id is the same open. The mouth bounds `text` to
+/// 1..=4000 bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatOpenDirectRequest {
+    pub request_id: String,
+    pub persona: String,
+    pub user_id: String,
+    pub text: String,
+}
+
+/// How the mouth answered an open, as its typed names. It reads consent from Matrix room state; none is kept here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectOutcome {
+    Opened,
+    Existing,
+    Brake,
+    PersonaMismatch,
+    UnknownPersona,
+    EmptyText,
+    ForeignUser,
+    NotAPerson,
+    NoSuchUser,
+    InvitePending,
+    Declined,
+    /// One creation per person per UTC day.
+    DailyLimit,
+    SendFailed,
+}
+
+impl DirectOutcome {
+    const ALL: [Self; 13] = [
+        Self::Opened,
+        Self::Existing,
+        Self::Brake,
+        Self::PersonaMismatch,
+        Self::UnknownPersona,
+        Self::EmptyText,
+        Self::ForeignUser,
+        Self::NotAPerson,
+        Self::NoSuchUser,
+        Self::InvitePending,
+        Self::Declined,
+        Self::DailyLimit,
+        Self::SendFailed,
+    ];
+
+    /// The mouth's spelling: a MessagePack string.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Opened => "Opened",
+            Self::Existing => "Existing",
+            Self::Brake => "Brake",
+            Self::PersonaMismatch => "PersonaMismatch",
+            Self::UnknownPersona => "UnknownPersona",
+            Self::EmptyText => "EmptyText",
+            Self::ForeignUser => "ForeignUser",
+            Self::NotAPerson => "NotAPerson",
+            Self::NoSuchUser => "NoSuchUser",
+            Self::InvitePending => "InvitePending",
+            Self::Declined => "Declined",
+            Self::DailyLimit => "DailyLimit",
+            Self::SendFailed => "SendFailed",
+        }
+    }
+}
+
+impl Serialize for DirectOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for DirectOutcome {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::ALL.into_iter().find(|outcome| outcome.name() == name).ok_or_else(|| serde::de::Error::custom("the mouth named an outcome this side does not know"))
+    }
+}
+
+/// The mouth's answer to an open. `room_id` and `event_id` are present exactly for `Opened` and `Existing`; a receipt
+/// that says otherwise does not decode.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawOpenReceipt")]
+pub struct ChatOpenDirectReceipt {
+    pub request_id: String,
+    pub outcome: DirectOutcome,
+    pub room_id: Option<String>,
+    pub event_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawOpenReceipt {
+    request_id: String,
+    outcome: DirectOutcome,
+    room_id: Option<String>,
+    event_id: Option<String>,
+}
+
+impl TryFrom<RawOpenReceipt> for ChatOpenDirectReceipt {
+    type Error = &'static str;
+
+    fn try_from(raw: RawOpenReceipt) -> Result<Self, Self::Error> {
+        let landed = matches!(raw.outcome, DirectOutcome::Opened | DirectOutcome::Existing);
+        if landed != (raw.room_id.is_some() && raw.event_id.is_some()) || (!landed && (raw.room_id.is_some() || raw.event_id.is_some())) {
+            return Err("the open receipt's ids do not match its outcome");
+        }
+        Ok(Self { request_id: raw.request_id, outcome: raw.outcome, room_id: raw.room_id, event_id: raw.event_id })
+    }
+}
+
 /// A document as the mouth reads it: a positional tuple.
 pub fn encode<T: Serialize>(document: &T) -> Result<Vec<u8>> {
     rmp_serde::to_vec(document).context("the chat document does not encode")
@@ -199,6 +316,8 @@ pub trait Chat {
     /// error that names the refusal.
     fn pending(&self, after_seq: u64) -> Result<Vec<ChatDelivery>>;
     fn send(&self, request: &ChatSendRequest) -> Result<ChatSendReceipt>;
+    /// Ask the mouth to open a DM. A refusal is a receipt; only a transport fault or a mouth that does not serve the kind is an error.
+    fn open_direct(&self, request: &ChatOpenDirectRequest) -> Result<ChatOpenDirectReceipt>;
     /// Every delivery up to and including `through_seq` is answered; the mouth
     /// advances its sync position only now, so a start that dies first has its
     /// deliveries again.
