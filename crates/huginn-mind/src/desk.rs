@@ -125,7 +125,7 @@ pub fn options_hash(question: &PipelineQuestion) -> Sha256Hex {
 }
 
 /// Every desk answer of one fork, with its key.
-fn answers_of<'a>(docs: &'a Docs<'_>, fork: &'a str) -> impl Iterator<Item = (&'a str, &'a PipelineDeskAnswer)> + 'a {
+pub(crate) fn answers_of<'a>(docs: &'a Docs<'_>, fork: &'a str) -> impl Iterator<Item = (&'a str, &'a PipelineDeskAnswer)> + 'a {
     docs.of_kind(PipelineKind::DeskAnswer).filter_map(move |(key, document)| match document {
         PipelineDocument::DeskAnswer(answer) if answer.fork.0 == fork => Some((key, answer)),
         _ => None,

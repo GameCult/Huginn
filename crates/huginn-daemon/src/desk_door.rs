@@ -9,6 +9,17 @@
 //! read and write spends what is left of it, so a peer that trickles bytes is cut off at the
 //! deadline like one that is silent), a reply past `DESK_MAX_RESPONSE_BYTES` refused by name.
 //!
+//! The trust boundary of the reads (ruling `desk-read-visibility-whole-record`). The peer-uid check
+//! IS the whole authentication: Huginn must be reachable only by Bifrost's peer-checked socket, so
+//! the configured uid is Bifrost's and no other process's. `Forks` and `Fork` return the WHOLE record
+//! (cards, outcomes, every decider's note) to whoever passes that check; nothing in Huginn strips a
+//! note or gates a read on `subject` or `deciders` (`deciders` only fills the card and the
+//! showability gate). Bifrost applies visibility at its own door (a stripped read serves `note: null`,
+//! CultLib `fork-card.md`). A second reader of this socket is therefore a note leak, and a deployment
+//! that gives the socket to any uid but Bifrost's has no reader check left. The reads carry no
+//! `authority` (a payload that names one is refused whole), and the door has no other way to ask who
+//! is reading.
+//!
 //! It owns no rule. Which Mind method answers is `Daemon::handle_desk`'s; when the door is
 //! served is `serve::run`'s, once per pass in the thread that owns the Mind. A peer that is
 //! slow costs the loop at most `DESK_ACCEPTS_PER_PASS` connections of `DESK_CONNECTION_DEADLINE`

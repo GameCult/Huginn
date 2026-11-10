@@ -69,6 +69,11 @@ impl<'i> Docs<'i> {
         self.image.id_of(kind, id).filter(|row| self.visible(*row)).map(|row| &self.image.row(row).view.document)
     }
 
+    /// The ordinal of the receipt that wrote an image document: its admission order.
+    pub(crate) fn ordinal_of(&self, kind: PipelineKind, id: &str) -> Option<u64> {
+        self.image.id_of(kind, id).filter(|row| self.visible(*row)).map(|row| self.image.row(row).ordinal)
+    }
+
     pub(crate) fn find(&self, kind: PipelineKind, id: &str) -> Option<&PipelineDocument> {
         self.in_batch(kind, id).or_else(|| self.in_image(kind, id))
     }

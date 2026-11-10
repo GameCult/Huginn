@@ -12,6 +12,8 @@
 //! `desk-read-visibility-whole-record`). Nothing is stored.
 
 use super::*;
+use crate::desk::answers_of;
+use crate::desk::options_hash;
 
 /// The card document's schema id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -223,22 +225,135 @@ impl JsonSchema for ForkLimit {
     }
 }
 
+/// The card of a question held at the snapshot `docs` reads, shown to the call's `deciders`.
+fn card_of(docs: &Docs<'_>, key: &str, question: &PipelineQuestion, deciders: &[Short]) -> Result<ForkCard, MindRefusal> {
+    let open = docs.in_force(PipelineKind::Question, key);
+    // The ruling that closed the fork: the in-force one that answers it (the key order picks if a second ever does).
+    let ruling = (!open)
+        .then(|| {
+            docs.of_kind(PipelineKind::Ruling)
+                .filter(|(ruling_key, document)| {
+                    matches!(document, PipelineDocument::Ruling(ruling) if ruling.answers.as_ref().is_some_and(|answers| answers.0 == key))
+                        && docs.in_force(PipelineKind::Ruling, ruling_key)
+                })
+                .map(|(ruling_key, _)| ruling_key.to_string())
+                .min()
+        })
+        .flatten();
+    Ok(ForkCard {
+        schema_version: CardSchema::V0,
+        fork_id: key.into(),
+        title: question.title.0.clone(),
+        context: question.question.0.clone(),
+        options: question.options.iter().map(|option| ForkOption { id: option.label.0.clone(), text: option.text.0.clone() }).collect(),
+        recommendation: question.recommended.0.clone(),
+        depends: question.depends.iter().map(|line| line.0.clone()).collect(),
+        leans: None,
+        flag: None,
+        raised_in: question.raised_in.as_ref().map(|raised| ForkRef { kind: format!("{:?}", raised.kind), id: raised.id.0.clone() }),
+        deciders: deciders.iter().map(|decider| decider.0.clone()).collect(),
+        status: if open { CardStatus::Open } else { CardStatus::Closed },
+        ruling,
+        ruled_from: Vec::new(),
+        order: docs.ordinal_of(PipelineKind::Question, key).ok_or_else(unreadable_key)?,
+        options_hash: options_hash(question).0,
+    })
+}
+
+/// The record of a fork: its answers in admission order and the answer that counts at this snapshot.
+fn record_of(docs: &Docs<'_>, key: &str, options_hash: &str) -> Result<ForkRecord, MindRefusal> {
+    let mut stored: Vec<_> = answers_of(docs, key).collect();
+    stored.sort_by_key(|(_, answer)| answer.sequence);
+    let answers = stored.into_iter().map(|(answer_key, answer)| project(answer_key, answer)).collect::<Result<Vec<_>, _>>()?;
+    let counted_answer_id = counted_answer(docs, key).map(|counted| answer_seq(key, &counted).map(n_text).ok_or_else(unreadable_key)).transpose()?;
+    Ok(ForkRecord { schema_version: RecordSchema::V0, fork_id: key.into(), options_hash: options_hash.into(), counted_answer_id, answers })
+}
+
+fn entry_of(docs: &Docs<'_>, key: &str, question: &PipelineQuestion, deciders: &[Short]) -> Result<ForkEntry, MindRefusal> {
+    let card = card_of(docs, key, question, deciders)?;
+    let record = record_of(docs, key, &card.options_hash)?;
+    Ok(ForkEntry { schema_version: EntrySchema::V0, card, record })
+}
+
 impl<S: MindStore> Mind<S> {
-    /// STUB
-    pub fn desk_forks(&self, _deciders: &[Short], _status: Option<ListStatus>, _cursor: Option<ForkCursor>, _limit: ForkLimit) -> DeskResponse {
-        DeskResponse::NotStored(fork_unknown())
+    /// One page of the desk's forks, read at one snapshot (`as_of`, also the page's stamp `s<as_of>`).
+    ///
+    /// The showable forks only: a question `showable` refuses (fewer than two options, a blank option
+    /// or depends line, no decider) is in no count and no page. `open_count` and `recorded_count` cover
+    /// that whole set whatever `status`, `cursor` and `limit` ask. The page is the forks newest first by
+    /// `order` (the question's admission ordinal), those with the asked `status` (`None` is both) and
+    /// an order strictly below the cursor's; `limit` 0 returns no entries. `next_cursor` names the last
+    /// order returned and is `None` when no further fork matches. Several questions admitted in one
+    /// commit share an order, and a page that ends between them skips the rest (the contract's cursor
+    /// has no tie-break).
+    ///
+    /// The call is handed the call's `deciders` and no subject: they fill each card's `deciders` and
+    /// feed the showability gate, and gate nothing else. The record is whole, notes included
+    /// (ruling `desk-read-visibility-whole-record`: Bifrost applies visibility, Huginn strips nothing).
+    pub fn desk_forks(&self, deciders: &[Short], status: Option<ListStatus>, cursor: Option<ForkCursor>, limit: ForkLimit) -> DeskResponse {
+        self.forks_page(deciders, status, cursor, limit).unwrap_or_else(door_refusal)
     }
 
-    /// STUB
-    pub fn desk_fork(&self, _deciders: &[Short], _fork_id: &str) -> DeskResponse {
-        DeskResponse::NotStored(fork_unknown())
+    /// One fork, as the entry a page carries, read at one snapshot. A fork that is not held, is not a
+    /// question or is not showable is `fork_unknown`, the answer path's refusal. Whole record, as `desk_forks`.
+    pub fn desk_fork(&self, deciders: &[Short], fork_id: &str) -> DeskResponse {
+        self.fork_entry(deciders, fork_id).unwrap_or_else(door_refusal)
+    }
+
+    fn forks_page(&self, deciders: &[Short], status: Option<ListStatus>, cursor: Option<ForkCursor>, limit: ForkLimit) -> Result<DeskResponse, MindRefusal> {
+        let image = self.image()?;
+        let docs = Docs::at(image, image.head);
+        let mut shown = Vec::new();
+        for (key, document) in docs.of_kind(PipelineKind::Question) {
+            let PipelineDocument::Question(question) = document else { continue };
+            if showable(question, deciders) {
+                let order = docs.ordinal_of(PipelineKind::Question, key).ok_or_else(unreadable_key)?;
+                shown.push((order, key, question, docs.in_force(PipelineKind::Question, key)));
+            }
+        }
+        // Newest first; the key breaks a tie so that a page is the same page on every read.
+        shown.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(left.1)));
+        let open_count = shown.iter().filter(|fork| fork.3).count() as u64;
+        let recorded_count = shown.len() as u64 - open_count;
+        let mut matching = shown.iter().filter(|(order, _, _, open)| {
+            cursor.is_none_or(|cursor| *order < cursor.order())
+                && match status {
+                    None => true,
+                    Some(ListStatus::Open) => *open,
+                    Some(ListStatus::Recorded) => !*open,
+                }
+        });
+        let page: Vec<_> = matching.by_ref().take(limit.get() as usize).collect();
+        let next_cursor = if matching.next().is_some() { page.last().and_then(|(order, ..)| ForkCursor::new(*order)) } else { None };
+        let forks = page.into_iter().map(|(_, key, question, _)| entry_of(&docs, key, question, deciders)).collect::<Result<Vec<_>, _>>()?;
+        let list = ForkList {
+            schema_version: ListSchema::V0,
+            mind: self.instance().0.clone(),
+            stamp: format!("s{}", image.head),
+            open_count,
+            recorded_count,
+            forks,
+            next_cursor,
+        };
+        Ok(DeskResponse::Forks { list, as_of: image.head })
+    }
+
+    fn fork_entry(&self, deciders: &[Short], fork_id: &str) -> Result<DeskResponse, MindRefusal> {
+        let image = self.image()?;
+        let docs = Docs::at(image, image.head);
+        let Some(PipelineDocument::Question(question)) = docs.in_image(PipelineKind::Question, fork_id) else {
+            return Ok(DeskResponse::NotStored(fork_unknown()));
+        };
+        if !showable(question, deciders) {
+            return Ok(DeskResponse::NotStored(fork_unknown()));
+        }
+        Ok(DeskResponse::Fork { entry: entry_of(&docs, fork_id, question, deciders)?, as_of: image.head })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desk::options_hash;
     use crate::envelope::{decode_desk_request, encode_desk_request, encode_desk_response};
     use crate::fixtures::*;
     use crate::store::test_stores::MemoryStore;
