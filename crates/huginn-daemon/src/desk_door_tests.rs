@@ -299,6 +299,7 @@ mod desk_door {
         for length in [65537_u32, u32::MAX] {
             let (mut client, server, reads, writes) = pair();
             client.write_all(&length.to_be_bytes()).unwrap();
+            drop(client); // a payload read, if one were made, would end in EOF rather than wait
             let served = serve_connection(server, my_uid(), &mut daemon, &registry, now(), |_| Ok(()));
             let Served::Dropped(why) = served else { panic!("{served:?}") };
             assert!(why.contains("exceeds"), "{why}");
