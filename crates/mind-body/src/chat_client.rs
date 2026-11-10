@@ -151,6 +151,19 @@ impl<'de> Deserialize<'de> for Refusal {
     }
 }
 
+/// The mouth refused a request outright with a typed refusal frame, and nothing was done. An error of `open_direct` when the
+/// mouth does not serve the kind: told as not sent, unlike a silent mouth, whose open may have gone out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouthRefused(pub Refusal);
+
+impl std::fmt::Display for MouthRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the mouth refused the request: {}", self.0.name())
+    }
+}
+
+impl std::error::Error for MouthRefused {}
+
 /// The mouth's typed answer to a request that names a Persona it does not
 /// serve: the pending request, the ack and the send alike.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
