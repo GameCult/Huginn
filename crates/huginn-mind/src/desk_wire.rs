@@ -664,7 +664,8 @@ mod tests {
         let first = wire(FORK, &hash);
         let (answer, counted, as_of) = answered(ask(&mut mind, "x", first.clone()).0);
         assert_eq!((answer.outcome.as_str(), counted.as_deref(), as_of), ("Counted", Some("n1"), head(&mind)));
-        let (answer, counted, as_of) = answered(ask(&mut mind, "y", wire(FORK, &hash)).0);
+        let second = wire(FORK, &hash);
+        let (answer, counted, as_of) = answered(ask(&mut mind, "y", second.clone()).0);
         assert_eq!((answer.outcome.as_str(), answer.of.as_deref(), counted.as_deref(), as_of), ("Revision", Some("n1"), Some("n1"), head(&mind)));
         // Retracting the counted answer promotes the next; the response says so at the new head.
         let (answer, counted, as_of) = answered(ask(&mut mind, "y", retraction(FORK, &hash, "n1")).0);
@@ -676,6 +677,9 @@ mod tests {
         assert!(replayed);
         assert_eq!((answer.outcome.as_str(), answer.answer_id.as_str(), counted.as_deref(), as_of), ("Counted", "n1", Some("n2"), before));
         assert_eq!(head(&mind), before);
+        // The second request replayed now counts, and its stored word is still Revision.
+        let (answer, counted, _) = answered(ask(&mut mind, "y", second).0);
+        assert_eq!((answer.outcome.as_str(), answer.answer_id.as_str(), counted.as_deref()), ("Revision", "n2", Some("n2")));
         // Retracting what counted leaves nothing counted.
         let (_, counted, _) = answered(ask(&mut mind, "x", retraction(FORK, &hash, "n2")).0);
         assert_eq!(counted, None);
