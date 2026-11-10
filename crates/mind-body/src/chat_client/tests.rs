@@ -16,6 +16,11 @@ const ROOM_MOVED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-cha
 const NIL_BASIS_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.nil-basis.msgpack");
 const SEEN_AND_SINCE_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.seen-and-since.msgpack");
 const SINCE_ONLY_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.since-only.msgpack");
+const OPEN_REQUEST_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_request.v1.msgpack");
+const OPENED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_receipt.v1.opened.msgpack");
+const EXISTING_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_receipt.v1.existing.msgpack");
+const DECLINED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_receipt.v1.declined.msgpack");
+const UNKNOWN_KIND_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v4/gamecult.persona.chat_refusal.v1.unknown-kind.msgpack");
 
 fn golden<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(bytes: &[u8], expected: &T) {
     assert_eq!(&decode::<T>(bytes).unwrap(), expected);
@@ -106,4 +111,63 @@ fn write_the_v2_pending_fixtures() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/persona-chat-v3/");
     std::fs::write(format!("{dir}gamecult.persona.chat_pending.v2.no-image.msgpack"), encode(&ChatPending { persona: "eureka".into(), deliveries: vec![delivery(None)] }).unwrap()).unwrap();
     std::fs::write(format!("{dir}gamecult.persona.chat_pending.v2.image.msgpack"), encode(&ChatPending { persona: "eureka".into(), deliveries: vec![delivery(Some(image()))] }).unwrap()).unwrap();
+}
+
+#[test]
+fn open_direct_fixtures_round_trip() {
+    golden(OPEN_REQUEST_BYTES, &ChatOpenDirectRequest { request_id: "req-1".into(), persona: "eureka".into(), user_id: "@meta:gamecult.org".into(), text: "hello Meta".into() });
+    golden(OPENED_BYTES, &ChatOpenDirectReceipt { request_id: "req-1".into(), outcome: DirectOutcome::Opened, room_id: Some("!dm1:gamecult.org".into()), event_id: Some("$line1".into()) });
+    golden(EXISTING_BYTES, &ChatOpenDirectReceipt { request_id: "req-2".into(), outcome: DirectOutcome::Existing, room_id: Some("!dm1:gamecult.org".into()), event_id: Some("$line2".into()) });
+    golden(DECLINED_BYTES, &ChatOpenDirectReceipt { request_id: "req-3".into(), outcome: DirectOutcome::Declined, room_id: None, event_id: None });
+    golden(UNKNOWN_KIND_BYTES, &ChatRefusal { persona: "eureka".into(), refusal: Refusal::UnknownKind });
+}
+
+#[test]
+fn every_outcome_is_spelled_as_the_mouth_spells_it() {
+    let all = [
+        (DirectOutcome::Opened, "Opened"),
+        (DirectOutcome::Existing, "Existing"),
+        (DirectOutcome::Brake, "Brake"),
+        (DirectOutcome::PersonaMismatch, "PersonaMismatch"),
+        (DirectOutcome::UnknownPersona, "UnknownPersona"),
+        (DirectOutcome::EmptyText, "EmptyText"),
+        (DirectOutcome::ForeignUser, "ForeignUser"),
+        (DirectOutcome::NotAPerson, "NotAPerson"),
+        (DirectOutcome::NoSuchUser, "NoSuchUser"),
+        (DirectOutcome::InvitePending, "InvitePending"),
+        (DirectOutcome::Declined, "Declined"),
+        (DirectOutcome::DailyLimit, "DailyLimit"),
+        (DirectOutcome::SendFailed, "SendFailed"),
+    ];
+    for (outcome, name) in all {
+        assert_eq!(outcome.name(), name);
+        let refused = outcome != DirectOutcome::Opened && outcome != DirectOutcome::Existing;
+        let ids = if refused { (None, None) } else { (Some("!r:x".to_string()), Some("$e".to_string())) };
+        let receipt = ChatOpenDirectReceipt { request_id: "q".into(), outcome, room_id: ids.0, event_id: ids.1 };
+        assert_eq!(decode::<ChatOpenDirectReceipt>(&encode(&receipt).unwrap()).unwrap(), receipt, "{name}");
+    }
+}
+
+#[test]
+fn a_receipt_with_ids_on_a_refusal_does_not_decode() {
+    let wire = |outcome: &str, room: Option<&str>, event: Option<&str>| rmp_serde::to_vec(&("q", outcome, room, event)).unwrap();
+    assert!(decode::<ChatOpenDirectReceipt>(&wire("Declined", Some("!r:x"), Some("$e"))).is_err());
+    assert!(decode::<ChatOpenDirectReceipt>(&wire("Declined", Some("!r:x"), None)).is_err());
+    assert!(decode::<ChatOpenDirectReceipt>(&wire("Declined", None, Some("$e"))).is_err());
+    assert!(decode::<ChatOpenDirectReceipt>(&wire("Opened", None, None)).is_err());
+    assert!(decode::<ChatOpenDirectReceipt>(&wire("Opened", Some("!r:x"), None)).is_err());
+    assert!(decode::<ChatOpenDirectReceipt>(&wire("Existing", None, Some("$e"))).is_err());
+    assert!(decode::<ChatOpenDirectReceipt>(&wire("Existing", Some("!r:x"), Some("$e"))).is_ok());
+    assert!(decode::<ChatOpenDirectReceipt>(&wire("Declined", None, None)).is_ok());
+}
+
+#[test]
+fn a_receipt_error_never_echoes_what_it_read() {
+    let canary = "CANARY-9f3a";
+    let bad_outcome = rmp_serde::to_vec(&("q", canary, None::<&str>, None::<&str>)).unwrap();
+    let bad_ids = rmp_serde::to_vec(&(canary, "Declined", Some(canary), Some(canary))).unwrap();
+    for bytes in [bad_outcome, bad_ids] {
+        let error = format!("{:#}", decode::<ChatOpenDirectReceipt>(&bytes).unwrap_err());
+        assert!(!error.contains(canary), "{error}");
+    }
 }
