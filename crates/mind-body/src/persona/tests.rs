@@ -7718,6 +7718,18 @@ fn public_rig(replies: &[String]) -> Rig {
     Rig::new(vec![delivery(1, "swarm", "@ann:chat", "ask me over, Eureka")], replies)
 }
 
+/// A rig whose second message arrives while the first turn runs, so that the line after the open is the one that tells its notice.
+fn public_rig_with_a_next_line(replies: &[String]) -> Rig {
+    let rig = public_rig(replies);
+    let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        if !pushed.replace(true) {
+            deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+        }
+    }));
+    rig
+}
+
 #[test]
 fn one_open_after_the_says_with_the_batch_request_id() {
     let rig = public_rig(&[opening(&[("swarm", "yes"), ("operator", "also")], "@ann:chat", "Hello Ann, shall we talk here?")]);
@@ -7793,14 +7805,14 @@ fn a_refused_or_unanswered_open_is_told_and_the_turn_stands() {
     ];
     for (outcome, told) in cases {
         let kept = json!({ "intent": "Ask them over", "say": [{ "room": "swarm", "text": "yes" }], "open_direct": { "with": "@ann:chat", "text": "Hello Ann" }, "start_self_run": null, "remember": [keeps("Did", "asked Ann over", &["@ann:chat"])], "settle": [], "urgency_permille": null }).to_string();
-        let rig = public_rig(&[kept, says(&[])]);
+        let rig = public_rig_with_a_next_line(&[kept, says(&[])]);
         rig.chat.open_outcome.set(outcome);
         let Outcome::Served { answered, failure, .. } = rig.go() else { panic!("served") };
         assert_eq!((answered, failure), (1 + 1, None), "{outcome:?}: never a failed step");
         assert_eq!(memories(&rig).len(), 1, "{outcome:?}: the memory landed");
-        assert_eq!(rig.chat.acked.borrow().as_slice(), &[1], "{outcome:?}");
+        assert_eq!(rig.chat.acked.borrow().as_slice(), &[1, 2], "{outcome:?}");
         let line = input_of(&rig, 1);
-        assert!(line.starts_with("notice role=organ ") && line.contains(told) && line.contains("@ann:chat"), "{outcome:?}: {line}");
+        assert!(line.contains("notice role=organ ") && line.contains(told) && line.contains("@ann:chat"), "{outcome:?}: {line}");
         assert!(!line.contains("CANARY"), "{outcome:?}: a transport error's text is not told: {line}");
         let trace = rig.trace.0.borrow();
         let item = trace[0].outputs.iter().find(|item| item.text.starts_with("open_direct ")).expect("traced");
@@ -7829,11 +7841,11 @@ fn every_outcome_is_told_in_its_own_words_and_a_landed_one_says_the_reply_comes_
     ];
     let mut distinct = std::collections::BTreeSet::new();
     for (outcome, told) in expected {
-        let rig = public_rig(&[opening(&[], "@ann:chat", "Hello Ann"), says(&[])]);
+        let rig = public_rig_with_a_next_line(&[opening(&[], "@ann:chat", "Hello Ann"), says(&[])]);
         rig.chat.open_outcome.set(Some(outcome));
         assert_eq!(failure_of(rig.go()), None);
         let line = input_of(&rig, 1);
-        assert!(line.starts_with("notice role=organ ") && line.contains(told) && line.contains("@ann:chat"), "{outcome:?}: {line}");
+        assert!(line.contains("notice role=organ ") && line.contains(told) && line.contains("@ann:chat"), "{outcome:?}: {line}");
         distinct.insert(line.clone());
     }
     assert_eq!(distinct.len(), 13, "no two outcomes share a notice");
