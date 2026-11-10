@@ -187,16 +187,16 @@ fn answer_seq(fork: &str, key: &str) -> Option<u32> {
 
 // ---- request, refusals ----
 
-fn refusal(code: ForkRefusalCode, error: String) -> ForkRefusal {
+fn fork_refusal(code: ForkRefusalCode, error: String) -> ForkRefusal {
     ForkRefusal { schema_version: RefusalSchema::V0, code, error }
 }
 
 fn fork_unknown() -> ForkRefusal {
-    refusal(ForkRefusalCode::ForkUnknown, "fork_unknown: no such fork".into())
+    fork_refusal(ForkRefusalCode::ForkUnknown, "fork_unknown: no such fork".into())
 }
 
 fn body_invalid(field: &str) -> ForkRefusal {
-    refusal(ForkRefusalCode::BodyInvalid, format!("body_invalid: the body does not satisfy gamecult.fork.answer_request.v0 ({field})"))
+    fork_refusal(ForkRefusalCode::BodyInvalid, format!("body_invalid: the body does not satisfy gamecult.fork.answer_request.v0 ({field})"))
 }
 
 /// The Mind's request for a wire request, or the refusal that stores nothing. Which of the
@@ -273,7 +273,7 @@ fn door_refusal(refused: MindRefusal) -> DeskResponse {
         MindRefusal::DeskRequestInvalid { field } if field == "fork" => DeskResponse::NotStored(fork_unknown()),
         MindRefusal::DeskRequestInvalid { field } => DeskResponse::NotStored(body_invalid(&field)),
         MindRefusal::DeskRequestIdConflict { .. } => {
-            DeskResponse::NotStored(refusal(ForkRefusalCode::RequestIdConflict, "request_id_conflict: this request_id was used for a different body".into()))
+            DeskResponse::NotStored(fork_refusal(ForkRefusalCode::RequestIdConflict, "request_id_conflict: this request_id was used for a different body".into()))
         }
         other => DeskResponse::Refused(other),
     }
@@ -340,5 +340,514 @@ impl<S: MindStore> Mind<S> {
         let fork = stored.fork.0.as_str();
         let counted_answer_id = counted_answer(&docs, fork).map(|counted| answer_seq(fork, &counted).map(n_text).ok_or_else(unreadable_key)).transpose()?;
         Ok((DeskResponse::Answered { answer: project(&key, stored)?, counted_answer_id, as_of: image.head }, replayed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::desk::options_hash as shown_hash;
+    use crate::fixtures::*;
+    use crate::store::test_stores::MemoryStore;
+    use eureka_pipeline::QuestionOption;
+    use serde_json::Value;
+    use std::collections::HashMap;
+
+    use PipelineDocument as D;
+
+    const FORK: &str = "eureka-state:question:Q1";
+    const FORK2: &str = "eureka-state:question:Q2";
+    const LIST: [&str; 4] = ["x", "y", "z", "op"];
+    const AT: &str = "2026-11-10T12:00:00Z";
+
+    // ---- Libby's vectors: CultLib 8ca1d184, `contracts/cultnet/governance/fork-card-vectors.json` ----
+
+    fn vectors() -> Value {
+        serde_json::from_str(include_str!("../vectors/fork-card-vectors.json")).unwrap()
+    }
+
+    fn bytes_of(hex: &str) -> Vec<u8> {
+        (0..hex.len()).step_by(2).map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap()).collect()
+    }
+
+    fn encode<T: Serialize>(value: &T) -> Vec<u8> {
+        rmp_serde::to_vec_named(value).unwrap()
+    }
+
+    /// The `{name, message, messagePackHex}` rows of one vector array.
+    fn rows(array: &Value) -> Vec<(String, Value, Vec<u8>)> {
+        array
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| (row["name"].as_str().unwrap().to_string(), row["message"].clone(), bytes_of(row["messagePackHex"].as_str().unwrap())))
+            .collect()
+    }
+
+    // ---- a desk with two questions, and the helpers every test shares ----
+
+    fn desk() -> Mind<MemoryStore> {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question_n(1), question_n(2)]));
+        mind
+    }
+
+    fn hash_of(mind: &Mind<MemoryStore>, fork: &str) -> String {
+        let image = mind.image().unwrap();
+        let docs = Docs::at(image, image.head);
+        let Some(D::Question(question)) = docs.find(PipelineKind::Question, fork) else { panic!("no question {fork}") };
+        shown_hash(question).0
+    }
+
+    fn fresh_id() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        format!("00000000-0000-4000-8000-{:012x}", NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// A plain answer, choice `A`, under a fresh request id.
+    fn wire(fork: &str, hash: &str) -> ForkAnswerRequest {
+        ForkAnswerRequest {
+            schema_version: RequestSchema::V0,
+            fork_id: fork.into(),
+            options_hash: hash.into(),
+            answer: Some(ForkAnswer { choice: Some("A".into()), note: None }),
+            retracted: false,
+            retracts: None,
+            answered_at: AT.into(),
+            request_id: fresh_id(),
+        }
+    }
+
+    fn retraction(fork: &str, hash: &str, target: &str) -> ForkAnswerRequest {
+        ForkAnswerRequest { answer: None, retracted: true, retracts: Some(target.into()), ..wire(fork, hash) }
+    }
+
+    fn deciders(list: &[&str]) -> Vec<Short> {
+        list.iter().map(|who| s(who)).collect()
+    }
+
+    fn ask_as(mind: &mut Mind<MemoryStore>, who: &str, list: &[&str], request: ForkAnswerRequest) -> (DeskResponse, bool) {
+        mind.desk_answer(&deciders(list), s(who), DeskAuthority::Member, request, now())
+    }
+
+    fn ask(mind: &mut Mind<MemoryStore>, who: &str, request: ForkAnswerRequest) -> (DeskResponse, bool) {
+        ask_as(mind, who, &LIST, request)
+    }
+
+    /// The answer, its counted id and the head it was read at; panics on any other response.
+    fn answered(response: DeskResponse) -> (ForkDeskAnswer, Option<String>, u64) {
+        match response {
+            DeskResponse::Answered { answer, counted_answer_id, as_of } => (answer, counted_answer_id, as_of),
+            other => panic!("expected an answer, got {other:?}"),
+        }
+    }
+
+    fn not_stored(response: DeskResponse) -> ForkRefusal {
+        match response {
+            DeskResponse::NotStored(refusal) => refusal,
+            other => panic!("expected a refusal that stores nothing, got {other:?}"),
+        }
+    }
+
+    fn head(mind: &Mind<MemoryStore>) -> u64 {
+        mind.image().unwrap().head
+    }
+
+    fn stored_count(mind: &Mind<MemoryStore>, fork: &str) -> usize {
+        let image = mind.image().unwrap();
+        Docs::at(image, image.head).of_kind(PipelineKind::DeskAnswer).filter(|(_, document)| matches!(document, D::DeskAnswer(answer) if answer.fork.0 == fork)).count()
+    }
+
+    fn counted_wire(mind: &Mind<MemoryStore>, fork: &str) -> Option<String> {
+        let image = mind.image().unwrap();
+        counted_answer(&Docs::at(image, image.head), fork).map(|key| n_text(answer_seq(fork, &key).unwrap()))
+    }
+
+    /// A ruling that answers the fork closes it.
+    fn close(mind: &mut Mind<MemoryStore>, fork: &str, label: &str, choice: &str) {
+        let mut ruled = ruling(label);
+        ruled.answers = Some(s(fork));
+        ruled.choice = Some(l(choice));
+        committed(admit(mind, vec![D::Ruling(ruled)]));
+    }
+
+    // ---- the vectors, byte for byte ----
+
+    #[test]
+    fn request_vectors_round_trip() {
+        let file = vectors();
+        let valid = rows(&file["request"]["valid"]);
+        assert_eq!(valid.len(), 7);
+        for (name, message, bytes) in &valid {
+            let decoded: ForkAnswerRequest = rmp_serde::from_slice(bytes).unwrap_or_else(|_| panic!("{name} does not decode"));
+            assert_eq!(&encode(&decoded), bytes, "{name} re-encodes to other bytes");
+            assert_eq!(decoded, serde_json::from_value::<ForkAnswerRequest>(message.clone()).unwrap(), "{name}");
+        }
+        // Where serde can say it, the invalid rows do not decode; every other one decodes and the
+        // Mind's shape step refuses it (the wire types hold text).
+        let invalid = rows(&file["request"]["invalid"]);
+        assert_eq!(invalid.len(), 16);
+        let mut undecodable = 0;
+        for (name, _, bytes) in &invalid {
+            match rmp_serde::from_slice::<ForkAnswerRequest>(bytes) {
+                Err(_) => undecodable += 1,
+                Ok(request) => {
+                    let mut mind = desk();
+                    let before = head(&mind);
+                    let refusal = not_stored(ask(&mut mind, "x", request).0);
+                    let want = if name == "fork_id_empty" { ForkRefusalCode::ForkUnknown } else { ForkRefusalCode::BodyInvalid };
+                    assert_eq!(refusal.code, want, "{name}");
+                    assert_eq!(head(&mind), before, "{name}");
+                }
+            }
+        }
+        // answerer_key, authority_key, answer_object_with_a_key, request_id_missing, retracted_not_a_boolean.
+        assert_eq!(undecodable, 5);
+    }
+
+    #[test]
+    fn door_refusal_vectors_round_trip() {
+        let file = vectors();
+        let mut seen = 0;
+        for (name, message, bytes) in rows(&file["doorRefusals"]) {
+            if !["fork_unknown", "body_invalid", "request_id_conflict"].contains(&name.as_str()) {
+                continue;
+            }
+            let decoded: ForkRefusal = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(encode(&decoded), bytes, "{name}");
+            assert_eq!(decoded, serde_json::from_value::<ForkRefusal>(message).unwrap(), "{name}");
+            seen += 1;
+        }
+        assert_eq!(seen, 3);
+        // Huginn's two fixed sentences are hers, byte for byte.
+        let fixed = |name: &str| rows(&file["doorRefusals"]).into_iter().find(|row| row.0 == name).unwrap().2;
+        assert_eq!(encode(&fork_unknown()), fixed("fork_unknown"));
+        let conflict = not_stored(door_refusal(MindRefusal::DeskRequestIdConflict { request_id: "x".into() }));
+        assert_eq!(encode(&conflict), fixed("request_id_conflict"));
+    }
+
+    /// The stored record that projects to one of her answer messages.
+    fn stored_from(message: &Value) -> (String, PipelineDeskAnswer) {
+        let text = |name: &str| message[name].as_str().map(str::to_string);
+        let fork = text("fork_id").unwrap();
+        let parts: Vec<&str> = fork.split(':').collect();
+        let key = |id: &str| format!("{}:desk_answer:{}.{id}", parts[0], parts[2]);
+        let id = text("answer_id").unwrap();
+        let target = |name: &str| text(name).map(|id| Short(key(&id)));
+        let outcome = match message["outcome"].as_str().unwrap() {
+            "Counted" => DeskOutcome::Counted,
+            "Revision" => DeskOutcome::Revision { of: target("of").unwrap() },
+            "Retraction" => DeskOutcome::Retraction { retracts: target("retracts").unwrap() },
+            "Refused" => {
+                let code = match message["code"].as_str().unwrap() {
+                    "stale_fork" => DeskRefusal::StaleFork,
+                    "not_a_decider" => DeskRefusal::NotADecider,
+                    "fork_closed" => DeskRefusal::ForkClosed,
+                    "choice_invalid" => DeskRefusal::ChoiceInvalid,
+                    "bad_retraction" => DeskRefusal::BadRetraction,
+                    "already_retracted" => DeskRefusal::AlreadyRetracted,
+                    other => panic!("{other}"),
+                };
+                DeskOutcome::Refused { code, retracts: target("retracts") }
+            }
+            other => panic!("{other}"),
+        };
+        let authority = serde_json::from_value(message["authority"].clone()).unwrap();
+        let stored = PipelineDeskAnswer {
+            campaign: slug(parts[0]),
+            fork: Short(fork.clone()),
+            sequence: id[1..].parse().unwrap(),
+            options_hash: Sha256Hex(text("options_hash").unwrap()),
+            choice: text("choice").map(Short),
+            note: text("note").map(Words),
+            answered_at: Short(text("answered_at").unwrap()),
+            received_at: Short(text("received_at").unwrap()),
+            claim_in_future: message["claim_in_future"].as_bool().unwrap(),
+            request_id: RequestId(text("request_id").unwrap()),
+            body_sha256: Sha256Hex("0".repeat(64)),
+            answerer: Short(text("answerer").unwrap()),
+            authority,
+            outcome,
+        };
+        (key(&id), stored)
+    }
+
+    #[test]
+    fn stored_answers_project_to_the_desk_answer_vectors() {
+        let file = vectors();
+        let valid = rows(&file["deskAnswer"]["valid"]);
+        assert_eq!(valid.len(), 5);
+        for (name, message, bytes) in &valid {
+            let (key, stored) = stored_from(message);
+            let projected = project(&key, &stored).unwrap();
+            assert_eq!(&encode(&projected), bytes, "{name}");
+        }
+        // Each answer inside her results is the projection of an equivalent record too.
+        let results = file["results"].as_array().unwrap();
+        assert_eq!(results.len(), 6);
+        for result in results {
+            let answer = &result["message"]["answer"];
+            let (key, stored) = stored_from(answer);
+            assert_eq!(project(&key, &stored).unwrap(), serde_json::from_value::<ForkDeskAnswer>(answer.clone()).unwrap(), "{}", result["name"]);
+        }
+    }
+
+    #[test]
+    fn the_projection_reads_the_stored_times() {
+        let file = vectors();
+        let (key, mut stored) = stored_from(&file["deskAnswer"]["valid"][0]["message"]);
+        // A claim a minute after the receipt is no claim in the future; the record says it was flagged.
+        stored.answered_at = Short("2020-01-01T00:01:00Z".into());
+        stored.received_at = Short("2020-01-01T00:00:00Z".into());
+        stored.claim_in_future = true;
+        let projected = project(&key, &stored).unwrap();
+        assert!(projected.claim_in_future);
+        assert_eq!((projected.answered_at.as_str(), projected.received_at.as_str()), ("2020-01-01T00:01:00Z", "2020-01-01T00:00:00Z"));
+        // And the other way: a claim far ahead that the record never flagged stays unflagged.
+        stored.answered_at = Short("2031-01-01T00:00:00Z".into());
+        stored.claim_in_future = false;
+        assert!(!project(&key, &stored).unwrap().claim_in_future);
+    }
+
+    // ---- what the projection says of refusals, counts and the conversion ----
+
+    /// What a stored refusal projects: the code, the sent choice and note, the target as `n<seq>`.
+    fn refusal_of(mind: &mut Mind<MemoryStore>, who: &str, request: ForkAnswerRequest) -> ForkDeskAnswer {
+        let (answer, _, _) = answered(ask(mind, who, request).0);
+        assert_eq!(answer.outcome, "Refused", "{answer:?}");
+        answer
+    }
+
+    #[test]
+    fn refusals_project_what_was_sent() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let stale = "e".repeat(64);
+        // A refused plain answer keeps its choice as sent, a label or not, and names no target.
+        let spaced = ForkAnswerRequest { answer: Some(ForkAnswer { choice: Some("has space".into()), note: Some("why".into()) }), ..wire(FORK, &hash) };
+        let answer = refusal_of(&mut mind, "x", spaced);
+        assert_eq!((answer.code, answer.choice.as_deref(), answer.note.as_deref(), answer.retracts.as_deref()), (Some(ForkAnswerCode::ChoiceInvalid), Some("has space"), Some("why"), None));
+        let answer = refusal_of(&mut mind, "x", wire(FORK, &stale));
+        assert_eq!((answer.code, answer.retracts), (Some(ForkAnswerCode::StaleFork), None));
+        // An illegal form keeps its choice and note; form (ii), no target at all, projects nil.
+        let both = ForkAnswer { choice: Some("A".into()), note: Some("sent with it".into()) };
+        let form_i = ForkAnswerRequest { answer: Some(both.clone()), retracted: true, retracts: Some("n1".into()), ..wire(FORK, &hash) };
+        let answer = refusal_of(&mut mind, "x", form_i);
+        assert_eq!((answer.code, answer.choice.as_deref(), answer.note.as_deref(), answer.retracts.as_deref()), (Some(ForkAnswerCode::BadRetraction), Some("A"), Some("sent with it"), Some("n1")));
+        let form_ii = ForkAnswerRequest { answer: None, retracted: true, retracts: None, ..wire(FORK, &hash) };
+        let answer = refusal_of(&mut mind, "x", form_ii);
+        assert_eq!((answer.code, answer.choice, answer.note, answer.retracts), (Some(ForkAnswerCode::BadRetraction), None, None, None));
+        // A refused retraction projects the target it was sent, whatever it named.
+        let target = |answer: ForkDeskAnswer, code| assert_eq!((answer.code, answer.retracts.as_deref()), (Some(code), Some("n99")), "{answer:?}");
+        target(refusal_of(&mut mind, "x", retraction(FORK, &hash, "n99")), ForkAnswerCode::BadRetraction);
+        target(refusal_of(&mut mind, "nobody", retraction(FORK, &hash, "n99")), ForkAnswerCode::NotADecider);
+        target(refusal_of(&mut mind, "x", retraction(FORK, &stale, "n99")), ForkAnswerCode::StaleFork);
+        // already_retracted and fork_closed name a real answer.
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        answered(ask(&mut mind, "x", wire(FORK, &hash)).0);
+        answered(ask(&mut mind, "x", retraction(FORK, &hash, "n1")).0);
+        let again = refusal_of(&mut mind, "y", retraction(FORK, &hash, "n1"));
+        assert_eq!((again.code, again.retracts.as_deref()), (Some(ForkAnswerCode::AlreadyRetracted), Some("n1")));
+        close(&mut mind, FORK, "RQ1", "A");
+        let closed = refusal_of(&mut mind, "y", retraction(FORK, &hash, "n1"));
+        assert_eq!((closed.code, closed.retracts.as_deref()), (Some(ForkAnswerCode::ForkClosed), Some("n1")));
+    }
+
+    #[test]
+    fn counts_are_derived_at_the_response_snapshot() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let first = wire(FORK, &hash);
+        let (answer, counted, as_of) = answered(ask(&mut mind, "x", first.clone()).0);
+        assert_eq!((answer.outcome.as_str(), counted.as_deref(), as_of), ("Counted", Some("n1"), head(&mind)));
+        let (answer, counted, as_of) = answered(ask(&mut mind, "y", wire(FORK, &hash)).0);
+        assert_eq!((answer.outcome.as_str(), answer.of.as_deref(), counted.as_deref(), as_of), ("Revision", Some("n1"), Some("n1"), head(&mind)));
+        // Retracting the counted answer promotes the next; the response says so at the new head.
+        let (answer, counted, as_of) = answered(ask(&mut mind, "y", retraction(FORK, &hash, "n1")).0);
+        assert_eq!((answer.outcome.as_str(), answer.retracts.as_deref(), counted.as_deref(), as_of), ("Retraction", Some("n1"), Some("n2"), head(&mind)));
+        // The first request replayed: its stored word is still Counted, the count is read now.
+        let before = head(&mind);
+        let (response, replayed) = ask(&mut mind, "x", first);
+        let (answer, counted, as_of) = answered(response);
+        assert!(replayed);
+        assert_eq!((answer.outcome.as_str(), answer.answer_id.as_str(), counted.as_deref(), as_of), ("Counted", "n1", Some("n2"), before));
+        assert_eq!(head(&mind), before);
+        // Retracting what counted leaves nothing counted.
+        let (_, counted, _) = answered(ask(&mut mind, "x", retraction(FORK, &hash, "n2")).0);
+        assert_eq!(counted, None);
+    }
+
+    #[test]
+    fn one_conversion_names_only_this_forks_answers() {
+        assert_eq!(answer_key(FORK, 1), "eureka-state:desk_answer:Q1.n1");
+        let mut mind = desk();
+        let (hash1, hash2) = (hash_of(&mind, FORK), hash_of(&mind, FORK2));
+        answered(ask(&mut mind, "x", wire(FORK, &hash1)).0);
+        answered(ask(&mut mind, "x", wire(FORK2, &hash2)).0);
+        // n1 retracted on Q2 is Q2's n1; Q1's n1 still counts.
+        let (answer, counted, _) = answered(ask(&mut mind, "y", retraction(FORK2, &hash2, "n1")).0);
+        assert_eq!((answer.outcome.as_str(), answer.retracts.as_deref(), counted), ("Retraction", Some("n1"), None));
+        assert_eq!(counted_wire(&mind, FORK), Some("n1".into()));
+        assert_eq!(counted_wire(&mind, FORK2), None);
+        // A key of another fork, a longer label, a leading zero or no n at all name no sequence here.
+        assert_eq!(answer_seq(FORK, &answer_key(FORK2, 1)), None);
+        assert_eq!(answer_seq(FORK, "eureka-state:desk_answer:Q10.n1"), None);
+        assert_eq!(answer_seq(FORK, "eureka-state:desk_answer:Q1.n01"), None);
+        assert_eq!(answer_seq(FORK, "eureka-state:desk_answer:Q1.1"), None);
+        assert_eq!(answer_seq(FORK, "eureka-state:question:Q1.n1"), None);
+        // The ends of the range round-trip.
+        for n in [1, 7, u32::MAX] {
+            assert_eq!(answer_seq(FORK, &answer_key(FORK, n)), Some(n));
+        }
+        assert_eq!(n_text(u32::MAX), "n4294967295");
+        assert_eq!(parse_n("n4294967296"), None);
+    }
+
+    #[test]
+    fn a_malformed_retracts_is_body_invalid() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        for bad in ["3", "n0", "n01", "n4294967296", " n1", "N1", "n", "n-1", "n+1", ""] {
+            let on_a_retraction = retraction(FORK, &hash, bad);
+            let on_an_answer = ForkAnswerRequest { retracts: Some(bad.into()), ..wire(FORK, &hash) };
+            for request in [on_a_retraction, on_an_answer] {
+                let refusal = request_of(&request).unwrap_err();
+                assert_eq!(refusal.code, ForkRefusalCode::BodyInvalid, "{bad:?}");
+                assert!(refusal.error.contains("retracts"), "{refusal:?}");
+                assert!(!refusal.error.contains(bad) || bad.is_empty() || bad == "n", "the error echoes the input: {refusal:?}");
+            }
+        }
+        for good in ["n1", "n9", "n4294967295"] {
+            assert!(request_of(&retraction(FORK, &hash, good)).is_ok(), "{good}");
+        }
+        // Through the Mind: nothing stored, and the request id is still free.
+        let before = head(&mind);
+        let mut bad = retraction(FORK, &hash, "n01");
+        let refusal = not_stored(ask(&mut mind, "x", bad.clone()).0);
+        assert_eq!(refusal.code, ForkRefusalCode::BodyInvalid);
+        assert_eq!(head(&mind), before);
+        bad = ForkAnswerRequest { retracts: None, retracted: false, answer: Some(ForkAnswer { choice: Some("A".into()), note: None }), ..bad };
+        assert_eq!(answered(ask(&mut mind, "x", bad).0).0.outcome, "Counted");
+    }
+
+    #[test]
+    fn illegal_retraction_forms_are_stored_bad_retraction() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        answered(ask(&mut mind, "x", wire(FORK, &hash)).0);
+        let said = ForkAnswer { choice: Some("A".into()), note: None };
+        let forms = [
+            ForkAnswerRequest { answer: Some(said.clone()), retracted: true, retracts: Some("n1".into()), ..wire(FORK, &hash) },
+            ForkAnswerRequest { answer: None, retracted: true, retracts: None, ..wire(FORK, &hash) },
+            ForkAnswerRequest { answer: Some(said.clone()), retracted: false, retracts: Some("n1".into()), ..wire(FORK, &hash) },
+        ];
+        for (form, request) in forms.into_iter().enumerate() {
+            let stored = stored_count(&mind, FORK);
+            let (response, replayed) = ask(&mut mind, "x", request.clone());
+            assert!(!replayed);
+            let (answer, _, _) = answered(response.clone());
+            assert_eq!((answer.outcome.as_str(), answer.code), ("Refused", Some(ForkAnswerCode::BadRetraction)), "form {form}");
+            assert_eq!(stored_count(&mind, FORK), stored + 1, "form {form}");
+            // The refusal is stored and bound: the same bytes replay, with no write.
+            let before = head(&mind);
+            assert_eq!(ask(&mut mind, "x", request), (response, true), "form {form}");
+            assert_eq!(head(&mind), before);
+        }
+        // (i) and (iii) with equal answer and target differ only in `retracted`: one id, two bodies.
+        let id = fresh_id();
+        let form_i = ForkAnswerRequest { answer: Some(said.clone()), retracted: true, retracts: Some("n1".into()), request_id: id.clone(), ..wire(FORK, &hash) };
+        let form_iii = ForkAnswerRequest { retracted: false, ..form_i.clone() };
+        answered(ask(&mut mind, "y", form_i).0);
+        let before = head(&mind);
+        assert_eq!(not_stored(ask(&mut mind, "y", form_iii).0).code, ForkRefusalCode::RequestIdConflict);
+        assert_eq!(head(&mind), before);
+        // No answer and no retraction, or an answer object with neither choice nor note, is no form.
+        let neither = ForkAnswerRequest { answer: None, retracted: false, ..wire(FORK, &hash) };
+        let empty = ForkAnswerRequest { answer: Some(ForkAnswer { choice: None, note: None }), ..wire(FORK, &hash) };
+        for request in [neither, empty] {
+            assert_eq!(not_stored(ask(&mut mind, "x", request).0).code, ForkRefusalCode::BodyInvalid);
+        }
+        assert_eq!(head(&mind), before);
+    }
+
+    #[test]
+    fn the_refusal_mapping_is_heimdalls() {
+        let code = |refused: MindRefusal| not_stored(door_refusal(refused)).code;
+        let missing = MindRefusal::MissingReference { kind: PipelineKind::Question, id: "eureka-state:question:nope".into() };
+        assert_eq!(code(missing), ForkRefusalCode::ForkUnknown);
+        assert_eq!(code(MindRefusal::DeskRequestInvalid { field: "fork".into() }), ForkRefusalCode::ForkUnknown);
+        assert_eq!(code(MindRefusal::CampaignMoved { campaign: "eureka-state".into(), to: "elsewhere".into() }), ForkRefusalCode::ForkUnknown);
+        assert_eq!(code(MindRefusal::DeskRequestIdConflict { request_id: "secret".into() }), ForkRefusalCode::RequestIdConflict);
+        let refusal = not_stored(door_refusal(MindRefusal::DeskRequestInvalid { field: "desk_answer.note".into() }));
+        assert_eq!(refusal.code, ForkRefusalCode::BodyInvalid);
+        assert!(refusal.error.contains("desk_answer.note"), "{refusal:?}");
+        // Nothing else is the door's to rename: it passes through unchanged, Unavailable included.
+        for other in [
+            MindRefusal::Unavailable { detail: "the store is down".into() },
+            MindRefusal::ForeignInstance { declared: "a".into(), mind: "b".into() },
+            MindRefusal::MissingIdentity,
+        ] {
+            assert_eq!(door_refusal(other.clone()), DeskResponse::Refused(other));
+        }
+        // The refusal never echoes the id it refuses.
+        let conflict = not_stored(door_refusal(MindRefusal::DeskRequestIdConflict { request_id: "secret".into() }));
+        assert!(!conflict.error.contains("secret"));
+    }
+
+    #[test]
+    fn wire_codes_are_snake_case() {
+        let table = [
+            (DeskRefusal::StaleFork, "stale_fork"),
+            (DeskRefusal::NotADecider, "not_a_decider"),
+            (DeskRefusal::ForkClosed, "fork_closed"),
+            (DeskRefusal::ChoiceInvalid, "choice_invalid"),
+            (DeskRefusal::BadRetraction, "bad_retraction"),
+            (DeskRefusal::AlreadyRetracted, "already_retracted"),
+        ];
+        for (refusal, spelled) in table {
+            assert_eq!(serde_json::to_value(ForkAnswerCode::from(refusal)).unwrap(), spelled);
+        }
+        for (code, spelled) in [(ForkRefusalCode::ForkUnknown, "fork_unknown"), (ForkRefusalCode::BodyInvalid, "body_invalid"), (ForkRefusalCode::RequestIdConflict, "request_id_conflict")] {
+            assert_eq!(serde_json::to_value(code).unwrap(), spelled);
+        }
+        // Outcome and authority are spelled as her schema spells them.
+        for (authority, spelled) in [(DeskAuthority::Operator, "Operator"), (DeskAuthority::Steward, "Steward"), (DeskAuthority::Member, "Member")] {
+            assert_eq!(serde_json::to_value(authority).unwrap(), spelled);
+        }
+        let outcomes = [DeskOutcome::Counted, DeskOutcome::Revision { of: s("k") }, DeskOutcome::Retraction { retracts: s("k") }, DeskOutcome::Refused { code: DeskRefusal::StaleFork, retracts: None }];
+        assert_eq!(outcomes.iter().map(DeskOutcome::name).collect::<Vec<_>>(), ["Counted", "Revision", "Retraction", "Refused"]);
+    }
+
+    #[test]
+    fn a_stale_answer_carries_no_card() {
+        let mut mind = desk();
+        let stale = wire(FORK, &"e".repeat(64));
+        let (fresh, replayed) = ask(&mut mind, "x", stale.clone());
+        assert!(!replayed);
+        let (answer, _, _) = answered(fresh.clone());
+        assert_eq!((answer.outcome.as_str(), answer.code), ("Refused", Some(ForkAnswerCode::StaleFork)));
+        // After the fork closed, the retry still answers the stored refusal, with nothing added.
+        close(&mut mind, FORK, "RQ1", "A");
+        let (again, replayed) = ask(&mut mind, "x", stale);
+        assert!(replayed);
+        let (again_answer, _, _) = answered(again.clone());
+        assert_eq!(again_answer, answer);
+        for response in [&fresh, &again] {
+            assert!(!serde_json::to_string(response).unwrap().to_lowercase().contains("card"), "{response:?}");
+        }
+    }
+
+    #[test]
+    fn a_replay_encodes_as_the_fresh_store() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let request = wire(FORK, &hash);
+        let (fresh, first) = ask(&mut mind, "x", request.clone());
+        let (replay, second) = ask(&mut mind, "x", request);
+        assert_eq!((first, second), (false, true));
+        assert_eq!(encode(&fresh), encode(&replay));
+        assert_eq!(stored_count(&mind, FORK), 1);
     }
 }
