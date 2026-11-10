@@ -33,6 +33,13 @@ const FORK: &str = "eureka-state:question:Q1";
 const R1: &str = "00000000-0000-4000-8000-000000000001";
 const R2: &str = "00000000-0000-4000-8000-000000000002";
 
+/// These tests run one at a time: each forks daemons and times them, and a fork made while another
+/// test holds a mind open lends that child the mind's lock until it execs.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn my_uid() -> u32 {
     let dir = tempfile::tempdir().unwrap();
     std::fs::metadata(dir.path()).unwrap().uid()
@@ -247,6 +254,7 @@ fn catalog_request() -> CultNetMessage {
 
 #[test]
 fn the_binary_serves_both_doors_and_survives_restart() {
+    let _serial = serial();
     assert_ne!(my_uid(), 0, "the door refuses uid 0, so this test cannot run as root");
     let (root, run) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let hash = seed(root.path());
@@ -296,6 +304,7 @@ fn the_binary_serves_both_doors_and_survives_restart() {
 
 #[test]
 fn the_binary_refuses_another_uid() {
+    let _serial = serial();
     let mine = my_uid();
     assert_ne!(mine, 0);
     let (root, run) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -318,6 +327,7 @@ fn the_binary_refuses_another_uid() {
 /// the real uid to the kernel, so the door sees the real uid and namespace root cannot pass as root.
 #[test]
 fn namespace_root_is_seen_as_the_real_uid() {
+    let _serial = serial();
     let probe = Command::new("unshare").args(["-r", "true"]).status();
     if !probe.is_ok_and(|status| status.success()) || Command::new("socat").arg("-V").stdout(Stdio::null()).status().is_err() {
         eprintln!("skipped: needs `unshare -r` (user namespaces) and socat");
@@ -384,6 +394,7 @@ fn drip(desk: &Path, hash: &str) -> std::thread::JoinHandle<(usize, Duration)> {
 /// another door's answer nor a stop beyond it (the sum is checked with the margin a loaded host needs).
 #[test]
 fn a_dripping_peer_does_not_delay_the_rudp_door() {
+    let _serial = serial();
     let (root, _run, hash, desk, log) = setup();
     let daemon = spawn(root.path(), &desk, my_uid(), &log);
     let dripper = drip(&desk, &hash);
@@ -397,6 +408,7 @@ fn a_dripping_peer_does_not_delay_the_rudp_door() {
 
 #[test]
 fn a_dripping_peer_does_not_delay_a_stop() {
+    let _serial = serial();
     let (root, _run, hash, desk, log) = setup();
     let mut daemon = spawn(root.path(), &desk, my_uid(), &log);
     let dripper = drip(&desk, &hash);
@@ -421,6 +433,7 @@ fn ticks(pid: u32) -> u64 {
 /// An idle daemon sleeps between passes: a loop that spins when nothing waits burns the core.
 #[test]
 fn an_idle_daemon_does_not_spin() {
+    let _serial = serial();
     let (root, _run, _hash, desk, log) = setup();
     let mut daemon = spawn(root.path(), &desk, my_uid(), &log);
     std::thread::sleep(Duration::from_millis(1500));
@@ -435,18 +448,19 @@ fn an_idle_daemon_does_not_spin() {
 /// WouldBlock on an idle listener is not an error and is not logged; a real accept error is.
 #[test]
 fn an_idle_door_logs_no_accept_error_and_a_real_one_is_logged() {
+    let _serial = serial();
     let (root, _run, _hash, desk, log) = setup();
     let mut daemon = spawn(root.path(), &desk, my_uid(), &log);
     std::thread::sleep(Duration::from_millis(500));
     assert!(!daemon.log_text().contains("could not accept"), "an idle door logged:\n{}", daemon.log_text());
-    // An accept error: the daemon's soft fd limit is what it holds open, then a peer connects.
+    // An accept error: the daemon's soft fd limit is 3, stdin, stdout and stderr, so no
+    // descriptor number is free whatever else it holds open; then a peer connects.
     let pid = daemon.child.id();
-    let open = std::fs::read_dir(format!("/proc/{pid}/fd")).unwrap().count();
     let limit = |soft: usize| {
         let status = Command::new("prlimit").args([&format!("--pid={pid}"), &format!("--nofile={soft}:4096")]).status();
         status.is_ok_and(|status| status.success())
     };
-    if !limit(open) {
+    if !limit(3) {
         eprintln!("skipped: needs prlimit");
         return;
     }
@@ -464,6 +478,7 @@ fn an_idle_door_logs_no_accept_error_and_a_real_one_is_logged() {
 /// sleep: eight queued connections are answered in two passes of four, with no sleep between.
 #[test]
 fn a_busy_pass_is_not_followed_by_the_idle_sleep() {
+    let _serial = serial();
     use huginn_daemon::index::Backoff;
     use huginn_daemon::index::ollama::pool;
     use huginn_daemon::index::qdrant::QdrantIndex;
