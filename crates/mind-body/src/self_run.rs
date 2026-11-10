@@ -795,17 +795,19 @@ impl<'a> SelfInbox<'a> {
         Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), serving, last_answers, flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
     }
 
-    /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps the reply and never ends the session.
+    /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps that reply and every one behind it
+    /// (the admission ordinal is the order the Persona hears them in, so none may overtake a refused one) and never ends the session.
     fn admit_unadmitted(&mut self) {
         let label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0).to_string();
-        let mut kept = Vec::new();
-        for reply in std::mem::take(&mut self.unadmitted) {
+        let mut queue = std::mem::take(&mut self.unadmitted).into_iter();
+        for reply in queue.by_ref() {
             let taken = matches!(self.mind.admit(AGENT, &label, vec![PipelineDocument::Reply(reply.clone())]), Ok(PipelineAdmissionOutcome::Committed { .. } | PipelineAdmissionOutcome::AlreadyAdmitted { .. }));
             if !taken {
-                kept.push(reply);
+                self.unadmitted.push(reply);
+                break;
             }
         }
-        self.unadmitted = kept;
+        self.unadmitted.extend(queue);
     }
 
     /// One result of the main thread: with words, one reply answering the briefs the CLI has taken since the last reply (the first 64, in tell

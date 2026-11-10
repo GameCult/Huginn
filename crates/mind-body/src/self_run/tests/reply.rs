@@ -106,3 +106,15 @@ fn a_reply_the_mind_did_not_take_is_tried_once_more_when_the_run_ends() {
     assert!(ran.outcome.is_ok());
     assert_eq!(text_of(&mind, 1), "last words");
 }
+
+#[test]
+fn a_refused_piece_of_a_long_result_holds_back_the_pieces_behind_it() {
+    let mind = live_mind();
+    let seen = Seen::of(&mind);
+    seen.fail_admits.set(1);                                   // the first piece is refused
+    let long = "w".repeat(REPLY_TEXT_LIMIT * 2 + 1);
+    let ran = carry_with(&seen, vec![Out(echo()), Out(at("m1", 10)), Out(saying(&long))], Some(0), false);
+    assert!(ran.outcome.is_ok());
+    let ordinals: Vec<u64> = (1..=3).map(|n| mind.view(K::Reply, &format!("{INSTANCE}:reply:selfrun-a-r{n}")).unwrap_or_else(|| panic!("piece {n} lost")).admission.ordinal).collect();
+    assert!(ordinals.windows(2).all(|w| w[0] < w[1]), "the pieces reached the mind out of order: {ordinals:?}");
+}
