@@ -795,17 +795,19 @@ impl<'a> SelfInbox<'a> {
         Self { mind, start, plan: render_plan(plan_quota, now_ms), told, waiting: Vec::new(), heard, run: run.clone(), carried, echoed: Vec::new(), serving, last_answers, flush_written: false, flushing: false, replies: 0, unadmitted: Vec::new() }
     }
 
-    /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps the reply and never ends the session.
+    /// Admits each reply the mind has not taken, in order; one try each. A refusal or an unreachable mind keeps that reply and every one behind it
+    /// (the admission ordinal is the order the Persona hears them in, so none may overtake a refused one) and never ends the session.
     fn admit_unadmitted(&mut self) {
         let label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0).to_string();
-        let mut kept = Vec::new();
-        for reply in std::mem::take(&mut self.unadmitted) {
+        let mut queue = std::mem::take(&mut self.unadmitted).into_iter();
+        for reply in queue.by_ref() {
             let taken = matches!(self.mind.admit(AGENT, &label, vec![PipelineDocument::Reply(reply.clone())]), Ok(PipelineAdmissionOutcome::Committed { .. } | PipelineAdmissionOutcome::AlreadyAdmitted { .. }));
             if !taken {
-                kept.push(reply);
+                self.unadmitted.push(reply);
+                break;
             }
         }
-        self.unadmitted = kept;
+        self.unadmitted.extend(queue);
     }
 
     /// One result of the main thread: with words, one reply answering the briefs the CLI has taken since the last reply (the first 64, in tell
@@ -816,21 +818,25 @@ impl<'a> SelfInbox<'a> {
         let flush = std::mem::take(&mut self.flushing);
         // The flush result is the session's note to its successor, in the journal: it is no reply.
         if ok && !flush && !text.trim().is_empty() {
-            self.replies += 1;
-            let run_label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0);
+            let run_label = self.run.id.0.rsplit(':').next().unwrap_or(&self.run.id.0).to_string();
             let taken = std::mem::take(&mut self.echoed);
             let answered: Vec<String> = if taken.is_empty() { self.last_answers.clone() } else { taken.into_iter().take(64).collect() };
-            let answers = answered.iter().map(|id| PipelineRef { kind: PipelineKind::FollowUp, id: id.as_str().into() }).collect();
+            let answers: Vec<PipelineRef> = answered.iter().map(|id| PipelineRef { kind: PipelineKind::FollowUp, id: id.as_str().into() }).collect();
             if !answered.is_empty() {
                 self.last_answers = answered;
             }
-            self.unadmitted.push(PipelineReply {
-                instance: self.mind.instance().clone(),
-                label: format!("{run_label}-r{}", self.replies).as_str().into(),
-                run: self.run.clone(),
-                answers,
-                text: cut_text(text, REPLY_TEXT_LIMIT).as_str().into(),
-            });
+            // A reply holds a bounded text, so a long result is delivered whole as consecutive replies, in order,
+            // each carrying the answers. A piece of only whitespace (the tail after a cut) is no reply.
+            for chunk in chunks(text, REPLY_TEXT_LIMIT).filter(|chunk| !chunk.trim().is_empty()) {
+                self.replies += 1;
+                self.unadmitted.push(PipelineReply {
+                    instance: self.mind.instance().clone(),
+                    label: format!("{run_label}-r{}", self.replies).as_str().into(),
+                    run: self.run.clone(),
+                    answers: answers.clone(),
+                    text: chunk.into(),
+                });
+            }
         }
         self.admit_unadmitted();
     }
@@ -892,10 +898,7 @@ impl SessionInbox for SelfInbox<'_> {
     }
 }
 
-/// The most of a result's text that reaches the journal.
-const RESULT_TEXT_LIMIT: usize = 4096;
-/// The most of a result's text that a reply holds
-/// (a `Para` holds 4000 bytes; the cut marker rides inside the rest).
+/// The most of a result's text that one reply holds (a `Para` holds 4000 bytes).
 const REPLY_TEXT_LIMIT: usize = 3800;
 
 /// A result event's subtype and error flag when it has them, as one line.
@@ -914,19 +917,26 @@ fn result_text(event: &serde_json::Map<String, Value>) -> &str {
     event.get("result").and_then(Value::as_str).unwrap_or("")
 }
 
-/// `text` cut at a character boundary to `limit` bytes, marked when cut.
-fn cut_text(text: &str, limit: usize) -> String {
-    let mut end = text.len().min(limit);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let marker = if end < text.len() { "\n[truncated]" } else { "" };
-    format!("{}{marker}", &text[..end])
+/// `text` in consecutive pieces of at most `limit` bytes, each cut at a character boundary; their concatenation is `text`.
+fn chunks(text: &str, limit: usize) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let mut end = rest.len().min(limit);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (piece, tail) = rest.split_at(end);
+        rest = tail;
+        Some(piece)
+    })
 }
 
-/// A result event as one line: its head, then its text cut to `limit` bytes.
-fn describe_result(event: &serde_json::Map<String, Value>, limit: usize) -> String {
-    format!("{}: {}", result_head(event), cut_text(result_text(event), limit))
+/// A result event as one line: its head, then its whole text.
+fn describe_result(event: &serde_json::Map<String, Value>) -> String {
+    format!("{}: {}", result_head(event), result_text(event))
 }
 
 /// What `claude` concluded, written to the unit's stdout so it reaches the
@@ -936,7 +946,7 @@ fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
     if event.get("type").and_then(Value::as_str) != Some("result") {
         return Ok(());
     }
-    writeln!(out, "{}", describe_result(&event, RESULT_TEXT_LIMIT))
+    writeln!(out, "{}", describe_result(&event))
 }
 
 /// The real spawner: the `claude` on the unit's `PATH`, its stderr in the
