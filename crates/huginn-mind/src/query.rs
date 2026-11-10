@@ -1826,7 +1826,7 @@ mod tests {
         let pick = |n: u32| crate::desk::DeskAnswerRequest {
             fork: s(&q2),
             options_hash: crate::desk::options_hash(&shown),
-            body: crate::desk::DeskBody::Answer { choice: Some(l("A")), note: None },
+            body: crate::desk::DeskBody::Answer { choice: Some(s("A")), note: None },
             answered_at: s("2026-11-10T12:00:00Z"),
             request_id: eureka_pipeline::RequestId(format!("00000000-0000-4000-8000-{n:012x}")),
         };

@@ -18,7 +18,7 @@
 //! displayed and flagged (`claim_in_future`), never compared for order, which is
 //! the per-question sequence, the receiver's order. `received_at` is the Mind's.
 
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, SubsecRound, Utc};
 use eureka_pipeline::{
     DeskAuthority, DeskOutcome, DeskRefusal, Label, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, PipelineRefusal,
     PipelineResolution, RequestId, ResolutionOutcome, Sha256Hex, Short, Slug, Words,
@@ -44,12 +44,17 @@ pub struct DeskAnswerRequest {
     pub request_id: RequestId,
 }
 
-/// An answer, or the retraction of one: a sum, so a retraction carrying an
-/// answer, or naming no target, cannot be written down (R1 by construction).
+/// An answer, a retraction of one, or one of the wire's illegal retraction forms. `choice` is
+/// the person's text, any non-empty string: one that is no option label is a stored
+/// `choice_invalid`, grammar or not (binding spec step 7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeskBody {
-    Answer { choice: Option<Label>, note: Option<Words> },
+    Answer { choice: Option<Short>, note: Option<Words> },
     Retraction { retracts: Short },
+    /// A retraction carrying an answer, naming no target, or a plain answer carrying
+    /// `retracts` (R1): what the door decodes those three forms to. Always stored as a
+    /// refused `bad_retraction` after steps 4 to 6; the fields are kept only in the body digest.
+    IllegalRetraction { choice: Option<Short>, note: Option<Words>, retracts: Option<Short> },
 }
 
 /// The door's verified context for one call: who answered, the role the account
@@ -162,10 +167,11 @@ fn refusal_of(docs: &Docs<'_>, question: &PipelineQuestion, stamp: &DeskStamp, r
         return Some(DeskRefusal::ForkClosed);
     }
     match &request.body {
-        DeskBody::Answer { choice: Some(choice), .. } if !question.options.iter().any(|option| option.label == *choice) => {
+        DeskBody::Answer { choice: Some(choice), .. } if !question.options.iter().any(|option| option.label.0 == choice.0) => {
             Some(DeskRefusal::ChoiceInvalid)
         }
         DeskBody::Answer { .. } => None,
+        DeskBody::IllegalRetraction { .. } => Some(DeskRefusal::BadRetraction),
         DeskBody::Retraction { retracts } => {
             let target = answers_of(docs, fork).find(|(key, _)| *key == retracts.0);
             if !target.is_some_and(|(_, answer)| counts_under(answer, &current)) {
@@ -195,12 +201,21 @@ fn body_digest(request: &DeskAnswerRequest) -> Sha256Hex {
         choice: Option<&'a str>,
         note: Option<&'a str>,
         retracts: Option<&'a str>,
+        // Written only for the illegal form, so every other body keeps its stored digest.
+        #[serde(skip_serializing_if = "is_false")]
+        illegal_retraction: bool,
     }
-    let (choice, note, retracts) = match &request.body {
-        DeskBody::Answer { choice, note } => (choice.as_ref().map(|c| c.0.as_str()), note.as_ref().map(|n| n.0.as_str()), None),
-        DeskBody::Retraction { retracts } => (None, None, Some(retracts.0.as_str())),
+    fn is_false(flag: &bool) -> bool {
+        !*flag
+    }
+    let (choice, note, retracts, illegal_retraction) = match &request.body {
+        DeskBody::Answer { choice, note } => (choice.as_ref().map(|c| c.0.as_str()), note.as_ref().map(|n| n.0.as_str()), None, false),
+        DeskBody::Retraction { retracts } => (None, None, Some(retracts.0.as_str()), false),
+        DeskBody::IllegalRetraction { choice, note, retracts } => {
+            (choice.as_ref().map(|c| c.0.as_str()), note.as_ref().map(|n| n.0.as_str()), retracts.as_ref().map(|r| r.0.as_str()), true)
+        }
     };
-    let sent = Sent { fork: &request.fork.0, options_hash: &request.options_hash.0, answered_at: &request.answered_at.0, choice, note, retracts };
+    let sent = Sent { fork: &request.fork.0, options_hash: &request.options_hash.0, answered_at: &request.answered_at.0, choice, note, retracts, illegal_retraction };
     let bytes = serde_json::to_string(&sent).expect("strings serialise");
     Sha256Hex(Sha256::digest(bytes.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect())
 }
@@ -238,25 +253,41 @@ impl<S: MindStore> Mind<S> {
             Ok(at) if at.offset().local_minus_utc() == 0 => at.with_timezone(&Utc),
             _ => return Err(invalid("answered_at")),
         };
+        // A choice is any non-empty text of at most 200 bytes. It is stored only when it reads as
+        // a label (the record's field is a Label); a refused one that does not keeps no choice.
+        let choice_shape = |choice: &Short| if choice.0.is_empty() || choice.0.len() > 200 { Err(invalid("desk_answer.choice")) } else { Ok(()) };
+        let label_of = |choice: &Short| Some(Label(choice.0.clone())).filter(|label| label.validate_label().is_ok());
         let (choice, note, shape_outcome) = match &request.body {
             DeskBody::Answer { choice, note } => {
                 if choice.is_none() && note.is_none() {
                     return Err(invalid("body"));
                 }
-                (choice.clone(), note.clone(), DeskOutcome::Counted)
+                choice.as_ref().map(choice_shape).transpose()?;
+                (choice.as_ref().and_then(label_of), note.clone(), DeskOutcome::Counted)
             }
             DeskBody::Retraction { retracts } => (None, None, DeskOutcome::Retraction { retracts: retracts.clone() }),
+            DeskBody::IllegalRetraction { choice, note, retracts } => {
+                choice.as_ref().map(choice_shape).transpose()?;
+                if retracts.as_ref().is_some_and(|target| target.0.len() > 200) {
+                    return Err(invalid("desk_answer.outcome.retracts"));
+                }
+                // The note is shape-checked through the probe, then dropped from the record.
+                (choice.as_ref().and_then(label_of), note.clone(), DeskOutcome::Counted)
+            }
         };
         let body_sha256 = body_digest(&request);
-        let received_at = Short(now.to_rfc3339_opts(SecondsFormat::Secs, true));
-        let claim_in_future = claimed > now + Duration::minutes(5);
-        let answer = |sequence: u32, outcome: DeskOutcome| PipelineDeskAnswer {
+        // received_at is the instant as stored, whole seconds, and claim_in_future is decided
+        // against that stored value, never the finer clock reading.
+        let received = now.trunc_subsecs(0);
+        let received_at = Short(received.to_rfc3339_opts(SecondsFormat::Secs, true));
+        let claim_in_future = claimed > received + Duration::minutes(5);
+        let answer = |sequence: u32, outcome: DeskOutcome, keep_body: bool| PipelineDeskAnswer {
             campaign: Slug(root.clone()),
             fork: request.fork.clone(),
             sequence,
             options_hash: request.options_hash.clone(),
-            choice: choice.clone(),
-            note: note.clone(),
+            choice: choice.clone().filter(|_| keep_body),
+            note: note.clone().filter(|_| keep_body),
             answered_at: request.answered_at.clone(),
             received_at: received_at.clone(),
             claim_in_future,
@@ -266,7 +297,7 @@ impl<S: MindStore> Mind<S> {
             authority: stamp.authority,
             outcome,
         };
-        let probe = PipelineDocument::DeskAnswer(answer(1, shape_outcome));
+        let probe = PipelineDocument::DeskAnswer(answer(1, shape_outcome, true));
         probe.validate().map_err(shape_fault)?;
         eureka_pipeline::pipeline_key(&probe).map_err(shape_fault)?;
 
@@ -300,6 +331,7 @@ impl<S: MindStore> Mind<S> {
             Some(code) => DeskOutcome::Refused { code },
             None => match &request.body {
                 DeskBody::Retraction { retracts } => DeskOutcome::Retraction { retracts: retracts.clone() },
+                DeskBody::IllegalRetraction { .. } => unreachable!("refusal_of refuses every illegal retraction"),
                 DeskBody::Answer { .. } => match counted_answer(&docs, fork) {
                     None => DeskOutcome::Counted,
                     Some(counted) => DeskOutcome::Revision { of: Short(counted) },
@@ -307,7 +339,7 @@ impl<S: MindStore> Mind<S> {
             },
         };
         let sequence = answers_of(&docs, fork).map(|(_, held)| held.sequence).max().unwrap_or(0).checked_add(1).ok_or_else(|| invalid("sequence"))?;
-        let document = PipelineDocument::DeskAnswer(answer(sequence, outcome.clone()));
+        let document = PipelineDocument::DeskAnswer(answer(sequence, outcome.clone(), !matches!(request.body, DeskBody::IllegalRetraction { .. })));
         let envelope = prepare(&document, self.cache())?;
         // The receipt names the operator only when the verified account is the operator's; a
         // steward or member answerer is named as such. Attribution only: admission reads no faculty.
@@ -389,7 +421,7 @@ mod tests {
         DeskAnswerRequest {
             fork: s(fork),
             options_hash: hash(label),
-            body: DeskBody::Answer { choice: Some(l(choice)), note: None },
+            body: DeskBody::Answer { choice: Some(s(choice)), note: None },
             answered_at: s(answered_at),
             request_id: fresh_id(),
         }
@@ -531,7 +563,7 @@ mod tests {
         let at = "2026-11-10T12:00:00Z";
         // Equal to an option's text, not its label.
         let mut by_text = pick(FORK, "Q1", "A", at);
-        by_text.body = DeskBody::Answer { choice: Some(l("an-option")), note: None };
+        by_text.body = DeskBody::Answer { choice: Some(s("an-option")), note: None };
         assert_eq!(stored(ask(&mut mind, &decider("x"), by_text)).1, DeskOutcome::Refused { code: DeskRefusal::ChoiceInvalid });
         // A label of another question.
         committed(admit(&mut mind, vec![question("Q3", &["Z", "Y"], "Z")]));
@@ -553,7 +585,7 @@ mod tests {
             request
         };
         let bad_choice = |mut request: DeskAnswerRequest| {
-            request.body = DeskBody::Answer { choice: Some(l("Q")), note: None };
+            request.body = DeskBody::Answer { choice: Some(s("Q")), note: None };
             request
         };
         let code = |mind: &mut Mind<MemoryStore>, stamp: &DeskStamp, request| match stored(ask(mind, stamp, request)).1 {
@@ -689,7 +721,7 @@ mod tests {
         let mut blank_note = pick(FORK, "Q1", "A", at);
         blank_note.body = DeskBody::Answer { choice: None, note: Some("  \n\t ".into()) };
         let mut empty_note = pick(FORK, "Q1", "A", at);
-        empty_note.body = DeskBody::Answer { choice: Some(l("A")), note: Some("".into()) };
+        empty_note.body = DeskBody::Answer { choice: Some(s("A")), note: Some("".into()) };
         let mut not_utc = pick(FORK, "Q1", "A", "2026-11-10T14:00:00+02:00");
         not_utc.answered_at = s("2026-11-10T14:00:00+02:00");
         let mut no_id = pick(FORK, "Q1", "A", at);
@@ -945,7 +977,7 @@ mod tests {
         let at = "2026-11-10T12:00:00Z";
         let with_note = |mind: &mut Mind<MemoryStore>, choice: Option<&str>, note: String| {
             let mut request = pick(FORK, "Q1", "A", at);
-            request.body = DeskBody::Answer { choice: choice.map(l), note: Some(Words(note)) };
+            request.body = DeskBody::Answer { choice: choice.map(s), note: Some(Words(note)) };
             ask(mind, &decider("x"), request)
         };
         let invalid = DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: "desk_answer.note".into() });
@@ -1065,11 +1097,11 @@ mod tests {
         let before = head(&mind);
         let conflict = DeskAnswerOutcome::Refused(MindRefusal::DeskRequestIdConflict { request_id: R1.into() });
         let mut other_choice = sent.clone();
-        other_choice.body = DeskBody::Answer { choice: Some(l("B")), note: None };
+        other_choice.body = DeskBody::Answer { choice: Some(s("B")), note: None };
         let mut only_the_time = sent.clone();
         only_the_time.answered_at = s("2026-11-10T12:00:01Z");
         let mut with_note = sent.clone();
-        with_note.body = DeskBody::Answer { choice: Some(l("A")), note: Some("Also this.".into()) };
+        with_note.body = DeskBody::Answer { choice: Some(s("A")), note: Some("Also this.".into()) };
         let mut other_fork = with_id(pick(FORK2, "Q2", "A", AT), R1);
         other_fork.answered_at = s(AT);
         let mut other_hash = sent.clone();
@@ -1185,7 +1217,7 @@ mod tests {
             answered_at: s("2026-11-10T12:00:00Z"),
             request_id: RequestId(R1.into()),
         };
-        let answer = request(DeskBody::Answer { choice: Some(l("A")), note: None });
+        let answer = request(DeskBody::Answer { choice: Some(s("A")), note: None });
         assert_eq!(body_digest(&answer).0, "8a4d5b2ed0b3452bfed2f3a276b2828974e6824a3edcc643cfe9cfcdda34173a");
         let retraction = request(DeskBody::Retraction { retracts: s("eureka-state:desk_answer:Q1.1") });
         assert_eq!(body_digest(&retraction).0, "9f8075382556898c0bea364ed7c6deb2a86d8c78288a1f34e06da6e9bf5f58a3");
@@ -1224,6 +1256,138 @@ mod tests {
         for (claim, flagged) in [("2026-09-16T12:05:00.000Z", false), ("2026-09-16T12:05:00.500Z", true), ("2026-09-16T12:04:59.900Z", false)] {
             let (answer, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", claim)));
             assert_eq!(held(&mind, &answer).claim_in_future, flagged, "{claim}");
+        }
+    }
+
+    fn code_of(outcome: DeskAnswerOutcome) -> DeskRefusal {
+        match stored(outcome).1 {
+            DeskOutcome::Refused { code } => code,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// R1: the wire's three illegal retraction forms are a stored `bad_retraction`, after steps 4 to 6.
+    #[test]
+    fn an_illegal_retraction_form_is_a_stored_bad_retraction() {
+        let mut mind = desk();
+        let (first, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", AT)));
+        let form = |choice: Option<&str>, note: Option<&str>, retracts: Option<&str>| {
+            let mut request = pick(FORK, "Q1", "A", AT);
+            request.body = DeskBody::IllegalRetraction { choice: choice.map(s), note: note.map(Into::into), retracts: retracts.map(s) };
+            request
+        };
+        for (what, request) in [
+            ("a retraction carrying an answer", form(Some("A"), Some("why"), Some(&first))),
+            ("a retraction lacking retracts", form(None, None, None)),
+            ("a plain answer carrying retracts", form(Some("A"), None, Some(&first))),
+        ] {
+            let before = head(&mind);
+            let id = request.request_id.clone();
+            let (answer, outcome) = stored(ask(&mut mind, &decider("y"), request.clone()));
+            assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::BadRetraction }, "{what}");
+            assert_eq!(head(&mind), before + 1, "{what} is stored");
+            let record = held(&mind, &answer);
+            assert_eq!((record.choice, record.note, record.request_id), (None, None, id), "{what}");
+            // The stored refusal binds its request id and replays unchanged.
+            assert_eq!(replayed(ask(&mut mind, &decider("y"), request)), (answer, outcome), "{what}");
+            assert_eq!(head(&mind), before + 1, "{what} replay writes nothing");
+        }
+        assert_eq!(counted(&mind, FORK), Some(first));
+        // Steps 4 to 6 come first: an off-list account is not_a_decider, a stale card is stale_fork.
+        assert_eq!(code_of(ask(&mut mind, &off(), form(None, None, None))), DeskRefusal::NotADecider);
+        let mut stale = form(None, None, None);
+        stale.options_hash = options_hash(&question_with("Q1", &["A", "B"], "B"));
+        assert_eq!(code_of(ask(&mut mind, &decider("y"), stale)), DeskRefusal::StaleFork);
+    }
+
+    /// The illegal form is its own body: the same id with the same fields as a legal answer conflicts.
+    #[test]
+    fn an_illegal_retraction_is_not_the_same_body_as_a_plain_answer() {
+        let mut mind = desk();
+        let plain = with_id(pick(FORK, "Q1", "A", AT), R1);
+        stored(ask(&mut mind, &decider("x"), plain.clone()));
+        let mut illegal = plain;
+        illegal.body = DeskBody::IllegalRetraction { choice: Some(s("A")), note: None, retracts: None };
+        assert_eq!(
+            ask(&mut mind, &decider("x"), illegal),
+            DeskAnswerOutcome::Refused(MindRefusal::DeskRequestIdConflict { request_id: R1.into() })
+        );
+    }
+
+    /// An illegal form still has to be a well-formed body, and an unknown fork still stores nothing.
+    #[test]
+    fn a_malformed_illegal_retraction_or_unknown_fork_stores_nothing() {
+        let mut mind = desk();
+        let before = head(&mind);
+        let illegal = |fork: &str, note: Option<&str>| {
+            let mut request = pick(fork, "Q1", "A", AT);
+            request.body = DeskBody::IllegalRetraction { choice: None, note: note.map(Into::into), retracts: None };
+            request
+        };
+        assert!(matches!(
+            ask(&mut mind, &decider("x"), illegal("eureka-state:question:nope", None)),
+            DeskAnswerOutcome::Refused(MindRefusal::MissingReference { .. })
+        ));
+        assert_eq!(
+            ask(&mut mind, &decider("x"), illegal(FORK, Some("  "))),
+            DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: "desk_answer.note".into() })
+        );
+        assert_eq!(head(&mind), before);
+    }
+
+    /// Step 7: a choice that is no option label is a stored `choice_invalid`, whatever it looks like;
+    /// an empty or oversize one is a malformed body and stores nothing.
+    #[test]
+    fn a_choice_that_is_no_label_is_a_stored_choice_invalid() {
+        let mut mind = desk();
+        let ask_choice = |mind: &mut Mind<MemoryStore>, choice: &str| {
+            let mut request = pick(FORK, "Q1", "A", AT);
+            request.body = DeskBody::Answer { choice: Some(s(choice)), note: None };
+            let id = request.request_id.clone();
+            (ask(mind, &decider("x"), request.clone()), request, id)
+        };
+        for choice in ["has space", "ä", "A/B", &"x".repeat(65)] {
+            let before = head(&mind);
+            let (outcome, request, id) = ask_choice(&mut mind, choice);
+            let (answer, outcome) = stored(outcome);
+            assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::ChoiceInvalid }, "{choice}");
+            assert_eq!(head(&mind), before + 1);
+            let record = held(&mind, &answer);
+            assert_eq!((record.choice, record.request_id), (None, id), "{choice}");
+            assert_eq!(replayed(ask(&mut mind, &decider("x"), request)), (answer, outcome));
+            assert_eq!(head(&mind), before + 1);
+        }
+        // Rule order: a stale card or an off-list account outranks it.
+        let mut off_list = pick(FORK, "Q1", "A", AT);
+        off_list.body = DeskBody::Answer { choice: Some(s("has space")), note: None };
+        assert_eq!(code_of(ask(&mut mind, &off(), off_list)), DeskRefusal::NotADecider);
+        assert_eq!(counted(&mind, FORK), None);
+        // Malformed: stores nothing and binds nothing.
+        let before = head(&mind);
+        let mut last = None;
+        for choice in ["", &"x".repeat(201)] {
+            let (outcome, request, _) = ask_choice(&mut mind, choice);
+            assert_eq!(outcome, DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: "desk_answer.choice".into() }));
+            assert_eq!(head(&mind), before);
+            last = Some(request);
+        }
+        let mut fixed = last.unwrap();
+        fixed.body = DeskBody::Answer { choice: Some(s("A")), note: None };
+        assert!(matches!(ask(&mut mind, &decider("x"), fixed), DeskAnswerOutcome::Stored { .. }), "its id stayed free");
+        assert_eq!(head(&mind), before + 1);
+    }
+
+    /// claim_in_future is decided against the stored received_at (whole seconds), not the clock
+    /// reading: at 12:00:00.6 the stored instant is 12:00:00, so a claim at 12:05:00.2 is 300.2 s
+    /// ahead of what the record says and is flagged, though 299.6 s ahead of the clock.
+    #[test]
+    fn claim_in_future_follows_the_stored_received_at() {
+        let mut mind = desk();
+        let clock = now() + Duration::milliseconds(600);
+        for (claim, flagged) in [("2026-09-16T12:05:00.000Z", false), ("2026-09-16T12:05:00.200Z", true), ("2026-09-16T12:05:00.600Z", true)] {
+            let (answer, _) = stored(mind.answer_desk(decider("x"), pick(FORK, "Q1", "A", claim), clock));
+            let record = held(&mind, &answer);
+            assert_eq!((record.received_at, record.claim_in_future), (s("2026-09-16T12:00:00Z"), flagged), "{claim}");
         }
     }
 }
