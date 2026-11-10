@@ -852,4 +852,286 @@ mod tests {
         assert_ne!(raw("E"), raw("D"));
         assert_eq!(raw("D"), options_hash(&shown(vectors.iter().find(|vector| vector["heimdall"] == "D").unwrap())).0);
     }
+
+    // ---- the fix batch on PR #29 ----
+
+    /// Writes `answer` the way only the desk door can, for a state the public path cannot reach
+    /// (an answer written under a card that has since changed).
+    fn plant(mind: &mut Mind<MemoryStore>, answer: PipelineDeskAnswer) {
+        let envelope = crate::fixtures::prepare(&D::DeskAnswer(answer));
+        let instance = mind.instance().clone();
+        let outcome = mind.admit_steps(Door::Desk, &instance, provenance(Faculty::Operator), vec![envelope], now());
+        committed(outcome.unwrap());
+    }
+
+    fn at_offset(seconds: i64) -> String {
+        (now() + Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+
+    #[test]
+    fn the_decider_list_decides_and_the_attribution_does_not() {
+        let at = "2026-11-10T12:00:00Z";
+        let mut mind = desk();
+        // The operator's own account, off the list, is no decider.
+        let operator_off = stamp_as("op", DeskAuthority::Operator, &["x"]);
+        assert_eq!(stored(ask(&mut mind, &operator_off, pick(FORK, "Q1", "A", at))).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
+        // A plain member on the list decides.
+        let member_on = stamp_as("m", DeskAuthority::Member, &["m"]);
+        assert_eq!(stored(ask(&mut mind, &member_on, pick(FORK, "Q1", "A", at))).1, DeskOutcome::Counted);
+        // An empty list admits no one.
+        let empty = stamp_as("m", DeskAuthority::Operator, &[]);
+        assert_eq!(stored(ask(&mut mind, &empty, pick(FORK2, "Q2", "A", at))).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
+    }
+
+    #[test]
+    fn the_receipt_names_the_operator_only_for_the_operator_account() {
+        let at = "2026-11-10T12:00:00Z";
+        let mut mind = desk();
+        for (authority, faculty) in [(DeskAuthority::Operator, Faculty::Operator), (DeskAuthority::Steward, Faculty::SelfFaculty), (DeskAuthority::Member, Faculty::SelfFaculty)] {
+            let outcome = ask(&mut mind, &stamp_as("x", authority, &LIST), pick(FORK, "Q1", "A", at));
+            let DeskAnswerOutcome::Stored { receipt_id, .. } = outcome else { panic!("{outcome:?}") };
+            let receipt = mind.receipts().unwrap().into_iter().find(|receipt| receipt.receipt_id == receipt_id).unwrap();
+            assert_eq!(receipt.provenance.faculty, faculty, "{authority:?}");
+            assert_eq!(receipt.provenance.agent, s("x"));
+        }
+    }
+
+    #[test]
+    fn answers_under_an_older_card_neither_count_nor_can_be_retracted() {
+        let mut mind = desk();
+        let (first, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", "2026-11-10T12:00:00Z")));
+        let mut old = held(&mind, &first);
+        old.sequence = 2;
+        old.options_hash = Sha256Hex("e".repeat(64));
+        old.request_id = fresh_id();
+        old.outcome = DeskOutcome::Counted;
+        plant(&mut mind, old);
+        // Retract the current answer, so only the older-card one remains.
+        stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &first)));
+        assert_eq!(counted(&mind, FORK), None, "an answer under an older hash does not count");
+        let older = key("Q1", 2);
+        // R1: a retraction names an answer under the current card only.
+        assert_eq!(stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &older))).1, DeskOutcome::Refused { code: DeskRefusal::BadRetraction });
+        // The next answer is Counted, not a Revision of the older one.
+        let outcome = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "B", "2026-11-10T12:00:00Z"))).1;
+        assert_eq!(outcome, DeskOutcome::Counted);
+    }
+
+    #[test]
+    fn received_at_is_the_minds_and_a_claim_over_five_minutes_ahead_is_flagged() {
+        let mut mind = desk();
+        for (offset, flagged) in [(-86_400, false), (0, false), (300, false), (301, true)] {
+            let claim = at_offset(offset);
+            let (answer, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", &claim)));
+            let record = held(&mind, &answer);
+            assert_eq!((record.claim_in_future, record.answered_at, record.received_at), (flagged, s(&claim), s("2026-09-16T12:00:00Z")), "{offset}");
+        }
+    }
+
+    #[test]
+    fn a_note_is_one_to_four_thousand_bytes_and_not_blank() {
+        let at = "2026-11-10T12:00:00Z";
+        let with_note = |mind: &mut Mind<MemoryStore>, choice: Option<&str>, note: String| {
+            let mut request = pick(FORK, "Q1", "A", at);
+            request.body = DeskBody::Answer { choice: choice.map(l), note: Some(Words(note)) };
+            ask(mind, &decider("x"), request)
+        };
+        let invalid = DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: "desk_answer.note".into() });
+        let mut mind = desk();
+        let before = head(&mind);
+        for note in ["".to_string(), "   ".into(), "\u{3000}\n".into(), "x".repeat(4001), "\u{1F600}".repeat(1001), "e\u{301}".repeat(1334)] {
+            // With a choice or without: the note alone sinks the body, and nothing is stored.
+            assert_eq!(with_note(&mut mind, None, note.clone()), invalid, "{} bytes", note.len());
+            assert_eq!(with_note(&mut mind, Some("A"), note.clone()), invalid, "{} bytes", note.len());
+        }
+        assert_eq!(head(&mind), before);
+        for note in ["x".repeat(4000), "\u{1F600}".repeat(1000), format!("{}x", "e\u{301}".repeat(1333)), " a ".to_string()] {
+            assert!(matches!(stored(with_note(&mut mind, None, note)).1, DeskOutcome::Counted | DeskOutcome::Revision { .. }));
+        }
+    }
+
+    #[test]
+    fn a_retraction_after_a_ruling_closed_the_fork_is_fork_closed() {
+        // Binding V10a: a ruling that answers the fork closes it; the retraction meets step 6.
+        let mut mind = desk();
+        let (first, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", "2026-11-10T12:00:00Z")));
+        let mut ruled = ruling("RQ1");
+        ruled.answers = Some(s(FORK));
+        ruled.choice = Some(l("A"));
+        committed(admit(&mut mind, vec![D::Ruling(ruled)]));
+        let (retraction, outcome) = stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &first)));
+        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::ForkClosed });
+        assert_eq!(held(&mind, &retraction).outcome, outcome);
+        assert_eq!(counted(&mind, FORK), Some(first), "the answer still stands");
+    }
+
+    /// Two spellings of "café" hash alike in every member that may carry one.
+    #[test]
+    fn options_hash_normalises_context_option_text_and_depends() {
+        let hash_with = |set: &dyn Fn(&mut PipelineQuestion, &str), spelling: &str| {
+            let mut question = question_with("Q1", &["A", "B"], "A");
+            set(&mut question, spelling);
+            options_hash(&question)
+        };
+        type Setter = fn(&mut PipelineQuestion, &str);
+        let members: [(&str, Setter); 4] = [
+            ("title", |q, s| q.title = s.into()),
+            ("context", |q, s| q.question = s.into()),
+            ("option text", |q, s| q.options[1].text = s.into()),
+            ("depends", |q, s| q.depends = vec![s.into()]),
+        ];
+        for (member, set) in members {
+            let (composed, decomposed) = ("caf\u{e9} \u{2603}", "cafe\u{301} \u{2603}");
+            assert_eq!(hash_with(&set, composed), hash_with(&set, decomposed), "{member}");
+            assert_ne!(hash_with(&set, composed), hash_with(&set, "cafe \u{2603}"), "{member} still moves the hash");
+        }
+    }
+
+    fn replayed(outcome: DeskAnswerOutcome) -> (String, DeskOutcome) {
+        match outcome {
+            DeskAnswerOutcome::Replayed { answer, outcome } => (answer.0, outcome),
+            other => panic!("expected a replay, got {other:?}"),
+        }
+    }
+
+    fn with_id(mut request: DeskAnswerRequest, id: &str) -> DeskAnswerRequest {
+        request.request_id = RequestId(id.into());
+        request
+    }
+
+    const R1: &str = "6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f13";
+    const R2: &str = "6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f14";
+    const R3: &str = "6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f15";
+    const AT: &str = "2026-11-10T12:00:00Z";
+
+    /// Binding V12 (Q1): a retry returns the stored outcome, Refused included, and writes nothing.
+    #[test]
+    fn q1_v12_a_retry_replays_the_stored_outcome_and_adds_nothing() {
+        let mut mind = desk();
+        let request = with_id(pick(FORK, "Q1", "A", AT), R1);
+        assert_eq!(stored(ask(&mut mind, &decider("x"), request.clone())), (key("Q1", 1), DeskOutcome::Counted));
+        let after_first = head(&mind);
+        assert_eq!(replayed(ask(&mut mind, &decider("x"), request)), (key("Q1", 1), DeskOutcome::Counted));
+        assert_eq!(head(&mind), after_first, "no n2 and no Revision");
+        // A stale-hash request replays as the same Refused stale_fork.
+        let mut stale = with_id(pick(FORK, "Q1", "A", AT), R2);
+        stale.options_hash = options_hash(&question_with("Q1", &["A", "B"], "B"));
+        let first = stored(ask(&mut mind, &decider("x"), stale.clone()));
+        assert_eq!(first.1, DeskOutcome::Refused { code: DeskRefusal::StaleFork });
+        let after_stale = head(&mind);
+        assert_eq!(replayed(ask(&mut mind, &decider("x"), stale)), first);
+        // A Revision replays as the Revision it was, not as a new one.
+        let revision = with_id(pick(FORK, "Q1", "B", AT), R3);
+        let (n, outcome) = stored(ask(&mut mind, &decider("x"), revision.clone()));
+        assert_eq!(outcome, DeskOutcome::Revision { of: s(&key("Q1", 1)) });
+        let after_revision = head(&mind);
+        assert!(after_revision > after_stale);
+        assert_eq!(replayed(ask(&mut mind, &decider("x"), revision)), (n, outcome));
+        assert_eq!(head(&mind), after_revision);
+        // A retraction replays too.
+        let retraction = with_id(retract(FORK, "Q1", &key("Q1", 1)), "6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f16");
+        let (r, outcome) = stored(ask(&mut mind, &decider("y"), retraction.clone()));
+        assert_eq!(replayed(ask(&mut mind, &decider("y"), retraction)), (r, outcome));
+    }
+
+    /// V12's lookup precedes the fork lookup: a retry gets its stored outcome after the campaign moved.
+    #[test]
+    fn q1_the_lookup_comes_before_the_fork_is_read() {
+        let mut mind = desk();
+        let request = with_id(pick(FORK, "Q1", "A", AT), R1);
+        stored(ask(&mut mind, &decider("x"), request.clone()));
+        committed(admit(&mut mind, vec![resolution(r(K::Campaign, "eureka-state:campaign:self"), ResolutionOutcome::Moved { to: slug("thought-cage") })]));
+        assert_eq!(replayed(ask(&mut mind, &decider("x"), request)), (key("Q1", 1), DeskOutcome::Counted));
+    }
+
+    /// V13 (Q2): the same id with any other part of the body is request_id_conflict and the store is unchanged.
+    #[test]
+    fn q2_v13_the_same_id_with_another_body_conflicts_and_stores_nothing() {
+        let mut mind = desk();
+        let sent = with_id(pick(FORK, "Q1", "A", AT), R1);
+        stored(ask(&mut mind, &decider("x"), sent.clone()));
+        let before = head(&mind);
+        let conflict = DeskAnswerOutcome::Refused(MindRefusal::DeskRequestIdConflict { request_id: R1.into() });
+        let mut other_choice = sent.clone();
+        other_choice.body = DeskBody::Answer { choice: Some(l("B")), note: None };
+        let mut only_the_time = sent.clone();
+        only_the_time.answered_at = s("2026-11-10T12:00:01Z");
+        let mut with_note = sent.clone();
+        with_note.body = DeskBody::Answer { choice: Some(l("A")), note: Some("Also this.".into()) };
+        let mut other_fork = with_id(pick(FORK2, "Q2", "A", AT), R1);
+        other_fork.answered_at = s(AT);
+        let mut other_hash = sent.clone();
+        other_hash.options_hash = options_hash(&question_with("Q1", &["A", "B"], "B"));
+        let mut as_retraction = sent.clone();
+        as_retraction.body = DeskBody::Retraction { retracts: s(&key("Q1", 1)) };
+        for request in [other_choice, only_the_time, with_note, other_fork, other_hash, as_retraction] {
+            assert_eq!(ask(&mut mind, &decider("x"), request), conflict);
+            assert_eq!(head(&mind), before);
+        }
+        // A retraction's id conflicts with another target.
+        let retraction = with_id(retract(FORK, "Q1", &key("Q1", 1)), R2);
+        stored(ask(&mut mind, &decider("y"), retraction.clone()));
+        let mut other_target = retraction;
+        other_target.body = DeskBody::Retraction { retracts: s(&key("Q1", 2)) };
+        let settled = head(&mind);
+        assert_eq!(ask(&mut mind, &decider("y"), other_target), DeskAnswerOutcome::Refused(MindRefusal::DeskRequestIdConflict { request_id: R2.into() }));
+        assert_eq!(head(&mind), settled);
+    }
+
+    /// V14 (Q3): the key is (answerer, request_id); an identical body from another account is its own request.
+    #[test]
+    fn q3_v14_another_account_with_the_same_id_and_body_is_its_own_request() {
+        let mut mind = desk();
+        let sent = with_id(pick(FORK, "Q1", "A", AT), R1);
+        assert_eq!(stored(ask(&mut mind, &decider("x"), sent.clone())), (key("Q1", 1), DeskOutcome::Counted));
+        let (y_answer, y_outcome) = stored(ask(&mut mind, &decider("y"), sent.clone()));
+        assert_eq!((y_answer.as_str(), &y_outcome), (key("Q1", 2).as_str(), &DeskOutcome::Revision { of: s(&key("Q1", 1)) }));
+        assert_eq!(held(&mind, &y_answer).answerer, s("y"));
+        assert_eq!(held(&mind, &key("Q1", 1)).answerer, s("x"));
+        // x's later retry still returns n1; y's returns n2.
+        assert_eq!(replayed(ask(&mut mind, &decider("x"), sent.clone())).0, key("Q1", 1));
+        assert_eq!(replayed(ask(&mut mind, &decider("y"), sent)).0, key("Q1", 2));
+        // x's id never reveals x's refusal to y: x off the list is refused, y with the identical body is Counted.
+        let mut fresh = desk();
+        let sent = with_id(pick(FORK, "Q1", "A", AT), R2);
+        assert_eq!(stored(ask(&mut fresh, &off(), sent.clone())).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
+        assert_eq!(stored(ask(&mut fresh, &decider("y"), sent)), (key("Q1", 2), DeskOutcome::Counted));
+    }
+
+    /// V15 (Q4), the Huginn half: a request Huginn never stored is a fresh answer on retry.
+    #[test]
+    fn q4_v15_a_request_never_stored_is_answered_fresh_on_retry() {
+        let mut mind = desk();
+        let request = with_id(pick(FORK, "Q1", "A", AT), R1);
+        // The first attempt died before Huginn: nothing is bound, so the retry is Counted.
+        assert_eq!(stored(ask(&mut mind, &decider("x"), request)), (key("Q1", 1), DeskOutcome::Counted));
+    }
+
+    /// V17 (Q6): a refusal that stores nothing binds no id.
+    #[test]
+    fn q6_v17_a_body_that_stored_nothing_leaves_its_id_free() {
+        let mut mind = desk();
+        let mut blank = with_id(pick(FORK, "Q1", "A", AT), R2);
+        blank.body = DeskBody::Answer { choice: None, note: Some("  ".into()) };
+        assert!(matches!(ask(&mut mind, &decider("x"), blank), DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { .. })));
+        assert_eq!(stored(ask(&mut mind, &decider("x"), with_id(pick(FORK, "Q1", "A", AT), R2))).1, DeskOutcome::Counted);
+        let unknown = with_id(pick("eureka-state:question:nope", "Q1", "A", AT), R3);
+        assert!(matches!(ask(&mut mind, &decider("x"), unknown), DeskAnswerOutcome::Refused(MindRefusal::MissingReference { .. })));
+        assert!(matches!(stored(ask(&mut mind, &decider("x"), with_id(pick(FORK2, "Q2", "A", AT), R3))).1, DeskOutcome::Counted));
+    }
+
+    /// V18: an id that is not a lowercase D-format UUID is refused (also in the shape table above).
+    #[test]
+    fn v18_request_ids_must_be_lowercase_d_format_uuids() {
+        for bad in ["", "retry-1", "6F1C0A52-3B7E-4D1A-9C58-0E2D7A4B9F13", "6f1c0a523b7e4d1a9c580e2d7a4b9f13", "{6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f13}", "6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f1g", " 6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f13"] {
+            let mut mind = desk();
+            let before = head(&mind);
+            assert_eq!(
+                ask(&mut mind, &decider("x"), with_id(pick(FORK, "Q1", "A", AT), bad)),
+                DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: "desk_answer.request_id".into() }),
+                "{bad:?}"
+            );
+            assert_eq!(head(&mind), before);
+        }
+    }
 }
