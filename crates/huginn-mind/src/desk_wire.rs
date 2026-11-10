@@ -850,4 +850,133 @@ mod tests {
         assert_eq!(encode(&fresh), encode(&replay));
         assert_eq!(stored_count(&mind, FORK), 1);
     }
+
+    // ---- the gate, the bounds and the request id through the wire ----
+
+    fn question_with(label: &str, edit: impl Fn(&mut PipelineQuestion)) -> PipelineDocument {
+        let D::Question(mut question) = question(label, &["A", "B"], "A") else { unreachable!() };
+        edit(&mut question);
+        D::Question(question)
+    }
+
+    #[test]
+    fn unshowable_forks_are_unknown() {
+        let mut mind = desk();
+        committed(admit(&mut mind, vec![question_with("Q3", |q| q.depends = vec!["".into()]), question_with("Q4", |q| q.options[1].text = "".into())]));
+        let id = fresh_id();
+        let request = |mind: &Mind<MemoryStore>, fork: &str| ForkAnswerRequest { request_id: id.clone(), ..wire(fork, &hash_of(mind, fork)) };
+        // A held question with an empty depends line or an empty option text stores nothing.
+        for fork in ["eureka-state:question:Q3", "eureka-state:question:Q4"] {
+            let (before, asked) = (head(&mind), request(&mind, fork));
+            assert_eq!(not_stored(ask(&mut mind, "x", asked).0).code, ForkRefusalCode::ForkUnknown, "{fork}");
+            assert_eq!((head(&mind), stored_count(&mind, fork)), (before, 0), "{fork}");
+        }
+        // So does a showable question with no decider to show it to.
+        let (before, asked) = (head(&mind), request(&mind, FORK));
+        assert_eq!(not_stored(ask_as(&mut mind, "x", &[], asked).0).code, ForkRefusalCode::ForkUnknown);
+        assert_eq!((head(&mind), stored_count(&mind, FORK)), (before, 0));
+        // None of that bound the request id.
+        let asked = request(&mind, FORK);
+        assert_eq!(answered(ask(&mut mind, "x", asked).0).0.outcome, "Counted");
+    }
+
+    #[test]
+    fn showable_needs_two_options_text_depends_and_a_decider() {
+        let D::Question(plain) = question("Q9", &["A", "B"], "A") else { unreachable!() };
+        let list = deciders(&LIST);
+        assert!(showable(&plain, &list));
+        assert!(!showable(&plain, &[]));
+        let mut one = plain.clone();
+        one.options.truncate(1);
+        assert!(!showable(&one, &list));
+        let mut none = plain.clone();
+        none.options.clear();
+        assert!(!showable(&none, &list));
+        let mut blank_text = plain.clone();
+        blank_text.options[0] = QuestionOption { label: l("A"), text: "".into() };
+        assert!(!showable(&blank_text, &list));
+        let mut blank_line = plain.clone();
+        blank_line.depends = vec!["Cut 3a".into(), "".into()];
+        assert!(!showable(&blank_line, &list));
+        let mut lines = plain;
+        lines.depends = vec!["Cut 3a".into()];
+        assert!(showable(&lines, &list));
+    }
+
+    #[test]
+    fn the_note_and_choice_limits_are_bytes() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let note = |text: String| ForkAnswerRequest { answer: Some(ForkAnswer { choice: None, note: Some(text) }), ..wire(FORK, &hash) };
+        let choice = |text: String| ForkAnswerRequest { answer: Some(ForkAnswer { choice: Some(text), note: None }), ..wire(FORK, &hash) };
+        let (answer, _, _) = answered(ask(&mut mind, "x", note("x".repeat(4000))).0);
+        assert_eq!(answer.outcome, "Counted");
+        let before = head(&mind);
+        for refused in [note("x".repeat(4001)), note("\u{1F600}".repeat(1001)), note("é".repeat(2001)), note("  \u{a0} ".into()), note(String::new())] {
+            let refusal = not_stored(ask(&mut mind, "x", refused).0);
+            assert_eq!(refusal.code, ForkRefusalCode::BodyInvalid);
+            assert!(refusal.error.contains("desk_answer.note"), "{refusal:?}");
+        }
+        assert_eq!(head(&mind), before);
+        // A choice is any text of 1 to 200 bytes: one that is no label is stored `choice_invalid`.
+        for text in ["has space".to_string(), "z".repeat(200)] {
+            let (answer, _, _) = answered(ask(&mut mind, "x", choice(text.clone())).0);
+            assert_eq!((answer.code, answer.choice), (Some(ForkAnswerCode::ChoiceInvalid), Some(text)));
+        }
+        let before = head(&mind);
+        for refused in [choice(String::new()), choice("z".repeat(201))] {
+            let refusal = not_stored(ask(&mut mind, "x", refused).0);
+            assert!(refusal.error.contains("desk_answer.choice"), "{refusal:?}");
+        }
+        assert_eq!(head(&mind), before);
+    }
+
+    #[test]
+    fn request_id_passes_through() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let request = wire(FORK, &hash);
+        let (first, _) = ask(&mut mind, "x", request.clone());
+        // V12: the same bytes replay.
+        let before = head(&mind);
+        assert_eq!(ask(&mut mind, "x", request.clone()), (first, true));
+        assert_eq!(head(&mind), before);
+        // V13: only answered_at changed is a conflict, and nothing is stored.
+        let moved = ForkAnswerRequest { answered_at: "2026-11-10T12:00:01Z".into(), ..request.clone() };
+        assert_eq!(not_stored(ask(&mut mind, "x", moved).0).code, ForkRefusalCode::RequestIdConflict);
+        assert_eq!((head(&mind), stored_count(&mind, FORK)), (before, 1));
+        // V14: another subject with identical bytes is its own request: its own answer id, stamped with it.
+        let (other, replayed) = ask(&mut mind, "y", request.clone());
+        let (other, _, _) = answered(other);
+        assert!(!replayed);
+        assert_eq!((other.answer_id.as_str(), other.answerer.as_str(), other.outcome.as_str(), other.request_id.as_str()), ("n2", "y", "Revision", request.request_id.as_str()));
+        let (original, _, _) = answered(ask(&mut mind, "x", request.clone()).0);
+        assert_eq!((original.answer_id.as_str(), original.answerer.as_str()), ("n1", "x"));
+        // V17 and V18: an id that is no lowercase D-format UUID is body_invalid naming request_id, and binds nothing.
+        let before = head(&mind);
+        for bad in ["retry-1", "0000000A-0000-4000-8000-00000000000B", "{00000000-0000-4000-8000-000000000001}", "00000000-0000-4000-8000-0000000000010", ""] {
+            let refusal = not_stored(ask(&mut mind, "x", ForkAnswerRequest { request_id: bad.into(), ..request.clone() }).0);
+            assert_eq!(refusal.code, ForkRefusalCode::BodyInvalid, "{bad:?}");
+            assert!(refusal.error.contains("request_id"), "{refusal:?}");
+        }
+        assert_eq!(head(&mind), before);
+    }
+
+    #[test]
+    fn forbidden_and_unknown_keys_do_not_decode() {
+        let base = vectors()["request"]["valid"][0]["message"].clone();
+        let decode = |value: &Value| rmp_serde::from_slice::<ForkAnswerRequest>(&rmp_serde::to_vec_named(value).unwrap());
+        assert!(decode(&base).is_ok());
+        for key in ["answerer", "authority", "attribution", "subject", "deciders", "mind", "mood"] {
+            let mut top = base.clone();
+            top[key] = Value::String("x".into());
+            assert!(decode(&top).is_err(), "{key} at the top");
+            let mut inside = base.clone();
+            inside["answer"][key] = Value::String("x".into());
+            assert!(decode(&inside).is_err(), "{key} inside answer");
+        }
+        let mut wrong = base.clone();
+        wrong["schemaVersion"] = Value::String("gamecult.fork.answer_request.v1".into());
+        assert!(decode(&wrong).is_err());
+    }
 }
