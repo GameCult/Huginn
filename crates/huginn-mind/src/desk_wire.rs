@@ -290,13 +290,14 @@ fn project(key: &str, stored: &PipelineDeskAnswer) -> Result<ForkDeskAnswer, Min
     })
 }
 
-/// The Mind's refusal as the door answers it: an unknown or moved fork, a body the shape step
+/// The Mind's refusal as the door answers it: an unknown or moved fork (one that reads as no
+/// question id, or whose id is over the 200-byte bound, names no fork), a body the shape step
 /// refused and a reused request id store nothing and have codes of their own; anything else,
 /// `Unavailable` included, passes through unchanged.
 fn door_refusal(refused: MindRefusal) -> DeskResponse {
     match refused {
         MindRefusal::MissingReference { .. } | MindRefusal::CampaignMoved { .. } => DeskResponse::NotStored(fork_unknown()),
-        MindRefusal::DeskRequestInvalid { field } if field == "fork" => DeskResponse::NotStored(fork_unknown()),
+        MindRefusal::DeskRequestInvalid { field } if field == "fork" || field == "desk_answer.fork" => DeskResponse::NotStored(fork_unknown()),
         MindRefusal::DeskRequestInvalid { field } => DeskResponse::NotStored(body_invalid(&field)),
         MindRefusal::DeskRequestIdConflict { .. } => {
             DeskResponse::NotStored(fork_refusal(ForkRefusalCode::RequestIdConflict, "request_id_conflict: this request_id was used for a different body".into()))
@@ -825,6 +826,29 @@ mod tests {
         // The refusal never echoes the id it refuses.
         let conflict = not_stored(door_refusal(MindRefusal::DeskRequestIdConflict { request_id: "secret".into() }));
         assert!(!conflict.error.contains("secret"));
+    }
+
+    /// Her schema takes any non-empty string as a fork id and her vectors hold no over-long one;
+    /// no such id can name a fork, so it is `fork_unknown` like the empty one. Recorded deviation:
+    /// the bound is the Mind's 200 bytes (`desk_answer.fork`), and the answer is not `body_invalid`.
+    #[test]
+    fn an_over_long_fork_id_is_unknown() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let before = head(&mind);
+        for fork in [format!("{FORK}{}", "9".repeat(200)), format!("eureka-state:question:{}", "q".repeat(300))] {
+            let refusal = not_stored(ask(&mut mind, "x", wire(&fork, &hash)).0);
+            assert_eq!(refusal.code, ForkRefusalCode::ForkUnknown, "{} bytes", fork.len());
+            assert_eq!(refusal, fork_unknown());
+        }
+        assert_eq!(head(&mind), before);
+        // The mapping is by exact field: a field that merely ends in "fork" is a bad body.
+        for field in ["desk_answer.fork", "fork"] {
+            assert_eq!(not_stored(door_refusal(MindRefusal::DeskRequestInvalid { field: field.into() })).code, ForkRefusalCode::ForkUnknown, "{field}");
+        }
+        for field in ["notfork", "desk_answer.forks", "desk_answer.fork.x", "request"] {
+            assert_eq!(not_stored(door_refusal(MindRefusal::DeskRequestInvalid { field: field.into() })).code, ForkRefusalCode::BodyInvalid, "{field}");
+        }
     }
 
     #[test]
