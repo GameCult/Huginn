@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
 use crate::sources::forge::HttpForge;
-use huginn_mind::desk_wire::{DeskRequest, DeskResponse, answer_ref};
+use huginn_mind::desk_wire::{DeskRequest, DeskResponse};
 use huginn_mind::eureka_pipeline::{PipelineRef, Slug};
 use huginn_mind::wire::{ACTIVITY_REPOS_MAX, HuginnMindRequest, HuginnMindResponse, IndexStatus};
 use huginn_mind::{Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery, SourceHits, SourceQuery};
@@ -237,7 +237,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
 
     /// One desk request, answered by the Mind method it names. The Mind is the instance's own
     /// (`mind` is checked against it); `deciders` is this call's list, handed to the Mind and
-    /// dropped. A fresh answer reaches the index as `Admit`'s writes do; a replay wrote nothing.
+    /// dropped. A desk answer is not indexed (`index_text` gives it no text), so nothing here tells the index.
     /// The reads wait on follow-up desk-door-reads and are refused until they exist.
     pub fn handle_desk(&mut self, request: DeskRequest, now: DateTime<Utc>) -> DeskResponse {
         if let Err(refusal) = self.mind.require_instance(request.mind()) {
@@ -245,15 +245,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         }
         match request {
             DeskRequest::Answer { subject, authority, deciders, request, .. } => {
-                let (response, replayed) = self.mind.desk_answer(&deciders, subject, authority, request, now);
-                if !replayed
-                    && let DeskResponse::Answered { answer, .. } = &response
-                    && let Some(stored) = answer_ref(answer)
-                    && let Err(error) = self.index.committed(&self.mind, std::slice::from_ref(&stored))
-                {
-                    eprintln!("huginn: the index refused the landed write [{}]: {error:#}", stored.id.0);
-                }
-                response
+                self.mind.desk_answer(&deciders, subject, authority, request, now).0
             }
             DeskRequest::Forks { .. } | DeskRequest::Fork { .. } => DeskResponse::Refused(MindRefusal::Unavailable { detail: DESK_READS_UNBUILT.into() }),
         }

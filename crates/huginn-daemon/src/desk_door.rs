@@ -5,13 +5,14 @@
 //! refused peer has nothing read and nothing written. The socket's life: bind, replace a stale
 //! one, refuse a live one or a file that is not a socket, mode 0660, unlink on drop. And the
 //! bounds: one request per connection, one reply, a header over `DESK_MAX_REQUEST_BYTES` refused
-//! before anything is allocated, `DESK_IO_TIMEOUT` on every read and write, a reply past
-//! `DESK_MAX_RESPONSE_BYTES` refused by name.
+//! before anything is allocated, one `DESK_CONNECTION_DEADLINE` for the whole connection (every
+//! read and write spends what is left of it, so a peer that trickles bytes is cut off at the
+//! deadline like one that is silent), a reply past `DESK_MAX_RESPONSE_BYTES` refused by name.
 //!
 //! It owns no rule. Which Mind method answers is `Daemon::handle_desk`'s; when the door is
 //! served is `serve::run`'s, once per pass in the thread that owns the Mind. A peer that is
-//! slow costs the loop at most `DESK_ACCEPTS_PER_PASS` connections of `2 * DESK_IO_TIMEOUT`
-//! each, and only the configured peer can reach that.
+//! slow costs the loop at most `DESK_ACCEPTS_PER_PASS` connections of `DESK_CONNECTION_DEADLINE`
+//! each, four seconds, and only the configured peer can reach that.
 //!
 //! The door keeps no request id: a retry after a lost reply is a new connection with the same
 //! request, and the stored answer is what replays it, across a restart as well.
@@ -23,7 +24,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
@@ -38,12 +39,13 @@ use huginn_mind::desk_wire::{
 };
 use huginn_mind::envelope::{OperationFailure, decode_desk_request, encode_desk_failure, encode_desk_response};
 use huginn_mind::{MindRefusal, MindStore};
+use rustix::net::sockopt::{Timeout, set_socket_timeout};
 
 use crate::daemon::{Daemon, IndexSink};
 use crate::serve::{MAX_ECHOED_FIELD_BYTES, overlong_echo};
 
-/// How long the door waits on one read or one write of the configured peer.
-pub const DESK_IO_TIMEOUT: Duration = Duration::from_millis(500);
+/// How long one connection of the configured peer may hold the loop, reading and writing together.
+pub const DESK_CONNECTION_DEADLINE: Duration = Duration::from_secs(1);
 
 /// Connections one loop pass serves, so a peer that connects in a stream cannot hold the RUDP door off.
 pub const DESK_ACCEPTS_PER_PASS: u32 = 4;
@@ -145,11 +147,7 @@ impl DeskDoor {
                 }
             };
             taken += 1;
-            let served = serve_connection(stream, self.peer_uid, daemon, &self.registry, now, |stream| {
-                stream.set_nonblocking(false)?;
-                stream.set_read_timeout(Some(DESK_IO_TIMEOUT))?;
-                stream.set_write_timeout(Some(DESK_IO_TIMEOUT))
-            });
+            let served = serve_connection(stream, self.peer_uid, daemon, &self.registry, now, |stream| stream.set_nonblocking(false));
             if served != Served::Answered {
                 eprintln!("huginn: {served}");
             }
@@ -171,9 +169,49 @@ fn profile() -> CultNetTransportProfile {
     )
 }
 
-/// One connection: the peer first, before anything is read, then one frame in, one frame out.
-/// `ready` readies the stream for blocking, bounded I/O and runs only after the peer is known to
-/// be the configured one.
+/// A stream whose every read and write is bounded by what is left of one deadline: the socket's
+/// timeout is reset to the remainder before each call, so bytes arriving do not extend it.
+pub(crate) struct Deadlined<St> {
+    inner: St,
+    deadline: Instant,
+}
+
+impl<St: AsFd> Deadlined<St> {
+    pub(crate) fn new(inner: St, within: Duration) -> Self {
+        Self { inner, deadline: Instant::now() + within }
+    }
+
+    fn remaining(&self, which: Timeout) -> io::Result<()> {
+        // Whole milliseconds: rustix rounds a sub-microsecond tail up into an out-of-range tv_usec.
+        let left = Duration::from_millis(self.deadline.saturating_duration_since(Instant::now()).as_millis() as u64);
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        set_socket_timeout(&self.inner, which, Some(left)).map_err(io::Error::from)
+    }
+}
+
+impl<St: Read + AsFd> Read for Deadlined<St> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.remaining(Timeout::Recv)?;
+        self.inner.read(buf)
+    }
+}
+
+impl<St: Write + AsFd> Write for Deadlined<St> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.remaining(Timeout::Send)?;
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// One connection: the peer first, before anything is read, then one frame in, one frame out,
+/// all inside `DESK_CONNECTION_DEADLINE`. `ready` readies the stream for blocking I/O and runs
+/// only after the peer is known to be the configured one.
 pub fn serve_connection<St, S, I>(
     stream: St,
     peer_uid: u32,
@@ -197,7 +235,7 @@ where
     if let Err(error) = ready(&stream) {
         return Served::Dropped(format!("the stream could not be readied: {error}"));
     }
-    let mut transport = TcpFramedTransportConnection::new(stream, profile());
+    let mut transport = TcpFramedTransportConnection::new(Deadlined::new(stream, DESK_CONNECTION_DEADLINE), profile());
     let frame = match transport.receive() {
         Ok(frame) => frame,
         Err(error) => return Served::Dropped(format!("no whole frame arrived: {error:#}")),
@@ -243,7 +281,14 @@ pub fn answer_desk_message<S: MindStore, I: IndexSink<S>>(
             Err(failure) => encode_desk_failure(message_id, operation, &failure, &runtime_id),
         },
         CultNetMessage::SchemaCatalogRequest { .. } => match registry.create_catalog_response(&message) {
-            Ok(response) => response,
+            Ok(reply) => bounded(reply, DESK_MAX_RESPONSE_BYTES, |size| CultNetMessage::Error {
+                error: match size {
+                    Ok(bytes) => format!("{DESK_SERVICE_ID} refuses a catalog reply of {bytes} bytes over {DESK_MAX_RESPONSE_BYTES}"),
+                    Err(detail) => detail,
+                },
+                code: None,
+                details: None,
+            }),
             Err(error) => CultNetMessage::Error { error: format!("{error:#}"), code: None, details: None },
         },
         _ => CultNetMessage::Error {
@@ -263,13 +308,21 @@ pub(crate) fn respond(response: &DeskResponse, message_id: &str, operation: &str
         Ok(reply) => reply,
         Err(error) => return not_encodable(format!("{error:#}")),
     };
-    let size = match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
-        Ok(bytes) => bytes.len(),
-        Err(error) => return not_encodable(format!("{error:#}")),
-    };
-    if size <= limit {
-        return reply;
+    bounded(reply, limit, |size| match size {
+        Ok(bytes) => {
+            let refusal = DeskResponse::Refused(MindRefusal::ResponseTooLarge { bytes: bytes as u64, limit: limit as u64 });
+            encode_desk_response(message_id, operation, &refusal, runtime_id).unwrap_or_else(|error| not_encodable(format!("{error:#}")))
+        }
+        Err(detail) => not_encodable(detail),
+    })
+}
+
+/// `reply` itself when it encodes to at most `limit` bytes. Otherwise what `refuse` makes of the
+/// encoded size, or of the encoding error. Every reply the door sends passes here.
+fn bounded(reply: CultNetMessage, limit: usize, refuse: impl FnOnce(Result<usize, String>) -> CultNetMessage) -> CultNetMessage {
+    match encode_cultnet_message_to_vec(&reply, CultNetWireContract::CultNetSchemaV0) {
+        Ok(bytes) if bytes.len() <= limit => reply,
+        Ok(bytes) => refuse(Ok(bytes.len())),
+        Err(error) => refuse(Err(format!("{error:#}"))),
     }
-    let refusal = DeskResponse::Refused(MindRefusal::ResponseTooLarge { bytes: size as u64, limit: limit as u64 });
-    encode_desk_response(message_id, operation, &refusal, runtime_id).unwrap_or_else(|error| not_encodable(format!("{error:#}")))
 }

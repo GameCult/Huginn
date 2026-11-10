@@ -30,7 +30,7 @@ use tempfile::TempDir;
 
 use crate::daemon::tests::{INSTANCE, OTHER, RecordingIndex, batch, campaign_seed, now, question_and_ruling, slug};
 use crate::daemon::Daemon;
-use crate::desk_door::{DeskDoor, Served, answer_desk_message, bind_desk, desk_registry, serve_connection};
+use crate::desk_door::{DESK_CONNECTION_DEADLINE, DeskDoor, Served, answer_desk_message, bind_desk, desk_registry, serve_connection};
 use crate::index::Backoff;
 use crate::serve::{Options, ServeOptions, bind, parse_options, run, schema_registry, startup};
 
@@ -342,17 +342,12 @@ mod door_smoke {
     fn a_counted_answer_over_the_socket_reads_back() {
         assert_ne!(my_uid(), 0, "the door refuses uid 0, so these tests cannot run as root");
         let mut rig = rig(my_uid());
-        let hash = rig.hash.clone();
+        let (before, hash) = (rig.state(), rig.hash.clone());
         let response = rig.serving(|path| reply_of(path, "m-1", &answer("x", DeskAuthority::Operator, &["x", "y"], wire(&hash, R1))));
         let DeskResponse::Answered { answer, counted_answer_id, .. } = &response else { panic!("{response:?}") };
         assert_eq!((answer.outcome.as_str(), counted_answer_id.as_deref(), answer.authority), ("Counted", Some("n1"), DeskAuthority::Operator));
-        let seen = rig.index.seen.lock().unwrap().clone();
-        assert_eq!(seen.len(), 1, "the fresh answer reached the index once");
-        let stored = huginn_mind::eureka_pipeline::PipelineRef {
-            kind: huginn_mind::eureka_pipeline::PipelineKind::DeskAnswer,
-            id: short(&seen[0].0[0]),
-        };
-        assert!(rig.daemon.mind().view(&stored).unwrap().is_some(), "the ref the index was given is the stored answer");
+        assert_eq!(rig.state().0, before.0 + 1, "the answer is stored");
+        assert!(rig.index.seen.lock().unwrap().is_empty(), "a desk answer is not indexed");
     }
 
     /// A pass takes at most `DESK_ACCEPTS_PER_PASS` waiting connections and says how many it took.
@@ -676,7 +671,7 @@ mod door_smoke {
         let (_, response) = decode_desk_response(&replayed).unwrap();
         assert_eq!(counted(response.unwrap()).0, "n1", "the retry is answered with the stored answer");
         assert_eq!(rig.state(), first_state, "the retry stored nothing");
-        assert_eq!(rig.index.seen.lock().unwrap().len(), 1, "the search index holds the answer once");
+        assert!(rig.index.seen.lock().unwrap().is_empty(), "a desk answer is not indexed");
     }
 
     #[test]
@@ -773,6 +768,7 @@ mod door_smoke {
 // ---- the bounds, pinned as the numbers the spec states ----
 
 mod bounds {
+    use crate::desk_door::Deadlined;
     use cultnet_rs::{CultNetSchemaKind, CultNetSchemaRegistration, CultNetSchemaRegistry};
     use huginn_mind::desk_wire::DESK_MAX_RESPONSE_BYTES;
 
@@ -813,6 +809,25 @@ mod bounds {
                 std::thread::sleep(Duration::from_millis(300));
             }
         });
+    }
+
+    /// The write side of the deadline: a peer that stops reading is let go of at one second, the
+    /// socket's own send timeout reset to what is left before each write.
+    #[test]
+    fn a_peer_that_never_reads_is_cut_off_at_one_second() {
+        let (_peer, server) = UnixStream::pair().unwrap();
+        let mut stream = Deadlined::new(server, DESK_CONNECTION_DEADLINE);
+        let (chunk, started) = (vec![0_u8; 64 * 1024], Instant::now());
+        let error = loop {
+            if let Err(error) = stream.write(&chunk) {
+                break error;
+            }
+        };
+        let took = started.elapsed();
+        // The kernel's send timeout reads as WouldBlock; the deadline already spent reads as TimedOut.
+        assert!(matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut), "{error:?}");
+        assert!(took >= Duration::from_millis(1000) && took < Duration::from_millis(1250), "the write was cut after {took:?}");
+        assert_eq!(stream.write(&chunk).unwrap_err().kind(), std::io::ErrorKind::TimedOut, "once spent, nothing more is written");
     }
 
     /// A catalog is a reply like any other and is measured against the response bound: one that
