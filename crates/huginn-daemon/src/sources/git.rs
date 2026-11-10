@@ -24,13 +24,26 @@ const SKIPPED_NAMES: &[&str] = &["package-lock.json", "pnpm-lock.yaml", "yarn.lo
 
 const LFS_POINTER: &[u8] = b"version https://git-lfs.github.com/spec/v1";
 
+/// Directories of editor settings and generated packets, not the repo's own
+/// writing: a path with one of these as a component is not indexed.
+const SKIPPED_DIRECTORIES: &[&str] = &[".obsidian", ".voidbot"];
+
+/// Licence texts, whatever their extension: they crowd out a front page.
+const SKIPPED_STEMS: &[&str] = &["license", "licence", "copying"];
+
 /// Whether a path is not worth reading, by name alone.
 pub fn skipped_path(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let mut components = path.split('/');
+    let name = components.next_back().unwrap_or(path).to_ascii_lowercase();
+    if components.any(|directory| SKIPPED_DIRECTORIES.contains(&directory.to_ascii_lowercase().as_str())) {
+        return true;
+    }
     if SKIPPED_NAMES.contains(&name.as_str()) {
         return true;
     }
-    name.rsplit_once('.').is_some_and(|(_, extension)| SKIPPED_EXTENSIONS.contains(&extension))
+    let stem = name.split('.').next().unwrap_or("");
+    let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
+    SKIPPED_STEMS.contains(&stem) || extension == "provenance" || SKIPPED_EXTENSIONS.contains(&extension)
 }
 
 /// The text of a blob worth indexing, or `None`: a NUL byte, bytes that are
@@ -186,10 +199,13 @@ mod tests {
 
     #[test]
     fn binary_unity_and_lock_paths_are_skipped_by_name_and_source_is_not() {
-        for path in ["a.png", "dir/B.PNG", "x.lock", "Assets/a.prefab", "Assets/a.unity", "a.cs.meta", "p/package-lock.json", "Cargo.lock"] {
+        for path in ["a.png", "dir/B.PNG", "x.lock", "Assets/a.prefab", "Assets/a.unity", "a.cs.meta", "p/package-lock.json", "Cargo.lock",
+            ".obsidian/app.json", "vault/.obsidian/appearance.json", ".voidbot/packets/a.json", "LICENSE", "LICENSE.md", "sub/licence.txt", "COPYING",
+            "bundle.provenance", "x/bundle.provenance"] {
             assert!(skipped_path(path), "{path}");
         }
-        for path in ["src/main.rs", "README.md", "docs/lock.md", "Assets/Scripts/Player.cs", "Makefile", ".gitignore", "locksmith"] {
+        for path in ["src/main.rs", "README.md", "docs/lock.md", "Assets/Scripts/Player.cs", "Makefile", ".gitignore", "locksmith",
+            "docs/x.md", "src/obsidian_notes.rs", "docs/licensing.md", "docs/obsidian/notes.md", "provenance.md"] {
             assert!(!skipped_path(path), "{path}");
         }
     }
