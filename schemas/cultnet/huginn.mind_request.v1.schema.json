@@ -2788,9 +2788,13 @@
       "maxLength": 64
     },
     "SourceQuery": {
-      "description": "A source search: the text to find chunks near, how many, and optionally the\none forge repo (by name) to look in.",
+      "description": "A source search: the text to find chunks near, how many, optionally the\none forge repo (by name) to look in, and whether to look only in repos'\nfront-page files (`FRONT_PAGE_FILES` at the repo root). An old client's\nrequest has no `front` and means false.",
       "type": "object",
       "properties": {
+        "front": {
+          "type": "boolean",
+          "default": false
+        },
         "repo": {
           "anyOf": [
             {

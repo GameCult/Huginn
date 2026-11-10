@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
-use crate::sources::{COLLECTION, DescribedSources, SourceIndex, SourcePayload, SourcePoint, SourceRow, SourcesMeta};
+use crate::sources::{COLLECTION, FRONT_PAGE_FILES, DescribedSources, SourceIndex, SourcePayload, SourcePoint, SourceRow, SourcesMeta};
 
 use super::{CollectionMeta, INDEX_CALL_TIMEOUT, Described, Hit, Http, Method, Point, VectorIndex};
 
@@ -175,6 +175,19 @@ impl VectorIndex for QdrantIndex {
     }
 }
 
+/// The payload filter of a source search: the repo, and the front-page paths
+/// (exact matches on the keyword-indexed `path`), both when both are asked.
+fn source_filter(repo: Option<&str>, front: bool) -> Option<Value> {
+    let mut must = Vec::new();
+    if let Some(repo) = repo {
+        must.push(json!({ "key": "repo", "match": { "value": repo } }));
+    }
+    if front {
+        must.push(json!({ "key": "path", "match": { "any": FRONT_PAGE_FILES } }));
+    }
+    (!must.is_empty()).then(|| json!({ "must": must }))
+}
+
 fn payload_json(payload: &SourcePayload) -> Value {
     json!({
         "repo": payload.repo,
@@ -298,12 +311,12 @@ impl SourceIndex for QdrantIndex {
         Ok(())
     }
 
-    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, limit: u32, within: Duration) -> Result<Vec<SourceRow>> {
+    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, front: bool, limit: u32, within: Duration) -> Result<Vec<SourceRow>> {
         let collection = self.sources.clone();
         let http = self.http.bounded(within);
         let mut body = json!({ "vector": vector, "limit": limit, "with_payload": true, "with_vector": false });
-        if let Some(repo) = repo {
-            body["filter"] = json!({ "must": [{ "key": "repo", "match": { "value": repo } }] });
+        if let Some(filter) = source_filter(repo, front) {
+            body["filter"] = filter;
         }
         let (_, answer) =
             self.ask_with(&http, Method::Post, &format!("/collections/{collection}/points/search"), Some(&body), &[200])?;
@@ -317,5 +330,39 @@ impl SourceIndex for QdrantIndex {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod source_filter_tests {
+    use super::*;
+
+    /// No ask, no filter; a repo alone is the repo's match.
+    #[test]
+    fn no_ask_is_no_filter_and_a_repo_is_its_own_match() {
+        assert_eq!(source_filter(None, false), None);
+        assert_eq!(source_filter(Some("Huginn"), false), Some(json!({ "must": [{ "key": "repo", "match": { "value": "Huginn" } }] })));
+    }
+
+    /// The front filter matches the path against exactly the front-page files
+    /// and nothing else, and composes with the repo: both conditions must hold.
+    #[test]
+    fn the_front_filter_is_exactly_the_front_files_and_composes_with_the_repo() {
+        let any = |filter: &Value| -> Vec<String> {
+            let conditions = filter["must"].as_array().unwrap();
+            let path: Vec<&Value> = conditions.iter().filter(|c| c["key"] == "path").collect();
+            assert_eq!(path.len(), 1);
+            path[0]["match"]["any"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_owned()).collect()
+        };
+        let front = source_filter(None, true).unwrap();
+        assert_eq!(any(&front), ["README.md", "README", "readme.md", "README.markdown", "CLAUDE.md", "AGENTS.md"]);
+        assert_eq!(front["must"].as_array().unwrap().len(), 1, "no repo condition when none was asked");
+
+        let both = source_filter(Some("Zyphos"), true).unwrap();
+        assert_eq!(any(&both), any(&front));
+        let repos: Vec<&Value> = both["must"].as_array().unwrap().iter().filter(|c| c["key"] == "repo").collect();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0]["match"]["value"], "Zyphos");
+        assert_eq!(both["must"].as_array().unwrap().len(), 2);
     }
 }

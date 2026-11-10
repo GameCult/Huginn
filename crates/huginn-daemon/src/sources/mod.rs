@@ -38,6 +38,10 @@ use git::{BLOB_BYTES_MAX, Mirror, TreeFile};
 /// The collection this organ's source index lives in.
 pub const COLLECTION: &str = "huginn_sources";
 
+/// The paths, exactly and at a repo's root, that are its front page: what an
+/// agent reads first to learn what the repo is. The only owner of the list.
+pub const FRONT_PAGE_FILES: [&str; 6] = ["README.md", "README", "readme.md", "README.markdown", "CLAUDE.md", "AGENTS.md"];
+
 /// What the collection says its corpus is.
 pub const CORPUS: &str = "forge:GameCult";
 
@@ -121,8 +125,9 @@ pub trait SourceIndex {
     fn delete_by(&mut self, repo: &str, paths: Option<&[String]>, keeping: Option<&str>) -> Result<()>;
     /// Writes chunks, acknowledged before it returns.
     fn upsert_sources(&mut self, points: &[SourcePoint]) -> Result<()>;
-    /// The `limit` nearest chunks, best first, in `repo` alone when given.
-    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, limit: u32, within: Duration) -> Result<Vec<SourceRow>>;
+    /// The `limit` nearest chunks, best first, in `repo` alone when given, and
+    /// among the `FRONT_PAGE_FILES` alone when `front`.
+    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, front: bool, limit: u32, within: Duration) -> Result<Vec<SourceRow>>;
 }
 
 /// A repo the forge lists as indexable.
@@ -459,7 +464,7 @@ pub fn search<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, quer
     ensure!(vectors.len() == 1, "the embedder returned {} vectors for one query", vectors.len());
     let vector = vectors.remove(0);
     ensure!(vector.len() == identity.dimensions as usize, "the embedder returned a query vector of {} where the collection holds {}", vector.len(), identity.dimensions);
-    let rows = index.search_sources(&vector, query.repo.as_ref().map(|repo| repo.0.as_str()), query.top_k, budget.left()?)?;
+    let rows = index.search_sources(&vector, query.repo.as_ref().map(|repo| repo.0.as_str()), query.front, query.top_k, budget.left()?)?;
     Ok(SourceHits {
         indexed_under: SourceModel { name: built.model, digest: built.model_digest },
         hits: rows

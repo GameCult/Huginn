@@ -181,13 +181,17 @@ pub struct RepoMoved {
 /// The most hits a source search answers.
 pub const SOURCE_TOP_K_MAX: u32 = 50;
 
-/// A source search: the text to find chunks near, how many, and optionally the
-/// one forge repo (by name) to look in.
+/// A source search: the text to find chunks near, how many, optionally the
+/// one forge repo (by name) to look in, and whether to look only in repos'
+/// front-page files (`FRONT_PAGE_FILES` at the repo root). An old client's
+/// request has no `front` and means false.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SourceQuery {
     pub text: Line,
     pub top_k: u32,
     pub repo: Option<Short>,
+    #[serde(default)]
+    pub front: bool,
 }
 
 impl SourceQuery {
@@ -415,7 +419,7 @@ mod tests {
             },
             HuginnMindRequest::SearchSources {
                 instance: slug(INSTANCE),
-                query: SourceQuery { text: Line("reconcile".into()), top_k: 5, repo: Some(Short("Huginn".into())) },
+                query: SourceQuery { text: Line("reconcile".into()), top_k: 5, repo: Some(Short("Huginn".into())), front: true },
             },
             HuginnMindRequest::RootsTouched { instance: slug(INSTANCE) },
         ]
@@ -516,6 +520,7 @@ mod tests {
             text: Line(text.into()),
             top_k,
             repo: repo.map(|repo| Short(repo.into())),
+            front: false,
         };
         let field = |query: SourceQuery| match query.check() {
             Err(MindRefusal::SelectionInvalid { field, .. }) => field,
@@ -527,6 +532,21 @@ mod tests {
         assert_eq!(field(query("x", 0, None)), "top_k");
         assert_eq!(field(query("x", SOURCE_TOP_K_MAX + 1, None)), "top_k");
         assert_eq!(field(query("x", 5, Some(" "))), "repo");
+    }
+
+    /// An old client's search has no `front`: it decodes as the whole-index
+    /// search it asked for.
+    #[test]
+    fn a_source_query_encoded_without_front_decodes_as_false() {
+        #[derive(Serialize)]
+        struct OldQuery {
+            text: Line,
+            top_k: u32,
+            repo: Option<Short>,
+        }
+        let old = OldQuery { text: Line("x".into()), top_k: 3, repo: None };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        assert!(!rmp_serde::from_slice::<SourceQuery>(&bytes).unwrap().front);
     }
 
     /// A new client reads an old daemon's page: the five fields it had, no

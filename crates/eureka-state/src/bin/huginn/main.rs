@@ -104,6 +104,10 @@ enum Command {
         /// Look in this repo alone (its forge name).
         #[arg(long)]
         repo: Option<String>,
+        /// Look only in repos' front-page files (README.md, README, readme.md,
+        /// README.markdown, CLAUDE.md, AGENTS.md at the repo root).
+        #[arg(long)]
+        front: bool,
         /// How many chunks (default 10, at most 50).
         #[arg(long)]
         top_k: Option<u32>,
@@ -273,9 +277,10 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
         Command::Sources {
             text,
             repo,
+            front,
             top_k,
             json,
-        } => sources(settings, text, repo, top_k, json),
+        } => sources(settings, text, repo, front, top_k, json),
         Command::Recipe(Recipe::Blocked { spec_id, page }) => {
             blocked(settings, &spec_id, page.cursor, page.documents)
         }
@@ -434,6 +439,7 @@ fn sources(
     settings: &Settings,
     text: String,
     repo: Option<String>,
+    front: bool,
     top_k: Option<u32>,
     json: bool,
 ) -> Result<u8, Trouble> {
@@ -441,6 +447,7 @@ fn sources(
         text: Line(text),
         top_k: top_k.unwrap_or(DEFAULT_TOP_K),
         repo: repo.map(Short),
+        front,
     };
     match settings.ask(|instance| HuginnMindRequest::SearchSources {
         instance: instance.clone(),
