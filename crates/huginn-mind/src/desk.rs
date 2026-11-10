@@ -932,7 +932,7 @@ mod tests {
         assert_eq!(counted(&mind, FORK), Some(answer));
     }
 
-    /// Libby's vectors (CultLib 8ca1d184, `contracts/cultnet/governance/fork-card-vectors.json`, the `optionsHash` array):
+    /// Libby's vectors (CultLib 6231ecad, `contracts/cultnet/governance/fork-card-vectors.json`, the `optionsHash` array):
     /// the seven of the binding file, A to G, and the eight she adds. Each is recomputed from its shown members.
     fn vectors() -> Vec<serde_json::Value> {
         let file: serde_json::Value = serde_json::from_str(include_str!("../vectors/fork-card-vectors.json")).unwrap();
@@ -1336,6 +1336,42 @@ mod tests {
     }
 
     /// The digest form is frozen: a fixed request digests to a fixed hex, computed outside this code.
+    /// Every `bodyDigests` golden of Libby's file that the frozen form still reproduces: the two plain
+    /// forms and the five whose illegal form carries `retracted`. Two older illegal goldens (no flag)
+    /// are the form desk-digest-retracted replaced on purpose, and are not asserted.
+    #[test]
+    fn body_digests_match_the_vendored_goldens() {
+        let file: serde_json::Value = serde_json::from_str(include_str!("../vectors/fork-card-vectors.json")).unwrap();
+        let mut checked = 0;
+        for golden in file["bodyDigests"].as_array().unwrap() {
+            let input = &golden["input"];
+            let text = |name: &str| input[name].as_str().map(s);
+            let body = match (input["illegal_retraction"].as_bool(), input["retracted"].as_bool()) {
+                (Some(true), None) => continue,
+                (Some(true), Some(retracted)) => DeskBody::IllegalRetraction {
+                    choice: text("choice"),
+                    note: input["note"].as_str().map(|note| Words(note.into())),
+                    retracts: text("retracts"),
+                    retracted,
+                },
+                _ => match text("retracts") {
+                    Some(retracts) => DeskBody::Retraction { retracts },
+                    None => DeskBody::Answer { choice: text("choice"), note: None },
+                },
+            };
+            let request = DeskAnswerRequest {
+                fork: text("fork").unwrap(),
+                options_hash: Sha256Hex(input["options_hash"].as_str().unwrap().into()),
+                body,
+                answered_at: text("answered_at").unwrap(),
+                request_id: RequestId(R1.into()),
+            };
+            assert_eq!(body_digest(&request).0, golden["sha256"].as_str().unwrap(), "{}", golden["name"]);
+            checked += 1;
+        }
+        assert_eq!(checked, 7);
+    }
+
     #[test]
     fn body_digest_is_pinned() {
         let request = |body: DeskBody| DeskAnswerRequest {
@@ -1360,6 +1396,9 @@ mod tests {
         assert_eq!(carried.0, "935cab1a0ae34606b809d8ebca7cffa2889d20b3585d2622d32153a4d6898af1");
         assert_eq!(plain_with_target.0, "82b24cccb4ed2535a549f95f844fcd935074c3712b5b832f0b2cbd89c71fd9a6");
         assert_eq!(body_digest(&illegal(None, None, true)).0, "34ef86ed63b9318459965d4b85e794d2636ffc15736da866036b087c9c4a30eb");
+        assert_eq!(body_digest(&illegal(Some("A"), None, true)).0, "79eee623fd6712db6537a4867cedf54ca49ee4885416c2c8e4acec59f811b894");
+        // The legal retraction as the door spells its target (`.n<seq>`).
+        assert_eq!(body_digest(&request(DeskBody::Retraction { retracts: s("eureka-state:desk_answer:Q1.n1") })).0, "84576840247830b9b75754b460dc4ea52883ca1e410f9f011521e0f69b99eee1");
         assert_ne!(carried, plain_with_target);
         // The id is not part of the body; answered_at is.
         let mut other_id = answer.clone();

@@ -1,5 +1,5 @@
 //! The fork desk's answer wire, Huginn's half: Libby's answer-side documents
-//! (CultLib `contracts/cultnet/governance/`, the contract file and its vectors at 8ca1d184)
+//! (CultLib `contracts/cultnet/governance/`, the contract file and its vectors at 6231ecad)
 //! as Rust types, the one conversion between her `n<seq>` answer ids and the
 //! record keys, the projection of a stored answer, the refusal mapping and the
 //! showability predicate, and `Mind::desk_answer`, the one call that runs them in order.
@@ -362,7 +362,7 @@ mod tests {
     const LIST: [&str; 4] = ["x", "y", "z", "op"];
     const AT: &str = "2026-11-10T12:00:00Z";
 
-    // ---- Libby's vectors: CultLib 8ca1d184, `contracts/cultnet/governance/fork-card-vectors.json` ----
+    // ---- Libby's vectors: CultLib 6231ecad, `contracts/cultnet/governance/fork-card-vectors.json` ----
 
     fn vectors() -> Value {
         serde_json::from_str(include_str!("../vectors/fork-card-vectors.json")).unwrap()
@@ -993,18 +993,6 @@ mod tests {
     /// desk.rs's `answers_under_an_older_card_neither_count_nor_can_be_retracted`.
     const CHANGED_CARD: [&str; 2] = ["a_changed_card_stops_the_old_answers_counting_and_a_new_answer_is_counted", "a_changed_card_leaves_no_counted_answer_until_one_arrives"];
 
-    /// The scenarios whose refused retraction names a target in Libby's record as null and here as `n<seq>`.
-    const NAMED_TARGET: [&str; 8] = [
-        "V8_retraction_with_an_answer_is_bad",
-        "V8_retracts_on_a_plain_answer_is_bad",
-        "V8_retraction_naming_an_unknown_answer_is_bad",
-        "V8_retraction_naming_a_Refused_answer_is_bad",
-        "V8_retracting_twice_is_already_retracted",
-        "V8_retraction_under_a_stale_hash_is_stale_fork",
-        "V9_an_account_off_the_list_cannot_retract",
-        "V10a_a_ruling_that_closed_the_fork_makes_a_retraction_fork_closed",
-    ];
-
     /// The question a scenario's card shows, held as Q1.
     fn question_of(card: &Value) -> PipelineQuestion {
         let text = |value: &Value| value.as_str().unwrap().to_string();
@@ -1020,7 +1008,8 @@ mod tests {
     #[test]
     fn libby_scenarios_replay_through_desk_answer() {
         let file = vectors();
-        let (mut played, mut compared, mut refused_at_the_door, mut deviations, mut skipped) = (0, 0, 0, Vec::new(), Vec::new());
+        let (mut played, mut compared, mut refused_at_the_door, mut skipped) = (0, 0, 0, Vec::new());
+        let (mut with_count, mut with_target) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
         for scenario in file["scenarios"].as_array().unwrap() {
             let name = scenario["name"].as_str().unwrap();
             if CHANGED_CARD.contains(&name) {
@@ -1082,33 +1071,42 @@ mod tests {
                     assert_eq!(serde_json::to_value(not_stored(mine).code).unwrap(), code.unwrap(), "{name}");
                     continue;
                 }
-                let (mut mine, _, _) = answered(mine);
+                let (mut mine, mut counted, _) = answered(mine);
                 let mut hers: ForkDeskAnswer = serde_json::from_value(response["answer"].clone()).unwrap();
                 assert_eq!(ids.entry(hers.answer_id.clone()).or_insert_with(|| mine.answer_id.clone()), &mine.answer_id, "{name}: one answer, one id");
                 mine.fork_id = her_fork.into();
+                // Her ids to the Mind's, once; everything else is compared exactly: the refused target as
+                // `n<seq>` and the count derived at the response's head.
                 let through = |id: &mut Option<String>| *id = id.take().map(|id| ids.get(&id).cloned().unwrap_or(id));
+                let mut hers_counted = response["counted_answer_id"].as_str().map(str::to_string);
                 through(&mut hers.of);
                 through(&mut hers.retracts);
+                through(&mut hers_counted);
                 hers.answer_id = mine.answer_id.clone();
-                if hers.retracts.is_none() && mine.retracts.is_some() {
-                    deviations.push(name);
-                    mine.retracts = None;
+                assert_eq!(counted.take(), hers_counted, "{name}: counted_answer_id");
+                if hers_counted.is_some() {
+                    with_count.insert(name);
+                }
+                if mine.outcome == "Refused" && mine.retracts.is_some() {
+                    with_target.insert(name);
                 }
                 assert_eq!(mine, hers, "{name}");
                 assert_eq!(encode(&mine), encode(&hers), "{name}");
                 compared += 1;
             }
             let record = &scenario["record"];
+            // Where her fixture numbers its answers as the Mind's sequence does, the map is the identity.
+            let sequential = record["answers"].as_array().unwrap().iter().enumerate().all(|(at, answer)| answer["answer_id"] == format!("n{}", at + 1));
+            assert!(!sequential || ids.iter().all(|(hers, mine)| hers == mine), "{name}: {ids:?}");
             assert_eq!(stored_count(&mind, FORK), record["answers"].as_array().unwrap().len(), "{name}: the stored answers");
             let hers = record["counted_answer_id"].as_str().map(|id| ids.get(id).cloned().unwrap_or(id.to_string()));
             assert_eq!(counted_wire(&mind, FORK), hers, "{name}: the answer that counts");
         }
-        assert_eq!((played, skipped.len()), (53, 2));
+        assert_eq!((played, skipped.len()), (61, 2));
         assert_eq!(refused_at_the_door, 7);
-        assert_eq!(compared, 71);
-        let mut named: Vec<&str> = deviations.clone();
-        named.dedup();
-        assert_eq!(named, NAMED_TARGET);
+        assert_eq!(compared, 91);
+        // 43 replayed scenarios pin a non-null counted_answer_id on an answer; 12 pin a refused retraction's target as n<seq>.
+        assert_eq!((with_count.len(), with_target.len()), (43, 12));
     }
 
     #[test]
