@@ -262,6 +262,26 @@
       "schemaVersion": "huginn.mind_response.v1",
       "title": "Huginn mind response",
       "path": "huginn.mind_response.v1.schema.json"
+    },
+    {
+      "schemaId": "huginn.desk_request.v1",
+      "kind": "wire_message",
+      "wireContracts": [
+        "cultnet.schema.v0"
+      ],
+      "schemaVersion": "huginn.desk_request.v1",
+      "title": "Huginn desk request",
+      "path": "huginn.desk_request.v1.schema.json"
+    },
+    {
+      "schemaId": "huginn.desk_response.v1",
+      "kind": "wire_message",
+      "wireContracts": [
+        "cultnet.schema.v0"
+      ],
+      "schemaVersion": "huginn.desk_response.v1",
+      "title": "Huginn desk response",
+      "path": "huginn.desk_response.v1.schema.json"
     }
   ]
 }

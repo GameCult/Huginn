@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeskRequest",
+  "description": "Every request the desk door answers. The fields are the wire names: the `mind` addressed\n(the persona and pipeline requests say `instance`; the sets are separate), the verified\n`subject` and `authority` Bifrost vouches for (door context, never body fields), and the\n`deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside the set refuses\nthe whole payload. The reads answer in follow-up desk-wire-reads.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "Answer": {
+          "type": "object",
+          "properties": {
+            "authority": {
+              "$ref": "#/$defs/DeskAuthority"
+            },
+            "deciders": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Short"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "mind": {
+              "$ref": "#/$defs/Slug"
+            },
+            "request": {
+              "$ref": "#/$defs/ForkAnswerRequest"
+            },
+            "subject": {
+              "$ref": "#/$defs/Short"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mind",
+            "subject",
+            "authority",
+            "deciders",
+            "request"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Answer"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Forks": {
+          "type": "object",
+          "properties": {
+            "deciders": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Short"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "mind": {
+              "$ref": "#/$defs/Slug"
+            },
+            "subject": {
+              "$ref": "#/$defs/Short"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mind",
+            "subject",
+            "deciders"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Forks"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Fork": {
+          "type": "object",
+          "properties": {
+            "deciders": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Short"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "fork_id": {
+              "type": "string"
+            },
+            "mind": {
+              "$ref": "#/$defs/Slug"
+            },
+            "subject": {
+              "$ref": "#/$defs/Short"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mind",
+            "subject",
+            "deciders",
+            "fork_id"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Fork"
+      ]
+    }
+  ],
+  "$defs": {
+    "DeskAuthority": {
+      "type": "string",
+      "enum": [
+        "Operator",
+        "Steward",
+        "Member"
+      ]
+    },
+    "ForkAnswerRequest": {
+      "description": "`gamecult.fork.answer_request.v0`: closed, her field order. The wire types hold text; the\nshape step of `Mind::answer_desk` judges it. The subject and the authority are the\ndoor's context and are no field here.",
+      "type": "object",
+      "properties": {
+        "answer": {
+          "description": "The person's words: a choice, a note, or both.",
+          "type": "object",
+          "properties": {
+            "choice": {
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "choice",
+            "note"
+          ]
+        },
+        "answered_at": {
+          "type": "string"
+        },
+        "fork_id": {
+          "type": "string"
+        },
+        "options_hash": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "retracted": {
+          "type": "boolean"
+        },
+        "retracts": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/RequestSchema"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "fork_id",
+        "options_hash",
+        "answer",
+        "retracted",
+        "retracts",
+        "answered_at",
+        "request_id"
+      ]
+    },
+    "RequestSchema": {
+      "description": "The request document's schema id; any other value fails to decode.",
+      "type": "string",
+      "enum": [
+        "gamecult.fork.answer_request.v0"
+      ]
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "type": "string",
+      "maxLength": 200
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "type": "string",
+      "maxLength": 64
+    }
+  }
+}
