@@ -1309,6 +1309,11 @@ mod tests {
             // Where her fixture numbers its answers as the Mind's sequence does, the map is the identity.
             let sequential = record["answers"].as_array().unwrap().iter().enumerate().all(|(at, answer)| answer["answer_id"] == format!("n{}", at + 1));
             assert!(!sequential || ids.iter().all(|(hers, mine)| hers == mine), "{name}: {ids:?}");
+            // And the map is one-to-one in every scenario, sequential or not: two of her answers never share one of the Mind's.
+            let mut mine: Vec<&String> = ids.values().collect();
+            mine.sort();
+            mine.dedup();
+            assert_eq!(mine.len(), ids.len(), "{name}: two answers share an id: {ids:?}");
             assert_eq!(stored_count(&mind, FORK), record["answers"].as_array().unwrap().len(), "{name}: the stored answers");
             let hers = record["counted_answer_id"].as_str().map(|id| ids.get(id).cloned().unwrap_or(id.to_string()));
             assert_eq!(counted_wire(&mind, FORK), hers, "{name}: the answer that counts");
