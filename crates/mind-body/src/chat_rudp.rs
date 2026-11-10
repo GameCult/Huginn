@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::chat_client::{
-    ACK, Chat, ChatAck, ChatDelivery, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
+    ACK, Chat, ChatAck, ChatDelivery, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, MouthRefused, Refusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
     SEND_REQUEST, decode, encode,
 };
 
@@ -92,14 +92,14 @@ impl RudpChat {
         Ok(Link { transport, runtime_id })
     }
 
-    /// Puts one document and, when `answer` names a kind and record key, waits for
+    /// Puts one document and, when `answer` names (kind, record key) pairs, waits for
     /// the document the mouth answers it with. Documents of other kinds or keys
     /// (a late receipt of an earlier send) are skipped.
     ///
     /// A failed exchange drops the link: a restarted mouth silently ignores packets from a sender it has not connected, so a held link
     /// would time out on every call after it. The next call opens a fresh one. Nothing is repeated on it: the caller's request id is
     /// what makes a repeat of a send the same send.
-    fn exchange<T: Serialize>(&self, kind: &str, record_key: &str, document: &T, answer: Option<(&[&str], &str)>) -> Result<Option<(String, Vec<u8>)>> {
+    fn exchange<T: Serialize>(&self, kind: &str, record_key: &str, document: &T, answer: Option<&[(&str, &str)]>) -> Result<Option<(String, Vec<u8>)>> {
         let result = self.exchange_on_link(kind, record_key, document, answer);
         if result.is_err()
             && let Some(mut link) = self.link.borrow_mut().take()
@@ -109,7 +109,7 @@ impl RudpChat {
         result
     }
 
-    fn exchange_on_link<T: Serialize>(&self, kind: &str, record_key: &str, document: &T, answer: Option<(&[&str], &str)>) -> Result<Option<(String, Vec<u8>)>> {
+    fn exchange_on_link<T: Serialize>(&self, kind: &str, record_key: &str, document: &T, answer: Option<&[(&str, &str)]>) -> Result<Option<(String, Vec<u8>)>> {
         let mut slot = self.link.borrow_mut();
         if slot.is_none() {
             *slot = Some(self.open()?);
@@ -131,7 +131,7 @@ impl RudpChat {
         };
         link.transport.send_schema_message(&message)?;
         let deadline = Instant::now() + self.reply_timeout;
-        let Some((answer_kinds, answer_key)) = answer else {
+        let Some(answers) = answer else {
             // Nothing is answered; the ack is done when the mouth has the packet.
             let left = deadline.saturating_duration_since(Instant::now());
             link.transport.flush_reliable(left)?;
@@ -144,7 +144,7 @@ impl RudpChat {
             link.transport.poll_resends()?;
             if let Some(CultNetMessage::DocumentPutRaw { document, .. }) = link.transport.receive_schema_message_once()? {
                 let tagged = document.tags.as_deref() == Some(&[TAG.to_string()][..]);
-                if tagged && answer_kinds.contains(&document.schema_id.as_str()) && document.record_key == answer_key {
+                if tagged && answers.contains(&(document.schema_id.as_str(), document.record_key.as_str())) {
                     return Ok(Some((document.schema_id, document.payload)));
                 }
             }
@@ -152,7 +152,7 @@ impl RudpChat {
     }
 
     fn call<Q: Serialize, A: DeserializeOwned>(&self, kind: &str, key: &str, request: &Q, answer: (&str, &str)) -> Result<A> {
-        let (_, payload) = self.exchange(kind, key, request, Some((&[answer.0][..], answer.1)))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        let (_, payload) = self.exchange(kind, key, request, Some(&[answer]))?.ok_or_else(|| anyhow!("no answer payload"))?;
         decode(&payload)
     }
 }
@@ -160,8 +160,8 @@ impl RudpChat {
 impl Chat for RudpChat {
     fn pending(&self, after_seq: u64) -> Result<Vec<ChatDelivery>> {
         let request = ChatPendingRequest { persona: self.persona.clone(), after_seq };
-        let kinds: &[&str] = &[PENDING, PENDING_V1, REFUSAL];
-        let (kind, payload) = self.exchange(PENDING_REQUEST, &self.persona, &request, Some((kinds, self.persona.as_str())))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        let p = self.persona.as_str();
+        let (kind, payload) = self.exchange(PENDING_REQUEST, p, &request, Some(&[(PENDING, p), (PENDING_V1, p), (REFUSAL, p)]))?.ok_or_else(|| anyhow!("no answer payload"))?;
         if kind == REFUSAL {
             let refusal: ChatRefusal = decode(&payload)?;
             bail!("the mouth refused the pending request: {}", refusal.refusal.name());
@@ -182,7 +182,19 @@ impl Chat for RudpChat {
     }
 
     fn open_direct(&self, request: &ChatOpenDirectRequest) -> Result<ChatOpenDirectReceipt> {
-        let receipt: ChatOpenDirectReceipt = self.call(OPEN_DIRECT_REQUEST, &request.request_id, request, (OPEN_DIRECT_RECEIPT, &request.request_id))?;
+        // A mouth that does not serve the kind answers with a refusal keyed by the persona, not by the request: heard here,
+        // it ends the wait, and the open is known not to have been sent.
+        let p = self.persona.as_str();
+        let answers = [(OPEN_DIRECT_RECEIPT, request.request_id.as_str()), (REFUSAL, p)];
+        let (kind, payload) = self.exchange(OPEN_DIRECT_REQUEST, &request.request_id, request, Some(&answers))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        if kind == REFUSAL {
+            let refusal: ChatRefusal = decode(&payload)?;
+            if refusal.persona != self.persona || refusal.refusal != Refusal::UnknownKind {
+                bail!("the mouth refused the open: {}", refusal.refusal.name());
+            }
+            return Err(MouthRefused(refusal.refusal).into());
+        }
+        let receipt: ChatOpenDirectReceipt = decode(&payload)?;
         if receipt.request_id != request.request_id {
             bail!("the mouth answered another open");
         }

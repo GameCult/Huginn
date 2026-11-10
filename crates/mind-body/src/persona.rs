@@ -86,7 +86,7 @@ use uuid::Uuid;
 
 use crate::address::{Addressee, Name, addresses, localpart, project_names};
 use crate::chat_image::{self, Image, MAX_PER_LINE};
-use crate::chat_client::{Chat, ChatDelivery, ChatOpenDirectRequest, ChatRead, DirectOutcome, ChatSendRequest, ContextLine, Refusal, SendBasis};
+use crate::chat_client::{Chat, ChatDelivery, MouthRefused, ChatOpenDirectRequest, ChatRead, DirectOutcome, ChatSendRequest, ContextLine, Refusal, SendBasis};
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
 use crate::heartbeat::{HeartbeatView, PollTrace};
@@ -413,6 +413,12 @@ fn start_in_bounds(ask: &StartSelfRun) -> bool {
     (1..=BRIEF_MAX_CHARS).contains(&ask.brief.chars().count()) && repo_in_bounds(&ask.repo) && campaign_in_bounds(&ask.campaign)
 }
 
+/// The `open_direct` field's description: the base text with the mouth's creation policy before the closing line.
+fn open_direct_description() -> String {
+    let (ask, tail) = OPEN_DIRECT_BASE.split_once(" Their replies").expect("the base names the reply channel");
+    format!("{ask} {OPEN_DAILY_POLICY} Their replies{tail}")
+}
+
 /// The JSON Schema every result of a process is constrained to: one per process, with the room
 /// enum from the process's conversation and the campaign enum from the mind's campaigns in force
 /// (none in force: `start_self_run` can only be null). The people she may name and the open items
@@ -422,7 +428,11 @@ const REMEMBER_DESCRIPTION: &str = "What you must still know when this conversat
 const INTENT_DESCRIPTION: &str = "Write this first. What you are going after right now in what you steward, and what this reply does about it. Name the thing: a repo, a run, a commitment, a person, an idea. Waiting is an answer only when you name whose decision you wait on, why it is theirs and not yours, and what this turn does toward it. If you have already asked and nothing more can be done, say so and name the next thing.";
 const INTENT_MAX_CHARS: usize = 600;
 const SETTLE_DESCRIPTION: &str = "Close an open item shown under 'You committed to' or 'Asked of you, not yet taken on' in this session: done when you have done it, declined when you will not (a commitment you let go: tell whoever holds the other parts), wrong when it was a mistake. Item is the id shown there. Leave empty when you close none.";
-const OPEN_DIRECT_DESCRIPTION: &str = "Ask one person to talk with you in a direct message, or null. Only a public conversation may; `with` is an id copied exactly from the people this session showed you, never a Mind and never yourself. `text` is the invitation: the person sees it as the reason before they accept, and it is the first line of the conversation, so say who you are and why you ask. The invitation is the ask: they accept or decline. A decline stands until they write to you first, so do not ask again. The mouth allows one new conversation with a person a day. Their replies reach you in the direct message, not here.";
+/// The mouth's creation policy as this side states it to the Mind, in the schema and in the DailyLimit notice. The mouth (Bifrost
+/// `openDirectNow`) is the authority and answers `DailyLimit`; this is a display copy with no channel from the mouth. If the mouth's
+/// policy changes, change this text with it.
+const OPEN_DAILY_POLICY: &str = "The mouth allows one new conversation with a person a day.";
+const OPEN_DIRECT_BASE: &str = "Ask one person to talk with you in a direct message, or null. Only a public conversation may; `with` is an id copied exactly from the people this session showed you, never a Mind and never yourself. `text` is the invitation: the person sees it as the reason before they accept, and it is the first line of the conversation, so say who you are and why you ask. The invitation is the ask: they accept or decline. A decline stands until they write to you first, so do not ask again. Their replies reach you in the direct message, not here.";
 const START_SELF_RUN_DESCRIPTION: &str = "A brief for your Self: it reaches your live Self within a minute, or starts one. It is also how you answer a `reply` line; your Self's replies to your briefs come back as `reply` lines.";
 const FOR_ITEM_DESCRIPTION: &str = "The open commitment or ask this Self run answers: null, an open item id shown in this session, or new:<i> for remember[i] (sort Asked or Committed) written in this same reply. An item taken on leaves the open lists.";
 
@@ -491,7 +501,7 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String], may_open: bool) -> S
                 {
                     "type": "object",
                     "additionalProperties": false,
-                    "description": OPEN_DIRECT_DESCRIPTION,
+                    "description": open_direct_description(),
                     "required": ["with", "text"],
                     "properties": { "with": { "type": "string" }, "text": { "type": "string", "minLength": 1 } }
                 }
@@ -1921,9 +1931,13 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
         let request_id = if finality.revised { format!("{batch_id}-r{turn}-d") } else { format!("{batch_id}-d") };
         let request = ChatOpenDirectRequest { request_id, persona: instance.0.clone(), user_id: ask.with.clone(), text: ask.text.clone() };
         // A refusal and a transport fault are told, never a failed step: the memories and settles of this reply still land.
-        let outcome = organs.chat.open_direct(&request).ok().map(|receipt| receipt.outcome);
-        outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("open_direct {}: {}", ask.with, outcome.map_or("unanswered", DirectOutcome::name)) });
-        notice = Some(organ_notice(unix_ms(organs.clock.now()), &open_told(&ask.with, outcome)));
+        let answer = organs.chat.open_direct(&request);
+        // A mouth that refused the kind outright did nothing; a silent one may have.
+        let unserved = answer.as_ref().err().and_then(|error| error.downcast_ref::<MouthRefused>()).map(|refused| refused.0.name());
+        let outcome = answer.ok().map(|receipt| receipt.outcome);
+        outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("open_direct {}: {}", ask.with, unserved.or(outcome.map(DirectOutcome::name)).unwrap_or("unanswered")) });
+        let told = if unserved.is_some() { format!("Your invitation to {} was not sent: the mouth does not serve invitations yet.", ask.with) } else { open_told(&ask.with, outcome) };
+        notice = Some(organ_notice(unix_ms(organs.clock.now()), &told));
     }
     // The one origin of this turn: its memories and its brief record the same conversation.
     let origin = origin_of(config, batch, &inbox.origin);
@@ -2903,7 +2917,7 @@ fn open_told(with: &str, outcome: Option<DirectOutcome>) -> String {
         Some(D::NoSuchUser) => format!("The mouth knows no such user as {with}."),
         Some(D::InvitePending) => format!("{with} has not answered your earlier invitation; it stays open. Do not send another."),
         Some(D::Declined) => format!("{with} declined your invitation or left that conversation. That stands until they write to you first; do not ask again."),
-        Some(D::DailyLimit) => format!("The mouth allows one new conversation with a person a day, and you opened one with {with} today. Try again tomorrow if it still matters, or wait for them to write."),
+        Some(D::DailyLimit) => format!("{OPEN_DAILY_POLICY} You opened one with {with} today. Try again tomorrow if it still matters, or wait for them to write."),
         Some(refused @ (D::PersonaMismatch | D::UnknownPersona | D::EmptyText | D::SendFailed)) => format!("Your invitation to {with} was not sent: the mouth refused it ({}).", refused.name()),
         None => format!("The mouth did not answer your invitation to {with}, so it may or may not have gone out. Do not repeat it unless they stay silent."),
     }
