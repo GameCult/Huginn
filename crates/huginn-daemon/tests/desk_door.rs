@@ -351,3 +351,162 @@ fn namespace_root_is_seen_as_the_real_uid() {
     assert!(text.contains(&format!("desk door refused a peer with uid {mine} (expects {})", mine + 1)), "{text}");
     assert!(!text.contains("refused a peer with uid 0"), "the door never sees namespace root as 0:\n{text}");
 }
+
+// ---- the loop's bounds, from the built binary and from run() in process ----
+
+fn setup() -> (tempfile::TempDir, tempfile::TempDir, String, PathBuf, PathBuf) {
+    let (root, run) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let hash = seed(root.path());
+    let (desk, log) = (run.path().join("desk.sock"), run.path().join("daemon.log"));
+    (root, run, hash, desk, log)
+}
+
+/// A peer that sends a valid frame one byte per 300 ms: inside any per-read timeout, so only a
+/// per-connection deadline cuts it off. Returns when the door has closed on it, with the bytes sent.
+fn drip(desk: &Path, hash: &str) -> std::thread::JoinHandle<(usize, Duration)> {
+    let (desk, bytes) = (desk.to_path_buf(), desk_bytes("m-1", &answer("x", hash, R1)));
+    std::thread::spawn(move || {
+        let mut stream = UnixStream::connect(&desk).unwrap();
+        let started = Instant::now();
+        let mut sent = 0;
+        for byte in bytes.iter().take(60) {
+            if stream.write_all(&[*byte]).is_err() {
+                break;
+            }
+            sent += 1;
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        (sent, started.elapsed())
+    })
+}
+
+/// The bound the door states for one connection is one second, so a dripping peer neither delays
+/// another door's answer nor a stop beyond it (the sum is checked with the margin a loaded host needs).
+#[test]
+fn a_dripping_peer_does_not_delay_the_rudp_door() {
+    let (root, _run, hash, desk, log) = setup();
+    let daemon = spawn(root.path(), &desk, my_uid(), &log);
+    let dripper = drip(&desk, &hash);
+    std::thread::sleep(Duration::from_millis(400));
+    let asked = Instant::now();
+    assert!(daemon.documents() > 0);
+    assert!(asked.elapsed() < Duration::from_millis(2500), "the RUDP whoami waited {:?} behind a drip", asked.elapsed());
+    let (sent, lasted) = dripper.join().unwrap();
+    assert!(lasted < Duration::from_millis(1800), "the drip was held for {lasted:?} ({sent} bytes), not cut at one second");
+}
+
+#[test]
+fn a_dripping_peer_does_not_delay_a_stop() {
+    let (root, _run, hash, desk, log) = setup();
+    let mut daemon = spawn(root.path(), &desk, my_uid(), &log);
+    let dripper = drip(&desk, &hash);
+    std::thread::sleep(Duration::from_millis(300));
+    let signalled = Instant::now();
+    let status = Command::new("kill").args(["-TERM", &daemon.child.id().to_string()]).status().unwrap();
+    assert!(status.success());
+    while daemon.child.try_wait().unwrap().is_none() {
+        assert!(signalled.elapsed() < Duration::from_millis(2500), "the daemon was still held by a drip {:?} after SIGTERM", signalled.elapsed());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    dripper.join().unwrap();
+}
+
+fn ticks(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let rest = &stat[stat.rfind(')').unwrap() + 2..];
+    let fields: Vec<&str> = rest.split(' ').collect();
+    fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+}
+
+/// An idle daemon sleeps between passes: a loop that spins when nothing waits burns the core.
+#[test]
+fn an_idle_daemon_does_not_spin() {
+    let (root, _run, _hash, desk, log) = setup();
+    let mut daemon = spawn(root.path(), &desk, my_uid(), &log);
+    std::thread::sleep(Duration::from_millis(1500));
+    let before = ticks(daemon.child.id());
+    std::thread::sleep(Duration::from_secs(2));
+    let burned = ticks(daemon.child.id()) - before;
+    // 100 ticks a second: a spinning loop burns about 200 in two seconds, an idle one a handful.
+    assert!(burned < 30, "an idle daemon burned {burned} ticks in 2 s");
+    daemon.signal("TERM");
+}
+
+/// WouldBlock on an idle listener is not an error and is not logged; a real accept error is.
+#[test]
+fn an_idle_door_logs_no_accept_error_and_a_real_one_is_logged() {
+    let (root, _run, _hash, desk, log) = setup();
+    let mut daemon = spawn(root.path(), &desk, my_uid(), &log);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!daemon.log_text().contains("could not accept"), "an idle door logged:\n{}", daemon.log_text());
+    // An accept error: the daemon's soft fd limit is what it holds open, then a peer connects.
+    let pid = daemon.child.id();
+    let open = std::fs::read_dir(format!("/proc/{pid}/fd")).unwrap().count();
+    let limit = |soft: usize| {
+        let status = Command::new("prlimit").args([&format!("--pid={pid}"), &format!("--nofile={soft}:4096")]).status();
+        status.is_ok_and(|status| status.success())
+    };
+    if !limit(open) {
+        eprintln!("skipped: needs prlimit");
+        return;
+    }
+    let _peer = UnixStream::connect(&desk).unwrap();
+    let started = Instant::now();
+    while !daemon.log_text().contains("could not accept") && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    limit(1024);
+    assert!(daemon.log_text().contains("could not accept"), "an accept error went unlogged:\n{}", daemon.log_text());
+    daemon.signal("TERM");
+}
+
+/// A pass that served desk connections is followed at once by the next pass, not by the idle
+/// sleep: eight queued connections are answered in two passes of four, with no sleep between.
+#[test]
+fn a_busy_pass_is_not_followed_by_the_idle_sleep() {
+    use huginn_daemon::index::Backoff;
+    use huginn_daemon::index::ollama::pool;
+    use huginn_daemon::index::qdrant::QdrantIndex;
+    use huginn_daemon::serve::{ServeOptions, Started, parse_options, run, startup};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (root, _run, _hash, desk, _log) = setup();
+    let args = [
+        "--state-root", root.path().to_str().unwrap(), "--instance", INSTANCE, "--bind", &format!("127.0.0.1:{}", free_port()),
+        "--qdrant-url", "http://127.0.0.1:1", "--ollama-url", "http://127.0.0.1:1", "--embedding-model", "a-model",
+        "--desk-socket", desk.to_str().unwrap(), "--desk-peer-uid", &my_uid().to_string(),
+    ];
+    let options = parse_options(args.iter().map(|arg| arg.to_string())).unwrap();
+    let embedder = pool(&options.ollama_urls, &options.reserve_ollama_urls, &options.embedding_model);
+    let Started { mut daemon, mut hub, registry, desk: mut door } =
+        startup(&options, embedder, QdrantIndex::new(&options.qdrant_url), Backoff::default()).unwrap();
+    let stopping = Arc::new(AtomicBool::new(false));
+    let loop_stopping = Arc::clone(&stopping);
+    let serving = std::thread::spawn(move || {
+        let serve = ServeOptions { idle_sleep: Duration::from_millis(600), ..ServeOptions::default() };
+        run(&mut daemon, &mut hub, &registry, door.as_mut(), &loop_stopping, &serve)
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let frame = framed(&catalog_request());
+    let mut peers: Vec<UnixStream> = (0..8)
+        .map(|_| {
+            let mut peer = UnixStream::connect(&desk).unwrap();
+            peer.write_all(&frame).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            peer
+        })
+        .collect();
+    let started = Instant::now();
+    let answered: Vec<Duration> = peers
+        .iter_mut()
+        .map(|peer| {
+            assert!(read_reply(peer).is_some());
+            started.elapsed()
+        })
+        .collect();
+    stopping.store(true, Ordering::SeqCst);
+    serving.join().unwrap().unwrap();
+    let gap = answered[4] - answered[3];
+    assert!(gap < Duration::from_millis(300), "the second batch waited {gap:?}: the loop slept after a busy pass ({answered:?})");
+}

@@ -769,3 +769,104 @@ mod door_smoke {
         assert!(rig.index.seen.lock().unwrap().is_empty());
     }
 }
+
+// ---- the bounds, pinned as the numbers the spec states ----
+
+mod bounds {
+    use cultnet_rs::{CultNetSchemaKind, CultNetSchemaRegistration, CultNetSchemaRegistry};
+    use huginn_mind::desk_wire::DESK_MAX_RESPONSE_BYTES;
+
+    use super::*;
+
+    /// One connection costs the loop one second and no more, whatever the peer does: the stated
+    /// worst stall is `DESK_ACCEPTS_PER_PASS` of them, four seconds. The lower edge fails a
+    /// shorter bound, the upper a longer one or one that restarts on every byte.
+    fn served_within_one_second(client: impl FnOnce(UnixStream) + Send) {
+        let mut rig = rig(my_uid());
+        let peer = connect(&rig.path);
+        std::thread::scope(|scope| {
+            scope.spawn(move || client(peer));
+            let started = Instant::now();
+            assert_eq!(rig.door.serve_ready(&mut rig.daemon, now()), 1);
+            let took = started.elapsed();
+            assert!(took >= Duration::from_millis(1000), "the connection was cut after {took:?}, short of one second");
+            assert!(took < Duration::from_millis(1250), "the connection held the loop for {took:?}");
+        });
+    }
+
+    #[test]
+    fn a_silent_peer_is_cut_off_at_one_second() {
+        served_within_one_second(|peer| {
+            std::thread::sleep(Duration::from_millis(1500));
+            drop(peer);
+        });
+    }
+
+    #[test]
+    fn a_dripping_peer_is_cut_off_at_one_second() {
+        let bytes = framed(&message("m-1", &answer("x", DeskAuthority::Operator, &["x"], wire("0", R1))));
+        served_within_one_second(move |mut peer| {
+            for byte in bytes.iter().take(20) {
+                if peer.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+    }
+
+    /// A catalog is a reply like any other and is measured against the response bound: one that
+    /// encodes to exactly the bound is sent, one byte more is refused naming the size.
+    #[test]
+    fn the_catalog_reply_is_bounded_at_exactly_the_response_limit() {
+        assert_eq!(DESK_MAX_RESPONSE_BYTES, 65_536);
+        let root = tempfile::tempdir().unwrap();
+        let (mut daemon, _) = seeded(root.path());
+        let request = CultNetMessage::SchemaCatalogRequest { message_id: "c-1".into(), include_schema_json: Some(true), schema_ids: None, kinds: None };
+        let registry = |filler: usize| {
+            let mut registry = desk_registry().unwrap();
+            registry
+                .register(CultNetSchemaRegistration {
+                    schema_id: "filler".into(),
+                    kind: CultNetSchemaKind::WireMessage,
+                    wire_contracts: vec![CultNetWireContract::CultNetSchemaV0],
+                    schema_version: Some("filler".into()),
+                    document_type: None,
+                    title: None,
+                    schema_json: Some(format!("\"{}\"", "x".repeat(filler))),
+                })
+                .unwrap();
+            registry
+        };
+        let size = |registry: &CultNetSchemaRegistry| {
+            encode_cultnet_message_to_vec(&registry.create_catalog_response(&request).unwrap(), CultNetWireContract::CultNetSchemaV0).unwrap().len()
+        };
+        let mut filler = DESK_MAX_RESPONSE_BYTES - size(&registry(0));
+        while size(&registry(filler)) > DESK_MAX_RESPONSE_BYTES {
+            filler -= 1;
+        }
+        while size(&registry(filler + 1)) <= DESK_MAX_RESPONSE_BYTES {
+            filler += 1;
+        }
+        let at_limit = answer_desk_message(&mut daemon, &registry(filler), request.clone(), now());
+        assert!(matches!(at_limit, CultNetMessage::SchemaCatalogResponse { .. }), "{at_limit:?}");
+        assert!(encode_cultnet_message_to_vec(&at_limit, CultNetWireContract::CultNetSchemaV0).unwrap().len() <= DESK_MAX_RESPONSE_BYTES);
+        let over = answer_desk_message(&mut daemon, &registry(filler + 1), request, now());
+        let CultNetMessage::Error { error, .. } = over else { panic!("{over:?}") };
+        assert!(error.contains("65536"), "{error}");
+    }
+
+    /// A fresh answer stores one document; the retry that replays it stores none.
+    #[test]
+    fn a_fresh_answer_stores_one_document_and_its_replay_none() {
+        let mut rig = rig(my_uid());
+        let (before, hash) = (rig.state(), rig.hash.clone());
+        let request = answer("x", DeskAuthority::Operator, &["x"], wire(&hash, R1));
+        let first = rig.daemon.handle_desk(request.clone(), now());
+        assert_eq!(counted(first.clone()).0, "n1");
+        assert_eq!(rig.state().0, before.0 + 1);
+        let replay = rig.daemon.handle_desk(request, now());
+        assert_eq!(replay, first);
+        assert_eq!(rig.state().0, before.0 + 1, "the replay stored nothing");
+    }
+}
