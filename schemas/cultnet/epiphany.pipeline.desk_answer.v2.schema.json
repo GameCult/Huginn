@@ -1,0 +1,187 @@
+{
+  "$defs": {
+    "DeskAuthority": {
+      "enum": [
+        "Operator",
+        "Decider"
+      ],
+      "type": "string"
+    },
+    "DeskOutcome": {
+      "description": "The one tagged outcome of a desk answer. A retraction is a variant, so a\nretraction without a target and a target without a retraction cannot be\nstored. `of` and `retracts` name desk answers by answer id (the record key).",
+      "oneOf": [
+        {
+          "const": "Counted",
+          "description": "The answer that counts for its fork when it was admitted.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A later passing answer, kept visible; `of` is the counted answer it followed.",
+          "properties": {
+            "Revision": {
+              "properties": {
+                "of": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "of"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Revision"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Retraction": {
+              "properties": {
+                "retracts": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "retracts"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Retraction"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Refused": {
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/DeskRefusal"
+                }
+              },
+              "required": [
+                "code"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Refused"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeskRefusal": {
+      "enum": [
+        "StaleFork",
+        "NotADecider",
+        "ForkClosed",
+        "ChoiceInvalid",
+        "BadRetraction",
+        "AlreadyRetracted"
+      ],
+      "type": "string"
+    },
+    "Label": {
+      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Para": {
+      "description": "Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.",
+      "maxLength": 4000,
+      "type": "string"
+    },
+    "Sha256Hex": {
+      "description": "A SHA-256 digest: exactly 64 lowercase hex characters.",
+      "maxLength": 64,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.desk_answer.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One answer the fork desk's receiver passed to the Mind, refused ones included.\n`answerer` and `authority` are stamped by the Mind from the verified caller and\nare absent from the request type; `answered_at` is the client's claim kept as\nwritten, display only: order is `sequence`, the receiver's order. `sequence` is\nper question and is the last part of the key (the answer id).",
+  "properties": {
+    "answered_at": {
+      "$ref": "#/$defs/Short"
+    },
+    "answerer": {
+      "$ref": "#/$defs/Short"
+    },
+    "authority": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DeskAuthority"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "choice": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Label"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fork": {
+      "$ref": "#/$defs/Short"
+    },
+    "note": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Para"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "options_hash": {
+      "$ref": "#/$defs/Sha256Hex"
+    },
+    "outcome": {
+      "$ref": "#/$defs/DeskOutcome"
+    },
+    "sequence": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "campaign",
+    "fork",
+    "sequence",
+    "options_hash",
+    "answered_at",
+    "answerer",
+    "outcome"
+  ],
+  "title": "PipelineDeskAnswer",
+  "type": "object"
+}
