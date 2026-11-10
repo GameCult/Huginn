@@ -15,7 +15,7 @@
 
 use chrono::{DateTime, Utc};
 use eureka_pipeline::{
-    DeskAuthority, DeskOutcome, DeskRefusal, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, RequestId, Sha256Hex, Short, Slug, Words,
+    DeskAuthority, DeskOutcome, DeskRefusal, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, PipelineRef, RequestId, Sha256Hex, Short, Slug, Words,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -328,6 +328,12 @@ fn parse_n(text: &str) -> Option<u32> {
 /// The key of `fork`'s `n`th answer.
 fn answer_key(fork: &str, n: u32) -> String {
     format!("{}{}", prefix(fork), n_text(n))
+}
+
+/// The record a projected answer was stored under: the ref the index is told about when the
+/// answer is fresh. `None` for an id outside the `n<seq>` form, which no stored answer has.
+pub fn answer_ref(answer: &ForkDeskAnswer) -> Option<PipelineRef> {
+    Some(PipelineRef { kind: PipelineKind::DeskAnswer, id: Short(answer_key(&answer.fork_id, parse_n(&answer.answer_id)?)) })
 }
 
 /// The sequence a key of `fork`'s answers names; `None` for another fork's key or any other text.

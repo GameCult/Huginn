@@ -30,6 +30,8 @@ chrono = "0.4.44"
 cultnet-rs.workspace = true
 huginn-mind = { path = "../huginn-mind" }
 rmp-serde = "1"
+# The desk door asks the kernel who is on the other end of a unix socket; mind-body's line.
+rustix = { version = "1", default-features = false, features = ["std", "net"] }
 serde = { version = "1", features = ["derive"] }
 # The vector store's and the embedder's HTTP APIs are the xenos boundary, and
 # JSON exists in `index/ollama.rs` and `index/qdrant.rs` only. `ureq` 3 with

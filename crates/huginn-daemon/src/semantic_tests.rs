@@ -176,7 +176,7 @@ impl Harness {
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
         let options = ServeOptions::default();
-        let serving = std::thread::spawn(move || run(&mut daemon, &mut hub, &registry, &loop_stopping, &options));
+        let serving = std::thread::spawn(move || run(&mut daemon, &mut hub, &registry, None, &loop_stopping, &options));
         Self { endpoint, stopping, serving: Some(serving), embedder, index, _root: root }
     }
 

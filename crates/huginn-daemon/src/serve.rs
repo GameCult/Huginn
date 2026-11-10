@@ -79,6 +79,7 @@ use crate::bodies::{
     DEFERRED_BUDGET_BYTES, DEFERRED_CHUNK_BYTES, DeferredBodies,
 };
 use crate::daemon::{Daemon, Handled, IndexSink, Search, SearchTicket, runtime_id};
+use crate::desk_door::{DeskDoor, bind_desk};
 use huginn_mind::envelope::{OperationFailure, decode_request, encode_failure, encode_response};
 use huginn_mind::MAX_DEFERRED_BODY_BYTES;
 use crate::index::{Backoff, Embedder, VectorIndex, WorkerSink};
@@ -118,12 +119,22 @@ pub struct Options {
     pub embedding_model: String,
     /// The forge a persona's activity read goes to; absent, that read is refused.
     pub forge_url: Option<String>,
+    /// The desk door: the unix socket Bifrost's receiver answers on, and the one uid that may
+    /// speak on it. Absent, the daemon serves the RUDP door alone.
+    pub desk: Option<DeskOptions>,
+}
+
+/// Where the desk door listens and who may speak there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeskOptions {
+    pub socket: PathBuf,
+    pub peer_uid: u32,
 }
 
 /// Exactly `--state-root`, `--instance`, `--bind`, `--qdrant-url`,
 /// `--ollama-url` and `--embedding-model`, each required, each once, except
 /// `--ollama-url`, which repeats for each GPU host, and the optional
-/// `--reserve-ollama-url`, which repeats for each CPU host, and the optional `--forge-url`, once. The URLs are plain
+/// `--reserve-ollama-url`, which repeats for each CPU host, and the optional `--forge-url`, once, and the optional pair `--desk-socket` (an absolute path) and `--desk-peer-uid` (a uid other than 0), both or neither, each once. The URLs are plain
 /// `http://`: this build carries no TLS.
 pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     let mut args = args;
@@ -132,7 +143,7 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     while let Some(name) = args.next() {
         let name = name.strip_prefix("--").with_context(|| format!("expected --option, got {name:?}"))?;
         ensure!(
-            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model" | "forge-url"),
+            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model" | "forge-url" | "desk-socket" | "desk-peer-uid"),
             "unsupported Huginn option --{name}"
         );
         let value = args.next().with_context(|| format!("missing value for --{name}"))?;
@@ -168,6 +179,17 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
         reserve_ollama_urls,
         embedding_model,
         forge_url: values.contains_key("forge-url").then(|| url("forge-url")).transpose()?,
+        desk: match (values.get("desk-socket"), values.get("desk-peer-uid")) {
+            (None, None) => None,
+            (Some(socket), Some(uid)) => {
+                let socket = PathBuf::from(socket);
+                ensure!(socket.is_absolute(), "--desk-socket must be an absolute path");
+                let peer_uid: u32 = uid.parse().with_context(|| format!("--desk-peer-uid must be a uid, got {uid:?}"))?;
+                ensure!(peer_uid != 0, "--desk-peer-uid must not be 0");
+                Some(DeskOptions { socket, peer_uid })
+            }
+            _ => anyhow::bail!("--desk-socket and --desk-peer-uid are given together or not at all"),
+        },
     })
 }
 
@@ -177,18 +199,14 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
 /// of the refusal and nothing reaches the vector store for a process that
 /// never listens. The worker's first act is to reconcile the collection
 /// against every indexable document the mind holds now.
-pub fn startup<E, V>(
-    options: &Options,
-    embedder: E,
-    index: V,
-    backoff: Backoff,
-) -> Result<(Daemon<OwnedRedbMessagePackBackingStore, WorkerSink>, CultNetRudpServerHub, CultNetSchemaRegistry)>
+pub fn startup<E, V>(options: &Options, embedder: E, index: V, backoff: Backoff) -> Result<Started>
 where
     E: Embedder + Send + 'static,
     V: VectorIndex + crate::sources::SourceIndex + Send + 'static,
 {
     let mind = Mind::open(&options.state_root, &options.instance)?;
     let hub = bind(options.bind, &runtime_id(&options.instance))?;
+    let desk = options.desk.as_ref().map(|desk| bind_desk(&desk.socket, desk.peer_uid)).transpose()?;
     let startup_entries = mind.index_entries(None)?;
     let sink = WorkerSink::spawn(embedder, index, &options.instance, mind.genesis_receipt_id()?, startup_entries, backoff);
     let daemon = Daemon::new(mind, sink);
@@ -196,7 +214,16 @@ where
         Some(url) => daemon.with_forge(crate::sources::forge::HttpForge::new(url)),
         None => daemon,
     };
-    Ok((daemon, hub, schema_registry()?))
+    Ok(Started { daemon, hub, registry: schema_registry()?, desk })
+}
+
+/// What `startup` hands the loop: the daemon over the opened mind, the bound RUDP hub, the
+/// catalog the RUDP door advertises, and the desk door when one was asked for.
+pub struct Started {
+    pub daemon: Daemon<OwnedRedbMessagePackBackingStore, WorkerSink>,
+    pub hub: CultNetRudpServerHub,
+    pub registry: CultNetSchemaRegistry,
+    pub desk: Option<DeskDoor>,
 }
 
 /// The bytes one reliable packet carries, and the packets one session may hold
@@ -255,7 +282,7 @@ pub const MAX_ECHOED_FIELD_BYTES: usize = 256;
 
 /// The first field of a request that a reply would echo and that is over
 /// `MAX_ECHOED_FIELD_BYTES`.
-fn overlong_echo(message: &CultNetMessage) -> Option<&'static str> {
+pub(crate) fn overlong_echo(message: &CultNetMessage) -> Option<&'static str> {
     let echoed: Vec<(&'static str, &str)> = match message {
         CultNetMessage::OperationRequest { message_id, service_id, operation, payload_schema, .. } => {
             vec![
@@ -479,6 +506,7 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
     daemon: &mut Daemon<S, I>,
     hub: &mut CultNetRudpServerHub,
     registry: &CultNetSchemaRegistry,
+    mut desk: Option<&mut DeskDoor>,
     stopping: &AtomicBool,
     options: &ServeOptions,
 ) -> Result<()> {
@@ -523,6 +551,7 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
             }
             served += 1;
         }
+        let desk_served = desk.as_deref_mut().map_or(0, |door| door.serve_ready(daemon, Utc::now()));
         let finished = collect_searches(daemon, &waiting);
         let answered = !finished.is_empty();
         for (ticket, found) in finished {
@@ -531,7 +560,7 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
             let reply = respond(&response, &asked.message_id, asked.operation, &daemon.runtime_id(), &mut bodies, Utc::now());
             send(hub, &asked.session, &reply);
         }
-        if served == 0 && !answered {
+        if served == 0 && desk_served == 0 && !answered {
             std::thread::sleep(options.idle_sleep);
         }
     }
@@ -756,7 +785,7 @@ mod tests {
 
         let loop_stopping = Arc::clone(&stopping);
         let serving = std::thread::spawn(move || {
-            let result = run(&mut daemon, &mut hub, &registry, &loop_stopping, &ServeOptions::default());
+            let result = run(&mut daemon, &mut hub, &registry, None, &loop_stopping, &ServeOptions::default());
             (result, daemon)
         });
 
@@ -863,7 +892,7 @@ mod tests {
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
         let serving = std::thread::spawn(move || {
-            let result = run(&mut daemon, &mut hub, &registry, &loop_stopping, &ServeOptions::default());
+            let result = run(&mut daemon, &mut hub, &registry, None, &loop_stopping, &ServeOptions::default());
             (result, daemon)
         });
 
@@ -1104,7 +1133,7 @@ mod tests {
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
         let serving = std::thread::spawn(move || {
-            let result = run(&mut daemon, &mut hub, &registry, &loop_stopping, &ServeOptions::default());
+            let result = run(&mut daemon, &mut hub, &registry, None, &loop_stopping, &ServeOptions::default());
             (result, daemon)
         });
 
@@ -1541,6 +1570,7 @@ mod tests {
             reserve_ollama_urls: Vec::new(),
             embedding_model: "a-model".into(),
             forge_url: None,
+            desk: None,
         };
         let started = |options: &Options| {
             let (embedder, index) = crate::index::fakes::pair();
@@ -1556,8 +1586,8 @@ mod tests {
         let error = format!("{:#}", started(&options).err().expect("a held port refuses"));
         assert!(error.contains("binding"), "{error}");
         drop(occupied);
-        let (_daemon, hub, _registry) = started(&options).expect("both gates open");
-        assert_eq!(hub.local_addr().unwrap(), port);
+        let started = started(&options).expect("both gates open");
+        assert_eq!(started.hub.local_addr().unwrap(), port);
     }
 
     #[test]
@@ -1579,6 +1609,7 @@ mod tests {
                 reserve_ollama_urls: Vec::new(),
                 embedding_model: "qwen3-embedding:0.6b".into(),
                 forge_url: None,
+                desk: None,
             }
         );
         // Each of the six is required: there is no index-less mode.

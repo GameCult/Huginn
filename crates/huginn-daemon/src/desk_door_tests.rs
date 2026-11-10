@@ -79,7 +79,7 @@ fn wire(hash: &str, request_id: &str) -> ForkAnswerRequest {
         answer: Some(ForkAnswer { choice: Some("A".into()), note: None }),
         retracted: false,
         retracts: None,
-        answered_at: "2026-11-10T12:00:00Z".into(),
+        answered_at: "2026-09-16T11:00:00Z".into(),
         request_id: request_id.into(),
     }
 }
@@ -137,7 +137,7 @@ fn failure_of(path: &Path, bytes: &[u8]) -> OperationFailure {
 fn counted(response: DeskResponse) -> (String, Option<String>) {
     match response {
         DeskResponse::Answered { answer, counted_answer_id, .. } => {
-            assert_eq!(answer.outcome, "counted", "{answer:?}");
+            assert_eq!(answer.outcome, "Counted", "{answer:?}");
             (answer.answer_id, counted_answer_id)
         }
         other => panic!("expected an answer, got {other:?}"),
@@ -298,11 +298,9 @@ mod desk_door {
         let registry = desk_registry().unwrap();
         let catalog = CultNetMessage::SchemaCatalogRequest {
             message_id: "c-1".into(),
-            include_schema_json: false,
+            include_schema_json: Some(true),
             schema_ids: None,
             kinds: None,
-            source_runtime_id: None,
-            target_runtime_id: None,
         };
         let reply = answer_desk_message(&mut daemon, &registry, catalog, now());
         let text = format!("{reply:?}");
@@ -329,7 +327,7 @@ mod door_smoke {
         let hash = rig.hash.clone();
         let response = rig.serving(|path| reply_of(path, "m-1", &answer("x", DeskAuthority::Operator, &["x", "y"], wire(&hash, R1))));
         let DeskResponse::Answered { answer, counted_answer_id, .. } = &response else { panic!("{response:?}") };
-        assert_eq!((answer.outcome.as_str(), counted_answer_id.as_deref(), answer.authority), ("counted", Some("n1"), DeskAuthority::Operator));
+        assert_eq!((answer.outcome.as_str(), counted_answer_id.as_deref(), answer.authority), ("Counted", Some("n1"), DeskAuthority::Operator));
         let seen = rig.index.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "the fresh answer reached the index once");
         let stored = huginn_mind::eureka_pipeline::PipelineRef {
@@ -490,8 +488,8 @@ mod door_smoke {
             options_hash: Sha256Hex(hash.clone()),
             choice: Some(short("A")),
             note: None,
-            answered_at: short("2026-11-10T12:00:00Z"),
-            received_at: short("2026-11-10T12:00:00Z"),
+            answered_at: short("2026-09-16T11:00:00Z"),
+            received_at: short("2026-09-16T11:00:00Z"),
             claim_in_future: false,
             request_id: RequestId(R1.into()),
             body_sha256: Sha256Hex("0".repeat(64)),
@@ -520,7 +518,7 @@ mod door_smoke {
         let response = rig.serving(|path| reply_of(path, "m-1", &answer("x", DeskAuthority::Operator, &["x"], wire(&"0".repeat(64), R1))));
         let DeskResponse::Answered { answer, counted_answer_id, .. } = response else { panic!("a stale answer is stored") };
         assert_eq!(answer.code, Some(ForkAnswerCode::StaleFork));
-        assert_eq!(answer.outcome, "refused");
+        assert_eq!(answer.outcome, "Refused");
         assert_eq!(counted_answer_id, None);
         // The reply type has no field a card could ride in; the encoded reply holds nothing but the answer.
         assert_eq!(answer.options_hash, "0".repeat(64));
@@ -545,11 +543,11 @@ mod door_smoke {
         });
         let (first, other_list, again, empty) = out;
         let DeskResponse::Answered { answer, .. } = &first else { panic!("{first:?}") };
-        assert_eq!((answer.outcome.as_str(), answer.authority), ("counted", DeskAuthority::Operator));
+        assert_eq!((answer.outcome.as_str(), answer.authority), ("Counted", DeskAuthority::Operator));
         let DeskResponse::Answered { answer, .. } = &other_list else { panic!("{other_list:?}") };
         assert_eq!(answer.code, Some(ForkAnswerCode::NotADecider), "the second list does not name x");
         let DeskResponse::Answered { answer, .. } = &again else { panic!("{again:?}") };
-        assert_eq!(answer.outcome, "revision", "nothing was kept between calls: the first list counts again");
+        assert_eq!(answer.outcome, "Revision", "nothing was kept between calls: the first list counts again");
         assert_eq!((empty.code.as_str(), empty.message.contains("deciders")), ("payload-not-a-request", true));
         assert_eq!(rig.state().0, before.0 + 3, "three answers landed: two counted, one refused");
     }
