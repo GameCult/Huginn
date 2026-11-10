@@ -20,7 +20,7 @@
 
 use chrono::{DateTime, Duration, SecondsFormat, SubsecRound, Utc};
 use eureka_pipeline::{
-    DeskAuthority, DeskOutcome, DeskRefusal, Label, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, PipelineRefusal,
+    DeskAuthority, DeskOutcome, DeskRefusal, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, PipelineRefusal,
     PipelineResolution, RequestId, ResolutionOutcome, Sha256Hex, Short, Slug, Words,
 };
 
@@ -53,7 +53,7 @@ pub enum DeskBody {
     Retraction { retracts: Short },
     /// A retraction carrying an answer, naming no target, or a plain answer carrying
     /// `retracts` (R1): what the door decodes those three forms to. Always stored as a
-    /// refused `bad_retraction` after steps 4 to 6; the fields are kept only in the body digest.
+    /// refused `bad_retraction` after steps 4 to 6; the record keeps every field as sent.
     IllegalRetraction { choice: Option<Short>, note: Option<Words>, retracts: Option<Short> },
 }
 
@@ -253,17 +253,16 @@ impl<S: MindStore> Mind<S> {
             Ok(at) if at.offset().local_minus_utc() == 0 => at.with_timezone(&Utc),
             _ => return Err(invalid("answered_at")),
         };
-        // A choice is any non-empty text of at most a Short (200 bytes). It is stored only when it reads as
-        // a label (the record's field is a Label); a refused one that does not keeps no choice.
+        // A choice is any non-empty text of at most a Short (200 bytes), kept as sent: the record's field
+        // is a Short because a `choice_invalid` choice is no label.
         let choice_shape = |choice: &Short| if choice.0.is_empty() || choice.0.len() > 200 { Err(invalid("desk_answer.choice")) } else { Ok(()) };
-        let label_of = |choice: &Short| Some(Label(choice.0.clone())).filter(|label| label.validate_label().is_ok());
         let (choice, note, shape_outcome) = match &request.body {
             DeskBody::Answer { choice, note } => {
                 if choice.is_none() && note.is_none() {
                     return Err(invalid("body"));
                 }
                 choice.as_ref().map(choice_shape).transpose()?;
-                (choice.as_ref().and_then(label_of), note.clone(), DeskOutcome::Counted)
+                (choice.clone(), note.clone(), DeskOutcome::Counted)
             }
             DeskBody::Retraction { retracts } => (None, None, DeskOutcome::Retraction { retracts: retracts.clone() }),
             DeskBody::IllegalRetraction { choice, note, retracts } => {
@@ -271,8 +270,7 @@ impl<S: MindStore> Mind<S> {
                 if retracts.as_ref().is_some_and(|target| target.0.len() > 200) {
                     return Err(invalid("desk_answer.outcome.retracts"));
                 }
-                // The note is shape-checked through the probe, then dropped from the record.
-                (choice.as_ref().and_then(label_of), note.clone(), DeskOutcome::Counted)
+                (choice.clone(), note.clone(), DeskOutcome::Counted)
             }
         };
         let body_sha256 = body_digest(&request);
@@ -281,13 +279,13 @@ impl<S: MindStore> Mind<S> {
         let received = now.trunc_subsecs(0);
         let received_at = Short(received.to_rfc3339_opts(SecondsFormat::Secs, true));
         let claim_in_future = claimed > received + Duration::minutes(5);
-        let answer = |sequence: u32, outcome: DeskOutcome, keep_body: bool| PipelineDeskAnswer {
+        let answer = |sequence: u32, outcome: DeskOutcome| PipelineDeskAnswer {
             campaign: Slug(root.clone()),
             fork: request.fork.clone(),
             sequence,
             options_hash: request.options_hash.clone(),
-            choice: choice.clone().filter(|_| keep_body),
-            note: note.clone().filter(|_| keep_body),
+            choice: choice.clone(),
+            note: note.clone(),
             answered_at: request.answered_at.clone(),
             received_at: received_at.clone(),
             claim_in_future,
@@ -316,7 +314,7 @@ impl<S: MindStore> Mind<S> {
             return Ok(DeskAnswerOutcome::Replayed { answer: Short(key.to_string()), outcome: held.outcome.clone() });
         }
 
-        let probe = PipelineDocument::DeskAnswer(answer(1, shape_outcome, true));
+        let probe = PipelineDocument::DeskAnswer(answer(1, shape_outcome));
         probe.validate().map_err(shape_fault)?;
         eureka_pipeline::pipeline_key(&probe).map_err(shape_fault)?;
 
@@ -330,7 +328,14 @@ impl<S: MindStore> Mind<S> {
 
         // Rules 4-7, R1: stored, refused, with the first failing code.
         let outcome = match refusal_of(&docs, question, &stamp, &request) {
-            Some(code) => DeskOutcome::Refused { code },
+            Some(code) => DeskOutcome::Refused {
+                code,
+                retracts: match &request.body {
+                    DeskBody::Retraction { retracts } => Some(retracts.clone()),
+                    DeskBody::IllegalRetraction { retracts, .. } => retracts.clone(),
+                    DeskBody::Answer { .. } => None,
+                },
+            },
             None => match &request.body {
                 DeskBody::Retraction { retracts } => DeskOutcome::Retraction { retracts: retracts.clone() },
                 DeskBody::IllegalRetraction { .. } => unreachable!("refusal_of refuses every illegal retraction"),
@@ -341,7 +346,7 @@ impl<S: MindStore> Mind<S> {
             },
         };
         let sequence = answers_of(&docs, fork).map(|(_, held)| held.sequence).max().unwrap_or(0).checked_add(1).ok_or_else(|| invalid("sequence"))?;
-        let document = PipelineDocument::DeskAnswer(answer(sequence, outcome.clone(), !matches!(request.body, DeskBody::IllegalRetraction { .. })));
+        let document = PipelineDocument::DeskAnswer(answer(sequence, outcome.clone()));
         let envelope = prepare(&document, self.cache())?;
         // The receipt names the operator only when the verified account is the operator's; a
         // steward or member answerer is named as such. Attribution only: admission reads no faculty.
@@ -373,6 +378,7 @@ impl<S: MindStore> Mind<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eureka_pipeline::Label;
     use crate::fixtures::*;
     use crate::store::test_stores::MemoryStore;
     use PipelineDocument as D;
@@ -496,12 +502,12 @@ mod tests {
         stored(ask(&mut mind, &decider("x"), first));
         stored(ask(&mut mind, &decider("y"), second));
         assert_eq!(counted(&mind, FORK), Some(key("Q1", 1)));
-        assert_eq!(held(&mind, &key("Q1", 1)).choice, Some(l("A")));
+        assert_eq!(held(&mind, &key("Q1", 1)).choice, Some(s("A")));
         // Swap the arrival: the other answer counts.
         let mut mind = desk();
         stored(ask(&mut mind, &decider("y"), pick(FORK, "Q1", "B", "2026-11-10T11:00:00Z")));
         stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", "2026-11-10T13:00:00Z")));
-        assert_eq!(held(&mind, &counted(&mind, FORK).unwrap()).choice, Some(l("B")));
+        assert_eq!(held(&mind, &counted(&mind, FORK).unwrap()).choice, Some(s("B")));
         // And by answerer: the lexically later answerer arriving first still counts.
         let mut mind = desk();
         stored(ask(&mut mind, &decider("z"), pick(FORK, "Q1", "A", "2026-11-10T12:00:00Z")));
@@ -516,7 +522,7 @@ mod tests {
         // The fork as another recommendation would render it: vector B against stored A.
         request.options_hash = options_hash(&question_with("Q1", &["A", "B"], "B"));
         let (answer, outcome) = stored(ask(&mut mind, &decider("x"), request));
-        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::StaleFork });
+        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::StaleFork, retracts: None });
         assert_eq!(held(&mind, &answer).outcome, outcome);
         assert_eq!(counted(&mind, FORK), None);
         // A hash over the title alone is not the fork's hash.
@@ -525,7 +531,7 @@ mod tests {
         title_only.question = "".into();
         let mut request = pick(FORK, "Q1", "A", "2026-11-10T12:00:00Z");
         request.options_hash = options_hash(&title_only);
-        assert_eq!(stored(ask(&mut mind, &decider("x"), request)).1, DeskOutcome::Refused { code: DeskRefusal::StaleFork });
+        assert_eq!(stored(ask(&mut mind, &decider("x"), request)).1, DeskOutcome::Refused { code: DeskRefusal::StaleFork, retracts: None });
     }
 
     #[test]
@@ -533,7 +539,7 @@ mod tests {
         let mut mind = desk();
         let off = off();
         let (_, outcome) = stored(ask(&mut mind, &off, pick(FORK, "Q1", "A", "2026-11-10T12:00:00Z")));
-        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
+        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::NotADecider, retracts: None });
         assert_eq!(counted(&mind, FORK), None);
     }
 
@@ -544,7 +550,7 @@ mod tests {
         committed(admit(&mut withdrawn_fork, vec![resolution(r(K::Question, FORK), withdrawn())]));
         assert_eq!(
             stored(ask(&mut withdrawn_fork, &decider("x"), pick(FORK, "Q1", "A", at))).1,
-            DeskOutcome::Refused { code: DeskRefusal::ForkClosed }
+            DeskOutcome::Refused { code: DeskRefusal::ForkClosed, retracts: None }
         );
         let mut ruled_fork = desk();
         let mut ruled = ruling("RQ1");
@@ -553,7 +559,7 @@ mod tests {
         committed(admit(&mut ruled_fork, vec![D::Ruling(ruled)]));
         assert_eq!(
             stored(ask(&mut ruled_fork, &decider("x"), pick(FORK, "Q1", "A", at))).1,
-            DeskOutcome::Refused { code: DeskRefusal::ForkClosed }
+            DeskOutcome::Refused { code: DeskRefusal::ForkClosed, retracts: None }
         );
         // The other fork stays open.
         assert_eq!(stored(ask(&mut ruled_fork, &decider("x"), pick(FORK2, "Q2", "A", at))).1, DeskOutcome::Counted);
@@ -566,10 +572,10 @@ mod tests {
         // Equal to an option's text, not its label.
         let mut by_text = pick(FORK, "Q1", "A", at);
         by_text.body = DeskBody::Answer { choice: Some(s("an-option")), note: None };
-        assert_eq!(stored(ask(&mut mind, &decider("x"), by_text)).1, DeskOutcome::Refused { code: DeskRefusal::ChoiceInvalid });
+        assert_eq!(stored(ask(&mut mind, &decider("x"), by_text)).1, DeskOutcome::Refused { code: DeskRefusal::ChoiceInvalid, retracts: None });
         // A label of another question.
         committed(admit(&mut mind, vec![question("Q3", &["Z", "Y"], "Z")]));
-        assert_eq!(stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "Z", at))).1, DeskOutcome::Refused { code: DeskRefusal::ChoiceInvalid });
+        assert_eq!(stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "Z", at))).1, DeskOutcome::Refused { code: DeskRefusal::ChoiceInvalid, retracts: None });
         // A note alone is an answer.
         let mut note_only = pick(FORK, "Q1", "A", at);
         note_only.body = DeskBody::Answer { choice: None, note: Some("Neither; ask again.".into()) };
@@ -591,7 +597,7 @@ mod tests {
             request
         };
         let code = |mind: &mut Mind<MemoryStore>, stamp: &DeskStamp, request| match stored(ask(mind, stamp, request)).1 {
-            DeskOutcome::Refused { code } => code,
+            DeskOutcome::Refused { code, .. } => code,
             other => panic!("{other:?}"),
         };
         // stale + off-list + closed
@@ -614,7 +620,7 @@ mod tests {
         stale.options_hash = options_hash(&question_with("Q1", &["A", "B"], "B"));
         let (refused, _) = stored(ask(&mut mind, &decider("x"), stale));
         let code = |mind: &mut Mind<MemoryStore>, request| match stored(ask(mind, &decider("y"), request)).1 {
-            DeskOutcome::Refused { code } => code,
+            DeskOutcome::Refused { code, .. } => code,
             other => panic!("{other:?}"),
         };
         // The retraction's own record, once it exists, is not a target.
@@ -636,10 +642,85 @@ mod tests {
         let at = "2026-11-10T12:00:00Z";
         let (first, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", at)));
         let off = off();
-        assert_eq!(stored(ask(&mut mind, &off, retract(FORK, "Q1", &first))).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
+        assert_eq!(stored(ask(&mut mind, &off, retract(FORK, "Q1", &first))).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider, retracts: Some(s(&first)) });
         assert_eq!(counted(&mind, FORK), Some(first.clone()));
         assert_eq!(stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &first))).1, DeskOutcome::Retraction { retracts: s(&first) });
         assert_eq!(counted(&mind, FORK), None);
+    }
+
+    /// What a read at `as_of` shows of the fork's answers: (key, stored outcome name, counts now).
+    fn read_counts(mind: &Mind<MemoryStore>, as_of: u64, keys: &[String]) -> Vec<(String, String, bool)> {
+        let selection = cultnet_rs::Selection { keys: Some(keys.to_vec()), ..Default::default() };
+        let page = mind.query_at(&selection, as_of).unwrap();
+        let crate::query::PipelinePageItems::Headers(headers) = page.items else { panic!("headers") };
+        headers
+            .into_iter()
+            .map(|header| match header.facts {
+                crate::query::PipelineFacts::DeskAnswer { outcome, counts, .. } => (header.id.id.0, outcome.0, counts),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// Which answer counts is derived at the read's snapshot, never the stored write-time word: n1 is
+    /// stored `Counted` forever, but once retracted the facts say it no longer counts and the promoted
+    /// n2 does; a read at an earlier snapshot shows the earlier counting.
+    #[test]
+    fn a_retraction_changes_which_answer_the_facts_say_counts() {
+        let mut mind = desk();
+        let at = "2026-11-10T12:00:00Z";
+        let (n1, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", at)));
+        let (n2, second) = stored(ask(&mut mind, &decider("y"), pick(FORK, "Q1", "B", at)));
+        assert_eq!(second, DeskOutcome::Revision { of: s(&n1) });
+        let both = [n1.clone(), n2.clone()];
+        let before = head(&mind);
+        assert_eq!(read_counts(&mind, before, &both), [(n1.clone(), "Counted".into(), true), (n2.clone(), "Revision".into(), false)]);
+        stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &n1)));
+        let after = head(&mind);
+        // The stored words are unchanged; the derived flag moved.
+        assert_eq!(read_counts(&mind, after, &both), [(n1.clone(), "Counted".into(), false), (n2.clone(), "Revision".into(), true)]);
+        assert_eq!(held(&mind, &n1).outcome, DeskOutcome::Counted);
+        // A read at the earlier snapshot shows the earlier counting.
+        assert_eq!(read_counts(&mind, before, &both), [(n1.clone(), "Counted".into(), true), (n2.clone(), "Revision".into(), false)]);
+        assert_eq!(counted(&mind, FORK), Some(n2));
+    }
+
+    /// Every refusal keeps what the request was sent with: the choice, the note and (for a retraction
+    /// form) the target, under every refusal code the desk stores.
+    #[test]
+    fn every_refusal_keeps_what_was_sent() {
+        let mut mind = desk();
+        let at = "2026-11-10T12:00:00Z";
+        let (first, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", at)));
+        let kept = |mind: &mut Mind<MemoryStore>, stamp: &DeskStamp, request: DeskAnswerRequest| {
+            let (answer, outcome) = stored(ask(mind, stamp, request));
+            let record = held(mind, &answer);
+            (outcome, record.choice, record.note)
+        };
+        let with = |fork: &str, label: &str, body: DeskBody| DeskAnswerRequest { body, ..pick(fork, label, "A", at) };
+        let answer = |choice: &str| DeskBody::Answer { choice: Some(s(choice)), note: Some("because".into()) };
+        let code = |code: DeskRefusal, retracts: Option<&str>| DeskOutcome::Refused { code, retracts: retracts.map(s) };
+        // stale_fork: an old card.
+        let mut stale = with(FORK, "Q1", answer("A"));
+        stale.options_hash = options_hash(&question_with("Q1", &["A", "B"], "B"));
+        assert_eq!(kept(&mut mind, &decider("x"), stale), (code(DeskRefusal::StaleFork, None), Some(s("A")), Some("because".into())));
+        // not_a_decider, answer and retraction.
+        assert_eq!(kept(&mut mind, &off(), with(FORK, "Q1", answer("B"))), (code(DeskRefusal::NotADecider, None), Some(s("B")), Some("because".into())));
+        assert_eq!(kept(&mut mind, &off(), retract(FORK, "Q1", &first)), (code(DeskRefusal::NotADecider, Some(&first)), None, None));
+        // choice_invalid keeps the text that is no label.
+        assert_eq!(kept(&mut mind, &decider("x"), with(FORK, "Q1", answer("not a label"))), (code(DeskRefusal::ChoiceInvalid, None), Some(s("not a label")), Some("because".into())));
+        // bad_retraction (no such answer) keeps the target; already_retracted keeps it too.
+        let missing = key("Q1", 99);
+        assert_eq!(kept(&mut mind, &decider("y"), retract(FORK, "Q1", &missing)), (code(DeskRefusal::BadRetraction, Some(&missing)), None, None));
+        stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &first)));
+        assert_eq!(kept(&mut mind, &decider("z"), retract(FORK, "Q1", &first)), (code(DeskRefusal::AlreadyRetracted, Some(&first)), None, None));
+        // fork_closed: a ruling closes the fork, then an answer and a retraction.
+        let mut ruled = ruling("RQ1");
+        ruled.answers = Some(s(FORK));
+        ruled.choice = Some(l("A"));
+        committed(admit(&mut mind, vec![D::Ruling(ruled)]));
+        assert_eq!(kept(&mut mind, &decider("x"), with(FORK, "Q1", answer("A"))), (code(DeskRefusal::ForkClosed, None), Some(s("A")), Some("because".into())));
+        assert_eq!(kept(&mut mind, &decider("x"), retract(FORK, "Q1", &first)), (code(DeskRefusal::ForkClosed, Some(&first)), None, None));
     }
 
     #[test]
@@ -679,7 +760,7 @@ mod tests {
         let (answer, outcome) = stored(ask(&mut mind, &off, pick(FORK, "Q1", "A", at)));
         let record = held(&mind, &answer);
         assert_eq!(record.outcome, outcome);
-        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
+        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::NotADecider, retracts: None });
         assert_eq!((record.answerer, record.authority, record.answered_at), (s("guest"), DeskAuthority::Steward, s(at)));
     }
 
@@ -920,13 +1001,13 @@ mod tests {
         let mut mind = desk();
         // The operator's own account, off the list, is no decider.
         let operator_off = stamp_as("op", DeskAuthority::Operator, &["x"]);
-        assert_eq!(stored(ask(&mut mind, &operator_off, pick(FORK, "Q1", "A", at))).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
+        assert_eq!(stored(ask(&mut mind, &operator_off, pick(FORK, "Q1", "A", at))).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider, retracts: None });
         // A plain member on the list decides.
         let member_on = stamp_as("m", DeskAuthority::Member, &["m"]);
         assert_eq!(stored(ask(&mut mind, &member_on, pick(FORK, "Q1", "A", at))).1, DeskOutcome::Counted);
         // An empty list admits no one.
         let empty = stamp_as("m", DeskAuthority::Operator, &[]);
-        assert_eq!(stored(ask(&mut mind, &empty, pick(FORK2, "Q2", "A", at))).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
+        assert_eq!(stored(ask(&mut mind, &empty, pick(FORK2, "Q2", "A", at))).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider, retracts: None });
     }
 
     #[test]
@@ -957,7 +1038,7 @@ mod tests {
         assert_eq!(counted(&mind, FORK), None, "an answer under an older hash does not count");
         let older = key("Q1", 2);
         // R1: a retraction names an answer under the current card only.
-        assert_eq!(stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &older))).1, DeskOutcome::Refused { code: DeskRefusal::BadRetraction });
+        assert_eq!(stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &older))).1, DeskOutcome::Refused { code: DeskRefusal::BadRetraction, retracts: Some(s(&older)) });
         // The next answer is Counted, not a Revision of the older one.
         let outcome = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "B", "2026-11-10T12:00:00Z"))).1;
         assert_eq!(outcome, DeskOutcome::Counted);
@@ -1006,7 +1087,7 @@ mod tests {
         ruled.choice = Some(l("A"));
         committed(admit(&mut mind, vec![D::Ruling(ruled)]));
         let (retraction, outcome) = stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &first)));
-        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::ForkClosed });
+        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::ForkClosed, retracts: Some(s(&first)) });
         assert_eq!(held(&mind, &retraction).outcome, outcome);
         assert_eq!(counted(&mind, FORK), Some(first), "the answer still stands");
     }
@@ -1063,7 +1144,7 @@ mod tests {
         let mut stale = with_id(pick(FORK, "Q1", "A", AT), R2);
         stale.options_hash = options_hash(&question_with("Q1", &["A", "B"], "B"));
         let first = stored(ask(&mut mind, &decider("x"), stale.clone()));
-        assert_eq!(first.1, DeskOutcome::Refused { code: DeskRefusal::StaleFork });
+        assert_eq!(first.1, DeskOutcome::Refused { code: DeskRefusal::StaleFork, retracts: None });
         let after_stale = head(&mind);
         assert_eq!(replayed(ask(&mut mind, &decider("x"), stale)), first);
         // A Revision replays as the Revision it was, not as a new one.
@@ -1169,7 +1250,7 @@ mod tests {
         // x's id never reveals x's refusal to y: x off the list is refused, y with the identical body is Counted.
         let mut fresh = desk();
         let sent = with_id(pick(FORK, "Q1", "A", AT), R2);
-        assert_eq!(stored(ask(&mut fresh, &off(), sent.clone())).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
+        assert_eq!(stored(ask(&mut fresh, &off(), sent.clone())).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider, retracts: None });
         assert_eq!(stored(ask(&mut fresh, &decider("y"), sent)), (key("Q1", 2), DeskOutcome::Counted));
     }
 
@@ -1292,7 +1373,7 @@ mod tests {
 
     fn code_of(outcome: DeskAnswerOutcome) -> DeskRefusal {
         match stored(outcome).1 {
-            DeskOutcome::Refused { code } => code,
+            DeskOutcome::Refused { code, .. } => code,
             other => panic!("{other:?}"),
         }
     }
@@ -1307,18 +1388,19 @@ mod tests {
             request.body = DeskBody::IllegalRetraction { choice: choice.map(s), note: note.map(Into::into), retracts: retracts.map(s) };
             request
         };
-        for (what, request) in [
-            ("a retraction carrying an answer", form(Some("A"), Some("why"), Some(&first))),
-            ("a retraction lacking retracts", form(None, None, None)),
-            ("a plain answer carrying retracts", form(Some("A"), None, Some(&first))),
+        for (what, request, sent) in [
+            ("a retraction carrying an answer", form(Some("A"), Some("why"), Some(&first)), (Some("A"), Some("why"), Some(first.as_str()))),
+            ("a retraction lacking retracts", form(None, None, None), (None, None, None)),
+            ("a plain answer carrying retracts", form(Some("A"), None, Some(&first)), (Some("A"), None, Some(first.as_str()))),
         ] {
             let before = head(&mind);
             let id = request.request_id.clone();
             let (answer, outcome) = stored(ask(&mut mind, &decider("y"), request.clone()));
-            assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::BadRetraction }, "{what}");
+            assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::BadRetraction, retracts: sent.2.map(|target| s(target)) }, "{what}");
             assert_eq!(head(&mind), before + 1, "{what} is stored");
+            // The record keeps what was sent: the choice, the note and the target it named.
             let record = held(&mind, &answer);
-            assert_eq!((record.choice, record.note, record.request_id), (None, None, id), "{what}");
+            assert_eq!((record.choice, record.note, record.request_id), (sent.0.map(s), sent.1.map(Into::into), id), "{what}");
             // The stored refusal binds its request id and replays unchanged.
             assert_eq!(replayed(ask(&mut mind, &decider("y"), request)), (answer, outcome), "{what}");
             assert_eq!(head(&mind), before + 1, "{what} replay writes nothing");
@@ -1381,10 +1463,10 @@ mod tests {
             let before = head(&mind);
             let (outcome, request, id) = ask_choice(&mut mind, choice);
             let (answer, outcome) = stored(outcome);
-            assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::ChoiceInvalid }, "{choice}");
+            assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::ChoiceInvalid, retracts: None }, "{choice}");
             assert_eq!(head(&mind), before + 1);
             let record = held(&mind, &answer);
-            assert_eq!((record.choice, record.request_id), (None, id), "{choice}");
+            assert_eq!((record.choice, record.request_id), (Some(s(choice)), id), "{choice} is kept as sent");
             assert_eq!(replayed(ask(&mut mind, &decider("x"), request)), (answer, outcome));
             assert_eq!(head(&mind), before + 1);
         }

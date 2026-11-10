@@ -18,7 +18,7 @@ use eureka_pipeline::{
     Line, Para, Short, Slug, StructuralDelta, pipeline_key,
 };
 
-use crate::docs::{citations, kind_of_type};
+use crate::docs::{Docs, citations, kind_of_type};
 use crate::mind::{Mind, schema_cache};
 use crate::persona::HuginnPersonaEntry;
 use crate::query::{AdmissionFacts, PipelineDocumentView, PipelineSelectionPage, PipelineStatus};
@@ -168,7 +168,7 @@ pub fn oracle_page<S: MindStore>(mind: &Mind<S>, selection: &Selection, as_of: u
     let rows: Vec<SelectionRow> = visible.iter().map(|doc| row_of(&visible, doc)).collect();
     let rows: Vec<&SelectionRow> = rows.iter().collect();
     let evaluation = select(&Vocabulary, &rows, &selection, as_of, mind.cursor_key())?;
-    Mind::<S>::page(&selection, evaluation, as_of, None)
+    Mind::<S>::page(&selection, evaluation, &Docs::at(mind.image()?, as_of), as_of, None)
 }
 
 /// The view of one document at `as_of`, derived from the store alone.

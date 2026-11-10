@@ -59,11 +59,22 @@
         },
         {
           "additionalProperties": false,
+          "description": "A request the desk would not count, kept with what it was sent with. `retracts` is the\ntarget a refused retraction named, as sent and unchecked (it may name no answer at all);\nit is `None` on a refused answer, and it is never a citation.",
           "properties": {
             "Refused": {
               "properties": {
                 "code": {
                   "$ref": "#/$defs/DeskRefusal"
+                },
+                "retracts": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Short"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
               },
               "required": [
@@ -88,11 +99,6 @@
         "BadRetraction",
         "AlreadyRetracted"
       ],
-      "type": "string"
-    },
-    "Label": {
-      "description": "A key label: `[A-Za-z0-9_-]{1,64}`.",
-      "maxLength": 64,
       "type": "string"
     },
     "RequestId": {
@@ -124,7 +130,7 @@
   },
   "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.desk_answer.v2.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "One answer the fork desk's receiver passed to the Mind, refused ones included.\n`answerer` and `authority` (an attribution, never a decision) are stamped by the\nMind from the verified caller and are absent from the request type; `answered_at`\nis the client's claim kept as written, display only: order is `sequence`, the\nreceiver's order. `received_at` is the Mind's admission time (UTC) and\n`claim_in_future` is set when `answered_at` is more than five minutes after it.\n`request_id` is the client's retry token and `body_sha256` the digest of the\nrequest it came with: the pair that makes a retry the same answer, never a new\none; the key is `(answerer, request_id)`. A record holds no card: a replayed\n`stale_fork` is shown the current card. `sequence` is per question and is the\nlast part of the key (the answer id).",
+  "description": "One answer the fork desk's receiver passed to the Mind, refused ones included.\n`answerer` and `authority` (an attribution, never a decision) are stamped by the\nMind from the verified caller and are absent from the request type; `answered_at`\nis the client's claim kept as written, display only: order is `sequence`, the\nreceiver's order. `received_at` is the Mind's admission time (UTC) and\n`claim_in_future` is set when `answered_at` is more than five minutes after it.\n`request_id` is the client's retry token and `body_sha256` the digest of the\nrequest it came with: the pair that makes a retry the same answer, never a new\none; the key is `(answerer, request_id)`. A record holds no card: a replayed\n`stale_fork` is shown the current card. `sequence` is per question and is the\nlast part of the key (the answer id). `choice`, `note` and (for a retraction) the\ntarget are kept as sent whether the request was counted or refused, so a refused\n`choice_invalid` keeps a choice that is no option label; which answer counts now is\nderived by the reader, never stored here.",
   "properties": {
     "answered_at": {
       "$ref": "#/$defs/Short"
@@ -144,7 +150,7 @@
     "choice": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Label"
+          "$ref": "#/$defs/Short"
         },
         {
           "type": "null"

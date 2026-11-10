@@ -38,6 +38,7 @@ use eureka_pipeline::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::desk::counted_answer;
 use crate::docs::{CitationRole, Docs, kind_of_type};
 use crate::image::{Image, status_of};
 use crate::mind::{Mind, schema_cache};
@@ -161,12 +162,15 @@ pub enum PipelineFacts {
     Memory { label: Label, sort: MemorySort, about: Vec<Short>, origin: MemoryOrigin, salience_permille: u16 },
     Research { pass: Label, label: Label, claim: Line, inferred: bool, observed_on: Date },
     Idea { pass: Label, label: Label, title: Title, proposed_on: Date },
-    /// `outcome` is the stored outcome's variant name; which answer counts now is `counted_answer`'s, derived.
-    DeskAnswer { fork: Short, sequence: u32, outcome: Short, authority: DeskAuthority },
+    /// `outcome` is the stored, write-time outcome's variant name. `counts` is whether this answer is
+    /// the one that counts for its fork at the read's snapshot, derived by `counted_answer` and never
+    /// stored: a retracted `Counted` answer reads `counts: false`, the promoted next answer `true`.
+    DeskAnswer { fork: Short, sequence: u32, outcome: Short, counts: bool, authority: DeskAuthority },
 }
 
 impl PipelineFacts {
-    fn of(document: &PipelineDocument) -> Self {
+    /// `counted_of` answers, for a fork, the key of the answer that counts at the read's snapshot.
+    fn of(id: &PipelineRef, document: &PipelineDocument, counted_of: &dyn Fn(&str) -> Option<String>) -> Self {
         use PipelineDocument as D;
         match document {
             D::Campaign(value) => Self::Campaign { title: value.title.clone(), repos: value.repos.clone() },
@@ -299,6 +303,7 @@ impl PipelineFacts {
                 fork: value.fork.clone(),
                 sequence: value.sequence,
                 outcome: Short(value.outcome.name().into()),
+                counts: counted_of(&value.fork.0).as_deref() == Some(id.id.0.as_str()),
                 authority: value.authority,
             },
         }
@@ -307,7 +312,9 @@ impl PipelineFacts {
 
 impl PipelineDocumentSummary {
     /// The header of a view: what a `headers` projection answers for it.
-    pub fn of(view: &PipelineDocumentView) -> Self {
+    /// `counted_of` names, for a desk fork, the answer that counts at the snapshot the view was read
+    /// at; a caller that summarises no desk answers passes `&|_| None`.
+    pub fn of(view: &PipelineDocumentView, counted_of: &dyn Fn(&str) -> Option<String>) -> Self {
         Self {
             id: view.id.clone(),
             admission: view.admission.clone(),
@@ -317,7 +324,7 @@ impl PipelineDocumentSummary {
                     PipelineStatusSummary::Resolved { resolution: resolution.clone(), outcome: record.outcome.clone() }
                 }
             },
-            facts: PipelineFacts::of(&view.document),
+            facts: PipelineFacts::of(&view.id, &view.document, counted_of),
         }
     }
 }
@@ -647,7 +654,7 @@ impl<S: MindStore> Mind<S> {
         let ids = reader.universe(selection);
         let rows = reader.rows(&ids);
         let evaluation = select(&Vocabulary, &rows, selection, as_of, self.cursor_key())?;
-        Self::page(selection, evaluation, as_of, None)
+        Self::page(selection, evaluation, &reader.docs, as_of, None)
     }
 
     /// Every root this mind holds a document under, with its newest admission and, for a root that is an in-force
@@ -815,7 +822,7 @@ impl<S: MindStore> Mind<S> {
         kept.sort_by_key(|(at, _)| *at);
         evaluation.edges = kept.into_iter().map(|(_, edge)| edge).collect();
         evaluation.matched = u32::try_from(members.ids.len()).unwrap_or(u32::MAX);
-        Ok(Ranked { page: Self::page(&selection, evaluation, as_of, Some(row_scores))?, dropped })
+        Ok(Ranked { page: Self::page(&selection, evaluation, &reader.docs, as_of, Some(row_scores))?, dropped })
     }
 
     /// The projection of an evaluation: a header or a whole view per row, and
@@ -823,13 +830,14 @@ impl<S: MindStore> Mind<S> {
     pub(crate) fn page(
         selection: &Selection,
         evaluation: Evaluation<&SelectionRow>,
+        docs: &Docs<'_>,
         as_of: u64,
         scores: Option<Vec<f32>>,
     ) -> Result<PipelineSelectionPage, MindRefusal> {
         let items = if selection.projection == PROJECTION_DOCUMENT {
             PipelinePageItems::Documents(evaluation.rows.iter().map(|row| row.view.clone()).collect())
         } else {
-            PipelinePageItems::Headers(evaluation.rows.iter().map(|row| PipelineDocumentSummary::of(&row.view)).collect())
+            PipelinePageItems::Headers(evaluation.rows.iter().map(|row| PipelineDocumentSummary::of(&row.view, &|fork| counted_answer(docs, fork))).collect())
         };
         let edges = if selection.has_hop() {
             let mut typed = Vec::with_capacity(evaluation.edges.len());
@@ -1734,7 +1742,7 @@ mod tests {
         let page = mind.query(&one).unwrap();
         let expected = view(&mind, K::Question, &q1);
         assert_eq!(page.edges, None, "no hop, no edges");
-        assert_eq!(headers(&page), [PipelineDocumentSummary::of(&expected)]);
+        assert_eq!(headers(&page), [PipelineDocumentSummary::of(&expected, &|_| None)]);
         assert_eq!(headers(&page)[0].facts, PipelineFacts::Question {
             label: l("Q1"),
             title: "Who owns the state?".into(),
@@ -1756,7 +1764,7 @@ mod tests {
         thought.nearest_permille = vec![300, 450];
         thought.chosen = 1;
         thought.text = "B.".into();
-        assert_eq!(PipelineFacts::of(&D::Thought(thought)), PipelineFacts::Thought { label: "t1".into(), chosen: 1, nearest_permille: 450 });
+        assert_eq!(PipelineFacts::of(&PipelineRef { kind: K::Thought, id: id("thought", "t1").as_str().into() }, &D::Thought(thought), &|_| None), PipelineFacts::Thought { label: "t1".into(), chosen: 1, nearest_permille: 450 });
     }
 
     #[test]

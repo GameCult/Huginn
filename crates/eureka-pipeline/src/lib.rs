@@ -879,9 +879,12 @@ value_types! {
     /// request it came with: the pair that makes a retry the same answer, never a new
     /// one; the key is `(answerer, request_id)`. A record holds no card: a replayed
     /// `stale_fork` is shown the current card. `sequence` is per question and is the
-    /// last part of the key (the answer id).
+    /// last part of the key (the answer id). `choice`, `note` and (for a retraction) the
+    /// target are kept as sent whether the request was counted or refused, so a refused
+    /// `choice_invalid` keeps a choice that is no option label; which answer counts now is
+    /// derived by the reader, never stored here.
     pub struct PipelineDeskAnswer {
-        campaign: Slug, fork: Short, sequence: u32, options_hash: Sha256Hex, choice: Option<Label>, note: Option<Words>,
+        campaign: Slug, fork: Short, sequence: u32, options_hash: Sha256Hex, choice: Option<Short>, note: Option<Words>,
         answered_at: Short, received_at: Short, claim_in_future: bool, request_id: RequestId, body_sha256: Sha256Hex,
         answerer: Short, authority: DeskAuthority, outcome: DeskOutcome,
     }
@@ -1181,7 +1184,10 @@ pub enum DeskOutcome {
     /// A later passing answer, kept visible; `of` is the counted answer it followed.
     Revision { of: Short },
     Retraction { retracts: Short },
-    Refused { code: DeskRefusal },
+    /// A request the desk would not count, kept with what it was sent with. `retracts` is the
+    /// target a refused retraction named, as sent and unchecked (it may name no answer at all);
+    /// it is `None` on a refused answer, and it is never a citation.
+    Refused { code: DeskRefusal, retracts: Option<Short> },
 }
 
 impl DeskOutcome {
@@ -1199,7 +1205,8 @@ impl DeskOutcome {
 impl Bounded for DeskOutcome {
     fn validate(&self, field: &str) -> Result<(), PipelineRefusal> {
         match self {
-            Self::Counted | Self::Refused { .. } => Ok(()),
+            Self::Counted => Ok(()),
+            Self::Refused { retracts, .. } => retracts.as_ref().map_or(Ok(()), |target| target.validate(&format!("{field}.retracts"))),
             Self::Revision { of: id } | Self::Retraction { retracts: id } => {
                 let field = format!("{field}.{}", if matches!(self, Self::Revision { .. }) { "of" } else { "retracts" });
                 id.validate(&field)?;
@@ -1870,7 +1877,7 @@ mod tests {
             }), format!("{INSTANCE}:thought:t1793000000")),
             (D::DeskAnswer(PipelineDeskAnswer {
                 campaign: slug(CAMPAIGN), fork: id("question", "Q1"), sequence: 1, options_hash: Sha256Hex("c".repeat(64)),
-                choice: Some(l("a")), note: Some("Share it, with the mark.".into()), answered_at: s("2026-11-10T15:00:00Z"),
+                choice: Some(s("a")), note: Some("Share it, with the mark.".into()), answered_at: s("2026-11-10T15:00:00Z"),
                 received_at: s("2026-11-10T15:00:03Z"), claim_in_future: false, request_id: RequestId("6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f13".into()), body_sha256: Sha256Hex("d".repeat(64)),
                 answerer: s("user-7"), authority: DeskAuthority::Member,
                 outcome: DeskOutcome::Revision { of: id("desk_answer", "Q1.n1") },
