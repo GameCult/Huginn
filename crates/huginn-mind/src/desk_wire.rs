@@ -207,7 +207,7 @@ pub const DESK_MAX_RESPONSE_BYTES: usize = 65536;
 /// Most deciders one call carries (CultLib `card.deciders` `maxItems`).
 pub const DESK_DECIDERS_MAX: usize = 64;
 
-/// A decider list, read whole or not at all: at most `DESK_DECIDERS_MAX`, no subject twice. A
+/// A decider list, read whole or not at all: one to `DESK_DECIDERS_MAX` subjects, none twice. A
 /// bad list is the decoder's refusal, which names the field and never quotes a subject.
 fn deciders<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Short>, D::Error> {
     struct List;
@@ -227,6 +227,9 @@ fn deciders<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Sho
                 }
                 list.push(subject);
             }
+            if list.is_empty() {
+                return Err(serde::de::Error::custom("no deciders"));
+            }
             Ok(list)
         }
     }
@@ -237,6 +240,7 @@ fn deciders_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schem
     schemars::json_schema!({
         "type": "array",
         "items": generator.subschema_for::<Short>(),
+        "minItems": 1,
         "maxItems": DESK_DECIDERS_MAX,
         "uniqueItems": true
     })
@@ -245,7 +249,7 @@ fn deciders_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schem
 /// Every request the desk door answers. The fields are the wire names: the `mind` addressed
 /// (the persona and pipeline requests say `instance`; the sets are separate), the verified
 /// `subject` and `authority` Bifrost vouches for (door context, never body fields), and the
-/// `deciders` of this call, which the Mind never stores. Closed: a key outside the set refuses
+/// `deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside the set refuses
 /// the whole payload. The reads answer in follow-up desk-wire-reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
