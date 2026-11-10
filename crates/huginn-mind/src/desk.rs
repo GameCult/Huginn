@@ -142,6 +142,15 @@ fn counts_under(answer: &PipelineDeskAnswer, current: &Sha256Hex) -> bool {
     matches!(answer.outcome, DeskOutcome::Counted | DeskOutcome::Revision { .. }) && answer.options_hash == *current
 }
 
+/// The answer already stored for `(answerer, request_id)`, if any: the one retry lookup, which
+/// `answer_desk` runs before it reads the fork and the door runs before its showability gate.
+pub(crate) fn bound_answer<'a>(docs: &'a Docs<'_>, answerer: &Short, request_id: &RequestId) -> Option<(&'a str, &'a PipelineDeskAnswer)> {
+    docs.of_kind(PipelineKind::DeskAnswer).find_map(|(key, document)| match document {
+        PipelineDocument::DeskAnswer(held) if held.answerer == *answerer && held.request_id == *request_id => Some((key, held)),
+        _ => None,
+    })
+}
+
 /// The answer that counts for `fork` now: the lowest-sequence answer whose stored
 /// outcome is Counted or Revision under the card's current options hash and that no
 /// Retraction names (R4; an answer under an older hash stops counting). Derived on
@@ -318,11 +327,7 @@ impl<S: MindStore> Mind<S> {
         // the fork is read, so a retry gets its stored outcome without re-validating and even if the
         // card has since changed. A malformed request_id binds no record and meets the probe below.
         // The key is (answerer, request_id).
-        let bound = docs.of_kind(PipelineKind::DeskAnswer).find_map(|(key, document)| match document {
-            PipelineDocument::DeskAnswer(held) if held.answerer == stamp.answerer && held.request_id == request.request_id => Some((key, held)),
-            _ => None,
-        });
-        if let Some((key, held)) = bound {
+        if let Some((key, held)) = bound_answer(&docs, &stamp.answerer, &request.request_id) {
             if held.body_sha256 != body_sha256 {
                 return Err(MindRefusal::DeskRequestIdConflict { request_id: request.request_id.0.clone() });
             }

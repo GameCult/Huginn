@@ -20,7 +20,7 @@ use eureka_pipeline::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::desk::{DeskAnswerOutcome, DeskAnswerRequest, DeskBody, DeskStamp, counted_answer};
+use crate::desk::{DeskAnswerOutcome, DeskAnswerRequest, DeskBody, DeskStamp, bound_answer, counted_answer};
 use crate::docs::Docs;
 use crate::mind::Mind;
 use crate::refusal::MindRefusal;
@@ -323,10 +323,11 @@ impl<S: MindStore> Mind<S> {
             Err(refused) => return Ok((DeskResponse::NotStored(refused), false)),
         };
         let image = self.image()?;
-        let unshowable = matches!(
-            Docs::at(image, image.head).find(PipelineKind::Question, &sent.fork.0),
-            Some(PipelineDocument::Question(question)) if !showable(question, deciders)
-        );
+        let docs = Docs::at(image, image.head);
+        // A request already stored replays whatever the list is now: the lookup is `answer_desk`'s,
+        // asked here only so the gate does not shadow it.
+        let unshowable = bound_answer(&docs, &subject, &sent.request_id).is_none()
+            && matches!(docs.find(PipelineKind::Question, &sent.fork.0), Some(PipelineDocument::Question(question)) if !showable(question, deciders));
         if unshowable {
             return Ok((DeskResponse::NotStored(fork_unknown()), false));
         }
@@ -884,6 +885,28 @@ mod tests {
         // None of that bound the request id.
         let asked = request(&mind, FORK);
         assert_eq!(answered(ask(&mut mind, "x", asked).0).0.outcome, "Counted");
+    }
+
+    #[test]
+    fn a_stored_answer_replays_whatever_the_decider_list_is_now() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let request = wire(FORK, &hash);
+        let (stored, replayed) = ask(&mut mind, "x", request.clone());
+        assert!(!replayed);
+        let before = head(&mind);
+        // The list Bifrost passes is empty now; the stored request still gets its stored answer.
+        let (again, replayed) = ask_as(&mut mind, "x", &[], request.clone());
+        assert!(replayed);
+        assert_eq!(encode(&again), encode(&stored));
+        assert_eq!(head(&mind), before);
+        // Another subject with the same bytes has stored nothing: the gate refuses it.
+        let (other, replayed) = ask_as(&mut mind, "y", &[], request);
+        assert_eq!((not_stored(other).code, replayed), (ForkRefusalCode::ForkUnknown, false));
+        // And a request nobody stored is fork_unknown while the list is empty.
+        let fresh = wire(FORK, &hash);
+        assert_eq!(not_stored(ask_as(&mut mind, "x", &[], fresh).0).code, ForkRefusalCode::ForkUnknown);
+        assert_eq!((head(&mind), stored_count(&mind, FORK)), (before, 1));
     }
 
     #[test]
