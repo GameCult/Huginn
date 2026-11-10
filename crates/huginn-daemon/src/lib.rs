@@ -15,12 +15,17 @@
 
 pub mod bodies;
 pub mod daemon;
+pub mod desk_door;
 pub mod index;
 pub mod serve;
 pub mod sources;
 
 #[cfg(test)]
+mod desk_door_tests;
+
+#[cfg(test)]
 mod semantic_tests;
 
 pub use daemon::{Daemon, Found, Handled, Hits, IndexSink, Search, SearchTicket, runtime_id};
-pub use serve::{Options, ServeOptions, parse_options, run, startup};
+pub use desk_door::DeskDoor;
+pub use serve::{Options, ServeOptions, Started, parse_options, run, startup};

@@ -164,7 +164,7 @@ pub fn serve<I: IndexSink<OwnedRedbMessagePackBackingStore> + Send + 'static>(
     let loop_stopping = Arc::clone(&stopping);
     let registry = schema_registry().unwrap();
     let thread = std::thread::spawn(move || {
-        run(&mut daemon, &mut hub, &registry, &loop_stopping, &ServeOptions::default()).unwrap();
+        run(&mut daemon, &mut hub, &registry, None, &loop_stopping, &ServeOptions::default()).unwrap();
     });
     Server { addr, stopping, thread: Some(thread), ended: Arc::default(), _root: Some(root) }
 }

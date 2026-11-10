@@ -9,13 +9,13 @@ use anyhow::{Context, Result};
 use huginn_daemon::index::Backoff;
 use huginn_daemon::index::ollama::pool;
 use huginn_daemon::index::qdrant::QdrantIndex;
-use huginn_daemon::serve::{ServeOptions, parse_options, run, startup};
+use huginn_daemon::serve::{ServeOptions, Started, parse_options, run, startup};
 
 fn main() -> Result<()> {
     let options = parse_options(std::env::args().skip(1))?;
     let embedder = pool(&options.ollama_urls, &options.reserve_ollama_urls, &options.embedding_model);
     let index = QdrantIndex::new(&options.qdrant_url);
-    let (mut daemon, mut hub, registry) = match startup(&options, embedder, index, Backoff::default()) {
+    let Started { mut daemon, mut hub, registry, mut desk } = match startup(&options, embedder, index, Backoff::default()) {
         Ok(started) => started,
         Err(error) => {
             eprintln!("huginn-daemon refuses to serve {}: {error:#}", options.instance.0);
@@ -33,5 +33,8 @@ fn main() -> Result<()> {
     }
 
     eprintln!("huginn-daemon serving {} on {}", options.instance.0, hub.local_addr()?);
-    run(&mut daemon, &mut hub, &registry, &stopping, &ServeOptions::default())
+    if let Some(door) = &desk {
+        eprintln!("huginn-daemon serving the desk door on {}", door.path().display());
+    }
+    run(&mut daemon, &mut hub, &registry, desk.as_mut(), &stopping, &ServeOptions::default())
 }

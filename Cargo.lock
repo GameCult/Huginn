@@ -935,6 +935,7 @@ dependencies = [
  "cultnet-rs 0.1.0",
  "huginn-mind",
  "rmp-serde",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
