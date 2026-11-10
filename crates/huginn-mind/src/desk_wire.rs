@@ -684,6 +684,24 @@ mod tests {
         assert_eq!((closed.code, closed.retracts.as_deref()), (Some(ForkAnswerCode::ForkClosed), Some("n1")));
     }
 
+    /// Words are stored and projected as sent: spaces, case and trailing text are the person's.
+    #[test]
+    fn choice_and_note_pass_through_as_sent() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let padded = ForkAnswerRequest { answer: Some(ForkAnswer { choice: Some(" a ".into()), note: Some("  Why \n".into()) }), ..wire(FORK, &hash) };
+        let answer = refusal_of(&mut mind, "x", padded);
+        assert_eq!((answer.code, answer.choice.as_deref(), answer.note.as_deref()), (Some(ForkAnswerCode::ChoiceInvalid), Some(" a "), Some("  Why \n")));
+        let note_only = ForkAnswerRequest { answer: Some(ForkAnswer { choice: None, note: Some("\tkeep my edges ".into()) }), ..wire(FORK, &hash) };
+        let (answer, _, _) = answered(ask(&mut mind, "x", note_only).0);
+        assert_eq!((answer.outcome.as_str(), answer.choice, answer.note.as_deref()), ("Counted", None, Some("\tkeep my edges ")));
+        // The stored record says the same: the projection copied it.
+        let image = mind.image().unwrap();
+        let docs = Docs::at(image, image.head);
+        let Some(D::DeskAnswer(stored)) = docs.find(PipelineKind::DeskAnswer, &answer_key(FORK, 2)) else { panic!("no second answer") };
+        assert_eq!(stored.note.as_ref().map(|note| note.0.as_str()), Some("\tkeep my edges "));
+    }
+
     #[test]
     fn counts_are_derived_at_the_response_snapshot() {
         let mut mind = desk();
@@ -742,7 +760,7 @@ mod tests {
     fn a_malformed_retracts_is_body_invalid() {
         let mut mind = desk();
         let hash = hash_of(&mind, FORK);
-        for bad in ["3", "n0", "n01", "n4294967296", " n1", "N1", "n", "n-1", "n+1", ""] {
+        for bad in ["3", "n0", "n01", "n4294967296", " n1", "N1", "n", "n-1", "n+1", "", "n1x", "n1 ", "n1\n", "n1.", "n\u{661}", "n1n2"] {
             let on_a_retraction = retraction(FORK, &hash, bad);
             let on_an_answer = ForkAnswerRequest { retracts: Some(bad.into()), ..wire(FORK, &hash) };
             for request in [on_a_retraction, on_an_answer] {
@@ -819,6 +837,9 @@ mod tests {
         // Nothing else is the door's to rename: it passes through unchanged, Unavailable included.
         for other in [
             MindRefusal::Unavailable { detail: "the store is down".into() },
+            MindRefusal::Unavailable { detail: "a stored desk answer names a key outside its fork's n<seq> form".into() },
+            MindRefusal::Unavailable { detail: "a race on fork request_id body".into() },
+            MindRefusal::Unavailable { detail: String::new() },
             MindRefusal::ForeignInstance { declared: "a".into(), mind: "b".into() },
             MindRefusal::MissingIdentity,
         ] {
@@ -1042,7 +1063,7 @@ mod tests {
         assert_eq!((original.answer_id.as_str(), original.answerer.as_str()), ("n1", "x"));
         // V17 and V18: an id that is no lowercase D-format UUID is body_invalid naming request_id, and binds nothing.
         let before = head(&mind);
-        for bad in ["retry-1", "0000000A-0000-4000-8000-00000000000B", "{00000000-0000-4000-8000-000000000001}", "00000000-0000-4000-8000-0000000000010", ""] {
+        for bad in ["retry-1", "0000000A-0000-4000-8000-00000000000B", "{00000000-0000-4000-8000-000000000001}", "00000000-0000-4000-8000-0000000000010", "", " 00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000001 ", "00000000-0000-4000-8000-000000000001\n", "00000000-0000-4000-8000-000000000001x"] {
             let refusal = not_stored(ask(&mut mind, "x", ForkAnswerRequest { request_id: bad.into(), ..request.clone() }).0);
             assert_eq!(refusal.code, ForkRefusalCode::BodyInvalid, "{bad:?}");
             assert!(refusal.error.contains("request_id"), "{refusal:?}");
