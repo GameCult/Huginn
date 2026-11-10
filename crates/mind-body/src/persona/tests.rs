@@ -7823,6 +7823,12 @@ fn a_refused_or_unanswered_open_is_told_and_the_turn_stands() {
 }
 
 #[test]
+fn a_pending_invitation_is_told_not_to_be_sent_again() {
+    let told = open_told("@ann:chat", Some(DirectOutcome::InvitePending));
+    assert!(told.contains("Do not send another"), "{told}");
+}
+
+#[test]
 fn every_outcome_is_told_in_its_own_words_and_a_landed_one_says_the_reply_comes_by_dm() {
     let expected = [
         (DirectOutcome::Opened, "accept or decline"),
