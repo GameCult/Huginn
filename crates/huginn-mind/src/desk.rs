@@ -54,7 +54,10 @@ pub enum DeskBody {
     /// A retraction carrying an answer, naming no target, or a plain answer carrying
     /// `retracts` (R1): what the door decodes those three forms to. Always stored as a
     /// refused `bad_retraction` after steps 4 to 6; the record keeps every field as sent.
-    IllegalRetraction { choice: Option<Short>, note: Option<Words>, retracts: Option<Short> },
+    /// `retracted` is the wire flag as sent and reaches only the body digest: true for a
+    /// retraction carrying an answer or naming no target, false for a plain answer carrying
+    /// `retracts`. Any other combination is no illegal form (`body` invalid).
+    IllegalRetraction { choice: Option<Short>, note: Option<Words>, retracts: Option<Short>, retracted: bool },
 }
 
 /// The door's verified context for one call: who answered, the role the account
@@ -190,7 +193,10 @@ fn refusal_of(docs: &Docs<'_>, question: &PipelineQuestion, stamp: &DeskStamp, r
 ///
 /// FROZEN: the digest form (field order, `serde_json` string of `Sent`, lowercase hex) is stored
 /// in every answer and read back by retries years later. A change of form is a new version of the
-/// stored field, never an edit here; `body_digest_is_pinned` fails on any edit.
+/// stored field, never an edit here; `body_digest_is_pinned` fails on any edit. The form covers
+/// the contract's fork_id, options_hash, choice, note, retracts, answered_at and, for the illegal
+/// form only, `retracted` (the two legal variants fix the flag, so their bytes do not carry it);
+/// the three illegal goldens and the two legal ones are all frozen.
 fn body_digest(request: &DeskAnswerRequest) -> Sha256Hex {
     use sha2::{Digest, Sha256};
     #[derive(serde::Serialize)]
@@ -204,18 +210,21 @@ fn body_digest(request: &DeskAnswerRequest) -> Sha256Hex {
         // Written only for the illegal form, so every other body keeps its stored digest.
         #[serde(skip_serializing_if = "is_false")]
         illegal_retraction: bool,
+        // The wire flag, written only for the illegal form (the legal variants fix it).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retracted: Option<bool>,
     }
     fn is_false(flag: &bool) -> bool {
         !*flag
     }
-    let (choice, note, retracts, illegal_retraction) = match &request.body {
-        DeskBody::Answer { choice, note } => (choice.as_ref().map(|c| c.0.as_str()), note.as_ref().map(|n| n.0.as_str()), None, false),
-        DeskBody::Retraction { retracts } => (None, None, Some(retracts.0.as_str()), false),
-        DeskBody::IllegalRetraction { choice, note, retracts } => {
-            (choice.as_ref().map(|c| c.0.as_str()), note.as_ref().map(|n| n.0.as_str()), retracts.as_ref().map(|r| r.0.as_str()), true)
+    let (choice, note, retracts, illegal_retraction, retracted) = match &request.body {
+        DeskBody::Answer { choice, note } => (choice.as_ref().map(|c| c.0.as_str()), note.as_ref().map(|n| n.0.as_str()), None, false, None),
+        DeskBody::Retraction { retracts } => (None, None, Some(retracts.0.as_str()), false, None),
+        DeskBody::IllegalRetraction { choice, note, retracts, retracted } => {
+            (choice.as_ref().map(|c| c.0.as_str()), note.as_ref().map(|n| n.0.as_str()), retracts.as_ref().map(|r| r.0.as_str()), true, Some(*retracted))
         }
     };
-    let sent = Sent { fork: &request.fork.0, options_hash: &request.options_hash.0, answered_at: &request.answered_at.0, choice, note, retracts, illegal_retraction };
+    let sent = Sent { fork: &request.fork.0, options_hash: &request.options_hash.0, answered_at: &request.answered_at.0, choice, note, retracts, illegal_retraction, retracted };
     let bytes = serde_json::to_string(&sent).expect("strings serialise");
     Sha256Hex(Sha256::digest(bytes.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect())
 }
@@ -265,7 +274,14 @@ impl<S: MindStore> Mind<S> {
                 (choice.clone(), note.clone(), DeskOutcome::Counted)
             }
             DeskBody::Retraction { retracts } => (None, None, DeskOutcome::Retraction { retracts: retracts.clone() }),
-            DeskBody::IllegalRetraction { choice, note, retracts } => {
+            DeskBody::IllegalRetraction { choice, note, retracts, retracted } => {
+                // Only the three wire forms are illegal retractions; any other value would store
+                // bad_retraction for a body the wire meant as legal.
+                let answered = choice.is_some() || note.is_some();
+                let is_form = if *retracted { answered || retracts.is_none() } else { answered && retracts.is_some() };
+                if !is_form {
+                    return Err(invalid("body"));
+                }
                 choice.as_ref().map(choice_shape).transpose()?;
                 if retracts.as_ref().is_some_and(|target| target.0.len() > 200) {
                     return Err(invalid("desk_answer.outcome.retracts"));
@@ -1333,6 +1349,18 @@ mod tests {
         assert_eq!(body_digest(&answer).0, "8a4d5b2ed0b3452bfed2f3a276b2828974e6824a3edcc643cfe9cfcdda34173a");
         let retraction = request(DeskBody::Retraction { retracts: s("eureka-state:desk_answer:Q1.1") });
         assert_eq!(body_digest(&retraction).0, "9f8075382556898c0bea364ed7c6deb2a86d8c78288a1f34e06da6e9bf5f58a3");
+        // The illegal form covers the wire flag: (i) a retraction carrying an answer, (iii) a plain
+        // answer carrying retracts, (ii) a retraction naming no target.
+        let target = Some(s("eureka-state:desk_answer:Q1.n1"));
+        let illegal = |choice: Option<&str>, retracts: Option<Short>, retracted: bool| {
+            request(DeskBody::IllegalRetraction { choice: choice.map(s), note: None, retracts, retracted })
+        };
+        let carried = body_digest(&illegal(Some("A"), target.clone(), true));
+        let plain_with_target = body_digest(&illegal(Some("A"), target.clone(), false));
+        assert_eq!(carried.0, "935cab1a0ae34606b809d8ebca7cffa2889d20b3585d2622d32153a4d6898af1");
+        assert_eq!(plain_with_target.0, "82b24cccb4ed2535a549f95f844fcd935074c3712b5b832f0b2cbd89c71fd9a6");
+        assert_eq!(body_digest(&illegal(None, None, true)).0, "34ef86ed63b9318459965d4b85e794d2636ffc15736da866036b087c9c4a30eb");
+        assert_ne!(carried, plain_with_target);
         // The id is not part of the body; answered_at is.
         let mut other_id = answer.clone();
         other_id.request_id = RequestId(R2.into());
@@ -1383,15 +1411,15 @@ mod tests {
     fn an_illegal_retraction_form_is_a_stored_bad_retraction() {
         let mut mind = desk();
         let (first, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", AT)));
-        let form = |choice: Option<&str>, note: Option<&str>, retracts: Option<&str>| {
+        let form = |choice: Option<&str>, note: Option<&str>, retracts: Option<&str>, retracted: bool| {
             let mut request = pick(FORK, "Q1", "A", AT);
-            request.body = DeskBody::IllegalRetraction { choice: choice.map(s), note: note.map(Into::into), retracts: retracts.map(s) };
+            request.body = DeskBody::IllegalRetraction { choice: choice.map(s), note: note.map(Into::into), retracts: retracts.map(s), retracted };
             request
         };
         for (what, request, sent) in [
-            ("a retraction carrying an answer", form(Some("A"), Some("why"), Some(&first)), (Some("A"), Some("why"), Some(first.as_str()))),
-            ("a retraction lacking retracts", form(None, None, None), (None, None, None)),
-            ("a plain answer carrying retracts", form(Some("A"), None, Some(&first)), (Some("A"), None, Some(first.as_str()))),
+            ("a retraction carrying an answer", form(Some("A"), Some("why"), Some(&first), true), (Some("A"), Some("why"), Some(first.as_str()))),
+            ("a retraction lacking retracts", form(None, None, None, true), (None, None, None)),
+            ("a plain answer carrying retracts", form(Some("A"), None, Some(&first), false), (Some("A"), None, Some(first.as_str()))),
         ] {
             let before = head(&mind);
             let id = request.request_id.clone();
@@ -1407,8 +1435,8 @@ mod tests {
         }
         assert_eq!(counted(&mind, FORK), Some(first));
         // Steps 4 to 6 come first: an off-list account is not_a_decider, a stale card is stale_fork.
-        assert_eq!(code_of(ask(&mut mind, &off(), form(None, None, None))), DeskRefusal::NotADecider);
-        let mut stale = form(None, None, None);
+        assert_eq!(code_of(ask(&mut mind, &off(), form(None, None, None, true))), DeskRefusal::NotADecider);
+        let mut stale = form(None, None, None, true);
         stale.options_hash = options_hash(&question_with("Q1", &["A", "B"], "B"));
         assert_eq!(code_of(ask(&mut mind, &decider("y"), stale)), DeskRefusal::StaleFork);
     }
@@ -1420,7 +1448,7 @@ mod tests {
         let plain = with_id(pick(FORK, "Q1", "A", AT), R1);
         stored(ask(&mut mind, &decider("x"), plain.clone()));
         let mut illegal = plain;
-        illegal.body = DeskBody::IllegalRetraction { choice: Some(s("A")), note: None, retracts: None };
+        illegal.body = DeskBody::IllegalRetraction { choice: Some(s("A")), note: None, retracts: None, retracted: true };
         assert_eq!(
             ask(&mut mind, &decider("x"), illegal),
             DeskAnswerOutcome::Refused(MindRefusal::DeskRequestIdConflict { request_id: R1.into() })
@@ -1434,7 +1462,7 @@ mod tests {
         let before = head(&mind);
         let illegal = |fork: &str, note: Option<&str>| {
             let mut request = pick(fork, "Q1", "A", AT);
-            request.body = DeskBody::IllegalRetraction { choice: None, note: note.map(Into::into), retracts: None };
+            request.body = DeskBody::IllegalRetraction { choice: None, note: note.map(Into::into), retracts: None, retracted: true };
             request
         };
         assert!(matches!(
@@ -1459,7 +1487,7 @@ mod tests {
             let id = request.request_id.clone();
             (ask(mind, &decider("x"), request.clone()), request, id)
         };
-        for choice in ["has space", "ä", "A/B", &"x".repeat(65)] {
+        for choice in ["has space", "ä", "A/B", "a", &"x".repeat(65), &"x".repeat(200)] {
             let before = head(&mind);
             let (outcome, request, id) = ask_choice(&mut mind, choice);
             let (answer, outcome) = stored(outcome);
@@ -1502,5 +1530,79 @@ mod tests {
             let record = held(&mind, &answer);
             assert_eq!((record.received_at, record.claim_in_future), (s("2026-09-16T12:00:00Z"), flagged), "{claim}");
         }
+    }
+
+    fn illegal_form(choice: Option<&str>, retracts: Option<&str>, retracted: bool) -> DeskAnswerRequest {
+        let mut request = pick(FORK, "Q1", "A", AT);
+        request.body = DeskBody::IllegalRetraction { choice: choice.map(s), note: None, retracts: retracts.map(s), retracted };
+        request
+    }
+
+    /// The illegal digest covers the wire flag: forms (i) and (iii) with equal fields are different bodies.
+    #[test]
+    fn the_illegal_digest_covers_retracted() {
+        let mut mind = desk();
+        let target = key("Q1", 1);
+        let (answer, outcome) = stored(ask(&mut mind, &decider("x"), with_id(illegal_form(Some("A"), Some(&target), false), R1)));
+        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::BadRetraction, retracts: Some(s(&target)) });
+        let before = head(&mind);
+        assert_eq!(
+            ask(&mut mind, &decider("x"), with_id(illegal_form(Some("A"), Some(&target), true), R1)),
+            DeskAnswerOutcome::Refused(MindRefusal::DeskRequestIdConflict { request_id: R1.into() })
+        );
+        assert_eq!(head(&mind), before);
+        assert_eq!(replayed(ask(&mut mind, &decider("x"), with_id(illegal_form(Some("A"), Some(&target), false), R1))), (answer, outcome));
+        assert_eq!(head(&mind), before);
+    }
+
+    /// A value that is no wire form is refused before the digest and the lookup, and binds nothing.
+    #[test]
+    fn a_value_that_is_no_illegal_form_is_body_invalid() {
+        let mut mind = desk();
+        let before = head(&mind);
+        let target = key("Q1", 1);
+        for (what, request) in [
+            ("a plain answer", illegal_form(Some("A"), None, false)),
+            ("a target and no answer, flag false", illegal_form(None, Some(&target), false)),
+            ("a legal retraction", illegal_form(None, Some(&target), true)),
+        ] {
+            let request = with_id(request, R1);
+            assert_eq!(
+                ask(&mut mind, &decider("x"), request),
+                DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: "body".into() }),
+                "{what}"
+            );
+            assert_eq!(head(&mind), before, "{what}");
+        }
+        assert!(matches!(ask(&mut mind, &decider("x"), with_id(pick(FORK, "Q1", "A", AT), R1)), DeskAnswerOutcome::Stored { .. }), "the id stayed free");
+    }
+
+    /// S5: a refused target is kept as sent up to 200 bytes; past that the body is malformed.
+    #[test]
+    fn an_illegal_target_is_at_most_200_bytes() {
+        let mut mind = desk();
+        let long = "x".repeat(200);
+        let (answer, outcome) = stored(ask(&mut mind, &decider("x"), illegal_form(Some("A"), Some(&long), false)));
+        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::BadRetraction, retracts: Some(s(&long)) });
+        assert_eq!(held(&mind, &answer).choice, Some(s("A")));
+        let before = head(&mind);
+        assert_eq!(
+            ask(&mut mind, &decider("x"), illegal_form(Some("A"), Some(&"x".repeat(201)), false)),
+            DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: "desk_answer.outcome.retracts".into() })
+        );
+        assert_eq!(head(&mind), before);
+    }
+
+    /// M2: steps 4 to 6 precede R1, so an illegal form on a closed fork is fork_closed.
+    #[test]
+    fn an_illegal_form_on_a_closed_fork_is_fork_closed() {
+        let mut mind = desk();
+        let (first, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", AT)));
+        let mut ruled = ruling("RQ1");
+        ruled.answers = Some(s(FORK));
+        ruled.choice = Some(l("A"));
+        committed(admit(&mut mind, vec![D::Ruling(ruled)]));
+        let (_, outcome) = stored(ask(&mut mind, &decider("y"), illegal_form(Some("A"), Some(&first), false)));
+        assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::ForkClosed, retracts: Some(s(&first)) });
     }
 }

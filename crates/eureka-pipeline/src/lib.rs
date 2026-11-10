@@ -4580,4 +4580,16 @@ mod tests {
         answer.outcome = DeskOutcome::Retraction { retracts: id("desk_answer", "Q1.n2") };
         assert_eq!(PipelineDocument::DeskAnswer(answer).validate(), Ok(()));
     }
+
+    #[test]
+    fn a_refused_target_is_bounded() {
+        let mut answer = desk_answer_sample();
+        answer.outcome = DeskOutcome::Refused { code: DeskRefusal::BadRetraction, retracts: Some(Short("x".repeat(200))) };
+        assert_eq!(PipelineDocument::DeskAnswer(answer.clone()).validate(), Ok(()));
+        answer.outcome = DeskOutcome::Refused { code: DeskRefusal::BadRetraction, retracts: Some(Short("x".repeat(201))) };
+        assert_eq!(
+            PipelineDocument::DeskAnswer(answer).validate(),
+            Err(PipelineRefusal::FieldBound { field: "desk_answer.outcome.retracts".into(), limit: 200, actual: 201 })
+        );
+    }
 }
