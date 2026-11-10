@@ -1,5 +1,5 @@
 //! The fork desk's answer wire, Huginn's half: Libby's answer-side documents
-//! (CultLib `contracts/cultnet/governance/fork-card.md` and `fork-card-vectors.json`)
+//! (CultLib `contracts/cultnet/governance/`, the contract file and its vectors at 8ca1d184)
 //! as Rust types, the one conversion between her `n<seq>` answer ids and the
 //! record keys, the projection of a stored answer, the refusal mapping and the
 //! showability predicate, and `Mind::desk_answer`, the one call that runs them in order.
@@ -147,6 +147,8 @@ pub struct ForkRefusal {
 /// included (a stale fork, a non-decider and the rest are stored), fresh or replayed alike.
 /// `NotStored` is a request that stored nothing. `Refused` is any other Mind refusal; an
 /// `Unavailable` is Bifrost's to turn into its 503, and Huginn writes no document for it.
+// One value per call, built and encoded once; a box would only add a deref to every reader.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum DeskResponse {
     Answered { answer: ForkDeskAnswer, counted_answer_id: Option<String>, as_of: u64 },
@@ -1081,7 +1083,8 @@ mod tests {
                 assert_eq!(ids.entry(hers.answer_id.clone()).or_insert_with(|| mine.answer_id.clone()), &mine.answer_id, "{name}: one answer, one id");
                 mine.fork_id = her_fork.into();
                 let through = |id: &mut Option<String>| *id = id.take().map(|id| ids.get(&id).cloned().unwrap_or(id));
-                (through(&mut hers.of), through(&mut hers.retracts));
+                through(&mut hers.of);
+                through(&mut hers.retracts);
                 hers.answer_id = mine.answer_id.clone();
                 if hers.retracts.is_none() && mine.retracts.is_some() {
                     deviations.push(name);
