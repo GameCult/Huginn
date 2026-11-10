@@ -84,7 +84,7 @@ use uuid::Uuid;
 
 use crate::address::{Addressee, Name, addresses, localpart, project_names};
 use crate::chat_image::{self, Image, MAX_PER_LINE};
-use crate::chat_client::{Chat, ChatDelivery, ChatSendRequest, ContextLine, Refusal, SendBasis};
+use crate::chat_client::{Chat, ChatDelivery, ChatRead, ChatSendRequest, ContextLine, Refusal, SendBasis};
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
 use crate::heartbeat::{HeartbeatView, PollTrace};
@@ -1228,6 +1228,9 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     /// What each room's newest message was among the lines the CLI took in this process: the seq and the event. Filled by `echoed` only:
     /// a line written and not echoed she has not seen.
     held: BTreeMap<String, (u64, String)>,
+    /// The seq of the newest event reported read in each room (by room id), so a retold or revised batch never reports an event
+    /// at or behind one already reported. Advanced only by a report the mouth took.
+    read_through: BTreeMap<String, u64>,
     /// The reply a stale send stopped, until it is told back.
     revision: Option<Revision>,
     /// A revision line, or a flush, was echoed since the last result: that result is her final answer, sent without a basis.
@@ -1295,6 +1298,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
             seen: Shown::default(),
             retell: None,
             held: BTreeMap::new(),
+            read_through: BTreeMap::new(),
             revision: None,
             echoed_revision: false,
             echoed_flush: false,
@@ -1482,6 +1486,32 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         Polled { pending, other: false, other_first: false, yield_now: !pending && !own_untold && self.replies_elsewhere }
     }
 
+    /// Her read receipts for a batch the CLI just took in: one `chat_read` per room, naming only the newest event of that room in
+    /// the batch. Every delivery of an echoed batch is a `message` line of her input, and the `earlier` lines before it are part
+    /// of the input too, so the newest message is the newest event she saw; nothing queued and not yet told is in `batch`, so
+    /// nothing unread is ever reported. Event ids are deliberately NOT added to the `earlier` or older message lines: a receipt
+    /// needs only the latest event the model saw, and an id on every line would grow the prompt for no receipt benefit.
+    /// Display only: a refused or unreachable report is dropped, never ends the session, and the ack stays the delivery
+    /// guarantee. A room already reported at or past a delivery's seq (a retold batch) is not reported again.
+    fn report_read(&mut self, batch: &[ChatDelivery]) {
+        let mut newest: BTreeMap<&str, &ChatDelivery> = BTreeMap::new();
+        for delivery in batch {
+            if newest.get(delivery.room_id.as_str()).is_none_or(|kept| kept.seq < delivery.seq) {
+                newest.insert(&delivery.room_id, delivery);
+            }
+        }
+        let persona = self.organs.mind.instance().0.clone();
+        for (room, delivery) in newest {
+            if self.read_through.get(room).is_some_and(|through| *through >= delivery.seq) {
+                continue;
+            }
+            let read = ChatRead { persona: persona.clone(), room: room.to_owned(), event_id: delivery.event_id.clone(), at_unix_ms: delivery.at_unix_ms };
+            if self.organs.chat.read(&read).is_ok() {
+                self.read_through.insert(room.to_owned(), delivery.seq);
+            }
+        }
+    }
+
     fn held(&self) -> Option<HeldReason> {
         match read(self.control, self.swarm, self.organs.mind.instance()) {
             Effective::Held { reason } => Some(reason),
@@ -1599,6 +1629,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                     self.held.insert(delivery.room_alias.clone(), (delivery.seq, delivery.event_id.clone()));
                 }
             }
+            self.report_read(&batch);
             self.echoed.extend(batch);
             self.seen.add(shown);
             self.echoed_revision |= revision;

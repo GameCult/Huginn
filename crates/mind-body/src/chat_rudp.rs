@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::chat_client::{
-    ACK, Chat, ChatAck, ChatDelivery, ChatPending, ChatPendingRequest, ChatRefusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, REFUSAL, SEND_RECEIPT,
+    ACK, Chat, ChatAck, ChatDelivery, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
     SEND_REQUEST, decode, encode,
 };
 
@@ -184,6 +184,10 @@ impl Chat for RudpChat {
     fn ack(&self, through_seq: u64) -> Result<()> {
         let ack = ChatAck { persona: self.persona.clone(), through_seq };
         self.exchange(ACK, &format!("{}:{through_seq}", self.persona), &ack, None).map(|_| ())
+    }
+
+    fn read(&self, read: &ChatRead) -> Result<()> {
+        self.exchange(READ, &format!("{}:{}", self.persona, read.event_id), read, None).map(|_| ())
     }
 }
 
