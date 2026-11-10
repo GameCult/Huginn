@@ -56,16 +56,22 @@ fn the_closure_holds_no_result_text_however_long_it_is() {
 }
 
 #[test]
-fn a_result_over_the_bound_is_cut_in_its_reply_at_a_character_boundary_marked_and_still_admitted() {
+fn a_result_over_the_bound_is_delivered_whole_in_order_across_replies_each_within_it() {
     let mind = with_run();
-    // Two bytes a character after a one-byte head, so the bound falls inside a character.
-    let text = format!("x{}", "é".repeat(3000));
+    // Two bytes a character after a one-byte head, so a bound falls inside a character.
+    let text = format!("x{}", "é".repeat(9000));
     carry_with(&Seen::of(&mind), vec![Out(result_with(&text))], Some(0), false).outcome.unwrap();
-    let PipelineDocument::Reply(reply) = mind.view(K::Reply, &format!("{INSTANCE}:reply:selfrun-a-r1")).expect("the reply was admitted").document else { panic!("a reply") };
-    let kept = reply.text.0.strip_suffix("\n[truncated]").expect("a cut result is marked");
-    assert_eq!(kept.len(), REPLY_TEXT_LIMIT - 1);
-    assert!(text.starts_with(kept));
-    assert!(reply.text.0.len() <= 4000);
+    let mut whole = String::new();
+    let mut n = 1;
+    while let Some(view) = mind.view(K::Reply, &format!("{INSTANCE}:reply:selfrun-a-r{n}")) {
+        let PipelineDocument::Reply(reply) = view.document else { panic!("a reply") };
+        assert!(reply.text.0.len() <= REPLY_TEXT_LIMIT && !reply.text.0.is_empty());
+        whole.push_str(&reply.text.0);
+        n += 1;
+    }
+    assert_eq!(n - 1, 5, "{} bytes in pieces of at most {REPLY_TEXT_LIMIT}", text.len());
+    assert_eq!(whole, text);
+    assert_eq!(mind.ids(K::Reply).len(), 5);
 }
 
 #[test]

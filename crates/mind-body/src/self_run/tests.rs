@@ -475,14 +475,13 @@ fn a_result_events_text_reaches_the_journal_with_its_subtype_and_error_flag() {
 }
 
 #[test]
-fn a_long_result_is_cut_at_the_limit_on_a_character_boundary_and_marked() {
-    // One ASCII byte first, so the limit falls in the middle of a two-byte character.
-    let text = format!("a{}", "é".repeat(RESULT_TEXT_LIMIT));
+fn a_long_result_reaches_the_journal_whole() {
+    let text = format!("a{}", "é".repeat(5000));
     let line = json!({"type": "result", "result": text}).to_string();
     let ran = go(vec![Out(line)]);
     let written = ran.out.lines().find(|l| l.starts_with("result")).unwrap();
-    assert_eq!(written, format!("result: a{}", "é".repeat(RESULT_TEXT_LIMIT / 2 - 1)));
-    assert!(ran.out.contains("\n[truncated]\n"), "{}", ran.out);
+    assert_eq!(written, format!("result: {text}"));
+    assert!(!ran.out.contains("[truncated]"), "{}", ran.out);
 }
 
 // ---- what is read -----------------------------------------------------------
