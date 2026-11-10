@@ -785,7 +785,7 @@ mod bounds {
             let started = Instant::now();
             assert_eq!(rig.door.serve_ready(&mut rig.daemon, now()), 1);
             let took = started.elapsed();
-            assert!(took >= Duration::from_millis(1000), "the connection was cut after {took:?}, short of one second");
+            assert!(took >= Duration::from_millis(950), "the connection was cut after {took:?}, short of the one-second deadline (the kernel timeout is jiffy-granular)");
             assert!(took < Duration::from_millis(1250), "the connection held the loop for {took:?}");
         });
     }
@@ -826,7 +826,7 @@ mod bounds {
         let took = started.elapsed();
         // The kernel's send timeout reads as WouldBlock; the deadline already spent reads as TimedOut.
         assert!(matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut), "{error:?}");
-        assert!(took >= Duration::from_millis(1000) && took < Duration::from_millis(1250), "the write was cut after {took:?}");
+        assert!(took >= Duration::from_millis(950) && took < Duration::from_millis(1250), "the write was cut after {took:?}");
         assert_eq!(stream.write(&chunk).unwrap_err().kind(), std::io::ErrorKind::TimedOut, "once spent, nothing more is written");
     }
 
