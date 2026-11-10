@@ -642,8 +642,9 @@ mod tests {
 
     /// What a stored refusal projects: the code, the sent choice and note, the target as `n<seq>`.
     fn refusal_of(mind: &mut Mind<MemoryStore>, who: &str, request: ForkAnswerRequest) -> ForkDeskAnswer {
-        let (answer, _, _) = answered(ask(mind, who, request).0);
+        let (answer, _, as_of) = answered(ask(mind, who, request).0);
         assert_eq!(answer.outcome, "Refused", "{answer:?}");
+        assert_eq!(as_of, head(mind), "a refused answer is read at the head too");
         answer
     }
 
@@ -707,8 +708,8 @@ mod tests {
         let (answer, counted, _) = answered(ask(&mut mind, "y", second).0);
         assert_eq!((answer.outcome.as_str(), answer.answer_id.as_str(), counted.as_deref()), ("Revision", "n2", Some("n2")));
         // Retracting what counted leaves nothing counted.
-        let (_, counted, _) = answered(ask(&mut mind, "x", retraction(FORK, &hash, "n2")).0);
-        assert_eq!(counted, None);
+        let (_, counted, as_of) = answered(ask(&mut mind, "x", retraction(FORK, &hash, "n2")).0);
+        assert_eq!((counted, as_of), (None, head(&mind)));
     }
 
     #[test]
@@ -719,8 +720,8 @@ mod tests {
         answered(ask(&mut mind, "x", wire(FORK, &hash1)).0);
         answered(ask(&mut mind, "x", wire(FORK2, &hash2)).0);
         // n1 retracted on Q2 is Q2's n1; Q1's n1 still counts.
-        let (answer, counted, _) = answered(ask(&mut mind, "y", retraction(FORK2, &hash2, "n1")).0);
-        assert_eq!((answer.outcome.as_str(), answer.retracts.as_deref(), counted), ("Retraction", Some("n1"), None));
+        let (answer, counted, as_of) = answered(ask(&mut mind, "y", retraction(FORK2, &hash2, "n1")).0);
+        assert_eq!((answer.outcome.as_str(), answer.retracts.as_deref(), counted, as_of), ("Retraction", Some("n1"), None, head(&mind)));
         assert_eq!(counted_wire(&mind, FORK), Some("n1".into()));
         assert_eq!(counted_wire(&mind, FORK2), None);
         // A key of another fork, a longer label, a leading zero or no n at all name no sequence here.
@@ -920,11 +921,21 @@ mod tests {
         committed(admit(&mut mind, vec![question_with("Q3", |q| q.depends = vec!["".into()]), question_with("Q4", |q| q.options[1].text = "".into())]));
         let id = fresh_id();
         let request = |mind: &Mind<MemoryStore>, fork: &str| ForkAnswerRequest { request_id: id.clone(), ..wire(fork, &hash_of(mind, fork)) };
-        // A held question with an empty depends line or an empty option text stores nothing.
+        // A held question with an empty depends line or an empty option text stores nothing, whatever
+        // form the request takes: an answer, a retraction or an illegal form.
         for fork in ["eureka-state:question:Q3", "eureka-state:question:Q4"] {
-            let (before, asked) = (head(&mind), request(&mind, fork));
-            assert_eq!(not_stored(ask(&mut mind, "x", asked).0).code, ForkRefusalCode::ForkUnknown, "{fork}");
-            assert_eq!((head(&mind), stored_count(&mind, fork)), (before, 0), "{fork}");
+            let hash = hash_of(&mind, fork);
+            let said = ForkAnswer { choice: Some("A".into()), note: None };
+            let forms = [
+                request(&mind, fork),
+                ForkAnswerRequest { request_id: id.clone(), ..retraction(fork, &hash, "n1") },
+                ForkAnswerRequest { request_id: id.clone(), answer: Some(said), retracted: true, retracts: Some("n1".into()), ..wire(fork, &hash) },
+            ];
+            for asked in forms {
+                let before = head(&mind);
+                assert_eq!(not_stored(ask(&mut mind, "x", asked).0).code, ForkRefusalCode::ForkUnknown, "{fork}");
+                assert_eq!((head(&mind), stored_count(&mind, fork)), (before, 0), "{fork}");
+            }
         }
         // So does a showable question with no decider to show it to.
         let (before, asked) = (head(&mind), request(&mind, FORK));
