@@ -630,4 +630,47 @@ mod tests {
         assert!(wire(&message) <= DESK_MAX_RESPONSE_BYTES && wire(&message) > 4000, "{}", wire(&message));
         assert_eq!(decode_desk_response(&message).unwrap().1, Ok(response));
     }
+
+    /// A desk call's refusal rides `huginn.desk_response.v1` whole: code and detail survive the
+    /// wire, and the published schema declares the variant. One row per refusal a desk call can
+    /// return, the four the door maps to `NotStored` included, because the response type can
+    /// carry any of them.
+    #[test]
+    fn every_refusal_a_desk_call_can_return_round_trips_losslessly() {
+        use crate::desk_wire::DESK_RESPONSE_SCHEMA_JSON;
+        use eureka_pipeline::{PipelineKind, PipelineRefusal};
+        let refusals = [
+            MindRefusal::Unavailable { detail: "the store did not answer".into() },
+            MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() },
+            MindRefusal::MissingIdentity,
+            MindRefusal::DeskAnswerOutsideDesk { id: "eureka-state:desk_answer:Q1.n1".into() },
+            MindRefusal::MissingReference { kind: PipelineKind::Question, id: "eureka-state:question:Q9".into() },
+            MindRefusal::CampaignMoved { campaign: "eureka-state".into(), to: OTHER.into() },
+            MindRefusal::DeskRequestInvalid { field: "desk_answer.note".into() },
+            MindRefusal::DeskRequestIdConflict { request_id: "00000000-0000-4000-8000-000000000001".into() },
+            MindRefusal::Document(PipelineRefusal::FieldBound { field: "note".into(), limit: 4000, actual: 4001 }),
+            MindRefusal::Document(PipelineRefusal::InvalidFormat { field: "request_id".into(), value: "x".into() }),
+            MindRefusal::Document(PipelineRefusal::InvalidIdentity { kind: PipelineKind::DeskAnswer, key: "k".into(), expected: "e".into() }),
+            MindRefusal::Document(PipelineRefusal::DuplicateRepo { field: "repos".into(), repo: "GameCult/Huginn".into() }),
+            MindRefusal::Document(PipelineRefusal::ForeignStore { r#type: "other".into() }),
+        ];
+        let schema: serde_json::Value = serde_json::from_str(DESK_RESPONSE_SCHEMA_JSON).unwrap();
+        assert!(schema["$defs"]["MindRefusal"].is_object() && schema["$defs"]["PipelineRefusal"].is_object());
+        let declared = serde_json::to_string(&schema).unwrap();
+        for refusal in refusals {
+            let response = DeskResponse::Refused(refusal.clone());
+            let message = encode_desk_response("m-12", "answer", &response, "huginn-yggdrasil").unwrap();
+            let (_, decoded) = decode_desk_response(&message).unwrap();
+            assert_eq!(decoded, Ok(DeskResponse::Refused(refusal.clone())), "{refusal:?}");
+            let value = serde_json::to_value(&refusal).unwrap();
+            let variant = value.as_str().map(str::to_string).or_else(|| value.as_object().and_then(|object| object.keys().next().cloned())).unwrap();
+            assert!(declared.contains(&format!("\"{variant}\"")), "the published schema declares {variant}");
+            // Each detail field is declared too, so a validator can hold the payload to the schema.
+            if let Some(object) = value.get(&variant).and_then(|inner| inner.as_object()) {
+                for field in object.keys() {
+                    assert!(declared.contains(&format!("\"{field}\"")), "{variant}.{field} is declared");
+                }
+            }
+        }
+    }
 }

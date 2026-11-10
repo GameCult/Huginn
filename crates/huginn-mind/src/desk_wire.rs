@@ -1561,25 +1561,29 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_decider_is_refused_naming_deciders_and_an_empty_list_decodes() {
+    fn an_empty_or_duplicated_decider_list_is_refused_at_decode_and_one_is_accepted() {
         let mut mind = desk();
         let hash = hash_of(&mind, FORK);
+        let before = (head(&mind), stored_count(&mind, FORK));
         let mut twice = list_of(3);
         twice.push(s("d1"));
-        for sent in desk_requests(INSTANCE, &twice, &hash) {
-            let failure = through_the_door(&sent).unwrap_err();
-            assert_eq!(failure.code, "payload-not-a-request");
-            assert!(failure.message.contains("deciders") && !failure.message.contains("d1"), "{}", failure.message);
+        for (what, list) in [("empty", vec![]), ("duplicate", twice)] {
+            for sent in desk_requests(INSTANCE, &list, &hash) {
+                let failure = through_the_door(&sent).unwrap_err();
+                assert_eq!(failure.code, "payload-not-a-request", "{what} {}", sent.operation());
+                assert!(failure.message.contains("deciders") && !failure.message.contains("d1"), "{what} {}: {}", sent.operation(), failure.message);
+            }
         }
-        // An empty list is a list: it decodes, and the Mind's showability gate is what says no.
-        let before = head(&mind);
-        let [answer, forks, fork] = desk_requests(INSTANCE, &[], &hash);
-        assert!(through_the_door(&forks).is_ok() && through_the_door(&fork).is_ok());
-        let DeskRequest::Answer { subject, authority, deciders, request, .. } = through_the_door(&answer).unwrap() else { panic!("not an answer") };
-        assert!(deciders.is_empty());
-        let refused = not_stored(mind.desk_answer(&deciders, subject, authority, request, now()).0);
+        // One decider is a list.
+        for sent in desk_requests(INSTANCE, &list_of(1), &hash) {
+            assert_eq!(through_the_door(&sent).unwrap(), sent);
+        }
+        assert_eq!((head(&mind), stored_count(&mind, FORK)), before);
+        // The Mind's showability gate is the second line: an empty list handed to it directly
+        // still refuses the fork and stores nothing.
+        let refused = not_stored(mind.desk_answer(&[], s("d0"), DeskAuthority::Member, wire(FORK, &hash), now()).0);
         assert_eq!(refused.code, ForkRefusalCode::ForkUnknown);
-        assert_eq!(head(&mind), before);
+        assert_eq!((head(&mind), stored_count(&mind, FORK)), before);
     }
 
     #[test]

@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(DESK_REQUEST_SCHEMA_JSON.replace("\r\n", "\n"), request);
         assert_eq!(DESK_RESPONSE_SCHEMA_JSON.replace("\r\n", "\n"), response);
         // The deciders bound is in the published schema, not only in the decoder.
-        assert!(request.contains("\"maxItems\": 64") && request.contains("\"uniqueItems\": true"), "deciders bound");
+        assert!(request.contains("\"maxItems\": 64") && request.contains("\"uniqueItems\": true") && request.contains("\"minItems\": 1"), "deciders bound");
         let index: serde_json::Value = serde_json::from_str(include_str!("../../../schemas/cultnet/index.json")).unwrap();
         for (id, title) in [(DESK_REQUEST_SCHEMA, "Huginn desk request"), (DESK_RESPONSE_SCHEMA, "Huginn desk response")] {
             let rows: Vec<_> = index["schemas"].as_array().unwrap().iter().filter(|row| row["schemaId"] == id).collect();
