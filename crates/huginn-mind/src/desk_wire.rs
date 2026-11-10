@@ -1046,6 +1046,27 @@ mod tests {
         let fresh = wire(FORK, &hash);
         assert_eq!(not_stored(ask_as(&mut mind, "x", &[], fresh).0).code, ForkRefusalCode::ForkUnknown);
         assert_eq!((head(&mind), stored_count(&mind, FORK)), (before, 1));
+        // A stored refusal and a stored revision replay the same way: a stale hash is stored as a
+        // refusal, a second answer by the same subject as a revision.
+        let stale = wire(FORK, "0".repeat(hash.len()).as_str());
+        let (refused, replayed) = ask(&mut mind, "x", stale.clone());
+        assert!(!replayed);
+        assert_eq!(answered(refused.clone()).0.outcome, "Refused");
+        let revision = wire(FORK, &hash);
+        let (revised, replayed) = ask(&mut mind, "x", revision.clone());
+        assert!(!replayed);
+        assert_eq!(answered(revised.clone()).0.outcome, "Revision");
+        let before = head(&mind);
+        for (request, stored) in [(stale, refused), (revision, revised)] {
+            let (again, replayed) = ask_as(&mut mind, "x", &[], request.clone());
+            assert!(replayed);
+            // `as_of` is the head the replay was read at, so the stored answer is what is compared.
+            assert_eq!(encode(&answered(again).0), encode(&answered(stored).0));
+            assert_eq!(head(&mind), before);
+            let (other, replayed) = ask_as(&mut mind, "w", &[], request);
+            assert_eq!((not_stored(other).code, replayed), (ForkRefusalCode::ForkUnknown, false));
+            assert_eq!(head(&mind), before);
+        }
     }
 
     #[test]
