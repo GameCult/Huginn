@@ -22,6 +22,8 @@ pub const PENDING: &str = "gamecult.persona.chat_pending.v2";
 /// The pending answer of a mouth that has no image field yet: its deliveries decode with `image: None`.
 pub const PENDING_V1: &str = "gamecult.persona.chat_pending.v1";
 pub const ACK: &str = "gamecult.persona.chat_ack.v1";
+/// Her read receipt: the newest event of a room that went into her model's input.
+pub const READ: &str = "gamecult.persona.chat_read.v1";
 pub const SEND_REQUEST: &str = "gamecult.persona.chat_send_request.v2";
 pub const SEND_RECEIPT: &str = "gamecult.persona.chat_send_receipt.v2";
 pub const REFUSAL: &str = "gamecult.persona.chat_refusal.v1";
@@ -82,6 +84,20 @@ pub struct ChatPending {
 pub struct ChatAck {
     pub persona: String,
     pub through_seq: u64,
+}
+
+/// One room's read report: `[persona, room, event_id, at_unix_ms]`, positional like `ChatAck`.
+///
+/// `room` is the delivery's `room_id` (the Matrix room id), not its alias. The mouth posts `m.read` to the room it delivered
+/// the event for and accepts either spelling, but only the id names one room with no lookup, and a direct room has no alias
+/// (its alias is its id). `event_id` is the newest event of that room among those the model's input held, and `at_unix_ms`
+/// that event's own instant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatRead {
+    pub persona: String,
+    pub room: String,
+    pub event_id: String,
+    pub at_unix_ms: u64,
 }
 
 /// Why the mouth refused a request, as its typed names (Bifrost
@@ -187,6 +203,9 @@ pub trait Chat {
     /// advances its sync position only now, so a start that dies first has its
     /// deliveries again.
     fn ack(&self, through_seq: u64) -> Result<()>;
+    /// The model's input now holds `read.event_id` and every earlier event of its room. A display-only receipt: it
+    /// acknowledges nothing and the mouth answers nothing.
+    fn read(&self, read: &ChatRead) -> Result<()>;
 }
 
 #[cfg(test)]

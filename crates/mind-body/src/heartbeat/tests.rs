@@ -99,6 +99,10 @@ impl Chat for FakeChat {
     fn ack(&self, _: u64) -> Result<()> {
         panic!("the heartbeat never acks a delivery")
     }
+
+    fn read(&self, _: &crate::chat_client::ChatRead) -> Result<()> {
+        panic!("the heartbeat reads nothing")
+    }
 }
 
 #[derive(Default)]

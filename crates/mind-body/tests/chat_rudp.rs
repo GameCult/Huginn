@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cultnet_rs::{CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions};
-use mind_body::chat_client::{self, ACK, Chat, ChatAck, ChatPending, ChatPendingRequest, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, SEND_RECEIPT, SEND_REQUEST};
+use mind_body::chat_client::{self, ACK, Chat, ChatAck, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, READ, SEND_RECEIPT, SEND_REQUEST};
 use mind_body::chat_rudp::{RudpChat, connection_id};
 
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
@@ -143,6 +143,20 @@ fn pending_send_and_ack_cross_a_real_rudp_session_in_the_mouths_bytes() {
             (ACK.to_string(), ACK_BYTES.to_vec()),
         ]
     );
+}
+
+#[test]
+fn a_read_reaches_the_mouth_as_the_positional_tuple_persona_room_event_instant() {
+    let mouth = mouth(KEY);
+    let chat = client(&mouth, KEY, "eureka", Duration::from_secs(5));
+    let read = ChatRead { persona: "eureka".into(), room: "!abc:gamecult.org".into(), event_id: "$e1".into(), at_unix_ms: 1_761_700_000_000 };
+    chat.read(&read).unwrap();
+    let seen = mouth.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, READ);
+    assert_eq!(chat_client::decode::<ChatRead>(&seen[0].1).unwrap(), read);
+    let tuple: serde_json::Value = rmp_serde::from_slice(&seen[0].1).unwrap();
+    assert_eq!(tuple, serde_json::json!(["eureka", "!abc:gamecult.org", "$e1", 1_761_700_000_000u64]), "a positional tuple, not a map");
 }
 
 #[test]

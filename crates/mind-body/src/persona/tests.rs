@@ -20,7 +20,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
-use crate::chat_client::{ChatImage, ChatSendReceipt, ContextLine, Refusal};
+use crate::chat_client::{ChatImage, ChatRead, ChatSendReceipt, ContextLine, Refusal};
 use base64::Engine;
 use eureka_pipeline::OrgRepo;
 use crate::control::{ControlWriter, FileSource, SwarmWriter};
@@ -59,6 +59,8 @@ struct FakeChat {
     deliveries: Deliveries,
     sent: RefCell<Vec<ChatSendRequest>>,
     acked: RefCell<Vec<u64>>,
+    reads: RefCell<Vec<ChatRead>>,
+    fail_read: Cell<bool>,
     pending_calls: Cell<usize>,
     fail_send_from: Cell<Option<usize>>,
     /// 0 a delivered receipt, 1 a refused one, 2 one with neither an event nor a refusal.
@@ -139,6 +141,14 @@ impl Chat for FakeChat {
             _ => (None, None),
         };
         Ok(ChatSendReceipt { request_id: request.request_id.clone(), event_id, refusal, newer: Vec::new() })
+    }
+
+    fn read(&self, read: &ChatRead) -> Result<()> {
+        if self.fail_read.get() {
+            return Err(anyhow!("the mouth is down"));
+        }
+        self.reads.borrow_mut().push(read.clone());
+        Ok(())
     }
 
     fn ack(&self, through_seq: u64) -> Result<()> {
@@ -414,6 +424,8 @@ impl Rig {
                 deliveries,
                 sent: RefCell::default(),
                 acked: RefCell::default(),
+                reads: RefCell::default(),
+                fail_read: Cell::new(false),
                 pending_calls: Cell::new(0),
                 fail_send_from: Cell::new(None),
                 receipt: Cell::new(0),
@@ -7515,4 +7527,81 @@ fn the_dropped_note_names_six_campaigns_and_counts_the_rest_together() {
     let counts = |campaigns: usize| -> BTreeMap<String, usize> { (0..campaigns).map(|index| (format!("c{index}"), 1)).collect() };
     assert_eq!(dropped_note(&counts(6)), "(6 more open follow-ups not shown: c0 1, c1 1, c2 1, c3 1, c4 1, c5 1; `huginn open <campaign>` lists them.)\n");
     assert_eq!(dropped_note(&counts(7)), "(7 more open follow-ups not shown: c0 1, c1 1, c2 1, c3 1, c4 1, c5 1, 1 more campaigns 1; `huginn open <campaign>` lists them.)\n");
+}
+
+fn read_of(rig: &Rig) -> Vec<(String, String)> {
+    rig.chat.reads.borrow().iter().map(|read| (read.room.clone(), read.event_id.clone())).collect()
+}
+
+#[test]
+fn a_read_is_sent_only_at_the_echo_one_per_room_for_the_newest_event_that_went_into_her_input() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (a1, a2, b1) = (delivery(1, "swarm", "@op:chat", "swarm-one"), delivery(2, "swarm", "@op:chat", "swarm-two"), delivery(3, "ops", "@op:chat", "ops-one"));
+    let unread = delivery(4, "swarm", "@op:chat", "swarm-queued-unread");
+    for each in [&a1, &a2, &b1] {
+        arrives(&rig, each);
+    }
+    with_inbox(&rig, &config(), vec![a1.clone(), a2.clone(), b1.clone()], |inbox| {
+        let line = inbox.start_line().unwrap();
+        assert!(rig.chat.reads.borrow().is_empty(), "a line written and not echoed is not read");
+        arrives(&rig, &unread); // in the mouth's queue, never in her input
+        assert!(inbox.poll().unwrap().pending);
+        inbox.echoed();
+        let reads = rig.chat.reads.borrow().clone();
+        assert_eq!(reads.len(), 2, "one per room");
+        for read in &reads {
+            assert_eq!(read.persona, "yggdrasil");
+            // The report names an event whose message is in the model's input, and no queued-unread one.
+            let reported = [&a1, &a2, &b1, &unread].into_iter().find(|delivery| delivery.event_id == read.event_id).expect("a delivered event");
+            assert!(line.contains(&reported.text), "the reported event {} is not in her input", read.event_id);
+            assert_ne!(read.event_id, unread.event_id);
+            assert_eq!(read.room, reported.room_id, "the room id of the delivery, not its alias");
+            assert_eq!(read.at_unix_ms, reported.at_unix_ms);
+        }
+        assert_eq!(read_of(&rig), vec![("!ops:chat".to_string(), b1.event_id.clone()), ("!swarm:chat".to_string(), a2.event_id.clone())], "the newest of each room");
+        // Each line of the prompt still carries no event id of its own.
+        assert!(!line.contains(&a1.event_id) && !line.contains(&a2.event_id));
+    });
+}
+
+#[test]
+fn a_line_told_and_not_echoed_reports_nothing_and_a_report_is_never_repeated_or_moved_back() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (first, second) = (delivery(1, "swarm", "@op:chat", "one"), delivery(3, "swarm", "@op:chat", "two"));
+    arrives(&rig, &first);
+    with_inbox(&rig, &config(), vec![first.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &second);
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell(false).unwrap();
+        assert_eq!(read_of(&rig).len(), 1, "written, never echoed: not read");
+        inbox.report_read(&[first.clone()]);
+        assert_eq!(read_of(&rig).len(), 1, "the same event is not reported twice");
+        inbox.echoed();
+        assert_eq!(read_of(&rig), vec![("!swarm:chat".to_string(), first.event_id.clone()), ("!swarm:chat".to_string(), second.event_id.clone())]);
+        inbox.report_read(&[first.clone()]);
+        assert_eq!(read_of(&rig).len(), 2, "an older event after a newer one is not reported");
+    });
+}
+
+#[test]
+fn a_read_the_mouth_does_not_take_is_dropped_without_ending_the_session_and_is_tried_again_with_the_next_batch() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    rig.chat.fail_read.set(true);
+    let first = delivery(1, "swarm", "@op:chat", "one");
+    arrives(&rig, &first);
+    with_inbox(&rig, &config(), vec![first.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        inbox.result(&reply_result(&says(&[("swarm", "hi")])), true, false).unwrap();
+        assert!(inbox.progress.failure.is_none() && inbox.progress.answered == 1, "a failed receipt is cosmetic");
+        assert_eq!(rig.chat.acked.borrow().as_slice(), &[1], "the ack is the delivery guarantee and still goes");
+        rig.chat.fail_read.set(false);
+        inbox.report_read(&[first.clone()]);
+        assert_eq!(read_of(&rig), vec![("!swarm:chat".to_string(), first.event_id.clone())], "a report that failed did not count as reported");
+    });
 }
