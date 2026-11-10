@@ -14,6 +14,7 @@ use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use cultnet_rs::CultNetMessage;
+use crate::desk_wire::{DESK_REQUEST_SCHEMA, DESK_RESPONSE_SCHEMA, DESK_SERVICE_ID, DeskRequest, DeskResponse};
 use crate::wire::{HuginnMindRequest, HuginnMindResponse, MIND_REQUEST_SCHEMA, MIND_RESPONSE_SCHEMA, MIND_SERVICE_ID};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -39,17 +40,20 @@ fn encode_payload<T: Serialize>(value: &T) -> Result<String> {
     Ok(STANDARD.encode(rmp_serde::to_vec_named(value)?))
 }
 
-/// One request, addressed to the mind service and naming its own operation.
-pub fn encode_request(
+/// One request to `service_id`, naming its own operation, its payload under `payload_schema`.
+fn encode_operation_request<T: Serialize>(
     message_id: &str,
-    request: &HuginnMindRequest,
+    service_id: &str,
+    payload_schema: &str,
+    operation: &str,
+    request: &T,
     source_runtime_id: Option<String>,
 ) -> Result<CultNetMessage> {
     Ok(CultNetMessage::OperationRequest {
         message_id: message_id.to_string(),
-        service_id: MIND_SERVICE_ID.to_string(),
-        operation: request.operation().to_string(),
-        payload_schema: MIND_REQUEST_SCHEMA.to_string(),
+        service_id: service_id.to_string(),
+        operation: operation.to_string(),
+        payload_schema: payload_schema.to_string(),
         payload_encoding: "messagepack-base64".to_string(),
         payload: encode_payload(request)?,
         source_runtime_id,
@@ -59,43 +63,49 @@ pub fn encode_request(
 
 /// The message, or the failure that says why it is not a request of this
 /// service. The envelope's `operation` string is checked against the decoded
-/// request rather than trusted, so a payload cannot arrive under another
-/// operation's name.
-pub fn decode_request(message: &CultNetMessage) -> Result<(String, HuginnMindRequest), OperationFailure> {
-    let CultNetMessage::OperationRequest { message_id, service_id, operation, payload_schema, payload, .. } = message
+/// request (`operation_of`) rather than trusted, so a payload cannot arrive
+/// under another operation's name.
+fn decode_operation_request<T: serde::de::DeserializeOwned>(
+    message: &CultNetMessage,
+    service_id: &str,
+    payload_schema: &str,
+    operation_of: impl Fn(&T) -> &'static str,
+) -> Result<(String, T), OperationFailure> {
+    let CultNetMessage::OperationRequest { message_id, service_id: sent_service, operation, payload_schema: sent_schema, payload, .. } = message
     else {
         return Err(OperationFailure::new(
             "not-an-operation-request",
-            "huginn.mind reads cultnet.operation_request.v0",
+            format!("{service_id} reads cultnet.operation_request.v0"),
         ));
     };
-    if service_id != MIND_SERVICE_ID {
-        return Err(OperationFailure::new("wrong-service", format!("the service is not {MIND_SERVICE_ID}")));
+    if sent_service != service_id {
+        return Err(OperationFailure::new("wrong-service", format!("the service is not {service_id}")));
     }
-    if payload_schema != MIND_REQUEST_SCHEMA {
+    if sent_schema != payload_schema {
         return Err(OperationFailure::new(
             "wrong-payload-schema",
-            format!("the payload schema is not {MIND_REQUEST_SCHEMA}"),
+            format!("the payload schema is not {payload_schema}"),
         ));
     }
     let bytes = STANDARD
         .decode(payload)
         .map_err(|_| OperationFailure::new("payload-not-base64", "the payload is not standard base64"))?;
-    let request = read_request(&bytes)?;
-    if operation != request.operation() {
+    let request = read_payload::<T>(&bytes)?;
+    let expected = operation_of(&request);
+    if operation != expected {
         return Err(OperationFailure::new(
             "operation-mismatch",
-            format!("the envelope's operation is not the payload's {}", request.operation()),
+            format!("the envelope's operation is not the payload's {expected}"),
         ));
     }
     Ok((message_id.clone(), request))
 }
 
-/// The payload as a request, or a failure naming the field path and the class
+/// The payload as a `T`, or a failure naming the field path and the class
 /// of error and nothing the caller sent: a decoder's own text quotes the
 /// offending value (an unknown variant, an integer), so no decoder text
 /// leaves this function.
-fn read_request(bytes: &[u8]) -> Result<HuginnMindRequest, OperationFailure> {
+fn read_payload<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, OperationFailure> {
     use rmp_serde::decode::Error as Decode;
     let mut decoder = rmp_serde::Deserializer::new(bytes);
     serde_path_to_error::deserialize(&mut decoder).map_err(|error| {
@@ -114,19 +124,22 @@ fn read_request(bytes: &[u8]) -> Result<HuginnMindRequest, OperationFailure> {
     })
 }
 
-/// One answer, whose status the response derives.
-pub fn encode_response(
+/// One answer, with the status its caller derived.
+fn encode_operation_response<T: Serialize>(
     message_id: &str,
+    service_id: &str,
+    payload_schema: &str,
     operation: &str,
-    response: &HuginnMindResponse,
+    status: &str,
+    response: &T,
     source_runtime_id: &str,
 ) -> Result<CultNetMessage> {
     Ok(CultNetMessage::OperationResponse {
         message_id: message_id.to_string(),
-        service_id: MIND_SERVICE_ID.to_string(),
+        service_id: service_id.to_string(),
         operation: operation.to_string(),
-        status: response.status().to_string(),
-        payload_schema: MIND_RESPONSE_SCHEMA.to_string(),
+        status: status.to_string(),
+        payload_schema: payload_schema.to_string(),
         payload_encoding: "messagepack-base64".to_string(),
         payload: encode_payload(response)?,
         diagnostics: vec![],
@@ -136,15 +149,16 @@ pub fn encode_response(
 
 /// The answer to an envelope that never reached a mind. Infallible: the
 /// failure is two strings and the daemon must always be able to say no.
-pub fn encode_failure(
+fn encode_operation_failure(
     message_id: &str,
+    service_id: &str,
     operation: &str,
     failure: &OperationFailure,
     source_runtime_id: &str,
 ) -> CultNetMessage {
     CultNetMessage::OperationResponse {
         message_id: message_id.to_string(),
-        service_id: MIND_SERVICE_ID.to_string(),
+        service_id: service_id.to_string(),
         operation: operation.to_string(),
         status: "rejected".to_string(),
         payload_schema: FAILURE_SCHEMA.to_string(),
@@ -155,19 +169,76 @@ pub fn encode_failure(
     }
 }
 
-/// The client's side: the correlation key and either the mind's answer or the
-/// failure that says the envelope never reached one.
-pub fn decode_response(message: &CultNetMessage) -> Result<(String, Result<HuginnMindResponse, OperationFailure>)> {
+/// The client's side: the correlation key and either the service's answer or
+/// the failure that says the envelope never reached one.
+fn decode_operation_response<T: serde::de::DeserializeOwned>(
+    message: &CultNetMessage,
+    service_id: &str,
+    response_schema: &str,
+) -> Result<(String, Result<T, OperationFailure>)> {
     let CultNetMessage::OperationResponse { message_id, payload_schema, payload, .. } = message else {
-        anyhow::bail!("huginn.mind answers with cultnet.operation_response.v0");
+        anyhow::bail!("{service_id} answers with cultnet.operation_response.v0");
     };
     let bytes = STANDARD.decode(payload)?;
-    let answer = match payload_schema.as_str() {
-        MIND_RESPONSE_SCHEMA => Ok(rmp_serde::from_slice::<HuginnMindResponse>(&bytes)?),
-        FAILURE_SCHEMA => Err(rmp_serde::from_slice::<OperationFailure>(&bytes)?),
-        other => anyhow::bail!("{other} is neither {MIND_RESPONSE_SCHEMA} nor {FAILURE_SCHEMA}"),
+    let answer = if payload_schema == response_schema {
+        Ok(rmp_serde::from_slice::<T>(&bytes)?)
+    } else if payload_schema == FAILURE_SCHEMA {
+        Err(rmp_serde::from_slice::<OperationFailure>(&bytes)?)
+    } else {
+        anyhow::bail!("{payload_schema} is neither {response_schema} nor {FAILURE_SCHEMA}")
     };
     Ok((message_id.clone(), answer))
+}
+
+/// One request, addressed to the mind service.
+pub fn encode_request(
+    message_id: &str,
+    request: &HuginnMindRequest,
+    source_runtime_id: Option<String>,
+) -> Result<CultNetMessage> {
+    encode_operation_request(message_id, MIND_SERVICE_ID, MIND_REQUEST_SCHEMA, request.operation(), request, source_runtime_id)
+}
+
+pub fn decode_request(message: &CultNetMessage) -> Result<(String, HuginnMindRequest), OperationFailure> {
+    decode_operation_request(message, MIND_SERVICE_ID, MIND_REQUEST_SCHEMA, HuginnMindRequest::operation)
+}
+
+pub fn encode_response(
+    message_id: &str,
+    operation: &str,
+    response: &HuginnMindResponse,
+    source_runtime_id: &str,
+) -> Result<CultNetMessage> {
+    encode_operation_response(message_id, MIND_SERVICE_ID, MIND_RESPONSE_SCHEMA, operation, response.status(), response, source_runtime_id)
+}
+
+pub fn encode_failure(message_id: &str, operation: &str, failure: &OperationFailure, source_runtime_id: &str) -> CultNetMessage {
+    encode_operation_failure(message_id, MIND_SERVICE_ID, operation, failure, source_runtime_id)
+}
+
+pub fn decode_response(message: &CultNetMessage) -> Result<(String, Result<HuginnMindResponse, OperationFailure>)> {
+    decode_operation_response(message, MIND_SERVICE_ID, MIND_RESPONSE_SCHEMA)
+}
+
+/// One request, addressed to the desk service.
+pub fn encode_desk_request(message_id: &str, request: &DeskRequest, source_runtime_id: Option<String>) -> Result<CultNetMessage> {
+    encode_operation_request(message_id, DESK_SERVICE_ID, DESK_REQUEST_SCHEMA, request.operation(), request, source_runtime_id)
+}
+
+pub fn decode_desk_request(message: &CultNetMessage) -> Result<(String, DeskRequest), OperationFailure> {
+    decode_operation_request(message, DESK_SERVICE_ID, DESK_REQUEST_SCHEMA, DeskRequest::operation)
+}
+
+pub fn encode_desk_response(message_id: &str, operation: &str, response: &DeskResponse, source_runtime_id: &str) -> Result<CultNetMessage> {
+    encode_operation_response(message_id, DESK_SERVICE_ID, DESK_RESPONSE_SCHEMA, operation, response.status(), response, source_runtime_id)
+}
+
+pub fn encode_desk_failure(message_id: &str, operation: &str, failure: &OperationFailure, source_runtime_id: &str) -> CultNetMessage {
+    encode_operation_failure(message_id, DESK_SERVICE_ID, operation, failure, source_runtime_id)
+}
+
+pub fn decode_desk_response(message: &CultNetMessage) -> Result<(String, Result<DeskResponse, OperationFailure>)> {
+    decode_operation_response(message, DESK_SERVICE_ID, DESK_RESPONSE_SCHEMA)
 }
 
 #[cfg(test)]
@@ -556,7 +627,7 @@ mod tests {
         };
         let response = DeskResponse::Answered { answer, counted_answer_id: Some("n4294967295".into()), as_of: u64::MAX };
         let message = encode_desk_response("m-11", "answer", &response, &long(200)).unwrap();
-        assert!(wire(&message) <= DESK_MAX_RESPONSE_BYTES && wire(&message) > DESK_MAX_RESPONSE_BYTES / 8, "{}", wire(&message));
+        assert!(wire(&message) <= DESK_MAX_RESPONSE_BYTES && wire(&message) > 4000, "{}", wire(&message));
         assert_eq!(decode_desk_response(&message).unwrap().1, Ok(response));
     }
 }

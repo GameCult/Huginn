@@ -10,12 +10,12 @@
 //! stays the only owner of "counts": the response builder calls it at the head
 //! the response is read at, and nothing here stores it. Huginn writes
 //! `gamecult.desk_answer.v0` and its own refusals; the stale-fork display
-//! and the answer result are Bifrost's to attach and write. The envelope, the published
-//! schemas, the reads and the socket are other cuts.
+//! and the answer result are Bifrost's to attach and write. The request type, its
+//! constants and the published schemas are here; the reads and the socket are other cuts.
 
 use chrono::{DateTime, Utc};
 use eureka_pipeline::{
-    DeskAuthority, DeskOutcome, DeskRefusal, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, RequestId, Sha256Hex, Short, Words,
+    DeskAuthority, DeskOutcome, DeskRefusal, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, RequestId, Sha256Hex, Short, Slug, Words,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -55,7 +55,7 @@ fn required<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(deserializer:
 }
 
 /// `gamecult.fork.answer_request.v0`: closed, her field order. The wire types hold text; the
-/// shape step of `Mind::answer_desk` judges it. The subject and the attribution are the
+/// shape step of `Mind::answer_desk` judges it. The subject and the authority are the
 /// door's context and are no field here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -178,6 +178,126 @@ pub enum DeskResponse {
     Answered { answer: ForkDeskAnswer, counted_answer_id: Option<String>, as_of: u64 },
     NotStored(ForkRefusal),
     Refused(MindRefusal),
+}
+
+impl DeskResponse {
+    /// The envelope's status: `rejected` exactly when nothing was stored or the Mind refused.
+    pub fn status(&self) -> &'static str {
+        match self {
+            Self::Answered { .. } => "accepted",
+            Self::NotStored(_) | Self::Refused(_) => "rejected",
+        }
+    }
+}
+
+/// The envelope's `service_id` for the desk door.
+pub const DESK_SERVICE_ID: &str = "huginn.desk";
+pub const DESK_REQUEST_SCHEMA: &str = "huginn.desk_request.v1";
+pub const DESK_RESPONSE_SCHEMA: &str = "huginn.desk_response.v1";
+
+/// The published schemas, derived from `DeskRequest` and `DeskResponse` and pinned byte for byte
+/// by `published_desk_schemas_match_derivation`.
+pub const DESK_REQUEST_SCHEMA_JSON: &str = include_str!("../../../schemas/cultnet/huginn.desk_request.v1.schema.json");
+pub const DESK_RESPONSE_SCHEMA_JSON: &str = include_str!("../../../schemas/cultnet/huginn.desk_response.v1.schema.json");
+
+/// The frame bounds the door enforces, on the encoded CultNet message.
+pub const DESK_MAX_REQUEST_BYTES: usize = 65536;
+pub const DESK_MAX_RESPONSE_BYTES: usize = 65536;
+
+/// Most deciders one call carries (CultLib `card.deciders` `maxItems`).
+pub const DESK_DECIDERS_MAX: usize = 64;
+
+/// A decider list, read whole or not at all: at most `DESK_DECIDERS_MAX`, no subject twice. A
+/// bad list is the decoder's refusal, which names the field and never quotes a subject.
+fn deciders<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Short>, D::Error> {
+    struct List;
+    impl<'de> serde::de::Visitor<'de> for List {
+        type Value = Vec<Short>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a list of distinct deciders")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<Short>, A::Error> {
+            let mut list = Vec::new();
+            while let Some(subject) = seq.next_element::<Short>()? {
+                if list.len() == DESK_DECIDERS_MAX {
+                    return Err(serde::de::Error::custom("too many deciders"));
+                }
+                if list.contains(&subject) {
+                    return Err(serde::de::Error::custom("a decider is listed twice"));
+                }
+                list.push(subject);
+            }
+            Ok(list)
+        }
+    }
+    deserializer.deserialize_seq(List)
+}
+
+fn deciders_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array",
+        "items": generator.subschema_for::<Short>(),
+        "maxItems": DESK_DECIDERS_MAX,
+        "uniqueItems": true
+    })
+}
+
+/// Every request the desk door answers. The fields are the wire names: the `mind` addressed
+/// (the persona and pipeline requests say `instance`; the sets are separate), the verified
+/// `subject` and `authority` Bifrost vouches for (door context, never body fields), and the
+/// `deciders` of this call, which the Mind never stores. Closed: a key outside the set refuses
+/// the whole payload. The reads answer in follow-up desk-wire-reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub enum DeskRequest {
+    Answer {
+        mind: Slug,
+        subject: Short,
+        authority: DeskAuthority,
+        #[serde(deserialize_with = "deciders")]
+        #[schemars(schema_with = "deciders_schema")]
+        deciders: Vec<Short>,
+        request: ForkAnswerRequest,
+    },
+    Forks {
+        mind: Slug,
+        subject: Short,
+        #[serde(deserialize_with = "deciders")]
+        #[schemars(schema_with = "deciders_schema")]
+        deciders: Vec<Short>,
+    },
+    Fork {
+        mind: Slug,
+        subject: Short,
+        #[serde(deserialize_with = "deciders")]
+        #[schemars(schema_with = "deciders_schema")]
+        deciders: Vec<Short>,
+        fork_id: String,
+    },
+}
+
+impl DeskRequest {
+    /// The envelope's `operation`.
+    pub fn operation(&self) -> &'static str {
+        match self {
+            Self::Answer { .. } => "answer",
+            Self::Forks { .. } => "forks",
+            Self::Fork { .. } => "fork",
+        }
+    }
+
+    /// The mind the request addresses, for `Mind::require_instance`.
+    pub fn mind(&self) -> &Slug {
+        match self {
+            Self::Answer { mind, .. } | Self::Forks { mind, .. } | Self::Fork { mind, .. } => mind,
+        }
+    }
+
+    pub fn deciders(&self) -> &[Short] {
+        match self {
+            Self::Answer { deciders, .. } | Self::Forks { deciders, .. } | Self::Fork { deciders, .. } => deciders,
+        }
+    }
 }
 
 // ---- the one conversion between her answer ids and the record keys ----
@@ -324,17 +444,17 @@ impl<S: MindStore> Mind<S> {
     /// One desk answer from the door: the wire request converted, the question gated, the answer
     /// decided and stored (or replayed) by `answer_desk`, and the stored answer projected with the
     /// derived count at the head it was read at. The flag is `true` when nothing was committed (a
-    /// replay); it is for the door and is never encoded. `subject` and `attribution` are the verified
+    /// replay); it is for the door and is never encoded. `subject` and `authority` are the verified
     /// caller's, `deciders` the door's list.
     pub fn desk_answer(
         &mut self,
         deciders: &[Short],
         subject: Short,
-        attribution: DeskAuthority,
+        authority: DeskAuthority,
         request: ForkAnswerRequest,
         now: DateTime<Utc>,
     ) -> (DeskResponse, bool) {
-        match self.desk_response(deciders, subject, attribution, &request, now) {
+        match self.desk_response(deciders, subject, authority, &request, now) {
             Ok(done) => done,
             Err(refused) => (door_refusal(refused), false),
         }
@@ -344,7 +464,7 @@ impl<S: MindStore> Mind<S> {
         &mut self,
         deciders: &[Short],
         subject: Short,
-        attribution: DeskAuthority,
+        authority: DeskAuthority,
         request: &ForkAnswerRequest,
         now: DateTime<Utc>,
     ) -> Result<(DeskResponse, bool), MindRefusal> {
@@ -361,7 +481,7 @@ impl<S: MindStore> Mind<S> {
         if unshowable {
             return Ok((DeskResponse::NotStored(fork_unknown()), false));
         }
-        let stamp = DeskStamp { answerer: subject, authority: attribution, deciders: deciders.to_vec() };
+        let stamp = DeskStamp { answerer: subject, authority, deciders: deciders.to_vec() };
         let (key, replayed) = match self.answer_desk(stamp, sent, now) {
             DeskAnswerOutcome::Stored { answer, .. } => (answer.0, false),
             DeskAnswerOutcome::Replayed { answer, .. } => (answer.0, true),

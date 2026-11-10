@@ -1,0 +1,1512 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeskResponse",
+  "description": "What the door answers one desk request with. `Answered` is a stored answer, refused ones\nincluded (a stale fork, a non-decider and the rest are stored), fresh or replayed alike.\n`NotStored` is a request that stored nothing. `Refused` is any other Mind refusal; an\n`Unavailable` is Bifrost's to turn into its 503, and Huginn writes no document for it.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "Answered": {
+          "type": "object",
+          "properties": {
+            "answer": {
+              "$ref": "#/$defs/ForkDeskAnswer"
+            },
+            "as_of": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "counted_answer_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "answer",
+            "as_of"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Answered"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "NotStored": {
+          "$ref": "#/$defs/ForkRefusal"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "NotStored"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Refused": {
+          "$ref": "#/$defs/MindRefusal"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Refused"
+      ]
+    }
+  ],
+  "$defs": {
+    "AnswerSchema": {
+      "description": "The desk answer document's schema id.",
+      "type": "string",
+      "enum": [
+        "gamecult.desk_answer.v0"
+      ]
+    },
+    "DeskAuthority": {
+      "type": "string",
+      "enum": [
+        "Operator",
+        "Steward",
+        "Member"
+      ]
+    },
+    "ForkDeskAnswer": {
+      "description": "`gamecult.desk_answer.v0`: one stored answer as the desk shows it, her field order,\n`request_id` last. Every value is a stored fact; `answer_id`, `of` and `retracts` are the\nrecord keys in her `n<seq>` spelling.",
+      "type": "object",
+      "properties": {
+        "answer_id": {
+          "type": "string"
+        },
+        "answered_at": {
+          "type": "string"
+        },
+        "answerer": {
+          "type": "string"
+        },
+        "authority": {
+          "$ref": "#/$defs/DeskAuthority"
+        },
+        "choice": {
+          "type": "string"
+        },
+        "claim_in_future": {
+          "type": "boolean"
+        },
+        "code": {
+          "description": "The six codes a refused answer is stored with, as her schema spells them.",
+          "type": "string",
+          "enum": [
+            "stale_fork",
+            "not_a_decider",
+            "fork_closed",
+            "choice_invalid",
+            "bad_retraction",
+            "already_retracted"
+          ]
+        },
+        "fork_id": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "of": {
+          "type": "string"
+        },
+        "options_hash": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "received_at": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "retracts": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/AnswerSchema"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "answer_id",
+        "fork_id",
+        "outcome",
+        "of",
+        "retracts",
+        "code",
+        "options_hash",
+        "choice",
+        "note",
+        "answered_at",
+        "received_at",
+        "claim_in_future",
+        "answerer",
+        "authority",
+        "request_id"
+      ]
+    },
+    "ForkRefusal": {
+      "description": "`gamecult.fork.refusal.v0`. `error` is a fixed sentence, never an echo of what was sent;\nfor `body_invalid` it names the field.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ForkRefusalCode"
+        },
+        "error": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/RefusalSchema"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "code",
+        "error"
+      ]
+    },
+    "ForkRefusalCode": {
+      "description": "The three requests Huginn refuses without storing, by code.",
+      "type": "string",
+      "enum": [
+        "fork_unknown",
+        "body_invalid",
+        "request_id_conflict"
+      ]
+    },
+    "MindRefusal": {
+      "description": "Every way a mind refuses. `Document` wraps the leaf's four (bounds,\nformats, key identity, foreign type); the rest are the organ's: store\nidentity, epoch, ownership, batch shape, references, and every cross-field\nand cross-document rule of admission.\n\nThe two sequenced kinds refuse in the same pair of shapes: an\n`OutOfSequence` when the writer's `sequence` is not the previous plus one,\nand `AlreadyResolved`/`AlreadyStewarded` when a record of that scope is\nstill in force.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "MissingIdentity",
+            "EmptySupersession",
+            "FindingWithoutRange",
+            "FindingWithoutEvidence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Document": {
+              "$ref": "#/$defs/PipelineRefusal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Document"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ForeignInstance": {
+              "type": "object",
+              "properties": {
+                "declared": {
+                  "type": "string"
+                },
+                "mind": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "declared",
+                "mind"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ForeignInstance"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ForeignEpoch": {
+              "type": "object",
+              "properties": {
+                "expected": {
+                  "type": "string"
+                },
+                "found": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "found",
+                "expected"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ForeignEpoch"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ForeignStore": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ForeignStore"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "MindAlreadyOwned": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "MindAlreadyOwned"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "BatchSize": {
+              "type": "object",
+              "properties": {
+                "actual": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "actual"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "BatchSize"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "IdentityCollision": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "$ref": "#/$defs/PipelineKind"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "IdentityCollision"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "MissingReference": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "$ref": "#/$defs/PipelineKind"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "MissingReference"
+          ]
+        },
+        {
+          "description": "`closed_by` is the resolution in force: to correct the closure, withdraw it (a resolution of `closed_by`), then resolve `subject` again at the next sequence.",
+          "type": "object",
+          "properties": {
+            "AlreadyResolved": {
+              "type": "object",
+              "properties": {
+                "closed_by": {
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "subject",
+                "closed_by"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "AlreadyResolved"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ResolutionOutOfSequence": {
+              "type": "object",
+              "properties": {
+                "actual": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "expected": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "subject": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "subject",
+                "expected",
+                "actual"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ResolutionOutOfSequence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "AlreadyStewarded": {
+              "type": "object",
+              "properties": {
+                "repo": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repo"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "AlreadyStewarded"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "StewardshipOutOfSequence": {
+              "type": "object",
+              "properties": {
+                "actual": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "expected": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "repo": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repo",
+                "expected",
+                "actual"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "StewardshipOutOfSequence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "IncompatibleResolution": {
+              "type": "object",
+              "properties": {
+                "outcome": {
+                  "type": "string"
+                },
+                "subject_kind": {
+                  "$ref": "#/$defs/PipelineKind"
+                }
+              },
+              "required": [
+                "subject_kind",
+                "outcome"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "IncompatibleResolution"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "WouldReinstateOverLater": {
+              "type": "object",
+              "properties": {
+                "later": {
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "subject",
+                "later"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "WouldReinstateOverLater"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "CitesResolvedDocument": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "$ref": "#/$defs/PipelineKind"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "CitesResolvedDocument"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "UnknownSupersessor": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "UnknownSupersessor"
+          ]
+        },
+        {
+          "description": "A consolidation and the supersession of the memory it consumes come together: `memory` consolidates `consumed`, or is named as superseding it, without the other half in the batch.",
+          "type": "object",
+          "properties": {
+            "UnpairedConsolidation": {
+              "type": "object",
+              "properties": {
+                "consumed": {
+                  "type": "string"
+                },
+                "memory": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "memory",
+                "consumed"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "UnpairedConsolidation"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "RevisionWithoutSupersession": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "$ref": "#/$defs/PipelineKind"
+                },
+                "revision": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "kind",
+                "revision"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "RevisionWithoutSupersession"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "DuplicateLabel": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "label"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "DuplicateLabel"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "InvalidOptions": {
+              "type": "object",
+              "properties": {
+                "question": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "question"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "InvalidOptions"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "InvalidChoice": {
+              "type": "object",
+              "properties": {
+                "choice": {
+                  "type": "string"
+                },
+                "ruling": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ruling",
+                "choice"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "InvalidChoice"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "QuoteWithoutOperator": {
+              "type": "object",
+              "properties": {
+                "ruling": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ruling"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "QuoteWithoutOperator"
+          ]
+        },
+        {
+          "description": "A `desk_answer` reached a door other than the desk's (an admit, an import or a derivation): `id` is its key.",
+          "type": "object",
+          "properties": {
+            "DeskAnswerOutsideDesk": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "DeskAnswerOutsideDesk"
+          ]
+        },
+        {
+          "description": "A desk request the Mind cannot read as an answer: `field` names the part (the fork, `answered_at`, an answer carrying neither choice nor note, a malformed answer id).",
+          "type": "object",
+          "properties": {
+            "DeskRequestInvalid": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "DeskRequestInvalid"
+          ]
+        },
+        {
+          "description": "The desk's `request_id_conflict` (CultLib PR #72): this `(answerer, request_id)` already bound another body. Nothing is stored.",
+          "type": "object",
+          "properties": {
+            "DeskRequestIdConflict": {
+              "type": "object",
+              "properties": {
+                "request_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "request_id"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "DeskRequestIdConflict"
+          ]
+        },
+        {
+          "description": "`campaign` names the refused document: a campaign, or a target revision that empties its predecessor's repos.",
+          "type": "object",
+          "properties": {
+            "EmptyRepos": {
+              "type": "object",
+              "properties": {
+                "campaign": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "campaign"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "EmptyRepos"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "RepoNotInCampaign": {
+              "type": "object",
+              "properties": {
+                "repo": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repo"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "RepoNotInCampaign"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "UnknownDependency": {
+              "type": "object",
+              "properties": {
+                "cut": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cut"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "UnknownDependency"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "CutReportWithoutSpec": {
+              "type": "object",
+              "properties": {
+                "report": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "report"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "CutReportWithoutSpec"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "SpecMismatch": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "SpecMismatch"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "RangeOutsideCommits": {
+              "type": "object",
+              "properties": {
+                "head": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "head"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "RangeOutsideCommits"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "FalsifiedClaimWithoutConfirmedFinding": {
+              "type": "object",
+              "properties": {
+                "claim": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "claim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "FalsifiedClaimWithoutConfirmedFinding"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "UnprovenClaimWithConfirmedFinding": {
+              "type": "object",
+              "properties": {
+                "claim": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "claim"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "UnprovenClaimWithConfirmedFinding"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "PromiseWithoutVerdict": {
+              "type": "object",
+              "properties": {
+                "promise": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "promise"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "PromiseWithoutVerdict"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "UnknownMutationLabel": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "UnknownMutationLabel"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "UnknownInvariant": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "UnknownInvariant"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "NotStewarded": {
+              "type": "object",
+              "properties": {
+                "repo": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repo"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "NotStewarded"
+          ]
+        },
+        {
+          "description": "`campaign` moved to mind `to`: nothing is written under its root here any more, whoever asks.",
+          "type": "object",
+          "properties": {
+            "CampaignMoved": {
+              "type": "object",
+              "properties": {
+                "campaign": {
+                  "type": "string"
+                },
+                "to": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "campaign",
+                "to"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "CampaignMoved"
+          ]
+        },
+        {
+          "description": "A campaign moves to another mind, never to the one that gives it up.",
+          "type": "string",
+          "const": "MoveToSelf"
+        },
+        {
+          "description": "A Moved resolution is final; withdrawing it would leave two minds keeping the campaign.",
+          "type": "string",
+          "const": "MoveIsFinal"
+        },
+        {
+          "description": "An import names this mind as its source.",
+          "type": "string",
+          "const": "ImportFromSelf"
+        },
+        {
+          "description": "An import carries a document of `root`, which is no campaign this mind holds or the batch carries, or under which this mind holds a native write that is not a follow-up or idea admitted after the import began, or which cites or resolves one of its own native documents.",
+          "type": "object",
+          "properties": {
+            "ImportOutsideCampaign": {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "root"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ImportOutsideCampaign"
+          ]
+        },
+        {
+          "description": "A move names `root`, this mind's own instance: an instance's records are not a campaign's to freeze.",
+          "type": "object",
+          "properties": {
+            "MoveOfInstanceRoot": {
+              "type": "object",
+              "properties": {
+                "root": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "root"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "MoveOfInstanceRoot"
+          ]
+        },
+        {
+          "description": "An import lists `id` as external, but this mind (or the batch) holds it.",
+          "type": "object",
+          "properties": {
+            "ExternalPresent": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ExternalPresent"
+          ]
+        },
+        {
+          "description": "The persona document fails the published schema: `path` is the\ndocument location (a key the schema does not declare is `*`) and\n`message` the schema keyword that failed. Never the offending value.",
+          "type": "object",
+          "properties": {
+            "PersonaInvalid": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "message"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "PersonaInvalid"
+          ]
+        },
+        {
+          "description": "The document's `personaId` is not this mind's instance, which is\n`instance`.",
+          "type": "object",
+          "properties": {
+            "PersonaForeign": {
+              "type": "object",
+              "properties": {
+                "instance": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "instance"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "PersonaForeign"
+          ]
+        },
+        {
+          "description": "The put's `expected_updated_at` is not the stored document's\n`updatedAt`, which is `stored` (none when no persona is stored).",
+          "type": "object",
+          "properties": {
+            "PersonaStale": {
+              "type": "object",
+              "properties": {
+                "stored": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "PersonaStale"
+          ]
+        },
+        {
+          "description": "The document's `provenance.authority` is not `canonical`: a projection\nor an import is not the mind's persona.",
+          "type": "string",
+          "const": "PersonaNotCanonical"
+        },
+        {
+          "description": "A run claims work another run in force already holds: `item` is the\nclaimed document's id and `run` the id of the run that holds it.",
+          "type": "object",
+          "properties": {
+            "AlreadyClaimed": {
+              "type": "object",
+              "properties": {
+                "item": {
+                  "type": "string"
+                },
+                "run": {
+                  "$ref": "#/$defs/RunId"
+                }
+              },
+              "required": [
+                "item",
+                "run"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "AlreadyClaimed"
+          ]
+        },
+        {
+          "description": "A run of hers opens, or is reinstated, while another in-force run of\nhers of the same instance and turn is live: `run` is the holder's id\n(ruling one-live-self-run).",
+          "type": "object",
+          "properties": {
+            "AlreadyLive": {
+              "type": "object",
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/RunId"
+                }
+              },
+              "required": [
+                "run"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "AlreadyLive"
+          ]
+        },
+        {
+          "description": "The one refusal a mind never raises: the answer exceeds the largest\nbody the organ will deliver by any plane, one send or a deferred body.\nIt lives here because a refusal rides the response schema and there is\none of those, so a client reads it the way it reads every other refusal\nrather than parsing a second vocabulary. `bytes` is the encoded answer\n(the payload, not its envelope) and `limit` is the largest body the\ndaemon defers, both so a caller can narrow its own request; nothing is\ntruncated or paginated on its behalf. The daemon owns it and its\ndeferral bound decides it; no rule of the mind is involved.",
+          "type": "object",
+          "properties": {
+            "ResponseTooLarge": {
+              "type": "object",
+              "properties": {
+                "bytes": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "limit": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "bytes",
+                "limit"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ResponseTooLarge"
+          ]
+        },
+        {
+          "description": "A selection the substrate or the organ's value door refused: `field`\nis the selection field the client sent, `value` the offending part.",
+          "type": "object",
+          "properties": {
+            "SelectionInvalid": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "field",
+                "message"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "SelectionInvalid"
+          ]
+        },
+        {
+          "description": "A cursor that does not decode, does not belong to this selection or\nwas not minted by this process, or names a snapshot this mind has not\nreached.",
+          "type": "object",
+          "properties": {
+            "CursorInvalid": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "CursorInvalid"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Unavailable": {
+              "type": "object",
+              "properties": {
+                "detail": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "detail"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Unavailable"
+          ]
+        }
+      ]
+    },
+    "PipelineKind": {
+      "type": "string",
+      "enum": [
+        "Campaign",
+        "Target",
+        "Question",
+        "Ruling",
+        "CutSpec",
+        "CutReport",
+        "Verdict",
+        "Finding",
+        "FollowUp",
+        "Resolution",
+        "Instance",
+        "Stewardship",
+        "HandOff",
+        "Run",
+        "Pulse",
+        "Memory",
+        "Research",
+        "Idea",
+        "Reply",
+        "Thought",
+        "DeskAnswer"
+      ]
+    },
+    "PipelineRefusal": {
+      "description": "Typed refusals of the pipeline documents: bounds, formats and key identity\n(D2's document half), and `ForeignStore`, raised by `decode` for an\nenvelope of any other type. This is every refusal the leaf decides; a\nstore's identity and its schema epoch are not decided here, since this\ncrate owns no store, and belong to the organ that will admit these\ndocuments.\n\nSerialised externally tagged, serde's default for an enum: each variant is\na one-key map from the variant's name to its named fields, so `field` and\n`value` are on the wire under their own names and a reader of a refusal\ncarried over a wire reads the same parts a local caller matches on. No\nattribute buys that, which is why there is none: an internal or adjacent\ntag would move the fields under a content key without making any of them\nmore visible.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "FieldBound": {
+              "type": "object",
+              "properties": {
+                "actual": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "field": {
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "field",
+                "limit",
+                "actual"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "FieldBound"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "InvalidFormat": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "value"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "InvalidFormat"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "InvalidIdentity": {
+              "type": "object",
+              "properties": {
+                "expected": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                },
+                "kind": {
+                  "$ref": "#/$defs/PipelineKind"
+                }
+              },
+              "required": [
+                "kind",
+                "key",
+                "expected"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "InvalidIdentity"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "DuplicateRepo": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "repo": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "repo"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "DuplicateRepo"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ForeignStore": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ForeignStore"
+          ]
+        }
+      ]
+    },
+    "RefusalSchema": {
+      "description": "The refusal document's schema id.",
+      "type": "string",
+      "enum": [
+        "gamecult.fork.refusal.v0"
+      ]
+    },
+    "RunId": {
+      "description": "The id of a run: a full pipeline id of kind Run. A refusal that names a\nholder carries one, so a reader gets a run's id from the wire only if it\nparses as one; a peer cannot fill it with any other string. The only ways\nin are `TryFrom<String>`, which every deserialized value passes, and the\nadmission rules, which name a run the mind holds. The error is a fixed\nmessage: it never echoes the offered value.",
+      "type": "string"
+    }
+  }
+}
