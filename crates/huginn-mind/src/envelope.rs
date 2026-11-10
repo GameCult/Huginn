@@ -324,4 +324,239 @@ mod tests {
         let foreign = CultNetMessage::Error { error: "not for you".into(), code: None, details: None };
         assert_eq!(decode_request(&foreign).unwrap_err().code, "not-an-operation-request");
     }
+
+    // ---- the desk's instantiation of the same cores ----
+
+    use crate::desk_wire::{
+        DESK_MAX_REQUEST_BYTES, DESK_MAX_RESPONSE_BYTES, DESK_REQUEST_SCHEMA, DESK_RESPONSE_SCHEMA, DESK_SERVICE_ID, DeskRequest, DeskResponse,
+        ForkAnswer, ForkAnswerRequest, ForkDeskAnswer, ForkRefusal, ForkRefusalCode, RefusalSchema,
+    };
+    use cultnet_rs::{CultNetWireContract, encode_cultnet_message_to_vec};
+    use eureka_pipeline::DeskAuthority;
+
+    fn desk_answer() -> DeskRequest {
+        DeskRequest::Answer {
+            mind: slug(INSTANCE),
+            subject: crate::fixtures::s("user-7"),
+            authority: DeskAuthority::Member,
+            deciders: vec![crate::fixtures::s("user-7")],
+            request: ForkAnswerRequest {
+                schema_version: crate::desk_wire::RequestSchema::V0,
+                fork_id: "eureka-state:question:Q1".into(),
+                options_hash: "0".repeat(64),
+                answer: Some(ForkAnswer { choice: Some("A".into()), note: None }),
+                retracted: false,
+                retracts: None,
+                answered_at: "2026-11-10T12:00:00Z".into(),
+                request_id: "00000000-0000-4000-8000-000000000001".into(),
+            },
+        }
+    }
+
+    fn desk_requests() -> [(DeskRequest, &'static str); 3] {
+        let (mind, subject, deciders) = (slug(INSTANCE), crate::fixtures::s("user-7"), vec![crate::fixtures::s("user-7")]);
+        [
+            (desk_answer(), "Answer"),
+            (DeskRequest::Forks { mind: mind.clone(), subject: subject.clone(), deciders: deciders.clone() }, "Forks"),
+            (DeskRequest::Fork { mind, subject, deciders, fork_id: "eureka-state:question:Q1".into() }, "Fork"),
+        ]
+    }
+
+    /// The fields of a desk request ARE Libby's wire names, with no mapping layer between: `mind`,
+    /// `subject`, `authority`, `deciders`, `request`. The persona and pipeline requests keep
+    /// `instance`; the sets do not mix. A key outside the set, or one that would make the caller
+    /// its own authority (`answerer`, `attribution`), refuses the whole payload.
+    #[test]
+    fn desk_request_fields_are_the_wire_names_and_the_set_is_closed() {
+        let keys = |value: &serde_json::Value, variant: &str| {
+            let mut keys: Vec<String> = value[variant].as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        let expected = [
+            ("Answer", vec!["authority", "deciders", "mind", "request", "subject"]),
+            ("Forks", vec!["deciders", "mind", "subject"]),
+            ("Fork", vec!["deciders", "fork_id", "mind", "subject"]),
+        ];
+        for ((request, variant), (named, names)) in desk_requests().iter().zip(expected) {
+            assert_eq!(*variant, named);
+            let value = serde_json::to_value(request).unwrap();
+            assert_eq!(keys(&value, variant), names, "{variant}");
+            let message = encode_desk_request("m-1", request, None).unwrap();
+            assert_eq!(decode_desk_request(&message).unwrap(), ("m-1".into(), request.clone()));
+            for extra in ["answerer", "attribution", "instance", "mood"] {
+                let mut bad = value.clone();
+                bad[*variant].as_object_mut().unwrap().insert(extra.into(), serde_json::json!(CANARY_KEY));
+                let payload = STANDARD.encode(rmp_serde::to_vec_named(&bad).unwrap());
+                let message = request_message(DESK_SERVICE_ID, request.operation(), DESK_REQUEST_SCHEMA, payload);
+                let failure = decode_desk_request(&message).unwrap_err();
+                assert_eq!(failure.code, "payload-not-a-request", "{variant} with {extra}");
+                assert!(failure.message.contains(variant), "{variant} with {extra}: {}", failure.message);
+                assert!(!failure.message.contains(CANARY_KEY), "{}", failure.message);
+            }
+            // `mind` is the desk's word: renamed to `instance` the payload is no desk request.
+            let mut renamed = value.clone();
+            let moved = renamed[*variant].as_object_mut().unwrap().remove("mind").unwrap();
+            renamed[*variant].as_object_mut().unwrap().insert("instance".into(), moved);
+            let payload = STANDARD.encode(rmp_serde::to_vec_named(&renamed).unwrap());
+            let message = request_message(DESK_SERVICE_ID, request.operation(), DESK_REQUEST_SCHEMA, payload);
+            assert_eq!(decode_desk_request(&message).unwrap_err().code, "payload-not-a-request");
+        }
+        // And the other way: the mind's `instance` named `mind` is no persona request.
+        let put = HuginnMindRequest::PersonaPut {
+            instance: slug(INSTANCE),
+            provenance: provenance(Faculty::Hands),
+            state: serde_json::json!({}),
+            expected_updated_at: None,
+        };
+        let mut value = serde_json::to_value(&put).unwrap();
+        let moved = value["PersonaPut"].as_object_mut().unwrap().remove("instance").unwrap();
+        value["PersonaPut"].as_object_mut().unwrap().insert("mind".into(), moved);
+        let message = request_message(MIND_SERVICE_ID, "persona_put", MIND_REQUEST_SCHEMA, STANDARD.encode(rmp_serde::to_vec_named(&value).unwrap()));
+        assert_eq!(decode_request(&message).unwrap_err().code, "payload-not-a-request");
+    }
+
+    const CANARY_KEY: &str = "CANARY-9e41-do-not-echo";
+
+    /// Two services share the cores and nothing else: a payload under the other service's schema,
+    /// service id or operation name never reaches a decoder.
+    #[test]
+    fn desk_and_mind_payloads_do_not_cross() {
+        let whoami = encode_request("m-5", &HuginnMindRequest::Whoami, None).unwrap();
+        let CultNetMessage::OperationRequest { payload: mind_payload, .. } = &whoami else { panic!("not a request") };
+        for (request, operation) in desk_requests().iter().map(|(request, _)| (request, request.operation())) {
+            let CultNetMessage::OperationRequest { payload: desk_payload, .. } = encode_desk_request("m-6", request, None).unwrap() else { panic!("not a request") };
+            // A desk payload under the mind's schema and a mind payload under the desk's.
+            let under_mind = request_message(DESK_SERVICE_ID, operation, MIND_REQUEST_SCHEMA, desk_payload.clone());
+            assert_eq!(decode_desk_request(&under_mind).unwrap_err().code, "wrong-payload-schema");
+            let under_desk = request_message(MIND_SERVICE_ID, "whoami", DESK_REQUEST_SCHEMA, mind_payload.clone());
+            assert_eq!(decode_request(&under_desk).unwrap_err().code, "wrong-payload-schema");
+            // The mind's service id at the desk decoder, and the desk's at the mind's.
+            let mind_service = request_message(MIND_SERVICE_ID, operation, DESK_REQUEST_SCHEMA, desk_payload.clone());
+            assert_eq!(decode_desk_request(&mind_service).unwrap_err().code, "wrong-service");
+            let desk_service = request_message(DESK_SERVICE_ID, "whoami", MIND_REQUEST_SCHEMA, mind_payload.clone());
+            assert_eq!(decode_request(&desk_service).unwrap_err().code, "wrong-service");
+            // The right labels around the other service's bytes: not a request.
+            let wrong_bytes = request_message(DESK_SERVICE_ID, operation, DESK_REQUEST_SCHEMA, mind_payload.clone());
+            assert_eq!(decode_desk_request(&wrong_bytes).unwrap_err().code, "payload-not-a-request");
+            // An operation name that is not the payload's.
+            let other = if operation == "forks" { "fork" } else { "forks" };
+            let mismatch = request_message(DESK_SERVICE_ID, other, DESK_REQUEST_SCHEMA, desk_payload);
+            assert_eq!(decode_desk_request(&mismatch).unwrap_err().code, "operation-mismatch");
+        }
+        // The three operations name themselves, on the envelope too.
+        let named: Vec<String> = desk_requests()
+            .iter()
+            .map(|(request, _)| match encode_desk_request("m", request, None).unwrap() {
+                CultNetMessage::OperationRequest { service_id, operation, payload_schema, .. } => {
+                    assert_eq!((service_id.as_str(), payload_schema.as_str()), (DESK_SERVICE_ID, DESK_REQUEST_SCHEMA));
+                    operation
+                }
+                _ => panic!("not a request"),
+            })
+            .collect();
+        assert_eq!(named, ["answer", "forks", "fork"]);
+    }
+
+    /// A desk answer is an answer on the desk's response schema; a refusal that stored nothing and
+    /// any other Mind refusal ride `rejected`; a failure rides the shared failure schema under the
+    /// desk's service id.
+    #[test]
+    fn a_desk_response_round_trips_with_its_status() {
+        let answered = DeskResponse::Answered {
+            answer: ForkDeskAnswer {
+                schema_version: crate::desk_wire::AnswerSchema::V0,
+                answer_id: "n1".into(),
+                fork_id: "eureka-state:question:Q1".into(),
+                outcome: "Counted".into(),
+                of: None,
+                retracts: None,
+                code: None,
+                options_hash: "0".repeat(64),
+                choice: Some("A".into()),
+                note: None,
+                answered_at: "2026-11-10T12:00:00Z".into(),
+                received_at: "2026-11-10T12:00:01Z".into(),
+                claim_in_future: false,
+                answerer: "user-7".into(),
+                authority: DeskAuthority::Member,
+                request_id: "00000000-0000-4000-8000-000000000001".into(),
+            },
+            counted_answer_id: Some("n1".into()),
+            as_of: 9,
+        };
+        let not_stored = DeskResponse::NotStored(ForkRefusal { schema_version: RefusalSchema::V0, code: ForkRefusalCode::ForkUnknown, error: "fork_unknown".into() });
+        for (response, status) in [(answered, "accepted"), (not_stored, "rejected"), (DeskResponse::Refused(refusal()), "rejected")] {
+            let message = encode_desk_response("m-7", "answer", &response, "huginn-yggdrasil").unwrap();
+            let CultNetMessage::OperationResponse { service_id, status: sent, payload_schema, .. } = &message else { panic!("not a response") };
+            assert_eq!((service_id.as_str(), sent.as_str(), payload_schema.as_str()), (DESK_SERVICE_ID, status, DESK_RESPONSE_SCHEMA));
+            assert_eq!(decode_desk_response(&message).unwrap(), ("m-7".into(), Ok(response)));
+        }
+        let failure = OperationFailure::new("wrong-service", "the service is not huginn.desk");
+        let message = encode_desk_failure("m-8", "forks", &failure, "huginn-yggdrasil");
+        let CultNetMessage::OperationResponse { service_id, status, payload_schema, .. } = &message else { panic!("not a response") };
+        assert_eq!((service_id.as_str(), status.as_str(), payload_schema.as_str()), (DESK_SERVICE_ID, "rejected", FAILURE_SCHEMA));
+        assert_eq!(decode_desk_response(&message).unwrap(), ("m-8".into(), Err(failure)));
+        // The mind's response schema is not the desk's.
+        let mind = encode_response("m-9", "whoami", &HuginnMindResponse::Refused(refusal()), "huginn-yggdrasil").unwrap();
+        assert!(decode_desk_response(&mind).is_err());
+    }
+
+    /// The largest message either side can build fits the frame the door enforces: 64 deciders of
+    /// 200 bytes and a 4000-byte note in a request, the widest stored answer in a response.
+    #[test]
+    fn a_maximal_desk_message_fits_the_frame() {
+        let long = |n: usize| "x".repeat(n);
+        let wire = |message: &CultNetMessage| encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap().len();
+        let deciders: Vec<_> = (0..64).map(|at| crate::fixtures::s(&format!("{at:0>200}"))).collect();
+        let mut sized = vec![];
+        for (request, _) in desk_requests() {
+            let widest = match request {
+                DeskRequest::Answer { mind, request, authority, .. } => DeskRequest::Answer {
+                    mind,
+                    subject: crate::fixtures::s(&long(200)),
+                    authority,
+                    deciders: deciders.clone(),
+                    request: ForkAnswerRequest {
+                        fork_id: long(200),
+                        answer: Some(ForkAnswer { choice: Some(long(200)), note: Some(long(4000)) }),
+                        retracts: Some("n4294967295".into()),
+                        ..request
+                    },
+                },
+                DeskRequest::Forks { mind, .. } => DeskRequest::Forks { mind, subject: crate::fixtures::s(&long(200)), deciders: deciders.clone() },
+                DeskRequest::Fork { mind, .. } => {
+                    DeskRequest::Fork { mind, subject: crate::fixtures::s(&long(200)), deciders: deciders.clone(), fork_id: long(200) }
+                }
+            };
+            let message = encode_desk_request("m-10", &widest, Some(long(200))).unwrap();
+            assert_eq!(decode_desk_request(&message).unwrap().1, widest);
+            sized.push(wire(&message));
+        }
+        assert!(sized.iter().all(|size| *size <= DESK_MAX_REQUEST_BYTES), "{sized:?} against {DESK_MAX_REQUEST_BYTES}");
+        assert!(sized[0] > DESK_MAX_REQUEST_BYTES / 4, "the test builds a request that is actually large: {sized:?}");
+
+        let answer = ForkDeskAnswer {
+            schema_version: crate::desk_wire::AnswerSchema::V0,
+            answer_id: "n4294967295".into(),
+            fork_id: long(200),
+            outcome: "Refused".into(),
+            of: Some("n4294967295".into()),
+            retracts: Some("n4294967295".into()),
+            code: None,
+            options_hash: "f".repeat(64),
+            choice: Some(long(200)),
+            note: Some(long(4000)),
+            answered_at: "2026-11-10T12:00:00.123456789+00:00".into(),
+            received_at: "2026-11-10T12:00:00.123456789+00:00".into(),
+            claim_in_future: true,
+            answerer: long(200),
+            authority: DeskAuthority::Operator,
+            request_id: "00000000-0000-4000-8000-000000000001".into(),
+        };
+        let response = DeskResponse::Answered { answer, counted_answer_id: Some("n4294967295".into()), as_of: u64::MAX };
+        let message = encode_desk_response("m-11", "answer", &response, &long(200)).unwrap();
+        assert!(wire(&message) <= DESK_MAX_RESPONSE_BYTES && wire(&message) > DESK_MAX_RESPONSE_BYTES / 8, "{}", wire(&message));
+        assert_eq!(decode_desk_response(&message).unwrap().1, Ok(response));
+    }
 }

@@ -1380,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn the_attribution_is_stamped_and_never_decides() {
+    fn the_authority_is_stamped_and_never_decides() {
         let mut mind = desk();
         let hash = hash_of(&mind, FORK);
         // The operator's own account, off the list, is no decider; a member on the list is.
@@ -1389,5 +1389,95 @@ mod tests {
         let on = mind.desk_answer(&deciders(&["m"]), s("m"), DeskAuthority::Member, wire(FORK, &hash), now()).0;
         let (answer, _, _) = answered(on);
         assert_eq!((answer.outcome.as_str(), answer.authority, answer.answerer.as_str()), ("Counted", DeskAuthority::Member, "m"));
+    }
+
+    // ---- the desk request on the wire: deciders ride each call, at most 64, never stored ----
+
+    use crate::envelope::{OperationFailure, decode_desk_request, encode_desk_request};
+
+    fn list_of(n: usize) -> Vec<Short> {
+        (0..n).map(|at| s(&format!("d{at}"))).collect()
+    }
+
+    /// Each request kind of the desk, carrying `list`.
+    fn desk_requests(mind: &str, list: &[Short], hash: &str) -> [DeskRequest; 3] {
+        [
+            DeskRequest::Answer { mind: slug(mind), subject: s("d0"), authority: DeskAuthority::Member, deciders: list.to_vec(), request: wire(FORK, hash) },
+            DeskRequest::Forks { mind: slug(mind), subject: s("d0"), deciders: list.to_vec() },
+            DeskRequest::Fork { mind: slug(mind), subject: s("d0"), deciders: list.to_vec(), fork_id: FORK.into() },
+        ]
+    }
+
+    /// The request as a client sends it and the door reads it.
+    fn through_the_door(request: &DeskRequest) -> Result<DeskRequest, OperationFailure> {
+        let message = encode_desk_request("m-1", request, None).unwrap();
+        decode_desk_request(&message).map(|(_, read)| read)
+    }
+
+    #[test]
+    fn deciders_are_at_most_sixty_four_per_call_on_answer_forks_and_fork() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let names = ["answer", "forks", "fork"];
+        for (at, sent) in desk_requests(INSTANCE, &list_of(64), &hash).into_iter().enumerate() {
+            let read = through_the_door(&sent).unwrap_or_else(|failure| panic!("{}: 64 deciders refused: {failure:?}", names[at]));
+            assert_eq!((read.operation(), read.deciders().len()), (names[at], 64));
+            assert_eq!(read, sent);
+        }
+        // 64 deciders through to the Mind: the subject is listed and counts.
+        let DeskRequest::Answer { subject, authority, deciders, request, .. } = through_the_door(&desk_requests(INSTANCE, &list_of(64), &hash)[0]).unwrap() else { panic!("not an answer") };
+        let (response, replayed) = mind.desk_answer(&deciders, subject, authority, request, now());
+        assert!(!replayed);
+        assert_eq!(answered(response).0.outcome, "Counted");
+
+        let (head_before, stored_before) = (head(&mind), stored_count(&mind, FORK));
+        for (at, sent) in desk_requests(INSTANCE, &list_of(65), &hash).into_iter().enumerate() {
+            let failure = through_the_door(&sent).unwrap_err();
+            assert_eq!(failure.code, "payload-not-a-request", "{}", names[at]);
+            assert!(failure.message.contains("deciders"), "{} names the field: {}", names[at], failure.message);
+            assert!(!failure.message.contains("d64"), "{} echoes a decider: {}", names[at], failure.message);
+        }
+        assert_eq!((head(&mind), stored_count(&mind, FORK)), (head_before, stored_before));
+    }
+
+    #[test]
+    fn a_duplicate_decider_is_refused_naming_deciders_and_an_empty_list_decodes() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let mut twice = list_of(3);
+        twice.push(s("d1"));
+        for sent in desk_requests(INSTANCE, &twice, &hash) {
+            let failure = through_the_door(&sent).unwrap_err();
+            assert_eq!(failure.code, "payload-not-a-request");
+            assert!(failure.message.contains("deciders") && !failure.message.contains("d1"), "{}", failure.message);
+        }
+        // An empty list is a list: it decodes, and the Mind's showability gate is what says no.
+        let before = head(&mind);
+        let [answer, forks, fork] = desk_requests(INSTANCE, &[], &hash);
+        assert!(through_the_door(&forks).is_ok() && through_the_door(&fork).is_ok());
+        let DeskRequest::Answer { subject, authority, deciders, request, .. } = through_the_door(&answer).unwrap() else { panic!("not an answer") };
+        assert!(deciders.is_empty());
+        let refused = not_stored(mind.desk_answer(&deciders, subject, authority, request, now()).0);
+        assert_eq!(refused.code, ForkRefusalCode::ForkUnknown);
+        assert_eq!(head(&mind), before);
+    }
+
+    #[test]
+    fn a_request_for_another_mind_is_refused_and_stores_nothing() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        let before = (head(&mind), stored_count(&mind, FORK));
+        for sent in desk_requests(OTHER_INSTANCE, &list_of(4), &hash) {
+            let read = through_the_door(&sent).unwrap();
+            assert_eq!(
+                mind.require_instance(read.mind()),
+                Err(MindRefusal::ForeignInstance { declared: OTHER_INSTANCE.into(), mind: INSTANCE.into() })
+            );
+        }
+        assert_eq!((head(&mind), stored_count(&mind, FORK)), before);
+        // The same request to the mind it names is answered.
+        let DeskRequest::Answer { mind: named, subject, authority, deciders, request } = through_the_door(&desk_requests(INSTANCE, &list_of(4), &hash)[0]).unwrap() else { panic!("not an answer") };
+        mind.require_instance(&named).unwrap();
+        assert_eq!(answered(mind.desk_answer(&deciders, subject, authority, request, now()).0).0.outcome, "Counted");
     }
 }

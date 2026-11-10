@@ -581,4 +581,27 @@ mod tests {
         assert!(request.contains(&format!("\"$ref\": \"{selection}\"")));
         assert!(!request.contains("\"cursor\""), "no second copy of the selection's shape");
     }
+
+    /// The desk's two published files are the derivation of its two types, byte for byte, and
+    /// the catalog index lists both as wire messages beside the mind's.
+    #[test]
+    fn published_desk_schemas_match_derivation() {
+        use crate::desk_wire::{DESK_REQUEST_SCHEMA, DESK_REQUEST_SCHEMA_JSON, DESK_RESPONSE_SCHEMA, DESK_RESPONSE_SCHEMA_JSON, DeskRequest, DeskResponse};
+        let request = serde_json::to_string_pretty(&schemars::schema_for!(DeskRequest)).unwrap();
+        let response = serde_json::to_string_pretty(&schemars::schema_for!(DeskResponse)).unwrap();
+        assert_eq!(DESK_REQUEST_SCHEMA_JSON.replace("\r\n", "\n"), request);
+        assert_eq!(DESK_RESPONSE_SCHEMA_JSON.replace("\r\n", "\n"), response);
+        // The deciders bound is in the published schema, not only in the decoder.
+        assert!(request.contains("\"maxItems\": 64") && request.contains("\"uniqueItems\": true"), "deciders bound");
+        let index: serde_json::Value = serde_json::from_str(include_str!("../../../schemas/cultnet/index.json")).unwrap();
+        for (id, title) in [(DESK_REQUEST_SCHEMA, "Huginn desk request"), (DESK_RESPONSE_SCHEMA, "Huginn desk response")] {
+            let rows: Vec<_> = index["schemas"].as_array().unwrap().iter().filter(|row| row["schemaId"] == id).collect();
+            assert_eq!(rows.len(), 1, "{id}");
+            let row = rows[0];
+            assert_eq!(
+                (row["kind"].as_str(), row["schemaVersion"].as_str(), row["title"].as_str(), row["path"].as_str(), row["wireContracts"][0].as_str()),
+                (Some("wire_message"), Some(id), Some(title), Some(format!("{id}.schema.json").as_str()), Some("cultnet.schema.v0"))
+            );
+        }
+    }
 }
