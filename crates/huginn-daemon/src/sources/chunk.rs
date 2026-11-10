@@ -2,10 +2,9 @@
 //! holds and a search answers, so its line range is a citation.
 
 /// Bumped whenever the windows or the embedded text would change for the same
-/// blob, or the skip list in `git::skipped_path` changes (an incremental run
-/// never revisits an unchanged path, so only a rebuild drops its old chunks): it is part of every chunk's identity and of the collection's label, so
+/// blob: it is part of every chunk's identity and of the collection's label, so
 /// a change rebuilds the collection instead of mixing two chunkings.
-pub const CHUNKER_VERSION: u32 = 2;
+pub const CHUNKER_VERSION: u32 = 1;
 
 /// The most lines a chunk holds.
 pub const CHUNK_LINES_MAX: usize = 48;
