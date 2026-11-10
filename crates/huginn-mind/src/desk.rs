@@ -176,8 +176,15 @@ fn refusal_of(docs: &Docs<'_>, question: &PipelineQuestion, stamp: &DeskStamp, r
     }
 }
 
-/// The digest of the request as the client sent it: what "the same body" means for a
-/// retry. Every part of the request but the id itself.
+/// The one definition of "the same body": Huginn's own SHA-256 over the canonical body of the
+/// request, which is every part of it but the id itself and so includes `answered_at` and, for a
+/// retraction, the target. It is never read from the client. It decides a replay (equal), a
+/// `request_id_conflict` (unequal under a bound id) and nothing else; no other code compares
+/// bodies, a refused retraction's target included, which the stored `outcome` already carries.
+///
+/// FROZEN: the digest form (field order, `serde_json` string of `Sent`, lowercase hex) is stored
+/// in every answer and read back by retries years later. A change of form is a new version of the
+/// stored field, never an edit here; `body_digest_is_pinned` fails on any edit.
 fn body_digest(request: &DeskAnswerRequest) -> Sha256Hex {
     use sha2::{Digest, Sha256};
     #[derive(serde::Serialize)]
@@ -302,9 +309,14 @@ impl<S: MindStore> Mind<S> {
         let sequence = answers_of(&docs, fork).map(|(_, held)| held.sequence).max().unwrap_or(0).checked_add(1).ok_or_else(|| invalid("sequence"))?;
         let document = PipelineDocument::DeskAnswer(answer(sequence, outcome.clone()));
         let envelope = prepare(&document, self.cache())?;
-        // The receipt names the operator only when the verified account is the operator's.
+        // The receipt names the operator only when the verified account is the operator's; a
+        // steward or member answerer is named as such. Attribution only: admission reads no faculty.
         let provenance = PipelineProvenance {
-            faculty: if stamp.authority == DeskAuthority::Operator { Faculty::Operator } else { Faculty::SelfFaculty },
+            faculty: match stamp.authority {
+                DeskAuthority::Operator => Faculty::Operator,
+                DeskAuthority::Steward => Faculty::Steward,
+                DeskAuthority::Member => Faculty::Member,
+            },
             agent: stamp.answerer.clone(),
             session: "desk".into(),
             tool: "huginn-desk".into(),
@@ -887,7 +899,7 @@ mod tests {
     fn the_receipt_names_the_operator_only_for_the_operator_account() {
         let at = "2026-11-10T12:00:00Z";
         let mut mind = desk();
-        for (authority, faculty) in [(DeskAuthority::Operator, Faculty::Operator), (DeskAuthority::Steward, Faculty::SelfFaculty), (DeskAuthority::Member, Faculty::SelfFaculty)] {
+        for (authority, faculty) in [(DeskAuthority::Operator, Faculty::Operator), (DeskAuthority::Steward, Faculty::Steward), (DeskAuthority::Member, Faculty::Member)] {
             let outcome = ask(&mut mind, &stamp_as("x", authority, &LIST), pick(FORK, "Q1", "A", at));
             let DeskAnswerOutcome::Stored { receipt_id, .. } = outcome else { panic!("{outcome:?}") };
             let receipt = mind.receipts().unwrap().into_iter().find(|receipt| receipt.receipt_id == receipt_id).unwrap();
@@ -1132,6 +1144,86 @@ mod tests {
                 "{bad:?}"
             );
             assert_eq!(head(&mind), before);
+        }
+    }
+
+    // ---- fix batch 3 ----
+
+    /// Faculty is attribution: a batch admitted under any faculty, Member and Steward included,
+    /// gets the outcome Hands gets, and no faculty opens the desk-answer door.
+    #[test]
+    fn member_and_steward_confer_no_admission_right() {
+        let all = [Faculty::SelfFaculty, Faculty::Imagination, Faculty::Hands, Faculty::Soul, Faculty::Life, Faculty::Eyes, Faculty::Operator, Faculty::Member, Faculty::Steward];
+        let outcome_of = |faculty: Faculty| {
+            let mut mind = desk();
+            let mut answer = held_after_one(&mut mind);
+            answer.request_id = fresh_id();
+            answer.sequence = 2;
+            let refused = admit_as(&mut mind, faculty, vec![D::DeskAnswer(answer)]);
+            let ordinary = admit_as(&mut mind, faculty, vec![question("Q9", &["A", "B"], "A")]);
+            (format!("{refused:?}"), matches!(ordinary, PipelineAdmissionOutcome::Committed { .. }))
+        };
+        let baseline = outcome_of(Faculty::Hands);
+        assert!(baseline.1 && baseline.0.contains("Refused"), "{baseline:?}");
+        for faculty in all {
+            assert_eq!(outcome_of(faculty), baseline, "{faculty:?}");
+        }
+    }
+
+    fn held_after_one(mind: &mut Mind<MemoryStore>) -> PipelineDeskAnswer {
+        let (answer, _) = stored(ask(mind, &decider("x"), pick(FORK, "Q1", "A", AT)));
+        held(mind, &answer)
+    }
+
+    /// The digest form is frozen: a fixed request digests to a fixed hex, computed outside this code.
+    #[test]
+    fn body_digest_is_pinned() {
+        let request = |body: DeskBody| DeskAnswerRequest {
+            fork: s("eureka-state:question:Q1"),
+            options_hash: Sha256Hex("a".repeat(64)),
+            body,
+            answered_at: s("2026-11-10T12:00:00Z"),
+            request_id: RequestId(R1.into()),
+        };
+        let answer = request(DeskBody::Answer { choice: Some(l("A")), note: None });
+        assert_eq!(body_digest(&answer).0, "8a4d5b2ed0b3452bfed2f3a276b2828974e6824a3edcc643cfe9cfcdda34173a");
+        let retraction = request(DeskBody::Retraction { retracts: s("eureka-state:desk_answer:Q1.1") });
+        assert_eq!(body_digest(&retraction).0, "9f8075382556898c0bea364ed7c6deb2a86d8c78288a1f34e06da6e9bf5f58a3");
+        // The id is not part of the body; answered_at is.
+        let mut other_id = answer.clone();
+        other_id.request_id = RequestId(R2.into());
+        assert_eq!(body_digest(&other_id), body_digest(&answer));
+        let mut other_time = answer.clone();
+        other_time.answered_at = s("2026-11-10T12:00:01Z");
+        assert_ne!(body_digest(&other_time), body_digest(&answer));
+    }
+
+    /// The retry lookup follows the shape check: a malformed body reusing a bound id is
+    /// desk_request_invalid, never a conflict, and stores nothing.
+    #[test]
+    fn the_lookup_comes_after_the_shape_check() {
+        let mut mind = desk();
+        stored(ask(&mut mind, &decider("x"), with_id(pick(FORK, "Q1", "A", AT), R1)));
+        let before = head(&mind);
+        let mut blank = with_id(pick(FORK, "Q1", "A", AT), R1);
+        blank.body = DeskBody::Answer { choice: None, note: None };
+        let mut bad_time = with_id(pick(FORK, "Q1", "A", AT), R1);
+        bad_time.answered_at = s("yesterday");
+        let mut bad_fork = with_id(pick(FORK, "Q1", "A", AT), R1);
+        bad_fork.fork = s("not-a-question");
+        for (request, field) in [(blank, "body"), (bad_time, "answered_at"), (bad_fork, "fork")] {
+            assert_eq!(ask(&mut mind, &decider("x"), request), DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: field.into() }), "{field}");
+        }
+        assert_eq!(head(&mind), before);
+    }
+
+    /// claim_in_future compares at sub-second precision: 300.0 s ahead is not flagged, 300.5 s is.
+    #[test]
+    fn claim_in_future_is_decided_below_the_second() {
+        let mut mind = desk();
+        for (claim, flagged) in [("2026-09-16T12:05:00.000Z", false), ("2026-09-16T12:05:00.500Z", true), ("2026-09-16T12:04:59.900Z", false)] {
+            let (answer, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", claim)));
+            assert_eq!(held(&mind, &answer).claim_in_future, flagged, "{claim}");
         }
     }
 }

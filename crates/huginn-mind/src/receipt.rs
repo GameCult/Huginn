@@ -29,7 +29,9 @@ pub const RECEIPT_SCHEMA_VERSION: &str = "huginn.mind_commit_receipt.v2";
 
 /// Which faculty a batch was admitted as. Attribution, not authority
 /// (ruling 18): no admission rule trusts it, and Cut 9's views read it back
-/// from the receipt.
+/// from the receipt. `Member` and `Steward` name a desk answerer who is neither the
+/// operator nor a faculty; they confer no admission right anywhere (a test admits a
+/// batch under each and checks the outcomes match).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Faculty {
     SelfFaculty,
@@ -40,6 +42,8 @@ pub enum Faculty {
     Life,
     Eyes,
     Operator,
+    Member,
+    Steward,
 }
 
 /// Who admitted a batch: the faculty, the agent, its session and the tool.

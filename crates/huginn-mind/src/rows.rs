@@ -63,7 +63,7 @@ pub(crate) enum Alias {
     Pass,
 }
 
-const FACULTIES: [&str; 7] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator"];
+const FACULTIES: [&str; 9] = ["SelfFaculty", "Imagination", "Hands", "Soul", "Life", "Eyes", "Operator", "Member", "Steward"];
 const OUTCOMES: [&str; 8] = ["Superseded", "Answered", "Fixed", "Deferred", "Recorded", "Withdrawn", "Slept", "Moved"];
 const BOOLEANS: [&str; 2] = ["true", "false"];
 const MEMORY_ORIGINS: [&str; 5] = ["Room", "Direct", "Wake", "SelfRun", "Sleep"];

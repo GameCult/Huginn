@@ -558,7 +558,7 @@
       ]
     },
     "Faculty": {
-      "description": "Which faculty a batch was admitted as. Attribution, not authority\n(ruling 18): no admission rule trusts it, and Cut 9's views read it back\nfrom the receipt.",
+      "description": "Which faculty a batch was admitted as. Attribution, not authority\n(ruling 18): no admission rule trusts it, and Cut 9's views read it back\nfrom the receipt. `Member` and `Steward` name a desk answerer who is neither the\noperator nor a faculty; they confer no admission right anywhere (a test admits a\nbatch under each and checks the outcomes match).",
       "type": "string",
       "enum": [
         "SelfFaculty",
@@ -567,7 +567,9 @@
         "Soul",
         "Life",
         "Eyes",
-        "Operator"
+        "Operator",
+        "Member",
+        "Steward"
       ]
     },
     "FileChange": {
