@@ -3,19 +3,25 @@
 //! `Mind::answer_desk` is the one owner of whether a desk answer counts, its
 //! sequence, its stored outcome and the stamping of `answerer` and `authority`
 //! (binding spec /opt/commons/handoff/fork-desk-answer-binding-20261110.md,
-//! 1.3 steps 3-8 and R1, R2, R4). It builds one `desk_answer` and commits it
-//! through `admit_steps` with `Door::Desk`, the same commit primitive every
-//! other write uses; no other door may write the kind.
+//! 1.3 steps 3-8 and R1, R2, R4, and CultLib PR #72 `fork-card.md` for the
+//! request id). It builds one `desk_answer` and commits it through
+//! `admit_steps` with `Door::Desk`, the same commit primitive every other write
+//! uses; no other door may write the kind. `answer_desk` and `DeskStamp` are
+//! crate-private: only code inside this crate can stamp, so the verified door
+//! that will call them (follow-up desk-answer-door) widens them in its own cut.
 //!
-//! The decider list is an input (`DeskStamp`, from the caller); the Mind never
-//! reads one. The request types carry no `answerer` and no `authority`.
-//! `answered_at` is the client's claim, displayed and never compared: order is
-//! the per-question sequence, which is the receiver's order.
+//! The decider list is an input (`DeskStamp.deciders`, from the door); the Mind
+//! never reads one. Whether an answerer decides is membership in that list and
+//! nothing else: the stamped `authority` (Operator, Steward, Member) is an
+//! attribution copied into the record and never decides. The request types carry
+//! no `answerer` and no `authority`. `answered_at` is the client's claim: it is
+//! displayed and flagged (`claim_in_future`), never compared for order, which is
+//! the per-question sequence, the receiver's order. `received_at` is the Mind's.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use eureka_pipeline::{
-    DeskAuthority, DeskOutcome, DeskRefusal, Label, Para, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion,
-    PipelineRefusal, PipelineResolution, ResolutionOutcome, Sha256Hex, Short, Slug,
+    DeskAuthority, DeskOutcome, DeskRefusal, Label, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, PipelineRefusal,
+    PipelineResolution, RequestId, ResolutionOutcome, Sha256Hex, Short, Slug, Words,
 };
 
 use crate::admission::{Door, PipelineAdmissionOutcome, prepare};
@@ -27,38 +33,46 @@ use crate::rows::root_and_local;
 use crate::store::MindStore;
 
 /// What the desk's receiver sends the Mind. `answered_at` is the person's
-/// claim, RFC 3339, kept as written.
+/// claim, RFC 3339 in UTC, kept as written. `request_id` is the client's retry
+/// token (a lowercase UUID), required.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeskAnswerRequest {
     pub fork: Short,
     pub options_hash: Sha256Hex,
     pub body: DeskBody,
     pub answered_at: Short,
+    pub request_id: RequestId,
 }
 
 /// An answer, or the retraction of one: a sum, so a retraction carrying an
 /// answer, or naming no target, cannot be written down (R1 by construction).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeskBody {
-    Answer { choice: Option<Label>, note: Option<Para> },
+    Answer { choice: Option<Label>, note: Option<Words> },
     Retraction { retracts: Short },
 }
 
-/// Who answered and in what standing, as the verified caller states it. The
-/// Mind copies both into the record and decides nothing from the caller's
-/// word except that `authority: None` is no decider (rule 5).
+/// The door's verified context for one call: who answered, the role the account
+/// holds (an attribution, stored on every answer) and the decider list the door
+/// holds. Membership of `answerer` in `deciders` is rule 5's whole input; the
+/// attribution never enters it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeskStamp {
-    pub answerer: Short,
-    pub authority: Option<DeskAuthority>,
+pub(crate) struct DeskStamp {
+    pub(crate) answerer: Short,
+    pub(crate) authority: DeskAuthority,
+    pub(crate) deciders: Vec<Short>,
 }
 
 /// `Stored`: the answer id (the record key), its outcome and the commit's receipt.
+/// `Replayed`: the same `(answerer, request_id)` and body came before; the stored
+/// outcome comes back unchanged and nothing was written. (A record holds no card:
+/// the read side shows the current card beside a `stale_fork`, replayed or not.)
 /// `Refused`: nothing was stored (a shape fault, an unknown fork, a moved campaign,
-/// or a commit fault).
+/// a request id reused for another body, or a commit fault).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeskAnswerOutcome {
     Stored { answer: Short, outcome: DeskOutcome, receipt_id: String },
+    Replayed { answer: Short, outcome: DeskOutcome },
     Refused(MindRefusal),
 }
 
@@ -114,13 +128,22 @@ fn is_retracted(docs: &Docs<'_>, fork: &str, key: &str) -> bool {
     answers_of(docs, fork).any(|(_, other)| matches!(&other.outcome, DeskOutcome::Retraction { retracts } if retracts.0 == key))
 }
 
+/// Whether a stored answer is a candidate to count under the fork's current card:
+/// Counted or Revision, and written against the card's current options hash.
+fn counts_under(answer: &PipelineDeskAnswer, current: &Sha256Hex) -> bool {
+    matches!(answer.outcome, DeskOutcome::Counted | DeskOutcome::Revision { .. }) && answer.options_hash == *current
+}
+
 /// The answer that counts for `fork` now: the lowest-sequence answer whose stored
-/// outcome is Counted or Revision and that no Retraction names (R4). Derived on
+/// outcome is Counted or Revision under the card's current options hash and that no
+/// Retraction names (R4; an answer under an older hash stops counting). Derived on
 /// every call and never stored; retracting the counted answer promotes the next,
 /// retracting another changes nothing. The one place "counts" is decided.
 pub(crate) fn counted_answer(docs: &Docs<'_>, fork: &str) -> Option<String> {
+    let Some(PipelineDocument::Question(question)) = docs.find(PipelineKind::Question, fork) else { return None };
+    let current = options_hash(question);
     answers_of(docs, fork)
-        .filter(|(key, answer)| matches!(answer.outcome, DeskOutcome::Counted | DeskOutcome::Revision { .. }) && !is_retracted(docs, fork, key))
+        .filter(|(key, answer)| counts_under(answer, &current) && !is_retracted(docs, fork, key))
         .min_by_key(|(_, answer)| answer.sequence)
         .map(|(key, _)| key.to_string())
 }
@@ -128,10 +151,11 @@ pub(crate) fn counted_answer(docs: &Docs<'_>, fork: &str) -> Option<String> {
 /// Rules 4-7 and R1 in the binding spec's order; the first failure is the code.
 fn refusal_of(docs: &Docs<'_>, question: &PipelineQuestion, stamp: &DeskStamp, request: &DeskAnswerRequest) -> Option<DeskRefusal> {
     let fork = request.fork.0.as_str();
-    if request.options_hash != options_hash(question) {
+    let current = options_hash(question);
+    if request.options_hash != current {
         return Some(DeskRefusal::StaleFork);
     }
-    if stamp.authority.is_none() {
+    if !stamp.deciders.contains(&stamp.answerer) {
         return Some(DeskRefusal::NotADecider);
     }
     if !docs.in_force(PipelineKind::Question, fork) {
@@ -144,12 +168,34 @@ fn refusal_of(docs: &Docs<'_>, question: &PipelineQuestion, stamp: &DeskStamp, r
         DeskBody::Answer { .. } => None,
         DeskBody::Retraction { retracts } => {
             let target = answers_of(docs, fork).find(|(key, _)| *key == retracts.0);
-            if !target.is_some_and(|(_, answer)| matches!(answer.outcome, DeskOutcome::Counted | DeskOutcome::Revision { .. })) {
+            if !target.is_some_and(|(_, answer)| counts_under(answer, &current)) {
                 return Some(DeskRefusal::BadRetraction);
             }
             is_retracted(docs, fork, &retracts.0).then_some(DeskRefusal::AlreadyRetracted)
         }
     }
+}
+
+/// The digest of the request as the client sent it: what "the same body" means for a
+/// retry. Every part of the request but the id itself.
+fn body_digest(request: &DeskAnswerRequest) -> Sha256Hex {
+    use sha2::{Digest, Sha256};
+    #[derive(serde::Serialize)]
+    struct Sent<'a> {
+        fork: &'a str,
+        options_hash: &'a str,
+        answered_at: &'a str,
+        choice: Option<&'a str>,
+        note: Option<&'a str>,
+        retracts: Option<&'a str>,
+    }
+    let (choice, note, retracts) = match &request.body {
+        DeskBody::Answer { choice, note } => (choice.as_ref().map(|c| c.0.as_str()), note.as_ref().map(|n| n.0.as_str()), None),
+        DeskBody::Retraction { retracts } => (None, None, Some(retracts.0.as_str())),
+    };
+    let sent = Sent { fork: &request.fork.0, options_hash: &request.options_hash.0, answered_at: &request.answered_at.0, choice, note, retracts };
+    let bytes = serde_json::to_string(&sent).expect("strings serialise");
+    Sha256Hex(Sha256::digest(bytes.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn shape_fault(refusal: PipelineRefusal) -> MindRefusal {
@@ -163,8 +209,10 @@ fn shape_fault(refusal: PipelineRefusal) -> MindRefusal {
 impl<S: MindStore> Mind<S> {
     /// Decides one desk answer and, when the request is well formed and names a
     /// held fork, stores it: counted, a revision, a retraction, or refused with its
-    /// code. See the module header for the order and the stored/not-stored line.
-    pub fn answer_desk(&mut self, stamp: DeskStamp, request: DeskAnswerRequest, now: DateTime<Utc>) -> DeskAnswerOutcome {
+    /// code. A retry of a stored request is replayed, never stored again. See the
+    /// module header for the order and the stored/not-stored line.
+    #[cfg_attr(not(test), allow(dead_code))] // the verified door (follow-up desk-answer-door) is the live caller
+    pub(crate) fn answer_desk(&mut self, stamp: DeskStamp, request: DeskAnswerRequest, now: DateTime<Utc>) -> DeskAnswerOutcome {
         match self.desk_steps(stamp, request, now) {
             Ok(outcome) => outcome,
             Err(refusal) => DeskAnswerOutcome::Refused(refusal),
@@ -178,9 +226,11 @@ impl<S: MindStore> Mind<S> {
             return Err(invalid("fork"));
         }
         let root = root_and_local(&request.fork.0).0.to_string();
-        if DateTime::parse_from_rfc3339(&request.answered_at.0).is_err() {
-            return Err(invalid("answered_at"));
-        }
+        // answered_at is the client's claim and must be RFC 3339 in UTC (offset zero).
+        let claimed = match DateTime::parse_from_rfc3339(&request.answered_at.0) {
+            Ok(at) if at.offset().local_minus_utc() == 0 => at.with_timezone(&Utc),
+            _ => return Err(invalid("answered_at")),
+        };
         let (choice, note, shape_outcome) = match &request.body {
             DeskBody::Answer { choice, note } => {
                 if choice.is_none() && note.is_none() {
@@ -190,6 +240,9 @@ impl<S: MindStore> Mind<S> {
             }
             DeskBody::Retraction { retracts } => (None, None, DeskOutcome::Retraction { retracts: retracts.clone() }),
         };
+        let body_sha256 = body_digest(&request);
+        let received_at = Short(now.to_rfc3339_opts(SecondsFormat::Secs, true));
+        let claim_in_future = claimed > now + Duration::minutes(5);
         let answer = |sequence: u32, outcome: DeskOutcome| PipelineDeskAnswer {
             campaign: Slug(root.clone()),
             fork: request.fork.clone(),
@@ -198,6 +251,10 @@ impl<S: MindStore> Mind<S> {
             choice: choice.clone(),
             note: note.clone(),
             answered_at: request.answered_at.clone(),
+            received_at: received_at.clone(),
+            claim_in_future,
+            request_id: request.request_id.clone(),
+            body_sha256: body_sha256.clone(),
             answerer: stamp.answerer.clone(),
             authority: stamp.authority,
             outcome,
@@ -206,10 +263,24 @@ impl<S: MindStore> Mind<S> {
         probe.validate().map_err(shape_fault)?;
         eureka_pipeline::pipeline_key(&probe).map_err(shape_fault)?;
 
-        // Rules 3 and the moved campaign: nothing is stored.
         let image = self.image()?;
         let docs = Docs::at(image, image.head);
         let fork = request.fork.0.as_str();
+
+        // The retry lookup: after the shape, before the fork is read, so a retry gets its stored
+        // outcome even if the card has since changed. The key is (answerer, request_id).
+        let bound = docs.of_kind(PipelineKind::DeskAnswer).find_map(|(key, document)| match document {
+            PipelineDocument::DeskAnswer(held) if held.answerer == stamp.answerer && held.request_id == request.request_id => Some((key, held)),
+            _ => None,
+        });
+        if let Some((key, held)) = bound {
+            if held.body_sha256 != body_sha256 {
+                return Err(MindRefusal::DeskRequestIdConflict { request_id: request.request_id.0.clone() });
+            }
+            return Ok(DeskAnswerOutcome::Replayed { answer: Short(key.to_string()), outcome: held.outcome.clone() });
+        }
+
+        // Rules 3 and the moved campaign: nothing is stored.
         let Some(PipelineDocument::Question(question)) = docs.find(PipelineKind::Question, fork) else {
             return Err(MindRefusal::MissingReference { kind: PipelineKind::Question, id: fork.into() });
         };
@@ -231,8 +302,9 @@ impl<S: MindStore> Mind<S> {
         let sequence = answers_of(&docs, fork).map(|(_, held)| held.sequence).max().unwrap_or(0).checked_add(1).ok_or_else(|| invalid("sequence"))?;
         let document = PipelineDocument::DeskAnswer(answer(sequence, outcome.clone()));
         let envelope = prepare(&document, self.cache())?;
+        // The receipt names the operator only when the verified account is the operator's.
         let provenance = PipelineProvenance {
-            faculty: Faculty::Operator,
+            faculty: if stamp.authority == DeskAuthority::Operator { Faculty::Operator } else { Faculty::SelfFaculty },
             agent: stamp.answerer.clone(),
             session: "desk".into(),
             tool: "huginn-desk".into(),
@@ -278,8 +350,27 @@ mod tests {
         options_hash(&question_with(label, &["A", "B"], "A"))
     }
 
+    /// The decider list the door holds in these tests.
+    const LIST: [&str; 6] = ["x", "y", "z", "a", "op", "dec"];
+
+    fn stamp_as(who: &str, authority: DeskAuthority, list: &[&str]) -> DeskStamp {
+        DeskStamp { answerer: s(who), authority, deciders: list.iter().map(|id| s(id)).collect() }
+    }
+
     fn decider(who: &str) -> DeskStamp {
-        DeskStamp { answerer: s(who), authority: Some(DeskAuthority::Decider) }
+        stamp_as(who, DeskAuthority::Member, &LIST)
+    }
+
+    /// An account on no decider list.
+    fn off() -> DeskStamp {
+        stamp_as("nobody", DeskAuthority::Member, &LIST)
+    }
+
+    /// A fresh lowercase UUID per call: every request is its own unless a test reuses one.
+    fn fresh_id() -> RequestId {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        RequestId(format!("00000000-0000-4000-8000-{:012x}", NEXT.fetch_add(1, Ordering::Relaxed)))
     }
 
     fn pick(fork: &str, label: &str, choice: &str, answered_at: &str) -> DeskAnswerRequest {
@@ -288,6 +379,7 @@ mod tests {
             options_hash: hash(label),
             body: DeskBody::Answer { choice: Some(l(choice)), note: None },
             answered_at: s(answered_at),
+            request_id: fresh_id(),
         }
     }
 
@@ -297,6 +389,7 @@ mod tests {
             options_hash: hash(label),
             body: DeskBody::Retraction { retracts: s(target) },
             answered_at: s("2026-11-10T12:00:00Z"),
+            request_id: fresh_id(),
         }
     }
 
@@ -306,7 +399,7 @@ mod tests {
 
     fn stored(outcome: DeskAnswerOutcome) -> (String, DeskOutcome) {
         match outcome {
-            DeskAnswerOutcome::Stored { answer, outcome, .. } => (answer.0, outcome),
+            DeskAnswerOutcome::Stored { answer, outcome, .. } | DeskAnswerOutcome::Replayed { answer, outcome, .. } => (answer.0, outcome),
             other => panic!("expected a stored answer, got {other:?}"),
         }
     }
@@ -392,7 +485,7 @@ mod tests {
     #[test]
     fn an_answer_off_the_decider_list_is_refused() {
         let mut mind = desk();
-        let off = DeskStamp { answerer: s("nobody"), authority: None };
+        let off = off();
         let (_, outcome) = stored(ask(&mut mind, &off, pick(FORK, "Q1", "A", "2026-11-10T12:00:00Z")));
         assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
         assert_eq!(counted(&mind, FORK), None);
@@ -440,7 +533,7 @@ mod tests {
     #[test]
     fn refusals_follow_the_binding_step_order() {
         let at = "2026-11-10T12:00:00Z";
-        let off = DeskStamp { answerer: s("nobody"), authority: None };
+        let off = off();
         let mut mind = desk();
         committed(admit(&mut mind, vec![resolution(r(K::Question, FORK), withdrawn())]));
         let stale = |mut request: DeskAnswerRequest| {
@@ -496,7 +589,7 @@ mod tests {
         let mut mind = desk();
         let at = "2026-11-10T12:00:00Z";
         let (first, _) = stored(ask(&mut mind, &decider("x"), pick(FORK, "Q1", "A", at)));
-        let off = DeskStamp { answerer: s("nobody"), authority: None };
+        let off = off();
         assert_eq!(stored(ask(&mut mind, &off, retract(FORK, "Q1", &first))).1, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
         assert_eq!(counted(&mind, FORK), Some(first.clone()));
         assert_eq!(stored(ask(&mut mind, &decider("y"), retract(FORK, "Q1", &first))).1, DeskOutcome::Retraction { retracts: s(&first) });
@@ -536,23 +629,22 @@ mod tests {
     fn refused_answers_are_stored_with_their_code() {
         let mut mind = desk();
         let at = "2026-11-10T12:00:00Z";
-        let off = DeskStamp { answerer: s("guest"), authority: None };
+        let off = stamp_as("guest", DeskAuthority::Steward, &LIST);
         let (answer, outcome) = stored(ask(&mut mind, &off, pick(FORK, "Q1", "A", at)));
         let record = held(&mind, &answer);
         assert_eq!(record.outcome, outcome);
         assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::NotADecider });
-        assert_eq!((record.answerer, record.authority, record.answered_at), (s("guest"), None, s(at)));
+        assert_eq!((record.answerer, record.authority, record.answered_at), (s("guest"), DeskAuthority::Steward, s(at)));
     }
 
     #[test]
     fn the_stamp_alone_sets_answerer_and_authority() {
         let mut mind = desk();
         let at = "2026-11-10T12:00:00Z";
-        for (who, authority) in [("op", DeskAuthority::Operator), ("dec", DeskAuthority::Decider)] {
-            let stamp = DeskStamp { answerer: s(who), authority: Some(authority) };
-            let (answer, _) = stored(ask(&mut mind, &stamp, pick(FORK, "Q1", "A", at)));
+        for (who, authority) in [("op", DeskAuthority::Operator), ("dec", DeskAuthority::Steward), ("x", DeskAuthority::Member)] {
+            let (answer, _) = stored(ask(&mut mind, &stamp_as(who, authority, &LIST), pick(FORK, "Q1", "A", at)));
             let record = held(&mind, &answer);
-            assert_eq!((record.answerer, record.authority), (s(who), Some(authority)));
+            assert_eq!((record.answerer, record.authority), (s(who), authority));
         }
     }
 
@@ -582,10 +674,36 @@ mod tests {
         assert!(matches!(unknown, DeskAnswerOutcome::Refused(MindRefusal::MissingReference { kind: K::Question, .. })), "{unknown:?}");
         let mut empty = pick(FORK, "Q1", "A", at);
         empty.body = DeskBody::Answer { choice: None, note: None };
+        let mut blank_note = pick(FORK, "Q1", "A", at);
+        blank_note.body = DeskBody::Answer { choice: None, note: Some("  \n\t ".into()) };
+        let mut empty_note = pick(FORK, "Q1", "A", at);
+        empty_note.body = DeskBody::Answer { choice: Some(l("A")), note: Some("".into()) };
+        let mut not_utc = pick(FORK, "Q1", "A", "2026-11-10T14:00:00+02:00");
+        not_utc.answered_at = s("2026-11-10T14:00:00+02:00");
+        let mut no_id = pick(FORK, "Q1", "A", at);
+        no_id.request_id = RequestId("".into());
+        let mut upper_id = pick(FORK, "Q1", "A", at);
+        upper_id.request_id = RequestId("00000000-0000-4000-8000-00000000ABCD".into());
+        let mut not_uuid = pick(FORK, "Q1", "A", at);
+        not_uuid.request_id = RequestId("req-1".into());
+        let mut braced = pick(FORK, "Q1", "A", at);
+        braced.request_id = RequestId("{00000000-0000-4000-8000-00000000abcd}".into());
         let bad_time = pick(FORK, "Q1", "A", "yesterday");
         let not_a_question = pick("eureka-state:ruling:R1", "Q1", "A", at);
         let bad_target = retract(FORK, "Q1", "n1");
-        for (request, field) in [(empty, "body"), (bad_time, "answered_at"), (not_a_question, "fork"), (bad_target, "desk_answer.outcome.retracts")] {
+        for (request, field) in [
+            (empty, "body"),
+            (blank_note, "desk_answer.note"),
+            (empty_note, "desk_answer.note"),
+            (not_utc, "answered_at"),
+            (no_id, "desk_answer.request_id"),
+            (upper_id, "desk_answer.request_id"),
+            (not_uuid, "desk_answer.request_id"),
+            (braced, "desk_answer.request_id"),
+            (bad_time, "answered_at"),
+            (not_a_question, "fork"),
+            (bad_target, "desk_answer.outcome.retracts"),
+        ] {
             assert_eq!(
                 ask(&mut mind, &decider("x"), request),
                 DeskAnswerOutcome::Refused(MindRefusal::DeskRequestInvalid { field: field.into() })

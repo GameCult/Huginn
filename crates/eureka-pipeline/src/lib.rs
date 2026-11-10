@@ -272,6 +272,27 @@ fn symbol_text(field: &str, value: &str) -> Result<(), PipelineRefusal> {
     within(128)(field, value)
 }
 
+/// A lowercase D-format UUID: 8-4-4-4-12 lowercase hex digits, any version.
+fn uuid_text(field: &str, value: &str) -> Result<(), PipelineRefusal> {
+    let shaped = value.len() == 36
+        && value.bytes().enumerate().all(|(at, byte)| match at {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
+        });
+    if !shaped {
+        return Err(format_error(field, value));
+    }
+    Ok(())
+}
+
+/// A person's words: 1 to 4000 UTF-8 bytes and not blank (`str::trim` leaves something).
+fn words_text(field: &str, value: &str) -> Result<(), PipelineRefusal> {
+    if value.trim().is_empty() {
+        return Err(format_error(field, value));
+    }
+    within(4000)(field, value)
+}
+
 bounded_text! {
     /// Text of at most 200 UTF-8 bytes.
     Short = 200, |field, value| within(200)(field, value);
@@ -290,6 +311,11 @@ bounded_text! {
     Symbol = 128, symbol_text;
     /// Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.
     Para = 4000, |field, value| within(4000)(field, value);
+    /// A person's words, verbatim: 1 to 4,000 UTF-8 bytes, not blank (CultLib PR #72, `answer.note`).
+    #[schemars(extend("minLength" = 1))]
+    Words = 4000, words_text;
+    /// A client's retry token: a lowercase D-format UUID.
+    RequestId = 36, uuid_text;
     /// A key label: `[A-Za-z0-9_-]{1,64}`.
     Label = 64, label_text;
     /// A campaign slug or key segment: label parts joined by `.`.
@@ -738,8 +764,9 @@ unit_enums! {
     RunOperator { Operator, Mind }
     RunTurn { PersonaTurn, SelfRun, Sleep }
     MemorySort { Asked, Decided, Committed, Learned, Did, Idea, Rapport }
-    // What a desk answerer is, as the receiver stamped it (never a client's claim).
-    DeskAuthority { Operator, Decider }
+    // The role the verified account holds, an attribution copied from Bifrost's state (CultLib PR #72,
+    // fork-card.md). It confers nothing: whether an answerer may decide is the decider list's, never this.
+    DeskAuthority { Operator, Steward, Member }
     // Why a desk answer was refused and stored: binding spec 1.3 steps 4-7 and R1.
     DeskRefusal { StaleFork, NotADecider, ForkClosed, ChoiceInvalid, BadRetraction, AlreadyRetracted }
 }
@@ -843,13 +870,20 @@ value_types! {
         promises: Vec<Promise>[64],
     }
     /// One answer the fork desk's receiver passed to the Mind, refused ones included.
-    /// `answerer` and `authority` are stamped by the Mind from the verified caller and
-    /// are absent from the request type; `answered_at` is the client's claim kept as
-    /// written, display only: order is `sequence`, the receiver's order. `sequence` is
-    /// per question and is the last part of the key (the answer id).
+    /// `answerer` and `authority` (an attribution, never a decision) are stamped by the
+    /// Mind from the verified caller and are absent from the request type; `answered_at`
+    /// is the client's claim kept as written, display only: order is `sequence`, the
+    /// receiver's order. `received_at` is the Mind's admission time (UTC) and
+    /// `claim_in_future` is set when `answered_at` is more than five minutes after it.
+    /// `request_id` is the client's retry token and `body_sha256` the digest of the
+    /// request it came with: the pair that makes a retry the same answer, never a new
+    /// one; the key is `(answerer, request_id)`. A record holds no card: a replayed
+    /// `stale_fork` is shown the current card. `sequence` is per question and is the
+    /// last part of the key (the answer id).
     pub struct PipelineDeskAnswer {
-        campaign: Slug, fork: Short, sequence: u32, options_hash: Sha256Hex, choice: Option<Label>, note: Option<Para>,
-        answered_at: Short, answerer: Short, authority: Option<DeskAuthority>, outcome: DeskOutcome,
+        campaign: Slug, fork: Short, sequence: u32, options_hash: Sha256Hex, choice: Option<Label>, note: Option<Words>,
+        answered_at: Short, received_at: Short, claim_in_future: bool, request_id: RequestId, body_sha256: Sha256Hex,
+        answerer: Short, authority: DeskAuthority, outcome: DeskOutcome,
     }
     pub struct PipelineVerdict { campaign: Slug, cut_report: Short, pass: u32, range: CommitRange, claims: Vec<VerdictClaim>[64] }
     pub struct PipelineFinding {
@@ -1837,7 +1871,8 @@ mod tests {
             (D::DeskAnswer(PipelineDeskAnswer {
                 campaign: slug(CAMPAIGN), fork: id("question", "Q1"), sequence: 1, options_hash: Sha256Hex("c".repeat(64)),
                 choice: Some(l("a")), note: Some("Share it, with the mark.".into()), answered_at: s("2026-11-10T15:00:00Z"),
-                answerer: s("user-7"), authority: Some(DeskAuthority::Decider),
+                received_at: s("2026-11-10T15:00:03Z"), claim_in_future: false, request_id: RequestId("6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f13".into()), body_sha256: Sha256Hex("d".repeat(64)),
+                answerer: s("user-7"), authority: DeskAuthority::Member,
                 outcome: DeskOutcome::Revision { of: id("desk_answer", "Q1.n1") },
             }), format!("{CAMPAIGN}:desk_answer:Q1.n1")),
         ]

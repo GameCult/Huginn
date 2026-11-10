@@ -48,6 +48,8 @@ pub enum MindRefusal {
     DeskAnswerOutsideDesk { id: String },
     /// A desk request the Mind cannot read as an answer: `field` names the part (the fork, `answered_at`, an answer carrying neither choice nor note, a malformed answer id).
     DeskRequestInvalid { field: String },
+    /// The desk's `request_id_conflict` (CultLib PR #72): this `(answerer, request_id)` already bound another body. Nothing is stored.
+    DeskRequestIdConflict { request_id: String },
     /// `campaign` names the refused document: a campaign, or a target revision that empties its predecessor's repos.
     EmptyRepos { campaign: String },
     RepoNotInCampaign { repo: String },

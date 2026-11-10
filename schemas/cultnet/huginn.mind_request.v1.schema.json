@@ -399,7 +399,8 @@
       "type": "string",
       "enum": [
         "Operator",
-        "Decider"
+        "Steward",
+        "Member"
       ]
     },
     "DeskOutcome": {
@@ -1181,7 +1182,7 @@
       ]
     },
     "PipelineDeskAnswer": {
-      "description": "One answer the fork desk's receiver passed to the Mind, refused ones included.\n`answerer` and `authority` are stamped by the Mind from the verified caller and\nare absent from the request type; `answered_at` is the client's claim kept as\nwritten, display only: order is `sequence`, the receiver's order. `sequence` is\nper question and is the last part of the key (the answer id).",
+      "description": "One answer the fork desk's receiver passed to the Mind, refused ones included.\n`answerer` and `authority` (an attribution, never a decision) are stamped by the\nMind from the verified caller and are absent from the request type; `answered_at`\nis the client's claim kept as written, display only: order is `sequence`, the\nreceiver's order. `received_at` is the Mind's admission time (UTC) and\n`claim_in_future` is set when `answered_at` is more than five minutes after it.\n`request_id` is the client's retry token and `body_sha256` the digest of the\nrequest it came with: the pair that makes a retry the same answer, never a new\none; the key is `(answerer, request_id)`. A record holds no card: a replayed\n`stale_fork` is shown the current card. `sequence` is per question and is the\nlast part of the key (the answer id).",
       "type": "object",
       "properties": {
         "answered_at": {
@@ -1191,14 +1192,10 @@
           "$ref": "#/$defs/Short"
         },
         "authority": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DeskAuthority"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/DeskAuthority"
+        },
+        "body_sha256": {
+          "$ref": "#/$defs/Sha256Hex"
         },
         "campaign": {
           "$ref": "#/$defs/Slug"
@@ -1213,13 +1210,16 @@
             }
           ]
         },
+        "claim_in_future": {
+          "type": "boolean"
+        },
         "fork": {
           "$ref": "#/$defs/Short"
         },
         "note": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Para"
+              "$ref": "#/$defs/Words"
             },
             {
               "type": "null"
@@ -1231,6 +1231,12 @@
         },
         "outcome": {
           "$ref": "#/$defs/DeskOutcome"
+        },
+        "received_at": {
+          "$ref": "#/$defs/Short"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
         },
         "sequence": {
           "type": "integer",
@@ -1244,7 +1250,12 @@
         "sequence",
         "options_hash",
         "answered_at",
+        "received_at",
+        "claim_in_future",
+        "request_id",
+        "body_sha256",
         "answerer",
+        "authority",
         "outcome"
       ]
     },
@@ -2606,6 +2617,11 @@
         "builds"
       ]
     },
+    "RequestId": {
+      "description": "A client's retry token: a lowercase D-format UUID.",
+      "type": "string",
+      "maxLength": 36
+    },
     "ResearchSource": {
       "description": "Where a research claim comes from. A `Repo` pin and a `Web` page are\noutside the document set; an `Observed` result reuses a finding's evidence;\na `Document` is the one source that is a citation edge.",
       "oneOf": [
@@ -3151,6 +3167,12 @@
         "name",
         "pins"
       ]
+    },
+    "Words": {
+      "description": "A person's words, verbatim: 1 to 4,000 UTF-8 bytes, not blank (CultLib PR #72, `answer.note`).",
+      "type": "string",
+      "maxLength": 4000,
+      "minLength": 1
     }
   }
 }

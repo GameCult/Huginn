@@ -162,7 +162,7 @@ pub enum PipelineFacts {
     Research { pass: Label, label: Label, claim: Line, inferred: bool, observed_on: Date },
     Idea { pass: Label, label: Label, title: Title, proposed_on: Date },
     /// `outcome` is the stored outcome's variant name; which answer counts now is `counted_answer`'s, derived.
-    DeskAnswer { fork: Short, sequence: u32, outcome: Short, authority: Option<DeskAuthority> },
+    DeskAnswer { fork: Short, sequence: u32, outcome: Short, authority: DeskAuthority },
 }
 
 impl PipelineFacts {
@@ -1822,16 +1822,17 @@ mod tests {
 
         // Two desk answers on the open fork Q2: the second is a Revision of the first.
         let D::Question(shown) = question("Q2", &["A", "B"], "A") else { unreachable!() };
-        let stamp = crate::desk::DeskStamp { answerer: s("x"), authority: Some(eureka_pipeline::DeskAuthority::Decider) };
-        let pick = || crate::desk::DeskAnswerRequest {
+        let stamp = crate::desk::DeskStamp { answerer: s("x"), authority: eureka_pipeline::DeskAuthority::Member, deciders: vec![s("x")] };
+        let pick = |n: u32| crate::desk::DeskAnswerRequest {
             fork: s(&q2),
             options_hash: crate::desk::options_hash(&shown),
             body: crate::desk::DeskBody::Answer { choice: Some(l("A")), note: None },
             answered_at: s("2026-11-10T12:00:00Z"),
+            request_id: eureka_pipeline::RequestId(format!("00000000-0000-4000-8000-{n:012x}")),
         };
         let (answer_1, answer_2) = (id("desk_answer", "Q2.n1"), id("desk_answer", "Q2.n2"));
-        for _ in 0..2 {
-            assert!(matches!(mind.answer_desk(stamp.clone(), pick(), now()), crate::desk::DeskAnswerOutcome::Stored { .. }));
+        for n in 1..=2 {
+            assert!(matches!(mind.answer_desk(stamp.clone(), pick(n), now()), crate::desk::DeskAnswerOutcome::Stored { .. }));
         }
 
         let (n1, f1_closed, f2_closed) = (
