@@ -757,6 +757,65 @@ mod tests {
     }
 
     #[test]
+    fn answer_key_and_answer_seq_round_trip() {
+        let mut seqs: Vec<u32> = (1..=2000).collect();
+        for power in 0..=9 {
+            let ten = 10u32.pow(power);
+            seqs.extend([ten.saturating_sub(1).max(1), ten, ten + 1]);
+        }
+        seqs.extend([u32::MAX - 2, u32::MAX - 1, u32::MAX, i32::MAX as u32, i32::MAX as u32 + 1, 65_535, 65_536]);
+        for fork in [FORK, FORK2, "eureka-state:question:Q10", "other-root:question:Q1"] {
+            for &n in &seqs {
+                assert_eq!(answer_seq(fork, &answer_key(fork, n)), Some(n), "{fork} {n}");
+                assert_eq!(n_text(n), format!("n{n}"));
+                assert_eq!(parse_n(&n_text(n)), Some(n));
+            }
+        }
+    }
+
+    /// A stored key outside its fork's `n<seq>` form is a fault of the store, never a wrong id:
+    /// it projects `Unavailable`, whichever of the answer, its `of` or its target names it. The
+    /// other fork's `n1` and Q10's `n1` agree with a split on the dot, and are refused all the same.
+    #[test]
+    fn a_stored_key_outside_the_forks_form_is_unavailable() {
+        let file = vectors();
+        let (key, counted) = stored_from(&file["deskAnswer"]["valid"][0]["message"]);
+        assert!(project(&key, &counted).is_ok());
+        let fork = counted.fork.0.clone();
+        let (root, local) = (fork.split(':').next().unwrap(), fork.split(':').nth(2).unwrap());
+        let foreign = [
+            format!("{root}:desk_answer:{local}x.n1"),
+            format!("{root}:desk_answer:{local}0.n1"),
+            format!("{root}:desk_answer:Other.n1"),
+            format!("{root}:question:{local}.n1"),
+            format!("{root}:desk_answer:{local}.n01"),
+            format!("{root}:desk_answer:{local}.1"),
+            format!("{root}:desk_answer:{local}.n"),
+            format!("{root}:desk_answer:{local}.n4294967296"),
+            format!("{root}:desk_answer:{local}.n1.n1"),
+            "n1".to_string(),
+            String::new(),
+        ];
+        let unavailable = |refused: MindRefusal| matches!(door_refusal(refused.clone()), DeskResponse::Refused(MindRefusal::Unavailable { .. }));
+        for bad in &foreign {
+            let refused = project(bad, &counted).expect_err(&format!("the answer's own key {bad:?}"));
+            assert!(unavailable(refused), "{bad:?}");
+            for outcome in [
+                DeskOutcome::Revision { of: Short(bad.clone()) },
+                DeskOutcome::Retraction { retracts: Short(bad.clone()) },
+                DeskOutcome::Refused { code: DeskRefusal::BadRetraction, retracts: Some(Short(bad.clone())) },
+            ] {
+                let stored = PipelineDeskAnswer { outcome, ..counted.clone() };
+                let refused = project(&key, &stored).expect_err(&format!("a target {bad:?}"));
+                assert!(unavailable(refused), "{bad:?}");
+            }
+        }
+        // A refused answer that names no target is fine.
+        let none = PipelineDeskAnswer { outcome: DeskOutcome::Refused { code: DeskRefusal::StaleFork, retracts: None }, ..counted };
+        assert!(project(&key, &none).is_ok());
+    }
+
+    #[test]
     fn a_malformed_retracts_is_body_invalid() {
         let mut mind = desk();
         let hash = hash_of(&mind, FORK);
