@@ -20,7 +20,8 @@ use cultnet_rs::{
     decode_cultnet_message_from_slice, encode_cultnet_message_to_vec, encode_frame,
 };
 use huginn_mind::desk_wire::{
-    DESK_REQUEST_SCHEMA, DESK_SERVICE_ID, DeskRequest, DeskResponse, ForkAnswer, ForkAnswerCode, ForkAnswerRequest, RequestSchema,
+    DESK_MAX_RESPONSE_BYTES, DESK_REQUEST_SCHEMA, DESK_SERVICE_ID, DeskRequest, DeskResponse, ForkAnswer, ForkAnswerCode, ForkAnswerRequest, ForkCursor,
+    ForkEntry, ForkLimit, ForkList, ListStatus, RequestSchema,
 };
 use huginn_mind::envelope::{OperationFailure, decode_desk_response, decode_response, encode_desk_request, encode_request};
 use huginn_mind::eureka_pipeline::{DeskAuthority, PipelineDocument, Short};
@@ -90,6 +91,45 @@ const R3: &str = "00000000-0000-4000-8000-000000000003";
 
 fn answer(who: &str, authority: DeskAuthority, deciders: &[&str], request: ForkAnswerRequest) -> DeskRequest {
     DeskRequest::Answer { mind: slug(INSTANCE), subject: short(who), authority, deciders: deciders.iter().map(|d| short(d)).collect(), request }
+}
+
+/// A list read by `who` against `deciders`.
+fn forks(who: &str, deciders: &[&str], status: Option<ListStatus>, cursor: Option<ForkCursor>, limit: u8) -> DeskRequest {
+    DeskRequest::Forks {
+        mind: slug(INSTANCE),
+        subject: short(who),
+        deciders: deciders.iter().map(|d| short(d)).collect(),
+        status,
+        cursor,
+        limit: ForkLimit::new(limit).unwrap(),
+    }
+}
+
+fn forks_all(deciders: &[&str]) -> DeskRequest {
+    forks("x", deciders, None, None, 50)
+}
+
+fn fork_read(who: &str, deciders: &[&str], fork_id: &str) -> DeskRequest {
+    DeskRequest::Fork { mind: slug(INSTANCE), subject: short(who), deciders: deciders.iter().map(|d| short(d)).collect(), fork_id: fork_id.into() }
+}
+
+fn page_of(response: DeskResponse) -> (ForkList, u64) {
+    match response {
+        DeskResponse::Forks { list, as_of } => (list, as_of),
+        other => panic!("expected a page, got {other:?}"),
+    }
+}
+
+fn entry_of(response: DeskResponse) -> (ForkEntry, u64) {
+    match response {
+        DeskResponse::Fork { entry, as_of } => (entry, as_of),
+        other => panic!("expected an entry, got {other:?}"),
+    }
+}
+
+/// A plain answer to the seeded fork, with a note.
+fn noted(hash: &str, request_id: &str, note: &str) -> ForkAnswerRequest {
+    ForkAnswerRequest { answer: Some(ForkAnswer { choice: Some("A".into()), note: Some(note.into()) }), ..wire(hash, request_id) }
 }
 
 fn message(id: &str, request: &DeskRequest) -> CultNetMessage {
@@ -750,18 +790,153 @@ mod door_smoke {
     }
 
     #[test]
-    fn forks_and_fork_are_refused_unavailable_while_reads_are_unbuilt() {
+    fn forks_and_fork_read_the_stored_fork_and_store_nothing() {
+        let mut rig = rig(my_uid());
+        let (before, hash) = (rig.state(), rig.hash.clone());
+        let (forks, fork) = rig.serving(|path| (reply_of(path, "m-1", &forks_all(&["x", "y"])), reply_of(path, "m-2", &fork_read("x", &["x", "y"], FORK))));
+        let (list, listed_at) = page_of(forks);
+        let (entry, read_at) = entry_of(fork);
+        assert_eq!((list.open_count, list.recorded_count, list.forks.len(), list.next_cursor), (1, 0, 1, None));
+        assert_eq!(list.mind, INSTANCE);
+        assert_eq!((listed_at, read_at), (before.1 as u64, before.1 as u64), "both read at the head the mind held");
+        assert_eq!(list.stamp, format!("s{listed_at}"));
+        assert_eq!(list.forks[0], entry);
+        assert_eq!((entry.card.fork_id.as_str(), entry.card.options_hash.as_str(), entry.card.deciders.as_slice()), (FORK, hash.as_str(), ["x".to_string(), "y".to_string()].as_slice()));
+        assert_eq!(rig.state(), before, "a read stores nothing");
+        assert!(rig.index.seen.lock().unwrap().is_empty());
+        // An unknown fork is the answer path's refusal.
+        let unknown = rig.serving(|path| reply_of(path, "m-3", &fork_read("x", &["x"], "eureka-state:question:Q404")));
+        assert!(matches!(unknown, DeskResponse::NotStored(ref refusal) if refusal.code == huginn_mind::desk_wire::ForkRefusalCode::ForkUnknown), "{unknown:?}");
+        // The mind is the instance's own.
+        let mut foreign = forks_all(&["x"]);
+        let DeskRequest::Forks { mind, .. } = &mut foreign else { unreachable!() };
+        *mind = slug(OTHER);
+        let refused = rig.serving(|path| reply_of(path, "m-4", &foreign));
+        assert_eq!(refused, DeskResponse::Refused(MindRefusal::ForeignInstance { declared: OTHER.into(), mind: INSTANCE.into() }));
+        assert_eq!(rig.state(), before);
+    }
+
+    /// Ruling `desk-read-visibility-whole-record`: Huginn returns the whole record, notes included, to
+    /// whoever the socket carries. The subject is not in the deciders; the decider's note is there.
+    #[test]
+    fn a_subject_not_in_deciders_reads_the_whole_record_with_the_notes() {
+        let mut rig = rig(my_uid());
+        let hash = rig.hash.clone();
+        let note = "Keep it local: the author's call.";
+        rig.serving(|path| counted(reply_of(path, "m-1", &DeskRequest::Answer {
+            mind: slug(INSTANCE),
+            subject: short("y"),
+            authority: DeskAuthority::Member,
+            deciders: vec![short("y")],
+            request: noted(&hash, R1, note),
+        })));
+        let (list, read) = rig.serving(|path| (reply_of(path, "m-2", &forks("outsider", &["x"], None, None, 50)), reply_of(path, "m-3", &fork_read("outsider", &["x"], FORK))));
+        let (list, _) = page_of(list);
+        let (read, _) = entry_of(read);
+        for entry in [&list.forks[0], &read] {
+            assert_eq!(entry.record.answers.len(), 1);
+            assert_eq!(entry.record.answers[0].note.as_deref(), Some(note));
+            assert_eq!(entry.record.answers[0].answerer, "y");
+            assert_eq!(entry.card.deciders, ["x"], "the list is the call's, and only fills the card");
+        }
+    }
+
+    #[test]
+    fn forks_and_fork_deciders_64_accepted_65_refused() {
         let mut rig = rig(my_uid());
         let before = rig.state();
-        let forks = DeskRequest::Forks { mind: slug(INSTANCE), subject: short("x"), deciders: vec![short("x")] };
-        let fork = DeskRequest::Fork { mind: slug(INSTANCE), subject: short("x"), deciders: vec![short("x")], fork_id: FORK.into() };
-        let (forks, fork) = rig.serving(|path| (reply_of(path, "m-1", &forks), reply_of(path, "m-2", &fork)));
-        for response in [forks, fork] {
-            let DeskResponse::Refused(MindRefusal::Unavailable { detail }) = response else { panic!("{response:?}") };
-            assert!(detail.contains("desk reads not built"), "{detail}");
+        let names = |n: usize| (0..n).map(|d| format!("d{d}")).collect::<Vec<_>>();
+        let (sixty_four, sixty_five) = (names(64), names(65));
+        let (sixty_four, sixty_five): (Vec<&str>, Vec<&str>) =
+            (sixty_four.iter().map(String::as_str).collect(), sixty_five.iter().map(String::as_str).collect());
+        let accepted = rig.serving(|path| (reply_of(path, "m-1", &forks("d0", &sixty_four, None, None, 50)), reply_of(path, "m-2", &fork_read("d0", &sixty_four, FORK))));
+        assert_eq!(page_of(accepted.0).0.forks[0].card.deciders.len(), 64);
+        assert_eq!(entry_of(accepted.1).0.card.deciders.len(), 64);
+        for (what, request) in [("forks", forks("d0", &sixty_five, None, None, 50)), ("fork", fork_read("d0", &sixty_five, FORK))] {
+            let bytes = framed(&message("m-3", &request));
+            let refused = rig.serving(|path| failure_of(path, &bytes));
+            assert_eq!(refused.code, "payload-not-a-request", "{what}");
+            assert!(refused.message.contains("deciders"), "{what}: {}", refused.message);
+            assert!(!refused.message.contains("d64"), "{what} echoes a decider: {}", refused.message);
+        }
+        assert_eq!(rig.state(), before, "nothing stored, head unchanged");
+    }
+
+    #[test]
+    fn forks_and_fork_deciders_empty_or_duplicate_refused() {
+        let mut rig = rig(my_uid());
+        let before = rig.state();
+        for (what, list) in [("empty", vec![]), ("duplicate", vec!["x", "x"])] {
+            for (name, request) in [("forks", forks("x", &list, None, None, 50)), ("fork", fork_read("x", &list, FORK))] {
+                let bytes = framed(&message("m-1", &request));
+                let refused = rig.serving(|path| failure_of(path, &bytes));
+                assert_eq!(refused.code, "payload-not-a-request", "{what} {name}");
+                assert!(refused.message.contains("deciders"), "{what} {name}: {}", refused.message);
+            }
+        }
+        // One decider is a list.
+        let ok = rig.serving(|path| reply_of(path, "m-2", &forks_all(&["x"])));
+        assert_eq!(page_of(ok).0.forks.len(), 1);
+        assert_eq!(rig.state(), before);
+    }
+
+    /// Chat's reads carry no `authority`: CultLib's list and read requests are closed and have none, so a
+    /// payload that names it is no request. Nothing is answered and the head does not move.
+    #[test]
+    fn a_read_that_names_an_authority_is_refused_at_the_door() {
+        let mut rig = rig(my_uid());
+        let before = rig.state();
+        for (operation, request) in [("forks", forks_all(&["x"])), ("fork", fork_read("x", &["x"], FORK))] {
+            let mut value = serde_json::to_value(&request).unwrap();
+            let variant = if operation == "forks" { "Forks" } else { "Fork" };
+            value[variant]["authority"] = serde_json::json!("Operator");
+            let payload = rmp_serde::to_vec_named(&value).unwrap();
+            let sent = framed(&raw(DESK_SERVICE_ID, DESK_REQUEST_SCHEMA, operation, "m-1", payload));
+            let refused = rig.serving(|path| failure_of(path, &sent));
+            assert_eq!(refused.code, "payload-not-a-request", "{operation}");
+            assert!(refused.message.contains(variant), "{operation}: {}", refused.message);
         }
         assert_eq!(rig.state(), before);
-        assert!(rig.index.seen.lock().unwrap().is_empty());
+        // The same reads without it are answered.
+        let (list, entry) = rig.serving(|path| (reply_of(path, "m-2", &forks_all(&["x"])), reply_of(path, "m-3", &fork_read("x", &["x"], FORK))));
+        assert_eq!((page_of(list).0.forks.len(), entry_of(entry).0.card.fork_id.as_str().to_string()), (1, FORK.to_string()));
+    }
+
+    /// Fifty wordy forks, one commit. A page of them is past the response bound: the door refuses it by name
+    /// (the client lowers `limit`), never cuts it, and the smaller page is whole.
+    #[test]
+    fn a_page_past_the_response_bound_is_refused_by_name_and_never_cut() {
+        let mut rig = rig(my_uid());
+        let (question, _) = question_and_ruling();
+        let PipelineDocument::Question(held) = question else { unreachable!() };
+        let documents: Vec<PipelineDocument> = (2..=51)
+            .map(|n| {
+                let mut wordy = held.clone();
+                wordy.label = format!("Q{n}").as_str().into();
+                wordy.question = "Should a slot mark be shared between authors? ".repeat(18).as_str().into();
+                PipelineDocument::Question(wordy)
+            })
+            .collect();
+        let admitted = rig.daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), now()).answered();
+        assert!(matches!(admitted, HuginnMindResponse::Admit(huginn_mind::PipelineAdmissionOutcome::Committed { .. })), "{admitted:?}");
+        let before = rig.state();
+        let (big, small) = rig.serving(|path| (reply_of(path, "m-1", &forks_all(&["x"])), reply_of(path, "m-2", &forks("x", &["x"], None, None, 10))));
+        let DeskResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) = big else { panic!("{big:?}") };
+        assert_eq!(limit, DESK_MAX_RESPONSE_BYTES as u64);
+        assert!(bytes > limit);
+        let (small, _) = page_of(small);
+        assert_eq!((small.forks.len(), small.open_count), (10, 51));
+        assert!(small.next_cursor.is_some());
+        assert_eq!(rig.state(), before);
+        // The bound is exact on a read: a response of N bytes passes at N and is refused at N - 1.
+        let response = DeskResponse::Forks { list: small, as_of: 1 };
+        let size = {
+            let message = huginn_mind::envelope::encode_desk_response("m-9", "forks", &response, "huginn-yggdrasil").unwrap();
+            encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).unwrap().len()
+        };
+        let at = |limit: usize| decode_desk_response(&crate::desk_door::respond(&response, "m-9", "forks", "huginn-yggdrasil", limit)).unwrap().1.unwrap();
+        assert_eq!(at(size), response);
+        assert!(matches!(at(size - 1), DeskResponse::Refused(MindRefusal::ResponseTooLarge { .. })));
     }
 }
 

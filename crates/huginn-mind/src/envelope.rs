@@ -428,7 +428,7 @@ mod tests {
         let (mind, subject, deciders) = (slug(INSTANCE), crate::fixtures::s("user-7"), vec![crate::fixtures::s("user-7")]);
         [
             (desk_answer(), "Answer"),
-            (DeskRequest::Forks { mind: mind.clone(), subject: subject.clone(), deciders: deciders.clone() }, "Forks"),
+            (DeskRequest::Forks { mind: mind.clone(), subject: subject.clone(), deciders: deciders.clone(), status: Some(crate::desk_wire::ListStatus::Open), cursor: crate::desk_wire::ForkCursor::new(7), limit: crate::desk_wire::ForkLimit::new(50).unwrap() }, "Forks"),
             (DeskRequest::Fork { mind, subject, deciders, fork_id: "eureka-state:question:Q1".into() }, "Fork"),
         ]
     }
@@ -446,7 +446,7 @@ mod tests {
         };
         let expected = [
             ("Answer", vec!["authority", "deciders", "mind", "request", "subject"]),
-            ("Forks", vec!["deciders", "mind", "subject"]),
+            ("Forks", vec!["cursor", "deciders", "limit", "mind", "status", "subject"]),
             ("Fork", vec!["deciders", "fork_id", "mind", "subject"]),
         ];
         for ((request, variant), (named, names)) in desk_requests().iter().zip(expected) {
@@ -595,7 +595,9 @@ mod tests {
                         ..request
                     },
                 },
-                DeskRequest::Forks { mind, .. } => DeskRequest::Forks { mind, subject: crate::fixtures::s(&long(200)), deciders: deciders.clone() },
+                DeskRequest::Forks { mind, status, cursor, limit, .. } => {
+                    DeskRequest::Forks { mind, subject: crate::fixtures::s(&long(200)), deciders: deciders.clone(), status, cursor, limit }
+                }
                 DeskRequest::Fork { mind, .. } => {
                     DeskRequest::Fork { mind, subject: crate::fixtures::s(&long(200)), deciders: deciders.clone(), fork_id: long(200) }
                 }

@@ -1,8 +1,10 @@
 //! The fork desk's answer wire, Huginn's half: Libby's answer-side documents
-//! (CultLib `contracts/cultnet/governance/`, the contract file and its vectors at 6231ecad)
+//! (CultLib `contracts/cultnet/governance/`, the contract file and its vectors at e57fbaee)
 //! as Rust types, the one conversion between her `n<seq>` answer ids and the
 //! record keys, the projection of a stored answer, the refusal mapping and the
 //! showability predicate, and `Mind::desk_answer`, the one call that runs them in order.
+//! The read side (card, record, entry and list, `Mind::desk_forks` and `Mind::desk_fork`)
+//! is the child module `reads`.
 //!
 //! `Mind::answer_desk` stays the only owner of an answer's outcome, sequence,
 //! request id lookup, replay and conflict; this module converts, projects and
@@ -11,7 +13,10 @@
 //! the response is read at, and nothing here stores it. Huginn writes
 //! `gamecult.desk_answer.v0` and its own refusals; the stale-fork display
 //! and the answer result are Bifrost's to attach and write. The request type, its
-//! constants and the published schemas are here; the reads and the socket are other cuts.
+//! constants and the published schemas are here; the socket is the daemon's.
+
+mod reads;
+pub use reads::{CardSchema, CardStatus, EntrySchema, ForkCard, ForkCursor, ForkEntry, ForkLimit, ForkList, ForkOption, ForkRecord, ForkRef, ListSchema, ListStatus, RecordSchema};
 
 use chrono::{DateTime, Utc};
 use eureka_pipeline::{
@@ -169,13 +174,24 @@ pub struct ForkRefusal {
 
 /// What the door answers one desk request with. `Answered` is a stored answer, refused ones
 /// included (a stale fork, a non-decider and the rest are stored), fresh or replayed alike.
-/// `NotStored` is a request that stored nothing. `Refused` is any other Mind refusal; an
-/// `Unavailable` is Bifrost's to turn into its 503, and Huginn writes no document for it.
+/// `Forks` and `Fork` are the reads: one page of entries, or one entry, with the head they were
+/// all read at. `NotStored` is a request that stored nothing (an unknown fork included).
+/// `Refused` is any other Mind refusal; an `Unavailable` is Bifrost's to turn into its 503, and
+/// Huginn writes no document for it.
+///
+/// The trust boundary of the reads (ruling `desk-read-visibility-whole-record`): `Forks` and `Fork`
+/// carry the WHOLE record, every answer's note included, to whatever the peer-checked socket
+/// carries. Huginn strips nothing and gates nothing; Bifrost applies visibility at its door (a
+/// stripped read serves `note: null`, CultLib `fork-card.md`). Huginn must therefore be reachable
+/// only by Bifrost's peer-checked socket: the peer-uid check IS the whole authentication, and a
+/// second reader of that socket is a note leak.
 // One value per call, built and encoded once; a box would only add a deref to every reader.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum DeskResponse {
     Answered { answer: ForkDeskAnswer, counted_answer_id: Option<String>, as_of: u64 },
+    Forks { list: ForkList, as_of: u64 },
+    Fork { entry: ForkEntry, as_of: u64 },
     NotStored(ForkRefusal),
     Refused(MindRefusal),
 }
@@ -184,7 +200,7 @@ impl DeskResponse {
     /// The envelope's status: `rejected` exactly when nothing was stored or the Mind refused.
     pub fn status(&self) -> &'static str {
         match self {
-            Self::Answered { .. } => "accepted",
+            Self::Answered { .. } | Self::Forks { .. } | Self::Fork { .. } => "accepted",
             Self::NotStored(_) | Self::Refused(_) => "rejected",
         }
     }
@@ -249,8 +265,17 @@ fn deciders_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schem
 /// Every request the desk door answers. The fields are the wire names: the `mind` addressed
 /// (the persona and pipeline requests say `instance`; the sets are separate), the verified
 /// `subject` and `authority` Bifrost vouches for (door context, never body fields), and the
-/// `deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside the set refuses
-/// the whole payload. The reads answer in follow-up desk-wire-reads.
+/// `deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside
+/// the set refuses the whole payload.
+///
+/// The reads, `Forks` and `Fork`, carry NO `authority` (CultLib `list_request` and
+/// `read_request` are closed and have none; one that names it is refused whole). Their `subject`
+/// and `deciders` gate nothing: `deciders` only fills the card's `deciders` and the showability
+/// gate, `subject` is read by no read. `Forks` takes the contract's `list_request` fields flat
+/// beside them (`status`, `cursor`, `limit`), each key written, `null` where absent. Huginn
+/// answers every read with the whole record and Bifrost applies visibility; see `DeskResponse`
+/// for the trust boundary. These docs and the doc of `Mind::desk_forks`/`Mind::desk_fork` are the
+/// reads spec.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub enum DeskRequest {
@@ -269,6 +294,13 @@ pub enum DeskRequest {
         #[serde(deserialize_with = "deciders")]
         #[schemars(schema_with = "deciders_schema")]
         deciders: Vec<Short>,
+        #[serde(deserialize_with = "required")]
+        #[schemars(required)]
+        status: Option<ListStatus>,
+        #[serde(deserialize_with = "required")]
+        #[schemars(required)]
+        cursor: Option<ForkCursor>,
+        limit: ForkLimit,
     },
     Fork {
         mind: Slug,
@@ -1527,7 +1559,7 @@ mod tests {
     fn desk_requests(mind: &str, list: &[Short], hash: &str) -> [DeskRequest; 3] {
         [
             DeskRequest::Answer { mind: slug(mind), subject: s("d0"), authority: DeskAuthority::Member, deciders: list.to_vec(), request: wire(FORK, hash) },
-            DeskRequest::Forks { mind: slug(mind), subject: s("d0"), deciders: list.to_vec() },
+            DeskRequest::Forks { mind: slug(mind), subject: s("d0"), deciders: list.to_vec(), status: None, cursor: None, limit: ForkLimit::new(10).unwrap() },
             DeskRequest::Fork { mind: slug(mind), subject: s("d0"), deciders: list.to_vec(), fork_id: FORK.into() },
         ]
     }
