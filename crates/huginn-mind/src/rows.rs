@@ -435,6 +435,20 @@ mod tests {
         names
     }
 
+    /// The `faculty` alias values are exactly Faculty's serde names; the exhaustive match makes
+    /// a new variant a compile error here until FACULTIES names it.
+    #[test]
+    fn the_faculty_alias_values_are_the_faculty_serde_names() {
+        use crate::receipt::Faculty;
+        let named = |faculty: Faculty| match faculty {
+            Faculty::SelfFaculty | Faculty::Imagination | Faculty::Hands | Faculty::Soul | Faculty::Life | Faculty::Eyes | Faculty::Operator | Faculty::Member | Faculty::Steward => {
+                serde_json::to_value(faculty).unwrap().as_str().unwrap().to_string()
+            }
+        };
+        let all = [Faculty::SelfFaculty, Faculty::Imagination, Faculty::Hands, Faculty::Soul, Faculty::Life, Faculty::Eyes, Faculty::Operator, Faculty::Member, Faculty::Steward];
+        assert_eq!(sorted(all.into_iter().map(named).collect()), strings(&FACULTIES));
+    }
+
     fn strings(names: &[&str]) -> Vec<String> {
         sorted(names.iter().map(|name| name.to_string()).collect())
     }
