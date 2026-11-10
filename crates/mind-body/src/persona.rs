@@ -28,7 +28,9 @@
 //! `eureka-body:ruling:persona-reply-typed-by-schema`), decoded into that one type and acted on:
 //! each `say` is sent, each `remember` becomes a memory in her own mind and each `settle`
 //! closes an open commitment or ask there (ruling `eureka-body:ruling:persona-memory-written-not-transcript`),
-//! with her vote in the same admission; `start_self_run` admits its brief as a follow-up and opens
+//! with her vote in the same admission; `open_direct`, from a public session only, asks the mouth to open a
+//! direct message with a person her session was shown, after the says and under the brakes read again: the mouth decides
+//! from the chat's own room state, and a refusal or silence from it is told to her on her next line, never a failed step; `start_self_run` admits its brief as a follow-up and opens
 //! a Self run that claims it (ruling `eureka-body:ruling:self-run-brief-claimed-follow-up`),
 //! taking an open item on when it names one; and only then are the deliveries acked. A reply that
 //! cannot be decoded sends nothing, acks nothing and is told back to her with the refusal; the

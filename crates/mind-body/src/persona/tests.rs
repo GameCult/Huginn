@@ -7857,3 +7857,15 @@ fn a_direct_session_that_opens_is_refused_and_nothing_is_opened() {
     assert_eq!(failure_of(rig.go()), Some(Failure::OutOfBounds(OPEN_DIRECT_FAULT)));
     assert!(rig.chat.opens.borrow().is_empty() && rig.chat.sent.borrow().is_empty() && rig.chat.acked.borrow().is_empty());
 }
+
+#[test]
+fn the_schema_a_session_runs_under_admits_an_open_only_in_a_public_session() {
+    let schema_of = |rig: &Rig| -> serde_json::Value { serde_json::from_str(&rig.model.requests.borrow()[0].output_schema_json).unwrap() };
+    let public = public_rig(&[says(&[("swarm", "hi")])]);
+    assert_eq!(failure_of(public.go()), None);
+    assert_eq!(schema_of(&public)["properties"]["open_direct"]["anyOf"][0], json!({ "type": "null" }));
+    assert_eq!(schema_of(&public)["properties"]["open_direct"]["anyOf"][1]["required"], json!(["with", "text"]));
+    let private = Rig::new(vec![direct(1, "!dm:chat", "@ann:chat", "hi")], &[says(&[("!dm:chat", "hello")])]);
+    assert_eq!(failure_of(private.go()), None);
+    assert_eq!(schema_of(&private)["properties"]["open_direct"], json!({ "type": "null" }));
+}
