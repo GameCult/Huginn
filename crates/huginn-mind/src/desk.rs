@@ -242,7 +242,6 @@ impl<S: MindStore> Mind<S> {
     /// held fork, stores it: counted, a revision, a retraction, or refused with its
     /// code. A retry of a stored request is replayed, never stored again. See the
     /// module header for the order and the stored/not-stored line.
-    #[cfg_attr(not(test), allow(dead_code))] // the verified door (follow-up desk-answer-door) is the live caller
     pub(crate) fn answer_desk(&mut self, stamp: DeskStamp, request: DeskAnswerRequest, now: DateTime<Utc>) -> DeskAnswerOutcome {
         match self.desk_steps(stamp, request, now) {
             Ok(outcome) => outcome,
@@ -933,10 +932,11 @@ mod tests {
         assert_eq!(counted(&mind, FORK), Some(answer));
     }
 
-    /// Libby's vectors (CultLib PR #72 head 7aec4961, `fork-card-vectors.json`, `optionsHash`): the seven
-    /// of the binding file, A to G, and the eight she adds. Each is recomputed from its shown members.
+    /// Libby's vectors (CultLib 8ca1d184, `contracts/cultnet/governance/fork-card-vectors.json`, the `optionsHash` array):
+    /// the seven of the binding file, A to G, and the eight she adds. Each is recomputed from its shown members.
     fn vectors() -> Vec<serde_json::Value> {
-        serde_json::from_str(include_str!("../vectors/fork-card-options-hash.json")).unwrap()
+        let file: serde_json::Value = serde_json::from_str(include_str!("../vectors/fork-card-vectors.json")).unwrap();
+        file["optionsHash"].as_array().unwrap().clone()
     }
 
     fn shown(vector: &serde_json::Value) -> PipelineQuestion {

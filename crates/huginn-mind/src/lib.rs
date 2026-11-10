@@ -28,6 +28,7 @@
 
 pub mod admission;
 mod desk;
+pub mod desk_wire;
 mod docs;
 mod image;
 pub mod envelope;
@@ -54,6 +55,7 @@ mod read_tests;
 mod move_tests;
 
 pub use desk::{DeskAnswerOutcome, DeskAnswerRequest, DeskBody, options_hash};
+pub use desk_wire::{DeskResponse, ForkAnswer, ForkAnswerCode, ForkAnswerRequest, ForkDeskAnswer, ForkRefusal, ForkRefusalCode};
 pub use docs::CitationRole;
 pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};
