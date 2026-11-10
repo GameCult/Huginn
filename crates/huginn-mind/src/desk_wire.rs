@@ -979,4 +979,140 @@ mod tests {
         wrong["schemaVersion"] = Value::String("gamecult.fork.answer_request.v1".into());
         assert!(decode(&wrong).is_err());
     }
+
+    // ---- Libby's scenarios through Mind::desk_answer ----
+
+    /// The scenarios whose card changes under their answers. A question is immutable in the Mind,
+    /// so there is no operation to replay a changed card with; the older-card rules are
+    /// desk.rs's `answers_under_an_older_card_neither_count_nor_can_be_retracted`.
+    const CHANGED_CARD: [&str; 2] = ["a_changed_card_stops_the_old_answers_counting_and_a_new_answer_is_counted", "a_changed_card_leaves_no_counted_answer_until_one_arrives"];
+
+    /// The scenarios whose refused retraction names a target in Libby's record as null and here as `n<seq>`.
+    const NAMED_TARGET: [&str; 8] = [
+        "V8_retraction_with_an_answer_is_bad",
+        "V8_retracts_on_a_plain_answer_is_bad",
+        "V8_retraction_naming_an_unknown_answer_is_bad",
+        "V8_retraction_naming_a_Refused_answer_is_bad",
+        "V8_retracting_twice_is_already_retracted",
+        "V8_retraction_under_a_stale_hash_is_stale_fork",
+        "V9_an_account_off_the_list_cannot_retract",
+        "V10a_a_ruling_that_closed_the_fork_makes_a_retraction_fork_closed",
+    ];
+
+    /// The question a scenario's card shows, held as Q1.
+    fn question_of(card: &Value) -> PipelineQuestion {
+        let text = |value: &Value| value.as_str().unwrap().to_string();
+        let D::Question(mut question) = question("Q1", &["A", "B"], "A") else { unreachable!() };
+        question.title = text(&card["title"]).as_str().into();
+        question.question = text(&card["context"]).as_str().into();
+        question.recommended = l(&text(&card["recommendation"]));
+        question.options = card["options"].as_array().unwrap().iter().map(|option| QuestionOption { label: l(&text(&option["id"])), text: text(&option["text"]).as_str().into() }).collect();
+        question.depends = card["depends"].as_array().unwrap().iter().map(|line| text(line).as_str().into()).collect();
+        question
+    }
+
+    #[test]
+    fn libby_scenarios_replay_through_desk_answer() {
+        let file = vectors();
+        let (mut played, mut compared, mut refused_at_the_door, mut deviations, mut skipped) = (0, 0, 0, Vec::new(), Vec::new());
+        for scenario in file["scenarios"].as_array().unwrap() {
+            let name = scenario["name"].as_str().unwrap();
+            if CHANGED_CARD.contains(&name) {
+                skipped.push(name);
+                continue;
+            }
+            played += 1;
+            let card = &scenario["card"];
+            let (her_fork, her_hash) = (card["fork_id"].as_str().unwrap(), card["options_hash"].as_str().unwrap());
+            let question = question_of(card);
+            assert_eq!(shown_hash(&question).0, her_hash, "{name}: the card's hash");
+            let mut mind = seeded();
+            committed(admit(&mut mind, vec![D::Question(question)]));
+            let list: Vec<&str> = card["deciders"].as_array().unwrap().iter().map(|who| who.as_str().unwrap()).collect();
+            if card["status"] == "closed" {
+                close(&mut mind, FORK, "RQ1", "no");
+            }
+            // Her ids to the Mind's: her fixtures number answers as they please, the Mind's sequence is its own.
+            let mut ids: HashMap<String, String> = HashMap::new();
+            for step in scenario["steps"].as_array().unwrap() {
+                let (response, server) = (&step["response"], &step["server"]);
+                match step["kind"].as_str().unwrap() {
+                    // A ruling closes the fork; a revised card changes nothing the Mind holds.
+                    "card" => {
+                        if step["card"]["status"] == "closed" {
+                            close(&mut mind, FORK, "RQ1", "no");
+                        }
+                        continue;
+                    }
+                    // Chat events reach no Mind.
+                    "matrix_event" => continue,
+                    _ => {}
+                }
+                let code = response["code"].as_str();
+                // Refused at the door before the Mind: a body outside the closed document does not decode here either.
+                if matches!(code, Some("body_forbidden_field" | "body_unknown_field")) {
+                    assert!(serde_json::from_value::<ForkAnswerRequest>(step["body"].clone()).is_err(), "{name}");
+                    refused_at_the_door += 1;
+                    continue;
+                }
+                if matches!(code, Some("forbidden" | "unauthenticated")) || (code == Some("unavailable") && server["stored"] != true) {
+                    continue;
+                }
+                let mut request: ForkAnswerRequest = serde_json::from_value(step["body"].clone()).unwrap();
+                if request.fork_id == her_fork {
+                    request.fork_id = FORK.into();
+                }
+                if let Some(mapped) = request.retracts.as_ref().and_then(|target| ids.get(target)) {
+                    request.retracts = Some(mapped.clone());
+                }
+                let authority = serde_json::from_value(server["authority"].clone()).unwrap();
+                let at = DateTime::parse_from_rfc3339(server["received_at"].as_str().unwrap()).unwrap().to_utc();
+                let answerer = s(server["answerer"].as_str().unwrap());
+                let (mine, _) = mind.desk_answer(&deciders(&list), answerer, authority, request, at);
+                if code == Some("unavailable") {
+                    continue; // the door went down after the Mind stored: its answer was never seen
+                }
+                if response["schemaVersion"].as_str().unwrap().ends_with("refusal.v0") {
+                    assert_eq!(serde_json::to_value(not_stored(mine).code).unwrap(), code.unwrap(), "{name}");
+                    continue;
+                }
+                let (mut mine, _, _) = answered(mine);
+                let mut hers: ForkDeskAnswer = serde_json::from_value(response["answer"].clone()).unwrap();
+                assert_eq!(ids.entry(hers.answer_id.clone()).or_insert_with(|| mine.answer_id.clone()), &mine.answer_id, "{name}: one answer, one id");
+                mine.fork_id = her_fork.into();
+                let through = |id: &mut Option<String>| *id = id.take().map(|id| ids.get(&id).cloned().unwrap_or(id));
+                (through(&mut hers.of), through(&mut hers.retracts));
+                hers.answer_id = mine.answer_id.clone();
+                if hers.retracts.is_none() && mine.retracts.is_some() {
+                    deviations.push(name);
+                    mine.retracts = None;
+                }
+                assert_eq!(mine, hers, "{name}");
+                assert_eq!(encode(&mine), encode(&hers), "{name}");
+                compared += 1;
+            }
+            let record = &scenario["record"];
+            assert_eq!(stored_count(&mind, FORK), record["answers"].as_array().unwrap().len(), "{name}: the stored answers");
+            let hers = record["counted_answer_id"].as_str().map(|id| ids.get(id).cloned().unwrap_or(id.to_string()));
+            assert_eq!(counted_wire(&mind, FORK), hers, "{name}: the answer that counts");
+        }
+        assert_eq!((played, skipped.len()), (53, 2));
+        assert_eq!(refused_at_the_door, 7);
+        assert_eq!(compared, 71);
+        let mut named: Vec<&str> = deviations.clone();
+        named.dedup();
+        assert_eq!(named, NAMED_TARGET);
+    }
+
+    #[test]
+    fn the_attribution_is_stamped_and_never_decides() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        // The operator's own account, off the list, is no decider; a member on the list is.
+        let off = mind.desk_answer(&deciders(&["x"]), s("op"), DeskAuthority::Operator, wire(FORK, &hash), now()).0;
+        assert_eq!(answered(off).0.code, Some(ForkAnswerCode::NotADecider));
+        let on = mind.desk_answer(&deciders(&["m"]), s("m"), DeskAuthority::Member, wire(FORK, &hash), now()).0;
+        let (answer, _, _) = answered(on);
+        assert_eq!((answer.outcome.as_str(), answer.authority, answer.answerer.as_str()), ("Counted", DeskAuthority::Member, "m"));
+    }
 }
