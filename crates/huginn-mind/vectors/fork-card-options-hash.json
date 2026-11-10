@@ -1,0 +1,343 @@
+[
+ {
+  "name": "heimdall_A_five_members",
+  "heimdall": "A",
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"yes\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+ },
+ {
+  "name": "heimdall_B_recommendation_changed",
+  "heimdall": "B",
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "yes",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"yes\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"yes\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A22796573222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "14b8ffbdb61106dbc06f69f3fc8e2072af7a205d766e4cc040e89733013d54dc"
+ },
+ {
+  "name": "heimdall_C_option_order_changed",
+  "heimdall": "C",
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "no",
+    "text": "Keep it local."
+   },
+   {
+    "id": "yes",
+    "text": "Share it."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"no\",\"text\":\"Keep it local.\"},{\"id\":\"yes\",\"text\":\"Share it.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D2C7B226964223A22796573222C2274657874223A2253686172652069742E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "ac67b41539f869f6203ac0908819df046e4328b27795743a919bd4ab390596b5"
+ },
+ {
+  "name": "heimdall_D_nfc_escapes_astral",
+  "heimdall": "D",
+  "title": "Café “desk”",
+  "context": "Line one\nLine two — 😀",
+  "options": [
+   {
+    "id": "a",
+    "text": "x"
+   },
+   {
+    "id": "b",
+    "text": "y"
+   }
+  ],
+  "recommendation": "a",
+  "depends": [],
+  "canonical": "{\"context\":\"Line one\\nLine two — 😀\",\"depends\":[],\"options\":[{\"id\":\"a\",\"text\":\"x\"},{\"id\":\"b\",\"text\":\"y\"}],\"recommendation\":\"a\",\"title\":\"Café “desk”\"}",
+  "canonicalHex": "7B22636F6E74657874223A224C696E65206F6E655C6E4C696E652074776F20E2809420F09F9880222C22646570656E6473223A5B5D2C226F7074696F6E73223A5B7B226964223A2261222C2274657874223A2278227D2C7B226964223A2262222C2274657874223A2279227D5D2C227265636F6D6D656E646174696F6E223A2261222C227469746C65223A22436166C3A920E2809C6465736BE2809D227D",
+  "sha256": "71d5c413478ad06aaa1cbdd9e91c53f0cb4cef1dbd4c51bf3d473bccc6a5a272"
+ },
+ {
+  "name": "heimdall_E_decomposed_equals_D",
+  "heimdall": "E",
+  "title": "Café “desk”",
+  "context": "Line one\nLine two — 😀",
+  "options": [
+   {
+    "id": "a",
+    "text": "x"
+   },
+   {
+    "id": "b",
+    "text": "y"
+   }
+  ],
+  "recommendation": "a",
+  "depends": [],
+  "canonical": "{\"context\":\"Line one\\nLine two — 😀\",\"depends\":[],\"options\":[{\"id\":\"a\",\"text\":\"x\"},{\"id\":\"b\",\"text\":\"y\"}],\"recommendation\":\"a\",\"title\":\"Café “desk”\"}",
+  "canonicalHex": "7B22636F6E74657874223A224C696E65206F6E655C6E4C696E652074776F20E2809420F09F9880222C22646570656E6473223A5B5D2C226F7074696F6E73223A5B7B226964223A2261222C2274657874223A2278227D2C7B226964223A2262222C2274657874223A2279227D5D2C227265636F6D6D656E646174696F6E223A2261222C227469746C65223A22436166C3A920E2809C6465736BE2809D227D",
+  "sha256": "71d5c413478ad06aaa1cbdd9e91c53f0cb4cef1dbd4c51bf3d473bccc6a5a272"
+ },
+ {
+  "name": "heimdall_F_option_id_changed",
+  "heimdall": "F",
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "share",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"share\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A227368617265222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "fb53aa3a9f7e74029f755d774064eedd240ab90d8fc64723f97c31b3d2846d40"
+ },
+ {
+  "name": "heimdall_G_depends_emptied",
+  "heimdall": "G",
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[],\"options\":[{\"id\":\"yes\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B5D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "f856edce121db4121b5f1af400b1c471ebbfa6579a042aca9a34ae31c15f5c86"
+ },
+ {
+  "name": "option_text_changed",
+  "heimdall": null,
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it!"
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"yes\",\"text\":\"Share it!\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A22536861726520697421227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "9ce0d2770497fdd2d5338e66f9f1ae1741d87301db4c793407c25762929392b6"
+ },
+ {
+  "name": "title_changed",
+  "heimdall": null,
+  "title": "Slot mark consent?",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"yes\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent?\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E743F227D",
+  "sha256": "30fe0c5bc88bd21d64592a495316c30e80fcee6cacf5c63fd9a818ca5cf87d0f"
+ },
+ {
+  "name": "context_changed",
+  "heimdall": null,
+  "title": "Slot mark consent",
+  "context": "Should slot marks be shared?",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should slot marks be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"yes\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C6420736C6F74206D61726B73206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "716de65096e34fd89cc92848b667d90f5c27eeb66929da3d340cabb80155e173"
+ },
+ {
+  "name": "depends_order_changed",
+  "heimdall": null,
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience",
+   "x:question:y"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\",\"x:question:y\"],\"options\":[{\"id\":\"yes\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365222C22783A7175657374696F6E3A79225D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "fc3f651c6f498385256fc1232d5db31ece9dcc542e391f97245d27bc9e385b3d"
+ },
+ {
+  "name": "depends_order_changed_reversed",
+  "heimdall": null,
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "x:question:y",
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"x:question:y\",\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"yes\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B22783A7175657374696F6E3A79222C2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "b22642e30f8d68839e3a0df5bc23b83ff50a839fcecf0366a65fa6e3cf873796"
+ },
+ {
+  "name": "hidden_members_do_not_move_it",
+  "heimdall": null,
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"yes\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48"
+ },
+ {
+  "name": "control_characters_and_markup_are_escaped_minimally",
+  "heimdall": null,
+  "title": "q \" b \\ t \t n \n bell \u0007 del ",
+  "context": "</script>   &",
+  "options": [
+   {
+    "id": "yes",
+    "text": "Share it."
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"</script>   &\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"yes\",\"text\":\"Share it.\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"q \\\" b \\\\ t \\t n \\n bell \\u0007 del \"}",
+  "canonicalHex": "7B22636F6E74657874223A223C2F7363726970743E20E280A82026222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A22796573222C2274657874223A2253686172652069742E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A2271205C222062205C5C2074205C74206E205C6E2062656C6C205C75303030372064656C207F227D",
+  "sha256": "f2d5a09513ce728129f6ca13f7123aa75b2bb77541b1de8946f39239634b40fe"
+ },
+ {
+  "name": "astral_option_id_and_text",
+  "heimdall": null,
+  "title": "Slot mark consent",
+  "context": "Should a slot mark be shared?",
+  "options": [
+   {
+    "id": "😀",
+    "text": "𝄞"
+   },
+   {
+    "id": "no",
+    "text": "Keep it local."
+   }
+  ],
+  "recommendation": "no",
+  "depends": [
+   "gamecult-chat:question:file-zone-audience"
+  ],
+  "canonical": "{\"context\":\"Should a slot mark be shared?\",\"depends\":[\"gamecult-chat:question:file-zone-audience\"],\"options\":[{\"id\":\"😀\",\"text\":\"𝄞\"},{\"id\":\"no\",\"text\":\"Keep it local.\"}],\"recommendation\":\"no\",\"title\":\"Slot mark consent\"}",
+  "canonicalHex": "7B22636F6E74657874223A2253686F756C64206120736C6F74206D61726B206265207368617265643F222C22646570656E6473223A5B2267616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365225D2C226F7074696F6E73223A5B7B226964223A22F09F9880222C2274657874223A22F09D849E227D2C7B226964223A226E6F222C2274657874223A224B656570206974206C6F63616C2E227D5D2C227265636F6D6D656E646174696F6E223A226E6F222C227469746C65223A22536C6F74206D61726B20636F6E73656E74227D",
+  "sha256": "836fbfce16127132bae100aa773d328a85ad08d241ae9bf47ea7f84766762cac"
+ }
+]

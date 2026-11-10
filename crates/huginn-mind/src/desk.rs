@@ -62,20 +62,44 @@ pub enum DeskAnswerOutcome {
     Refused(MindRefusal),
 }
 
-/// The hash of a fork as the desk shows it, which an answer must quote (rule 4).
-///
-/// PENDING: the bytes are Libby's CultNet card contract (CultLib PR #72) and are
-/// not implemented in this seam yet. Until they are, the seam fails closed: no
-/// request can quote the value returned here, so every answer is stored
-/// `Refused { StaleFork }`. Tests are served by `fixtures::fixture_options_hash`.
+/// The hash of a fork as the desk shows it, which an answer must quote (rule 4): the
+/// lowercase hex SHA-256 of the canonical bytes pinned by CultLib PR #72
+/// (`contracts/cultnet/governance/fork-card.md`, "Options hash"). The five members
+/// `context`, `depends`, `options[{id, text}]`, `recommendation`, `title`, every string
+/// NFC-normalised, serialised as RFC 8785 JCS. The struct declares its fields in JCS key
+/// order, and `serde_json::to_string` writes no whitespace, escapes only `"`, `\` and the
+/// controls below U+0020 (lowercase `\u00xx`, `\b \t \n \f \r` short forms) and
+/// writes everything else raw, which is JCS for strings; the five members hold no number.
+/// `depends` are the stored lines verbatim (`PipelineQuestion.depends` is prose lines).
+/// This is the one owner: the counting rule calls it and nothing else computes the hash.
 pub fn options_hash(question: &PipelineQuestion) -> Sha256Hex {
-    #[cfg(test)]
-    return fixtures::fixture_options_hash(question);
-    #[cfg(not(test))]
-    {
-        let _ = question;
-        Sha256Hex("0".repeat(64))
+    use sha2::{Digest, Sha256};
+    use unicode_normalization::UnicodeNormalization;
+
+    // Declared in JCS key order (UTF-16 code units: context < depends < options < recommendation < title).
+    #[derive(serde::Serialize)]
+    struct Shown {
+        context: String,
+        depends: Vec<String>,
+        options: Vec<ShownOption>,
+        recommendation: String,
+        title: String,
     }
+    #[derive(serde::Serialize)]
+    struct ShownOption {
+        id: String,
+        text: String,
+    }
+    let nfc = |text: &str| text.nfc().collect::<String>();
+    let shown = Shown {
+        context: nfc(&question.question.0),
+        depends: question.depends.iter().map(|line| nfc(&line.0)).collect(),
+        options: question.options.iter().map(|option| ShownOption { id: nfc(&option.label.0), text: nfc(&option.text.0) }).collect(),
+        recommendation: nfc(&question.recommended.0),
+        title: nfc(&question.title.0),
+    };
+    let canonical = serde_json::to_string(&shown).expect("strings serialise");
+    Sha256Hex(Sha256::digest(canonical.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Every desk answer of one fork, with its key.
@@ -225,36 +249,6 @@ impl<S: MindStore> Mind<S> {
                 Err(MindRefusal::Unavailable { detail: "a desk answer raced another write; ask again".into() })
             }
         }
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod fixtures {
-    use super::*;
-
-    /// A stand-in for `options_hash` served to tests only: a deterministic function of every
-    /// member the binding spec names, order-sensitive, NOT SHA-256 and NOT Libby's bytes.
-    /// It lets the counting rules be tested while the real bytes are pending.
-    pub(crate) fn fixture_options_hash(question: &PipelineQuestion) -> Sha256Hex {
-        let text = format!(
-            "{:?}|{:?}|{:?}|{:?}|{:?}",
-            question.title.0,
-            question.question.0,
-            question.options.iter().map(|option| (&option.label.0, &option.text.0)).collect::<Vec<_>>(),
-            question.recommended.0,
-            question.depends.iter().map(|line| &line.0).collect::<Vec<_>>()
-        );
-        // Four rounds of FNV-1a with distinct seeds make 64 hex digits.
-        let digits: String = (0u64..4)
-            .map(|round| {
-                let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                for byte in text.bytes() {
-                    hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
-                }
-                format!("{hash:016x}")
-            })
-            .collect();
-        Sha256Hex(digits)
     }
 }
 
@@ -669,5 +663,68 @@ mod tests {
         }
         assert_eq!(head(&mind), before);
         assert_eq!(counted(&mind, FORK), Some(answer));
+    }
+
+    /// Libby's vectors (CultLib PR #72 head 7aec4961, `fork-card-vectors.json`, `optionsHash`): the seven
+    /// of the binding file, A to G, and the eight she adds. Each is recomputed from its shown members.
+    fn vectors() -> Vec<serde_json::Value> {
+        serde_json::from_str(include_str!("../vectors/fork-card-options-hash.json")).unwrap()
+    }
+
+    fn shown(vector: &serde_json::Value) -> PipelineQuestion {
+        let text = |value: &serde_json::Value| -> String { value.as_str().unwrap().to_string() };
+        let D::Question(mut question) = question("Q1", &["A", "B"], "A") else { unreachable!() };
+        question.title = text(&vector["title"]).as_str().into();
+        question.question = text(&vector["context"]).as_str().into();
+        question.recommended = Label(text(&vector["recommendation"]));
+        question.options = vector["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|option| eureka_pipeline::QuestionOption { label: Label(text(&option["id"])), text: text(&option["text"]).as_str().into() })
+            .collect();
+        question.depends = vector["depends"].as_array().unwrap().iter().map(|line| text(line).as_str().into()).collect();
+        question
+    }
+
+    #[test]
+    fn options_hash_reproduces_binding_vectors() {
+        let vectors = vectors();
+        assert_eq!(vectors.len(), 15);
+        for vector in &vectors {
+            let name = vector["name"].as_str().unwrap();
+            assert_eq!(options_hash(&shown(vector)).0, vector["sha256"].as_str().unwrap(), "{name}");
+        }
+        let by = |tag: &str| vectors.iter().find(|vector| vector["heimdall"] == tag).unwrap();
+        let hash = |tag: &str| options_hash(&shown(by(tag))).0;
+        // The pinned values of the binding file, 1.5.
+        assert_eq!(hash("A"), "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48");
+        assert_eq!(hash("B"), "14b8ffbdb61106dbc06f69f3fc8e2072af7a205d766e4cc040e89733013d54dc");
+        assert_eq!(hash("C"), "ac67b41539f869f6203ac0908819df046e4328b27795743a919bd4ab390596b5");
+        assert_eq!(hash("D"), "71d5c413478ad06aaa1cbdd9e91c53f0cb4cef1dbd4c51bf3d473bccc6a5a272");
+        assert_eq!(hash("F"), "fb53aa3a9f7e74029f755d774064eedd240ab90d8fc64723f97c31b3d2846d40");
+        assert_eq!(hash("G"), "f856edce121db4121b5f1af400b1c471ebbfa6579a042aca9a34ae31c15f5c86");
+        // E spells "Cafe" decomposed; NFC makes it D.
+        assert_eq!(hash("E"), hash("D"));
+        // Each shown member moves the hash.
+        let distinct = ["A", "B", "C", "D", "F", "G"].map(hash);
+        assert_eq!(distinct.iter().collect::<std::collections::BTreeSet<_>>().len(), 6);
+    }
+
+    #[test]
+    fn options_hash_needs_nfc_to_equal_across_spellings() {
+        // Without NFC the decomposed spelling hashes differently: this is what E pins.
+        use sha2::{Digest, Sha256};
+        let vectors = vectors();
+        let raw = |tag: &str| {
+            let vector = vectors.iter().find(|vector| vector["heimdall"] == tag).unwrap();
+            let json = serde_json::json!({
+                "context": vector["context"], "depends": vector["depends"], "options": vector["options"],
+                "recommendation": vector["recommendation"], "title": vector["title"],
+            });
+            Sha256::digest(serde_json::to_string(&json).unwrap().as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        };
+        assert_ne!(raw("E"), raw("D"));
+        assert_eq!(raw("D"), options_hash(&shown(vectors.iter().find(|vector| vector["heimdall"] == "D").unwrap())).0);
     }
 }
