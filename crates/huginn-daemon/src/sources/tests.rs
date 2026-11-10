@@ -500,8 +500,12 @@ fn skips_binary_lfs_oversize() {
     assert_eq!(rig.index.cursors().get("Demo"), Some(&c));
 }
 
+fn front_query(text: &str, top_k: u32, repo: Option<&str>) -> SourceQuery {
+    SourceQuery { front: true, ..query(text, top_k, repo) }
+}
+
 fn query(text: &str, top_k: u32, repo: Option<&str>) -> SourceQuery {
-    SourceQuery { text: Line(text.into()), top_k, repo: repo.map(|repo| Short(repo.into())) }
+    SourceQuery { text: Line(text.into()), top_k, repo: repo.map(|repo| Short(repo.into())), front: false }
 }
 
 /// A daemon whose embedder is not the one the collection was built under
@@ -553,6 +557,28 @@ fn a_source_search_answers_held_chunks_within_a_repo_and_a_limit() {
     assert_eq!(limited.hits.len(), 1);
     let asked = rig.embedder.texts().last().cloned().unwrap();
     assert_eq!(asked, format!("Instruct: {SOURCE_QUERY_INSTRUCTION}\nQuery: alpha"));
+}
+
+/// A front search answers only the front-page files at a repo's root, in every
+/// repo or in the one asked for; a nested README or a look-alike is not one.
+#[test]
+fn a_front_search_answers_only_root_front_pages_within_the_repo_asked() {
+    let (one, two) = (Remote::new(), Remote::new());
+    one.commit(&[("README.md", b"one front\n"), ("docs/README.md", b"nested\n"), ("README.md.bak", b"bak\n"), ("a.rs", b"code\n"), ("AGENTS.md", b"agents\n")], &[]);
+    two.commit(&[("CLAUDE.md", b"two front\n"), ("src/lib.rs", b"lib\n")], &[]);
+    let mut rig = Rig::new();
+    rig.converged(&mut FakeForge::of(&[("One", &one), ("Two", &two)]));
+    let within = Duration::from_secs(5);
+    let mut held = |query: &SourceQuery| {
+        let mut found: Vec<(String, String)> =
+            search(&mut rig.embedder, &mut rig.index, query, within).unwrap().hits.into_iter().map(|hit| (hit.repo, hit.path)).collect();
+        found.sort();
+        found
+    };
+    let pair = |repo: &str, path: &str| (repo.to_owned(), path.to_owned());
+    assert_eq!(held(&front_query("front", 50, None)), [pair("One", "AGENTS.md"), pair("One", "README.md"), pair("Two", "CLAUDE.md")]);
+    assert_eq!(held(&front_query("front", 50, Some("Two"))), [pair("Two", "CLAUDE.md")]);
+    assert_eq!(held(&query("front", 50, Some("Two"))).len(), 2, "without front, the repo's other files answer too");
 }
 
 /// Chunk ids are the content address: the same blob chunked the same way is

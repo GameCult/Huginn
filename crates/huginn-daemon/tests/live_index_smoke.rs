@@ -181,6 +181,7 @@ fn a_small_repo_is_refreshed_into_a_scratch_source_collection_and_found() {
                 text: huginn_mind::eureka_pipeline::Line("what does this repository do".into()),
                 top_k: 3,
                 repo: None,
+                front: false,
             };
             huginn_daemon::sources::search(&mut embedder, &mut index, &query, Duration::from_secs(60)).ok()
         });

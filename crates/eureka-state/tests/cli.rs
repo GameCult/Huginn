@@ -1283,6 +1283,7 @@ impl huginn_daemon::sources::SourceIndex for Desk {
         &mut self,
         _vector: &[f32],
         repo: Option<&str>,
+        front: bool,
         limit: u32,
         _within: Duration,
     ) -> anyhow::Result<Vec<huginn_daemon::sources::SourceRow>> {
@@ -1290,6 +1291,7 @@ impl huginn_daemon::sources::SourceIndex for Desk {
             .held
             .iter()
             .filter(|payload| repo.is_none_or(|repo| payload.repo == repo))
+            .filter(|payload| !front || huginn_daemon::sources::FRONT_PAGE_FILES.contains(&payload.path.as_str()))
             .take(limit as usize)
             .map(|payload| huginn_daemon::sources::SourceRow { score: 0.9, payload: payload.clone() })
             .collect())
@@ -1368,6 +1370,16 @@ fn sources_prints_a_citation_for_a_search_answered_by_a_daemon() {
     assert_eq!(found.code, 0, "{}", found.err);
     assert!(found.out.starts_with("Demo:src/lib.rs:3-9 @abcdef1 0.900\nfn cursor() {}"), "{}", found.out);
     assert!(!found.out.contains("README") && !found.out.contains("Other"), "{}", found.out);
+}
+
+/// `huginn sources --front` end to end: only the front-page file answers, in
+/// the repo asked for, with the line range to cite.
+#[test]
+fn sources_front_prints_only_the_front_page_with_its_lines() {
+    let server = source_daemon("d1", "d1");
+    let found = at(server.addr, &["sources", "what is this", "--front", "--repo", "Demo"], None);
+    assert_eq!(found.code, 0, "{}", found.err);
+    assert_eq!(found.out.trim_end(), "Demo:README.md:1-2 @abcdef1 0.900\n# Demo", "{}", found.out);
 }
 
 /// A daemon whose embedder is not the model the index was built under refuses

@@ -355,13 +355,14 @@ impl SourceIndex for FakeSources {
         Ok(())
     }
 
-    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, limit: u32, _within: Duration) -> Result<Vec<SourceRow>> {
+    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, front: bool, limit: u32, _within: Duration) -> Result<Vec<SourceRow>> {
         let mut state = self.state.lock().unwrap();
         state.searches.push((repo.map(str::to_owned), limit));
         let mut rows: Vec<SourceRow> = state
             .points
             .values()
             .filter(|point| repo.is_none_or(|repo| point.payload.repo == repo))
+            .filter(|point| !front || crate::sources::FRONT_PAGE_FILES.contains(&point.payload.path.as_str()))
             .map(|point| SourceRow { score: cosine(vector, &point.vector), payload: point.payload.clone() })
             .collect();
         rows.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -386,7 +387,7 @@ impl SourceIndex for FakeIndex {
     fn upsert_sources(&mut self, points: &[SourcePoint]) -> Result<()> {
         self.sources.upsert_sources(points)
     }
-    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, limit: u32, within: Duration) -> Result<Vec<SourceRow>> {
-        self.sources.search_sources(vector, repo, limit, within)
+    fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, front: bool, limit: u32, within: Duration) -> Result<Vec<SourceRow>> {
+        self.sources.search_sources(vector, repo, front, limit, within)
     }
 }
