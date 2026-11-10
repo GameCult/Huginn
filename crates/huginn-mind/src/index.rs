@@ -102,7 +102,8 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
             lines.push(&idea.idea.0);
             lines.push(&idea.tradeoffs.0);
         }
-        D::Instance(_) | D::Stewardship(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) => {}
+        // A desk answer is a person's words, not indexed.
+        D::Instance(_) | D::Stewardship(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) | D::DeskAnswer(_) => {}
     }
     lines.retain(|line| !line.is_empty());
     if lines.is_empty() {

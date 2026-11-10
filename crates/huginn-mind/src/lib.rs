@@ -27,6 +27,7 @@
 //! `now` is passed in.
 
 pub mod admission;
+mod desk;
 mod docs;
 mod image;
 pub mod envelope;
@@ -52,6 +53,7 @@ mod read_tests;
 #[cfg(test)]
 mod move_tests;
 
+pub use desk::{DeskAnswerOutcome, DeskAnswerRequest, DeskBody, DeskStamp, options_hash};
 pub use docs::CitationRole;
 pub use index::{INDEX_TEXT_MAX_BYTES, INDEX_TEXT_VERSION, IndexEntry, index_text};
 pub use admission::{BATCH_MAX, PipelineAdmissionBatch, PipelineAdmissionOutcome};

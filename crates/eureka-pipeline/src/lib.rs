@@ -1150,6 +1150,18 @@ pub enum DeskOutcome {
     Refused { code: DeskRefusal },
 }
 
+impl DeskOutcome {
+    /// The variant's spelling, for headers and listings.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Counted => "Counted",
+            Self::Revision { .. } => "Revision",
+            Self::Retraction { .. } => "Retraction",
+            Self::Refused { .. } => "Refused",
+        }
+    }
+}
+
 impl Bounded for DeskOutcome {
     fn validate(&self, field: &str) -> Result<(), PipelineRefusal> {
         match self {

@@ -395,6 +395,95 @@
       "type": "string",
       "maxLength": 10
     },
+    "DeskAuthority": {
+      "type": "string",
+      "enum": [
+        "Operator",
+        "Decider"
+      ]
+    },
+    "DeskOutcome": {
+      "description": "The one tagged outcome of a desk answer. A retraction is a variant, so a\nretraction without a target and a target without a retraction cannot be\nstored. `of` and `retracts` name desk answers by answer id (the record key).",
+      "oneOf": [
+        {
+          "description": "The answer that counts for its fork when it was admitted.",
+          "type": "string",
+          "const": "Counted"
+        },
+        {
+          "description": "A later passing answer, kept visible; `of` is the counted answer it followed.",
+          "type": "object",
+          "properties": {
+            "Revision": {
+              "type": "object",
+              "properties": {
+                "of": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "of"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Revision"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Retraction": {
+              "type": "object",
+              "properties": {
+                "retracts": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "retracts"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Retraction"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Refused": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/DeskRefusal"
+                }
+              },
+              "required": [
+                "code"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Refused"
+          ]
+        }
+      ]
+    },
+    "DeskRefusal": {
+      "type": "string",
+      "enum": [
+        "StaleFork",
+        "NotADecider",
+        "ForkClosed",
+        "ChoiceInvalid",
+        "BadRetraction",
+        "AlreadyRetracted"
+      ]
+    },
     "Deviation": {
       "type": "object",
       "properties": {
@@ -1091,6 +1180,74 @@
         "questions"
       ]
     },
+    "PipelineDeskAnswer": {
+      "description": "One answer the fork desk's receiver passed to the Mind, refused ones included.\n`answerer` and `authority` are stamped by the Mind from the verified caller and\nare absent from the request type; `answered_at` is the client's claim kept as\nwritten, display only: order is `sequence`, the receiver's order. `sequence` is\nper question and is the last part of the key (the answer id).",
+      "type": "object",
+      "properties": {
+        "answered_at": {
+          "$ref": "#/$defs/Short"
+        },
+        "answerer": {
+          "$ref": "#/$defs/Short"
+        },
+        "authority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeskAuthority"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "choice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Label"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fork": {
+          "$ref": "#/$defs/Short"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Para"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "options_hash": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "outcome": {
+          "$ref": "#/$defs/DeskOutcome"
+        },
+        "sequence": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "campaign",
+        "fork",
+        "sequence",
+        "options_hash",
+        "answered_at",
+        "answerer",
+        "outcome"
+      ]
+    },
     "PipelineDocument": {
       "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\neighteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
       "oneOf": [
@@ -1413,6 +1570,22 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "desk_answer"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineDeskAnswer"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -1679,7 +1852,8 @@
         "Research",
         "Idea",
         "Reply",
-        "Thought"
+        "Thought",
+        "DeskAnswer"
       ]
     },
     "PipelineMemory": {

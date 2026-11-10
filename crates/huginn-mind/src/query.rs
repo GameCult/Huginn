@@ -31,7 +31,7 @@ use cultnet_rs::{
     Cursor, EdgeAnchor, EdgeMatch, Evaluation, LIMIT_MAX, LIMIT_MIN, PROJECTION_DOCUMENT, Selection, select, validate,
 };
 use eureka_pipeline::{
-    ClaimOutcome, CommitRange, Date, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MemoryOrigin, MemorySort, OrgRepo,
+    ClaimOutcome, CommitRange, Date, DeskAuthority, FindingConfidence, FindingOrigin, FindingSeverity, Label, Line, MemoryOrigin, MemorySort, OrgRepo,
     PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha,
     Short, Slug, Title, pipeline_key,
 };
@@ -161,6 +161,8 @@ pub enum PipelineFacts {
     Memory { label: Label, sort: MemorySort, about: Vec<Short>, origin: MemoryOrigin, salience_permille: u16 },
     Research { pass: Label, label: Label, claim: Line, inferred: bool, observed_on: Date },
     Idea { pass: Label, label: Label, title: Title, proposed_on: Date },
+    /// `outcome` is the stored outcome's variant name; which answer counts now is `counted_answer`'s, derived.
+    DeskAnswer { fork: Short, sequence: u32, outcome: Short, authority: Option<DeskAuthority> },
 }
 
 impl PipelineFacts {
@@ -292,6 +294,12 @@ impl PipelineFacts {
                 label: value.label.clone(),
                 title: value.title.clone(),
                 proposed_on: value.proposed_on.clone(),
+            },
+            D::DeskAnswer(value) => Self::DeskAnswer {
+                fork: value.fork.clone(),
+                sequence: value.sequence,
+                outcome: Short(value.outcome.name().into()),
+                authority: value.authority,
             },
         }
     }
@@ -1812,6 +1820,20 @@ mod tests {
         way_document.toward = vec![r(K::Question, &q1)];
         committed(admit(&mut mind, vec![D::Research(note_document), D::Idea(way_document)]));
 
+        // Two desk answers on the open fork Q2: the second is a Revision of the first.
+        let D::Question(shown) = question("Q2", &["A", "B"], "A") else { unreachable!() };
+        let stamp = crate::desk::DeskStamp { answerer: s("x"), authority: Some(eureka_pipeline::DeskAuthority::Decider) };
+        let pick = || crate::desk::DeskAnswerRequest {
+            fork: s(&q2),
+            options_hash: crate::desk::options_hash(&shown),
+            body: crate::desk::DeskBody::Answer { choice: Some(l("A")), note: None },
+            answered_at: s("2026-11-10T12:00:00Z"),
+        };
+        let (answer_1, answer_2) = (id("desk_answer", "Q2.n1"), id("desk_answer", "Q2.n2"));
+        for _ in 0..2 {
+            assert!(matches!(mind.answer_desk(stamp.clone(), pick(), now()), crate::desk::DeskAnswerOutcome::Stored { .. }));
+        }
+
         let (n1, f1_closed, f2_closed) = (
             id("resolution", "question.Q1.n1"),
             id("resolution", &format!("finding.{}.n1", f1.rsplit(':').next().unwrap())),
@@ -1857,8 +1879,11 @@ mod tests {
             (CitationRole::Sources, &note, &f1),
             (CitationRole::RestsOn, &way, &note),
             (CitationRole::Toward, &way, &q1),
+            (CitationRole::Fork, &answer_1, &q2),
+            (CitationRole::Fork, &answer_2, &q2),
+            (CitationRole::Answer, &answer_2, &answer_1),
         ];
-        assert_eq!(CitationRole::ALL.len(), 24);
+        assert_eq!(CitationRole::ALL.len(), 26);
         for role in CitationRole::ALL {
             let selection =
                 Selection { cited: Some(Incoming { role: role.name().into(), exists: true }), ..Selection::default() };

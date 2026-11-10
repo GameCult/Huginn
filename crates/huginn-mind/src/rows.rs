@@ -246,7 +246,7 @@ impl SelectionRow {
                 D::FollowUp(follow_up) => vec![follow_up.repo.identity()],
                 D::Stewardship(stewardship) => vec![stewardship.repo.identity()],
                 D::HandOff(hand_off) => vec![hand_off.repo.identity()],
-                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Memory(_) | D::Research(_) | D::Idea(_) => {
+                D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Memory(_) | D::Research(_) | D::Idea(_) | D::DeskAnswer(_) => {
                     Vec::new()
                 }
             },
@@ -445,7 +445,7 @@ mod tests {
     /// refused at the substrate's door.
     #[test]
     fn each_kind_declares_exactly_its_aliases_and_none_is_numeric() {
-        let table: [(K, &[&str]); 20] = [
+        let table: [(K, &[&str]); 21] = [
             (K::Campaign, &["repo"]),
             (K::Target, &[]),
             (K::Question, &[]),
@@ -466,6 +466,7 @@ mod tests {
             (K::Idea, &["pass"]),
             (K::Reply, &[]),
             (K::Thought, &[]),
+            (K::DeskAnswer, &[]),
         ];
         for (kind, extra) in table {
             let want = [&["root", "in_force", "faculty"][..], extra].concat();
@@ -478,10 +479,10 @@ mod tests {
 
     /// Each role is declared by the one kind whose field carries it, and its
     /// targets are the kinds that field is typed to, "any" spelled as all
-    /// twenty.
+    /// twenty-one.
     #[test]
     fn each_kind_declares_the_roles_it_carries_and_their_targets() {
-        let table: [(K, &[&str]); 20] = [
+        let table: [(K, &[&str]); 21] = [
             (K::Campaign, &[]),
             (K::Target, &[]),
             (K::Question, &["raised_in"]),
@@ -502,13 +503,14 @@ mod tests {
             (K::Idea, &["rests_on", "toward"]),
             (K::Reply, &["run"]),
             (K::Thought, &["reads"]),
+            (K::DeskAnswer, &["fork", "answer"]),
         ];
         for (kind, roles) in table {
             assert_eq!(sorted(Vocabulary.declared_roles(kind.type_id())), strings(roles), "{kind:?}");
         }
         assert_eq!(Vocabulary.target_leaves("answers"), vec![K::Question.type_id().to_string()]);
         assert_eq!(Vocabulary.target_leaves("rulings"), vec![K::Ruling.type_id().to_string()]);
-        assert_eq!(Vocabulary.target_leaves("subject").len(), 20);
+        assert_eq!(Vocabulary.target_leaves("subject").len(), 21);
         assert_eq!(
             sorted(Vocabulary.target_leaves("claims")),
             sorted([K::CutSpec, K::Finding, K::FollowUp].iter().map(|kind| kind.type_id().to_string()).collect())

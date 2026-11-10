@@ -44,6 +44,10 @@ pub enum MindRefusal {
     InvalidOptions { question: String },
     InvalidChoice { ruling: String, choice: String },
     QuoteWithoutOperator { ruling: String },
+    /// A `desk_answer` reached a door other than the desk's (an admit, an import or a derivation): `id` is its key.
+    DeskAnswerOutsideDesk { id: String },
+    /// A desk request the Mind cannot read as an answer: `field` names the part (the fork, `answered_at`, an answer carrying neither choice nor note, a malformed answer id).
+    DeskRequestInvalid { field: String },
     /// `campaign` names the refused document: a campaign, or a target revision that empties its predecessor's repos.
     EmptyRepos { campaign: String },
     RepoNotInCampaign { repo: String },
