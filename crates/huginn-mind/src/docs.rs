@@ -7,7 +7,7 @@
 
 use cultcache_rs::CultCacheEnvelope;
 use eureka_pipeline::{
-    Label, OrgRepo, PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
+    DeskOutcome, Label, OrgRepo, PipelineCampaign, PipelineDocument, PipelineKind, PipelineRef, PipelineResolution, PipelineRun, PipelineStewardship, ResolutionOutcome,
     ResearchSource, RunOperator, Short, Slug,
 };
 use schemars::JsonSchema;
@@ -382,7 +382,8 @@ pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
         | D::Run(_)
         | D::Pulse(_)
         | D::Reply(_)
-        | D::Thought(_) => None,
+        | D::Thought(_)
+        | D::DeskAnswer(_) => None,
     }
 }
 
@@ -434,10 +435,12 @@ pub enum CitationRole {
     Run,
     Reads,
     DayThrough,
+    Fork,
+    Answer,
 }
 
 impl CitationRole {
-    pub const ALL: [CitationRole; 24] = [
+    pub const ALL: [CitationRole; 26] = [
         Self::RaisedIn,
         Self::Answers,
         Self::Rulings,
@@ -462,6 +465,8 @@ impl CitationRole {
         Self::Run,
         Self::Reads,
         Self::DayThrough,
+        Self::Fork,
+        Self::Answer,
     ];
 
     /// The wire spelling, equal to the referring field's name.
@@ -491,6 +496,8 @@ impl CitationRole {
             Self::Run => "run",
             Self::Reads => "reads",
             Self::DayThrough => "day_through",
+            Self::Fork => "fork",
+            Self::Answer => "answer",
         }
     }
 
@@ -517,6 +524,7 @@ impl CitationRole {
             Self::RestsOn | Self::Toward => K::Idea,
             Self::Run => K::Reply,
             Self::Reads => K::Thought,
+            Self::Fork | Self::Answer => K::DeskAnswer,
         }
     }
 
@@ -526,7 +534,7 @@ impl CitationRole {
     pub fn target_kinds(self) -> Vec<PipelineKind> {
         use PipelineKind as K;
         match self {
-            Self::Answers | Self::Questions | Self::Forks => vec![K::Question],
+            Self::Answers | Self::Questions | Self::Forks | Self::Fork => vec![K::Question],
             Self::Rulings => vec![K::Ruling],
             Self::CutSpec => vec![K::CutSpec],
             Self::CutReport => vec![K::CutReport],
@@ -535,6 +543,7 @@ impl CitationRole {
             Self::Claims => vec![K::CutSpec, K::Finding, K::FollowUp],
             Self::Consolidates | Self::DayThrough => vec![K::Memory],
             Self::Run => vec![K::Run],
+            Self::Answer => vec![K::DeskAnswer],
             Self::RaisedIn
             | Self::Source
             | Self::Subject
@@ -635,6 +644,13 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
         D::Idea(idea) => {
             edges.extend(idea.rests_on.iter().map(|to| (R::RestsOn, to.clone())));
             edges.extend(idea.toward.iter().map(|to| (R::Toward, to.clone())));
+        }
+        D::DeskAnswer(answer) => {
+            edges.push((R::Fork, cited(K::Question, &answer.fork)));
+            match &answer.outcome {
+                DeskOutcome::Revision { of: id } | DeskOutcome::Retraction { retracts: id } => edges.push((R::Answer, cited(K::DeskAnswer, id))),
+                DeskOutcome::Counted | DeskOutcome::Refused { .. } => {}
+            }
         }
         D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) | D::Pulse(_) => {}
     }

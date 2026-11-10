@@ -51,6 +51,26 @@ use crate::receipt::{self, CommitOutcome, IMPORT_EXTERNAL_MAX, ImportSource, Pip
 use crate::refusal::{MindRefusal, RunId};
 use crate::store::MindStore;
 
+/// The door a batch enters by. A desk answer is decided by `Mind::answer_desk`
+/// before its document exists, from a stamp the caller cannot forge, so only the
+/// desk's own call passes `Desk`; `admit`, `admit_prepared`, imports and
+/// derivations pass `Admit` and may not write one (ruling
+/// desk-second-peer-checked-door).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Door {
+    Admit,
+    Desk,
+}
+
+/// Every staged `desk_answer`, whether the caller sent it or a derivation
+/// produced it, is refused unless it came by the desk door.
+fn refuse_desk_answers_outside_desk(door: Door, docs: &Docs<'_>) -> Result<(), MindRefusal> {
+    match docs.batch.iter().find(|staged| staged.kind == PipelineKind::DeskAnswer) {
+        Some(staged) if door != Door::Desk => Err(MindRefusal::DeskAnswerOutsideDesk { id: staged.key.clone() }),
+        _ => Ok(()),
+    }
+}
+
 /// The most envelopes one batch may carry.
 pub const BATCH_MAX: usize = 64;
 
@@ -77,7 +97,7 @@ pub enum PipelineAdmissionOutcome {
 /// Keys a document through the leaf, then encodes it. A key the leaf cannot
 /// compose is the document's fault and is refused as a document; only the
 /// cache's encode fault is the organ's.
-fn prepare(document: &PipelineDocument, cache: &CultCache) -> Result<CultCacheEnvelope, MindRefusal> {
+pub(crate) fn prepare(document: &PipelineDocument, cache: &CultCache) -> Result<CultCacheEnvelope, MindRefusal> {
     pipeline_key(document).map_err(MindRefusal::Document)?;
     document.prepare(cache).map_err(unavailable)
 }
@@ -108,14 +128,15 @@ impl<S: MindStore> Mind<S> {
         envelopes: Vec<CultCacheEnvelope>,
         now: DateTime<Utc>,
     ) -> PipelineAdmissionOutcome {
-        match self.admit_steps(instance, provenance, envelopes, now) {
+        match self.admit_steps(Door::Admit, instance, provenance, envelopes, now) {
             Ok(outcome) => outcome,
             Err(refusal) => PipelineAdmissionOutcome::Refused(refusal),
         }
     }
 
-    fn admit_steps(
+    pub(crate) fn admit_steps(
         &mut self,
+        door: Door,
         instance: &Slug,
         provenance: PipelineProvenance,
         envelopes: Vec<CultCacheEnvelope>,
@@ -139,6 +160,7 @@ impl<S: MindStore> Mind<S> {
         for envelope in envelopes {
             docs.push(stage(envelope, &mind)?)?;
         }
+        refuse_desk_answers_outside_desk(door, &docs)?;
         // A6
         let carries_instance = docs.batch.iter().filter(|staged| staged.kind == PipelineKind::Instance).count() == 1;
         if self.is_empty() && !carries_instance {
@@ -162,6 +184,7 @@ impl<S: MindStore> Mind<S> {
                 docs.push(stage(envelope, &mind)?)?;
             }
         }
+        refuse_desk_answers_outside_desk(door, &docs)?;
         for staged in &docs.batch[originals..] {
             resolve(&docs, staged, &mind, external, &mut strong)?;
         }
@@ -602,6 +625,8 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
             }
             unique_labels("question.options", question.options.iter().map(|option| option.label.0.as_str()))
         }
+        // Decided in `answer_desk` before the document exists; no other door can stage one.
+        D::DeskAnswer(_) => Ok(()),
         D::Ruling(ruling) => {
             if ruling.operator_quote.is_some() && ruling.authority != RulingAuthority::Operator {
                 return Err(MindRefusal::QuoteWithoutOperator { ruling: key.into() });

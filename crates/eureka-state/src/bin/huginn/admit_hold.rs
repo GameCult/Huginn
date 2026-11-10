@@ -49,7 +49,7 @@ pub fn check(
         }
         text.push_str(&format!("For {id}:\n"));
         for (_, view) in &found {
-            text.push_str(&render::header(&PipelineDocumentSummary::of(view)));
+            text.push_str(&render::header(&PipelineDocumentSummary::of(view, &|_| None)));
             text.push('\n');
         }
     }

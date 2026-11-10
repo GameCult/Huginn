@@ -31,7 +31,8 @@
         "Research",
         "Idea",
         "Reply",
-        "Thought"
+        "Thought",
+        "DeskAnswer"
       ],
       "type": "string"
     },

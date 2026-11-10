@@ -272,6 +272,27 @@ fn symbol_text(field: &str, value: &str) -> Result<(), PipelineRefusal> {
     within(128)(field, value)
 }
 
+/// A lowercase D-format UUID: 8-4-4-4-12 lowercase hex digits, any version.
+fn uuid_text(field: &str, value: &str) -> Result<(), PipelineRefusal> {
+    let shaped = value.len() == 36
+        && value.bytes().enumerate().all(|(at, byte)| match at {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
+        });
+    if !shaped {
+        return Err(format_error(field, value));
+    }
+    Ok(())
+}
+
+/// A person's words: 1 to 4000 UTF-8 bytes and not blank (`str::trim` leaves something).
+fn words_text(field: &str, value: &str) -> Result<(), PipelineRefusal> {
+    if value.trim().is_empty() {
+        return Err(format_error(field, value));
+    }
+    within(4000)(field, value)
+}
+
 bounded_text! {
     /// Text of at most 200 UTF-8 bytes.
     Short = 200, |field, value| within(200)(field, value);
@@ -290,6 +311,11 @@ bounded_text! {
     Symbol = 128, symbol_text;
     /// Text of at most 4,000 UTF-8 bytes; longer narrative is cited by `DocRef`.
     Para = 4000, |field, value| within(4000)(field, value);
+    /// A person's words, verbatim: 1 to 4,000 UTF-8 bytes, not blank (CultLib PR #72, `answer.note`).
+    #[schemars(extend("minLength" = 1))]
+    Words = 4000, words_text;
+    /// A client's retry token: a lowercase D-format UUID.
+    RequestId = 36, uuid_text;
     /// A key label: `[A-Za-z0-9_-]{1,64}`.
     Label = 64, label_text;
     /// A campaign slug or key segment: label parts joined by `.`.
@@ -738,6 +764,11 @@ unit_enums! {
     RunOperator { Operator, Mind }
     RunTurn { PersonaTurn, SelfRun, Sleep }
     MemorySort { Asked, Decided, Committed, Learned, Did, Idea, Rapport }
+    // The role the verified account holds, an attribution copied from Bifrost's state (CultLib PR #72,
+    // fork-card.md). It confers nothing: whether an answerer may decide is the decider list's, never this.
+    DeskAuthority { Operator, Steward, Member }
+    // Why a desk answer was refused and stored: binding spec 1.3 steps 4-7 and R1.
+    DeskRefusal { StaleFork, NotADecider, ForkClosed, ChoiceInvalid, BadRetraction, AlreadyRetracted }
 }
 
 /// The slots of a Mind's runs: one live run of hers per instance and slot. A
@@ -837,6 +868,25 @@ value_types! {
         mutations: Vec<MutationRecord>[64], deviations: Vec<Deviation>[32], forks: Vec<Short>[8],
         structural_delta: StructuralDelta, landed_names: Vec<LandedName>[128], undone: Vec<Line>[32],
         promises: Vec<Promise>[64],
+    }
+    /// One answer the fork desk's receiver passed to the Mind, refused ones included.
+    /// `answerer` and `authority` (an attribution, never a decision) are stamped by the
+    /// Mind from the verified caller and are absent from the request type; `answered_at`
+    /// is the client's claim kept as written, display only: order is `sequence`, the
+    /// receiver's order. `received_at` is the Mind's admission time (UTC) and
+    /// `claim_in_future` is set when `answered_at` is more than five minutes after it.
+    /// `request_id` is the client's retry token and `body_sha256` the digest of the
+    /// request it came with: the pair that makes a retry the same answer, never a new
+    /// one; the key is `(answerer, request_id)`. A record holds no card: a replayed
+    /// `stale_fork` is shown the current card. `sequence` is per question and is the
+    /// last part of the key (the answer id). `choice`, `note` and (for a retraction) the
+    /// target are kept as sent whether the request was counted or refused, so a refused
+    /// `choice_invalid` keeps a choice that is no option label; which answer counts now is
+    /// derived by the reader, never stored here.
+    pub struct PipelineDeskAnswer {
+        campaign: Slug, fork: Short, sequence: u32, options_hash: Sha256Hex, choice: Option<Short>, note: Option<Words>,
+        answered_at: Short, received_at: Short, claim_in_future: bool, request_id: RequestId, body_sha256: Sha256Hex,
+        answerer: Short, authority: DeskAuthority, outcome: DeskOutcome,
     }
     pub struct PipelineVerdict { campaign: Slug, cut_report: Short, pass: u32, range: CommitRange, claims: Vec<VerdictClaim>[64] }
     pub struct PipelineFinding {
@@ -1124,6 +1174,48 @@ impl Bounded for ResolutionOutcome {
     }
 }
 
+/// The one tagged outcome of a desk answer. A retraction is a variant, so a
+/// retraction without a target and a target without a retraction cannot be
+/// stored. `of` and `retracts` name desk answers by answer id (the record key).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum DeskOutcome {
+    /// The answer that counts for its fork when it was admitted.
+    Counted,
+    /// A later passing answer, kept visible; `of` is the counted answer it followed.
+    Revision { of: Short },
+    Retraction { retracts: Short },
+    /// A request the desk would not count, kept with what it was sent with. `retracts` is the
+    /// target a refused retraction named, as sent and unchecked (it may name no answer at all);
+    /// it is `None` on a refused answer, and it is never a citation.
+    Refused { code: DeskRefusal, retracts: Option<Short> },
+}
+
+impl DeskOutcome {
+    /// The variant's spelling, for headers and listings.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Counted => "Counted",
+            Self::Revision { .. } => "Revision",
+            Self::Retraction { .. } => "Retraction",
+            Self::Refused { .. } => "Refused",
+        }
+    }
+}
+
+impl Bounded for DeskOutcome {
+    fn validate(&self, field: &str) -> Result<(), PipelineRefusal> {
+        match self {
+            Self::Counted => Ok(()),
+            Self::Refused { retracts, .. } => retracts.as_ref().map_or(Ok(()), |target| target.validate(&format!("{field}.retracts"))),
+            Self::Revision { of: id } | Self::Retraction { retracts: id } => {
+                let field = format!("{field}.{}", if matches!(self, Self::Revision { .. }) { "of" } else { "retracts" });
+                id.validate(&field)?;
+                pipeline_id(&field, &id.0, PipelineKind::DeskAnswer).map(|_| ())
+            }
+        }
+    }
+}
+
 macro_rules! pipeline_kinds {
     ($($variant:ident($value:ident) => $document:ident, $name:literal, $type_id:tt, $schema:tt;)*) => {
         $(
@@ -1283,6 +1375,8 @@ pipeline_kinds! {
         "epiphany.pipeline.reply.v2", "EpiphanyPipelineReplyDocument";
     Thought(PipelineThought) => EpiphanyPipelineThoughtDocument, "thought",
         "epiphany.pipeline.thought.v2", "EpiphanyPipelineThoughtDocument";
+    DeskAnswer(PipelineDeskAnswer) => EpiphanyPipelineDeskAnswerDocument, "desk_answer",
+        "epiphany.pipeline.desk_answer.v2", "EpiphanyPipelineDeskAnswerDocument";
 }
 
 /// Parses a full document id: the grammar read backwards. A key and an id are
@@ -1393,6 +1487,8 @@ const _: () = assert!(64 + ":".len() + LONGEST_KIND_NAME + ":".len() + RESOLUTIO
 fn local_max(kind: PipelineKind) -> usize {
     match kind {
         PipelineKind::Resolution => RESOLUTION_LOCAL_MAX,
+        // `<question label>.n<sequence>`: every question label is answerable.
+        PipelineKind::DeskAnswer => SUBJECT_LOCAL_MAX + SEQUENCE_PART_MAX,
         _ => SUBJECT_LOCAL_MAX,
     }
 }
@@ -1501,6 +1597,11 @@ pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefus
                 value.campaign.0.as_str(),
                 local(&key_field, document_kind, &[&format!("cut-{cut}"), &format!("h{}", value.attempt)])?,
             )
+        }
+        D::DeskAnswer(value) => {
+            let label = parent_local("desk_answer.fork", &value.fork.0, &value.campaign.0, PipelineKind::Question)?;
+            let sequence = format!("n{}", value.sequence);
+            (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[label, &sequence])?)
         }
         D::Verdict(value) => {
             let report = parent_local("verdict.cut_report", &value.cut_report.0, &value.campaign.0, PipelineKind::CutReport)?;
@@ -1774,6 +1875,13 @@ mod tests {
                 nearest_permille: vec![310, 870], chosen: 0, projector_ms: 4200, continuer_ms: 9100,
                 prompt_version: "ghostlight=c43eb54; words=180".into(),
             }), format!("{INSTANCE}:thought:t1793000000")),
+            (D::DeskAnswer(PipelineDeskAnswer {
+                campaign: slug(CAMPAIGN), fork: id("question", "Q1"), sequence: 1, options_hash: Sha256Hex("c".repeat(64)),
+                choice: Some(s("a")), note: Some("Share it, with the mark.".into()), answered_at: s("2026-11-10T15:00:00Z"),
+                received_at: s("2026-11-10T15:00:03Z"), claim_in_future: false, request_id: RequestId("6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f13".into()), body_sha256: Sha256Hex("d".repeat(64)),
+                answerer: s("user-7"), authority: DeskAuthority::Member,
+                outcome: DeskOutcome::Revision { of: id("desk_answer", "Q1.n1") },
+            }), format!("{CAMPAIGN}:desk_answer:Q1.n1")),
         ]
     }
 
@@ -3908,11 +4016,11 @@ mod tests {
         };
         let document_schema = serde_json::to_value(schemars::schema_for!(PipelineDocument))?;
         let variants = document_schema["oneOf"].as_array().expect("the document schema is a oneOf");
-        assert_eq!(PipelineKind::ALL.len(), 20, "twenty kinds");
+        assert_eq!(PipelineKind::ALL.len(), 21, "twenty-one kinds");
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
-            "the document schema lists exactly the twenty kinds, by name"
+            "the document schema lists exactly the twenty-one kinds, by name"
         );
 
         let refusal_schema = serde_json::to_value(schemars::schema_for!(PipelineRefusal))?;
@@ -4435,5 +4543,41 @@ mod tests {
             Err(PipelineRefusal::FieldBound { field: "question.title".into(), limit: 200, actual: 201 })
         );
         Ok(())
+    }
+
+    fn desk_answer_sample() -> PipelineDeskAnswer {
+        let PipelineDocument::DeskAnswer(answer) = samples().pop().unwrap().0 else { unreachable!() };
+        answer
+    }
+
+    #[test]
+    fn a_desk_answer_is_keyed_under_its_question_and_sequence() {
+        let mut answer = desk_answer_sample();
+        let key = |answer: &PipelineDeskAnswer| pipeline_key(&PipelineDocument::DeskAnswer(answer.clone()));
+        assert_eq!(key(&answer), Ok(format!("{CAMPAIGN}:desk_answer:Q1.n1")));
+        // Every 64-byte question label is answerable at the largest sequence.
+        let label = "q".repeat(64);
+        answer.fork = id("question", &label);
+        answer.sequence = u32::MAX;
+        answer.outcome = DeskOutcome::Counted;
+        assert_eq!(key(&answer), Ok(format!("{CAMPAIGN}:desk_answer:{label}.n4294967295")));
+        // The fork must be a question of the same campaign.
+        answer.fork = Short(format!("other:question:{label}"));
+        assert!(matches!(key(&answer), Err(PipelineRefusal::InvalidFormat { .. })));
+        answer.fork = id("ruling", "Q1");
+        assert!(matches!(key(&answer), Err(PipelineRefusal::InvalidFormat { .. })));
+    }
+
+    #[test]
+    fn a_desk_outcome_names_desk_answers_by_id() {
+        let mut answer = desk_answer_sample();
+        for bad in [id("question", "Q1"), Short("n1".into())] {
+            answer.outcome = DeskOutcome::Retraction { retracts: bad.clone() };
+            assert!(matches!(PipelineDocument::DeskAnswer(answer.clone()).validate(), Err(PipelineRefusal::InvalidFormat { .. })), "{bad:?}");
+            answer.outcome = DeskOutcome::Revision { of: bad.clone() };
+            assert!(matches!(PipelineDocument::DeskAnswer(answer.clone()).validate(), Err(PipelineRefusal::InvalidFormat { .. })), "{bad:?}");
+        }
+        answer.outcome = DeskOutcome::Retraction { retracts: id("desk_answer", "Q1.n2") };
+        assert_eq!(PipelineDocument::DeskAnswer(answer).validate(), Ok(()));
     }
 }

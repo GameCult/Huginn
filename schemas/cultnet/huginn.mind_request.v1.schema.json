@@ -395,6 +395,107 @@
       "type": "string",
       "maxLength": 10
     },
+    "DeskAuthority": {
+      "type": "string",
+      "enum": [
+        "Operator",
+        "Steward",
+        "Member"
+      ]
+    },
+    "DeskOutcome": {
+      "description": "The one tagged outcome of a desk answer. A retraction is a variant, so a\nretraction without a target and a target without a retraction cannot be\nstored. `of` and `retracts` name desk answers by answer id (the record key).",
+      "oneOf": [
+        {
+          "description": "The answer that counts for its fork when it was admitted.",
+          "type": "string",
+          "const": "Counted"
+        },
+        {
+          "description": "A later passing answer, kept visible; `of` is the counted answer it followed.",
+          "type": "object",
+          "properties": {
+            "Revision": {
+              "type": "object",
+              "properties": {
+                "of": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "of"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Revision"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Retraction": {
+              "type": "object",
+              "properties": {
+                "retracts": {
+                  "$ref": "#/$defs/Short"
+                }
+              },
+              "required": [
+                "retracts"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Retraction"
+          ]
+        },
+        {
+          "description": "A request the desk would not count, kept with what it was sent with. `retracts` is the\ntarget a refused retraction named, as sent and unchecked (it may name no answer at all);\nit is `None` on a refused answer, and it is never a citation.",
+          "type": "object",
+          "properties": {
+            "Refused": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/DeskRefusal"
+                },
+                "retracts": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Short"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "code"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Refused"
+          ]
+        }
+      ]
+    },
+    "DeskRefusal": {
+      "type": "string",
+      "enum": [
+        "StaleFork",
+        "NotADecider",
+        "ForkClosed",
+        "ChoiceInvalid",
+        "BadRetraction",
+        "AlreadyRetracted"
+      ]
+    },
     "Deviation": {
       "type": "object",
       "properties": {
@@ -468,7 +569,7 @@
       ]
     },
     "Faculty": {
-      "description": "Which faculty a batch was admitted as. Attribution, not authority\n(ruling 18): no admission rule trusts it, and Cut 9's views read it back\nfrom the receipt.",
+      "description": "Which faculty a batch was admitted as. Attribution, not authority\n(ruling 18): no admission rule trusts it, and Cut 9's views read it back\nfrom the receipt. `Member` and `Steward` name a desk answerer who is neither the\noperator nor a faculty; they confer no admission right anywhere (a test admits a\nbatch under each and checks the outcomes match).",
       "type": "string",
       "enum": [
         "SelfFaculty",
@@ -477,7 +578,9 @@
         "Soul",
         "Life",
         "Eyes",
-        "Operator"
+        "Operator",
+        "Member",
+        "Steward"
       ]
     },
     "FileChange": {
@@ -1091,6 +1194,84 @@
         "questions"
       ]
     },
+    "PipelineDeskAnswer": {
+      "description": "One answer the fork desk's receiver passed to the Mind, refused ones included.\n`answerer` and `authority` (an attribution, never a decision) are stamped by the\nMind from the verified caller and are absent from the request type; `answered_at`\nis the client's claim kept as written, display only: order is `sequence`, the\nreceiver's order. `received_at` is the Mind's admission time (UTC) and\n`claim_in_future` is set when `answered_at` is more than five minutes after it.\n`request_id` is the client's retry token and `body_sha256` the digest of the\nrequest it came with: the pair that makes a retry the same answer, never a new\none; the key is `(answerer, request_id)`. A record holds no card: a replayed\n`stale_fork` is shown the current card. `sequence` is per question and is the\nlast part of the key (the answer id). `choice`, `note` and (for a retraction) the\ntarget are kept as sent whether the request was counted or refused, so a refused\n`choice_invalid` keeps a choice that is no option label; which answer counts now is\nderived by the reader, never stored here.",
+      "type": "object",
+      "properties": {
+        "answered_at": {
+          "$ref": "#/$defs/Short"
+        },
+        "answerer": {
+          "$ref": "#/$defs/Short"
+        },
+        "authority": {
+          "$ref": "#/$defs/DeskAuthority"
+        },
+        "body_sha256": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "choice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Short"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_in_future": {
+          "type": "boolean"
+        },
+        "fork": {
+          "$ref": "#/$defs/Short"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Words"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "options_hash": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "outcome": {
+          "$ref": "#/$defs/DeskOutcome"
+        },
+        "received_at": {
+          "$ref": "#/$defs/Short"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "sequence": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "campaign",
+        "fork",
+        "sequence",
+        "options_hash",
+        "answered_at",
+        "received_at",
+        "claim_in_future",
+        "request_id",
+        "body_sha256",
+        "answerer",
+        "authority",
+        "outcome"
+      ]
+    },
     "PipelineDocument": {
       "description": "The envelope enum, adjacently tagged on the kind name: a document\non a wire is `{ kind, value }`, and `kind` is exactly what\n`PipelineKind::name()` returns, so a reader dispatches on the kind\nsegment it already knows from the key and needs no second registry\nmapping variant spellings to kinds. Adjacent rather than internal\nbecause a value is a named map of its own and an internal tag would\nhave to be merged into it; the tag stays beside the value instead.\nThis is not a published schema: `schemas/cultnet` publishes the\neighteen per-kind value documents, and the envelope is the wire's\nshape, not a document's.",
       "oneOf": [
@@ -1413,6 +1594,22 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "desk_answer"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineDeskAnswer"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -1679,7 +1876,8 @@
         "Research",
         "Idea",
         "Reply",
-        "Thought"
+        "Thought",
+        "DeskAnswer"
       ]
     },
     "PipelineMemory": {
@@ -2432,6 +2630,11 @@
         "builds"
       ]
     },
+    "RequestId": {
+      "description": "A client's retry token: a lowercase D-format UUID.",
+      "type": "string",
+      "maxLength": 36
+    },
     "ResearchSource": {
       "description": "Where a research claim comes from. A `Repo` pin and a `Web` page are\noutside the document set; an `Observed` result reuses a finding's evidence;\na `Document` is the one source that is a citation edge.",
       "oneOf": [
@@ -2977,6 +3180,12 @@
         "name",
         "pins"
       ]
+    },
+    "Words": {
+      "description": "A person's words, verbatim: 1 to 4,000 UTF-8 bytes, not blank (CultLib PR #72, `answer.note`).",
+      "type": "string",
+      "maxLength": 4000,
+      "minLength": 1
     }
   }
 }

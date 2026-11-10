@@ -1144,12 +1144,12 @@ fn schema_prints_the_published_files() {
     let names = run(&[], &["schema"], None);
     assert_eq!(names.code, 0);
     let names: Vec<&str> = names.out.lines().collect();
-    assert_eq!(names.len(), 21, "{names:?}");
+    assert_eq!(names.len(), 22, "{names:?}");
     assert_eq!(names[0], "campaign");
     assert_eq!(names[14], "pulse");
     assert_eq!(names[15], "memory");
     assert_eq!((names[16], names[17]), ("research", "idea"));
-    assert_eq!((names[18], names[19], names[20]), ("reply", "thought", "selection"));
+    assert_eq!((names[18], names[19], names[20], names[21]), ("reply", "thought", "desk_answer", "selection"));
     for kind in PipelineKind::ALL {
         assert!(names.contains(&kind.name()), "{}", kind.name());
     }
