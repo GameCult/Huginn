@@ -825,6 +825,7 @@ impl<'a> SelfInbox<'a> {
     fn reply_to(&mut self, line: &str, ok: bool) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         let text = result_text(&event);
+        let text = text.as_str();
         let flush = std::mem::take(&mut self.flushing);
         // The flush result is the session's note to its successor, in the journal: it is no reply.
         if ok && !flush && !text.trim().is_empty() {
@@ -923,8 +924,39 @@ fn result_head(event: &serde_json::Map<String, Value>) -> String {
     head
 }
 
-fn result_text(event: &serde_json::Map<String, Value>) -> &str {
-    event.get("result").and_then(Value::as_str).unwrap_or("")
+/// A result's words as they leave the actuator, for the journal and for her mind: the one place URL credentials are redacted.
+fn result_text(event: &serde_json::Map<String, Value>) -> String {
+    redact_url_userinfo(event.get("result").and_then(Value::as_str).unwrap_or(""))
+}
+
+/// `text` with the userinfo of every `scheme://userinfo@host` replaced: `scheme://<redacted>@host`. A forge token rides in a remote URL
+/// (`https://user:token@host/...`, `https://token@host/...`) and Self prints remotes. Userinfo with a colon is user and password, always
+/// redacted. Without a colon it is a bare token on http, https, ftp and ftps, and a plain username on every other scheme (`ssh://git@host`),
+/// which stays. The userinfo ends at the last `@` before the authority ends (`/`, `?`, `#`, whitespace, a quote or a bracket), so a password
+/// holding `@` leaks no tail. A tiny syntactic guardrail on URL shape, not a reading of meaning; the CLI's own transcript files are not covered.
+fn redact_url_userinfo(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let (before, after) = rest.split_at(at);
+        let scheme_start = before.rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))).map_or(0, |i| i + 1);
+        let scheme = before[scheme_start..].to_ascii_lowercase();
+        let body = &after[3..];
+        let end = body.find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '"' | '\'' | '`' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '\\')).unwrap_or(body.len());
+        let authority = &body[..end];
+        out.push_str(before);
+        out.push_str("://");
+        match authority.rfind('@') {
+            Some(i) if !scheme.is_empty() && (authority[..i].contains(':') || matches!(scheme.as_str(), "http" | "https" | "ftp" | "ftps")) => {
+                out.push_str("<redacted>@");
+                out.push_str(&authority[i + 1..]);
+            }
+            _ => out.push_str(authority),
+        }
+        rest = &body[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `text` in consecutive pieces of at most `limit` bytes, each cut at a character boundary; their concatenation is `text`.

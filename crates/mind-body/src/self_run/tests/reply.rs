@@ -118,3 +118,43 @@ fn a_refused_piece_of_a_long_result_holds_back_the_pieces_behind_it() {
     let ordinals: Vec<u64> = (1..=3).map(|n| mind.view(K::Reply, &format!("{INSTANCE}:reply:selfrun-a-r{n}")).unwrap_or_else(|| panic!("piece {n} lost")).admission.ordinal).collect();
     assert!(ordinals.windows(2).all(|w| w[0] < w[1]), "the pieces reached the mind out of order: {ordinals:?}");
 }
+
+// A canary stands where a forge token would: no byte of it may reach the journal or her mind.
+const CANARY: &str = "CANARY-NOT-A-REAL-TOKEN-0000";
+
+#[test]
+fn url_userinfo_is_redacted_where_it_is_a_secret_and_kept_where_it_is_a_username() {
+    let said = format!(
+        "a https://user:{CANARY}@host.example/r.git b https://{CANARY}@host.example/r.git c ssh://u:{CANARY}@h/x d http://{CANARY}@h e HTTPS://x:{CANARY}@h \
+         f https://u:p@ss{CANARY}@h/x g ssh://git@host.example/r.git h git://git@h/x i https://host.example/no-userinfo j (https://u:{CANARY}@h) k ://@x"
+    );
+    let want = "a https://<redacted>@host.example/r.git b https://<redacted>@host.example/r.git c ssh://<redacted>@h/x d http://<redacted>@h e HTTPS://<redacted>@h \
+         f https://<redacted>@h/x g ssh://git@host.example/r.git h git://git@h/x i https://host.example/no-userinfo j (https://<redacted>@h) k ://@x";
+    assert_eq!(redact_url_userinfo(&said), want);
+    assert!(!redact_url_userinfo(&said).contains(CANARY));
+}
+
+#[test]
+fn a_credential_in_a_url_reaches_neither_the_journal_nor_the_admitted_reply() {
+    let mind = live_mind();
+    let said = format!("origin https://user:{CANARY}@host.example/r.git and https://{CANARY}@host.example/s.git");
+    let ran = mind_run(&mind, vec![Out(echo()), Out(saying(&said))]);
+    assert!(ran.outcome.is_ok());
+    assert!(!ran.out.contains(CANARY), "{}", ran.out);
+    assert!(ran.out.contains("https://<redacted>@host.example/r.git"), "{}", ran.out);
+    let text = text_of(&mind, 1);
+    assert!(!text.contains(CANARY), "{text}");
+    assert_eq!(text, "origin https://<redacted>@host.example/r.git and https://<redacted>@host.example/s.git");
+}
+
+#[test]
+fn a_credential_split_by_the_reply_limit_is_redacted_before_the_cut() {
+    let mind = live_mind();
+    let said = format!("{}https://u:{CANARY}@h/x", "a".repeat(REPLY_TEXT_LIMIT - 25));
+    mind_run(&mind, vec![Out(echo()), Out(saying(&said))]).outcome.unwrap();
+    for n in 1..=2 {
+        if let Some(reply) = reply_of(&mind, n) {
+            assert!(!reply.text.0.contains("CANARY"), "{}", reply.text.0);
+        }
+    }
+}
