@@ -8042,7 +8042,8 @@ fn a_message_naming_only_her_project_is_told_though_no_table_holds_the_name() {
     rig.clock.step.set(0);
     let (child, writes) = answering(&rig, reply_saying("ok"));
     let (_, acked) = carry_children(&rig, vec![child]);
-    assert!(first_line(&writes).contains("bad day simulator"), "{}", first_line(&writes));
+    let line = first_line(&writes);
+    assert!(line.contains(r#"to_you=true"#) && line.contains(r#"text="is the bad day simulator green?""#), "told as a message to her: {line}");
     assert_eq!(acked, [1], "acked once, after it was answered");
 }
 
@@ -8058,4 +8059,61 @@ fn a_refused_quiet_ack_ends_the_start_and_tells_nothing() {
     assert_eq!(failure_of(outcome), Some(Failure::Ack));
     assert!(acked.is_empty());
     assert!(writes.borrow().is_empty());
+}
+
+/// A stale send with no batch waits for the messages that interrupted it: one that is not hers is not acked away, and the revision line shows it.
+#[test]
+fn a_stale_send_with_no_batch_keeps_an_unaddressed_interrupter_for_its_revision_line() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let chatter = ChatDelivery { at_unix_ms: 9_999_999_999_999, ..plain(delivery(1, "swarm", "@libby:chat", "lunch anyone")) };
+    with_inbox(&rig, &config(), vec![], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &chatter);
+        inbox.result(&reply_result(&says(&[("swarm", "hello")])), true, false).unwrap();
+        assert!(inbox.revision.is_some(), "the room moved: the send is stale");
+        for _ in 0..8 {
+            inbox.poll().unwrap();
+        }
+        assert!(rig.chat.acked.borrow().is_empty(), "the interrupter is not acked before it is shown");
+        assert!(inbox.revision_ready());
+        let line = inbox.tell(false).unwrap();
+        assert!(line.contains("lunch anyone"), "{line}");
+    });
+}
+
+/// An unaddressed line behind one she was told is not told by waiting.
+#[test]
+fn an_unaddressed_line_behind_a_told_one_is_not_told_by_waiting() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let first = delivery(1, "swarm", "@op:chat", "who owns the stairs?");
+    let behind = plain(delivery(2, "swarm", "@libby:chat", "lunch anyone"));
+    arrives(&rig, &first);
+    with_inbox(&rig, &config(), vec![first.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &behind);
+        for now in [0i64, 20_000, 3_600_000] {
+            rig.clock.now.set(rig.clock.now.get() + now);
+            assert!(!inbox.poll().unwrap().pending, "told after {now} ms though it is not hers");
+        }
+    });
+}
+
+/// A quiet ack the mouth refuses inside a poll is not the end of the session: the next poll tries again.
+#[test]
+fn a_refused_quiet_ack_in_a_poll_is_retried_at_the_next_poll() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    arrives(&rig, &plain(delivery(1, "swarm", "@libby:chat", "lunch anyone")));
+    with_inbox(&rig, &config(), vec![], |inbox| {
+        rig.chat.fail_ack.set(true);
+        assert!(!inbox.poll().unwrap().pending);
+        assert!(inbox.progress.failure.is_none() && rig.chat.acked.borrow().is_empty());
+        rig.chat.fail_ack.set(false);
+        inbox.poll().unwrap();
+        assert_eq!(*rig.chat.acked.borrow(), [1]);
+    });
 }
