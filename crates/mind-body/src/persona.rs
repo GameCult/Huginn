@@ -882,7 +882,7 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
             progress.failure = Some(Failure::Chat);
             break;
         };
-        let (mut pending, tail) = (polled.deliveries, polled.tail);
+        let (mut pending, tail, tail_gaps) = (polled.deliveries, polled.tail, polled.tail_gaps);
         // A mind that cannot be asked for her Self's replies still serves her chat.
         let routes = reply_routes(organs.mind, &BTreeSet::new()).unwrap_or_default();
         let addressing = addressing_of(config, organs.heartbeat, &own_addressee(config));
@@ -906,6 +906,7 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
             break;
         }
         session.tail = tail;
+        session.tail_gaps = tail_gaps;
         // A line a delivery still waiting will tell is that delivery's to show.
         session.waiting_ids = pending_ids;
         let turns = progress.turn;
@@ -1126,6 +1127,8 @@ struct Session {
     first: Vec<ChatDelivery>,
     /// The mouth's tail of her rooms at the poll this session was made from (None: the mouth sent none); its first line shows it.
     tail: Option<Vec<TailLine>>,
+    /// The rooms the mouth named at that poll as not fully read: shown as unknown, never quiet.
+    tail_gaps: Vec<String>,
     /// The event ids of the deliveries still waiting at that poll: they will be told as messages, which show their lines.
     waiting_ids: Vec<String>,
 }
@@ -1139,14 +1142,14 @@ fn next_session(config: &Config, addressing: &[Addressee], pending: Vec<ChatDeli
     if let Some(first) = batch.first()
         && route.is_none_or(|route| first.at_unix_ms <= route.at_unix_ms || Conversation::of(first) == route.conversation)
     {
-        return Some(Session { conversation: Conversation::of(first), origin: origin_of(config, &batch, &MemoryOrigin::Wake).0, first: batch, tail: None, waiting_ids: Vec::new() });
+        return Some(Session { conversation: Conversation::of(first), origin: origin_of(config, &batch, &MemoryOrigin::Wake).0, first: batch, tail: None, tail_gaps: Vec::new(), waiting_ids: Vec::new() });
     }
     match route {
         Some(route) => {
             opened_alone.insert(route.id.clone());
-            Some(Session { conversation: route.conversation.clone(), origin: route.origin.clone().unwrap_or(MemoryOrigin::Wake), first: Vec::new(), tail: None, waiting_ids: Vec::new() })
+            Some(Session { conversation: route.conversation.clone(), origin: route.origin.clone().unwrap_or(MemoryOrigin::Wake), first: Vec::new(), tail: None, tail_gaps: Vec::new(), waiting_ids: Vec::new() })
         }
-        None => (process == 0).then(|| Session { conversation: Conversation::Public, origin: MemoryOrigin::Wake, first: Vec::new(), tail: None, waiting_ids: Vec::new() }),
+        None => (process == 0).then(|| Session { conversation: Conversation::Public, origin: MemoryOrigin::Wake, first: Vec::new(), tail: None, tail_gaps: Vec::new(), waiting_ids: Vec::new() }),
     }
 }
 
@@ -1269,6 +1272,8 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     start: Vec<ChatDelivery>,
     /// The mouth's tail of her rooms, shown once by the first line; none when the mouth sent none.
     tail: Option<Vec<TailLine>>,
+    /// The rooms the mouth named as not fully read, shown once with the tail.
+    tail_gaps: Vec<String>,
     /// The event ids of the deliveries waiting when the tail was polled: their messages show those lines.
     waiting_ids: Vec<String>,
     /// The deliveries derived at the last poll that no line has carried yet.
@@ -1336,7 +1341,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
     /// One process's session inbox over its first batch. The caller has read the gate and started the child.
     #[allow(clippy::too_many_arguments, reason = "one process's state is these few things, and a struct for them would be a second owner")]
     fn new(organs: &'a Organs<'a>, control: &'a C, swarm: &'a S, config: &'a Config, run: &'a PipelineRef, progress: &'a mut Progress, session: Session, started_ms: u64, plan: String) -> Self {
-        let Session { conversation, origin, first, tail, waiting_ids } = session;
+        let Session { conversation, origin, first, tail, tail_gaps, waiting_ids } = session;
         let rooms = reply_rooms(config, &conversation);
         Self {
             organs,
@@ -1352,6 +1357,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
             plan,
             started_ms,
             tail,
+            tail_gaps,
             waiting_ids,
             told: BTreeSet::new(),
             start: first,
@@ -1417,7 +1423,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         let (heard, replies) = self.take_reply_lines();
         let (attached, images) = attachment_lines(self.config, deliveries);
         let mut told = lines_told(deliveries, &earlier);
-        let tail = render_tail(self.config, &self.addressing, std::mem::take(&mut self.tail), &tail_rooms(self.config, &self.conversation), &told, &self.waiting_ids);
+        let tail = render_tail(self.config, &self.addressing, std::mem::take(&mut self.tail), &std::mem::take(&mut self.tail_gaps), &tail_rooms(self.config, &self.conversation), &told, &self.waiting_ids);
         told.extend(tail.keys);
         let input = render_input(self.config, started_self_today, &tail.text, &format!("{heard}{}{attached}", message_lines(self.config, &self.addressee, &self.addressing, deliveries, &earlier)), note, &history, &goals.text, &wear, &recall::render(&recalled), &format!("{}\n\n{tempo}", self.plan), &people);
         Ok(Rendered { input, shown: Shown { people, open: goals.open }, told, replies, images })
@@ -3499,8 +3505,8 @@ fn tail_line(config: &Config, addressing: &[Addressee], line: &TailLine) -> Stri
 /// The tail a process opens with, from the mouth's `tail` (None: it sent none): the lines of `rooms` (`tail_rooms`) that the `seen` lines
 /// of this same line do not already show, the newest `TAIL_PER_ROOM` of each and `TAIL_TOTAL` over all, then the newest that fit
 /// `TAIL_MAX_BYTES` counted as rendered. A marker says how many were dropped, and a room with no line says so: she is told the room was
-/// quiet, or unread by the mouth, and is never left to assume.
-fn render_tail(config: &Config, addressing: &[Addressee], tail: Option<Vec<TailLine>>, rooms: &[String], seen: &[LineKey], waiting_ids: &[String]) -> Tail {
+/// quiet, or that the mouth named it a gap (`gaps`: unknown), and is never left to assume.
+fn render_tail(config: &Config, addressing: &[Addressee], tail: Option<Vec<TailLine>>, gaps: &[String], rooms: &[String], seen: &[LineKey], waiting_ids: &[String]) -> Tail {
     let Some(mut lines) = tail else { return Tail { text: format!("{TAIL_UNAVAILABLE}\n\n"), keys: Vec::new() } };
     lines.retain(|line| rooms.contains(&line.room));
     // A line the first line shows already, as a message, a delivery's context, or a waiting delivery's message, is not repeated; its room
@@ -3518,8 +3524,16 @@ fn render_tail(config: &Config, addressing: &[Addressee], tail: Option<Vec<TailL
         }
     }
     within.reverse();
-    let quiet: Vec<String> = rooms.iter().filter(|room| !within.iter().chain(&shown).any(|line| &line.room == *room)).map(|room| quoted(room)).collect();
-    let quiet_note = if quiet.is_empty() { String::new() } else { format!("No tail line for: {}. They were quiet, or the mouth could not read them.\n", quiet.join(", ")) };
+    // A room the mouth names is unknown, with lines or without: older lines may exist that she cannot see. Only an unnamed room with no line is quiet.
+    let unknown: Vec<String> = rooms.iter().filter(|room| gaps.contains(room)).map(|room| quoted(room)).collect();
+    let quiet: Vec<String> = rooms.iter().filter(|room| !gaps.contains(room) && !within.iter().chain(&shown).any(|line| &line.room == *room)).map(|room| quoted(room)).collect();
+    let mut quiet_note = String::new();
+    if !unknown.is_empty() {
+        quiet_note.push_str(&format!("Unknown, not quiet: {}. The mouth could not show all of their lines, so older ones may exist; do not assume nothing was said.\n", unknown.join(", ")));
+    }
+    if !quiet.is_empty() {
+        quiet_note.push_str(&format!("No tail line for: {}. The mouth names no gap there, so they were quiet.\n", quiet.join(", ")));
+    }
     let mut budget = TAIL_MAX_BYTES.saturating_sub(TAIL_HEADER.len() + quiet_note.len() + 160);
     let mut kept: Vec<&TailLine> = Vec::new();
     for line in within.iter().rev() {
@@ -3532,7 +3546,8 @@ fn render_tail(config: &Config, addressing: &[Addressee], tail: Option<Vec<TailL
     }
     kept.reverse();
     if kept.is_empty() && offered == 0 {
-        let text = if shown.is_empty() { format!("Recent tail of your rooms: empty. {quiet_note}\n") } else { format!("Recent tail of your rooms: its {} lines are shown below as messages and are not repeated here. {quiet_note}\n", shown.len()) };
+        // "empty" says the rooms were read and held nothing: a named gap contradicts it, so then the note stands alone.
+        let text = if shown.is_empty() && !unknown.is_empty() { format!("Recent tail of your rooms: {quiet_note}\n") } else if shown.is_empty() { format!("Recent tail of your rooms: empty. {quiet_note}\n") } else { format!("Recent tail of your rooms: its {} lines are shown below as messages and are not repeated here. {quiet_note}\n", shown.len()) };
         return Tail { text, keys: Vec::new() };
     }
     let mut text = format!("{TAIL_HEADER}\n");

@@ -89,6 +89,8 @@ struct FakeChat {
     homeserver: RefCell<Option<Vec<TailLine>>>,
     /// Rooms that are her DMs, which she may speak in without configuring them.
     dms: RefCell<Vec<String>>,
+    /// The rooms the fake mouth names as not fully read.
+    gaps: RefCell<Vec<String>>,
     /// The mouth cannot be asked for its pending.
     fail_pending: Cell<bool>,
 }
@@ -146,7 +148,7 @@ impl Chat for FakeChat {
         if self.fail_pending.get() {
             return Err(anyhow!("the mouth is down"));
         }
-        Ok(ChatPending { persona: "eureka".into(), deliveries: self.deliveries.borrow().iter().filter(|delivery| delivery.seq > after_seq).cloned().collect(), tail: self.tail_reply() })
+        Ok(ChatPending { persona: "eureka".into(), deliveries: self.deliveries.borrow().iter().filter(|delivery| delivery.seq > after_seq).cloned().collect(), tail: self.tail_reply(), tail_gaps: self.gaps.borrow().clone() })
     }
 
     fn send(&self, request: &ChatSendRequest) -> Result<ChatSendReceipt> {
@@ -499,6 +501,7 @@ impl Rig {
                 open_unserved: Cell::new(false),
                 homeserver: RefCell::new(None),
                 dms: RefCell::default(),
+                gaps: RefCell::new(Vec::new()),
                 fail_pending: Cell::new(false),
             },
             model: FakeSession {
@@ -1090,7 +1093,7 @@ fn the_tail_size_budget_measures_a_mind_line_as_the_line_it_prints() {
     let lines = |pad: usize| -> Vec<TailLine> { (1..=TAIL_PER_ROOM as u64).map(|n| tl("swarm", n, LIBBY, &format!("{n:02} {}", "t".repeat(pad)))).collect() };
     let budget = TAIL_MAX_BYTES - (TAIL_HEADER.len() + 160);
     let pad = (1..2000).rev().find(|&pad| lines(pad).iter().map(|line| tail_line(&c, &table, line).len()).sum::<usize>() <= budget).expect("a pad fits");
-    let tail = render_tail(&c, &table, Some(lines(pad)), &rooms, &[], &[]);
+    let tail = render_tail(&c, &table, Some(lines(pad)), &[], &rooms, &[], &[]);
     assert_eq!(tail.text.matches("tail room=").count(), TAIL_PER_ROOM, "every line fits when measured as printed");
     assert_eq!(tail.text.matches("role=mind").count(), TAIL_PER_ROOM);
 }
@@ -6796,7 +6799,7 @@ fn a_flush_written_beside_a_revision_line_still_makes_the_reply_final() {
 
 /// The session a start would open over `first` with no reply waiting: its conversation and origin are the batch's.
 fn session_of(config: &Config, first: Vec<ChatDelivery>) -> Session {
-    Session { conversation: first.first().map_or(Conversation::Public, Conversation::of), origin: origin_of(config, &first, &MemoryOrigin::Wake).0, first, tail: None, waiting_ids: Vec::new() }
+    Session { conversation: first.first().map_or(Conversation::Public, Conversation::of), origin: origin_of(config, &first, &MemoryOrigin::Wake).0, first, tail: None, tail_gaps: Vec::new(), waiting_ids: Vec::new() }
 }
 
 // ---- a Self reply is told only in its brief's conversation ----
@@ -8354,9 +8357,9 @@ fn rooms_she_may_not_speak_in_contribute_nothing_and_a_dm_session_reads_its_own_
     let input = first_input(&rig);
     assert!(input.contains("in-her-room") && !input.contains("in-a-room-not-hers"));
     // The consumer holds the rule too: a mouth that sent a foreign room's line is not believed.
-    let foreign = render_tail(&config(), &[], Some(vec![tl("!stranger:chat", 1, "@m:chat", "leak"), tl("!dm:chat", 2, "@m:chat", "dm-line")]), &tail_rooms(&config(), &Conversation::Public), &[], &[]);
+    let foreign = render_tail(&config(), &[], Some(vec![tl("!stranger:chat", 1, "@m:chat", "leak"), tl("!dm:chat", 2, "@m:chat", "dm-line")]), &[], &tail_rooms(&config(), &Conversation::Public), &[], &[]);
     assert!(!foreign.text.contains("leak") && !foreign.text.contains("dm-line"));
-    let dm = render_tail(&config(), &[], Some(vec![tl("swarm", 1, "@m:chat", "public-line"), tl("!dm:chat", 2, "@m:chat", "dm-line")]), &tail_rooms(&config(), &Conversation::Direct("!dm:chat".into())), &[], &[]);
+    let dm = render_tail(&config(), &[], Some(vec![tl("swarm", 1, "@m:chat", "public-line"), tl("!dm:chat", 2, "@m:chat", "dm-line")]), &[], &tail_rooms(&config(), &Conversation::Direct("!dm:chat".into())), &[], &[]);
     assert!(dm.text.contains("dm-line") && !dm.text.contains("public-line"));
 }
 
@@ -8387,7 +8390,7 @@ fn an_instruction_in_a_tail_line_stays_inside_the_data_frame() {
 fn the_tail_holds_its_byte_bound_counting_its_framing_and_marks_the_drop() {
     let big = "x".repeat(1000);
     let lines: Vec<TailLine> = (1..=60u64).map(|n| tl(["swarm", "usage", "operator"][(n % 3) as usize], n, "@m:chat", &format!("{n:02}{}", &big[2..]))).collect();
-    let tail = render_tail(&config(), &[], Some(lines), &config().rooms, &[], &[]);
+    let tail = render_tail(&config(), &[], Some(lines), &[], &config().rooms, &[], &[]);
     assert!(tail.text.len() <= TAIL_MAX_BYTES, "{} bytes, framing included", tail.text.len());
     assert!(tail.text.contains("[tail truncated:") && tail.text.contains("\"60xxx"), "the newest kept, the drop marked");
 }
@@ -8405,17 +8408,17 @@ fn a_first_poll_the_mouth_cannot_answer_still_fails_the_start_as_chat() {
 fn the_consumer_holds_the_caps_when_the_mouth_over_sends() {
     // 200 lines of one room: only the room's newest TAIL_PER_ROOM show.
     let one_room: Vec<TailLine> = (1..=200u64).map(|n| tl("swarm", n, "@m:chat", &format!("p-{n:04}"))).collect();
-    let tail = render_tail(&config(), &[], Some(one_room), &config().rooms, &[], &[]);
+    let tail = render_tail(&config(), &[], Some(one_room), &[], &config().rooms, &[], &[]);
     assert_eq!(tail.text.lines().filter(|l| l.starts_with("tail room=")).count(), TAIL_PER_ROOM);
     assert!(tail.text.contains("p-0200") && !tail.text.contains("p-0180\""), "the newest of the room");
     // 300 lines over three rooms: TAIL_TOTAL, with the rest counted in the marker.
     let three: Vec<TailLine> = (1..=300u64).map(|n| tl(["swarm", "usage", "operator"][(n % 3) as usize], n, "@m:chat", &format!("p-{n:04}"))).collect();
-    let tail = render_tail(&config(), &[], Some(three), &config().rooms, &[], &[]);
+    let tail = render_tail(&config(), &[], Some(three), &[], &config().rooms, &[], &[]);
     assert_eq!(tail.text.lines().filter(|l| l.starts_with("tail room=")).count(), TAIL_TOTAL);
     assert!(tail.text.contains("[tail truncated: 240 lines are not shown, the newest 60 are]"), "{}", tail.text);
     // Lines of a room that is not speakable are not believed, and do not count against the caps of the rooms that are.
     let mixed: Vec<TailLine> = (1..=100u64).map(|n| tl("!stranger:chat", n, "@m:chat", "foreign")).chain(std::iter::once(tl("swarm", 101, "@m:chat", "hers"))).collect();
-    let tail = render_tail(&config(), &[], Some(mixed), &config().rooms, &[], &[]);
+    let tail = render_tail(&config(), &[], Some(mixed), &[], &config().rooms, &[], &[]);
     assert!(tail.text.contains("hers") && !tail.text.contains("foreign") && !tail.text.contains("truncated"), "{}", tail.text);
 }
 
@@ -8426,7 +8429,7 @@ fn a_hostile_sender_room_and_event_id_are_quoted_as_the_body_is() {
     cfg.rooms = vec![evil.into()];
     let mut line = tl(evil, 1, evil, evil);
     line.event_id = evil.into();
-    let tail = render_tail(&cfg, &[], Some(vec![line]), &cfg.rooms, &[], &[]);
+    let tail = render_tail(&cfg, &[], Some(vec![line]), &[], &cfg.rooms, &[], &[]);
     assert!(!tail.text.lines().any(|l| l.starts_with("message ")), "{}", tail.text);
     assert!(!tail.text.contains('\u{2028}'), "a Unicode line separator cannot end the line");
     assert_eq!(tail.text.lines().filter(|l| l.starts_with("tail ")).count(), 1, "one tail line, whatever its fields hold");
@@ -8456,4 +8459,34 @@ fn when_every_tail_line_is_shown_below_the_line_does_not_say_the_rooms_were_quie
     let input = first_input(&rig);
     assert!(input.contains("are shown below as messages and are not repeated here"), "{input}");
     assert!(!input.contains("Recent tail of your rooms: empty") && !input.contains("No tail line for: \"swarm\""), "swarm was not quiet");
+}
+
+/// A room the mouth names as a gap reads as unknown, whether it has lines or none; a room it does not name and that has no line is quiet.
+/// The same bytes a four-field mouth sends decode into the gaps the first line renders.
+#[test]
+fn a_room_the_mouth_names_as_a_gap_is_unknown_in_the_first_line_and_an_unnamed_empty_one_is_quiet() {
+    let rig = Rig::new(vec![], &[says(&[])]);
+    *rig.chat.homeserver.borrow_mut() = Some(vec![tl("operator", 1, "@m:chat", "a-line")]);
+    *rig.chat.gaps.borrow_mut() = vec!["swarm".into(), "operator".into(), "!stranger:chat".into()];
+    let input = first_input(&rig);
+    assert!(input.contains("Unknown, not quiet: \"swarm\", \"operator\"."), "{input}");
+    assert!(!input.contains("!stranger:chat"), "a gap named for a room she may not speak in shows nothing");
+    assert!(input.contains("No tail line for: \"usage\".") && !input.contains("Unknown, not quiet: \"swarm\", \"operator\", \"usage\""), "the unnamed empty rooms are quiet, and only they: {input}");
+    let rooms = config().rooms;
+    let quiet_alone = render_tail(&config(), &[], Some(vec![]), &[], &rooms, &[], &[]);
+    assert!(!quiet_alone.text.contains("Unknown"), "no gap named: nothing is unknown: {}", quiet_alone.text);
+    let decoded: crate::chat_client::ChatPending = crate::chat_client::decode(include_bytes!("../../tests/fixtures/persona-chat-v7/gamecult.persona.chat_pending.v3.tail-gaps.msgpack")).unwrap();
+    let bytes_rendered = render_tail(&config(), &[], decoded.tail, &decoded.tail_gaps, &["#swarm:gamecult.org".to_string(), "#quiet:gamecult.org".to_string()], &[], &[]);
+    assert!(bytes_rendered.text.contains("Unknown, not quiet: \"#swarm:gamecult.org\"."), "{}", bytes_rendered.text);
+    assert!(bytes_rendered.text.contains("No tail line for: \"#quiet:gamecult.org\"."), "{}", bytes_rendered.text);
+}
+
+/// No line offered and a room named: the section is the unknown note alone, never "empty"; with no room named, "empty" stays.
+#[test]
+fn a_named_gap_with_no_lines_reads_unknown_and_never_empty() {
+    let rooms = config().rooms;
+    let gapped = render_tail(&config(), &[], Some(vec![]), &["swarm".to_string()], &rooms, &[], &[]);
+    assert!(gapped.text.contains("Unknown, not quiet: \"swarm\".") && !gapped.text.contains("empty"), "{}", gapped.text);
+    let none = render_tail(&config(), &[], Some(vec![]), &[], &rooms, &[], &[]);
+    assert!(none.text.contains("Recent tail of your rooms: empty."), "{}", none.text);
 }
