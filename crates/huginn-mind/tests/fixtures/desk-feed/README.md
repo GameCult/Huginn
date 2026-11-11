@@ -15,9 +15,9 @@ Each case has up to four files:
 Hex is lowercase with one trailing newline. The fork id is a question Eureka's mind holds. The
 record's answers, notes and hash are synthetic.
 
-**The listing gate is not live.** On `main` every showable question goes to every reader. Do not
-put a Mind that holds private questions behind a live receiver before `cut-desk-feed-listing`
-lands (see `docs/desk-feed-door.md`).
+**The listing gate is live in Huginn.** A reader who is not on the call's deciders sees only forks the
+Mind lists (`docs/desk-feed-door.md`); `list-empty.response` is what such a reader gets from a Mind with
+nothing listed.
 
 | case | direction | content |
 |---|---|---|
@@ -31,6 +31,10 @@ lands (see `docs/desk-feed-door.md`).
 | `list-open-non-decider.response` | Huginn to Bifrost | the same page for a non-decider: `deciders` empty, `decider_count` 2, every `answerer` nil, `answerer_count` 3; no account id anywhere in its bytes |
 | `read.response` | Huginn to Bifrost | a decider's read of one fork, `raised_at` nil |
 | `read-non-decider.response` | Huginn to Bifrost | the same read for a non-decider, `raised_at` nil, no account id |
+| `read-mxid-decider.request` | client to Huginn | a `Fork` whose first decider is a Matrix id, so outside the account grammar; refused at decode |
+| `read-mxid-decider.failure.response` | Huginn to Bifrost | the operation failure for it: `payload-not-a-request`, naming `deciders`, never quoting the id |
+| `read-email-subject.request` | client to Huginn | a `Fork` whose subject is an email address; refused at decode |
+| `read-email-subject.failure.response` | Huginn to Bifrost | the operation failure for it, naming `subject` |
 | `list-empty.response` | Huginn to Bifrost | an empty Mind, or nothing listed to this reader: counts 0, `forks: []` |
 | `list-counts.response` | Huginn to Bifrost | the limit-0 answer: open 3, recorded 5, `forks: []` |
 | `read-unknown.response` | Huginn to Bifrost | `NotStored` `fork_unknown` (Bifrost: 404) |

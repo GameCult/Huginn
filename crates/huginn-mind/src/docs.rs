@@ -401,7 +401,8 @@ pub(crate) fn line_of(document: &PipelineDocument) -> Option<Lineage<'_>> {
         | D::Pulse(_)
         | D::Reply(_)
         | D::Thought(_)
-        | D::DeskAnswer(_) => None,
+        | D::DeskAnswer(_)
+        | D::DeskListing(_) => None,
     }
 }
 
@@ -455,10 +456,11 @@ pub enum CitationRole {
     DayThrough,
     Fork,
     Answer,
+    Listed,
 }
 
 impl CitationRole {
-    pub const ALL: [CitationRole; 26] = [
+    pub const ALL: [CitationRole; 27] = [
         Self::RaisedIn,
         Self::Answers,
         Self::Rulings,
@@ -485,6 +487,7 @@ impl CitationRole {
         Self::DayThrough,
         Self::Fork,
         Self::Answer,
+        Self::Listed,
     ];
 
     /// The wire spelling, equal to the referring field's name.
@@ -516,6 +519,7 @@ impl CitationRole {
             Self::DayThrough => "day_through",
             Self::Fork => "fork",
             Self::Answer => "answer",
+            Self::Listed => "listed",
         }
     }
 
@@ -543,6 +547,7 @@ impl CitationRole {
             Self::Run => K::Reply,
             Self::Reads => K::Thought,
             Self::Fork | Self::Answer => K::DeskAnswer,
+            Self::Listed => K::DeskListing,
         }
     }
 
@@ -552,7 +557,7 @@ impl CitationRole {
     pub fn target_kinds(self) -> Vec<PipelineKind> {
         use PipelineKind as K;
         match self {
-            Self::Answers | Self::Questions | Self::Forks | Self::Fork => vec![K::Question],
+            Self::Answers | Self::Questions | Self::Forks | Self::Fork | Self::Listed => vec![K::Question],
             Self::Rulings => vec![K::Ruling],
             Self::CutSpec => vec![K::CutSpec],
             Self::CutReport => vec![K::CutReport],
@@ -670,6 +675,7 @@ pub(crate) fn citations(document: &PipelineDocument) -> Vec<(CitationRole, Pipel
                 DeskOutcome::Counted | DeskOutcome::Refused { .. } => {}
             }
         }
+        D::DeskListing(listing) => edges.push((R::Listed, cited(K::Question, &listing.listed))),
         D::Campaign(_) | D::Target(_) | D::Instance(_) | D::Stewardship(_) | D::Pulse(_) => {}
     }
     edges

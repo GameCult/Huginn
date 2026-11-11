@@ -85,20 +85,26 @@ fn wire(hash: &str, request_id: &str) -> ForkAnswerRequest {
     }
 }
 
+/// A test's name for someone as the Bifrost account id the door requires: a deterministic lowercase D-format UUID.
+fn acct(name: &str) -> huginn_mind::eureka_pipeline::AccountId {
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+    huginn_mind::eureka_pipeline::AccountId(format!("{:08x}-{:04x}-4000-8000-{:012x}", hash >> 32, (hash >> 16) & 0xffff, hash & 0xffff_ffff_ffff))
+}
+
 const R1: &str = "00000000-0000-4000-8000-000000000001";
 const R2: &str = "00000000-0000-4000-8000-000000000002";
 const R3: &str = "00000000-0000-4000-8000-000000000003";
 
 fn answer(who: &str, authority: DeskAuthority, deciders: &[&str], request: ForkAnswerRequest) -> DeskRequest {
-    DeskRequest::Answer { mind: slug(INSTANCE), subject: short(who), authority, deciders: deciders.iter().map(|d| short(d)).collect(), request }
+    DeskRequest::Answer { mind: slug(INSTANCE), subject: acct(who), authority, deciders: deciders.iter().map(|d| acct(d)).collect(), request }
 }
 
 /// A list read by `who` against `deciders`.
 fn forks(who: &str, deciders: &[&str], status: Option<ListStatus>, cursor: Option<ForkCursor>, limit: u8) -> DeskRequest {
     DeskRequest::Forks {
         mind: slug(INSTANCE),
-        subject: short(who),
-        deciders: deciders.iter().map(|d| short(d)).collect(),
+        subject: acct(who),
+        deciders: deciders.iter().map(|d| acct(d)).collect(),
         status,
         cursor,
         limit: ForkLimit::new(limit).unwrap(),
@@ -110,7 +116,7 @@ fn forks_all(deciders: &[&str]) -> DeskRequest {
 }
 
 fn fork_read(who: &str, deciders: &[&str], fork_id: &str) -> DeskRequest {
-    DeskRequest::Fork { mind: slug(INSTANCE), subject: short(who), deciders: deciders.iter().map(|d| short(d)).collect(), fork_id: fork_id.into() }
+    DeskRequest::Fork { mind: slug(INSTANCE), subject: acct(who), deciders: deciders.iter().map(|d| acct(d)).collect(), fork_id: fork_id.into() }
 }
 
 fn page_of(response: DeskResponse) -> (ForkList, u64) {
@@ -567,7 +573,7 @@ mod door_smoke {
             claim_in_future: false,
             request_id: RequestId(R1.into()),
             body_sha256: Sha256Hex("0".repeat(64)),
-            answerer: short("x"),
+            answerer: acct("x"),
             authority: DeskAuthority::Operator,
             outcome: DeskOutcome::Counted,
         });
@@ -801,7 +807,7 @@ mod door_smoke {
         assert_eq!((listed_at, read_at), (before.1 as u64, before.1 as u64), "both read at the head the mind held");
         assert_eq!(list.stamp, format!("s{listed_at}"));
         assert_eq!(list.forks[0], entry);
-        assert_eq!((entry.card.fork_id.as_str(), entry.card.options_hash.as_str(), entry.card.deciders.as_slice()), (FORK, hash.as_str(), ["x".to_string(), "y".to_string()].as_slice()));
+        assert_eq!((entry.card.fork_id.as_str(), entry.card.options_hash.as_str(), entry.card.deciders.as_slice()), (FORK, hash.as_str(), [acct("x").0, acct("y").0].as_slice()));
         assert_eq!(rig.state(), before, "a read stores nothing");
         assert!(rig.index.seen.lock().unwrap().is_empty());
         // An unknown fork is the answer path's refusal.
@@ -864,11 +870,19 @@ mod door_smoke {
         let note = "Keep it local: the author's call.";
         rig.serving(|path| counted(reply_of(path, "m-1", &DeskRequest::Answer {
             mind: slug(INSTANCE),
-            subject: short("y"),
+            subject: acct("y"),
             authority: DeskAuthority::Member,
-            deciders: vec![short("y")],
+            deciders: vec![acct("y")],
             request: noted(&hash, R1, note),
         })));
+        // Unlisted: the outsider is shown nothing at all, and a read is `fork_unknown`.
+        let (hidden, unknown) = rig.serving(|path| (reply_of(path, "m-1", &forks("outsider", &["x"], None, None, 50)), reply_of(path, "m-1b", &fork_read("outsider", &["x"], FORK))));
+        assert_eq!(page_of(hidden).0.forks.len(), 0);
+        assert!(matches!(unknown, DeskResponse::NotStored(_)), "{unknown:?}");
+        // The Mind lists it, on its own door.
+        let listing = PipelineDocument::DeskListing(huginn_mind::eureka_pipeline::PipelineDeskListing { campaign: slug("eureka-state"), listed: short(FORK), reason: "Members may read why.".into() });
+        let admitted = rig.daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![listing])), now()).answered();
+        assert!(matches!(admitted, HuginnMindResponse::Admit(huginn_mind::PipelineAdmissionOutcome::Committed { .. })), "{admitted:?}");
         let (list, read) = rig.serving(|path| (reply_of(path, "m-2", &forks("outsider", &["x"], None, None, 50)), reply_of(path, "m-3", &fork_read("outsider", &["x"], FORK))));
         let (list, _) = page_of(list);
         let (read, _) = entry_of(read);
@@ -882,8 +896,8 @@ mod door_smoke {
         }
         let seen = rig.serving(|path| reply_of(path, "m-4", &fork_read("x", &["x"], FORK)));
         let (seen, _) = entry_of(seen);
-        assert_eq!(seen.card.deciders, ["x"]);
-        assert_eq!(seen.record.answers[0].answerer.as_deref(), Some("y"));
+        assert_eq!(seen.card.deciders, [acct("x").0]);
+        assert_eq!(seen.record.answers[0].answerer.as_deref(), Some(acct("y").0.as_str()));
     }
 
     #[test]
@@ -902,7 +916,7 @@ mod door_smoke {
             let refused = rig.serving(|path| failure_of(path, &bytes));
             assert_eq!(refused.code, "payload-not-a-request", "{what}");
             assert!(refused.message.contains("deciders"), "{what}: {}", refused.message);
-            assert!(!refused.message.contains("d64"), "{what} echoes a decider: {}", refused.message);
+            assert!(!refused.message.contains(&acct("d64").0), "{what} echoes a decider: {}", refused.message);
         }
         assert_eq!(rig.state(), before, "nothing stored, head unchanged");
     }

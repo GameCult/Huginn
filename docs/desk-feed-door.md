@@ -5,14 +5,13 @@ Status, 2026-11-11: the list and read wire described here is on `main` (`DeskReq
 and `desk_wire/reads.rs`; the socket is `crates/huginn-daemon/src/desk_door.rs`). No running daemon
 binds a desk socket yet (follow-up `eureka-substrate:follow_up:desk-door-ops-root-run`). The reader
 shapes are built: the card's `raised_at` and `decider_count`, the record's `answerer_count`, the
-nullable `answerer`, and the withholding of account ids from a non-decider (below). One part is
-planned and not built: the listing gate that decides which forks a reader sees (cut spec
-`cut-desk-feed-listing` in the `eureka-substrate` campaign).
+nullable `answerer`, and the withholding of account ids from a non-decider (below). The listing gate
+is built too: a reader who is not a decider sees a fork only while the Mind lists it (Listing, below).
+Both are `cut-desk-feed-raised-at` and `cut-desk-feed-listing` in the `eureka-substrate` campaign.
 
-**Not live: the listing gate.** On `main` today every showable question is returned to every
-reader, whatever the call's `deciders` say. The default of not listed, described under Listing below,
-holds only once `cut-desk-feed-listing` lands. Until then, neither Bifrost's receiver nor the ops
-root-run (`desk-door-ops-root-run`) may go live on a Mind that holds private questions.
+**Operator note.** After deploy, a non-decider's Desk row for a Mind is empty until that Mind lists a
+fork. Say so in #minds before the feed goes live. Neither Bifrost's receiver nor the ops root-run
+(`desk-door-ops-root-run`) goes live on a Mind holding private questions before this is deployed.
 
 This page is the wire contract for the consumer, Bifrost's `UnixSocketDeskDoor` (Bifrost PR #67,
 `docs/desk-feed-design.md`). The golden bytes are in `crates/huginn-mind/tests/fixtures/desk-feed/`.
@@ -99,10 +98,12 @@ no `authority`, and a payload that names it is refused whole.
 `DeskEndpoints.cs` with `accountId.Value.ToString("D")`, and `StartupConfigurationValidator.cs`
 refuses any decider not in that form). That is the same grammar Huginn names for `RequestId`
 (`uuid_text`). These ids are opaque random UUIDs. A Matrix id, an email, a display name or any other
-handle is never one of them. Bifrost enforces the grammar; Huginn's door does not yet: it reads these
-fields as `Short` (any text up to 200 bytes) and would accept `@x:server` or an email. A subject
-is stored as `answerer` on an answer, so a wrong value would enter the mind. Refusing every other
-shape at decode is owed by `cut-desk-feed-listing`. The test
+handle is never one of them. Bifrost enforces the grammar, and so does Huginn's door: `subject` and
+every `deciders` entry are read as `AccountId` (`eureka-pipeline`), and decode refuses any other shape as
+`payload-not-a-request`, naming the field and never quoting the value (fixtures
+`read-mxid-decider.request` and `read-email-subject.request`, each with its `.failure.response`). A
+subject is stored as `answerer` on an answer, and the stored `desk_answer.answerer` is an `AccountId` too,
+so no other shape can enter the mind. The test
 `every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid` pins the grammar. The fixtures use
 synthetic UUIDs.
 
@@ -226,7 +227,7 @@ fixtures carry it (`list-open.response` a string, `read.response` nil).
   stripping notes for a reader who is not a decider (`DeskNotes`). It no longer masks answerer
   ids.
 
-## Listing: which forks a reader sees (Huginn's; NOT live, see the status above)
+## Listing: which forks a reader sees (Huginn's)
 
 Huginn owns audience and visibility, at its door. The card has no audience key (CultLib), and
 Bifrost's feed applies no fork filter.
@@ -248,10 +249,10 @@ Bifrost's feed applies no fork filter.
   gate accepts this leak: no fork's text, id or count leaves the door. Ranking over the visible set
   only would make `order` depend on the reader and move whenever a fork is listed, which breaks
   CultLib's rule that an order never changes and breaks every held cursor.
-- **The listing record** is planned kind `desk_listing`, key `<campaign>:desk_listing:<question-label>`,
+- **The listing record** is kind `desk_listing` (`epiphany.pipeline.desk_listing.v2`), key `<campaign>:desk_listing:<question-label>`,
   fields `campaign`, `listed` (the question's id, in the same campaign) and `reason` (one line: why
   members may read it). It is
-  admitted on the Mind's own door, so its receipt records who listed it and when. Unlisting is a
+  admitted on the Mind's own Admit door only (the desk door refuses one), so its receipt records who listed it and when. Unlisting is a
   `Withdrawn` resolution on it, and relisting withdraws that resolution, which reopens it. Each
   flip is a document with its own receipt, so the history is `huginn history <listing id>`. No flag
   is stored anywhere else.

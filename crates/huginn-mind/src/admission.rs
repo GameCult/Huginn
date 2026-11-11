@@ -62,12 +62,18 @@ pub(crate) enum Door {
     Desk,
 }
 
-/// Every staged `desk_answer`, whether the caller sent it or a derivation
-/// produced it, is refused unless it came by the desk door.
-fn refuse_desk_answers_outside_desk(door: Door, docs: &Docs<'_>) -> Result<(), MindRefusal> {
-    match docs.batch.iter().find(|staged| staged.kind == PipelineKind::DeskAnswer) {
-        Some(staged) if door != Door::Desk => Err(MindRefusal::DeskAnswerOutsideDesk { id: staged.key.clone() }),
-        _ => Ok(()),
+/// The door split. Every staged `desk_answer`, whether the caller sent it or a derivation produced it,
+/// is refused unless it came by the desk door; and a staged `desk_listing` is refused if it came by the
+/// desk door: listing is the Mind's own act, on the Admit door, with a receipt saying who.
+fn refuse_documents_at_the_wrong_door(door: Door, docs: &Docs<'_>) -> Result<(), MindRefusal> {
+    match docs.batch.iter().find(|staged| match staged.kind {
+        PipelineKind::DeskAnswer => door != Door::Desk,
+        PipelineKind::DeskListing => door == Door::Desk,
+        _ => false,
+    }) {
+        Some(staged) if staged.kind == PipelineKind::DeskListing => Err(MindRefusal::DeskRequestInvalid { field: "desk_listing".into() }),
+        Some(staged) => Err(MindRefusal::DeskAnswerOutsideDesk { id: staged.key.clone() }),
+        None => Ok(()),
     }
 }
 
@@ -160,7 +166,7 @@ impl<S: MindStore> Mind<S> {
         for envelope in envelopes {
             docs.push(stage(envelope, &mind)?)?;
         }
-        refuse_desk_answers_outside_desk(door, &docs)?;
+        refuse_documents_at_the_wrong_door(door, &docs)?;
         // A6
         let carries_instance = docs.batch.iter().filter(|staged| staged.kind == PipelineKind::Instance).count() == 1;
         if self.is_empty() && !carries_instance {
@@ -184,7 +190,7 @@ impl<S: MindStore> Mind<S> {
                 docs.push(stage(envelope, &mind)?)?;
             }
         }
-        refuse_desk_answers_outside_desk(door, &docs)?;
+        refuse_documents_at_the_wrong_door(door, &docs)?;
         for staged in &docs.batch[originals..] {
             resolve(&docs, staged, &mind, external, &mut strong)?;
         }
@@ -627,6 +633,9 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
         }
         // Decided in `answer_desk` before the document exists; no other door can stage one.
         D::DeskAnswer(_) => Ok(()),
+        // The question is a citation (`listed`), so a missing one is refused with every other missing referent, and
+        // the key derivation holds it to the listing's own campaign.
+        D::DeskListing(_) => Ok(()),
         D::Ruling(ruling) => {
             if ruling.operator_quote.is_some() && ruling.authority != RulingAuthority::Operator {
                 return Err(MindRefusal::QuoteWithoutOperator { ruling: key.into() });
@@ -905,6 +914,7 @@ fn matrix(subject: PipelineKind, outcome: &ResolutionOutcome) -> bool {
         (K::Target, O::Superseded { by }) => all(by, K::Target),
         (K::Question, O::Answered { by }) => by.kind == K::Ruling,
         (K::Question, O::Withdrawn { .. }) => true,
+        (K::DeskListing, O::Withdrawn { .. }) => true,
         (K::Ruling, O::Superseded { by }) => all(by, K::Ruling),
         (K::CutSpec, O::Superseded { by }) => all(by, K::CutSpec),
         (K::CutSpec, O::Withdrawn { .. }) => true,
