@@ -191,7 +191,7 @@ impl PipelineFacts {
                 title: value.title.clone(),
                 answers: value.answers.clone(),
                 choice: value.choice.clone(),
-                authority: value.authority,
+                authority: value.authority.clone(),
                 ruled_on: value.ruled_on.clone(),
             },
             D::CutSpec(value) => Self::CutSpec {
@@ -1502,6 +1502,25 @@ mod tests {
         assert_eq!(by("Standing").matched, 1);
         let misspelt = with(of_kinds(&[K::Ruling]), any_of("authority", &["Minds"]));
         assert!(matches!(refused(&mind, &misspelt), MindRefusal::SelectionInvalid { value: Some(v), .. } if v == "Minds"));
+    }
+
+    /// A peer's ruling is found by the Mind who decided, by the stewardship she decided under, and by authority.
+    #[test]
+    fn a_peers_rulings_are_selected_by_mind_and_by_repo() {
+        let mut mind = seeded();
+        let mut peer = ruling("R1");
+        peer.authority = RulingAuthority::Steward {
+            steward: "@heimdall:chat".into(),
+            repo: eureka_pipeline::OrgRepo("GameCult/Bifrost".into()),
+            words: "refuse leading zeros".into(),
+            event: None,
+        };
+        committed(admit(&mut mind, vec![D::Ruling(peer), D::Ruling(ruling("R2"))]));
+        let found = |alias: &str, word: &str| mind.query(&with(of_kinds(&[K::Ruling]), any_of(alias, &[word]))).unwrap().matched;
+        assert_eq!(found("authority", "Steward"), 1);
+        assert_eq!(found("about", "@heimdall:chat"), 1);
+        assert_eq!(found("repo", "GameCult/Bifrost"), 1);
+        assert_eq!(found("repo", "GameCult/CultLib"), 0);
     }
 
     #[test]

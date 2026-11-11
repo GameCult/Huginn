@@ -7,7 +7,7 @@
 //! how a change to it makes every projection rebuild. No network, no JSON, no
 //! store handle: the daemon owns the vector store and the embedder.
 
-use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef};
+use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, RulingAuthority};
 use sha2::{Digest, Sha256};
 
 use crate::mind::Mind;
@@ -56,6 +56,9 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
             lines.push(&ruling.title.0);
             lines.push(&ruling.ruling.0);
             lines.extend(ruling.operator_quote.iter().map(|quote| quote.0.as_str()));
+            if let RulingAuthority::Steward { words, .. } = &ruling.authority {
+                lines.push(&words.0);
+            }
         }
         D::CutSpec(spec) => {
             lines.push(&spec.title.0);

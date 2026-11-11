@@ -100,7 +100,17 @@ pub fn header(item: &PipelineDocumentSummary) -> String {
             let _ = write!(line, " {name}");
         }
         for (key, value) in facts {
-            if key != "title"
+            if key == "authority"
+                && let Some(Value::Object(steward)) = value.get("Steward")
+            {
+                // Her words stay out of the header: it names who decided and under what.
+                let _ = write!(line, " authority=Steward");
+                for field in ["steward", "repo"] {
+                    if let Some(shown) = steward.get(field).and_then(scalar) {
+                        let _ = write!(line, " {field}={shown}");
+                    }
+                }
+            } else if key != "title"
                 && key != "label"
                 && let Some(shown) = scalar(value)
             {
@@ -254,6 +264,32 @@ two
         assert_eq!(source_hits(&empty), "");
         let json = serde_json::to_string(&found).unwrap();
         assert_eq!(serde_json::from_str::<SourceHits>(&json).unwrap(), found, "--json round-trips");
+    }
+
+    #[test]
+    fn a_steward_ruling_header_names_the_decider_and_her_stewardship_but_not_her_words() {
+        use huginn_mind::eureka_pipeline::{OrgRepo, PipelineRuling, RulingAuthority};
+        let mut view = viewed(None, PipelineStatus::InForce);
+        view.document = PipelineDocument::Ruling(PipelineRuling {
+            campaign: Slug("c".into()),
+            label: "R1".into(),
+            title: "Zeros".into(),
+            answers: None,
+            choice: None,
+            ruling: "Refuse them.".into(),
+            operator_quote: None,
+            ruled_on: Date("2026-11-11".into()),
+            precedents: vec![],
+            authority: RulingAuthority::Steward {
+                steward: "@heimdall:chat".into(),
+                repo: OrgRepo("GameCult/Bifrost".into()),
+                words: "refuse leading zeros".into(),
+                event: None,
+            },
+        });
+        let line = header(&PipelineDocumentSummary::of(&view, &|_| None));
+        assert!(line.contains("authority=Steward steward=@heimdall:chat repo=GameCult/Bifrost"), "{line}");
+        assert!(!line.contains("zeros"), "{line}");
     }
 
     #[test]

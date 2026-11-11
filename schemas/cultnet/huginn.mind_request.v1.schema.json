@@ -2929,12 +2929,55 @@
       ]
     },
     "RulingAuthority": {
-      "type": "string",
-      "enum": [
-        "Operator",
-        "Standing",
-        "Defaulted",
-        "Mind"
+      "description": "Who decided a ruling, and under what. `Mind` is this mind's own decision, admitted by her Self. `Steward` is\na named peer's decision inside the peer's stewardship, as this mind heard it: `steward` is the deciding Mind's\nMatrix id, `repo` the stewardship she decided under, `words` her own words copied from the line this mind heard,\n`event` that line's Matrix event id when it was a delivery. The four unit variants stay bare strings on the wire.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Operator",
+            "Standing",
+            "Defaulted",
+            "Mind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Steward": {
+              "type": "object",
+              "properties": {
+                "event": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Short"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "repo": {
+                  "$ref": "#/$defs/OrgRepo"
+                },
+                "steward": {
+                  "$ref": "#/$defs/Short"
+                },
+                "words": {
+                  "$ref": "#/$defs/Para"
+                }
+              },
+              "required": [
+                "steward",
+                "repo",
+                "words"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Steward"
+          ]
+        }
       ]
     },
     "RunOperator": {
