@@ -118,20 +118,37 @@ byte; both values are in the account-id format above. Any other reader is a non-
   Bifrost, withholds account ids from a non-decider and returns a count instead. Bifrost cannot do
   it, because the card is opaque to it. A decider sees the ids. The superseding ruling is in force:
   `eureka-substrate:ruling:desk-read-visibility-withheld-ids`.
-- **CultLib cannot carry this yet.** The card has 16 required keys in closed map-mode (17 once `raised_at` lands), and
-  `deciders` must hold at least one item. `answerer` is a required, non-null id. The proposal to
-  Libby (follow-up `cultlib-fork-card-reader-counts`):
-  - the card gains a required `decider_count` (an integer). A non-decider gets `deciders: []`; a
-    decider gets the ids. The count is the same for both.
-  - `answerer` becomes nullable: nil for a non-decider, with the key kept, as `note` is stripped.
-  - the record gains a required `answerer_count`, the number of distinct answerers.
-- **Proposed fixtures**, built from mirror types that exist only in the test:
-  - `card-viewers-decider.synthetic` and `card-viewers-non-decider.synthetic` hold only the two card
-    keys the proposal changes. They are not cards.
-  - `record-non-decider.proposed` is a whole record as the proposal shapes it.
+- **The shape** (ruling `eureka-substrate:ruling:desk-reader-counts-shape`, from Libby's CultLib
+  reader-counts cut). CultLib main does not have it yet: on main the card has 16 required keys and
+  `deciders` needs at least one item, and `answerer` is a required, non-null id.
+  - **Card:** `decider_count` is an integer from 1 to 64, placed right after `deciders`. An empty
+    `deciders` means the ids are withheld from this reader; a non-empty list holds exactly
+    `decider_count` ids. With `raised_at` the card has 18 keys (MessagePack header `DE 00 12`).
+  - **Record:** `answerer_count` is the number of distinct answerers over ALL the fork's stored
+    answers, refusals included. It is the same for both readers. The record has 6 keys (header `86`).
+  - **Answers:** `answerer` is nullable on all four variants (`Counted`, `Revision`, `Retraction`,
+    `Refused`). It is null only in a non-decider's view, with the key kept. Stored answers always
+    carry it.
+  - `options_hash` does not change (still five members).
+- **Mirror fixtures.** These come from types that exist only in the test. They are neither CultLib's
+  bytes nor Huginn's output:
+  - `card-viewers-decider.synthetic` and `card-viewers-non-decider.synthetic` hold only `deciders`
+    and `decider_count`. They are not cards.
+  - `record-decider.mirror` and `record-non-decider.mirror` are a record with three answers by three
+    accounts (one of them refused) as each reader sees it.
 
-  The test `a_non_decider_gets_counts_and_no_ids_a_decider_gets_ids` checks that neither account id
-  appears anywhere in a non-decider's bytes. `record-whole` is the decider's view.
+  The tests check:
+  - a non-decider's bytes hold no account id anywhere, and a decider's hold every id;
+  - `answerer_count` is 3, counting the refusal, for both readers, and each record view starts with
+    `86`;
+  - a non-empty `deciders` must match `decider_count`, and the count stays within 1 to 64;
+  - `answerer` is null exactly in a non-decider's view.
+
+  Where `answerer_count` sits among the record's six keys is CultLib's to fix. The mirror puts it
+  before `answers`.
+- **Pending:** Libby's re-pinned vectors. When she posts the CultLib sha, Huginn's real types are
+  decoded against those vectors and these mirrors are retired (`cut-desk-feed-listing`). No byte
+  beyond Huginn's own envelope is pinned until then.
 
 Response (`huginn.desk_response.v1`):
 
@@ -182,7 +199,7 @@ An empty list is never served in place of a failure. `open_count: 0` means zero 
 ## Card fields (pending CultLib's re-pinned card vectors)
 
 `raised_at` is ruled by CultLib's steward (2026-11-11). It is a required card key whose value is an
-RFC3339 string or nil, which takes the card from 16 to 17 keys in closed map-mode. Nil means unknown.
+RFC3339 string or nil, which takes the card from 16 to 17 keys in closed map-mode (18 with `decider_count`). Nil means unknown.
 A string is the question's first-admission time, which never moves. It is outside `options_hash`,
 which keeps its five members, so the hash vectors do not change. Huginn derives it from the
 question's admission: the `committed_at` of the receipt that first admitted the question, or for an

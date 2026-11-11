@@ -28,6 +28,8 @@ const RUNTIME: &str = "huginn-eureka";
 /// other decider). Synthetic values.
 const READER: &str = "5f0c2b1e-8a4d-4c3b-9e7f-1a2b3c4d5e6f";
 const OTHER_DECIDER: &str = "0b9d7e3a-6c21-4f58-a0d4-9e8f7a6b5c4d";
+/// A member who answered but is not a decider: their answer is stored `Refused(not_a_decider)`.
+const OUTSIDER: &str = "c3a1f2e4-7b6d-4e8f-9a0b-1c2d3e4f5a6b";
 /// A question Eureka's mind holds (asked 2026-11-11). The answers, notes and hash in `record()` are
 /// synthetic: the hash is CultLib's sample digest, not this question's.
 const FORK: &str = "eureka-substrate:question:desk-listing-authority";
@@ -102,33 +104,40 @@ fn record() -> ForkRecord {
         answers: vec![
             answer("n1", "Counted", None, READER, "The asker lists her own forks.", "2026-11-11T17:00:00Z"),
             answer("n2", "Revision", Some("n1"), OTHER_DECIDER, "Agreed.", "2026-11-11T17:05:00Z"),
+            ForkDeskAnswer { code: Some(huginn_mind::desk_wire::ForkAnswerCode::NotADecider), ..answer("n3", "Refused", None, OUTSIDER, "Me too.", "2026-11-11T17:06:00Z") },
         ],
     }
 }
 
-// ---- PROPOSED reader views (ruling: the door withholds account ids from readers who are not
-// deciders, and returns counts). CultLib's card and desk_answer cannot carry this yet (card
-// `deciders` has minItems 1 and no count key; `answerer` is a required non-null id), so these are
-// fragments in the shape proposed to Libby (follow-up `cultlib-fork-card-reader-counts`), built from
-// mirror types that exist only here. They are not Huginn's output until that contract lands and
-// `cut-desk-feed-listing` builds it. ----
+// ---- Reader views, as MIRROR TYPES (ruling desk-read-visibility-withheld-ids; shape ruling
+// desk-reader-counts-shape, Libby's CultLib reader-counts cut). These types exist only here: Huginn
+// does not project reader views yet (cut-desk-feed-listing), and CultLib's re-pinned vectors are not
+// posted yet. They pin the rules, not CultLib's bytes; when Libby posts the sha, her vectors are
+// decoded against Huginn's real types instead. ----
 
-/// The two card keys the proposal changes, as a fragment: a decider gets the ids, anyone else `[]`
-/// and the count. Not a card.
+/// The card's `deciders` and `decider_count` (right after `deciders`), as a fragment. Not a card.
 #[derive(Serialize)]
 struct CardViewers {
     deciders: Vec<String>,
     decider_count: u64,
 }
 
+/// What the call's deciders look like to one reader: the ids for a decider, `[]` (withheld) for
+/// anyone else; the count either way.
 fn card_viewers(decider: bool) -> CardViewers {
     let ids = vec![READER.to_string(), OTHER_DECIDER.to_string()];
     CardViewers { decider_count: ids.len() as u64, deciders: if decider { ids } else { Vec::new() } }
 }
 
-/// `gamecult.desk_answer.v0` as proposed for a reader who is not a decider: `answerer` nil, key kept.
+/// The card rule: `decider_count` is 1..64, and `deciders` is either empty (withheld) or holds
+/// exactly `decider_count` ids.
+fn card_viewers_hold(view: &CardViewers) -> bool {
+    (1..=64).contains(&view.decider_count) && (view.deciders.is_empty() || view.deciders.len() as u64 == view.decider_count)
+}
+
+/// `gamecult.desk_answer.v0` with `answerer` nullable (all four variants).
 #[derive(Serialize)]
-struct WithheldAnswer {
+struct ViewAnswer {
     #[serde(rename = "schemaVersion")]
     schema_version: AnswerSchema,
     answer_id: String,
@@ -148,25 +157,27 @@ struct WithheldAnswer {
     request_id: String,
 }
 
-/// `gamecult.fork.record.v0` as proposed for a reader who is not a decider: every `answerer` nil and
-/// `answerer_count`, the number of distinct answerers, in their place.
+/// `gamecult.fork.record.v0` with `answerer_count`: six keys (header 0x86). The count's position
+/// among the six is CultLib's; this mirror puts it before `answers` until the vectors say.
 #[derive(Serialize)]
-struct WithheldRecord {
+struct ViewRecord {
     #[serde(rename = "schemaVersion")]
     schema_version: RecordSchema,
     fork_id: String,
     options_hash: String,
     counted_answer_id: Option<String>,
     answerer_count: u64,
-    answers: Vec<WithheldAnswer>,
+    answers: Vec<ViewAnswer>,
 }
 
-fn withheld(record: ForkRecord) -> WithheldRecord {
+/// One record as one reader sees it. `answerer_count` is the distinct answerers over ALL stored
+/// answers, refusals included, for both readers; only a non-decider's view nils `answerer`.
+fn view(record: ForkRecord, decider: bool) -> ViewRecord {
     let mut answerers: Vec<&str> = record.answers.iter().map(|answer| answer.answerer.as_str()).collect();
     answerers.sort_unstable();
     answerers.dedup();
     let answerer_count = answerers.len() as u64;
-    WithheldRecord {
+    ViewRecord {
         schema_version: record.schema_version,
         fork_id: record.fork_id,
         options_hash: record.options_hash,
@@ -175,7 +186,7 @@ fn withheld(record: ForkRecord) -> WithheldRecord {
         answers: record
             .answers
             .into_iter()
-            .map(|answer| WithheldAnswer {
+            .map(|answer| ViewAnswer {
                 schema_version: answer.schema_version,
                 answer_id: answer.answer_id,
                 fork_id: answer.fork_id,
@@ -189,7 +200,7 @@ fn withheld(record: ForkRecord) -> WithheldRecord {
                 answered_at: answer.answered_at,
                 received_at: answer.received_at,
                 claim_in_future: answer.claim_in_future,
-                answerer: None,
+                answerer: decider.then_some(answer.answerer),
                 authority: answer.authority,
                 request_id: answer.request_id,
             })
@@ -197,12 +208,18 @@ fn withheld(record: ForkRecord) -> WithheldRecord {
     }
 }
 
-/// The proposed fragments by reader kind: (file stem, bytes).
+/// The record rule: `answerer` is null exactly in a non-decider's view.
+fn record_view_holds(view: &ViewRecord, decider: bool) -> bool {
+    view.answers.iter().all(|answer| answer.answerer.is_some() == decider)
+}
+
+/// The mirror fragments by reader kind: (file stem, bytes).
 fn reader_views() -> Vec<(&'static str, Vec<u8>)> {
     vec![
         ("card-viewers-decider.synthetic", rmp_serde::to_vec_named(&card_viewers(true)).unwrap()),
         ("card-viewers-non-decider.synthetic", rmp_serde::to_vec_named(&card_viewers(false)).unwrap()),
-        ("record-non-decider.proposed", rmp_serde::to_vec_named(&withheld(record())).unwrap()),
+        ("record-decider.mirror", rmp_serde::to_vec_named(&view(record(), true)).unwrap()),
+        ("record-non-decider.mirror", rmp_serde::to_vec_named(&view(record(), false)).unwrap()),
     ]
 }
 
@@ -349,26 +366,56 @@ fn holds(bytes: &[u8], text: &str) -> bool {
     bytes.windows(text.len()).any(|window| window == text.as_bytes())
 }
 
-/// This test pins MIRROR TYPES ONLY (`CardViewers`, `WithheldRecord`), the shapes proposed to CultLib.
-/// It does not exercise Huginn's projection, which does not withhold ids yet. The tests on real list and
-/// read responses land with `cut-desk-feed-listing` (r6).
+/// MIRROR TYPES ONLY: these tests pin the reader-view rules on the types above, not Huginn's
+/// projection (which does not withhold ids yet) and not CultLib's bytes (pending Libby's sha). The
+/// tests on real list and read responses land with `cut-desk-feed-listing`.
 ///
-/// A reader who is not a decider gets counts and no account id at all: neither UUID appears
-/// anywhere in its fragments' bytes. A decider gets every id. (Proposed shapes; the build cut pins
-/// the same on Huginn's real list and read responses.)
+/// A non-decider's fragments hold no account id anywhere in their bytes, only counts; a decider's
+/// hold every id and the same counts.
 #[test]
 fn a_non_decider_gets_counts_and_no_ids_a_decider_gets_ids() {
     let views = reader_views();
     let bytes = |name: &str| views.iter().find(|(stem, _)| *stem == name).unwrap().1.clone();
-    for name in ["card-viewers-non-decider.synthetic", "record-non-decider.proposed"] {
-        let view = bytes(name);
-        assert!(!holds(&view, READER) && !holds(&view, OTHER_DECIDER), "{name} carries an account id");
+    for name in ["card-viewers-non-decider.synthetic", "record-non-decider.mirror"] {
+        let held = bytes(name);
+        assert!([READER, OTHER_DECIDER, OUTSIDER].iter().all(|id| !holds(&held, id)), "{name} carries an account id");
     }
-    let non_decider = card_viewers(false);
-    assert_eq!((non_decider.deciders.len(), non_decider.decider_count), (0, 2));
-    assert_eq!(withheld(record()).answerer_count, 2);
-    let decider = bytes("card-viewers-decider.synthetic");
-    assert!(holds(&decider, READER) && holds(&decider, OTHER_DECIDER));
-    let whole = rmp_serde::to_vec_named(&record()).unwrap();
-    assert!(holds(&whole, READER) && holds(&whole, OTHER_DECIDER), "a decider's record keeps the answerer ids");
+    let held = bytes("card-viewers-decider.synthetic");
+    assert!(holds(&held, READER) && holds(&held, OTHER_DECIDER));
+    let held = bytes("record-decider.mirror");
+    assert!([READER, OTHER_DECIDER, OUTSIDER].iter().all(|id| holds(&held, id)), "a decider's record keeps every answerer id");
+    assert_eq!(card_viewers(false).decider_count, card_viewers(true).decider_count);
+}
+
+/// `answerer_count` counts distinct answerers over every stored answer, the refused one included,
+/// and is the same for both readers; a record view has six keys (header 0x86).
+#[test]
+fn answerer_count_covers_refusals_and_the_record_has_six_keys() {
+    assert_eq!(record().answers.iter().filter(|answer| answer.outcome == "Refused").count(), 1);
+    assert_eq!((view(record(), false).answerer_count, view(record(), true).answerer_count), (3, 3));
+    for name in ["record-decider.mirror", "record-non-decider.mirror"] {
+        let held = reader_views().into_iter().find(|(stem, _)| *stem == name).unwrap().1;
+        assert_eq!(held[0], 0x86, "{name}");
+    }
+}
+
+/// `decider_count` is 1..64; `deciders` is empty (withheld) or holds exactly `decider_count` ids;
+/// `answerer` is null exactly in a non-decider's view.
+#[test]
+fn a_non_empty_decider_list_matches_its_count_and_answerer_is_null_only_for_non_deciders() {
+    assert!(card_viewers_hold(&card_viewers(true)) && card_viewers_hold(&card_viewers(false)));
+    let ids = |n: usize| (0..n).map(|at| format!("00000000-0000-4000-8000-{at:012x}")).collect::<Vec<_>>();
+    for (deciders, decider_count, holds) in [
+        (ids(1), 2, false),
+        (ids(3), 2, false),
+        (Vec::new(), 0, false),
+        (Vec::new(), 65, false),
+        (ids(64), 64, true),
+        (Vec::new(), 64, true),
+        (ids(1), 1, true),
+    ] {
+        assert_eq!(card_viewers_hold(&CardViewers { deciders, decider_count }), holds);
+    }
+    assert!(record_view_holds(&view(record(), true), true) && record_view_holds(&view(record(), false), false));
+    assert!(!record_view_holds(&view(record(), true), false) && !record_view_holds(&view(record(), false), true));
 }
