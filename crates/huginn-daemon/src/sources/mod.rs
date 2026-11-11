@@ -24,12 +24,13 @@ pub mod git;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use huginn_mind::{SourceHit, SourceHits, SourceModel, SourceQuery};
+use huginn_mind::{SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery};
 
 use crate::index::{BATCH, BULK_EMBED_TIMEOUT, Budget, Embedder, INDEX_CALL_TIMEOUT, MANAGED_BY, ModelIdentity, point_id};
 use chunk::{CHUNKER_VERSION, embedded_text};
@@ -48,6 +49,14 @@ pub const CORPUS: &str = "forge:GameCult";
 /// The instruction Qwen3 embedding models take in front of a query about code.
 pub const SOURCE_QUERY_INSTRUCTION: &str =
     "Given a question about a codebase, retrieve the source code and documentation passages that answer it";
+
+/// The constant of reciprocal rank fusion, score = sum over lists of
+/// 1 / (FUSE_K + rank), rank 1-based: Cormack, Clarke and Buttcher, SIGIR 2009,
+/// whose value this is. The one calibration constant of a multi-text search.
+pub const FUSE_K: u32 = 60;
+
+/// How many chunks each text's list holds before the lists are fused.
+pub const FUSE_DEPTH: u32 = SOURCE_TOP_K_MAX;
 
 /// Paths named in one delete call.
 const DELETE_PATHS_PER_CALL: usize = 256;
@@ -436,6 +445,31 @@ impl Batch {
         self.texts.clear();
         index.upsert_sources(&points).context("writing chunks")
     }
+}
+
+/// Reciprocal rank fusion of ranked lists (best first): an item's score is the
+/// sum over the lists that hold it of `1 / (k + rank)`, rank 1-based, and items
+/// with the same `key` are one item (the first list's copy is kept). Best first,
+/// the first-seen item ahead on a tie, cut to `top_k`. Pure: the one fuse, which
+/// every search that ranks across lists calls and none copies.
+pub fn fuse<T>(lists: Vec<Vec<T>>, key: impl Fn(&T) -> String, k: u32, top_k: usize) -> Vec<(f32, T)> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut fused: Vec<(f32, T)> = Vec::new();
+    for list in lists {
+        for (rank, item) in list.into_iter().enumerate() {
+            let share = 1.0 / (k as f32 + rank as f32 + 1.0);
+            match seen.entry(key(&item)) {
+                Entry::Occupied(at) => fused[*at.get()].0 += share,
+                Entry::Vacant(at) => {
+                    at.insert(fused.len());
+                    fused.push((share, item));
+                }
+            }
+        }
+    }
+    fused.sort_by(|a, b| b.0.total_cmp(&a.0));
+    fused.truncate(top_k);
+    fused
 }
 
 /// A source search, which a daemon answers from the collection as it finds it:

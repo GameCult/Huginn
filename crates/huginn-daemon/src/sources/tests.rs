@@ -606,3 +606,28 @@ fn chunks_are_embedded_in_bounded_batches() {
     assert_eq!(sizes, [BATCH, BATCH, 6]);
     assert_eq!(rig.index.held().len(), 70);
 }
+
+fn fused(lists: &[&[&str]], top_k: usize) -> Vec<(f32, String)> {
+    fuse(lists.iter().map(|list| list.iter().map(|item| (*item).to_owned()).collect()).collect(), |item| item.clone(), FUSE_K, top_k)
+}
+
+/// A chunk that two lists put first outranks one that a single list puts first:
+/// 1/61 + 1/61 against 1/61, with k = 60 and ranks counted from 1.
+#[test]
+fn a_chunk_first_in_two_lists_outranks_a_chunk_first_in_one() {
+    let found = fused(&[&["both", "x"], &["both", "y"]], 10);
+    let names: Vec<&str> = found.iter().map(|(_, item)| item.as_str()).collect();
+    assert_eq!(names[0], "both");
+    assert!((found[0].0 - 2.0 / 61.0).abs() < 1e-6, "{}", found[0].0);
+    assert!((found[1].0 - 1.0 / 62.0).abs() < 1e-6, "second place in one list is 1/(60+2)");
+    assert_eq!(names, ["both", "x", "y"], "a tie keeps the earlier list's item ahead");
+    let deeper = fused(&[&["a", "b", "c"], &["c"]], 10);
+    assert_eq!(deeper[0].1, "c", "1/63 + 1/61 beats 1/61");
+}
+
+/// The fused list is cut to `top_k`, and an empty input fuses to nothing.
+#[test]
+fn a_fused_list_is_cut_to_top_k() {
+    assert_eq!(fused(&[&["a", "b", "c"]], 2).len(), 2);
+    assert!(fused(&[], 5).is_empty());
+}
