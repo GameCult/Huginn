@@ -24,12 +24,13 @@ pub mod git;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use huginn_mind::{SourceHit, SourceHits, SourceModel, SourceQuery};
+use huginn_mind::{SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery};
 
 use crate::index::{BATCH, BULK_EMBED_TIMEOUT, Budget, Embedder, INDEX_CALL_TIMEOUT, MANAGED_BY, ModelIdentity, point_id};
 use chunk::{CHUNKER_VERSION, embedded_text};
@@ -48,6 +49,14 @@ pub const CORPUS: &str = "forge:GameCult";
 /// The instruction Qwen3 embedding models take in front of a query about code.
 pub const SOURCE_QUERY_INSTRUCTION: &str =
     "Given a question about a codebase, retrieve the source code and documentation passages that answer it";
+
+/// The constant of reciprocal rank fusion, score = sum over lists of
+/// 1 / (FUSE_K + rank), rank 1-based: Cormack, Clarke and Buttcher, SIGIR 2009,
+/// whose value this is. The one calibration constant of a multi-text search.
+pub const FUSE_K: u32 = 60;
+
+/// How many chunks each text's list holds before the lists are fused.
+pub const FUSE_DEPTH: u32 = SOURCE_TOP_K_MAX;
 
 /// Paths named in one delete call.
 const DELETE_PATHS_PER_CALL: usize = 256;
@@ -438,6 +447,44 @@ impl Batch {
     }
 }
 
+/// Reciprocal rank fusion of ranked lists (best first): an item's score is the
+/// sum over the lists that hold it of `1 / (k + rank)`, rank 1-based, and items
+/// with the same `key` are one item (the first list's copy is kept). Best first,
+/// the first-seen item ahead on a tie, cut to `top_k`. Pure: the one fuse, which
+/// every search that ranks across lists calls and none copies.
+pub fn fuse<T>(lists: Vec<Vec<T>>, key: impl Fn(&T) -> String, k: u32, top_k: usize) -> Vec<(f32, T)> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut fused: Vec<(f32, T)> = Vec::new();
+    for list in lists {
+        for (rank, item) in list.into_iter().enumerate() {
+            let share = 1.0 / (k as f32 + rank as f32 + 1.0);
+            match seen.entry(key(&item)) {
+                Entry::Occupied(at) => fused[*at.get()].0 += share,
+                Entry::Vacant(at) => {
+                    at.insert(fused.len());
+                    fused.push((share, item));
+                }
+            }
+        }
+    }
+    fused.sort_by(|a, b| b.0.total_cmp(&a.0));
+    fused.truncate(top_k);
+    fused
+}
+
+/// The texts a query searches by: `texts`, or an old client's `text` as a list
+/// of one, trimmed, and each distinct text once, in the order asked.
+fn query_texts(query: &SourceQuery) -> Vec<&str> {
+    let asked: Vec<&str> = if query.texts.is_empty() { vec![query.text.0.as_str()] } else { query.texts.iter().map(|text| text.0.as_str()).collect() };
+    let mut distinct: Vec<&str> = Vec::with_capacity(asked.len());
+    for text in asked {
+        if !distinct.iter().any(|seen| seen.trim() == text.trim()) {
+            distinct.push(text);
+        }
+    }
+    distinct
+}
+
 /// A source search, which a daemon answers from the collection as it finds it:
 /// it embeds the query with its own embedder, and refuses if the collection
 /// was built under another model, because vectors of two models do not compare.
@@ -459,12 +506,23 @@ pub fn search<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, quer
         identity.digest,
         identity.dimensions
     );
-    let text = format!("Instruct: {SOURCE_QUERY_INSTRUCTION}\nQuery: {}", query.text.0);
-    let mut vectors = embedder.embed(&[text], budget.left()?).context("embedding the query")?;
-    ensure!(vectors.len() == 1, "the embedder returned {} vectors for one query", vectors.len());
-    let vector = vectors.remove(0);
-    ensure!(vector.len() == identity.dimensions as usize, "the embedder returned a query vector of {} where the collection holds {}", vector.len(), identity.dimensions);
-    let rows = index.search_sources(&vector, query.repo.as_ref().map(|repo| repo.0.as_str()), query.front, query.top_k, budget.left()?)?;
+    let topics = query_texts(query);
+    let prompts: Vec<String> = topics.iter().map(|topic| format!("Instruct: {SOURCE_QUERY_INSTRUCTION}\nQuery: {topic}")).collect();
+    let vectors = embedder.embed(&prompts, budget.left()?).context("embedding the query")?;
+    ensure!(vectors.len() == prompts.len(), "the embedder returned {} vectors for {} query texts", vectors.len(), prompts.len());
+    let repo = query.repo.as_ref().map(|repo| repo.0.as_str());
+    let depth = if vectors.len() == 1 { query.top_k } else { FUSE_DEPTH };
+    let mut lists = Vec::with_capacity(vectors.len());
+    for vector in &vectors {
+        ensure!(vector.len() == identity.dimensions as usize, "the embedder returned a query vector of {} where the collection holds {}", vector.len(), identity.dimensions);
+        lists.push(index.search_sources(vector, repo, query.front, depth, budget.left()?)?);
+    }
+    let rows = if lists.len() == 1 {
+        lists.remove(0)
+    } else {
+        let key = |row: &SourceRow| chunk_id(&row.payload.repo, &row.payload.path, &row.payload.blob, row.payload.chunk_index);
+        fuse(lists, key, FUSE_K, query.top_k as usize).into_iter().map(|(score, row)| SourceRow { score, ..row }).collect()
+    };
     Ok(SourceHits {
         indexed_under: SourceModel { name: built.model, digest: built.model_digest },
         hits: rows
