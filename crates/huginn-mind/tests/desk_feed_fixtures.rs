@@ -326,7 +326,21 @@ fn every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid() {
         assert!(request.deciders().iter().all(|decider| account_id(&decider.0)), "deciders");
     }
     assert!(record().answers.iter().all(|answer| account_id(&answer.answerer)), "answerer");
-    for shape in ["@heimdall:gamecult.org", "meta@gamecult.org", "heimdall", "7", "5F0C2B1E-8A4D-4C3B-9E7F-1A2B3C4D5E6F", "{5f0c2b1e-8a4d-4c3b-9e7f-1a2b3c4d5e6f}", ""] {
+    for shape in [
+        "@heimdall:gamecult.org",
+        "meta@gamecult.org",
+        "heimdall",
+        "7",
+        "5F0C2B1E-8A4D-4C3B-9E7F-1A2B3C4D5E6F",
+        "{5f0c2b1e-8a4d-4c3b-9e7f-1a2b3c4d5e6f}",
+        "",
+        // 36 hex digits and no dash: the length alone does not make an id.
+        "5f0c2b1e08a4d04c3b09e7f01a2b3c4d5e6f",
+        // 37 characters: a valid id with one more digit.
+        "5f0c2b1e-8a4d-4c3b-9e7f-1a2b3c4d5e6f0",
+        // A dash moved off its position.
+        "5f0c2b1e8-a4d-4c3b-9e7f-1a2b3c4d5e6f",
+    ] {
         assert!(!account_id(shape), "{shape} is not an account id");
     }
 }
@@ -335,6 +349,10 @@ fn holds(bytes: &[u8], text: &str) -> bool {
     bytes.windows(text.len()).any(|window| window == text.as_bytes())
 }
 
+/// This test pins MIRROR TYPES ONLY (`CardViewers`, `WithheldRecord`), the shapes proposed to CultLib.
+/// It does not exercise Huginn's projection, which does not withhold ids yet. The tests on real list and
+/// read responses land with `cut-desk-feed-listing` (r6).
+///
 /// A reader who is not a decider gets counts and no account id at all: neither UUID appears
 /// anywhere in its fragments' bytes. A decider gets every id. (Proposed shapes; the build cut pins
 /// the same on Huginn's real list and read responses.)

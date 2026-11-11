@@ -102,7 +102,7 @@ refuses any decider not in that form). That is the same grammar Huginn names for
 handle is never one of them. Bifrost enforces the grammar; Huginn's door does not yet: it reads these
 fields as `Short` (any text up to 200 bytes) and would accept `@x:server` or an email. A subject
 is stored as `answerer` on an answer, so a wrong value would enter the mind. Refusing every other
-shape at decode is owed by `cut-desk-feed-listing.r5`. The test
+shape at decode is owed by `cut-desk-feed-listing.r6`. The test
 `every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid` pins the grammar. The fixtures use
 synthetic UUIDs.
 
@@ -118,7 +118,7 @@ byte; both values are in the account-id format above. Any other reader is a non-
   Bifrost, withholds account ids from a non-decider and returns a count instead. Bifrost cannot do
   it, because the card is opaque to it. A decider sees the ids. The superseding ruling is drafted
   as `desk-read-visibility-withheld-ids`.
-- **CultLib cannot carry this yet.** The card has 17 required keys in closed map-mode, and
+- **CultLib cannot carry this yet.** The card has 16 required keys in closed map-mode (17 once `raised_at` lands), and
   `deciders` must hold at least one item. `answerer` is a required, non-null id. The proposal to
   Libby (follow-up `cultlib-fork-card-reader-counts`):
   - the card gains a required `decider_count` (an integer). A non-decider gets `deciders: []`; a
