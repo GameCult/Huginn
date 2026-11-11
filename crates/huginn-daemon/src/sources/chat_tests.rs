@@ -18,6 +18,14 @@ use crate::index::fakes::{FakeEmbedder, FakeSources};
 
 // ---- the rig ----
 
+fn plain(id: &str) -> RoomFacts {
+    RoomFacts { room_id: id.into(), alias: None, alt_aliases: vec![], name: None, encrypted: false, direct: false, bridge: None }
+}
+
+fn estate(ids: &[&str]) -> Estate {
+    Estate::new(ids.iter().chain(["!pad1:s", "!pad2:s", "!pad3:s"].iter()).take(3).map(|id| (*id).to_owned()).collect()).unwrap()
+}
+
 struct Scripted {
     facts: RoomFacts,
     events: Vec<RoomEvent>,
@@ -28,11 +36,15 @@ struct FakeHistory {
     joined: Vec<String>,
     rooms: BTreeMap<String, Scripted>,
     calls: Vec<String>,
+    /// Rooms whose state cannot be read.
+    facts_fail: BTreeSet<String>,
+    /// Serve an event a redaction targets as the server does, without its content.
+    prune: bool,
 }
 
 impl FakeHistory {
     fn room(&mut self, id: &str, events: Vec<RoomEvent>) -> &mut Self {
-        self.rooms.insert(id.into(), Scripted { facts: RoomFacts { room_id: id.into(), ..RoomFacts::default() }, events });
+        self.rooms.insert(id.into(), Scripted { facts: plain(id), events });
         self.joined.push(id.into());
         self
     }
@@ -59,6 +71,9 @@ impl RoomHistory for FakeHistory {
 
     fn facts(&mut self, room_id: &str) -> Result<RoomFacts> {
         self.calls.push(format!("facts:{room_id}"));
+        if self.facts_fail.contains(room_id) {
+            bail!("the server did not answer for the state of {room_id}");
+        }
         match self.rooms.get(room_id) {
             Some(room) => Ok(room.facts.clone()),
             None => bail!("no such room"),
@@ -75,9 +90,13 @@ impl RoomHistory for FakeHistory {
                 None => return Ok(None),
             },
         };
-        let rest = &room.events[from..];
-        let take = rest.len().min(limit as usize);
-        Ok(Some(EventPage { events: rest[..take].to_vec(), more: take < rest.len() }))
+        let redacted: BTreeSet<&str> = room.events.iter().filter_map(|event| if let EventKind::Redaction { target } = &event.kind { Some(target.as_str()) } else { None }).collect();
+        let served: Vec<RoomEvent> = room.events[from..]
+            .iter()
+            .map(|event| if self.prune && redacted.contains(event.event_id.as_str()) { RoomEvent { kind: EventKind::Other, content_keys: vec![], ..event.clone() } } else { event.clone() })
+            .collect();
+        let take = served.len().min(limit as usize);
+        Ok(Some(EventPage { events: served[..take].to_vec(), more: take < served.len() }))
     }
 }
 
@@ -117,7 +136,7 @@ impl Rig {
             chunker_version: chunk::CHUNKER_VERSION,
         };
         index.plant(DescribedSources::Labelled { meta, cursors: BTreeMap::new() });
-        Self { embedder, index, estate: Estate::default() }
+        Self { embedder, index, estate: estate(&[]) }
     }
 
     fn run(&mut self, history: &mut FakeHistory) -> (Result<ChatRefreshed>, Vec<String>) {
@@ -188,7 +207,7 @@ fn only_joined_rooms_are_looked_at_and_a_join_rule_is_not_the_test() {
     let mut history = FakeHistory::default();
     history.room("!a:s", vec![said("$a1", 1, "in a")]).room("!b:s", vec![said("$b1", 2, "in b")]);
     // A room the reader has not joined: scripted, but never listed.
-    history.rooms.insert("!c:s".into(), Scripted { facts: RoomFacts { room_id: "!c:s".into(), ..RoomFacts::default() }, events: vec![said("$c1", 3, "in c")] });
+    history.rooms.insert("!c:s".into(), Scripted { facts: plain("!c:s"), events: vec![said("$c1", 3, "in c")] });
     let mut rig = Rig::new();
     let done = rig.ok(&mut history);
     assert!(done.is_clean());
@@ -217,7 +236,7 @@ fn a_dm_room_is_refused_unread_unindexed_and_purged() {
 #[test]
 fn each_estate_room_is_refused_by_id_and_by_alias_and_an_excluded_room_in_the_index_is_purged() {
     let mut rig = Rig::new();
-    rig.estate = Estate { ids: ["!byid:s".to_owned()].into() };
+    rig.estate = estate(&["!byid:s"]);
     let mut history = FakeHistory::default();
     history.room("!byid:s", vec![said("$i1", 1, "x")]);
     for (n, alias) in ESTATE_ALIASES.iter().map(|alias| alias.to_string()).chain(["#USERS:GAMECULT.ORG".to_owned()]).enumerate() {
@@ -282,6 +301,8 @@ fn a_bridged_platforms_sender_or_content_refuses_the_room_before_anything_is_emb
         event("$bad", "@discord_123:s", 2, EventKind::Message { body: "SECRET-BODY-TEXT".into() }),
         event("$bad", "@_discord_9:s", 2, EventKind::Message { body: "SECRET-BODY-TEXT".into() }),
         event("$bad", "@discordbot:s", 2, EventKind::Message { body: "SECRET-BODY-TEXT".into() }),
+        event("$bad", "@mautrix_discord:s", 2, EventKind::Message { body: "SECRET-BODY-TEXT".into() }),
+        event("$bad", "@_bridge_discordbot:s", 2, EventKind::Message { body: "SECRET-BODY-TEXT".into() }),
         RoomEvent { content_keys: vec!["body".into(), "fi.mau.discord".into()], ..said("$bad", 2, "SECRET-BODY-TEXT") },
         RoomEvent { content_keys: vec!["uk.half-shot.discord".into()], ..said("$bad", 2, "SECRET-BODY-TEXT") },
     ];
@@ -522,10 +543,10 @@ fn retire_chat_removes_rooms_no_longer_kept_and_given_none_all_chat_and_touches_
     cursors.insert(format!("{CHAT_PURGE_PREFIX}!a:s"), "1..2".into());
     rig.index.set_cursors(&cursors).unwrap();
     let retired = retire_chat(&mut rig.index, &["!a:s".to_owned()].into()).unwrap();
-    assert_eq!(retired, ["!b:s"]);
+    assert_eq!(retired.retired, ["!b:s"]);
     assert_eq!(rig.held_ids("!a:s"), ["$e"]);
     assert!(rig.held_ids("!b:s").is_empty() && rig.cursor("!b:s").is_none());
-    assert_eq!(retire_chat(&mut rig.index, &BTreeSet::new()).unwrap(), ["!a:s"]);
+    assert_eq!(retire_chat(&mut rig.index, &BTreeSet::new()).unwrap().retired, ["!a:s"]);
     assert!(rig.points().is_empty());
     assert_eq!(rig.index.state.lock().unwrap().points.len(), 1, "a forge point stays");
     let kept: Vec<String> = rig.index.cursors().into_keys().collect();
@@ -540,38 +561,42 @@ fn retire_chat_removes_rooms_no_longer_kept_and_given_none_all_chat_and_touches_
 
 // ---- the credential scrub through the job ----
 
-fn planted() -> Vec<(ScrubKind, String)> {
+fn planted() -> Vec<(ScrubKind, String, String)> {
+    let t = |kind, secret: String, needle: &str| (kind, secret, needle.to_owned());
     vec![
-        (ScrubKind::AuthorizationHeader, format!("Authorization: Bearer {}", "a1B2".repeat(8))),
-        (ScrubKind::Bearer, format!("Bearer {}", "z9Y8".repeat(6))),
-        (ScrubKind::KeyShape, format!("sk-{}", "q7W3".repeat(8))),
-        (ScrubKind::KeyShape, format!("sk_live_{}", "m4N5".repeat(6))),
-        (ScrubKind::KeyShape, format!("ghp_{}", "k2L9".repeat(9))),
-        (ScrubKind::KeyShape, format!("github_pat_{}_{}", "A1b2C3".repeat(4) + "ab", "d4E5f6".repeat(9) + "abcde")),
-        (ScrubKind::KeyShape, format!("glpat-{}", "r6T7".repeat(5))),
-        (ScrubKind::KeyShape, "xoxb-123456789012-987654321098-aBcDeFgHiJkLmNoP".into()),
-        (ScrubKind::KeyShape, "AKIA0123456789ABCDEF".into()),
-        (ScrubKind::KeyShape, format!("AIza{}", "Sy1_".repeat(9))),
-        (ScrubKind::Jwt, "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJlZmFrZQ".into()),
-        (ScrubKind::PemBlock, "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAfake\n-----END RSA PRIVATE KEY-----".into()),
-        (ScrubKind::PemBlock, "-----BEGIN PRIVATE KEY-----\nMIIBVQIBADANfakeNOEND".into()),
-        (ScrubKind::UrlUserinfo, "https://user:hunter2hunter2@host.example/r.git".into()),
-        (ScrubKind::UrlUserinfo, "https://tokenvalue12345@host.example/".into()),
+        t(ScrubKind::AuthorizationHeader, format!("Authorization: Bearer {}", "a1B2".repeat(8)), "a1B2a1B2a1B2"),
+        t(ScrubKind::Bearer, format!("Bearer {}", "z9Y8".repeat(6)), "z9Y8z9Y8z9Y8"),
+        t(ScrubKind::Bearer, format!("bearer:{}", "z9Y8".repeat(6)), "z9Y8z9Y8z9Y8"),
+        t(ScrubKind::KeyShape, format!("sk-{}", "q7W3".repeat(8)), "q7W3q7W3q7W3"),
+        t(ScrubKind::KeyShape, format!("sk_live_{}", "m4N5".repeat(6)), "m4N5m4N5m4N5"),
+        t(ScrubKind::KeyShape, format!("ghp_{}", "k2L9".repeat(9)), "k2L9k2L9k2L9"),
+        t(ScrubKind::KeyShape, format!("xxx-ghp_{}", "k2L9".repeat(9)), "k2L9k2L9k2L9"),
+        t(ScrubKind::KeyShape, format!("github_pat_{}_{}", "A1b2C3".repeat(4) + "ab", "d4E5f6".repeat(9) + "abcde"), "A1b2C3A1b2C3"),
+        t(ScrubKind::KeyShape, format!("glpat-{}", "r6T7".repeat(5)), "r6T7r6T7r6T7"),
+        t(ScrubKind::KeyShape, "xoxb-123456789012-987654321098-aBcDeFgHiJkLmNoP".into(), "aBcDeFgHiJkL"),
+        t(ScrubKind::KeyShape, "xoxa-2-123456789012-aBcDeFgHiJkLmNoP".into(), "aBcDeFgHiJkL"),
+        t(ScrubKind::KeyShape, "xoxp-123456789012-987654321098-aBcDeFgHiJkLmNoP".into(), "aBcDeFgHiJkL"),
+        t(ScrubKind::KeyShape, "xoxr-123456789012-987654321098-aBcDeFgHiJkLmNoP".into(), "aBcDeFgHiJkL"),
+        t(ScrubKind::KeyShape, "xoxs-123456789012-987654321098-aBcDeFgHiJkLmNoP".into(), "aBcDeFgHiJkL"),
+        t(ScrubKind::KeyShape, "AKIA0123456789ABCDEF".into(), "0123456789ABCDEF"),
+        t(ScrubKind::KeyShape, "xAKIA0123456789ABCDEF".into(), "0123456789ABCDEF"),
+        t(ScrubKind::KeyShape, format!("AIza{}", "Sy1_".repeat(9)), "Sy1_Sy1_Sy1_"),
+        t(ScrubKind::KeyShape, format!("syt_{}_{}_{}", "YWxpY2U", "aBcDeFgHiJkLmNoPqR", "0a1B2c"), "aBcDeFgHiJkLmNoPqR"),
+        t(ScrubKind::KeyShape, format!("mct_{}", "w4X5".repeat(8)), "w4X5w4X5w4X5"),
+        t(ScrubKind::AccessToken, "https://h/_matrix/client/v3/sync?access_token=abcDEF123456xyz&since=s1".into(), "abcDEF123456xyz"),
+        t(ScrubKind::AccessToken, "{\"access_token\": \"tokenValue987654\", \"user\": 1}".into(), "tokenValue987654"),
+        t(ScrubKind::Jwt, "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJlZmFrZQ".into(), "c2lnbmF0dXJlZmFrZQ"),
+        t(ScrubKind::PemBlock, "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAfake\n-----END RSA PRIVATE KEY-----".into(), "MIIEowIBAAKCAQEAfake"),
+        t(ScrubKind::PemBlock, "-----BEGIN PRIVATE KEY-----\nMIIBVQIBADANfakeNOEND".into(), "MIIBVQIBADANfake"),
+        t(ScrubKind::PemBlock, "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBFakeFakeFake\n-----END PGP PRIVATE KEY BLOCK-----".into(), "lQOYBFakeFake"),
+        t(ScrubKind::UrlUserinfo, "https://user:hunter2hunter2@host.example/r.git".into(), "hunter2hunter2"),
+        t(ScrubKind::UrlUserinfo, "https://tokenvalue12345@host.example/".into(), "tokenvalue12345"),
     ]
-}
-
-/// The part of a planted secret no replacement can contain.
-fn distinct(secret: &str) -> String {
-    let bare = secret.rsplit(['@', ' ', '\n']).next().filter(|_| !secret.contains("://")).unwrap_or(secret);
-    let source = if secret.contains("://") { secret.split("://").nth(1).unwrap().split('@').next().unwrap().rsplit(':').next().unwrap() } else { bare };
-    source.chars().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect()
 }
 
 #[test]
 fn planted_credentials_never_reach_the_chunk_the_embedder_or_the_journal_in_a_message_or_an_edit() {
-    for (kind, secret) in planted() {
-        let needle = distinct(&secret);
-        assert!(needle.len() >= 8, "{secret}");
+    for (kind, secret, needle) in planted() {
         for shape in ["see {} now", "see {}", "{}\nnext line"] {
             let (dirty, clean) = (shape.replace("{}", &secret), "nothing here".to_owned());
             let mut history = FakeHistory::default();
@@ -778,5 +803,162 @@ fn the_ingest_code_is_pure_over_its_ports_and_names_no_credential_shape_no_secon
         assert_eq!((code.matches("\"chat:").count(), code.matches("\"chat-purge:").count()), (defined, defined), "{name}: each prefix is defined once");
     }
     let chat = include_str!("chat.rs");
-    assert_eq!(chat.matches("scrub(").count(), 1, "scrub is called in one place");
+    assert_eq!(chat.matches("scrub(").count(), 2, "scrub is called for a body and for the room name, nowhere else");
+}
+
+// ---- redacted edits, redacted originals, late edits ----
+
+const EDIT_SECRET: &str = "EDIT-SECRET";
+
+fn nothing_secret_stored(rig: &Rig) {
+    let stored = format!("{:?}", rig.points().iter().map(|point| (&point.payload.messages, &point.payload.text)).collect::<Vec<_>>());
+    assert!(!stored.contains(EDIT_SECRET), "{stored}");
+}
+
+#[test]
+fn a_redacted_edit_in_the_same_page_reverts_the_message_to_its_earlier_body() {
+    let mut history = FakeHistory::default();
+    history.room("!r:s", vec![said("$m", 10, "original words"), edit("$e1", "@a:s", 20, "$m", "first edit"), edit("$e2", "@a:s", 30, "$m", EDIT_SECRET), redaction("$r", 40, "$e2")]);
+    let mut rig = Rig::new();
+    rig.ok(&mut history);
+    assert_eq!(rig.bodies(), ["first edit"]);
+    assert!(rig.embedded().iter().all(|text| !text.contains(EDIT_SECRET)));
+    history.room("!q:s", vec![said("$m", 10, "orig"), edit("$e", "@a:s", 20, "$m", EDIT_SECRET), redaction("$r", 30, "$e")]);
+    rig.ok(&mut history);
+    assert!(rig.bodies().contains(&"orig".to_owned()));
+    nothing_secret_stored(&rig);
+}
+
+#[test]
+fn a_redaction_of_an_edit_a_later_run_stored_rebuilds_the_room_and_the_secret_does_not_return() {
+    let mut history = FakeHistory { prune: true, ..FakeHistory::default() };
+    history.room("!r:s", vec![said("$m", 10, "original"), edit("$e", "@a:s", 20, "$m", EDIT_SECRET)]);
+    history.room("!q:s", vec![said("$q", 10, "quiet")]);
+    let mut rig = Rig::new();
+    rig.ok(&mut history);
+    assert!(rig.bodies().iter().any(|body| body == EDIT_SECRET), "the edit applied while it stood");
+    let recreated = rig.index.state.lock().unwrap().recreated;
+    history.push("!r:s", vec![redaction("$r", 30, "$e")]);
+    let done = rig.ok(&mut history);
+    assert!(done.is_clean());
+    nothing_secret_stored(&rig);
+    assert!(rig.bodies().contains(&"original".to_owned()));
+    assert_eq!(rig.held_ids("!q:s"), ["$q"]);
+    assert_eq!(rig.index.state.lock().unwrap().recreated, recreated);
+    assert_eq!(rig.cursor("!r:s").unwrap(), format!("{}:$r", chat_version()));
+    // The rebuild does not loop: the redaction it replays is not a trigger the second time, and nothing changes.
+    let ids = rig.ids();
+    rig.ok(&mut history);
+    assert_eq!(rig.ids(), ids);
+}
+
+#[test]
+fn a_redacted_original_takes_its_live_and_late_edits_with_it_in_a_page_across_runs_and_across_a_rebuild() {
+    let script = |history: &mut FakeHistory| {
+        history.room("!r:s", vec![said("$m", 10, "original"), edit("$e1", "@a:s", 20, "$m", "live edit"), redaction("$re", 25, "$e1"), redaction("$rm", 30, "$m"), edit("$late", "@a:s", 40, "$m", EDIT_SECRET)]);
+        history.prune = true;
+    };
+    // One page.
+    let (mut history, mut rig) = (FakeHistory::default(), Rig::new());
+    script(&mut history);
+    rig.ok(&mut history);
+    nothing_secret_stored(&rig);
+    assert!(rig.points().is_empty());
+    // Across runs: the original and a live edit stand, then it is redacted, then a late edit arrives.
+    let (mut history, mut rig) = (FakeHistory { prune: true, ..FakeHistory::default() }, Rig::new());
+    history.room("!r:s", vec![said("$m", 10, "original"), edit("$e1", "@a:s", 20, "$m", EDIT_SECRET)]);
+    rig.ok(&mut history);
+    history.push("!r:s", vec![redaction("$rm", 30, "$m")]);
+    rig.ok(&mut history);
+    nothing_secret_stored(&rig);
+    history.push("!r:s", vec![edit("$late", "@a:s", 40, "$m", EDIT_SECRET)]);
+    rig.ok(&mut history);
+    nothing_secret_stored(&rig);
+    assert!(rig.points().is_empty());
+    // Across a rebuild: a lost cursor re-reads the whole history.
+    let mut cursors = rig.index.cursors();
+    cursors.remove(&cursor_key("!r:s"));
+    rig.index.set_cursors(&cursors).unwrap();
+    rig.ok(&mut history);
+    nothing_secret_stored(&rig);
+    assert!(rig.points().is_empty());
+}
+
+#[test]
+fn a_stranger_cannot_edit_a_message_of_the_same_page() {
+    let mut history = FakeHistory::default();
+    history.room("!r:s", vec![said("$m", 10, "mine"), edit("$e", "@stranger:s", 20, "$m", "hijacked")]);
+    let mut rig = Rig::new();
+    rig.ok(&mut history);
+    assert_eq!(rig.bodies(), ["mine"]);
+}
+
+#[test]
+fn the_room_name_is_scrubbed_before_it_is_embedded_or_stored() {
+    let mut history = FakeHistory::default();
+    let token = format!("ghp_{}", "k2L9".repeat(9));
+    history.room("!r:s", vec![said("$m", 10, "hello")]).facts("!r:s", |facts| facts.name = Some(format!("Swarm {token}")));
+    let mut rig = Rig::new();
+    let (done, journal) = rig.run(&mut history);
+    let done = done.unwrap();
+    assert!(rig.embedded().iter().all(|text| !text.contains("k2L9k2L9")));
+    assert!(rig.points().iter().all(|point| !point.payload.text.contains("k2L9k2L9") && point.payload.text.starts_with("Swarm <redacted>")));
+    assert!(done.scrubbed.iter().any(|hit| hit.event_id == "(name)") && journal.iter().all(|line| !line.contains("k2L9k2L9")));
+}
+
+#[test]
+fn a_token_split_by_zero_width_characters_leaves_no_tail_in_a_stored_body() {
+    let mut history = FakeHistory::default();
+    history.room("!r:s", vec![said("$m", 10, &format!("key sk-{}\u{200b}{} done", "q7W3".repeat(4), "q7W3".repeat(4)))]);
+    let mut rig = Rig::new();
+    rig.ok(&mut history);
+    assert_eq!(rig.bodies(), ["key <redacted> done"]);
+}
+
+#[test]
+fn retire_goes_on_past_a_failed_delete_and_names_each_failure() {
+    let mut rig = Rig::new();
+    for room in ["!a:s", "!b:s", "!c:s"] {
+        rig.seed(room, "$e", 1);
+    }
+    rig.index.state.lock().unwrap().fail_chat_deletes_for = ["!a:s".to_owned()].into();
+    let done = retire_chat(&mut rig.index, &BTreeSet::new()).unwrap();
+    assert_eq!(done.retired, ["!b:s", "!c:s"]);
+    assert_eq!(done.failed.len(), 1);
+    assert_eq!(done.failed[0].0, "!a:s");
+    assert_eq!(rig.held_ids("!a:s"), ["$e"]);
+    assert!(rig.cursor("!a:s").is_some(), "the cursor stays so the next run finds it again");
+    // The refresh reports it too.
+    let mut history = FakeHistory::default();
+    history.room("!z:s", vec![said("$z", 1, "x")]);
+    let done = rig.ok(&mut history);
+    assert!(done.failed.contains(&"!a:s".to_owned()) && !done.is_clean());
+}
+
+#[test]
+fn a_facts_error_on_a_joined_room_keeps_its_points_and_cursor_and_is_reported() {
+    let mut history = FakeHistory::default();
+    history.room("!r:s", vec![said("$a", 1, "x")]);
+    let mut rig = Rig::new();
+    rig.ok(&mut history);
+    let (cursor, points) = (rig.cursor("!r:s"), rig.points());
+    history.facts_fail.insert("!r:s".into());
+    let (done, journal) = rig.run(&mut history);
+    let done = done.unwrap();
+    assert_eq!((rig.cursor("!r:s"), rig.points()), (cursor, points));
+    assert_eq!(done.failed, ["!r:s"]);
+    assert!(done.rooms.iter().any(|report| report.room_id == "!r:s" && report.failure.is_some()));
+    assert!(journal.iter().any(|line| line.contains("!r:s") && line.contains("failed")));
+}
+
+#[test]
+fn the_tail_on_equal_ends_is_the_greatest_chunk_id() {
+    let mut rig = Rig::new();
+    let (a, b) = (chunk_id("!r:s", "$a"), chunk_id("!r:s", "$b"));
+    rig.index.upsert_chat(&[
+        ChatPoint { id: a.clone(), vector: vec![1.0; 4], payload: chunk_payload_of("!r:s", &[("$a", 5)]) },
+        ChatPoint { id: b.clone(), vector: vec![1.0; 4], payload: chunk_payload_of("!r:s", &[("$b", 5)]) },
+    ])
+    .unwrap();
+    assert_eq!(rig.index.chat_tail("!r:s").unwrap().unwrap().id, a.max(b));
 }

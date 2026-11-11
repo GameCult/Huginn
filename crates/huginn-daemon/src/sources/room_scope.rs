@@ -16,8 +16,9 @@ use super::chat::RoomEvent;
 pub const ESTATE_ALIASES: [&str; 3] = ["#users:gamecult.org", "#members:gamecult.org", "#patrons:gamecult.org"];
 
 /// What the server says about a room, as far as admission needs it. The Matrix
-/// client fills it from the room's state and decides nothing.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// client fills it from the room's state and decides nothing. It has no `Default`: a
+/// room whose state could not be read is a port error, never a plain room.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomFacts {
     pub room_id: String,
     pub alias: Option<String>,
@@ -31,13 +32,25 @@ pub struct RoomFacts {
     pub bridge: Option<String>,
 }
 
-/// The estate room ids the caller knows (they exist only on the live server).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The estate room ids the caller knows (they exist only on the live server): exactly one per
+/// estate alias, so a job that was handed none, or too few, cannot be built.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Estate {
-    pub ids: BTreeSet<String>,
+    ids: BTreeSet<String>,
 }
 
 impl Estate {
+    pub fn new(ids: BTreeSet<String>) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            ids.len() == ESTATE_ALIASES.len() && ids.iter().all(|id| id.starts_with('!')),
+            "the estate is exactly {} room ids ({}), got {}",
+            ESTATE_ALIASES.len(),
+            ESTATE_ALIASES.join(", "),
+            ids.len()
+        );
+        Ok(Self { ids })
+    }
+
     /// Whether `room_id` is a named estate room. Decided before the room's state is read.
     pub fn holds_id(&self, room_id: &str) -> bool {
         self.ids.contains(room_id)
@@ -86,12 +99,14 @@ pub fn admit_room(facts: &RoomFacts, estate: &Estate) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Whether an event refuses its whole room: a sender whose localpart, lowercased
-/// with leading underscores stripped, starts with the platform's name, or content
-/// with a top-level key naming it. Deterministic identifier rules, not language reading.
+/// Whether an event refuses its whole room: a sender whose localpart, lowercased, starts with the
+/// platform's name after any leading underscores, has it after an underscore (`mautrix_discord`,
+/// `_bridge_discordbot`), or has it followed by `bot` or an underscore; or content with a top-level key
+/// naming it. Deterministic identifier rules, not language reading; `discourse` is not it.
 pub fn refuse_event(event: &RoomEvent) -> Option<Refusal> {
-    let localpart = event.sender.trim_start_matches('@').split(':').next().unwrap_or("");
-    if localpart.to_ascii_lowercase().trim_start_matches('_').starts_with("discord") {
+    let localpart = event.sender.trim_start_matches('@').split(':').next().unwrap_or("").to_ascii_lowercase();
+    let name = ["disc", "ord"].concat();
+    if localpart.trim_start_matches('_').starts_with(&name) || localpart.contains(&format!("_{name}")) || localpart.contains(&format!("{name}bot")) || localpart.contains(&format!("{name}_")) {
         return Some(Refusal::DiscordSender);
     }
     event.content_keys.iter().any(|key| key.to_ascii_lowercase().contains("discord")).then_some(Refusal::DiscordContent)
@@ -103,7 +118,11 @@ mod tests {
     use super::*;
 
     fn facts(id: &str) -> RoomFacts {
-        RoomFacts { room_id: id.into(), ..RoomFacts::default() }
+        RoomFacts { room_id: id.into(), alias: None, alt_aliases: vec![], name: None, encrypted: false, direct: false, bridge: None }
+    }
+
+    fn estate(ids: &[&str]) -> Estate {
+        Estate::new(ids.iter().chain(["!pad1:s", "!pad2:s", "!pad3:s"].iter()).take(3).map(|id| (*id).to_owned()).collect()).unwrap()
     }
 
     fn event(sender: &str, keys: &[&str]) -> RoomEvent {
@@ -112,7 +131,7 @@ mod tests {
 
     #[test]
     fn a_direct_encrypted_or_bridged_room_is_refused_and_a_plain_room_is_admitted() {
-        let estate = Estate::default();
+        let estate = estate(&[]);
         assert_eq!(admit_room(&RoomFacts { direct: true, ..facts("!a:s") }, &estate), Err(Refusal::Direct));
         assert_eq!(admit_room(&RoomFacts { encrypted: true, ..facts("!a:s") }, &estate), Err(Refusal::Encrypted));
         for state_type in ["m.bridge", "uk.half-shot.bridge"] {
@@ -123,29 +142,37 @@ mod tests {
 
     #[test]
     fn the_estate_is_refused_by_id_and_by_alias_in_any_case_and_a_lookalike_is_not() {
-        let estate = Estate { ids: ["!ids:s".to_owned()].into() };
-        assert!(estate.holds_id("!ids:s") && !estate.holds_id("!other:s"));
-        assert_eq!(admit_room(&facts("!ids:s"), &estate), Err(Refusal::Estate));
+        let named = estate(&["!ids:s"]);
+        assert!(named.holds_id("!ids:s") && !named.holds_id("!other:s"));
+        assert_eq!(admit_room(&facts("!ids:s"), &named), Err(Refusal::Estate));
         for alias in ESTATE_ALIASES.iter().map(|alias| alias.to_string()).chain(["#USERS:Gamecult.Org".to_owned()]) {
-            assert_eq!(admit_room(&RoomFacts { alias: Some(alias.clone()), ..facts("!x:s") }, &Estate::default()), Err(Refusal::Estate), "{alias}");
-            assert_eq!(admit_room(&RoomFacts { alt_aliases: vec!["#a:s".into(), alias.clone()], ..facts("!x:s") }, &Estate::default()), Err(Refusal::Estate), "alt {alias}");
+            assert_eq!(admit_room(&RoomFacts { alias: Some(alias.clone()), ..facts("!x:s") }, &estate(&[])), Err(Refusal::Estate), "{alias}");
+            assert_eq!(admit_room(&RoomFacts { alt_aliases: vec!["#a:s".into(), alias.clone()], ..facts("!x:s") }, &estate(&[])), Err(Refusal::Estate), "alt {alias}");
         }
         for lookalike in ["#users-guide:gamecult.org", "#patrons-club:gamecult.org", "#users:gamecult.org.evil", "#users:other.org"] {
-            assert_eq!(admit_room(&RoomFacts { alias: Some(lookalike.into()), ..facts("!x:s") }, &Estate::default()), Ok(()), "{lookalike}");
+            assert_eq!(admit_room(&RoomFacts { alias: Some(lookalike.into()), ..facts("!x:s") }, &estate(&[])), Ok(()), "{lookalike}");
         }
     }
 
     #[test]
     fn a_bridged_platform_sender_or_content_key_refuses_and_a_lookalike_does_not() {
-        for sender in ["@discord_123:s", "@_discord_9:s", "@__DiscordBot:s", "@discordbot:s"] {
+        for sender in ["@discord_123:s", "@_discord_9:s", "@__DiscordBot:s", "@discordbot:s", "@mautrix_discord:s", "@_bridge_discordbot:s", "@a_discord:s"] {
             assert_eq!(refuse_event(&event(sender, &[])), Some(Refusal::DiscordSender), "{sender}");
         }
         for key in ["fi.mau.discord", "uk.half-shot.discord", "X.DISCORD.y"] {
             assert_eq!(refuse_event(&event("@a:s", &["body", key])), Some(Refusal::DiscordContent), "{key}");
         }
-        for sender in ["@discourse:s", "@disco:s", "@eureka:s", "@a_discord:s", "@x:discord.com"] {
+        for sender in ["@discourse:s", "@disco:s", "@eureka:s", "@x:discord.com"] {
             assert_eq!(refuse_event(&event(sender, &["discourse", "body"])), None, "{sender}");
         }
+    }
+
+    #[test]
+    fn the_estate_needs_exactly_its_room_ids() {
+        for ids in [vec![], vec!["!a:s"], vec!["!a:s", "!b:s", "!c:s", "!d:s"], vec!["!a:s", "!b:s", "notaroom"]] {
+            assert!(Estate::new(ids.iter().map(|id| (*id).to_owned()).collect()).is_err(), "{ids:?}");
+        }
+        assert!(Estate::new(["!a:s", "!b:s", "!c:s"].map(str::to_owned).into()).is_ok());
     }
 
     #[test]

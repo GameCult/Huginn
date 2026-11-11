@@ -270,6 +270,8 @@ pub(crate) struct SourcesState {
     pub(crate) fail_chat_upserts: bool,
     /// Every chat delete refuses while this is set.
     pub(crate) fail_chat_deletes: bool,
+    /// A chat delete naming one of these rooms refuses.
+    pub(crate) fail_chat_deletes_for: BTreeSet<String>,
     /// Every chat delete that went through: the room and the ids (`None` is all of the room).
     pub(crate) chat_deletes: Vec<(String, Option<Vec<String>>)>,
     /// The repo filter and limit of every search, in order.
@@ -439,7 +441,7 @@ impl SourceIndex for FakeSources {
 
     fn delete_chat(&mut self, room_id: &str, ids: Option<&[String]>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        ensure!(!state.fail_chat_deletes, "the vector store refused the chat delete");
+        ensure!(!state.fail_chat_deletes && !state.fail_chat_deletes_for.contains(room_id), "the vector store refused the chat delete");
         state.chat_deletes.push((room_id.to_owned(), ids.map(<[String]>::to_vec)));
         state.chat.retain(|id, point| !(point.payload.room_id == room_id && ids.is_none_or(|ids| ids.contains(id))));
         Ok(())

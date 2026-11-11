@@ -107,7 +107,7 @@ fn redact_word(word: &str) -> String {
 
 /// The version of the scrub's rules. Part of the chat version: a bump makes every
 /// room re-ingest from the room's history and scrub it again.
-pub const SCRUB_VERSION: u32 = 1;
+pub const SCRUB_VERSION: u32 = 2;
 
 /// What replaces a secret.
 pub const REDACTED: &str = "<redacted>";
@@ -121,6 +121,7 @@ pub enum ScrubKind {
     KeyShape,
     Jwt,
     PemBlock,
+    AccessToken,
 }
 
 impl std::fmt::Display for ScrubKind {
@@ -132,6 +133,7 @@ impl std::fmt::Display for ScrubKind {
             Self::KeyShape => "key-shape",
             Self::Jwt => "jwt",
             Self::PemBlock => "pem-block",
+            Self::AccessToken => "access-token",
         })
     }
 }
@@ -143,26 +145,35 @@ pub struct Scrubbed {
     pub hits: Vec<ScrubKind>,
 }
 
-/// Replaces credential shapes in `text`: a PEM private key block, an `authorization:` header line,
-/// `Bearer`/`Basic`/`token` followed by a long token, a vendor key shape, a JWT, and URL userinfo.
+/// Zero-width characters a secret could be split with.
+fn zero_width(c: char) -> bool {
+    matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{00ad}' | '\u{180e}')
+}
+
+/// Replaces credential shapes in `text`: a PEM or PGP private key block, an `authorization:` header
+/// line, `Bearer`/`Basic`/`token` followed by a long token (blank or colon between), a vendor key
+/// shape (Matrix tokens included), an `access_token` query or JSON value, a JWT, and URL userinfo.
 /// Each hit becomes `<redacted>`. Token shapes only; ordinary prose, SHAs, UUIDs and ids pass byte for byte.
+/// Zero-width characters are removed before matching; when anything matched, the returned text is the
+/// stripped one, so a token split by them leaves no tail, and when nothing matched the text is returned as it came (emoji joiners stay).
 pub fn scrub(text: &str) -> Scrubbed {
     let mut hits = Vec::new();
-    let mut text = text.to_owned();
-    let passes: [(ScrubKind, fn(&str, usize) -> Option<usize>); 5] = [
+    let mut stripped: String = text.chars().filter(|c| !zero_width(*c)).collect();
+    let passes: [(ScrubKind, fn(&str, usize) -> Option<usize>); 6] = [
         (ScrubKind::PemBlock, pem_block),
         (ScrubKind::AuthorizationHeader, authorization_line),
+        (ScrubKind::AccessToken, access_token),
         (ScrubKind::Bearer, bearer_token),
         (ScrubKind::KeyShape, key_shape),
         (ScrubKind::Jwt, jwt),
     ];
     for (kind, find) in passes {
-        text = replace_matches(&text, kind, find, &mut hits);
+        stripped = replace_matches(&stripped, kind, find, &mut hits);
     }
-    let urls = redact_url_userinfo(&text);
-    let (before, after) = (text.matches(REDACTED).count(), urls.matches(REDACTED).count());
+    let urls = redact_url_userinfo(&stripped);
+    let (before, after) = (stripped.matches(REDACTED).count(), urls.matches(REDACTED).count());
     hits.extend(std::iter::repeat_n(ScrubKind::UrlUserinfo, after.saturating_sub(before)));
-    Scrubbed { text: urls, hits }
+    if hits.is_empty() { Scrubbed { text: text.to_owned(), hits } } else { Scrubbed { text: urls, hits } }
 }
 
 fn replace_matches(text: &str, kind: ScrubKind, find: fn(&str, usize) -> Option<usize>, hits: &mut Vec<ScrubKind>) -> String {
@@ -212,12 +223,14 @@ fn pem_block(text: &str, at: usize) -> Option<usize> {
     let rest = &text[at..];
     let label = rest.strip_prefix("-----BEGIN ")?;
     let words = run_end(label, 0, |byte| byte.is_ascii_uppercase() || byte == b' ');
-    label[..words].ends_with("PRIVATE KEY").then_some(())?;
+    (label[..words].ends_with("PRIVATE KEY") || label[..words].ends_with("PRIVATE KEY BLOCK")).then_some(())?;
     label[words..].starts_with("-----").then_some(())?;
     let body_from = at + "-----BEGIN ".len() + words + 5;
-    let end = text[body_from..]
-        .find("-----END ")
-        .and_then(|end| text[body_from + end..].find("PRIVATE KEY-----").map(|tail| body_from + end + tail + "PRIVATE KEY-----".len()));
+    let end = text[body_from..].find("-----END ").and_then(|end| {
+        let name = body_from + end + "-----END ".len();
+        let words = run_end(text, name, |byte| byte.is_ascii_uppercase() || byte == b' ');
+        text[words..].starts_with("-----").then_some(words + 5)
+    });
     Some(end.unwrap_or(text.len()))
 }
 
@@ -234,20 +247,21 @@ fn bearer_token(text: &str, at: usize) -> Option<usize> {
     word_start(text, at).then_some(())?;
     let word = ["bearer", "basic", "token"].into_iter().find(|word| starts_with_ignore_case(text, at, word))?;
     let blanks = at + word.len();
-    let value = run_end(text, blanks, |byte| byte == b' ' || byte == b'\t');
+    let colon = usize::from(text.as_bytes().get(blanks) == Some(&b':'));
+    let value = run_end(text, blanks + colon, |byte| byte == b' ' || byte == b'\t');
     (value > blanks).then_some(())?;
     let end = run_end(text, value, token_char);
     (end - value >= 16).then_some(end)
 }
 
-/// A vendor key at a word start: the prefix, then a long enough run of the key alphabet.
+/// A vendor key: the prefix, then a long enough run of the key alphabet.
 fn key_shape(text: &str, at: usize) -> Option<usize> {
-    word_start(text, at).then_some(())?;
     let rest = &text[at..];
-    let by_prefix = [("sk-", 16), ("sk_live_", 16), ("pk_live_", 16), ("github_pat_", 16), ("glpat-", 16)];
+    let by_prefix = [("sk-", 16), ("sk_live_", 16), ("pk_live_", 16), ("github_pat_", 16), ("glpat-", 16), ("syt_", 16), ("mct_", 16)];
     let tokens = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"].into_iter().map(|prefix| (prefix, 16));
     for (prefix, least) in by_prefix.into_iter().chain(tokens) {
-        if rest.starts_with(prefix) {
+        // Only the generic prefix needs a word start (`risk-averse`, `task-force`); the distinctive ones are found glued to anything.
+        if rest.starts_with(prefix) && (prefix != "sk-" || word_start(text, at)) {
             let end = run_end(text, at + prefix.len(), key_char);
             return (end - at - prefix.len() >= least).then_some(end);
         }
@@ -271,9 +285,23 @@ fn key_shape(text: &str, at: usize) -> Option<usize> {
     None
 }
 
+/// `access_token` as a query parameter or JSON member, through its value (8 or more characters).
+fn access_token(text: &str, at: usize) -> Option<usize> {
+    starts_with_ignore_case(text, at, "access_token").then_some(())?;
+    let mut at = at + "access_token".len();
+    let skip = |at: usize, set: &[u8]| run_end(text, at, |byte| set.contains(&byte));
+    at = skip(at, b"\"'");
+    at = skip(at, b" \t");
+    matches!(text.as_bytes().get(at), Some(b'=' | b':')).then_some(())?;
+    at = skip(at + 1, b" \t");
+    at = skip(at, b"\"'");
+    let end = run_end(text, at, |byte| !byte.is_ascii_whitespace() && !matches!(byte, b'&' | b'"' | b'\'' | b',' | b'}' | b';' | b'#'));
+    (end - at >= 8).then_some(end)
+}
+
 /// Three base64url segments, the first starting `eyJ`.
 fn jwt(text: &str, at: usize) -> Option<usize> {
-    (word_start(text, at) && text[at..].starts_with("eyJ")).then_some(())?;
+    text[at..].starts_with("eyJ").then_some(())?;
     let segment = |from: usize| run_end(text, from, key_char);
     let first = segment(at);
     let mut end = first;
@@ -383,6 +411,20 @@ mod tests {
             (ScrubKind::Jwt, "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJlZmFrZQ".into(), "c2lnbmF0dXJlZmFrZQ".into()),
             (ScrubKind::PemBlock, pem, "MIIEowIBAAKCAQEAfake".into()),
             (ScrubKind::PemBlock, "-----BEGIN PRIVATE KEY-----\nMIIBVQIBADANfakeNOEND".into(), "MIIBVQIBADANfake".into()),
+            (ScrubKind::KeyShape, format!("syt_{}_{}_{}", "YWxpY2U", "aBcDeFgHiJkLmNoPqR", "0a1B2c"), "aBcDeFgHiJkLmNoPqR".into()),
+            (ScrubKind::KeyShape, format!("mct_{}", "w4X5".repeat(8)), "w4X5w4X5w4X5".into()),
+            (ScrubKind::KeyShape, "xoxa-2-123456789012-aBcDeFgHiJkLmNoP".into(), "aBcDeFgHiJkL".into()),
+            (ScrubKind::KeyShape, "xoxp-123456789012-987654321098-aBcDeFgHiJkLmNoP".into(), "aBcDeFgHiJkL".into()),
+            (ScrubKind::KeyShape, "xoxr-123456789012-987654321098-aBcDeFgHiJkLmNoP".into(), "aBcDeFgHiJkL".into()),
+            (ScrubKind::KeyShape, "xoxs-123456789012-987654321098-aBcDeFgHiJkLmNoP".into(), "aBcDeFgHiJkL".into()),
+            (ScrubKind::KeyShape, "ASIA0123456789ABCDEF".into(), "0123456789ABCDEF".into()),
+            (ScrubKind::KeyShape, "gho_".to_owned() + &"p1Q2".repeat(9), "p1Q2p1Q2p1Q2".into()),
+            (ScrubKind::KeyShape, "pk_live_".to_owned() + &"e3R4".repeat(6), "e3R4e3R4e3R4".into()),
+            (ScrubKind::AccessToken, "https://h/_matrix/client/v3/sync?access_token=abcDEF123456xyz&since=s1".into(), "abcDEF123456xyz".into()),
+            (ScrubKind::AccessToken, "{\"access_token\": \"tokenValue987654\", \"user\": 1}".into(), "tokenValue987654".into()),
+            (ScrubKind::Bearer, format!("bearer:{}", "z9Y8x7".repeat(4)), "z9Y8x7z9Y8".into()),
+            (ScrubKind::Bearer, format!("token: {}", "m1N2o3".repeat(4)), "m1N2o3m1N2".into()),
+            (ScrubKind::PemBlock, "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBFakeFakeFake\n-----END PGP PRIVATE KEY BLOCK-----".into(), "lQOYBFakeFake".into()),
             (ScrubKind::UrlUserinfo, "https://user:hunter2hunter2@host.example/r.git".into(), "hunter2hunter2".into()),
             (ScrubKind::UrlUserinfo, "https://tokenvalue12345@host.example/".into(), "tokenvalue12345".into()),
         ]
@@ -439,6 +481,34 @@ mod tests {
             for end in start..=chars.len() {
                 let _ = scrub(&chars[start..end].iter().collect::<String>());
             }
+        }
+    }
+
+    #[test]
+    fn a_distinctive_key_is_found_glued_to_other_text_but_the_generic_prefix_still_needs_a_word_start() {
+        let ghp = format!("xxx{}", "ghp_".to_owned() + &"k2L9".repeat(9));
+        assert_eq!(scrub(&ghp).text, "xxx<redacted>");
+        assert_eq!(scrub("idAKIA0123456789ABCDEFend").hits, [ScrubKind::KeyShape]);
+        assert_eq!(scrub(&format!("zzz{}", "xoxb-123456789012-aBcDeFgHiJkLmNoP")).hits, [ScrubKind::KeyShape]);
+        assert_eq!(scrub(&format!("q{}", "AIza".to_owned() + &"Sy1_".repeat(9))).hits, [ScrubKind::KeyShape]);
+        assert!(scrub("risk-averse-thinking-process task-force-alpha-bravo").hits.is_empty());
+    }
+
+    #[test]
+    fn zero_width_characters_inside_a_token_leave_no_tail_and_emoji_joiners_survive_when_nothing_matched() {
+        let split = format!("sk-{}\u{200b}{}", "q7W3".repeat(4), "q7W3".repeat(4));
+        let out = scrub(&format!("key {split} end"));
+        assert_eq!(out.text, "key <redacted> end");
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJz\u{feff}dWIiOiJmYWtlIn0.c2lnbmF0dXJl\u{200d}ZmFrZQ";
+        assert_eq!(scrub(jwt).text, "<redacted>");
+        let family = "family \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} here";
+        assert_eq!(scrub(family).text, family);
+    }
+
+    #[test]
+    fn matrix_tokens_and_query_values_are_found_and_prose_about_them_is_not() {
+        for same in ["the access_token is a thing", "access_token: short", "syt_ is the prefix", "mct_ tokens", "bearer:short"] {
+            assert_eq!(scrub(same).text, same, "{same}");
         }
     }
 }

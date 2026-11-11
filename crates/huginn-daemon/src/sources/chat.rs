@@ -108,6 +108,8 @@ pub struct ChatReport {
     pub scrubbed: u32,
     pub purged: u32,
     pub seconds: f64,
+    /// Why the room could not be read or written this run; what the index held for it stays as it was.
+    pub failure: Option<String>,
 }
 
 impl std::fmt::Display for ChatReport {
@@ -124,7 +126,11 @@ impl std::fmt::Display for ChatReport {
             self.scrubbed,
             self.purged,
             self.seconds
-        )
+        )?;
+        match &self.failure {
+            Some(why) => write!(formatter, " failed: {why}"),
+            None => Ok(()),
+        }
     }
 }
 
@@ -152,6 +158,17 @@ pub struct ChatRefreshed {
     pub failed: Vec<String>,
     pub refused: Vec<RefusedRoom>,
     pub scrubbed: Vec<ScrubHit>,
+}
+
+impl ChatReport {
+    fn empty(room_id: &str, alias: Option<String>) -> Self {
+        Self { room_id: room_id.to_owned(), alias, first: None, last: None, events: 0, chunks: 0, scrubbed: 0, purged: 0, seconds: 0.0, failure: None }
+    }
+
+    /// A room that could not be handled this run. Its points and cursor are untouched: an error is not a reclassification.
+    fn failed(room_id: &str, alias: Option<String>, error: &anyhow::Error) -> Self {
+        Self { failure: Some(format!("{error:#}")), ..Self::empty(room_id, alias) }
+    }
 }
 
 impl ChatRefreshed {
@@ -191,21 +208,32 @@ fn purge_room<S: SourceIndex>(index: &mut S, room_id: &str) -> Result<()> {
     drop_cursor(index, &cursor_key(room_id))
 }
 
+/// What `retire_chat` did: the rooms it removed, and those it could not (each with why), which it went on past.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Retired {
+    pub retired: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
 /// Deletes the points and `chat:` cursor of every room not in `keep` (the reader left it,
-/// or it is refused or excluded), and returns those rooms. Purge tombstones and forge
-/// repos are never touched. With the empty set it removes the whole chat corpus.
-pub fn retire_chat<S: SourceIndex>(index: &mut S, keep: &BTreeSet<String>) -> Result<Vec<String>> {
+/// or it is refused or excluded). A room whose delete fails is reported and the others go on. Purge
+/// tombstones and forge repos are never touched. With the empty set it removes the whole chat corpus.
+pub fn retire_chat<S: SourceIndex>(index: &mut S, keep: &BTreeSet<String>) -> Result<Retired> {
     let rooms: Vec<String> = read_cursors(index)?.keys().filter_map(|key| cursor_room(key)).filter(|room| !keep.contains(*room)).map(str::to_owned).collect();
-    for room in &rooms {
-        purge_room(index, room)?;
+    let mut done = Retired::default();
+    for room in rooms {
+        match purge_room(index, &room) {
+            Ok(()) => done.retired.push(room),
+            Err(error) => done.failed.push((room, format!("{error:#}"))),
+        }
     }
-    Ok(rooms)
+    Ok(done)
 }
 
 /// A change to chunks already stored, in event order.
 enum Op {
     /// An edit by `sender` of `target`'s body; applies only to the original's sender.
-    Edit { target: String, sender: String, body: String },
+    Edit { id: String, target: String, sender: String, body: String },
     /// A held message's body is what the page says it is (a replay).
     Set { target: String, body: String },
     Redact { target: String },
@@ -233,9 +261,19 @@ impl Op {
     }
 }
 
+/// A message of the page with the edits of the page that apply to it: the body is the last edit's, and a
+/// redacted edit leaves the list, so the body falls back to the one before it.
+struct Pending {
+    message: ChatMessage,
+    original: String,
+    edits: Vec<(String, String)>,
+}
+
 struct Folded {
     pending: Vec<ChatMessage>,
     ops: Vec<Op>,
+    /// Every event id of the page: a redaction of one of them is known.
+    seen: HashSet<String>,
 }
 
 struct Room<'a> {
@@ -247,8 +285,8 @@ struct Room<'a> {
 /// The page folded in order: the purge filter, then the credential scrub, then the
 /// event's effect. After this no raw body exists.
 fn fold(room: &Room, events: &[RoomEvent], report: &mut ChatReport, out: &mut ChatRefreshed) -> Folded {
-    let mut folded = Folded { pending: Vec::new(), ops: Vec::new() };
-    let mut redacted: HashSet<&str> = HashSet::new();
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut ops: Vec<Op> = Vec::new();
     let mut scrubbed = |event: &RoomEvent, body: &str| {
         let clean = scrub(body);
         for kind in clean.hits {
@@ -262,10 +300,11 @@ fn fold(room: &Room, events: &[RoomEvent], report: &mut ChatReport, out: &mut Ch
             EventKind::Message { body } => {
                 if covers(&room.windows, event.ts_ms) {
                     report.purged += 1;
-                } else if !redacted.contains(event.event_id.as_str()) {
+                } else {
                     let body = scrubbed(event, body);
                     if !body.trim().is_empty() {
-                        folded.pending.push(ChatMessage { event_id: event.event_id.clone(), sender: event.sender.clone(), ts_ms: event.ts_ms, body });
+                        let message = ChatMessage { event_id: event.event_id.clone(), sender: event.sender.clone(), ts_ms: event.ts_ms, body: body.clone() };
+                        pending.push(Pending { message, original: body, edits: Vec::new() });
                     }
                 }
             }
@@ -275,21 +314,29 @@ fn fold(room: &Room, events: &[RoomEvent], report: &mut ChatReport, out: &mut Ch
                     continue;
                 }
                 let body = scrubbed(event, body);
-                match folded.pending.iter_mut().find(|message| message.event_id == *target) {
-                    Some(message) if message.sender == event.sender && !body.trim().is_empty() => message.body = body,
+                match pending.iter_mut().find(|held| held.message.event_id == *target) {
+                    Some(held) if held.message.sender == event.sender && !body.trim().is_empty() => {
+                        held.edits.push((event.event_id.clone(), body.clone()));
+                        held.message.body = body;
+                    }
                     Some(_) => {}
-                    None => folded.ops.push(Op::Edit { target: target.clone(), sender: event.sender.clone(), body }),
+                    None => ops.push(Op::Edit { id: event.event_id.clone(), target: target.clone(), sender: event.sender.clone(), body }),
                 }
             }
             EventKind::Redaction { target } => {
-                folded.pending.retain(|message| message.event_id != *target);
-                redacted.insert(target);
-                folded.ops.push(Op::Redact { target: target.clone() });
+                // The target may be a message, or an edit whose own text must stop applying.
+                pending.retain(|held| held.message.event_id != *target);
+                for held in &mut pending {
+                    held.edits.retain(|(id, _)| id != target);
+                    held.message.body = held.edits.last().map_or_else(|| held.original.clone(), |(_, body)| body.clone());
+                }
+                ops.retain(|op| !matches!(op, Op::Edit { id, .. } if id == target));
+                ops.push(Op::Redact { target: target.clone() });
             }
             EventKind::Other => {}
         }
     }
-    folded
+    Folded { pending: pending.into_iter().map(|held| held.message).collect(), ops, seen: events.iter().map(|event| event.event_id.clone()).collect() }
 }
 
 /// Chunks to rewrite: the stored chunk ids they replace and the messages that now make them.
@@ -364,16 +411,29 @@ fn apply_purge<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, dim
 
 /// Folds one page into the stored chunks: edits and redactions rewrite the chunk that held
 /// the target alone, new messages extend the open tail.
-fn write_page<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, dimensions: u32, room: &Room, mut folded: Folded) -> Result<u32> {
+fn write_page<E: Embedder, S: SourceIndex>(
+    embedder: &mut E,
+    index: &mut S,
+    dimensions: u32,
+    room: &Room,
+    mut folded: Folded,
+    may_rebuild: bool,
+) -> Result<Option<u32>> {
     let room_id = &room.facts.room_id;
     let mut asked: Vec<String> = folded.pending.iter().map(|message| message.event_id.clone()).collect();
     asked.extend(folded.ops.iter().map(|op| op.target().to_owned()));
     if asked.is_empty() {
-        return Ok(0);
+        return Ok(Some(0));
     }
     let holding = index.chat_chunks_holding(room_id, &asked)?;
     // A message the index already holds is a replay: its page body is asserted, never appended again.
     let held: HashSet<&str> = holding.iter().flat_map(|chunk| chunk.payload.messages.iter().map(|message| message.event_id.as_str())).collect();
+    // A redaction of an event this room neither holds nor shows on the page may be of an edit whose own id is
+    // never stored, so a body it changed cannot be taken back here: the room is rebuilt from the history, which
+    // serves a redacted edit without its text.
+    if may_rebuild && folded.ops.iter().any(|op| matches!(op, Op::Redact { target } if !folded.seen.contains(target) && !held.contains(target.as_str()))) {
+        return Ok(None);
+    }
     let (replayed, fresh): (Vec<ChatMessage>, Vec<ChatMessage>) = folded.pending.drain(..).partition(|message| held.contains(message.event_id.as_str()));
     let mut ops: Vec<Op> = replayed.into_iter().map(|message| Op::Set { target: message.event_id, body: message.body }).collect();
     ops.append(&mut folded.ops);
@@ -400,7 +460,7 @@ fn write_page<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, dime
         tail_messages.extend(fresh);
         rewrites.push((tail_id.into_iter().collect(), tail_messages));
     }
-    write_rewrites(embedder, index, dimensions, room, rewrites, &standing)
+    write_rewrites(embedder, index, dimensions, room, rewrites, &standing).map(Some)
 }
 
 enum Outcome {
@@ -421,9 +481,13 @@ fn ingest_room<E: Embedder, S: SourceIndex, H: RoomHistory>(
     let room_id = facts.room_id.as_str();
     let (key, version) = (cursor_key(room_id), chat_version());
     let cursors = read_cursors(index)?;
+    let mut may_rebuild = false;
     let mut after: Option<String> = match cursors.get(&key).map(|value| parse_cursor(value)) {
         None => None,
-        Some(Some((held, event))) if held == version => Some(event.to_owned()).filter(|event| !event.is_empty()),
+        Some(Some((held, event))) if held == version => {
+            may_rebuild = true;
+            Some(event.to_owned()).filter(|event| !event.is_empty())
+        }
         // Another chunker or scrub version, or a value nobody here wrote: this room alone starts over.
         Some(_) => {
             index.delete_chat(room_id, None).with_context(|| format!("deleting the chunks of {room_id} for a re-ingest"))?;
@@ -434,9 +498,20 @@ fn ingest_room<E: Embedder, S: SourceIndex, H: RoomHistory>(
         put_cursor(index, &key, &format!("{version}:"))?;
     }
     let windows = cursors.get(&purge_key(room_id)).map(|value| parse_windows(value)).transpose()?.unwrap_or_default();
-    let label = facts.name.clone().or_else(|| facts.alias.clone()).unwrap_or_else(|| room_id.to_owned());
+    let mut report = ChatReport::empty(room_id, facts.alias.clone());
+    // The room's name is embedded and stored in every chunk, so it passes the scrub like a body.
+    let label = match &facts.name {
+        Some(name) => {
+            let clean = scrub(name);
+            for kind in clean.hits {
+                report.scrubbed += 1;
+                out.scrubbed.push(ScrubHit { room_id: room_id.to_owned(), event_id: "(name)".to_owned(), kind });
+            }
+            clean.text
+        }
+        None => facts.alias.clone().unwrap_or_else(|| room_id.to_owned()),
+    };
     let room = Room { facts, label, windows };
-    let mut report = ChatReport { room_id: room_id.to_owned(), alias: facts.alias.clone(), first: None, last: None, events: 0, chunks: 0, scrubbed: 0, purged: 0, seconds: 0.0 };
     apply_purge(embedder, index, dimensions, &room, &mut report)?;
     let mut restarted = false;
     loop {
@@ -457,7 +532,15 @@ fn ingest_room<E: Embedder, S: SourceIndex, H: RoomHistory>(
         report.first.get_or_insert_with(|| page.events[0].event_id.clone());
         report.events += u32::try_from(page.events.len()).unwrap_or(u32::MAX);
         let folded = fold(&room, &page.events, &mut report, out);
-        report.chunks += write_page(embedder, index, dimensions, &room, folded)?;
+        let Some(written) = write_page(embedder, index, dimensions, &room, folded, may_rebuild)? else {
+            // Start this room over from the history; nothing it read is trusted to be complete.
+            purge_room(index, room_id)?;
+            put_cursor(index, &key, &format!("{version}:"))?;
+            (after, may_rebuild) = (None, false);
+            report = ChatReport { scrubbed: report.scrubbed, ..ChatReport::empty(room_id, facts.alias.clone()) };
+            continue;
+        };
+        report.chunks += written;
         put_cursor(index, &key, &format!("{version}:{last}"))?;
         report.last = Some(last.clone());
         after = Some(last);
@@ -504,26 +587,31 @@ pub fn refresh_chat<E: Embedder, S: SourceIndex, H: RoomHistory>(
         match verdict {
             Ok(Ok(facts)) => admitted.push(facts),
             Ok(Err(reason)) => {
+                // Not kept, so the retirement below purges whatever it held.
                 keep.remove(room_id);
-                match purge_room(index, room_id) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        journal(format!("huginn-sources: chat {room_id} could not be purged, the others go on: {error:#}"));
-                        out.failed.push(room_id.clone());
-                    }
-                }
                 journal(format!("refused: {room_id} {reason}"));
                 out.refused.push(RefusedRoom { room_id: room_id.clone(), reason, event_id: None });
             }
+            // An error is not a reclassification: the room keeps its points and cursor, and the report says why.
             Err(error) => {
-                journal(format!("huginn-sources: chat {room_id} facts failed, the others go on: {error:#}"));
+                let report = ChatReport::failed(room_id, None, &error.context("reading the room's facts"));
+                journal(report.to_string());
                 out.failed.push(room_id.clone());
+                out.rooms.push(report);
             }
         }
     }
-    if let Err(error) = retire_chat(index, &keep) {
-        journal(format!("huginn-sources: retiring rooms the reader left failed, the others go on: {error:#}"));
-        out.failed.push("retire".to_owned());
+    match retire_chat(index, &keep) {
+        Ok(done) => {
+            for (room, why) in done.failed {
+                journal(format!("huginn-sources: retiring {room} failed, the others go on: {why}"));
+                out.failed.push(room);
+            }
+        }
+        Err(error) => {
+            journal(format!("huginn-sources: retiring rooms failed: {error:#}"));
+            out.failed.push("retire".to_owned());
+        }
     }
     for facts in admitted {
         match ingest_room(embedder, index, history, identity.dimensions, &facts, &mut out) {
@@ -536,8 +624,10 @@ pub fn refresh_chat<E: Embedder, S: SourceIndex, H: RoomHistory>(
                 out.refused.push(refused);
             }
             Err(error) => {
-                journal(format!("huginn-sources: chat {} failed, the others go on: {error:#}", facts.room_id));
+                let report = ChatReport::failed(&facts.room_id, facts.alias.clone(), &error);
+                journal(report.to_string());
                 out.failed.push(facts.room_id.clone());
+                out.rooms.push(report);
             }
         }
     }

@@ -169,3 +169,32 @@ the cited message and its neighbours in the same room from this index, no
 embedder and no Synapse; an id the index lacks is refused naming `event_id`.
 The listing limit above is not changed by it: the cut spec does not assign that
 fix, so it stays open.
+
+## Status: ingest core (cut chat-ingest-core)
+
+`sources::chat::refresh_chat` writes chat points; scope is `sources/room_scope.rs`
+and the credential scrub is `huginn_mind::redact`. Rules the code holds, which a
+reader of the index must know:
+
+- A text edit changes the stored body in place, only when its sender is the
+  original's sender. Edits are never stored as events, so no payload field
+  records which edit changed a body.
+- **Rebuild on an unknown redaction.** A redaction whose target is neither a
+  message in the room's stored chunks nor an event of the same page may be of an
+  edit whose own id Huginn never stored, so the body that edit set cannot be
+  taken back from the chunk. The room is then rebuilt: its points and cursor are
+  purged and the next read re-ingests its history from the port. Synapse serves a
+  redacted edit without its content (verified against Synapse 1.164.1), so the
+  original body returns and the edited text does not. Within one page, a redacted
+  edit is reverted in the fold without a rebuild. Redactions the rebuild itself
+  replays do not trigger another rebuild. A redaction of a media or state event
+  also lands here (the cost is one rebuild of that room).
+- **Edits of a redacted original are dropped.** Synapse keeps serving the
+  edits of a redacted original, with their replacement text, so Huginn drops any
+  edit whose target is not a message it holds or has just read (a redacted,
+  purged, never-stored or unknown original), live or late, in the fold and in a
+  rebuild alike.
+- How the Matrix port maps a pruned event (`content: {}`) to `EventKind::Other`
+  is the ingest-job cut's to pin; this core only assumes it does.
+- An error reading a joined room's facts is not a reclassification: the room
+  keeps its points and cursor, and the run's report for the room says why.

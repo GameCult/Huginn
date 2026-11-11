@@ -467,7 +467,11 @@ impl SourceIndex for QdrantIndex {
 
     fn chat_tail(&mut self, room_id: &str) -> Result<Option<StoredChat>> {
         let order = json!({ "key": "ts_end_ms", "direction": "desc" });
-        Ok(self.scroll_chat(chat_room_filter(room_id, vec![]), Some((order, 1)))?.into_iter().next())
+        let Some(newest) = self.scroll_chat(chat_room_filter(room_id, vec![]), Some((order, 1)))?.into_iter().next() else { return Ok(None) };
+        // Chunks tied on the greatest end are all read and the greatest id wins, so the tail is the same chunk on every run.
+        let end = newest.payload.messages.iter().map(|message| message.ts_ms).max().unwrap_or(0);
+        let tied = self.scroll_chat(chat_room_filter(room_id, vec![json!({ "key": "ts_end_ms", "range": { "gte": end } })]), None)?;
+        Ok(tied.into_iter().max_by(|a, b| a.id.cmp(&b.id)))
     }
 
     fn chat_chunks_holding(&mut self, room_id: &str, event_ids: &[String]) -> Result<Vec<StoredChat>> {
