@@ -134,12 +134,12 @@ byte; both values are in the account-id format above. Any other reader is a non-
   bytes nor Huginn's output:
   - `card-viewers-decider.synthetic` and `card-viewers-non-decider.synthetic` hold only `deciders`
     and `decider_count`. They are not cards.
-  - `record-decider.mirror` and `record-non-decider.mirror` are a record with three answers by three
-    accounts (one of them refused) as each reader sees it.
+  - `record-decider.mirror` and `record-non-decider.mirror` are a record with four answers by three accounts, one of
+    each variant (`Counted`, `Revision`, `Refused`, `Retraction`), with one account answering twice, as each reader sees it.
 
   The tests check:
   - a non-decider's bytes hold no account id anywhere, and a decider's hold every id;
-  - `answerer_count` is 3, counting the refusal, for both readers, and each record view starts with
+  - `answerer_count` is 3 over four answers, counting the refusal, for both readers, and each record view starts with
     `86`;
   - a non-empty `deciders` must match `decider_count`, and the count stays within 1 to 64;
   - `answerer` is null exactly in a non-decider's view.

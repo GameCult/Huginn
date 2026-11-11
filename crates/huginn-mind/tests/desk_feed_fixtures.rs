@@ -105,6 +105,13 @@ fn record() -> ForkRecord {
             answer("n1", "Counted", None, READER, "The asker lists her own forks.", "2026-11-11T17:00:00Z"),
             answer("n2", "Revision", Some("n1"), OTHER_DECIDER, "Agreed.", "2026-11-11T17:05:00Z"),
             ForkDeskAnswer { code: Some(huginn_mind::desk_wire::ForkAnswerCode::NotADecider), ..answer("n3", "Refused", None, OUTSIDER, "Me too.", "2026-11-11T17:06:00Z") },
+            // A second answer by an account already counted: four answers, three answerers.
+            ForkDeskAnswer {
+                retracts: Some("n2".into()),
+                choice: None,
+                note: None,
+                ..answer("n4", "Retraction", None, OTHER_DECIDER, "", "2026-11-11T17:07:00Z")
+            },
         ],
     }
 }
@@ -387,11 +394,14 @@ fn a_non_decider_gets_counts_and_no_ids_a_decider_gets_ids() {
     assert_eq!(card_viewers(false).decider_count, card_viewers(true).decider_count);
 }
 
-/// `answerer_count` counts distinct answerers over every stored answer, the refused one included,
+/// `answerer_count` counts DISTINCT answerers over every stored answer, the refused one included
+/// (four answers, one account answering twice, count 3),
 /// and is the same for both readers; a record view has six keys (header 0x86).
 #[test]
 fn answerer_count_covers_refusals_and_the_record_has_six_keys() {
-    assert_eq!(record().answers.iter().filter(|answer| answer.outcome == "Refused").count(), 1);
+    let outcomes: Vec<String> = record().answers.iter().map(|answer| answer.outcome.clone()).collect();
+    assert_eq!(outcomes, ["Counted", "Revision", "Refused", "Retraction"], "all four variants");
+    assert_eq!(record().answers.len(), 4, "four answers by three accounts");
     assert_eq!((view(record(), false).answerer_count, view(record(), true).answerer_count), (3, 3));
     for name in ["record-decider.mirror", "record-non-decider.mirror"] {
         let held = reader_views().into_iter().find(|(stem, _)| *stem == name).unwrap().1;

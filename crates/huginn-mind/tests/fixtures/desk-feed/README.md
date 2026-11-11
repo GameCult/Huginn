@@ -35,8 +35,8 @@ lands (see `docs/desk-feed-door.md`).
 | `unavailable.response` | Huginn to Bifrost | `Refused` `Unavailable` (Bifrost: 503 for this Mind) |
 | `failure.response` | Huginn to Bifrost | operation failure, `payloadSchema` `gamecult.cultnet.operation_failure.v1` (Bifrost: 503) |
 | `error.response` | Huginn to Bifrost | CultNet `Error` message, no payload (Bifrost: 503) |
-| `record-whole` | fragment | `gamecult.fork.record.v0` with a counted answer, a revision and a refused answer, answerer ids and notes whole: what the door sends today (5 keys, no `answerer_count`) |
-| `record-decider.mirror` | fragment | MIRROR (ruling `desk-reader-counts-shape`): a record with three answers by three accounts (one refused), as a decider sees it: every `answerer` id, `answerer_count` 3, header `86`. Not Huginn output yet |
+| `record-whole` | fragment | `gamecult.fork.record.v0` with all four answer variants (Counted, Revision, Refused, Retraction) by three accounts, answerer ids and notes whole: what the door sends today (5 keys, no `answerer_count`) |
+| `record-decider.mirror` | fragment | MIRROR (ruling `desk-reader-counts-shape`): a record with four answers (Counted, Revision, Refused, Retraction) by three accounts, as a decider sees it: every `answerer` id, `answerer_count` 3, header `86`. Not Huginn output yet |
 | `record-non-decider.mirror` | fragment | MIRROR: the same record for a non-decider, with every `answerer` nil and `answerer_count` 3. Not Huginn output yet |
 | `card-viewers-decider.synthetic` | fragment | SYNTHETIC: only `{deciders: [two ids], decider_count: 2}`. Not a card |
 | `card-viewers-non-decider.synthetic` | fragment | SYNTHETIC: only `{deciders: [], decider_count: 2}` (withheld). Not a card |
