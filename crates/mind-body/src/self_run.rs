@@ -1051,6 +1051,11 @@ fn describe_result(event: &serde_json::Map<String, Value>) -> String {
     format!("{}: {}", result_head(event), result_text(event))
 }
 
+/// A model id as one journal field: every byte outside `[A-Za-z0-9._:/-]` is `%XX`, so a space, `;`, `=` or newline in an id the CLI reports cannot split the line or forge a segment. Real ids pass unchanged.
+fn field_safe(id: &str) -> String {
+    id.bytes().map(|b| if b.is_ascii_alphanumeric() || b"._:/-".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
 /// What a result spent, as one journal line: its tokens by model for this turn alone, read from
 /// `model_usage_since_last_result`. `modelUsage` is the session's running total on a resumed
 /// session, so it is never the source. Usage the result did not report, or reported
@@ -1065,12 +1070,17 @@ fn usage_line(event: &serde_json::Map<String, Value>) -> String {
             .iter()
             .map(|(model, counts)| {
                 let count = |name: &str| counts.get(name).and_then(Value::as_u64);
+                // The 5m and 1h cache writes are priced apart; each is carried when the envelope has it and left out when it does not.
+                let ttl = |label: &str, name: &str| count(name).map(|n| format!(" cache_creation_{label} {n}")).unwrap_or_default();
                 Some(format!(
-                    "{model} input {} cache_read {} cache_creation {} output {}",
+                    "{} input {} cache_read {} cache_creation {} output {}{}{}",
+                    field_safe(model),
                     count("inputTokens")?,
                     count("cacheReadInputTokens")?,
                     count("cacheCreationInputTokens")?,
-                    count("outputTokens")?
+                    count("outputTokens")?,
+                    ttl("5m", "cacheCreationEphemeral5mInputTokens"),
+                    ttl("1h", "cacheCreationEphemeral1hInputTokens"),
                 ))
             })
             .collect()

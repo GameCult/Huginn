@@ -543,6 +543,29 @@ fn each_model_in_the_turns_usage_is_its_own_segment() {
 }
 
 #[test]
+fn a_model_id_cannot_split_the_line_or_forge_a_segment() {
+    let counts = json!({"inputTokens": 1, "cacheReadInputTokens": 2, "cacheCreationInputTokens": 3, "outputTokens": 4});
+    let line = json!({"type": "result", "result_index": 0, "model_usage_since_last_result": {"evil
+usage turn 9: x input 9; y=1": counts}}).to_string();
+    let journal = journal_of(&line);
+    assert_eq!(journal.lines().count(), 2, "{journal}");
+    assert_eq!(usage_lines(&journal), ["usage turn 0: evil%0Ausage%20turn%209:%20x%20input%209%3B%20y%3D1 input 1 cache_read 2 cache_creation 3 output 4"]);
+}
+
+#[test]
+fn the_cache_write_split_is_carried_when_reported_and_left_out_when_not() {
+    let mut entry = json!({"inputTokens": 1, "cacheReadInputTokens": 2, "cacheCreationInputTokens": 7, "outputTokens": 4});
+    let journal = |entry: &Value| journal_of(&json!({"type": "result", "result_index": 0, "model_usage_since_last_result": {"m": entry}}).to_string());
+    entry["cacheCreationEphemeral5mInputTokens"] = json!(3);
+    entry["cacheCreationEphemeral1hInputTokens"] = json!(4);
+    assert_eq!(usage_lines(&journal(&entry)), ["usage turn 0: m input 1 cache_read 2 cache_creation 7 output 4 cache_creation_5m 3 cache_creation_1h 4"]);
+    entry.as_object_mut().unwrap().remove("cacheCreationEphemeral5mInputTokens");
+    assert_eq!(usage_lines(&journal(&entry)), ["usage turn 0: m input 1 cache_read 2 cache_creation 7 output 4 cache_creation_1h 4"]);
+    entry.as_object_mut().unwrap().remove("cacheCreationEphemeral1hInputTokens");
+    assert_eq!(usage_lines(&journal(&entry)), ["usage turn 0: m input 1 cache_read 2 cache_creation 7 output 4"]);
+}
+
+#[test]
 fn an_unreported_usage_is_said_never_zero() {
     let whole = json!({"inputTokens": 1, "cacheReadInputTokens": 2, "cacheCreationInputTokens": 3, "outputTokens": 4});
     let mut cases = vec![json!({"type": "result", "result_index": 2}), json!({"type": "result", "result_index": 2, "model_usage_since_last_result": {}})];
