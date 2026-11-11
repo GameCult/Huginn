@@ -17,6 +17,7 @@
 //! exits 1 when the campaign is not moved to this mind or this mind holds records of its own under it, and 4 when the history cannot be replayed whole.
 
 mod admit_hold;
+mod chat;
 mod config;
 mod door;
 mod import;
@@ -40,7 +41,7 @@ use huginn_mind::eureka_pipeline::{
     Line, PipelineDocument, PipelineRef, Short, Slug, pipeline_key,
 };
 use huginn_mind::{
-    BATCH_MAX, Faculty, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionBatch, PipelineAdmissionOutcome,
+    BATCH_MAX, ChatQuery, Faculty, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionBatch, PipelineAdmissionOutcome,
     PersonaPutOutcome, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, SemanticQuery, SourceQuery,
 };
 use serde_json::Value;
@@ -69,6 +70,34 @@ const IMPORT_HELP: &str = "Reads the giver's mind (it sends Query alone) and adm
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum ChatCommand {
+    /// Chunks of the joined rooms (never DMs or Discord), each citing its room,
+    /// event ids and times. With texts, ranked by meaning; with none, a listing
+    /// oldest first, at most --top-k, ending in the `--after` to continue from.
+    Search {
+        /// Up to eight topics to find; the ranked lists of several are fused.
+        #[arg(num_args = 0..=8)]
+        texts: Vec<String>,
+        /// Only this room: an id (`!abc:gamecult.org`) or a canonical alias
+        /// (`#swarm:gamecult.org`). Repeat for several.
+        #[arg(long = "room")]
+        rooms: Vec<String>,
+        /// From this instant: an RFC 3339 time, or an age such as 6h or 2d.
+        #[arg(long)]
+        after: Option<String>,
+        /// Until this instant, as --after.
+        #[arg(long)]
+        before: Option<String>,
+        /// How many chunks (default 10, at most 50).
+        #[arg(long)]
+        top_k: Option<u32>,
+        /// Print the answer as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -117,6 +146,11 @@ enum Command {
         /// Print the answer as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Search the Minds' chat rooms.
+    Chat {
+        #[command(subcommand)]
+        command: ChatCommand,
     },
     #[command(flatten)]
     Recipe(Recipe),
@@ -284,6 +318,9 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
             top_k,
             json,
         } => sources(settings, texts, repo, front, top_k, json),
+        Command::Chat { command: ChatCommand::Search { texts, rooms, after, before, top_k, json } } => {
+            chat_search(settings, texts, rooms, after.as_deref(), before.as_deref(), top_k, json)
+        }
         Command::Recipe(Recipe::Blocked { spec_id, page }) => {
             blocked(settings, &spec_id, page.cursor, page.documents)
         }
@@ -463,6 +500,37 @@ fn sources(
                 say(serde_json::to_string_pretty(&found).map_err(|error| Trouble::Internal(error.to_string()))?);
             } else {
                 say(render::source_hits(&found));
+            }
+            Ok(0)
+        }
+        HuginnMindResponse::Refused(refusal) => Ok(refused(&refusal)),
+        other => Err(unexpected(&other)),
+    }
+}
+
+fn chat_search(
+    settings: &Settings,
+    texts: Vec<String>,
+    rooms: Vec<String>,
+    after: Option<&str>,
+    before: Option<&str>,
+    top_k: Option<u32>,
+    json: bool,
+) -> Result<u8, Trouble> {
+    let now = chrono::Utc::now();
+    let query = ChatQuery {
+        texts: texts.into_iter().map(Line).collect(),
+        rooms: rooms.into_iter().map(Short).collect(),
+        after_ms: after.map(|text| chat::instant_ms("--after", text, now)).transpose()?,
+        before_ms: before.map(|text| chat::instant_ms("--before", text, now)).transpose()?,
+        top_k: top_k.unwrap_or(DEFAULT_TOP_K),
+    };
+    match settings.ask(|instance| HuginnMindRequest::SearchChat { instance: instance.clone(), query })? {
+        HuginnMindResponse::Chat(found) => {
+            if json {
+                say(serde_json::to_string_pretty(&found).map_err(|error| Trouble::Internal(error.to_string()))?);
+            } else {
+                say(render::chat_hits(&found));
             }
             Ok(0)
         }

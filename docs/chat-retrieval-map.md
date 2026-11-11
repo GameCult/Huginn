@@ -144,3 +144,16 @@ What changed since the map was written:
   (`gamecult-chat:ruling:chat-index-minds-rooms`), Discord never.
 - A Mind that must remember DM content writes a memory citing the chat or room
   id as its source; the index is not where DM content is kept.
+
+## Status: read side (cut chat-search)
+
+Built: `huginn chat search [TEXT]... [--room R]... [--after T] [--before T] [--top-k N] [--json]`
+over request `SearchChat` (`sources::search_chat`), listing oldest first without
+texts and ranking by meaning with them. The chat point's shape is `ChatPayload`
+(`sources/mod.rs`); every point carries `corpus` (`forge` or `chat`) and
+`SourcesMeta.corpus` is `forge:GameCult+chat:rooms`. Not built: the ingest job
+that writes chat points through `upsert_chat`, and the event-id window. Until the
+ingest lands the collection holds no chat points and a chat search answers empty.
+In a listing across rooms, the last hit's `ts_end_ms + 1` can repeat messages of
+an earlier-starting longer chunk of another room; within one room it continues
+exactly.

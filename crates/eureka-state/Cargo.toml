@@ -32,6 +32,7 @@ required-features = ["cli"]
 
 [dependencies]
 anyhow = "1"
+chrono = "0.4.44"
 clap = { version = "4", features = ["derive"], optional = true }
 cultnet-rs.workspace = true
 huginn-mind = { path = "../huginn-mind" }
@@ -48,6 +49,5 @@ unicode-general-category = "1"
 # Tests run a real daemon in-process against a temporary mind, and the real
 # binary against it.
 [dev-dependencies]
-chrono = "0.4.44"
 huginn-daemon = { path = "../huginn-daemon" }
 tempfile = "3"
