@@ -992,17 +992,26 @@ mod bounds {
     fn a_peer_that_never_reads_is_cut_off_at_one_second() {
         let (_peer, server) = UnixStream::pair().unwrap();
         let mut stream = Deadlined::new(server, DESK_CONNECTION_DEADLINE);
-        let (chunk, started) = (vec![0_u8; 64 * 1024], Instant::now());
-        let error = loop {
-            if let Err(error) = stream.write(&chunk) {
-                break error;
-            }
-        };
-        let took = started.elapsed();
+        // The writer runs on its own thread and the test waits for it with a clock of its own: without
+        // the deadline the write blocks for good, and that must fail this test, not hang the suite.
+        let (sent, heard) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let (chunk, started) = (vec![0_u8; 64 * 1024], Instant::now());
+            let error = loop {
+                if let Err(error) = stream.write(&chunk) {
+                    break error;
+                }
+            };
+            let took = started.elapsed();
+            let again = stream.write(&chunk).unwrap_err().kind();
+            let _ = sent.send((error, took, again));
+        });
+        let (error, took, again) = heard.recv_timeout(Duration::from_secs(5)).expect("a peer that never reads is cut off within seconds, not waited on");
+        writer.join().unwrap();
         // The kernel's send timeout reads as WouldBlock; the deadline already spent reads as TimedOut.
         assert!(matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut), "{error:?}");
         assert!(took >= Duration::from_millis(950) && took < Duration::from_millis(1250), "the write was cut after {took:?}");
-        assert_eq!(stream.write(&chunk).unwrap_err().kind(), std::io::ErrorKind::TimedOut, "once spent, nothing more is written");
+        assert_eq!(again, std::io::ErrorKind::TimedOut, "once spent, nothing more is written");
     }
 
     /// A catalog is a reply like any other and is measured against the response bound: one that
