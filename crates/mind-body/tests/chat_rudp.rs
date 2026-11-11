@@ -19,6 +19,8 @@ use mind_body::chat_rudp::{RudpChat, connection_id};
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
 const PENDING_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending.v1.msgpack");
 const PENDING_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v5/gamecult.persona.chat_pending.v3.tag.msgpack");
+const PENDING_TAILED_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.tag.msgpack");
+const PENDING_TAIL_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.tail.msgpack");
 const PENDING_V2_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v3/gamecult.persona.chat_pending.v2.image.msgpack");
 const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v5/gamecult.persona.chat_pending_request.v2.msgpack");
 const PENDING_REQUEST_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
@@ -141,7 +143,7 @@ fn pending_send_and_ack_cross_a_real_rudp_session_in_the_mouths_bytes() {
     let mouth = mouth(KEY);
     let chat = client(&mouth, KEY, "eureka", Duration::from_secs(5));
 
-    let deliveries = chat.pending(3).unwrap();
+    let deliveries = chat.pending(3).unwrap().deliveries;
     assert_eq!(deliveries, chat_client::decode::<ChatPending>(PENDING_BYTES).unwrap().deliveries);
     assert_eq!(deliveries[0].seq, 7);
 
@@ -203,8 +205,8 @@ fn a_client_recovers_from_a_restarted_mouth_on_its_next_call() {
     drop(first);
     let second = mouth_at(KEY, &address.to_string());
     assert!(chat.pending(0).is_err(), "the restarted mouth ignores a link it never saw: the call times out");
-    assert_eq!(chat.pending(0).unwrap(), chat_client::decode::<ChatPending>(PENDING_BYTES).unwrap().deliveries, "the next call opens a fresh link");
-    assert_eq!(chat.pending(0).unwrap().len(), 1, "and keeps it");
+    assert_eq!(chat.pending(0).unwrap(), chat_client::decode::<ChatPending>(PENDING_BYTES).unwrap(), "the next call opens a fresh link");
+    assert_eq!(chat.pending(0).unwrap().deliveries.len(), 1, "and keeps it");
     let reads = second.seen.lock().unwrap().iter().filter(|(kind, _)| kind == PENDING_REQUEST).count();
     assert_eq!(reads, 2, "the restarted mouth read the two requests that reached it on a fresh link");
 }
@@ -224,19 +226,21 @@ fn a_send_that_timed_out_is_not_repeated_by_the_client() {
 fn a_mouth_without_the_v2_request_is_asked_the_v1_way_and_its_deliveries_carry_no_addressing_facts() {
     for (mouth, text) in [(legacy_mouth(KEY), "v1 answer"), (imaged_mouth(KEY), "v2 answer")] {
         let old = client(&mouth, KEY, "eureka", Duration::from_millis(1500)).pending(3).unwrap();
+        assert_eq!(old.tail, None, "{text}: a v1 request is answered with no tail");
+        let old = old.deliveries;
         assert_eq!(old.len(), 1, "{text}");
         assert_eq!((old[0].basis, old[0].form), (None, Form::Message), "{text}");
         let seen: Vec<String> = mouth.seen.lock().unwrap().iter().map(|(kind, _)| kind.clone()).collect();
         assert_eq!(seen, [PENDING_REQUEST, PENDING_REQUEST_V1], "{text}: the v2 request first, refused as an unknown kind, then the v1 request");
         assert_eq!(mouth.seen.lock().unwrap()[1].1, PENDING_REQUEST_V1_BYTES, "{text}");
     }
-    assert!(client(&imaged_mouth(KEY), KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap()[0].image.is_some());
+    assert!(client(&imaged_mouth(KEY), KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap().deliveries[0].image.is_some());
 }
 
 #[test]
 fn a_current_mouth_answers_the_v2_request_with_basis_and_form() {
     let current = mouth(KEY);
-    let new = client(&current, KEY, "eureka", Duration::from_millis(1500)).pending(3).unwrap();
+    let new = client(&current, KEY, "eureka", Duration::from_millis(1500)).pending(3).unwrap().deliveries;
     assert_eq!((new[0].basis, new[0].form), (Some(Basis::Tag), Form::Message));
     let kinds: Vec<String> = current.seen.lock().unwrap().iter().map(|(kind, _)| kind.clone()).collect();
     assert_eq!(kinds, [PENDING_REQUEST], "no v1 request follows an answered v2 request");
@@ -303,4 +307,19 @@ fn an_unknown_kind_refusal_keyed_by_this_persona_but_naming_another_is_not_heard
     let request = chat_client::decode::<ChatOpenDirectRequest>(OPEN_REQUEST_BYTES).unwrap();
     let error = client(&mouth, KEY, "eureka", Duration::from_secs(20)).open_direct(&request).unwrap_err();
     assert!(error.downcast_ref::<MouthRefused>().is_none(), "the payload names another Persona: {error}");
+}
+
+/// The wire, not only the decoder: the three-field `chat_pending.v3` of Bifrost e8722d0 crosses a real RUDP session as `chat_pending.v3`,
+/// and the tail arrives; the two-field answer of the mouth before it (the fixture the other tests serve) arrives with none.
+#[test]
+fn the_three_field_v3_crosses_real_rudp_with_its_tail_and_the_two_field_one_with_none() {
+    let tailed = serve(KEY, "127.0.0.1:0", PENDING, PENDING_TAIL_BYTES, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES));
+    let got = client(&tailed, KEY, "eureka", Duration::from_secs(5)).pending(0).unwrap();
+    assert_eq!(got, chat_client::decode::<ChatPending>(PENDING_TAIL_BYTES).unwrap());
+    assert_eq!(got.tail.as_ref().map(Vec::len), Some(2));
+    let with_delivery = serve(KEY, "127.0.0.1:0", PENDING, PENDING_TAILED_BYTES, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES));
+    let got = client(&with_delivery, KEY, "eureka", Duration::from_secs(5)).pending(0).unwrap();
+    assert_eq!((got.deliveries.len(), got.tail), (1, Some(vec![])), "a delivery and an empty tail: the mouth had nothing to add");
+    let old = client(&mouth(KEY), KEY, "eureka", Duration::from_secs(5)).pending(0).unwrap();
+    assert_eq!((old.deliveries.len(), old.tail), (1, None), "the older mouth's two-field answer carries no tail");
 }

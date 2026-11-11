@@ -158,7 +158,7 @@ impl RudpChat {
 }
 
 impl Chat for RudpChat {
-    fn pending(&self, after_seq: u64) -> Result<Vec<ChatDelivery>> {
+    fn pending(&self, after_seq: u64) -> Result<ChatPending> {
         let request = ChatPendingRequest { persona: self.persona.clone(), after_seq };
         let p = self.persona.as_str();
         let answers = [(PENDING, p), (PENDING_V2, p), (PENDING_V1, p), (REFUSAL, p)];
@@ -175,7 +175,7 @@ impl Chat for RudpChat {
         if pending.persona != self.persona {
             bail!("the mouth answered for another Persona");
         }
-        Ok(pending.deliveries)
+        Ok(pending)
     }
 
     fn send(&self, request: &ChatSendRequest) -> Result<ChatSendReceipt> {

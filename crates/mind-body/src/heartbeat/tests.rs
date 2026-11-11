@@ -88,9 +88,9 @@ struct FakeChat {
 }
 
 impl Chat for FakeChat {
-    fn pending(&self, after_seq: u64) -> Result<Vec<ChatDelivery>> {
+    fn pending(&self, after_seq: u64) -> Result<crate::chat_client::ChatPending> {
         self.pending_calls.set(self.pending_calls.get() + 1);
-        Ok(self.deliveries.borrow().iter().filter(|delivery| delivery.seq > after_seq).cloned().collect())
+        Ok(crate::chat_client::ChatPending { persona: "eureka".into(), deliveries: self.deliveries.borrow().iter().filter(|delivery| delivery.seq > after_seq).cloned().collect(), tail: None })
     }
 
     fn send(&self, _: &crate::chat_client::ChatSendRequest) -> Result<crate::chat_client::ChatSendReceipt> {
