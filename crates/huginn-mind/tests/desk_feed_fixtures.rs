@@ -14,14 +14,16 @@ use std::path::PathBuf;
 use cultnet_rs::{CultNetMessage, CultNetWireContract, encode_cultnet_message_to_vec, encode_frame};
 use huginn_mind::MindRefusal;
 use huginn_mind::desk_wire::{
-    AnswerSchema, DeskRequest, DeskResponse, ForkCursor, ForkDeskAnswer, ForkLimit, ForkList, ForkRecord, ForkRefusal, ForkRefusalCode,
+    fork_too_large_read, AnswerSchema, DeskRequest, DeskResponse, ForkCursor, ForkDeskAnswer, ForkLimit, ForkList, ForkRecord, ForkRefusal, ForkRefusalCode,
     ListSchema, ListStatus, RecordSchema,
 };
 use huginn_mind::envelope::{OperationFailure, encode_desk_failure, encode_desk_request, encode_desk_response};
 use huginn_mind::eureka_pipeline::{DeskAuthority, Short, Slug};
 
 const RUNTIME: &str = "huginn-eureka";
-const FORK: &str = "eureka-substrate:question:desk-fork-audience";
+/// A question Eureka's mind holds (asked 2026-11-11). The answers, notes and hash in `record()` are
+/// synthetic: the hash is CultLib's sample digest, not this question's.
+const FORK: &str = "eureka-substrate:question:desk-listing-authority";
 
 fn s(text: &str) -> Short {
     Short(text.into())
@@ -71,7 +73,7 @@ fn answer(id: &str, outcome: &str, of: Option<&str>, answerer: &str, note: &str,
         retracts: None,
         code: None,
         options_hash: "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48".into(),
-        choice: Some("campaign-listing".into()),
+        choice: Some("asking-mind".into()),
         note: Some(note.into()),
         answered_at: received_at.into(),
         received_at: received_at.into(),
@@ -91,8 +93,8 @@ fn record() -> ForkRecord {
         options_hash: "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48".into(),
         counted_answer_id: Some("n1".into()),
         answers: vec![
-            answer("n1", "Counted", None, "7", "List by campaign.", "2026-11-11T17:00:00Z"),
-            answer("n2", "Revision", Some("n1"), "12", "Agreed, campaign grain.", "2026-11-11T17:05:00Z"),
+            answer("n1", "Counted", None, "7", "The asker lists her own forks.", "2026-11-11T17:00:00Z"),
+            answer("n2", "Revision", Some("n1"), "12", "Agreed.", "2026-11-11T17:05:00Z"),
         ],
     }
 }
@@ -150,6 +152,12 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
         )
         .unwrap(),
     );
+    message("read-too-large.response", encode_desk_response("m-4", "fork", &DeskResponse::NotStored(fork_too_large_read(FORK)), RUNTIME).unwrap());
+    message(
+        "list-response-too-large.response",
+        encode_desk_response("m-1", "forks", &DeskResponse::Refused(MindRefusal::ResponseTooLarge { bytes: 70000, limit: 65536 }), RUNTIME).unwrap(),
+    );
+    message("refused-unit.response", encode_desk_response("m-1", "forks", &DeskResponse::Refused(MindRefusal::MissingIdentity), RUNTIME).unwrap());
     message(
         "unavailable.response",
         encode_desk_response("m-1", "forks", &DeskResponse::Refused(MindRefusal::Unavailable { detail: "the mind store is not readable".into() }), RUNTIME).unwrap(),

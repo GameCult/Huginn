@@ -12,7 +12,12 @@ Each case has up to four files:
 - `<case>.payload.msgpack` and `<case>.payload.hex`: the base64-decoded `payload` of an operation
   message (named MessagePack). The `record-*` cases are bare payload fragments with no frame.
 
-Hex is lowercase with one trailing newline.
+Hex is lowercase with one trailing newline. The fork id is a question Eureka's mind holds. The
+record's answers, notes and hash are synthetic.
+
+**The listing gate is not live.** On `main` every showable question goes to every reader. Do not
+put a Mind that holds private questions behind a live receiver before `cut-desk-feed-listing`
+lands (see `docs/desk-feed-door.md`).
 
 | case | direction | content |
 |---|---|---|
@@ -24,6 +29,9 @@ Hex is lowercase with one trailing newline.
 | `list-counts.response` | Huginn to Bifrost | the limit-0 answer: open 3, recorded 5, `forks: []` |
 | `read-unknown.response` | Huginn to Bifrost | `NotStored` `fork_unknown` (Bifrost: 404) |
 | `list-too-large.response` | Huginn to Bifrost | `NotStored` `fork_too_large` naming the cursor to continue (Bifrost: 422) |
+| `read-too-large.response` | Huginn to Bifrost | `NotStored` `fork_too_large`, read form: names the fork, no order or cursor (Bifrost: 422) |
+| `list-response-too-large.response` | Huginn to Bifrost | `Refused` `ResponseTooLarge` (Bifrost: 503) |
+| `refused-unit.response` | Huginn to Bifrost | `Refused` with a unit variant: a bare string `"MissingIdentity"` (shape only; Bifrost: 503) |
 | `unavailable.response` | Huginn to Bifrost | `Refused` `Unavailable` (Bifrost: 503 for this Mind) |
 | `failure.response` | Huginn to Bifrost | operation failure, `payloadSchema` `gamecult.cultnet.operation_failure.v1` (Bifrost: 503) |
 | `error.response` | Huginn to Bifrost | CultNet `Error` message, no payload (Bifrost: 503) |
