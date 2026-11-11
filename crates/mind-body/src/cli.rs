@@ -28,12 +28,12 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use eureka_pipeline::{RunTurn, Slug};
+use eureka_pipeline::Slug;
 
 use crate::control::{
     ControlWriter, Effective, FileSource, SwarmWriter, control_path, derive, derive_swarm, load_state, load_swarm_state, swarm_path,
 };
-use crate::launch::{StopScope, unit};
+use crate::launch::{StopScope, stop_args};
 
 const USAGE: &str =
     "usage: mind-control [--root <dir>] --instance <slug> show | check | brake hold | brake release | mind-control [--root <dir>] swarm show | brake hold | brake release";
@@ -110,7 +110,7 @@ pub fn run(
             let stopped = stop_units(StopScope::Mind(&instance));
             match (written, stopped) {
                 (Ok(()), Ok(())) => {
-                    writeln!(out, "units: stopped {} {}", unit(&instance, RunTurn::SelfRun)?, unit(&instance, RunTurn::PersonaTurn)?)?;
+                    writeln!(out, "units: stopped {}", stop_args(StopScope::Mind(&instance))?[2..].join(" "))?;
                     Ok(())
                 }
                 outcome => held(outcome),
@@ -151,7 +151,7 @@ fn swarm(
             let written = SwarmWriter::open(&path).and_then(|mut writer| writer.set_brake(false, now, set_by));
             let stopped = stop_units(StopScope::Swarm);
             if written.is_ok() && stopped.is_ok() {
-                writeln!(out, "units: stopped every mind-self@ and mind-persona@ unit")?;
+                writeln!(out, "units: stopped every {}", stop_args(StopScope::Swarm)?[2..].join(" "))?;
             }
             held((written, stopped))
         }

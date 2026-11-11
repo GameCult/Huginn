@@ -124,15 +124,23 @@ fn template(turn: RunTurn) -> &'static str {
     }
 }
 
-/// The unit of one turn: the template by turn, then the instance, held to the
-/// leaf's grammar first so it cannot escape the name. The error names nothing
-/// of the value. Start and alive both name the unit here.
-pub(crate) fn unit(instance: &Slug, turn: RunTurn) -> Result<String> {
+/// The stream's unit template: not a run slot, so only a brake hold names it.
+const STREAM_TEMPLATE: &str = "mind-stream";
+
+/// A template's unit for one instance, the instance held to the leaf's grammar
+/// first so it cannot escape the name. The error names nothing of the value.
+fn named(template: &str, instance: &Slug) -> Result<String> {
     instance.validate_slug().map_err(|_| anyhow!("the instance is not a unit name"))?;
-    Ok(format!("{}@{}.service", template(turn), instance.0))
+    Ok(format!("{template}@{}.service", instance.0))
 }
 
-/// What one stop reaches: the two units of one Mind, or every Mind's.
+/// The unit of one turn: the template by turn, then the instance. Start and
+/// alive both name the unit here.
+pub(crate) fn unit(instance: &Slug, turn: RunTurn) -> Result<String> {
+    named(template(turn), instance)
+}
+
+/// What one stop reaches: the three units of one Mind, or every Mind's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopScope<'a> {
     Mind(&'a Slug),
@@ -141,20 +149,23 @@ pub enum StopScope<'a> {
 
 /// The arguments of the one synchronous stop. A Mind's: the exact unit `unit()`
 /// names for each turn of this instance, the same names start and alive use,
-/// with no glob (a prefix glob also matches another instance, `eureka*` matches
+/// and its stream's, with no glob (a prefix glob also matches another instance, `eureka*` matches
 /// `eureka-two`). The swarm's: each template's glob over the loaded units,
 /// which is exactly every running Mind and exits 0 when none is loaded. No
 /// `--no-block`: `systemctl stop` returns when the units are down. The
-/// instance is validated by `unit()`.
+/// instance is validated by `named()`.
 pub(crate) fn stop_args(scope: StopScope<'_>) -> Result<Vec<String>> {
     let mut args = vec!["stop".to_string(), "--".to_string()];
-    for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
-        args.push(match scope {
-            StopScope::Mind(instance) => unit(instance, turn)?,
-            StopScope::Swarm => format!("{}@*.service", template(turn)),
-        });
-    }
+    args.extend(held_templates().into_iter().map(|template| match scope {
+        StopScope::Mind(instance) => named(template, instance),
+        StopScope::Swarm => Ok(format!("{template}@*.service")),
+    }).collect::<Result<Vec<_>>>()?);
     Ok(args)
+}
+
+/// The templates a hold stops: both run slots and the stream.
+fn held_templates() -> [&'static str; 3] {
+    [template(RunTurn::SelfRun), template(RunTurn::PersonaTurn), STREAM_TEMPLATE]
 }
 
 impl SystemdLauncher {
@@ -173,10 +184,10 @@ impl SystemdLauncher {
         }
         let states = match scope {
             StopScope::Mind(instance) => {
-                let states = [RunTurn::SelfRun, RunTurn::PersonaTurn]
+                let states = held_templates()
                     .into_iter()
-                    .map(|turn| {
-                        let unit = unit(instance, turn)?;
+                    .map(|template| {
+                        let unit = named(template, instance)?;
                         let state = self.unit_state(&unit);
                         Ok(format!("{unit} is {state}"))
                     })
@@ -1486,10 +1497,12 @@ mod tests {
                 launcher.start(&instance, turn).unwrap();
                 started.push(spy.calls.borrow().last().unwrap().last().unwrap().clone());
             }
-            assert_eq!(args[2..], started[..], "stop names exactly the units start names, for both turns");
+            assert_eq!(args[2..4], started[..], "stop names exactly the units start names, for both turns");
+            assert_eq!(args[4], format!("mind-stream@{name}.service"), "and the stream of that instance");
+            assert_eq!(args.len(), 5);
             assert!(args[2..].iter().all(|unit| !unit.contains(['*', '?', '['])), "a glob can match another instance or none: {args:?}");
         }
-        assert_eq!(stop_args(StopScope::Mind(&eureka())).unwrap(), ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service"]);
+        assert_eq!(stop_args(StopScope::Mind(&eureka())).unwrap(), ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service", "mind-stream@eureka.service"]);
     }
 
     #[test]
@@ -1503,7 +1516,7 @@ mod tests {
     fn the_swarm_stop_is_one_stop_of_both_templates_globs() {
         let (launcher, spy) = spied();
         launcher.stop(StopScope::Swarm).unwrap();
-        assert_eq!(*spy.calls.borrow(), vec![vec!["stop", "--", "mind-self@*.service", "mind-persona@*.service"]]);
+        assert_eq!(*spy.calls.borrow(), vec![vec!["stop", "--", "mind-self@*.service", "mind-persona@*.service", "mind-stream@*.service"]]);
     }
 
     #[test]
@@ -1535,12 +1548,12 @@ mod tests {
         let (launcher, spy) = spied();
         spy.success.set(false);
         spy.code.set(Some(5));
-        spy.states.borrow_mut().extend([("mind-self@eureka.service", "inactive\n"), ("mind-persona@eureka.service", "active\n")]);
+        spy.states.borrow_mut().extend([("mind-self@eureka.service", "inactive\n"), ("mind-persona@eureka.service", "active\n"), ("mind-stream@eureka.service", "failed\n")]);
         let shown = format!("{:#}", launcher.stop(StopScope::Mind(&eureka())).unwrap_err());
         assert!(shown.contains("exit status 5"), "{shown}");
-        assert!(shown.contains("mind-self@eureka.service is inactive") && shown.contains("mind-persona@eureka.service is active"), "{shown}");
+        assert!(shown.contains("mind-self@eureka.service is inactive") && shown.contains("mind-persona@eureka.service is active") && shown.contains("mind-stream@eureka.service is failed"), "{shown}");
         let asked: Vec<Vec<String>> = spy.calls.borrow().iter().skip(1).cloned().collect();
-        assert_eq!(asked, [["is-active", "mind-self@eureka.service"], ["is-active", "mind-persona@eureka.service"]], "one query per unit, after the one stop");
+        assert_eq!(asked, [["is-active", "mind-self@eureka.service"], ["is-active", "mind-persona@eureka.service"], ["is-active", "mind-stream@eureka.service"]], "one query per unit, after the one stop");
         // A state word outside the three, and anything systemctl prints with it, is not carried.
         spy.states.borrow_mut().clear();
         *spy.stdout.borrow_mut() = "canary-output-7f3a91\n".to_string();

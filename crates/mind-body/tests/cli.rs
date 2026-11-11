@@ -275,7 +275,7 @@ fn brake_hold_stops_once_with_the_instance_and_the_store_already_held() {
     result.unwrap();
     assert_eq!(calls, [Some("eureka".to_string())]);
     assert!(seen_at_stop.contains("BrakeHeld"), "the write comes before the stop: {seen_at_stop}");
-    assert!(out.contains("units: stopped mind-self@eureka.service mind-persona@eureka.service"), "{out}");
+    assert!(out.lines().any(|line| line == "units: stopped mind-self@eureka.service mind-persona@eureka.service mind-stream@eureka.service"), "{out}");
 }
 
 #[test]
@@ -362,8 +362,8 @@ fn hold_through_the_binary(exit: i32) -> (std::process::Output, Vec<String>, tem
 fn the_binary_hold_runs_systemctl_stop_on_exactly_the_units_it_starts() {
     let (output, recorded, _root) = hold_through_the_binary(0);
     assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(recorded, ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service"], "a stop that succeeds asks no state");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("units: stopped mind-self@eureka.service mind-persona@eureka.service"));
+    assert_eq!(recorded, ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service", "mind-stream@eureka.service"], "a stop that succeeds asks no state");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("units: stopped mind-self@eureka.service mind-persona@eureka.service mind-stream@eureka.service"));
 }
 
 #[cfg(unix)]
@@ -373,11 +373,11 @@ fn a_partial_stop_names_each_units_state_and_keeps_the_brake_held_with_exit_2() 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         recorded,
-        ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service", "is-active", "mind-self@eureka.service", "is-active", "mind-persona@eureka.service"]
+        ["stop", "--", "mind-self@eureka.service", "mind-persona@eureka.service", "mind-stream@eureka.service", "is-active", "mind-self@eureka.service", "is-active", "mind-persona@eureka.service", "is-active", "mind-stream@eureka.service"]
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("exit status 5") && stderr.contains("the brake is held"), "{stderr}");
-    assert!(stderr.contains("mind-self@eureka.service is inactive") && stderr.contains("mind-persona@eureka.service is active"), "{stderr}");
+    assert!(stderr.contains("mind-self@eureka.service is inactive") && stderr.contains("mind-persona@eureka.service is active") && stderr.contains("mind-stream@eureka.service is active"), "{stderr}");
     assert!(!stderr.contains("were not stopped"), "{stderr}");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("stopped"));
     assert!(shown(root.path()).contains("BrakeHeld"));
@@ -475,7 +475,7 @@ fn swarm_brake_hold_stops_once_with_the_swarm_scope_and_the_swarm_store_already_
     result.unwrap();
     assert_eq!(calls, [None], "one stop, for the swarm");
     assert!(seen_at_stop.contains("BrakeHeld"), "the write comes before the stop: {seen_at_stop}");
-    assert!(out.contains("units: stopped every mind-self@ and mind-persona@ unit"), "{out}");
+    assert!(out.lines().any(|line| line == "units: stopped every mind-self@*.service mind-persona@*.service mind-stream@*.service"), "the line names exactly what stop_args stopped: {out}");
 }
 
 #[test]

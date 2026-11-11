@@ -328,20 +328,26 @@ mind_body::stream: const AGENT : & str
 mind_body::stream: const STREAM_IDLE_GAP_S : i64
 mind_body::stream: const STREAM_MIN_GAP_S : i64
 mind_body::stream: const STREAM_POLL_S : i64
+mind_body::stream: fn connector_key (credentials : & std :: path :: Path) -> Result < String >
 mind_body::stream: fn tick (organs : & Organs , brake : & dyn Fn () -> Effective , mode : Mode , now : DateTime < Utc >) -> Result < Outcome >
+mind_body::stream: impl Continuer for OllamaContinuer
 mind_body::stream: impl HuginnPersonaSource
 mind_body::stream: impl HuginnPersonaSource: fn new (client : HuginnClient) -> Self
-mind_body::stream: impl OllamaStream
-mind_body::stream: impl OllamaStream: fn open (endpoint : & str , projector_model : & str , base_model : & str) -> Result < Self >
+mind_body::stream: impl KitProjector
+mind_body::stream: impl KitProjector: fn open (endpoint : SocketAddr , connection_key : String , caller : & str , model : & str , timeout : Duration) -> Result < Self >
+mind_body::stream: impl OllamaContinuer
+mind_body::stream: impl OllamaContinuer: fn open (endpoint : & str , base_model : & str) -> Result < Self >
 mind_body::stream: impl PersonaSource for HuginnPersonaSource
+mind_body::stream: impl Projector for KitProjector
 mind_body::stream: impl Sampling
 mind_body::stream: impl Seed
-mind_body::stream: impl StreamModel for OllamaStream
+mind_body::stream: pub trait Continuer { fn continue_raw (& self , prompt : & str , sampling : & Sampling , n : usize) -> Result < Vec < String > > ; }
 mind_body::stream: pub trait PersonaSource { fn persona (& self) -> Result < PersonaRead > ; }
-mind_body::stream: pub trait StreamModel { fn project (& self , prompt : & str) -> Result < String > ; fn continue_raw (& self , prompt : & str , sampling : & Sampling , n : usize) -> Result < Vec < String > > ; }
+mind_body::stream: pub trait Projector { fn model (& self) -> & str ; fn project (& self , request_id : & str , prompt : & str) -> Result < String > ; }
 mind_body::stream: struct HuginnPersonaSource  pub-fields[]
-mind_body::stream: struct OllamaStream  pub-fields[]
-mind_body::stream: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, persona: & 'a dyn PersonaSource, model: & 'a dyn StreamModel, projector_model: & 'a str, base_model: & 'a str]
+mind_body::stream: struct KitProjector  pub-fields[]
+mind_body::stream: struct OllamaContinuer  pub-fields[]
+mind_body::stream: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, persona: & 'a dyn PersonaSource, projector: & 'a dyn Projector, continuer: & 'a dyn Continuer, base_model: & 'a str]
 mind_body::stream: struct PersonaRead  pub-fields[state: Value, receipt_id: String]
 mind_body::stream: struct Sampling # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub-fields[temperature_permille: u16, min_p_permille: u16, max_tokens: u16]
 mind_body::tempo: const DEFAULT_BEAT_S : u32

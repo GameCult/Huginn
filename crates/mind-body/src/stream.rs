@@ -13,7 +13,7 @@
 //! and never starts a run. Delivery to a Persona is another organ's.
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -25,7 +25,9 @@ use eureka_pipeline::{
 use eureka_state::HuginnClient;
 use ghostlight_persona_projection::{ProjectorPrompt, build_projector_prompt};
 use huginn_mind::{HuginnMindResponse, PipelineAdmissionOutcome, PipelineDocumentView, PipelinePageItems};
+use model_connector::{ConnectorClient, InputItem, ProviderRequest, ReasoningEffort, StopReason, TransportDisposition, TransportEventPayload, TransportInvocation, TransportOutcome};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::control::Effective;
 use crate::persona::{Responsibilities, outcome_words, quoted, recent_runs, render_responsibilities, repo_notice_line};
@@ -95,25 +97,31 @@ impl Sampling {
     const STREAM: Self = Self { temperature_permille: TEMPERATURE_PERMILLE, min_p_permille: MIN_P_PERMILLE, max_tokens: MAX_TOKENS };
 }
 
-/// The two models of a tick. Faults are errors: the tick ends, the process does not.
-pub trait StreamModel {
-    /// The Projector: one chat prompt in, one projection out.
-    fn project(&self, prompt: &str) -> Result<String>;
-    /// The continuer: `n` raw continuations of `prompt`, no chat template.
+/// The Projector: state to narrative. Its one owner is `KitProjector`, her own caller on the connector. A fault is an error:
+/// the tick ends, the process does not.
+pub trait Projector {
+    /// The model id every projection of this Projector names; the thought records it, so it is the model that ran.
+    fn model(&self) -> &str;
+    /// One turn: `prompt` is the turn's one user text and `request_id` is its identity on the connector.
+    fn project(&self, request_id: &str, prompt: &str) -> Result<String>;
+}
+
+/// The continuer: raw continuation of a frame. Its one owner is `OllamaContinuer`, the base model on this host.
+pub trait Continuer {
+    /// `n` raw continuations of `prompt`, no chat template.
     fn continue_raw(&self, prompt: &str, sampling: &Sampling, n: usize) -> Result<Vec<String>>;
 }
 
-/// Ollama on this host. Loopback only, as Ghostlight's local binding is.
-pub struct OllamaStream {
+/// The base model on Ollama on this host. Loopback only, as Ghostlight's local binding is.
+pub struct OllamaContinuer {
     base: String,
-    projector_model: String,
     base_model: String,
     agent: ureq::Agent,
 }
 
-impl OllamaStream {
+impl OllamaContinuer {
     /// `endpoint` is `http://<loopback host>:<port>`; any other address is refused here.
-    pub fn open(endpoint: &str, projector_model: &str, base_model: &str) -> Result<Self> {
+    pub fn open(endpoint: &str, base_model: &str) -> Result<Self> {
         // Parsed as the HTTP client parses it, so the host checked is the host connected to.
         let uri: ureq::http::Uri = endpoint.parse().map_err(|_| anyhow!("the stream endpoint is not a URL"))?;
         let authority = uri.authority().filter(|_| uri.scheme_str() == Some("http")).ok_or_else(|| anyhow!("the stream endpoint must be http://<loopback>:<port>"))?;
@@ -137,7 +145,7 @@ impl OllamaStream {
             .max_redirects(0)
             .build()
             .into();
-        Ok(Self { base: format!("http://{authority}"), projector_model: projector_model.to_owned(), base_model: base_model.to_owned(), agent })
+        Ok(Self { base: format!("http://{authority}"), base_model: base_model.to_owned(), agent })
     }
 
     fn post(&self, path: &str, body: &Value) -> Result<Value> {
@@ -152,12 +160,7 @@ impl OllamaStream {
     }
 }
 
-impl StreamModel for OllamaStream {
-    fn project(&self, prompt: &str) -> Result<String> {
-        let answer = self.post("/api/chat", &json!({ "model": self.projector_model, "stream": false, "messages": [{ "role": "user", "content": prompt }] }))?;
-        answer["message"]["content"].as_str().map(str::to_owned).ok_or_else(|| anyhow!("the Projector's answer has no message content"))
-    }
-
+impl Continuer for OllamaContinuer {
     fn continue_raw(&self, prompt: &str, sampling: &Sampling, n: usize) -> Result<Vec<String>> {
         let body = json!({
             "model": self.base_model,
@@ -175,6 +178,82 @@ impl StreamModel for OllamaStream {
         (0..n)
             .map(|_| self.post("/api/generate", &body)?["response"].as_str().map(str::to_owned).ok_or_else(|| anyhow!("a continuation's answer has no response")))
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The Projector: her own caller on the connector.
+
+/// What the connector's request asks of the model beside the user text. It names no membrane text: that is Ghostlight's.
+const PROJECTOR_INSTRUCTIONS: &str = "Write only the text the request asks for.";
+/// Room for the model's adaptive thinking; the projection itself is at most `PROJECTOR_WORDS` words.
+const PROJECTOR_MAX_OUTPUT_TOKENS: u32 = 1024;
+/// The sealed frame the client will carry: the prompt out and the projection back fit with wide room.
+const CONNECTOR_FRAME_BYTES: usize = 256 * 1024;
+/// How long an invocation stays admissible at the connector.
+const INVOCATION_LIFE_MS: u64 = 60_000;
+
+/// The identity of one projection on the connector. A live tick's is derived from the instance and the tick label alone; a
+/// dry run's also carries the moment, because the kit's replay store answers a repeated id byte-identically.
+fn request_id(instance: &Slug, label: &str, mode: Mode, now: DateTime<Utc>) -> String {
+    match mode {
+        Mode::Live => format!("{AGENT}:{}:{label}", instance.0),
+        Mode::DryRun => format!("{AGENT}:{}:{label}:dry{}", instance.0, now.timestamp_millis()),
+    }
+}
+
+/// The connector key: the credential file in systemd's credentials directory, read once and trimmed. Its error names the
+/// credential and never a byte of the file.
+pub fn connector_key(credentials: &std::path::Path) -> Result<String> {
+    let key = std::fs::read_to_string(credentials.join("connector-key")).map_err(|_| anyhow!("the connector-key credential could not be read"))?;
+    Ok(key.trim().to_owned())
+}
+
+/// The Projector as one tool-less connector turn by `caller` (her instance) on `model`. Loopback only, as the kit is.
+/// Each projection is its own conversation: nothing is carried from one tick to the next.
+pub struct KitProjector {
+    client: ConnectorClient,
+    caller: String,
+    model: String,
+}
+
+impl KitProjector {
+    /// `endpoint` is the kit's loopback address; `connection_key` is the caller's key, read by the binary and never printed.
+    pub fn open(endpoint: SocketAddr, connection_key: String, caller: &str, model: &str, timeout: Duration) -> Result<Self> {
+        if !endpoint.ip().is_loopback() {
+            bail!("the connector endpoint is not a loopback address");
+        }
+        let client = ConnectorClient::new(endpoint, connection_key, CONNECTOR_FRAME_BYTES, Some(timeout)).map_err(|_| anyhow!("the connector client could not be configured"))?;
+        Ok(Self { client, caller: caller.to_owned(), model: model.to_owned() })
+    }
+}
+
+impl Projector for KitProjector {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn project(&self, request_id: &str, prompt: &str) -> Result<String> {
+        let mut request = ProviderRequest::new(request_id, request_id, &self.model, PROJECTOR_INSTRUCTIONS, PROJECTOR_MAX_OUTPUT_TOKENS);
+        request.input = vec![InputItem::UserText { text: prompt.to_owned() }];
+        request.reasoning_effort = Some(ReasoningEffort::Low);
+        let expires = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default() + INVOCATION_LIFE_MS;
+        let invocation = TransportInvocation::new(&self.caller, expires, Sha256::digest(prompt.as_bytes()).into(), request).map_err(|_| anyhow!("the Projector's request is not a valid connector request"))?;
+        let result = self.client.execute(&invocation).map_err(|fault| anyhow!("the connector did not answer the Projector: {fault}"))?;
+        match result.disposition {
+            TransportDisposition::Refused(reason) => bail!("the connector refused the Projector: {reason:?}"),
+            TransportDisposition::Transported { events, receipt } => match receipt.outcome {
+                TransportOutcome::Completed { stop_reason: StopReason::EndTurn, .. } => Ok(events
+                    .into_iter()
+                    .filter_map(|event| match event.payload {
+                        TransportEventPayload::TextDelta { text } => Some(text),
+                        _ => None,
+                    })
+                    .collect()),
+                TransportOutcome::Completed { stop_reason, .. } => bail!("the Projector's turn ended early: {stop_reason:?}"),
+                TransportOutcome::Failed { kind, .. } => bail!("the provider failed the Projector: {kind:?}"),
+            },
+        }
     }
 }
 
@@ -526,8 +605,8 @@ pub enum Mode {
 pub struct Organs<'a> {
     pub mind: &'a dyn MindPort,
     pub persona: &'a dyn PersonaSource,
-    pub model: &'a dyn StreamModel,
-    pub projector_model: &'a str,
+    pub projector: &'a dyn Projector,
+    pub continuer: &'a dyn Continuer,
     pub base_model: &'a str,
 }
 
@@ -586,8 +665,9 @@ pub fn tick(organs: &Organs, brake: &dyn Fn() -> Effective, mode: Mode, now: Dat
     let persona = organs.persona.persona()?;
     let seed = build_seed(mind, &persona, since, now, &responsibilities, fresh)?;
 
+    let label = format!("t{}", now.timestamp());
     let began = std::time::Instant::now();
-    let projection = bounded(&organs.model.project(&seed.projector_prompt())?, PARA_MAX_BYTES);
+    let projection = bounded(&organs.projector.project(&request_id(mind.instance(), &label, mode, now), &seed.projector_prompt())?, PARA_MAX_BYTES);
     let projector_ms = u32::try_from(began.elapsed().as_millis()).unwrap_or(u32::MAX);
     if projection.is_empty() {
         return Ok(Outcome::Blank);
@@ -595,7 +675,7 @@ pub fn tick(organs: &Organs, brake: &dyn Fn() -> Effective, mode: Mode, now: Dat
     let frame = continuer_frame(text_of(&persona.state, &["publicName"]), &now.format(FRAME_DATE_FORMAT).to_string(), &projection);
     let began = std::time::Instant::now();
     let candidates: Vec<String> = organs
-        .model
+        .continuer
         .continue_raw(&frame, &Sampling::STREAM, CONTINUATIONS)?
         .iter()
         .map(|text| bounded(text, LINE_MAX_BYTES))
@@ -610,14 +690,14 @@ pub fn tick(organs: &Organs, brake: &dyn Fn() -> Effective, mode: Mode, now: Dat
     let chosen = least_near(&nearest_permille);
     let thought = PipelineThought {
         instance: mind.instance().clone(),
-        label: Label::from(format!("t{}", now.timestamp()).as_str()),
+        label: Label::from(label.as_str()),
         text: Para::from(candidates[chosen].as_str()),
         reads: seed.reads.clone(),
         persona_receipt: Short(persona.receipt_id.clone()),
         identity: Line::from(seed.identity.as_str()),
         context: Para::from(seed.context.as_str()),
         stimulus: Para::from(seed.stimulus.as_str()),
-        projector_model: Short(organs.projector_model.to_owned()),
+        projector_model: Short(organs.projector.model().to_owned()),
         projection: Para::from(projection.as_str()),
         base_model: Short(organs.base_model.to_owned()),
         temperature_permille: Sampling::STREAM.temperature_permille,
@@ -633,7 +713,6 @@ pub fn tick(organs: &Organs, brake: &dyn Fn() -> Effective, mode: Mode, now: Dat
     if mode == Mode::DryRun {
         return Ok(Outcome::Thought { thought: Box::new(thought), admitted: false });
     }
-    let label = thought.label.0.clone();
     match mind.admit(AGENT, &format!("stream-{label}"), vec![PipelineDocument::Thought(thought.clone())])? {
         PipelineAdmissionOutcome::Committed { .. } => Ok(Outcome::Thought { thought: Box::new(thought), admitted: true }),
         other => Err(anyhow!("the mind did not admit the thought: {other:?}")),

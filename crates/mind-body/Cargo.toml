@@ -25,7 +25,8 @@ publish.workspace = true
 #
 # The stream organ (`stream`, the `mind-stream` binary) builds its Projector prompt with Ghostlight's
 # `ghostlight-persona-projection`, pinned to a revision, so the membrane's text stays Ghostlight's; it
-# speaks to a model host on loopback over `ureq` 3 with default features off (plain HTTP, no TLS), as the
+# asks its Projector through the connector kit's client (`model-connector`, one turn per tick) and speaks to the base
+# model's host on loopback over `ureq` 3 with default features off (plain HTTP, no TLS), as the
 # daemon's embedder does, and stays below 3.4 for the same reason.
 #
 # `serde_json` reads Claude Code's stream-json, a foreign owner's wire (`self_run`);
@@ -63,6 +64,9 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 tempfile = "3"
+# A real kit server (`serve` over a scripted `ProviderBackend`) proves the stream's Projector wire, not a fake of it.
+# Same revision as the dependency; the `daemon` feature is test-only.
+model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "c1802d85bee3ae04b0c5737563c8343c1fef515d", package = "model-connector", features = ["daemon"] }
 
 [lib]
 name = "mind_body"

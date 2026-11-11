@@ -58,7 +58,7 @@ struct Fake {
     projection: String,
     candidates: Vec<String>,
     fault: bool,
-    projected: RefCell<Vec<String>>,
+    projected: RefCell<Vec<(String, String)>>,
     continued: RefCell<Vec<(String, Sampling, usize)>>,
 }
 
@@ -72,12 +72,18 @@ impl Fake {
     }
 }
 
-impl StreamModel for Fake {
-    fn project(&self, prompt: &str) -> Result<String> {
-        self.projected.borrow_mut().push(prompt.into());
-        if self.fault { Err(anyhow!("the model host is down")) } else { Ok(self.projection.clone()) }
+impl Projector for Fake {
+    fn model(&self) -> &str {
+        "projector:test"
     }
 
+    fn project(&self, request_id: &str, prompt: &str) -> Result<String> {
+        self.projected.borrow_mut().push((request_id.into(), prompt.into()));
+        if self.fault { Err(anyhow!("the connector is down")) } else { Ok(self.projection.clone()) }
+    }
+}
+
+impl Continuer for Fake {
     fn continue_raw(&self, prompt: &str, sampling: &Sampling, n: usize) -> Result<Vec<String>> {
         self.continued.borrow_mut().push((prompt.into(), *sampling, n));
         Ok(self.candidates.iter().take(n).cloned().collect())
@@ -200,7 +206,7 @@ fn mind_with_thought(thought_at: i64) -> TestMind {
 }
 
 fn organs<'a>(mind: &'a dyn MindPort, persona: &'a Persona, model: &'a Fake) -> Organs<'a> {
-    Organs { mind, persona, model, projector_model: "projector:test", base_model: "base:test" }
+    Organs { mind, persona, projector: model, continuer: model, base_model: "base:test" }
 }
 
 fn thoughts(mind: &TestMind) -> Vec<String> {
@@ -414,8 +420,8 @@ fn frame_holds_projection_verbatim() {
         assert!(!prompt.contains(foreign), "{foreign} reached the continuer");
     }
     let projected = model.projected.borrow();
-    assert!(projected[0].contains("private Projector") && projected[0].contains(STREAM_GUIDANCE), "the Projector prompt is Ghostlight's builder over her seed");
-    assert!(projected[0].contains("Libby holds the sounds"));
+    assert!(projected[0].1.contains("private Projector") && projected[0].1.contains(STREAM_GUIDANCE), "the Projector prompt is Ghostlight's builder over her seed");
+    assert!(projected[0].1.contains("Libby holds the sounds"));
 }
 
 #[test]
@@ -465,7 +471,202 @@ fn stream_admits_only_thoughts() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The model port against a fake HTTP server.
+// The Projector against a real kit server.
+
+use model_connector::{CallerAdmission, ProviderBackend, ProviderCall, ServeLimits, StopReason, TransportEvent, TransportResult, Usage, serve as serve_kit};
+
+const KIT_KEY: &str = "stream-projector-test-key";
+const KIT_MODEL: &str = "claude-haiku-5-5";
+
+/// Answers every call as scripted and records the caller and the request the provider would have been shown.
+struct Scripted {
+    outcome: TransportOutcome,
+    words: Vec<&'static str>,
+    seen: Mutex<Vec<(String, ProviderRequest)>>,
+}
+
+impl Scripted {
+    fn ending(stop_reason: StopReason, words: &[&'static str]) -> Arc<Self> {
+        let usage = Usage { input_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 1, reasoning_tokens: None };
+        Arc::new(Self { outcome: TransportOutcome::Completed { provider_response_id: Some("msg-1".into()), stop_reason, usage }, words: words.to_vec(), seen: Mutex::default() })
+    }
+}
+
+impl ProviderBackend for Scripted {
+    fn ready(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn provider(&self) -> &str {
+        "anthropic-messages"
+    }
+
+    fn execute(&self, call: &ProviderCall) -> TransportResult {
+        self.seen.lock().unwrap().push((call.caller_runtime_id().to_owned(), call.request().clone()));
+        let events = self.words.iter().enumerate().map(|(at, text)| TransportEvent { sequence: at as u64, payload: TransportEventPayload::TextDelta { text: (*text).into() } }).collect();
+        call.transported(events, self.outcome.clone())
+    }
+}
+
+/// A running kit whose caller row for `instance` allows `allowed`, and a Projector opened on it.
+fn kit(backend: Arc<Scripted>, allowed: &str) -> (KitProjector, tempfile::TempDir) {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("replay.cc");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let admission = CallerAdmission::new(INSTANCE, KIT_KEY, 1, [allowed.to_owned()], 2, 64 * 1024, 4096).unwrap();
+    let limits = ServeLimits { max_frame_bytes: 512 * 1024, max_connections: 8, socket_timeout_ms: 5000, max_expiry_skew_ms: 300_000 };
+    std::thread::spawn(move || serve_kit(listener, limits, vec![admission], &store, backend));
+    (KitProjector::open(endpoint, KIT_KEY.into(), INSTANCE, KIT_MODEL, Duration::from_secs(5)).unwrap(), root)
+}
+
+#[test]
+fn projector_is_one_kit_turn() {
+    let backend = Scripted::ending(StopReason::EndTurn, &["I turn ", "it over."]);
+    let (projector, _root) = kit(Arc::clone(&backend), KIT_MODEL);
+    let id = "mind-stream:eureka:t100";
+    assert_eq!(projector.project(id, "The projector prompt.").unwrap(), "I turn it over.");
+    let seen = backend.seen.lock().unwrap();
+    let (caller, request) = &seen[0];
+    assert_eq!(caller, INSTANCE, "her instance is the caller");
+    assert_eq!((request.request_id.as_str(), request.conversation_id.as_str(), request.model.as_str()), (id, id, KIT_MODEL));
+    assert_eq!(request.input, [InputItem::UserText { text: "The projector prompt.".into() }]);
+    assert_eq!(request.instructions, PROJECTOR_INSTRUCTIONS);
+    assert_eq!(request.reasoning_effort, Some(ReasoningEffort::Low));
+    assert!(request.tools.is_empty() && request.output_schema_json.is_none());
+    assert_eq!(request.max_output_tokens, PROJECTOR_MAX_OUTPUT_TOKENS);
+}
+
+#[test]
+fn each_projection_is_its_own_conversation() {
+    let backend = Scripted::ending(StopReason::EndTurn, &["One."]);
+    let (projector, _root) = kit(Arc::clone(&backend), KIT_MODEL);
+    projector.project("mind-stream:eureka:t100", "first").unwrap();
+    projector.project("mind-stream:eureka:t200", "second").unwrap();
+    let seen = backend.seen.lock().unwrap();
+    assert_ne!(seen[0].1.request_id, seen[1].1.request_id);
+    assert_ne!(seen[0].1.conversation_id, seen[1].1.conversation_id);
+    assert_eq!(seen[1].1.input, [InputItem::UserText { text: "second".into() }], "no transcript is carried");
+}
+
+#[test]
+fn a_kit_refusal_is_a_tick_fault() {
+    let backend = Scripted::ending(StopReason::EndTurn, &["Never said."]);
+    let (projector, _root) = kit(Arc::clone(&backend), "some-other-model");
+    let mind = mind_with_thought(1000);
+    let continuer = Fake::saying("unused", &["unused"]);
+    let persona = persona();
+    let wrap = Wrap::over(&mind, &[]);
+    let organs = Organs { mind: &wrap, persona: &persona, projector: &projector, continuer: &continuer, base_model: "base:test" };
+    let fault = format!("{:#}", tick(&organs, &|| released(), Mode::Live, t(1000 + STREAM_IDLE_GAP_S)).unwrap_err());
+    assert!(fault.contains("ModelNotAllowed"), "{fault}");
+    assert!(backend.seen.lock().unwrap().is_empty(), "the provider was never reached");
+    assert_eq!(continuer.calls(), 0, "the continuer is not called");
+    assert!(wrap.admitted.borrow().is_empty());
+}
+
+#[test]
+fn a_thought_names_the_model_the_kit_ran() {
+    let backend = Scripted::ending(StopReason::EndTurn, &["I turn it over."]);
+    let (projector, _root) = kit(Arc::clone(&backend), KIT_MODEL);
+    let mind = mind_with_thought(1000);
+    let continuer = Fake::saying("unused", &["A drift"]);
+    let persona = persona();
+    let wrap = Wrap::over(&mind, &[0.1]);
+    let organs = Organs { mind: &wrap, persona: &persona, projector: &projector, continuer: &continuer, base_model: "base:test" };
+    let Outcome::Thought { thought, .. } = tick(&organs, &|| released(), Mode::Live, t(1000 + STREAM_IDLE_GAP_S)).unwrap() else { panic!("a thought") };
+    let ran = backend.seen.lock().unwrap()[0].1.model.clone();
+    assert_eq!(ran, KIT_MODEL);
+    assert_eq!(thought.projector_model.0, ran, "the recorded model is the one the kit was asked for");
+}
+
+#[test]
+fn the_instructions_restate_no_membrane_text() {
+    let membrane = build_projector_prompt(&ProjectorPrompt { identity: "", typed_context: "", visible_stimulus: "", domain_guidance: STREAM_GUIDANCE, word_budget: PROJECTOR_WORDS }).to_lowercase();
+    let words: Vec<&str> = PROJECTOR_INSTRUCTIONS.split_whitespace().collect();
+    assert!(!PROJECTOR_INSTRUCTIONS.contains('\n') && words.len() <= 20, "one short line");
+    for run in words.windows(4) {
+        let run = run.join(" ").to_lowercase();
+        assert!(!membrane.contains(&run), "Ghostlight's membrane text reached the instructions: {run}");
+    }
+}
+
+#[test]
+fn the_connector_key_is_read_trimmed_and_its_absence_leaks_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("connector-key"), "canary-key-7f3a91\n").unwrap();
+    assert_eq!(connector_key(dir.path()).unwrap(), "canary-key-7f3a91");
+    for (written, read) in [("canary-key-7f3a91\r\n", "canary-key-7f3a91"), ("canary-key-7f3a91\n\n\n", "canary-key-7f3a91"), (" \t\ncanary-key-7f3a91 \t\r\n\n", "canary-key-7f3a91"), ("canary-key-7f3a91", "canary-key-7f3a91")] {
+        std::fs::write(dir.path().join("connector-key"), written).unwrap();
+        assert_eq!(connector_key(dir.path()).unwrap(), read, "{written:?}");
+    }
+    let empty = tempfile::tempdir().unwrap();
+    let fault = format!("{:#}", connector_key(empty.path()).unwrap_err());
+    assert!(fault.contains("connector-key") && !fault.contains(empty.path().to_str().unwrap()), "{fault}");
+    let bad = tempfile::tempdir().unwrap();
+    std::fs::write(bad.path().join("connector-key"), b"canary-key-7f3a91\xff\xfe").unwrap();
+    let fault = format!("{:#}", connector_key(bad.path()).unwrap_err());
+    assert!(!fault.contains("canary"), "no byte of the key reaches an error: {fault}");
+}
+
+#[test]
+fn no_open_error_carries_any_part_of_the_key() {
+    let key = "zq7Kx-9wVtm3Pd";
+    // Every way open() can fail with the key in hand: a non-loopback endpoint and a configuration the client refuses.
+    for endpoint in ["10.77.0.1:4103", "127.0.0.1:0", "0.0.0.0:4103"] {
+        let fault = format!("{:#}", KitProjector::open(endpoint.parse().unwrap(), key.into(), INSTANCE, KIT_MODEL, Duration::from_secs(1)).err().unwrap());
+        for window in key.as_bytes().windows(4) {
+            assert!(!fault.contains(std::str::from_utf8(window).unwrap()), "{endpoint}: part of the key reached the error: {fault}");
+        }
+    }
+}
+
+#[test]
+fn a_projection_cut_short_is_a_fault() {
+    for stop in [StopReason::MaxOutputTokens, StopReason::Refusal, StopReason::ToolUse, StopReason::ContextWindow] {
+        let (projector, _root) = kit(Scripted::ending(stop, &["Half a thou"]), KIT_MODEL);
+        let fault = format!("{:#}", projector.project("mind-stream:eureka:t1", "p").unwrap_err());
+        assert!(fault.contains("ended early") && !fault.contains("Half a thou"), "{stop:?}: {fault}");
+    }
+    let failed = Arc::new(Scripted { outcome: TransportOutcome::Failed { kind: model_connector::FailureKind::RateLimited, message: "slow down".into(), usage: None }, words: vec![], seen: Mutex::default() });
+    let (projector, _root) = kit(failed, KIT_MODEL);
+    assert!(format!("{:#}", projector.project("mind-stream:eureka:t1", "p").unwrap_err()).contains("RateLimited"));
+}
+
+#[test]
+fn non_loopback_connector_refused() {
+    for refused in ["10.77.0.1:4103", "192.0.2.1:4103", "[2001:db8::1]:4103"] {
+        assert!(KitProjector::open(refused.parse().unwrap(), KIT_KEY.into(), INSTANCE, KIT_MODEL, Duration::from_secs(1)).is_err(), "{refused} must be refused");
+    }
+    for opened in ["127.0.0.1:4103", "[::1]:4103"] {
+        assert!(KitProjector::open(opened.parse().unwrap(), KIT_KEY.into(), INSTANCE, KIT_MODEL, Duration::from_secs(1)).is_ok(), "{opened} is loopback");
+    }
+}
+
+#[test]
+fn request_ids_name_the_tick_and_a_dry_run_never_takes_the_live_one() {
+    let mind = mind_with_thought(1000);
+    let persona = persona();
+    let at = t(1000 + STREAM_IDLE_GAP_S);
+    let run = |mode, now: DateTime<Utc>| {
+        let model = Fake::saying("I turn it over.", &["A drift"]);
+        let wrap = Wrap::over(&mind, &[0.1]);
+        tick(&organs(&wrap, &persona, &model), &|| released(), mode, now).unwrap();
+        model.projected.into_inner().remove(0).0
+    };
+    let live = run(Mode::Live, at);
+    assert_eq!(live, format!("mind-stream:{INSTANCE}:t{}", at.timestamp()));
+    let dry = run(Mode::DryRun, at);
+    let later_dry = run(Mode::DryRun, at + Span::milliseconds(5));
+    assert_ne!(dry, live, "the kit's replay store would answer the live id byte-identically");
+    assert!(dry.starts_with(&format!("{live}:dry")), "{dry}");
+    assert_ne!(dry, later_dry, "two dry runs of one label do not collide");
+    let next = run(Mode::Live, at + Span::seconds(STREAM_IDLE_GAP_S));
+    assert_ne!(next, live, "each tick is its own conversation");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The continuer against a fake HTTP server.
 
 type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 
@@ -503,7 +704,7 @@ fn serve(answers: Vec<String>) -> (String, Seen) {
 #[test]
 fn raw_generate_is_raw() {
     let (endpoint, seen) = serve(vec![json!({ "response": "one" }).to_string(), json!({ "response": "two" }).to_string()]);
-    let model = OllamaStream::open(&endpoint, "projector:x", "base:y").unwrap();
+    let model = OllamaContinuer::open(&endpoint, "base:y").unwrap();
     let out = model.continue_raw("The frame\n\n", &Sampling::STREAM, 2).unwrap();
     assert_eq!(out, ["one", "two"]);
     let seen = seen.lock().unwrap();
@@ -519,16 +720,6 @@ fn raw_generate_is_raw() {
 }
 
 #[test]
-fn the_projector_is_asked_in_chat() {
-    let (endpoint, seen) = serve(vec![json!({ "message": { "role": "assistant", "content": "I hold it." } }).to_string()]);
-    let model = OllamaStream::open(&endpoint, "projector:x", "base:y").unwrap();
-    assert_eq!(model.project("Be the Projector.").unwrap(), "I hold it.");
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen[0].0, "/api/chat");
-    assert_eq!(seen[0].1, json!({ "model": "projector:x", "stream": false, "messages": [{ "role": "user", "content": "Be the Projector." }] }));
-}
-
-#[test]
 fn a_model_host_that_answers_badly_is_a_fault() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -538,8 +729,8 @@ fn a_model_host_that_answers_badly_is_a_fault() {
         let _ = socket.read(&mut buffer);
         let _ = socket.write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 4\r\nconnection: close\r\n\r\nboom");
     });
-    let model = OllamaStream::open(&endpoint, "p", "b").unwrap();
-    let fault = model.project("x").unwrap_err().to_string();
+    let model = OllamaContinuer::open(&endpoint, "b").unwrap();
+    let fault = model.continue_raw("x", &Sampling::STREAM, 1).unwrap_err().to_string();
     assert!(fault.contains("500"), "{fault}");
 }
 
@@ -560,13 +751,13 @@ fn non_loopback_endpoint_refused() {
         "http://",
         "",
     ] {
-        assert!(OllamaStream::open(refused, "p", "b").is_err(), "{refused} must be refused");
+        assert!(OllamaContinuer::open(refused, "b").is_err(), "{refused} must be refused");
     }
     for refused in ["http://10.77.0.1:11434", "http://example.com:11434", "http://0.0.0.0:11434", "https://127.0.0.1:11434", "127.0.0.1:11434", "http://127.0.0.1:11434/api", "http://[2001:db8::1]:11434"] {
-        assert!(OllamaStream::open(refused, "p", "b").is_err(), "{refused} must be refused");
+        assert!(OllamaContinuer::open(refused, "b").is_err(), "{refused} must be refused");
     }
     for opened in ["http://127.0.0.1:11434", "http://localhost:11434", "http://[::1]:11434", "http://127.0.0.2:1/", "http://LOCALHOST:11434/"] {
-        assert!(OllamaStream::open(opened, "p", "b").is_ok(), "{opened} is loopback");
+        assert!(OllamaContinuer::open(opened, "b").is_ok(), "{opened} is loopback");
     }
 }
 
@@ -706,7 +897,7 @@ fn old_repo_activity_does_not_make_a_tick_due() {
     let model = Fake::saying("I turn it over.", &["A new drift"]);
     let persona = CountedPersona(persona(), std::cell::Cell::new(0));
     let wrap = Wrap::over(&mind, &[0.1]).with_forge(vec![push(1, 500)]);
-    let organs = Organs { mind: &wrap, persona: &persona, model: &model, projector_model: "projector:test", base_model: "base:test" };
+    let organs = Organs { mind: &wrap, persona: &persona, projector: &model, continuer: &model, base_model: "base:test" };
     assert_eq!(tick(&organs, &|| released(), Mode::Live, t(1901)).unwrap(), Outcome::NotDue);
     assert_eq!((model.calls(), persona.1.get(), thoughts(&mind).len()), (0, 0, 1), "no model call, no seed, no thought");
 }
@@ -777,7 +968,7 @@ fn every_thought_records_the_fixed_parts_of_its_prompts() {
     assert!(version.len() <= LINE_MAX_BYTES, "{}", version.len());
     assert!(include_str!("../../Cargo.toml").contains(GHOSTLIGHT_REV), "the recorded revision is the manifest's pin");
     let rebuilt = build_projector_prompt(&ProjectorPrompt { identity: &thought.identity.0, typed_context: &thought.context.0, visible_stimulus: &thought.stimulus.0, domain_guidance: STREAM_GUIDANCE, word_budget: PROJECTOR_WORDS });
-    assert_eq!(model.projected.borrow()[0], rebuilt, "the trace rebuilds the Projector's exact prompt");
+    assert_eq!(model.projected.borrow()[0].1, rebuilt, "the trace rebuilds the Projector's exact prompt");
 }
 
 
