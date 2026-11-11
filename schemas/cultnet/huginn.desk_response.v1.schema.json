@@ -471,12 +471,13 @@
       ]
     },
     "ForkRefusalCode": {
-      "description": "The three requests Huginn refuses without storing, by code.",
+      "description": "The refusals Huginn sends without storing, by code. `ForkTooLarge` is the list's alone.",
       "type": "string",
       "enum": [
         "fork_unknown",
         "body_invalid",
-        "request_id_conflict"
+        "request_id_conflict",
+        "fork_too_large"
       ]
     },
     "ListSchema": {
@@ -1560,45 +1561,6 @@
           "additionalProperties": false,
           "required": [
             "ResponseTooLarge"
-          ]
-        },
-        {
-          "description": "A desk page whose first entry alone is past the page budget: `fork` is that fork, `order` its\nrank (a caller goes on past it with the cursor `c<order>`, which returns the forks below it),\n`bytes` what the page holding it would encode to (without the envelope) and `limit` the page\nbudget it exceeds. Raised by the mind's page fill, which is why it is not `ResponseTooLarge`.",
-          "type": "object",
-          "properties": {
-            "DeskForkTooLarge": {
-              "type": "object",
-              "properties": {
-                "bytes": {
-                  "type": "integer",
-                  "format": "uint64",
-                  "minimum": 0
-                },
-                "fork": {
-                  "type": "string"
-                },
-                "limit": {
-                  "type": "integer",
-                  "format": "uint64",
-                  "minimum": 0
-                },
-                "order": {
-                  "type": "integer",
-                  "format": "uint64",
-                  "minimum": 0
-                }
-              },
-              "required": [
-                "fork",
-                "order",
-                "bytes",
-                "limit"
-              ]
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "DeskForkTooLarge"
           ]
         },
         {
