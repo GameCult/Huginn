@@ -8846,7 +8846,6 @@ fn events_a_restarted_mouth_renumbers_are_told_once_and_nothing_new_is_lost() {
 fn an_event_told_and_unanswered_that_the_mouth_renumbers_is_not_told_again() {
     let first = operator_says(1, "first");
     let rig = Rig::new(vec![first.clone()], &[says(&[("operator", "one")]), says(&[("operator", "two")])]);
-    rig.clock.step.set(0);
     let (deliveries, now, count) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(0));
     *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
         count.set(count.get() + 1);
