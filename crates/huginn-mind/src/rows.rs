@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use cultnet_rs::{Row, RowSet, Selection};
 use eureka_pipeline::{
-    FindingConfidence, FindingOrigin, FindingSeverity, Label, MemoryOrigin, MemorySort, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, ResolutionOutcome,
+    FindingConfidence, FindingOrigin, FindingSeverity, Label, MemoryOrigin, MemorySort, OrgRepo, PipelineDocument, PipelineKind, PipelineRef, PipelineRuling, ResolutionOutcome,
     RulingAuthority, RunOperator, RunTurn, Slug,
 };
 
@@ -134,7 +134,7 @@ impl Alias {
         match self {
             Self::Root | Self::InForce | Self::Faculty => true,
             Self::Repo => {
-                matches!(kind, K::Campaign | K::CutSpec | K::CutReport | K::FollowUp | K::Stewardship | K::HandOff | K::Resolution)
+                matches!(kind, K::Campaign | K::CutSpec | K::CutReport | K::FollowUp | K::Stewardship | K::HandOff | K::Resolution | K::Ruling)
             }
             Self::Cut => matches!(kind, K::CutSpec | K::CutReport | K::Verdict | K::Finding | K::Resolution),
             Self::Severity | Self::Confidence | Self::Origin => kind == K::Finding,
@@ -143,7 +143,8 @@ impl Alias {
             Self::Outcome => kind == K::Resolution,
             Self::Turn | Self::OperatedBy | Self::Ran => kind == K::Run,
             Self::Voted | Self::Urged => kind == K::Pulse,
-            Self::Sort | Self::About | Self::MemoryOrigin => kind == K::Memory,
+            Self::Sort | Self::MemoryOrigin => kind == K::Memory,
+            Self::About => matches!(kind, K::Memory | K::Ruling),
             Self::Pass => matches!(kind, K::Research | K::Idea),
         }
     }
@@ -246,6 +247,7 @@ impl SelectionRow {
                 D::FollowUp(follow_up) => vec![follow_up.repo.identity()],
                 D::Stewardship(stewardship) => vec![stewardship.repo.identity()],
                 D::HandOff(hand_off) => vec![hand_off.repo.identity()],
+                D::Ruling(PipelineRuling { authority: RulingAuthority::Steward { repo, .. }, .. }) => vec![repo.identity()],
                 D::Target(_) | D::Question(_) | D::Ruling(_) | D::Verdict(_) | D::Finding(_) | D::Instance(_) | D::Resolution(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) | D::Thought(_) | D::Memory(_) | D::Research(_) | D::Idea(_) | D::DeskAnswer(_) => {
                     Vec::new()
                 }
@@ -267,7 +269,12 @@ impl SelectionRow {
                 put(Alias::Confidence, vec![format!("{:?}", finding.confidence)]);
                 put(Alias::Origin, vec![format!("{:?}", finding.origin)]);
             }
-            D::Ruling(ruling) => put(Alias::Authority, vec![format!("{:?}", ruling.authority)]),
+            D::Ruling(ruling) => {
+                put(Alias::Authority, vec![ruling.authority.name().to_string()]);
+                if let RulingAuthority::Steward { steward, .. } = &ruling.authority {
+                    put(Alias::About, vec![steward.0.clone()]);
+                }
+            }
             D::Verdict(verdict) => {
                 put(Alias::ClaimOutcome, verdict.claims.iter().map(|claim| format!("{:?}", claim.outcome)).collect())
             }
@@ -463,7 +470,7 @@ mod tests {
             (K::Campaign, &["repo"]),
             (K::Target, &[]),
             (K::Question, &[]),
-            (K::Ruling, &["authority"]),
+            (K::Ruling, &["authority", "repo", "about"]),
             (K::CutSpec, &["repo", "cut"]),
             (K::CutReport, &["repo", "cut"]),
             (K::Verdict, &["cut", "claim_outcome"]),

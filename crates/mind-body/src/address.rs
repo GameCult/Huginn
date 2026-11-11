@@ -16,23 +16,32 @@ pub struct Name {
     pub(crate) exact: bool,
 }
 
-/// Whom a delivery may be addressing: one Mind's Matrix id and her names.
+/// Whom a delivery may be addressing: one Mind's Matrix id, her names and the repos she stewards.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Addressee {
     matrix_id: String,
     names: Vec<Name>,
+    /// The repos her in-force stewardships name, as the one read that gave `names` found them: what a ruling of hers may be decided under.
+    #[serde(default)]
+    repos: Vec<OrgRepo>,
 }
 
 impl Addressee {
     /// A Mind by her id and her own names, each matched in any case.
     pub(crate) fn new<'a>(matrix_id: &str, own_names: impl IntoIterator<Item = &'a str>) -> Self {
-        Self { matrix_id: matrix_id.to_string(), names: own_names.into_iter().map(|text| Name { text: text.to_string(), exact: false }).collect() }
+        Self { matrix_id: matrix_id.to_string(), names: own_names.into_iter().map(|text| Name { text: text.to_string(), exact: false }).collect(), repos: Vec::new() }
     }
 
-    /// The same Mind, also addressed by her projects' names.
-    pub(crate) fn with_projects(mut self, names: impl IntoIterator<Item = Name>) -> Self {
+    /// The same Mind, also addressed by her projects' names, with the repos those stewardships name.
+    pub(crate) fn with_stewardships(mut self, names: impl IntoIterator<Item = Name>, repos: impl IntoIterator<Item = OrgRepo>) -> Self {
         self.names.extend(names);
+        self.repos.extend(repos);
         self
+    }
+
+    /// The repos she stewards, as the heartbeat last read them.
+    pub(crate) fn repos(&self) -> &[OrgRepo] {
+        &self.repos
     }
 
     pub(crate) fn matrix_id(&self) -> &str {

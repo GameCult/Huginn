@@ -641,6 +641,8 @@ fn the_heartbeat_writes_the_table_it_read_and_only_when_it_changed() {
     rig.poll();
     assert_eq!(rig.store.addressing_saves.get(), 2);
     assert!(addresses(&table_row(&rig, "@bob:chat"), &delivery(9, "@op:chat", "BDS is down", &[])));
+    assert!(table_row(&rig, "@bob:chat").repos().contains(&eureka_pipeline::OrgRepo("GameCult/BadDaySimulator".into())), "the row carries the repos her names came from");
+    assert!(!table_row(&rig, "@ann:chat").repos().contains(&eureka_pipeline::OrgRepo("GameCult/BadDaySimulator".into())));
     assert!(addresses(&table_row(&rig, "@ann:chat"), &delivery(9, "@op:chat", "Ann?", &[])) && !addresses(&table_row(&rig, "@ann:chat"), &delivery(9, "@op:chat", "BDS", &[])));
     rig.poll();
     assert_eq!(rig.store.addressing_saves.get(), 2, "an identical poll writes nothing");
@@ -1430,7 +1432,7 @@ fn the_file_store_reads_back_the_addressing_it_wrote_to_the_view() {
     let dir = TempDir::new().unwrap();
     let store = FileStore::new(dir.path().join("heartbeat.cc"));
     assert_eq!(store.addressing().unwrap(), None);
-    let table = Addressing { minds: vec![Addressee::new("@bob:chat", ["Bob"]).with_projects([Name { text: "BDS".into(), exact: true }])] };
+    let table = Addressing { minds: vec![Addressee::new("@bob:chat", ["Bob"]).with_stewardships([Name { text: "BDS".into(), exact: true }], [])] };
     store.save_addressing(&table).unwrap();
     assert_eq!(store.addressing().unwrap(), Some(table.clone()));
     assert_eq!(store.load_addressing().unwrap(), Some(table));

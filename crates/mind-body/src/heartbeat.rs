@@ -36,7 +36,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, SecondsFormat, Timelike, Utc};
 use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
 use cultnet_rs::Selection;
-use eureka_pipeline::{PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
+use eureka_pipeline::{OrgRepo, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
 use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 
 use crate::address::{Addressee, Name, is_for, project_names};
@@ -502,15 +502,16 @@ fn newest(mind: &dyn MindPort, selection: Selection) -> Result<Option<PipelineDo
     Ok(found.into_iter().next())
 }
 
-/// The chat names of every repo she stewards in force: one query on her mind.
-pub(crate) fn project_names_of(mind: &dyn MindPort) -> Result<Vec<Name>> {
-    let mut names = Vec::new();
+/// Every repo she stewards in force and the chat names of those repos: one query on her mind.
+pub(crate) fn stewardships_of(mind: &dyn MindPort) -> Result<(Vec<Name>, Vec<OrgRepo>)> {
+    let (mut names, mut repos) = (Vec::new(), Vec::new());
     for header in headers(mind, &in_force(of_kind(PipelineKind::Stewardship)))? {
         if let PipelineFacts::Stewardship { repo, names: listed, .. } = &header.facts {
             names.extend(project_names(repo, listed));
+            repos.push(repo.clone());
         }
     }
-    Ok(names)
+    Ok((names, repos))
 }
 
 /// Whether a delivery wakes `who` off the beat: the operator or another Mind of
@@ -771,8 +772,8 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
             }
             // Her projects' names address her too; read only when something is pending. A failed read keeps her last-read row.
             if !row.pending.is_empty() {
-                match project_names_of(seat.mind) {
-                    Ok(names) => row.addressee = roster.with_projects(names),
+                match stewardships_of(seat.mind) {
+                    Ok((names, repos)) => row.addressee = roster.with_stewardships(names, repos),
                     Err(error) => row.note = format!("{} stewardship names unread: {error}", row.note).trim().to_string(),
                 }
             }

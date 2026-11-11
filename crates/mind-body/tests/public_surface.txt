@@ -57,7 +57,7 @@ mind_body::chat_client: struct ChatDelivery # [derive (Clone , Debug , PartialEq
 mind_body::chat_client: struct ChatImage # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[path: String, mime: String, size: u64, sha256: String]
 mind_body::chat_client: struct ChatOpenDirectReceipt # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, outcome: DirectOutcome, room_id: Option < String >, event_id: Option < String >]
 mind_body::chat_client: struct ChatOpenDirectRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, persona: String, user_id: String, text: String]
-mind_body::chat_client: struct ChatPending # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, deliveries: Vec < ChatDelivery >, tail: Option < Vec < TailLine > >]
+mind_body::chat_client: struct ChatPending # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, deliveries: Vec < ChatDelivery >, tail: Option < Vec < TailLine > >, tail_gaps: Vec < String >]
 mind_body::chat_client: struct ChatPendingRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, after_seq: u64]
 mind_body::chat_client: struct ChatRead # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, room: String, event_id: String, at_unix_ms: u64]
 mind_body::chat_client: struct ChatRefusal # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, refusal: Refusal]
@@ -189,7 +189,7 @@ mind_body::lease_client: struct SocketLender  pub-fields[]
 mind_body::lease_client: struct TokenFd  pub-fields[]
 mind_body::lease_client::socket: impl Lease for Granted
 mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq , Serialize , Deserialize)] # [serde (rename_all = "lowercase")] pub enum SettleOutcome { Done , Declined , Wrong , }
-mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Doctrine , DoctrineTooLarge , Lease , Session , Undecodable , OutOfBounds (& 'static str) , RoomNotAllowed , Send , SelfRun , Memory , Ack , }
+mind_body::persona: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Doctrine , DoctrineTooLarge , Lease , Session , Undecodable , OutOfBounds (& 'static str) , RuleRepo (String) , RoomNotAllowed , Send , SelfRun , Memory , Ack , }
 mind_body::persona: # [derive (Debug , PartialEq , Eq)] pub enum Outcome { Dead (HeldReason) , NoRun , Served { run : PipelineRef , answered : u32 , failure : Option < Failure > , self_run : Option < PipelineRef > } , }
 mind_body::persona: const AGENT : & str
 mind_body::persona: const DOCTRINE_MAX_BYTES : usize
@@ -233,8 +233,9 @@ mind_body::persona: struct FileTrace  pub-fields[]
 mind_body::persona: struct HuginnPersona  pub-fields[]
 mind_body::persona: struct OpenDirect # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[with: String, text: String]
 mind_body::persona: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, chat: & 'a dyn Chat, persona: & 'a dyn PersonaState, trace: & 'a dyn Trace, heartbeat: Option < & 'a dyn HeartbeatView >, lender: & 'a dyn Lender, spawner: & 'a dyn Spawner, run_cap_s: u64, sandbox: & 'a Path, scratch: & 'a Path]
-mind_body::persona: struct PersonaReply # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[intent: String, say: Vec < Say >, open_direct: Option < OpenDirect >, start_self_run: Option < StartSelfRun >, remember: Vec < Remember >, settle: Vec < Settle >, tempo_vote_beat_s: Option < Option < u32 > >, urgency_permille: Option < u16 >]
+mind_body::persona: struct PersonaReply # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[intent: String, say: Vec < Say >, open_direct: Option < OpenDirect >, start_self_run: Option < StartSelfRun >, remember: Vec < Remember >, rule: Vec < Rule >, settle: Vec < Settle >, tempo_vote_beat_s: Option < Option < u32 > >, urgency_permille: Option < u16 >]
 mind_body::persona: struct Remember # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[sort: MemorySort, text: String, about: Vec < String >, salience_permille: u16]
+mind_body::persona: struct Rule # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[by: String, words: String, repo: String, campaign: String, title: String, ruling: String]
 mind_body::persona: struct Say # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[room: String, text: String]
 mind_body::persona: struct Settle # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[item: String, outcome: SettleOutcome, why: String]
 mind_body::persona: struct StartSelfRun # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[brief: String, repo: String, campaign: String, for_item: Option < String >]

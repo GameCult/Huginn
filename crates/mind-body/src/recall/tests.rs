@@ -403,6 +403,28 @@ fn a_follow_up_and_a_ruling_read_as_what_she_set_herself_and_what_was_ruled() {
 }
 
 #[test]
+fn a_ruling_names_who_decided_it() {
+    let mind = TestMind::seeded();
+    mind.committed(vec![spec("x")]);
+    let by = |label: &str, authority: RulingAuthority| match ruling(label, None) {
+        PipelineDocument::Ruling(mut ruling) => {
+            ruling.authority = authority;
+            PipelineDocument::Ruling(ruling)
+        }
+        other => other,
+    };
+    let steward = RulingAuthority::Steward { steward: "@heimdall:chat".into(), repo: eureka_pipeline::OrgRepo("GameCult/Bifrost".into()), words: "no zeros".into(), event: None };
+    mind.committed(vec![follow_up("fork-it", &spec_ref("x")), by("R1", steward), by("R2", RulingAuthority::Mind), by("R3", RulingAuthority::Operator)]);
+    let mut asking = cue(&[LIBBY], &["Later"], &[]);
+    asking.names = BTreeMap::from([("@heimdall:chat", "Heimdall")]);
+    let recalled = select(&Recording::over(&mind), &asking).unwrap();
+    let lines: Vec<&str> = recalled.entries().map(|entry| entry.line.as_str()).collect();
+    for expected in ["- Heimdall ruled, as steward of GameCult/Bifrost: \"A ruling\"\n", "- You ruled: \"A ruling\"\n", "- The operator ruled: \"A ruling\"\n"] {
+        assert!(lines.contains(&expected), "{expected}: {lines:?}");
+    }
+}
+
+#[test]
 fn the_empty_notice_appears_only_when_nothing_is_remembered_or_left_out() {
     let open_only = TestMind::seeded();
     open_only.committed(vec![memory("asked-one", MemorySort::Asked, "Do it", &["@op:chat"])]);

@@ -2346,6 +2346,22 @@ mod tests {
     }
 
     #[test]
+    fn a_steward_ruling_takes_no_operator_quote() {
+        let mut mind = seeded();
+        let mut peer = ruling("R1");
+        peer.authority = RulingAuthority::Steward {
+            steward: "@heimdall:chat".into(),
+            repo: eureka_pipeline::OrgRepo("GameCult/Bifrost".into()),
+            words: "refuse leading zeros".into(),
+            event: None,
+        };
+        peer.operator_quote = Some("all recommendations, go ahead".into());
+        assert_eq!(refusal(admit(&mut mind, vec![D::Ruling(peer.clone())])), MindRefusal::QuoteWithoutOperator { ruling: id("ruling", "R1") });
+        peer.operator_quote = None;
+        committed(admit(&mut mind, vec![D::Ruling(peer)]));
+    }
+
+    #[test]
     fn a_mind_ruling_without_a_quote_is_admitted() {
         let mut mind = seeded();
         let mut own = ruling("R1");

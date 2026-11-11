@@ -7,7 +7,7 @@
 //! how a change to it makes every projection rebuild. No network, no JSON, no
 //! store handle: the daemon owns the vector store and the embedder.
 
-use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef};
+use eureka_pipeline::{PipelineDocument, PipelineKind, PipelineRef, RulingAuthority};
 use sha2::{Digest, Sha256};
 
 use crate::mind::Mind;
@@ -56,6 +56,9 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
             lines.push(&ruling.title.0);
             lines.push(&ruling.ruling.0);
             lines.extend(ruling.operator_quote.iter().map(|quote| quote.0.as_str()));
+            if let RulingAuthority::Steward { words, .. } = &ruling.authority {
+                lines.push(&words.0);
+            }
         }
         D::CutSpec(spec) => {
             lines.push(&spec.title.0);
@@ -245,6 +248,15 @@ A paper
 Keep notes small.
 More documents.");
         assert_eq!(INDEX_TEXT_VERSION, 1);
+    }
+
+    /// A Steward ruling is found by the words the peer said as well as by its title and ruling.
+    #[test]
+    fn a_steward_rulings_words_are_indexed() {
+        let mut peer = ruling("R1");
+        peer.operator_quote = None;
+        peer.authority = RulingAuthority::Steward { steward: s("@heimdall:chat"), repo: eureka_pipeline::OrgRepo(REPO.into()), words: "refuse leading zeros".into(), event: None };
+        assert!(index_text(&D::Ruling(peer)).unwrap().lines().any(|line| line == "refuse leading zeros"));
     }
 
     fn texts(mind: &Mind<MemoryStore>) -> BTreeMap<String, String> {
