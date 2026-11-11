@@ -796,6 +796,7 @@ fn a_jump_past_the_ceiling_plus_the_headroom_writes_the_flush_and_the_running_tu
 request 2 prefix 400000
 request 3 prefix 470000
 result subtype=success is_error=false: The answer.
+usage turn ?: not reported
 request 4 prefix 459999
 request 5 prefix 460000
 ");
@@ -1015,6 +1016,7 @@ fn unreadable_and_foreign_lines_are_skipped_and_never_printed() {
     ]);
     assert_eq!(ran.lines(), "request 1 prefix 10
 result subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed
+usage turn ?: not reported
 ");
     let outcome = ran.outcome.as_ref().unwrap().to_string();
     assert!(!ran.out.contains(canary) && !outcome.contains(canary));
@@ -1218,6 +1220,7 @@ exit 0");
         assert_eq!(printed, "request 1 prefix 10
 request 2 prefix 300000
 result subtype=success is_error=false: The answer.
+usage turn ?: not reported
 ");
     }
 
