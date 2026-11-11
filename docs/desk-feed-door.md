@@ -166,7 +166,7 @@ CultLib commit.
   to Bifrost's uid alone.
 - Bifrost owns three things: the per-request membership check, the `desk.read` token, and
   masking on what the door returns. It masks answerer ids for a reader who is not a decider (X3,
-  Heimdall 2026-11-11) and strips notes (ruling `desk-read-visibility-whole-record`, `DeskNotes`).
+  Heimdall 2026-11-11) and strips notes (ruling `desk-read-visibility-listed`, `DeskNotes`).
   Huginn masks nothing.
 
 ## Listing: which forks a reader sees (Huginn's; NOT live, see the status above)
