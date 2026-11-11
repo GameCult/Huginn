@@ -979,7 +979,7 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
 fn redact_schemeless(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut word = String::new();
-    let mut flush = |word: &mut String, out: &mut String| {
+    let flush = |word: &mut String, out: &mut String| {
         out.push_str(&redact_word(word));
         word.clear();
     };
