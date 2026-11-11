@@ -8826,15 +8826,12 @@ fn the_trace_holds_the_quote_line_she_was_shown() {
 /// event that really is new alongside them is told once.
 #[test]
 fn events_a_restarted_mouth_renumbers_are_told_once_and_nothing_new_is_lost() {
-    let rig = Rig::new(vec![delivery_of(1, "swarm", "@op:chat", "first", "$e1"), delivery_of(2, "swarm", "@op:chat", "second", "$e2")], &[says(&[("operator", "one")]), says(&[("operator", "two")])]);
+    let (first, second, third) = (operator_says(1, "first"), operator_says(2, "second"), operator_says(5, "third"));
+    let rig = Rig::new(vec![first.clone(), second.clone()], &[says(&[("operator", "one")]), says(&[("operator", "two")])]);
     let (deliveries, restarted) = (rig.chat.deliveries.clone(), Cell::new(false));
     *rig.model.during.borrow_mut() = Some(Box::new(move || {
         if !restarted.replace(true) {
-            *deliveries.borrow_mut() = vec![
-                delivery_of(3, "swarm", "@op:chat", "first", "$e1"),
-                delivery_of(4, "swarm", "@op:chat", "second", "$e2"),
-                delivery_of(5, "swarm", "@op:chat", "third", "$e3"),
-            ];
+            *deliveries.borrow_mut() = vec![ChatDelivery { seq: 3, ..first.clone() }, ChatDelivery { seq: 4, ..second.clone() }, third.clone()];
         }
     }));
     rig.go();
