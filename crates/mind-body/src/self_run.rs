@@ -825,6 +825,7 @@ impl<'a> SelfInbox<'a> {
     fn reply_to(&mut self, line: &str, ok: bool) {
         let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return };
         let text = result_text(&event);
+        let text = text.as_str();
         let flush = std::mem::take(&mut self.flushing);
         // The flush result is the session's note to its successor, in the journal: it is no reply.
         if ok && !flush && !text.trim().is_empty() {
@@ -923,8 +924,109 @@ fn result_head(event: &serde_json::Map<String, Value>) -> String {
     head
 }
 
-fn result_text(event: &serde_json::Map<String, Value>) -> &str {
-    event.get("result").and_then(Value::as_str).unwrap_or("")
+/// A result's words as they leave the actuator, for the journal and for her mind (the reply): redacted by `redact_url_userinfo`.
+fn result_text(event: &serde_json::Map<String, Value>) -> String {
+    redact_url_userinfo(event.get("result").and_then(Value::as_str).unwrap_or(""))
+}
+
+/// The one redaction of URL credentials. Call it at each place a string the CLI produced enters the journal, her mind or chat: today
+/// the Self result (`result_text`: journal line and Reply) and the structured output of a Persona or Sleep result
+/// (`persona::structured_output`, string by string). It does not cover claude's stderr (inherited) or the CLI's transcript files.
+///
+/// A forge token rides in a remote URL, so every `scheme://` and every protocol-relative `//` opens an authority, read as git, curl and
+/// RFC 3986 read it: it ends at the first `/`, `?`, `#`, backslash, quote, backtick, parenthesis, bracket, angle bracket or ASCII whitespace
+/// (`is_authority_end`). Its userinfo is everything before the authority's LAST `@` (a raw `@` in a password still redacts), and non-ASCII
+/// characters, NBSP and U+2028 included, stay inside it. The userinfo becomes `<redacted>`: `scheme://<redacted>@host`. With a colon it is
+/// always redacted; without one it is a bare token on http, https, ftp, ftps, ws, wss, any `+http`/`+https` scheme (`git+https`), protocol-relative `//` and an unparseable scheme, and a plain
+/// username on any other scheme (`ssh://git@host`), which stays. A `@` after the authority (`github.com/@user`, `pkg@1.2.3`) is path, not
+/// userinfo, and is left alone. Scheme-less credentials are covered only in the shape `word:secret@host.tld/` at the start of an
+/// ASCII-whitespace-delimited word. Not covered: a password holding `/ ? # ` a quote or ASCII whitespace (no parser reads it as userinfo),
+/// scp-style `user:secret@host:path`, tokens in query strings, claude's stderr, the kept transcripts. Syntax only; no reading of meaning.
+pub(crate) fn redact_url_userinfo(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("//") {
+        let (before, after) = rest.split_at(at);
+        let body = &after[2..];
+        out.push_str(before);
+        out.push_str("//");
+        // The scheme is the ASCII run before `:`. Without a colon, `//` opens an authority only at a word start (`a//b@c` is not one).
+        let scheme = match before.strip_suffix(':') {
+            // Only ASCII bytes match, so the byte after the last non-match is a character boundary.
+            Some(head) => head[head.bytes().rposition(|c| !(c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))).map_or(0, |i| i + 1)..].to_ascii_lowercase(),
+            None if before.chars().next_back().is_none_or(|c| is_break(c) || matches!(c, '"' | '\'' | '`' | '(' | '[' | '{' | '<' | '=' | ',')) => String::new(),
+            None => {
+                rest = body;
+                continue;
+            }
+        };
+        let end = body.find(is_authority_end).unwrap_or(body.len());
+        let authority = &body[..end];
+        match authority.rfind('@') {
+            Some(i) if i > 0 && (authority[..i].contains(':') || carries_bare_token(&scheme)) => {
+                out.push_str("<redacted>");
+                out.push_str(&authority[i..]);
+            }
+            _ => out.push_str(authority),
+        }
+        rest = &body[end..];
+    }
+    out.push_str(rest);
+    redact_schemeless(&out)
+}
+
+/// Schemes whose lone userinfo is a token, not a username: web and ftp schemes, `ws`/`wss`, and `x+http`/`x+https` wrappers; `scheme` is lowercase.
+fn carries_bare_token(scheme: &str) -> bool {
+    matches!(scheme, "" | "http" | "https" | "ftp" | "ftps" | "ws" | "wss") || scheme.ends_with("+http") || scheme.ends_with("+https")
+}
+
+/// ASCII whitespace; NBSP, U+2028 and other Unicode whitespace are not, so a secret holding them is redacted whole.
+fn is_break(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c')
+}
+
+/// The end of a URL's authority.
+fn is_authority_end(c: char) -> bool {
+    is_break(c) || matches!(c, '/' | '?' | '#' | '\\' | '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')
+}
+
+/// `word:secret@host.tld/` at the start of a whitespace-delimited word that holds no `//` becomes `<redacted>@host.tld/`.
+fn redact_schemeless(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        out.push_str(&redact_word(word));
+        word.clear();
+    };
+    for c in text.chars() {
+        if is_break(c) {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+fn redact_word(word: &str) -> String {
+    let shaped = (|| {
+        if word.contains("//") {
+            return None;
+        }
+        let at = word.rfind('@')?;
+        let colon = word.find(':')?;
+        let (user, host) = (&word[..colon], &word[at + 1..]);
+        let host_name = &host[..host.find('/')?];
+        let user_ok = !user.is_empty() && user.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        let host_ok = host_name.contains('.') && host_name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'));
+        (colon + 1 < at && user_ok && host_ok).then_some(at)
+    })();
+    match shaped {
+        Some(at) => format!("<redacted>{}", &word[at..]),
+        None => word.to_string(),
+    }
 }
 
 /// `text` in consecutive pieces of at most `limit` bytes, each cut at a character boundary; their concatenation is `text`.
