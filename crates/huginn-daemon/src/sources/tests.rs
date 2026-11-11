@@ -1071,13 +1071,81 @@ fn a_window_at_a_rooms_edge_returns_fewer_and_says_nothing_more_lies_beyond() {
 }
 
 #[test]
-fn a_window_stops_after_six_reads_and_says_more_remain() {
+fn a_window_stops_after_six_reads_of_five_chunks_and_says_more_remain() {
     let points: Vec<ChatPoint> = (0..80).map(|n| chat_point("!a:x", None, 0, 4, &[(&format!("$m{n:02}"), 1000 + n as u64)])).collect();
     let mut rig = chat_rig(points).0;
     let around = window(&mut rig.index, &wq("$m70", 50, 0), WITHIN).unwrap().unwrap();
-    assert!(around.messages.len() < 51, "six reads of five chunks reach at most 30 earlier messages");
+    assert_eq!(around.messages.len(), 31, "six reads of five new chunks: thirty earlier messages and the anchor");
+    assert_eq!(around.messages[0].event_id, "$m40");
     assert_eq!(around.messages.last().unwrap().event_id, "$m70");
     assert!(around.more_before && around.more_after, "the cap is not the room's start, and $m71 follows the anchor");
+    // Asking for exactly what the six reads reach leaves the same honest flag.
+    let exact = window(&mut rig.index, &wq("$m70", 30, 0), WITHIN).unwrap().unwrap();
+    assert_eq!((exact.messages.len(), exact.more_before), (31, true), "thirty held is not yet 'more than asked': the sixth read ended the walk, not the room");
+    let fewer = window(&mut rig.index, &wq("$m70", 29, 0), WITHIN).unwrap().unwrap();
+    assert_eq!((fewer.messages.len(), fewer.more_before), (30, true), "the cut leaves $m40 beyond");
+}
+
+#[test]
+fn a_window_does_not_change_with_the_message_that_anchors_it_when_chunks_share_a_start() {
+    let chunks = [("$t1", "$t2", 150), ("$u1", "$u2", 160), ("$v1", "$v2", 170)];
+    let points: Vec<ChatPoint> = chunks.iter().map(|(first, second, at)| chat_point("!a:x", None, 0, 4, &[(first, 100), (second, *at)])).collect();
+    let mut rig = chat_rig(points).0;
+    let want = ["$t1", "$u1", "$v1", "$t2", "$u2", "$v2"];
+    for anchor in want {
+        let around = window(&mut rig.index, &wq(anchor, 10, 10), WITHIN).unwrap().unwrap();
+        assert_eq!(window_ids(&around), want, "anchored at {anchor}");
+        assert!(!around.more_before && !around.more_after);
+    }
+}
+
+#[test]
+fn a_run_of_chunks_at_one_millisecond_is_all_reached() {
+    let points: Vec<ChatPoint> = (0..8).map(|n| chat_point("!a:x", None, 0, 4, &[(&format!("$c{n}"), 100)])).collect();
+    let mut rig = chat_rig(points).0;
+    for anchor in ["$c0", "$c3", "$c7"] {
+        let around = window(&mut rig.index, &wq(anchor, 20, 20), WITHIN).unwrap().unwrap();
+        assert_eq!(window_ids(&around), ["$c0", "$c1", "$c2", "$c3", "$c4", "$c5", "$c6", "$c7"], "anchored at {anchor}");
+        assert!(!around.more_before && !around.more_after, "the room ends in both directions");
+    }
+}
+
+#[test]
+fn a_chunk_starting_with_the_anchors_chunk_is_reached_going_forward_alone() {
+    // The anchor's own chunk already holds a message before it, so no earlier read happens.
+    let mut rig = chat_rig(vec![chat_point("!a:x", None, 0, 4, &[("$x0", 100), ("$x1", 120)]), chat_point("!a:x", None, 0, 4, &[("$y0", 100), ("$y1", 130)])]).0;
+    let around = window(&mut rig.index, &wq("$x1", 0, 5), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&around), ["$x1", "$y1"]);
+    assert!(around.more_before && !around.more_after, "$x0 and $y0 precede; nothing follows $y1");
+}
+
+#[test]
+fn a_walk_that_holds_exactly_the_asked_count_still_reads_on_to_learn_the_rooms_end() {
+    let points: Vec<ChatPoint> = (0..10).map(|n| chat_point("!a:x", None, 0, 4, &[(&format!("$m{n}"), 1000 + n as u64)])).collect();
+    let mut rig = chat_rig(points).0;
+    let around = window(&mut rig.index, &wq("$m5", 5, 0), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&around), ["$m0", "$m1", "$m2", "$m3", "$m4", "$m5"]);
+    assert!(!around.more_before, "the room starts at $m0");
+}
+
+#[test]
+fn an_event_repeated_in_a_neighbour_chunk_appears_once() {
+    let mut rig = chat_rig(vec![chat_point("!a:x", None, 0, 4, &[("$a1", 100), ("$a2", 200)]), chat_point("!a:x", None, 0, 4, &[("$a2", 200), ("$a3", 300)])]).0;
+    let around = window(&mut rig.index, &wq("$a1", 0, 5), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&around), ["$a1", "$a2", "$a3"]);
+}
+
+#[test]
+fn a_forge_point_is_not_an_event_the_window_can_anchor_on() {
+    let (mut rig, _) = topic_rig(4);
+    let mut state = rig.index.state.lock().unwrap();
+    let mut point = state.points.values().next().unwrap().clone();
+    point.id = "forge-with-an-event-id".into();
+    point.payload.text = "$f1 looks like an event id".into();
+    state.points.insert(point.id.clone(), point);
+    drop(state);
+    let (field, _) = refusal_field(window(&mut rig.index, &wq("$f1", 1, 1), WITHIN));
+    assert_eq!(field, "event_id", "only corpus=chat points are read, as for an unknown id");
 }
 
 #[test]

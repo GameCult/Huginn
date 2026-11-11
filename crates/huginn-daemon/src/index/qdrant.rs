@@ -562,5 +562,7 @@ mod source_filter_tests {
                 { "key": "event_ids", "match": { "value": "$e" } },
             ])
         );
+        let corpus = json!({ "key": "corpus", "match": { "value": "chat" } });
+        assert_eq!(filter["must"][0], corpus, "a point with no corpus, or another, does not match: the chat corpus clause is always first");
     }
 }

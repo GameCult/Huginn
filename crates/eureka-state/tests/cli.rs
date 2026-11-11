@@ -2963,7 +2963,7 @@ fn chat_search_prints_cited_messages_and_sends_its_selectors() {
     assert_eq!(
         found.out,
         "#swarm:gamecult.org (!r:gamecult.org) $e1..$e2 2023-11-14T22:13:20.000Z..2023-11-14T22:14:20.000Z\n\
-         2023-11-14T22:13:20.000Z @nibu:gamecult.org $e1 ship the cut\nthen rest\n\
+         2023-11-14T22:13:20.000Z @nibu:gamecult.org $e1 ship the cut\\nthen rest\n\
          2023-11-14T22:14:20.000Z @eureka:gamecult.org $e2 done\n\n"
     );
     let other = at(server.addr, &["chat", "search", "--room", "!elsewhere:gamecult.org"], None);
@@ -3006,7 +3006,7 @@ fn chat_window_prints_the_anchor_marked_and_refuses_what_the_index_lacks() {
     assert_eq!(
         found.out,
         "#swarm:gamecult.org (!r:gamecult.org)\n\
-         \x20 2023-11-14T22:13:20.000Z @nibu:gamecult.org $e1 ship the cut\nthen rest\n\
+         \x20 2023-11-14T22:13:20.000Z @nibu:gamecult.org $e1 ship the cut\\nthen rest\n\
          > 2023-11-14T22:14:20.000Z @eureka:gamecult.org $e2 done\n"
     );
     let over = at(server.addr, &["chat", "window", "$e2", "--before", "51"], None);

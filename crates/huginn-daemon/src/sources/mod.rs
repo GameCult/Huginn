@@ -725,14 +725,12 @@ pub fn window<S: SourceIndex>(index: &mut S, query: &ChatWindowQuery, within: Du
         }));
     };
     let start_of = |chunk: &ChatPayload| chunk.messages.iter().map(|message| message.ts_ms).min().unwrap_or(0);
-    let first_id = |chunk: &ChatPayload| chunk.messages.first().map(|message| message.event_id.clone());
+    let first_id = |chunk: &ChatPayload| chunk.messages.first().map(|message| message.event_id.clone()).unwrap_or_default();
     let room = ChatFilter { rooms: vec![anchor.room_id.clone()], ..ChatFilter::default() };
     let at = anchor.messages.iter().position(|message| message.event_id == id).context("the chat index returned a chunk that does not hold the event it was asked for")?;
-    let mut held = vec![first_id(&anchor)];
-    // Each side walks chunks of the anchor's room only, away from the anchor,
-    // until it holds more messages than asked (so the cut can tell whether
-    // more exist), the room ends, or the reads are spent.
-    let mut walk = |forward: bool, want: usize, mine: usize| -> Result<(Vec<Vec<ChatMessage>>, bool)> {
+    // Chunks held so far as (first event id, start): the anchor's, then each walk's.
+    let mut held = vec![(first_id(&anchor), start_of(&anchor))];
+    let mut walk = |forward: bool, want: usize, mine: usize| -> Result<(Vec<ChatPayload>, bool)> {
         let (mut chunks, mut count, mut edge, mut exhausted) = (Vec::new(), mine, start_of(&anchor), false);
         for _ in 0..WINDOW_SCROLLS_MAX {
             if count > want {
@@ -743,21 +741,23 @@ pub fn window<S: SourceIndex>(index: &mut S, query: &ChatWindowQuery, within: Du
             } else {
                 (ChatFilter { starts_to_ms: Some(edge), ..room.clone() }, ChatOrder::NewestFirst)
             };
-            let read = index.chat_scroll(&filter, order, WINDOW_CHUNKS_PER_SCROLL, budget.left()?)?;
-            exhausted = (read.len() as u32) < WINDOW_CHUNKS_PER_SCROLL;
-            let mut gained = false;
+            // Held chunks starting at the edge come back first with any others
+            // that start there; asking for that many extra means a run of
+            // chunks at one millisecond cannot fill a read with chunks held.
+            let limit = WINDOW_CHUNKS_PER_SCROLL + held.iter().filter(|(_, start)| *start == edge).count() as u32;
+            let read = index.chat_scroll(&filter, order, limit, budget.left()?)?;
+            exhausted = (read.len() as u32) < limit;
             for chunk in read {
-                let first = first_id(&chunk);
-                if held.contains(&first) {
+                let key = (first_id(&chunk), start_of(&chunk));
+                if held.contains(&key) {
                     continue;
                 }
-                held.push(first);
-                gained = true;
-                edge = if forward { start_of(&chunk).max(edge) } else { start_of(&chunk).min(edge) };
+                edge = if forward { key.1.max(edge) } else { key.1.min(edge) };
+                held.push(key);
                 count += chunk.messages.len();
-                chunks.push(chunk.messages);
+                chunks.push(chunk);
             }
-            if exhausted || !gained {
+            if exhausted {
                 break;
             }
         }
@@ -767,16 +767,20 @@ pub fn window<S: SourceIndex>(index: &mut S, query: &ChatWindowQuery, within: Du
     };
     let (earlier, unreached_before) = walk(false, query.before as usize, at)?;
     let (later, unreached_after) = walk(true, query.after as usize, anchor.messages.len() - at - 1)?;
-    // Chronological: furthest earlier chunk first, the anchor's chunk, then later ones;
-    // stable by ts_ms, so ties keep chunk order and position.
-    let ordered = earlier.into_iter().rev().chain(std::iter::once(anchor.messages.clone())).chain(later).flatten();
+    // Chronological by (ts, chunk start, chunk first event id, position), so
+    // the order does not depend on which message anchored the read.
+    let mut keyed: Vec<(u64, u64, String, usize, ChatMessage)> = Vec::new();
+    for chunk in earlier.iter().chain(std::iter::once(&anchor)).chain(later.iter()) {
+        let (start, first) = (start_of(chunk), first_id(chunk));
+        keyed.extend(chunk.messages.iter().enumerate().map(|(position, message)| (message.ts_ms, start, first.clone(), position, message.clone())));
+    }
+    keyed.sort_by(|a, b| (a.0, a.1, &a.2, a.3).cmp(&(b.0, b.1, &b.2, b.3)));
     let (mut seen, mut messages) = (std::collections::BTreeSet::new(), Vec::new());
-    for message in ordered {
+    for (.., message) in keyed {
         if seen.insert(message.event_id.clone()) {
             messages.push(message);
         }
     }
-    messages.sort_by_key(|message| message.ts_ms);
     let at = messages.iter().position(|message| message.event_id == id).context("the anchor fell out of its own window")?;
     let (lo, hi) = (at.saturating_sub(query.before as usize), (at + 1 + query.after as usize).min(messages.len()));
     Ok(Ok(ChatWindow {
