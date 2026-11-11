@@ -83,16 +83,12 @@ deletes the chunk window's points and re-chunks the window without it.
    is absent from every point after the next refresh; a failed upsert leaves
    the cursor where it was. A grep over the collection payload for the Discord
    puppet pattern returns nothing.
-3. **persona-chat-recall**. A recall lane built from the batch's messages as
-   the `texts` of cut 1, `corpus=chat`, own byte budget, not shown for text
-   already in the batch, shown as conversation (not memory). Negative checks: a
-   hit from a room the sender could not read is never shown (DM rule, persona.rs
-   `next_batch`); a hit whose text imitates a `message` line or `role=operator`
-   is rendered quoted and carries no role; the lane failing leaves the turn
-   going without it (as `Search::Unavailable`).
+3. **persona-chat-recall: dropped.** No recall lane; a Persona has a shell
+   and runs `huginn sources` (`gamecult-chat:ruling:chat-recall-lookup-not-memory-dms-out`).
+   The text hits the public-only index only, so the DM check below is moot.
 
 Cut 1 ships alone and improves every `huginn sources` caller. Cut 2 waits on
-questions 1 and 2. Cut 3 waits on 2 and 3.
+questions 1 and 2 (both answered, see Status).
 
 ## Questions (put to the operator; admitted as questions)
 
@@ -102,9 +98,8 @@ questions 1 and 2. Cut 3 waits on 2 and 3.
    (one more server in the path), or Synapse admin API (broader than needed).
 2. Scope: public community rooms only (recommended) or also Persona-visible
    private rooms. DMs stay out either way.
-3. Recall tension: does transcript search in a Persona turn contradict
-   `persona-memory-written-not-transcript`? Recommend no: it is lookup, labelled
-   conversation, not memory; what she must keep is still written.
+3. Recall tension: answered. Lookup, not memory, no recall lane
+   (`gamecult-chat:ruling:chat-recall-lookup-not-memory-dms-out`).
 
 Confidence: cut 1 and the owner decision, high. The window chunker size and
 k=60 are calibration, not design; RRF over a handful of lists is the
@@ -120,11 +115,16 @@ What changed since the map was written:
 - Questions 1 and 2 are answered with the recommendations
   (`gamecult-chat:ruling:chat-index-synapse-credential`, operator 2026-11-03,
   "I take both recs."; `gamecult-chat:ruling:chat-index-room-scope`,
-  public-only). Question 3 (`chat-recall-vs-memory-ruling`) is still open.
-- **Cut 3's premise is stale.** A Persona now carries a live session under
-  bubblewrap with a shell and the web (`mind-body/src/persona.rs:53`, `--tools`;
-  rulings `persona-session-full-sandbox`, `live-mind-sessions`). She can run
-  `huginn sources` herself, so a pushed recall lane is no longer the only path.
-  Re-map cut 3 on that before it is specced: whether to push chat hits into her
-  input at all, and under which budget, is open again. Cuts 1 and 2 are
-  unaffected.
+  public-only). Question 3 is ruled (see Ruling below).
+- Cut 3 is dropped (see Ruling below).
+
+## Ruling (2026-11-11)
+
+`gamecult-chat:ruling:chat-recall-lookup-not-memory-dms-out`:
+
+- Chat retrieval is conversation lookup, not memory. There is no Persona recall
+  lane; Personas have a shell and run `huginn sources`. What a Mind keeps is
+  written memory (`persona-memory-written-not-transcript`).
+- DMs and private rooms never enter the index: public rooms only, Discord never.
+- A Mind that must remember DM content writes a memory citing the chat or room
+  id as its source; the index is not where DM content is kept.
