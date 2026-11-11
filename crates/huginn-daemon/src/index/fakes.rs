@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail, ensure};
 
-use crate::sources::{ChatFilter, ChatOrder, ChatPayload, ChatPoint, ChatRow, DescribedSources, SourceIndex, SourcePoint, SourceRow, SourcesMeta};
+use crate::sources::{ChatFilter, ChatOrder, ChatPayload, ChatPoint, ChatRow, DescribedSources, SourceIndex, SourcePoint, SourceRow, SourcesMeta, StoredChat};
 
 use super::{CollectionMeta, Described, Embedder, Hit, ModelIdentity, Point, VectorIndex, point_id};
 
@@ -264,6 +264,16 @@ pub(crate) struct SourcesState {
     pub(crate) deletes: Vec<(String, Option<Vec<String>>)>,
     /// A delete naming this repo refuses.
     pub(crate) fail_deletes_of: Option<String>,
+    /// Every cursor write refuses once this many have been written.
+    pub(crate) fail_cursor_writes_after: Option<usize>,
+    /// Every chat upsert refuses while this is set.
+    pub(crate) fail_chat_upserts: bool,
+    /// Every chat delete refuses while this is set.
+    pub(crate) fail_chat_deletes: bool,
+    /// A chat delete naming one of these rooms refuses.
+    pub(crate) fail_chat_deletes_for: BTreeSet<String>,
+    /// Every chat delete that went through: the room and the ids (`None` is all of the room).
+    pub(crate) chat_deletes: Vec<(String, Option<Vec<String>>)>,
     /// The repo filter and limit of every search, in order.
     pub(crate) searches: Vec<(Option<String>, u32)>,
 }
@@ -326,6 +336,9 @@ impl SourceIndex for FakeSources {
 
     fn set_cursors(&mut self, cursors: &BTreeMap<String, String>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+        if state.fail_cursor_writes_after.is_some_and(|after| state.cursor_writes.len() >= after) {
+            bail!("the vector store refused the cursor write");
+        }
         state.cursor_writes.push(cursors.clone());
         let Some(DescribedSources::Labelled { cursors: held, .. }) = &mut state.described else { bail!("no source collection") };
         *held = cursors.clone();
@@ -375,6 +388,7 @@ impl SourceIndex for FakeSources {
 
     fn upsert_chat(&mut self, points: &[ChatPoint]) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+        ensure!(!state.fail_chat_upserts, "the vector store refused the chat upsert");
         for point in points {
             ensure!(!point.payload.messages.is_empty(), "a chat chunk carries no messages");
             state.chat.insert(point.id.clone(), point.clone());
@@ -404,6 +418,44 @@ impl SourceIndex for FakeSources {
         }
         Ok(kept.into_iter().take(limit as usize).cloned().collect())
     }
+
+    fn chat_tail(&mut self, room_id: &str) -> Result<Option<StoredChat>> {
+        let state = self.state.lock().unwrap();
+        Ok(state.chat.iter().filter(|(_, point)| point.payload.room_id == room_id).max_by_key(|(id, point)| (span(&point.payload).1, (*id).clone())).map(stored))
+    }
+
+    fn chat_chunks_holding(&mut self, room_id: &str, event_ids: &[String]) -> Result<Vec<StoredChat>> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .chat
+            .iter()
+            .filter(|(_, point)| point.payload.room_id == room_id && point.payload.messages.iter().any(|message| event_ids.contains(&message.event_id)))
+            .map(stored)
+            .collect())
+    }
+
+    fn chat_chunks_overlapping(&mut self, room_id: &str, from_ms: u64, to_ms: u64) -> Result<Vec<StoredChat>> {
+        let state = self.state.lock().unwrap();
+        Ok(state.chat.iter().filter(|(_, point)| point.payload.room_id == room_id && span(&point.payload).1 >= from_ms && span(&point.payload).0 < to_ms).map(stored).collect())
+    }
+
+    fn delete_chat(&mut self, room_id: &str, ids: Option<&[String]>) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        ensure!(!state.fail_chat_deletes && !state.fail_chat_deletes_for.contains(room_id), "the vector store refused the chat delete");
+        state.chat_deletes.push((room_id.to_owned(), ids.map(<[String]>::to_vec)));
+        state.chat.retain(|id, point| !(point.payload.room_id == room_id && ids.is_none_or(|ids| ids.contains(id))));
+        Ok(())
+    }
+}
+
+fn stored((id, point): (&String, &ChatPoint)) -> StoredChat {
+    StoredChat { id: id.clone(), payload: point.payload.clone() }
+}
+
+/// (start, end) of the times a chunk's messages make.
+fn span(payload: &ChatPayload) -> (u64, u64) {
+    let times = || payload.messages.iter().map(|message| message.ts_ms);
+    (times().min().unwrap_or(0), times().max().unwrap_or(0))
 }
 
 /// A chat chunk under a filter, by the span its messages make.
@@ -442,5 +494,17 @@ impl SourceIndex for FakeIndex {
     }
     fn chat_scroll(&mut self, filter: &ChatFilter, order: ChatOrder, limit: u32, within: Duration) -> Result<Vec<ChatPayload>> {
         self.sources.chat_scroll(filter, order, limit, within)
+    }
+    fn chat_tail(&mut self, room_id: &str) -> Result<Option<StoredChat>> {
+        self.sources.chat_tail(room_id)
+    }
+    fn chat_chunks_holding(&mut self, room_id: &str, event_ids: &[String]) -> Result<Vec<StoredChat>> {
+        self.sources.chat_chunks_holding(room_id, event_ids)
+    }
+    fn chat_chunks_overlapping(&mut self, room_id: &str, from_ms: u64, to_ms: u64) -> Result<Vec<StoredChat>> {
+        self.sources.chat_chunks_overlapping(room_id, from_ms, to_ms)
+    }
+    fn delete_chat(&mut self, room_id: &str, ids: Option<&[String]>) -> Result<()> {
+        self.sources.delete_chat(room_id, ids)
     }
 }

@@ -1303,6 +1303,22 @@ impl huginn_daemon::sources::SourceIndex for Desk {
         anyhow::bail!("a daemon never writes the source index")
     }
 
+    fn chat_tail(&mut self, _room_id: &str) -> anyhow::Result<Option<huginn_daemon::sources::StoredChat>> {
+        anyhow::bail!("a daemon never reads the ingest job's side of the source index")
+    }
+
+    fn chat_chunks_holding(&mut self, _room_id: &str, _event_ids: &[String]) -> anyhow::Result<Vec<huginn_daemon::sources::StoredChat>> {
+        anyhow::bail!("a daemon never reads the ingest job's side of the source index")
+    }
+
+    fn chat_chunks_overlapping(&mut self, _room_id: &str, _from_ms: u64, _to_ms: u64) -> anyhow::Result<Vec<huginn_daemon::sources::StoredChat>> {
+        anyhow::bail!("a daemon never reads the ingest job's side of the source index")
+    }
+
+    fn delete_chat(&mut self, _room_id: &str, _ids: Option<&[String]>) -> anyhow::Result<()> {
+        anyhow::bail!("a daemon never writes the source index")
+    }
+
     fn chat_nearest(
         &mut self,
         _vector: &[f32],

@@ -1155,3 +1155,24 @@ fn a_window_asks_the_index_only_and_needs_no_embedder() {
     let signature = &signature[..signature.find('{').unwrap()];
     assert!(!signature.contains("Embedder"), "{signature}");
 }
+
+/// A chat cursor and a purge tombstone share the forge's cursors object; the
+/// forge retire never reads either as a repo name, and still retires a repo.
+#[test]
+fn chat_cursor_and_purge_tombstone_keys_survive_the_forge_retire() {
+    let (keep, gone) = (Remote::new(), Remote::new());
+    keep.commit(&[("a.rs", b"a\n")], &[]);
+    gone.commit(&[("b.rs", b"b\n")], &[]);
+    let mut rig = Rig::new();
+    rig.converged(&mut FakeForge::of(&[("Keep", &keep), ("Gone", &gone)]));
+    let mut cursors = rig.index.cursors();
+    cursors.insert("chat:!r:s".into(), "1:$e".into());
+    cursors.insert("chat-purge:!r:s".into(), "1..2".into());
+    rig.index.set_cursors(&cursors).unwrap();
+    rig.index.upsert_chat(&[chat_point("!r:s", None, 0, 4, &[("$e", 5)])]).unwrap();
+    rig.converged(&mut FakeForge::of(&[("Keep", &keep)]));
+    let after = rig.index.cursors();
+    assert_eq!(after.keys().map(String::as_str).collect::<Vec<_>>(), ["Keep", "chat-purge:!r:s", "chat:!r:s"], "Gone retired; both chat keys kept");
+    assert!(rig.index.state.lock().unwrap().deletes.iter().all(|(repo, _)| !repo.starts_with("chat")));
+    assert_eq!(rig.index.state.lock().unwrap().chat.len(), 1);
+}
