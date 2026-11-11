@@ -188,6 +188,7 @@
           "type": "string"
         },
         "order": {
+          "description": "The question's rank: unique, 0-based, in (admission ordinal, key) order among all the Mind's\nquestions (see `Mind::desk_forks`; it deviates from \"the admission ordinal\" only in being unique).",
           "type": "integer",
           "format": "uint64",
           "minimum": 0

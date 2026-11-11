@@ -816,6 +816,45 @@ mod door_smoke {
         assert_eq!(rig.state(), before);
     }
 
+    /// The daemon hands a list's `status` and `cursor` to the Mind, whole: a recorded-only list is the
+    /// one closed fork, an open-only list the open ones, and a cursor page is the forks below it; read
+    /// both in the daemon and over the socket.
+    #[test]
+    fn the_status_and_the_cursor_reach_the_mind() {
+        let mut rig = rig(my_uid());
+        let (question, ruling) = question_and_ruling();
+        let PipelineDocument::Question(held) = &question else { unreachable!() };
+        let more: Vec<PipelineDocument> = (2..=3)
+            .map(|n| {
+                let mut next = held.clone();
+                next.label = format!("Q{n}").as_str().into();
+                PipelineDocument::Question(next)
+            })
+            .collect();
+        for documents in [more, vec![ruling]] {
+            let admitted = rig.daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), now()).answered();
+            assert!(matches!(admitted, HuginnMindResponse::Admit(huginn_mind::PipelineAdmissionOutcome::Committed { .. })), "{admitted:?}");
+        }
+        let ids = |list: &ForkList| list.forks.iter().map(|entry| entry.card.fork_id.clone()).collect::<Vec<_>>();
+        let q = |n: u32| format!("eureka-state:question:Q{n}");
+        let cases = [
+            (Some(ListStatus::Recorded), None, vec![q(1)]),
+            (Some(ListStatus::Open), None, vec![q(3), q(2)]),
+            (None, None, vec![q(3), q(2), q(1)]),
+            (None, ForkCursor::new(2), vec![q(2), q(1)]),
+            (Some(ListStatus::Open), ForkCursor::new(2), vec![q(2)]),
+        ];
+        let now = now();
+        for (status, cursor, expected) in cases {
+            let request = forks("x", &["x"], status, cursor, 50);
+            let (list, _) = page_of(rig.daemon.handle_desk(request.clone(), now));
+            assert_eq!(ids(&list), expected, "{status:?} {cursor:?} in the daemon");
+            let (list, _) = page_of(rig.serving(|path| reply_of(path, "m-1", &request)));
+            assert_eq!(ids(&list), expected, "{status:?} {cursor:?} over the socket");
+            assert_eq!((list.open_count, list.recorded_count), (2, 1));
+        }
+    }
+
     /// Ruling `desk-read-visibility-whole-record`: Huginn returns the whole record, notes included, to
     /// whoever the socket carries. The subject is not in the deciders; the decider's note is there.
     #[test]
@@ -904,8 +943,8 @@ mod door_smoke {
 
     /// Fifty wordy forks, one commit each. A limit-50 page of them would pass the response bound: the Mind
     /// stops the page short at its budget and names the cursor, so the door sends it whole; the door's own
-    /// measure stays exact at the bound. A group of them admitted in one commit that is past the budget by
-    /// itself comes back as the Mind's refusal naming its first fork.
+    /// measure stays exact at the bound. Fifty of them admitted in one commit page like any other: the
+    /// ranks are unique, so the Mind stops the page at its budget inside the commit.
     #[test]
     fn a_page_is_short_of_the_response_bound_and_the_door_still_measures_it_exactly() {
         let mut rig = rig(my_uid());
@@ -923,9 +962,8 @@ mod door_smoke {
         assert!(matches!(admitted, HuginnMindResponse::Admit(huginn_mind::PipelineAdmissionOutcome::Committed { .. })), "{admitted:?}");
         let before = rig.state();
         let grouped = rig.serving(|path| reply_of(path, "m-0", &forks_all(&["x"])));
-        let DeskResponse::Refused(MindRefusal::DeskForkTooLarge { bytes, limit, .. }) = grouped else { panic!("{grouped:?}") };
-        assert_eq!(limit, huginn_mind::desk_wire::DESK_PAGE_BUDGET as u64);
-        assert!(bytes > limit);
+        let (grouped, _) = page_of(grouped);
+        assert!(grouped.forks.len() > 1 && grouped.forks.len() < 50 && grouped.next_cursor.is_some(), "{} entries", grouped.forks.len());
         assert_eq!(rig.state(), before);
         // Then fifty more, each in its own commit, newer than the group.
         for n in 52..=101 {

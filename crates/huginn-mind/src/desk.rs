@@ -7,8 +7,7 @@
 //! request id). It builds one `desk_answer` and commits it through
 //! `admit_steps` with `Door::Desk`, the same commit primitive every other write
 //! uses; no other door may write the kind. `answer_desk` and `DeskStamp` are
-//! crate-private: only code inside this crate can stamp, so the verified door
-//! that will call them (follow-up desk-answer-door) widens them in its own cut.
+//! crate-private: only code inside this crate can stamp.
 //!
 //! The decider list is an input (`DeskStamp.deciders`, from the door); the Mind
 //! never reads one. Whether an answerer decides is membership in that list and
