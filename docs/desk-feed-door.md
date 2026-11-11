@@ -192,7 +192,7 @@ Bifrost's feed applies no fork filter.
   only would make `order` depend on the reader and move whenever a fork is listed, which breaks
   CultLib's rule that an order never changes and breaks every held cursor.
 - **The listing record** is planned kind `desk_listing`, key `<campaign>:desk_listing:<question-label>`,
-  fields `campaign`, `fork` (the question's id, in the same campaign) and `reason` (one line: why
+  fields `campaign`, `listed` (the question's id, in the same campaign) and `reason` (one line: why
   members may read it). It is
   admitted on the Mind's own door, so its receipt records who listed it and when. Unlisting is a
   `Withdrawn` resolution on it, and relisting withdraws that resolution, which reopens it. Each
