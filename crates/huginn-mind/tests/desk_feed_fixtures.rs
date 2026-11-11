@@ -3,15 +3,16 @@
 //! are what the door speaks. `docs/desk-feed-door.md` is the contract they pin; the README in the
 //! fixtures directory lists them.
 //!
-//! The card (`gamecult.fork.card.v0`) is in no fixture: it waits on CultLib's re-pinned card
-//! vectors for `raised_at`. Every response pinned here carries no entry.
+//! No fixture written here carries a card: Huginn's types do not carry `raised_at`, `decider_count`,
+//! `answerer_count` or a nullable `answerer` yet. Those shapes are CultLib's own bytes, vendored at
+//! one commit in `fixtures/desk-feed/cultlib-3a51bbab/` and checked below.
 //!
 //! `cargo test -p huginn-mind --test desk_feed_fixtures` compares every file with what the
 //! encoders produce now. `HUGINN_WRITE_DESK_FIXTURES=1` rewrites them instead.
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use cultnet_rs::{CultNetMessage, CultNetWireContract, encode_cultnet_message_to_vec, encode_frame};
 use huginn_mind::MindRefusal;
@@ -116,120 +117,6 @@ fn record() -> ForkRecord {
     }
 }
 
-// ---- Reader views, as MIRROR TYPES (ruling desk-read-visibility-withheld-ids; shape ruling
-// desk-reader-counts-shape, Libby's CultLib reader-counts cut). These types exist only here: Huginn
-// does not project reader views yet (cut-desk-feed-listing), and CultLib's re-pinned vectors are not
-// posted yet. They pin the rules, not CultLib's bytes; when Libby posts the sha, her vectors are
-// decoded against Huginn's real types instead. ----
-
-/// The card's `deciders` and `decider_count` (right after `deciders`), as a fragment. Not a card.
-#[derive(Serialize)]
-struct CardViewers {
-    deciders: Vec<String>,
-    decider_count: u64,
-}
-
-/// What the call's deciders look like to one reader: the ids for a decider, `[]` (withheld) for
-/// anyone else; the count either way.
-fn card_viewers(decider: bool) -> CardViewers {
-    let ids = vec![READER.to_string(), OTHER_DECIDER.to_string()];
-    CardViewers { decider_count: ids.len() as u64, deciders: if decider { ids } else { Vec::new() } }
-}
-
-/// The card rule: `decider_count` is 1..64, and `deciders` is either empty (withheld) or holds
-/// exactly `decider_count` ids.
-fn card_viewers_hold(view: &CardViewers) -> bool {
-    (1..=64).contains(&view.decider_count) && (view.deciders.is_empty() || view.deciders.len() as u64 == view.decider_count)
-}
-
-/// `gamecult.desk_answer.v0` with `answerer` nullable (all four variants).
-#[derive(Serialize)]
-struct ViewAnswer {
-    #[serde(rename = "schemaVersion")]
-    schema_version: AnswerSchema,
-    answer_id: String,
-    fork_id: String,
-    outcome: String,
-    of: Option<String>,
-    retracts: Option<String>,
-    code: Option<huginn_mind::desk_wire::ForkAnswerCode>,
-    options_hash: String,
-    choice: Option<String>,
-    note: Option<String>,
-    answered_at: String,
-    received_at: String,
-    claim_in_future: bool,
-    answerer: Option<String>,
-    authority: DeskAuthority,
-    request_id: String,
-}
-
-/// `gamecult.fork.record.v0` with `answerer_count`: six keys (header 0x86). The count's position
-/// among the six is CultLib's; this mirror puts it before `answers` until the vectors say.
-#[derive(Serialize)]
-struct ViewRecord {
-    #[serde(rename = "schemaVersion")]
-    schema_version: RecordSchema,
-    fork_id: String,
-    options_hash: String,
-    counted_answer_id: Option<String>,
-    answerer_count: u64,
-    answers: Vec<ViewAnswer>,
-}
-
-/// One record as one reader sees it. `answerer_count` is the distinct answerers over ALL stored
-/// answers, refusals included, for both readers; only a non-decider's view nils `answerer`.
-fn view(record: ForkRecord, decider: bool) -> ViewRecord {
-    let mut answerers: Vec<&str> = record.answers.iter().map(|answer| answer.answerer.as_str()).collect();
-    answerers.sort_unstable();
-    answerers.dedup();
-    let answerer_count = answerers.len() as u64;
-    ViewRecord {
-        schema_version: record.schema_version,
-        fork_id: record.fork_id,
-        options_hash: record.options_hash,
-        counted_answer_id: record.counted_answer_id,
-        answerer_count,
-        answers: record
-            .answers
-            .into_iter()
-            .map(|answer| ViewAnswer {
-                schema_version: answer.schema_version,
-                answer_id: answer.answer_id,
-                fork_id: answer.fork_id,
-                outcome: answer.outcome,
-                of: answer.of,
-                retracts: answer.retracts,
-                code: answer.code,
-                options_hash: answer.options_hash,
-                choice: answer.choice,
-                note: answer.note,
-                answered_at: answer.answered_at,
-                received_at: answer.received_at,
-                claim_in_future: answer.claim_in_future,
-                answerer: decider.then_some(answer.answerer),
-                authority: answer.authority,
-                request_id: answer.request_id,
-            })
-            .collect(),
-    }
-}
-
-/// The record rule: `answerer` is null exactly in a non-decider's view.
-fn record_view_holds(view: &ViewRecord, decider: bool) -> bool {
-    view.answers.iter().all(|answer| answer.answerer.is_some() == decider)
-}
-
-/// The mirror fragments by reader kind: (file stem, bytes).
-fn reader_views() -> Vec<(&'static str, Vec<u8>)> {
-    vec![
-        ("card-viewers-decider.synthetic", rmp_serde::to_vec_named(&card_viewers(true)).unwrap()),
-        ("card-viewers-non-decider.synthetic", rmp_serde::to_vec_named(&card_viewers(false)).unwrap()),
-        ("record-decider.mirror", rmp_serde::to_vec_named(&view(record(), true)).unwrap()),
-        ("record-non-decider.mirror", rmp_serde::to_vec_named(&view(record(), false)).unwrap()),
-    ]
-}
-
 /// The named MessagePack payload a CultNet operation message carries (base64 in the envelope).
 fn payload(message: &CultNetMessage) -> Vec<u8> {
     use base64::Engine;
@@ -301,10 +188,6 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
     let whole = rmp_serde::to_vec_named(&record()).unwrap();
     files.push(("record-whole.payload.msgpack".into(), whole.clone()));
     files.push(("record-whole.payload.hex".into(), hex(&whole).into_bytes()));
-    for (name, bytes) in reader_views() {
-        files.push((format!("{name}.payload.msgpack"), bytes.clone()));
-        files.push((format!("{name}.payload.hex"), hex(&bytes).into_bytes()));
-    }
     files
 }
 
@@ -369,63 +252,262 @@ fn every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid() {
     }
 }
 
+
+// ---- CultLib's bytes: the reader-count shapes, pinned at one commit. ----
+
+/// The CultLib commit the vendored vectors come from (#117 on #115). Re-pin: see the README beside them.
+const CULTLIB_SHA: &str = "3a51bbabad244a56ec4521080530d88744001ce4";
+
+/// Each vendored vector and the SHA-256 of its bytes.
+const VENDORED: &[(&str, &str)] = &[
+    ("card-operator-fork", "56bfdb65ded60b562001d09d0b8da6e092900f404bf5f68f7084dff29bcc34f5"),
+    ("card-raised-at-nil", "b81bb825790ffe03fabe63c3f8a61c36bd50ca268aa6dff67b5bcfad3957e58c"),
+    ("card-withheld-deciders", "d13b9b77461cfdf78f943ef56c6aeab852ab6b6f0b355e26c5b361f99c79c7f7"),
+    ("answer-counted", "55d69ae3cc7ebbeeae7d501e8641640e115c3fb5aac399ea760588bca343b9e6"),
+    ("answer-withheld-answerer", "b66b4f921cdd374be04af3de34c59e254a5e542027ae8c57f196a3ea3406e427"),
+    ("answer-refused-stale", "3183bc9c483f4a625332cda11ef22a9c8560868a7728b77daa63a1960a3cd3d6"),
+    ("entry-open-counted", "b51f499e8dd0465cf5df9d68d8fccbe94dd1339fd3157969693dd0d4ecb2549b"),
+    ("entry-withheld-open-counted", "62ccad7a9f41262d6e35d0247315d0bb75d1313b3c9dabe8a99d1aa1b844607f"),
+    ("entry-closed-with-ruling-and-a-refusal", "f7859c7d04d338d6b1c634308b08ae58ae77b0ff459767859a5e40f0af2f16e5"),
+    ("entry-withheld-closed-with-ruling-and-a-refusal", "daaa819bfa2612616826ef3217dfcf8d8d8cb71d86547d7106426c779134f827"),
+];
+
+fn vendored(name: &str) -> Vec<u8> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/desk-feed/cultlib-3a51bbab").join(format!("{name}.msgpack"));
+    std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// A decoded MessagePack value that keeps map order. A small decoder of its own, so the key counts,
+/// headers and positions below are read off the bytes and not off `rmp_serde`'s idea of the types.
+#[derive(Debug, PartialEq)]
+enum Value {
+    Nil,
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    List(Vec<Value>),
+    Map(Vec<(String, Value)>),
+}
+
+impl Value {
+    fn get(&self, key: &str) -> &Value {
+        let Value::Map(pairs) = self else { panic!("not a map") };
+        &pairs.iter().find(|(name, _)| name == key).unwrap_or_else(|| panic!("no key {key}")).1
+    }
+    fn keys(&self) -> Vec<&str> {
+        let Value::Map(pairs) = self else { panic!("not a map") };
+        pairs.iter().map(|(name, _)| name.as_str()).collect()
+    }
+    fn list(&self) -> &[Value] {
+        let Value::List(items) = self else { panic!("not a list") };
+        items
+    }
+    fn str(&self) -> &str {
+        let Value::Str(text) = self else { panic!("not a string: {self:?}") };
+        text
+    }
+    fn int(&self) -> i64 {
+        let Value::Int(number) = self else { panic!("not an int: {self:?}") };
+        *number
+    }
+}
+
+fn decode(bytes: &[u8]) -> Value {
+    fn take<'a>(bytes: &'a [u8], at: &mut usize, n: usize) -> &'a [u8] {
+        let slice = &bytes[*at..*at + n];
+        *at += n;
+        slice
+    }
+    fn be(slice: &[u8]) -> u64 {
+        slice.iter().fold(0, |acc, byte| (acc << 8) | u64::from(*byte))
+    }
+    fn text(bytes: &[u8], at: &mut usize, n: usize) -> Value {
+        Value::Str(String::from_utf8(take(bytes, at, n).to_vec()).unwrap())
+    }
+    fn items(bytes: &[u8], at: &mut usize, n: usize) -> Vec<Value> {
+        (0..n).map(|_| value(bytes, at)).collect()
+    }
+    fn pairs(bytes: &[u8], at: &mut usize, n: usize) -> Value {
+        Value::Map((0..n).map(|_| (value(bytes, at).str().to_string(), value(bytes, at))).collect())
+    }
+    fn value(bytes: &[u8], at: &mut usize) -> Value {
+        let tag = take(bytes, at, 1)[0];
+        match tag {
+            0x00..=0x7f => Value::Int(i64::from(tag)),
+            0x80..=0x8f => pairs(bytes, at, usize::from(tag & 0x0f)),
+            0x90..=0x9f => Value::List(items(bytes, at, usize::from(tag & 0x0f))),
+            0xa0..=0xbf => text(bytes, at, usize::from(tag & 0x1f)),
+            0xc0 => Value::Nil,
+            0xc2 => Value::Bool(false),
+            0xc3 => Value::Bool(true),
+            0xcc => Value::Int(be(take(bytes, at, 1)) as i64),
+            0xcd => Value::Int(be(take(bytes, at, 2)) as i64),
+            0xce => Value::Int(be(take(bytes, at, 4)) as i64),
+            0xd9 => {
+                let n = be(take(bytes, at, 1)) as usize;
+                text(bytes, at, n)
+            }
+            0xda => {
+                let n = be(take(bytes, at, 2)) as usize;
+                text(bytes, at, n)
+            }
+            0xdc => {
+                let n = be(take(bytes, at, 2)) as usize;
+                Value::List(items(bytes, at, n))
+            }
+            0xde => {
+                let n = be(take(bytes, at, 2)) as usize;
+                pairs(bytes, at, n)
+            }
+            other => panic!("MessagePack tag {other:#04x} at {} is not in this decoder", *at - 1),
+        }
+    }
+    let mut at = 0;
+    let decoded = value(bytes, &mut at);
+    assert_eq!(at, bytes.len(), "trailing bytes");
+    decoded
+}
+
+const CARD_KEYS: [&str; 18] = [
+    "schemaVersion", "fork_id", "title", "context", "options", "recommendation", "depends", "leans", "flag", "raised_in", "raised_at", "deciders",
+    "decider_count", "status", "ruling", "ruled_from", "order", "options_hash",
+];
+const RECORD_KEYS: [&str; 6] = ["schemaVersion", "fork_id", "options_hash", "counted_answer_id", "answerer_count", "answers"];
+
+#[test]
+fn the_vendored_cultlib_vectors_are_the_pinned_bytes() {
+    assert_eq!(CULTLIB_SHA.len(), 40);
+    for (name, sha) in VENDORED {
+        let digest: String = Sha256::digest(vendored(name)).iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(&digest, sha, "{name} is not CultLib {CULTLIB_SHA}'s bytes");
+    }
+}
+
+/// The card: header `DE 00 12` (map16, 18 entries: `schemaVersion` and 17 fields), the keys in this
+/// order, `raised_at` a string or nil, `decider_count` 1..64 right after `deciders`, and `deciders` empty
+/// (withheld) or exactly `decider_count` account ids.
+fn check_card(card: &Value, withheld: bool) {
+    assert_eq!(card.keys(), CARD_KEYS);
+    assert!(matches!(card.get("raised_at"), Value::Nil | Value::Str(_)));
+    let count = card.get("decider_count").int();
+    assert!((1..=64).contains(&count));
+    let ids = card.get("deciders").list();
+    assert_eq!(ids.is_empty(), withheld);
+    assert!(ids.is_empty() || ids.len() as i64 == count);
+    assert!(ids.iter().all(|id| account_id(id.str())), "deciders are lowercase D-format UUIDs");
+    assert_eq!(card.get("options_hash").str().len(), 64);
+}
+
+#[test]
+fn the_cards_are_eighteen_keys_with_raised_at_and_decider_count() {
+    for name in ["card-operator-fork", "card-raised-at-nil", "card-withheld-deciders"] {
+        let bytes = vendored(name);
+        assert_eq!(bytes[..3], [0xde, 0x00, 0x12], "{name}: header");
+        check_card(&decode(&bytes), name == "card-withheld-deciders");
+    }
+    assert!(matches!(decode(&vendored("card-operator-fork")).get("raised_at"), Value::Str(_)));
+    assert_eq!(decode(&vendored("card-raised-at-nil")).get("raised_at"), &Value::Nil);
+    assert_eq!(decode(&vendored("card-withheld-deciders")).get("decider_count").int(), 2);
+}
+
+/// `answerer` is a string or nil on every answer; `Value::Nil` only when `named` is false.
+fn check_answer(answer: &Value, named: bool) {
+    assert_eq!(answer.keys().len(), 16);
+    assert_eq!(answer.keys()[13], "answerer");
+    match answer.get("answerer") {
+        Value::Str(id) => assert!(named && account_id(id), "a named answerer is a lowercase D-format UUID"),
+        Value::Nil => assert!(!named),
+        other => panic!("answerer is {other:?}"),
+    }
+}
+
+#[test]
+fn the_answers_keep_sixteen_keys_and_answerer_is_a_string_or_nil() {
+    for (name, named) in [("answer-counted", true), ("answer-refused-stale", true), ("answer-withheld-answerer", false)] {
+        let bytes = vendored(name);
+        assert_eq!(bytes[..3], [0xde, 0x00, 0x10], "{name}: header");
+        check_answer(&decode(&bytes), named);
+    }
+    assert_eq!(decode(&vendored("answer-refused-stale")).get("outcome").str(), "Refused");
+}
+
+/// The entry is `83` and its record `86`, `answerer_count` the fifth key. In a decider's view the count
+/// is the number of distinct answerer ids over every stored answer, refusals included; in a
+/// non-decider's view no answerer is named and the count is between 1 and the number of answers (0 for
+/// none). A non-decider entry holds none of its twin's account ids anywhere in its bytes.
+#[test]
+fn the_entries_are_83_over_a_record_of_86_with_answerer_count_before_answers() {
+    for (decider, non_decider) in [("entry-open-counted", "entry-withheld-open-counted"), ("entry-closed-with-ruling-and-a-refusal", "entry-withheld-closed-with-ruling-and-a-refusal")] {
+        let (decider_bytes, non_decider_bytes) = (vendored(decider), vendored(non_decider));
+        let mut ids = Vec::new();
+        for (bytes, named) in [(&decider_bytes, true), (&non_decider_bytes, false)] {
+            assert_eq!(bytes[0], 0x83, "entry header");
+            let entry = decode(bytes);
+            assert_eq!(entry.keys(), ["schemaVersion", "card", "record"]);
+            check_card(entry.get("card"), !named);
+            let record = entry.get("record");
+            assert_eq!(record.keys(), RECORD_KEYS);
+            let answers = record.list_of_answers();
+            let count = record.get("answerer_count").int();
+            answers.iter().for_each(|answer| check_answer(answer, named));
+            if named {
+                let mut distinct: Vec<&str> = answers.iter().map(|answer| answer.get("answerer").str()).collect();
+                distinct.sort_unstable();
+                distinct.dedup();
+                assert_eq!(count, distinct.len() as i64, "{decider}: distinct answerers");
+                ids.extend(distinct.iter().map(|id| id.to_string()));
+                ids.extend(entry.get("card").get("deciders").list().iter().map(|id| id.str().to_string()));
+            } else if answers.is_empty() {
+                assert_eq!(count, 0);
+            } else {
+                assert!((1..=answers.len() as i64).contains(&count));
+            }
+        }
+        assert!(!ids.is_empty());
+        assert!(ids.iter().all(|id| !holds(&non_decider_bytes, id)), "{non_decider} carries an account id");
+        assert!(ids.iter().all(|id| holds(&decider_bytes, id)), "{decider} names every id");
+        // The twins agree on everything the view does not move.
+        let (a, b) = (decode(&decider_bytes), decode(&non_decider_bytes));
+        assert_eq!(a.get("card").get("options_hash"), b.get("card").get("options_hash"));
+        assert_eq!(a.get("card").get("decider_count"), b.get("card").get("decider_count"));
+        assert_eq!(a.get("record").get("answerer_count"), b.get("record").get("answerer_count"));
+    }
+    // A refusal is an answer and its answerer counts: the closed fork's two answers are two accounts.
+    let closed = decode(&vendored("entry-closed-with-ruling-and-a-refusal"));
+    assert!(closed.get("record").list_of_answers().iter().any(|answer| answer.get("outcome").str() == "Refused"));
+    assert_eq!(closed.get("record").get("answerer_count").int(), 2);
+}
+
 fn holds(bytes: &[u8], text: &str) -> bool {
     bytes.windows(text.len()).any(|window| window == text.as_bytes())
 }
 
-/// MIRROR TYPES ONLY: these tests pin the reader-view rules on the types above, not Huginn's
-/// projection (which does not withhold ids yet) and not CultLib's bytes (pending Libby's sha). The
-/// tests on real list and read responses land with `cut-desk-feed-listing`.
-///
-/// A non-decider's fragments hold no account id anywhere in their bytes, only counts; a decider's
-/// hold every id and the same counts.
-#[test]
-fn a_non_decider_gets_counts_and_no_ids_a_decider_gets_ids() {
-    let views = reader_views();
-    let bytes = |name: &str| views.iter().find(|(stem, _)| *stem == name).unwrap().1.clone();
-    for name in ["card-viewers-non-decider.synthetic", "record-non-decider.mirror"] {
-        let held = bytes(name);
-        assert!([READER, OTHER_DECIDER, OUTSIDER].iter().all(|id| !holds(&held, id)), "{name} carries an account id");
-    }
-    let held = bytes("card-viewers-decider.synthetic");
-    assert!(holds(&held, READER) && holds(&held, OTHER_DECIDER));
-    let held = bytes("record-decider.mirror");
-    assert!([READER, OTHER_DECIDER, OUTSIDER].iter().all(|id| holds(&held, id)), "a decider's record keeps every answerer id");
-    assert_eq!(card_viewers(false).decider_count, card_viewers(true).decider_count);
-}
-
-/// `answerer_count` counts DISTINCT answerers over every stored answer, the refused one included
-/// (four answers, one account answering twice, count 3),
-/// and is the same for both readers; a record view has six keys (header 0x86).
-#[test]
-fn answerer_count_covers_refusals_and_the_record_has_six_keys() {
-    let outcomes: Vec<String> = record().answers.iter().map(|answer| answer.outcome.clone()).collect();
-    assert_eq!(outcomes, ["Counted", "Revision", "Refused", "Retraction"], "all four variants");
-    assert_eq!(record().answers.len(), 4, "four answers by three accounts");
-    assert_eq!((view(record(), false).answerer_count, view(record(), true).answerer_count), (3, 3));
-    for name in ["record-decider.mirror", "record-non-decider.mirror"] {
-        let held = reader_views().into_iter().find(|(stem, _)| *stem == name).unwrap().1;
-        assert_eq!(held[0], 0x86, "{name}");
+impl Value {
+    fn list_of_answers(&self) -> &[Value] {
+        self.get("answers").list()
     }
 }
 
-/// `decider_count` is 1..64; `deciders` is empty (withheld) or holds exactly `decider_count` ids;
-/// `answerer` is null exactly in a non-decider's view.
+/// Huginn's real types against CultLib's bytes. A decider's answers already decode (the answer keeps
+/// its 16 keys). The card and the record do not: `ForkCard` has no `raised_at` or `decider_count`,
+/// `ForkRecord` no `answerer_count`, and `ForkDeskAnswer.answerer` is a non-null string, and each type
+/// refuses unknown keys. This pins the gap `cut-desk-feed-listing` closes; when it does, these
+/// refusals become successful decodes of the same bytes and this test changes with them.
 #[test]
-fn a_non_empty_decider_list_matches_its_count_and_answerer_is_null_only_for_non_deciders() {
-    assert!(card_viewers_hold(&card_viewers(true)) && card_viewers_hold(&card_viewers(false)));
-    let ids = |n: usize| (0..n).map(|at| format!("00000000-0000-4000-8000-{at:012x}")).collect::<Vec<_>>();
-    for (deciders, decider_count, holds) in [
-        (ids(1), 2, false),
-        (ids(3), 2, false),
-        (Vec::new(), 0, false),
-        (Vec::new(), 65, false),
-        (ids(64), 64, true),
-        (Vec::new(), 64, true),
-        (ids(1), 1, true),
-    ] {
-        assert_eq!(card_viewers_hold(&CardViewers { deciders, decider_count }), holds);
+fn huginn_types_do_not_yet_carry_the_pinned_shapes() {
+    use huginn_mind::desk_wire::ForkCard;
+    for name in ["answer-counted", "answer-refused-stale"] {
+        rmp_serde::from_slice::<ForkDeskAnswer>(&vendored(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
     }
-    assert!(record_view_holds(&view(record(), true), true) && record_view_holds(&view(record(), false), false));
-    assert!(!record_view_holds(&view(record(), true), false) && !record_view_holds(&view(record(), false), true));
+    fn refused<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> String {
+        rmp_serde::from_slice::<T>(bytes).err().expect("the real type refuses these bytes").to_string()
+    }
+    assert!(refused::<ForkCard>(&vendored("card-operator-fork")).contains("raised_at"));
+    assert!(refused::<ForkCard>(&vendored("card-withheld-deciders")).contains("raised_at"));
+    assert!(refused::<ForkDeskAnswer>(&vendored("answer-withheld-answerer")).contains("string"));
+    // The record is the entry's last key: its bytes run from the `86` after the key to the end.
+    let entry = vendored("entry-open-counted");
+    let key = [&[0xa6u8][..], b"record", &[0x86]].concat();
+    let at = entry.windows(key.len()).position(|window| window == key).expect("the record key") + key.len() - 1;
+    assert!(refused::<ForkRecord>(&entry[at..]).contains("answerer_count"));
 }
