@@ -243,7 +243,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         }
         match request {
             DeskRequest::Answer { subject, authority, deciders, request, .. } => {
-                self.mind.desk_answer(&deciders, subject, authority, request, now).0
+                self.mind.desk_answer(&deciders, subject, authority, request, now)
             }
             DeskRequest::Forks { deciders, status, cursor, limit, .. } => self.mind.desk_forks(&deciders, status, cursor, limit),
             DeskRequest::Fork { deciders, fork_id, .. } => self.mind.desk_fork(&deciders, &fork_id),

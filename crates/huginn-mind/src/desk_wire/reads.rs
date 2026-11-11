@@ -461,7 +461,7 @@ mod tests {
             answered_at: "2026-09-16T11:00:00Z".into(),
             request_id: request_id(),
         };
-        mind.desk_answer(&list(deciders), s(who), DeskAuthority::Member, request, now()).0
+        mind.desk_answer(&list(deciders), s(who), DeskAuthority::Member, request, now())
     }
 
     fn close(mind: &mut Mind<MemoryStore>, fork: &str, label: &str) {
@@ -755,7 +755,7 @@ mod tests {
             answered_at: "2026-09-16T11:00:00Z".into(),
             request_id: request_id(),
         };
-        let stored = mind.desk_answer(&list(&LIST), s("x"), DeskAuthority::Member, retract, now()).0;
+        let stored = mind.desk_answer(&list(&LIST), s("x"), DeskAuthority::Member, retract, now());
         assert!(matches!(stored, DeskResponse::Answered { .. }));
         let (after, _) = entry(mind.desk_fork(&list(&LIST), &fork(1)));
         assert_eq!(after.record.counted_answer_id.as_deref(), Some("n2"));
