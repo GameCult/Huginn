@@ -160,13 +160,14 @@ fn a_credential_split_by_the_reply_limit_is_redacted_before_the_cut() {
 #[test]
 fn delimiters_inside_a_secret_leak_none_of_it_and_the_bare_and_scheme_less_forms_are_covered() {
     let r = redact_url_userinfo;
-    for secret in ["pa/ssT", "pa?ssT", "pa#ssT", "pa\"ssT", "pa'ssT", "pa)ssT", "pa<ssT", "pa]ssT", "[u]"] {
+    for secret in ["pa/ssT", "pa?ssT", "pa#ssT", "pa\"ssT", "pa'ssT", "pa)ssT", "pa\u{a0}ssT", "pa\u{2028}ssT", "pa<ssT", "pa]ssT", "[u]"] {
         let out = r(&format!("x https://u:{secret}@h/x"));
         assert!(out.starts_with("x https://<redacted>@h"), "{secret:?} -> {out:?}");
         assert!(!out.contains("ssT"), "{secret:?} -> {out:?}");
     }
-    // Whitespace of any kind ends a candidate run, so a secret holding it is cut there.
-    assert_eq!(r("https://u:pa\u{a0}ssT@h/x"), "https://u:pa\u{a0}ssT@h/x");
+    // Only ASCII whitespace ends a candidate run.
+    assert_eq!(r("https://u:pa ssT@h/x"), "https://u:pa ssT@h/x");
+    assert_eq!(r("https://u:pa\ttoken@h/x"), "https://u:pa\ttoken@h/x");
     assert_eq!(r("HTTPS://TOKEN@h"), "HTTPS://<redacted>@h");
     assert_eq!(r("[l](https://T@h/x) <https://T@h> `https://u:T@h`"), "[l](https://<redacted>@h/x) <https://<redacted>@h> `https://<redacted>@h`");
     assert_eq!(r("a //u:T@host/x b //T@host c"), "a //<redacted>@host/x b //<redacted>@host c");

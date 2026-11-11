@@ -934,7 +934,7 @@ fn result_text(event: &serde_json::Map<String, Value>) -> String {
 /// (`persona::structured_output`, string by string). It does not cover claude's stderr (inherited) or the CLI's transcript files.
 ///
 /// A forge token rides in a remote URL, so every `scheme://`, and every protocol-relative `//`, opens a candidate: the run up to the next
-/// whitespace of any kind. Its userinfo is everything before the run's LAST `@`, whatever delimiters sit inside (fail closed: a path holding
+/// ASCII whitespace. Its userinfo is everything before the run's LAST `@`, whatever delimiters sit inside (fail closed: a path holding
 /// `@` is redacted too). The userinfo becomes `<redacted>`: `scheme://<redacted>@host`. With a colon (user:password) it is always
 /// redacted; without one it is a bare token on http, https, ftp, ftps and protocol-relative `//`, and a plain username on any other scheme
 /// (`ssh://git@host`), which stays. Scheme-less credentials are covered only in the shape `word:secret@host.tld/` at the start of a
@@ -945,7 +945,7 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
     while let Some(at) = rest.find("//") {
         let (before, after) = rest.split_at(at);
         let body = &after[2..];
-        let end = body.find(char::is_whitespace).unwrap_or(body.len());
+        let end = body.find(is_break).unwrap_or(body.len());
         let run = &body[..end];
         out.push_str(before);
         out.push_str("//");
@@ -975,6 +975,11 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
     redact_schemeless(&out)
 }
 
+/// ASCII whitespace ends a candidate; NBSP, U+2028 and other Unicode whitespace do not, so a secret holding them is redacted whole.
+fn is_break(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c')
+}
+
 /// `word:secret@host.tld/` at the start of a whitespace-delimited word that holds no `//` becomes `<redacted>@host.tld/`.
 fn redact_schemeless(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -984,7 +989,7 @@ fn redact_schemeless(text: &str) -> String {
         word.clear();
     };
     for c in text.chars() {
-        if c.is_whitespace() {
+        if is_break(c) {
             flush(&mut word, &mut out);
             out.push(c);
         } else {
