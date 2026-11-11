@@ -277,7 +277,7 @@ fn the_binary_serves_both_doors_and_survives_restart() {
     let catalog = format!("{:?}", exchange(&desk, &framed(&catalog_request())).expect("a catalog"));
     assert!(catalog.contains("huginn.desk_request.v1") && catalog.contains("huginn.desk_response.v1"), "{catalog}");
     assert!(!catalog.contains("huginn.mind_request.v1"), "{catalog}");
-    // The reads answer, store nothing, and carry the whole record to a subject the deciders do not name.
+    // The reads answer and store nothing; a decider reading its own list is told the ids.
     let (list, listed_at) = match ask(&desk, "m-r1", &forks_request("x", &["x"])) {
         DeskResponse::Forks { list, as_of } => (list, as_of),
         other => panic!("{other:?}"),

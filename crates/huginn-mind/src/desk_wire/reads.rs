@@ -796,6 +796,18 @@ mod tests {
         answer(&mut mind, BEN, &deciders, &fork(1), &hash, Some("Ben's note"));
         answer(&mut mind, CORA, &deciders, &fork(1), &hash, Some("Cora's note"));
         answer(&mut mind, BEN, &deciders, &fork(1), &hash, Some("Ben again"));
+        // Ben retracts Anna's first answer: a Retraction row, so the non-decider view must null it too.
+        let retraction = ForkAnswerRequest {
+            schema_version: RequestSchema::V0,
+            fork_id: fork(1),
+            options_hash: hash.clone(),
+            answer: None,
+            retracted: true,
+            retracts: Some("n1".into()),
+            answered_at: "2026-09-16T11:00:00Z".into(),
+            request_id: request_id(),
+        };
+        mind.desk_answer(&list(&deciders), s(BEN), DeskAuthority::Member, retraction, now());
         mind
     }
 
@@ -826,7 +838,8 @@ mod tests {
             assert!(card.deciders.is_empty(), "withheld, never no deciders");
             assert_eq!(card.decider_count, 2);
         }
-        assert_eq!(read.record.answers.len(), 4);
+        assert_eq!(read.record.answers.len(), 5);
+        assert!(read.record.answers.iter().any(|shown| shown.outcome == "Retraction"), "the retraction row is there and nulled too");
         assert!(read.record.answers.iter().all(|shown| shown.answerer.is_none()), "the key is written, null");
         assert_eq!(read.record.answerer_count, 3, "Anna, Ben and the refused Cora");
         // The other fork has no answers: zero answerers.
@@ -843,7 +856,7 @@ mod tests {
         assert_eq!(as_decider.card.deciders, [ANNA, BEN]);
         assert_eq!(as_decider.card.decider_count, 2);
         let named: Vec<_> = as_decider.record.answers.iter().map(|shown| shown.answerer.as_deref().unwrap()).collect();
-        assert_eq!(named, [ANNA, BEN, CORA, BEN]);
+        assert_eq!(named, [ANNA, BEN, CORA, BEN, BEN]);
         assert_eq!(as_decider.record.answerer_count, 3);
         // Nothing else differs between the two views.
         let blind = ForkEntry {
@@ -926,6 +939,19 @@ mod tests {
         let mut mind = seeded();
         let id = imported_question(&mut mind, "2026-11-08T16:20:05+02:00");
         assert_eq!(raised_at(&mind, &id).as_deref(), Some("2026-11-08T14:20:05Z"), "the source's time, in UTC, not the import's");
+    }
+
+    /// CultLib's instant has four year digits: a time whose UTC year leaves 0..=9999 is served nil.
+    #[test]
+    fn an_import_time_outside_year_0_to_9999_in_utc_is_nil() {
+        for committed_at in ["0000-01-01T00:00:00+05:00", "9999-12-31T23:59:59-05:00"] {
+            let mut mind = seeded();
+            let id = imported_question(&mut mind, committed_at);
+            assert_eq!(raised_at(&mind, &id), None, "{committed_at}");
+        }
+        let mut mind = seeded();
+        let id = imported_question(&mut mind, "9999-12-31T23:59:59Z");
+        assert_eq!(raised_at(&mind, &id).as_deref(), Some("9999-12-31T23:59:59Z"));
     }
 
     #[test]

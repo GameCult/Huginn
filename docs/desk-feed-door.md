@@ -10,11 +10,9 @@ planned and not built: the listing gate that decides which forks a reader sees (
 `cut-desk-feed-listing` in the `eureka-substrate` campaign).
 
 **Not live: the listing gate.** On `main` today every showable question is returned to every
-reader, whatever the call's `deciders` say (pinned by
-`the_whole_record_comes_back_whoever_the_deciders_list_leaves_out` in `desk_wire/reads.rs`).
-The default of not listed, described under Listing below, holds only once `cut-desk-feed-listing`
-lands. Until then, neither Bifrost's receiver nor the ops root-run (`desk-door-ops-root-run`) may
-go live on a Mind that holds private questions.
+reader, whatever the call's `deciders` say. The default of not listed, described under Listing below,
+holds only once `cut-desk-feed-listing` lands. Until then, neither Bifrost's receiver nor the ops
+root-run (`desk-door-ops-root-run`) may go live on a Mind that holds private questions.
 
 This page is the wire contract for the consumer, Bifrost's `UnixSocketDeskDoor` (Bifrost PR #67,
 `docs/desk-feed-design.md`). The golden bytes are in `crates/huginn-mind/tests/fixtures/desk-feed/`.
@@ -206,7 +204,7 @@ An empty list is never served in place of a failure. `open_count: 0` means zero 
 ## Card fields
 
 `raised_at` is a required card key whose value is an RFC3339 string or nil (CultLib #115, `af914253`).
-Nil means unknown. A string is the question's first-admission time, which never moves. It is outside
+Nil means unknown. A string is the question's first-admission time, which never moves: a UTC `Z` instant at seconds resolution (the form CultLib requires), and nil when the time is unknown, does not parse, or its UTC year is outside 0..9999. It is outside
 `options_hash`, which keeps its five members, so the hash vectors do not change. Huginn derives it
 from the question's admission: the `committed_at` of the receipt that first admitted the question, or
 for an imported question the source mind's `committed_at` (`imported_from.committed_at`). A value that
