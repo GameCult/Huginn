@@ -596,6 +596,10 @@ fn the_connector_key_is_read_trimmed_and_its_absence_leaks_nothing() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("connector-key"), "canary-key-7f3a91\n").unwrap();
     assert_eq!(connector_key(dir.path()).unwrap(), "canary-key-7f3a91");
+    for (written, read) in [("canary-key-7f3a91\r\n", "canary-key-7f3a91"), ("canary-key-7f3a91\n\n\n", "canary-key-7f3a91"), (" \t\ncanary-key-7f3a91 \t\r\n\n", "canary-key-7f3a91"), ("canary-key-7f3a91", "canary-key-7f3a91")] {
+        std::fs::write(dir.path().join("connector-key"), written).unwrap();
+        assert_eq!(connector_key(dir.path()).unwrap(), read, "{written:?}");
+    }
     let empty = tempfile::tempdir().unwrap();
     let fault = format!("{:#}", connector_key(empty.path()).unwrap_err());
     assert!(fault.contains("connector-key") && !fault.contains(empty.path().to_str().unwrap()), "{fault}");
@@ -603,6 +607,18 @@ fn the_connector_key_is_read_trimmed_and_its_absence_leaks_nothing() {
     std::fs::write(bad.path().join("connector-key"), b"canary-key-7f3a91\xff\xfe").unwrap();
     let fault = format!("{:#}", connector_key(bad.path()).unwrap_err());
     assert!(!fault.contains("canary"), "no byte of the key reaches an error: {fault}");
+}
+
+#[test]
+fn no_open_error_carries_any_part_of_the_key() {
+    let key = "zq7Kx-9wVtm3Pd";
+    // Every way open() can fail with the key in hand: a non-loopback endpoint and a configuration the client refuses.
+    for endpoint in ["10.77.0.1:4103", "127.0.0.1:0", "0.0.0.0:4103"] {
+        let fault = format!("{:#}", KitProjector::open(endpoint.parse().unwrap(), key.into(), INSTANCE, KIT_MODEL, Duration::from_secs(1)).err().unwrap());
+        for window in key.as_bytes().windows(4) {
+            assert!(!fault.contains(std::str::from_utf8(window).unwrap()), "{endpoint}: part of the key reached the error: {fault}");
+        }
+    }
 }
 
 #[test]

@@ -3,7 +3,7 @@
 
 use std::process::{Command, Output};
 
-const CANARY: &str = "canary-key-7f3a91";
+const CANARY: &str = "zq7Kx-9wVtm3Pd";
 
 fn run(credentials: Option<&std::path::Path>, connector: &str) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mind-stream"));
@@ -32,13 +32,20 @@ fn a_missing_credentials_directory_names_the_variable_and_a_missing_key_names_th
     assert!(stderr.contains("connector-key"), "{stderr}");
 }
 
+/// Every four-byte run of the key: a partial key is as much a leak as the whole.
+fn leaks(shown: &str) -> Option<&str> {
+    CANARY.as_bytes().windows(4).map(|window| std::str::from_utf8(window).unwrap()).find(|run| shown.contains(run))
+}
+
 #[test]
-fn the_key_is_never_printed() {
+fn no_byte_run_of_the_key_is_printed_on_any_startup_path() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("connector-key"), format!("{CANARY}\n")).unwrap();
-    // A non-loopback connector ends startup after the key was read and handed over.
-    let output = run(Some(dir.path()), "10.77.0.1:4103");
-    let shown = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-    assert!(shown.contains("not a loopback address"), "the key was read and startup went on to the endpoint check: {shown}");
-    assert!(!shown.contains(CANARY), "{shown}");
+    // A non-loopback connector and a configuration the client refuses both end startup after the key was read and handed over.
+    for (connector, ending) in [("10.77.0.1:4103", "not a loopback address"), ("127.0.0.1:0", "could not be configured")] {
+        let output = run(Some(dir.path()), connector);
+        let shown = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(shown.contains(ending), "{connector}: the key was read and startup went on: {shown}");
+        assert_eq!(leaks(&shown), None, "{connector}: {shown}");
+    }
 }
