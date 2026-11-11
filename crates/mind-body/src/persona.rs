@@ -1964,7 +1964,7 @@ fn refused_note(why: Failure) -> String {
 /// Every string of `value` through the one URL-credential redaction, so JSON structure is never inside a candidate run.
 fn redact_strings(value: &mut Value) {
     match value {
-        Value::String(text) => *text = crate::self_run::redact_url_userinfo(text),
+        Value::String(text) => *text = huginn_mind::redact::redact_url_userinfo(text),
         Value::Array(items) => items.iter_mut().for_each(redact_strings),
         Value::Object(map) => map.values_mut().for_each(redact_strings),
         _ => {}

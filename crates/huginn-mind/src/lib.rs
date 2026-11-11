@@ -41,6 +41,7 @@ mod rows;
 pub mod oracle;
 pub mod query;
 pub mod receipt;
+pub mod redact;
 pub mod refusal;
 pub mod store;
 pub mod wire;
