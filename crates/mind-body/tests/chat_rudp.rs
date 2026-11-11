@@ -21,6 +21,8 @@ const PENDING_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecul
 const PENDING_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v5/gamecult.persona.chat_pending.v3.tag.msgpack");
 const PENDING_TAILED_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.tag.msgpack");
 const PENDING_TAIL_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.tail.msgpack");
+// The four-field `chat_pending.v3` of a mouth with `tail_gaps`: Bifrost b2e0bb2's own golden bytes, copied unchanged.
+const PENDING_GAPS_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v7/gamecult.persona.chat_pending.v3.tail-gaps.msgpack");
 const PENDING_V2_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v3/gamecult.persona.chat_pending.v2.image.msgpack");
 const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v5/gamecult.persona.chat_pending_request.v2.msgpack");
 const PENDING_REQUEST_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
@@ -322,4 +324,27 @@ fn the_three_field_v3_crosses_real_rudp_with_its_tail_and_the_two_field_one_with
     assert_eq!((got.deliveries.len(), got.tail), (1, Some(vec![])), "a delivery and an empty tail: the mouth had nothing to add");
     let old = client(&mouth(KEY), KEY, "eureka", Duration::from_secs(5)).pending(0).unwrap();
     assert_eq!((old.deliveries.len(), old.tail), (1, None), "the older mouth's two-field answer carries no tail");
+}
+
+/// The three-field answer with a fourth element appended, as a four-field mouth would send it.
+fn four_field(three: &[u8], gaps: &[&str]) -> &'static [u8] {
+    let mut value: serde_json::Value = rmp_serde::from_slice(three).unwrap();
+    value.as_array_mut().unwrap().push(serde_json::json!(gaps));
+    Box::leak(rmp_serde::to_vec(&value).unwrap().into_boxed_slice())
+}
+
+/// Deploy safety for `tail_gaps` (Bifrost b2e0bb2): the three-field answer, the four-field one with gaps and the four-field one with
+/// none all cross real RUDP and decode. Only a named room is a gap; a quiet room is never in the list.
+#[test]
+fn the_four_field_v3_crosses_real_rudp_with_its_gaps_and_the_three_field_one_with_none() {
+    let fetch = |bytes: &'static [u8]| client(&serve(KEY, "127.0.0.1:0", PENDING, bytes, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES)), KEY, "eureka", Duration::from_secs(5)).pending(0).unwrap();
+    let three = fetch(PENDING_TAIL_BYTES);
+    assert_eq!((three.tail.as_ref().map(Vec::len), three.tail_gaps), (Some(2), Vec::<String>::new()), "a three-field answer names no gap");
+    let gapped = fetch(PENDING_GAPS_BYTES);
+    assert_eq!((gapped.deliveries.len(), gapped.tail.as_ref().map(Vec::len)), (0, Some(1)));
+    assert_eq!(gapped.tail_gaps, vec!["#swarm:gamecult.org".to_string(), "!dm1:gamecult.org".to_string()], "the mouth's own bytes name two rooms");
+    let empty = fetch(four_field(PENDING_TAIL_BYTES, &[]));
+    assert_eq!((empty.tail.as_ref().map(Vec::len), empty.tail_gaps), (Some(2), Vec::<String>::new()), "an empty fourth element is every room read fully");
+    let quiet = fetch(four_field(PENDING_TAIL_BYTES, &["#swarm:gamecult.org"]));
+    assert!(!quiet.tail_gaps.contains(&"#operator:gamecult.org".to_string()), "a room the mouth did not name is not a gap, however few lines it has");
 }

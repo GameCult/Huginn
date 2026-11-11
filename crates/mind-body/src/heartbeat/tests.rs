@@ -90,7 +90,7 @@ struct FakeChat {
 impl Chat for FakeChat {
     fn pending(&self, after_seq: u64) -> Result<crate::chat_client::ChatPending> {
         self.pending_calls.set(self.pending_calls.get() + 1);
-        Ok(crate::chat_client::ChatPending { persona: "eureka".into(), deliveries: self.deliveries.borrow().iter().filter(|delivery| delivery.seq > after_seq).cloned().collect(), tail: None })
+        Ok(crate::chat_client::ChatPending { persona: "eureka".into(), deliveries: self.deliveries.borrow().iter().filter(|delivery| delivery.seq > after_seq).cloned().collect(), tail: None, tail_gaps: vec![] })
     }
 
     fn send(&self, _: &crate::chat_client::ChatSendRequest) -> Result<crate::chat_client::ChatSendReceipt> {
