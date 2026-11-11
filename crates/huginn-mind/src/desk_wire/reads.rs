@@ -376,7 +376,7 @@ impl<S: MindStore> Mind<S> {
             let list = held(&mut response);
             if bytes > DESK_PAGE_BUDGET {
                 if kept == 0 {
-                    return Ok(DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: matching[taken].1.to_string(), bytes: bytes as u64, limit: DESK_PAGE_BUDGET as u64 }));
+                    return Ok(DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: matching[taken].1.to_string(), order: matching[taken].0, bytes: bytes as u64, limit: DESK_PAGE_BUDGET as u64 }));
                 }
                 list.forks.truncate(kept);
                 list.next_cursor = last_order.and_then(ForkCursor::new);
@@ -406,7 +406,7 @@ mod tests {
     use crate::envelope::{decode_desk_request, encode_desk_request, encode_desk_response};
     use crate::fixtures::*;
     use crate::store::test_stores::MemoryStore;
-    use crate::PipelineAdmissionOutcome;
+    use crate::{Faculty, PipelineAdmissionBatch, PipelineAdmissionOutcome};
     use eureka_pipeline::{Line, PipelineRef, QuestionOption};
     use serde_json::{Value, json};
 
@@ -560,7 +560,9 @@ mod tests {
         assert!(orders.windows(2).all(|pair| pair[0] > pair[1]), "{orders:?}");
         assert_eq!(everything.next_cursor, None, "the last page has no cursor");
         // A cursor names an order and returns the cards strictly below it.
-        for (at, expected) in [(0, 3), (1, 2), (2, 1), (3, 0)] {
+        assert_eq!(orders, [3, 2, 1, 0], "the ranks, from 0");
+        assert_eq!(ForkCursor::new(0), None, "no cursor names rank 0: nothing is below it");
+        for (at, expected) in [(0, 3), (1, 2), (2, 1)] {
             let below = ForkCursor::new(orders[at]).unwrap();
             let (rest, _) = page(mind.desk_forks(&list(&LIST), None, Some(below), limit(50)));
             assert_eq!(rest.forks.len(), expected, "below order {}", orders[at]);
@@ -719,7 +721,7 @@ mod tests {
         assert_eq!((card.leans.clone(), card.flag.clone(), card.status, card.ruling.clone(), card.ruled_from.clone()), (None, None, CardStatus::Open, None, vec![]));
         assert_eq!(card.deciders, LIST);
         assert_eq!(card.options_hash, hash_of(&mind, &fork(1)));
-        assert_eq!(card.order, mind.image().unwrap().row(mind.image().unwrap().id_of(PipelineKind::Question, &fork(1)).unwrap()).ordinal);
+        assert_eq!(card.order, 0, "the only question is rank 0");
         assert_eq!(read.record.fork_id, fork(1));
         assert_eq!((read.record.counted_answer_id, read.record.answers.len()), (None, 0));
     }
@@ -1023,25 +1025,16 @@ mod tests {
         assert_eq!(ids(&rest), [fork(1)]);
     }
 
-    /// A fork whose entry alone is past the budget cannot be paged: it is refused by name, never dropped.
-    #[test]
-    fn a_lone_oversize_entry_is_refused_by_name() {
-        let mut mind = desk(3);
-        let hash = hash_of(&mind, &fork(2));
+    /// Grows fork `n`'s record with notes until its entry alone encodes to more than `bytes`.
+    fn grown_past(mind: &mut Mind<MemoryStore>, n: u32, bytes: usize) {
+        let hash = hash_of(mind, &fork(n));
         let note = "a long reason, ".repeat(60);
-        let mut grown = 0;
-        while bare(&mind.desk_fork(&list(&LIST), &fork(2))) <= DESK_PAGE_BUDGET {
-            let DeskResponse::Answered { .. } = answer(&mut mind, "x", &LIST, &fork(2), &hash, Some(&note)) else { panic!("the note was not stored") };
-            grown += 1;
-            assert!(grown < 200, "the record does not grow");
+        let mut added = 0;
+        while bare(&mind.desk_fork(&list(&LIST), &fork(n))) <= bytes {
+            let DeskResponse::Answered { .. } = answer(mind, "x", &LIST, &fork(n), &hash, Some(&note)) else { panic!("the note was not stored") };
+            added += 1;
+            assert!(added < 200, "the record does not grow");
         }
-        // The newest fork pages; the one with the long record is refused when its page is asked for.
-        let response = mind.desk_forks(&list(&LIST), None, ForkCursor::new(docs_order(&mind, &fork(3))), limit(50));
-        let DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: named, bytes, limit: bound }) = response else { panic!("{response:?}") };
-        assert_eq!((named, bound), (fork(2), DESK_PAGE_BUDGET as u64));
-        assert!(bytes > bound);
-        // And a read of that fork alone is still its whole entry.
-        entry(mind.desk_fork(&list(&LIST), &fork(2)));
     }
 
     fn docs_order(mind: &Mind<MemoryStore>, key: &str) -> u64 {
@@ -1049,57 +1042,294 @@ mod tests {
         Docs::at(image, image.head).ordinal_of(PipelineKind::Question, key).unwrap()
     }
 
-    /// Questions admitted in one commit share an order, and the cursor is "strictly below an order":
-    /// a page never ends inside such a group (the page may pass `limit` by the group's size).
-    #[test]
-    fn a_page_never_splits_a_group_admitted_in_one_commit() {
-        let mut mind = seeded();
-        committed(admit(&mut mind, vec![question_n(1)]));
-        committed(admit(&mut mind, (2..=6).map(question_n).collect()));
-        committed(admit(&mut mind, vec![question_n(7)]));
-        // Newest first; the key breaks a tie inside the group.
-        let mut group: Vec<String> = (2..=6).map(fork).collect();
-        group.sort();
-        group.reverse();
-        let expected: Vec<String> = std::iter::once(fork(7)).chain(group).chain(std::iter::once(fork(1))).collect();
-        for size in [1, 2, 3, 5, 6] {
-            let all = pages(&mind, size);
-            let seen: Vec<String> = all.iter().flat_map(|(_, page)| ids(page)).collect();
-            assert_eq!(seen, expected, "limit {size}: no fork skipped or repeated");
-            for (_, page) in &all {
-                let orders: Vec<u64> = page.forks.iter().map(|entry| entry.card.order).collect();
-                let group = orders.iter().filter(|order| **order == docs_order(&mind, &fork(2))).count();
-                assert!(group == 0 || group == 5, "limit {size}: the group of five is whole or absent, not {group}");
-            }
-        }
-        // The first page at limit 2 runs past the limit to finish the group it ends in.
-        let (first, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(2)));
-        assert_eq!(first.forks.len(), 6);
-        assert_eq!(first.next_cursor.map(ForkCursor::order), Some(docs_order(&mind, &fork(2))));
+    fn orders(list: &ForkList) -> Vec<u64> {
+        list.forks.iter().map(|entry| entry.card.order).collect()
     }
 
-    /// A group the page budget would end inside goes whole to the next page; one that is over the
-    /// budget by itself is refused by name of its first fork.
+    /// A fork whose entry alone is past the budget cannot be paged: the page that starts at it is the
+    /// refusal naming it and its order, the forks before it page, and the cursor the refusal names
+    /// reaches the forks below it. The list is not bricked.
     #[test]
-    fn a_group_past_the_byte_budget_moves_whole_or_is_refused() {
+    fn a_lone_oversize_entry_is_refused_by_name_and_the_older_forks_are_still_reachable() {
+        let mut mind = desk(3);
+        grown_past(&mut mind, 2, DESK_PAGE_BUDGET);
+        // The newest fork pages alone: the oversize one would bust the page beside it.
+        let (first, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(50)));
+        assert_eq!(ids(&first), [fork(3)]);
+        assert_eq!(first.next_cursor.map(ForkCursor::order), Some(2));
+        let response = mind.desk_forks(&list(&LIST), None, first.next_cursor, limit(50));
+        let DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: named, order, bytes, limit: bound }) = response else { panic!("{response:?}") };
+        assert_eq!((named, order, bound), (fork(2), 1, DESK_PAGE_BUDGET as u64));
+        assert!(bytes > bound);
+        // The order the refusal names is the order of the fork it names; its cursor goes on past it.
+        assert_eq!(entry(mind.desk_fork(&list(&LIST), &fork(2))).0.card.order, order);
+        let (rest, _) = page(mind.desk_forks(&list(&LIST), None, ForkCursor::new(order), limit(50)));
+        assert_eq!((ids(&rest), rest.next_cursor), (vec![fork(1)], None));
+    }
+
+    /// A batch of 64 questions admitted in ONE commit pages whole at every limit: no page passes its
+    /// limit or 50, and the pages are every fork once, newest first, with unique orders.
+    #[test]
+    fn a_batch_admitted_in_one_commit_pages_every_fork_once_newest_first() {
         let mut mind = seeded();
-        committed(admit(&mut mind, (1..=50).map(wordy).collect()));
-        let response = mind.desk_forks(&list(&LIST), None, None, limit(50));
-        let DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: named, .. }) = response else { panic!("{response:?}") };
-        assert!(named.starts_with("eureka-state:question:Q"));
-        let mut mind = seeded();
-        committed(admit(&mut mind, vec![wordy(1)]));
-        committed(admit(&mut mind, (2..=21).map(wordy).collect()));
-        for n in 22..=29 {
-            committed(admit(&mut mind, vec![wordy(n)]));
+        committed(admit(&mut mind, (1..=64).map(question_n).collect()));
+        let mut expected: Vec<String> = (1..=64).map(fork).collect();
+        expected.sort();
+        expected.reverse();
+        for size in [1, 2, 3, 50] {
+            let all = pages(&mind, size);
+            let seen: Vec<String> = all.iter().flat_map(|(_, page)| ids(page)).collect();
+            assert_eq!(seen, expected, "limit {size}: every fork once, newest first");
+            for (_, page) in &all {
+                assert!(page.forks.len() <= size as usize && page.forks.len() <= 50, "limit {size}: a page of {}", page.forks.len());
+            }
+            let seen: Vec<u64> = all.iter().flat_map(|(_, page)| orders(page)).collect();
+            assert_eq!(seen, (0..64).rev().collect::<Vec<u64>>(), "limit {size}: the orders are the ranks 63 down to 0");
         }
+    }
+
+    /// A rank is the position in (admission, key) order among all the questions, so a question admitted
+    /// later is the newest whatever its key, and a cursor held from before still resumes correctly.
+    #[test]
+    fn a_rank_is_stable_when_more_questions_are_admitted() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, (1..=5).map(question_n).collect()));
+        let (first, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(2)));
+        assert_eq!((orders(&first), first.next_cursor.map(ForkCursor::order)), (vec![4, 3], Some(3)));
+        let held = first.next_cursor;
+        let (before, _) = page(mind.desk_forks(&list(&LIST), None, held, limit(50)));
+        committed(admit(&mut mind, vec![question_n(6)]));
+        committed(admit(&mut mind, vec![question_n(0)]));
+        let (after, _) = page(mind.desk_forks(&list(&LIST), None, held, limit(50)));
+        assert_eq!(after, ForkList { stamp: after.stamp.clone(), ..before.clone() }, "the cursor from before resumes the same forks");
+        let everything = all(&mind, 50);
+        assert_eq!(ids(&everything), [fork(0), fork(6), fork(5), fork(4), fork(3), fork(2), fork(1)]);
+        assert_eq!(orders(&everything), [6, 5, 4, 3, 2, 1, 0], "Q0 sorts first by key and is still the newest");
+    }
+
+    /// An unshowable question keeps its rank, so the others' ranks leave a gap and do not shift, and the
+    /// call's deciders list changes nothing about a rank.
+    #[test]
+    fn an_unshowable_question_leaves_a_gap_and_never_shifts_a_rank() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question_n(1)]));
+        let mut blank = question("Q2", &["A", "B"], "A");
+        let D::Question(held) = &mut blank else { unreachable!() };
+        held.depends = vec!["Cut 3a".into(), "".into()];
+        if !matches!(admit(&mut mind, vec![blank]), PipelineAdmissionOutcome::Committed { .. }) {
+            let mut blank = question("Q2", &["A", "B"], "A");
+            let D::Question(held) = &mut blank else { unreachable!() };
+            held.options[0] = QuestionOption { label: l("A"), text: "".into() };
+            committed(admit(&mut mind, vec![blank]));
+        }
+        committed(admit(&mut mind, vec![question_n(3)]));
+        for who in [&LIST[..], &["x"][..], &["z"][..]] {
+            let (shown, _) = page(mind.desk_forks(&list(who), None, None, limit(50)));
+            assert_eq!((ids(&shown), orders(&shown)), (vec![fork(3), fork(1)], vec![2, 0]), "{who:?}: rank 1 is the gap");
+            assert_eq!(entry(mind.desk_fork(&list(who), &fork(3))).0.card.order, 2, "{who:?}");
+        }
+        committed(admit(&mut mind, vec![question_n(4)]));
+        assert_eq!(orders(&all(&mind, 50)), [3, 2, 0]);
+    }
+
+    /// A page where one entry fits and the next busts the budget is that one entry and a cursor; it is
+    /// neither empty nor a refusal.
+    #[test]
+    fn a_page_of_one_when_the_next_entry_busts_the_budget() {
+        let mut mind = desk(2);
+        for n in [1, 2] {
+            grown_past(&mut mind, n, DESK_PAGE_BUDGET * 55 / 100);
+            assert!(bare(&mind.desk_fork(&list(&LIST), &fork(n))) <= DESK_PAGE_BUDGET, "each fork alone fits");
+        }
+        let (one, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(50)));
+        assert_eq!((ids(&one), one.next_cursor.map(ForkCursor::order)), (vec![fork(2)], Some(1)));
+        let (rest, _) = page(mind.desk_forks(&list(&LIST), None, one.next_cursor, limit(50)));
+        assert_eq!((ids(&rest), rest.next_cursor), (vec![fork(1)], None));
+    }
+
+    /// The invariants of `order`: a unique 0-based rank by (admission, key), stable under later
+    /// admissions, order 0 legal and reached by the page boundary `c1`.
+    #[test]
+    fn order_is_a_unique_zero_based_rank_stable_under_appends() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, (1..=64).map(question_n).collect()));
+        let mut keys: Vec<String> = (1..=64).map(fork).collect();
+        keys.sort();
+        let ranks = |mind: &Mind<MemoryStore>| -> Vec<(String, u64)> {
+            let mut out: Vec<(String, u64)> = pages(mind, 50).iter().flat_map(|(_, page)| page.forks.iter().map(|e| (e.card.fork_id.clone(), e.card.order))).collect();
+            out.sort();
+            out
+        };
+        let before = ranks(&mind);
+        assert_eq!(before.iter().map(|(_, order)| *order).collect::<std::collections::BTreeSet<_>>(), (0..64).collect(), "distinct, 0 to 63");
+        for (rank, key) in keys.iter().enumerate() {
+            assert_eq!(before.iter().find(|(id, _)| id == key).unwrap().1, rank as u64, "ties inside one commit break on the key");
+        }
+        committed(admit(&mut mind, vec![question_n(65)]));
+        committed(admit(&mut mind, (66..=70).map(question_n).collect()));
+        let after = ranks(&mind);
+        for row in &before {
+            assert!(after.contains(row), "{row:?} kept its rank");
+        }
+        assert_eq!(after.len(), 70);
+        assert_eq!(after.iter().map(|(_, order)| *order).collect::<std::collections::BTreeSet<_>>(), (0..70).collect());
+        // The page boundary at c1: the page ending at order 1 names c1, and the next page is order 0 alone.
+        let (upper, _) = page(mind.desk_forks(&list(&LIST), None, ForkCursor::new(3), limit(2)));
+        assert_eq!((orders(&upper), upper.next_cursor.map(ForkCursor::order)), (vec![2, 1], Some(1)));
+        let (last, _) = page(mind.desk_forks(&list(&LIST), None, upper.next_cursor, limit(50)));
+        assert_eq!((orders(&last), last.next_cursor), (vec![0], None));
+    }
+
+    /// No admission path reorders the ranks: a re-admitted question (replayed batch, the same document
+    /// in a new batch, a rewrite, a resolution of it, an import of it or of a new one) keeps every
+    /// existing rank, and a question that is new is admitted last whatever its key.
+    #[test]
+    fn no_admission_path_moves_an_existing_rank() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question_n(2), question_n(3)]));
+        committed(admit(&mut mind, vec![question_n(5)]));
+        let ranks = |mind: &Mind<MemoryStore>| -> Vec<(String, u64)> {
+            pages(mind, 50).iter().flat_map(|(_, page)| page.forks.iter().map(|e| (e.card.fork_id.clone(), e.card.order))).collect()
+        };
+        let base = ranks(&mind);
+        assert_eq!(base.iter().map(|(_, order)| *order).collect::<Vec<_>>(), [2, 1, 0]);
+        let held = |mind: &Mind<MemoryStore>| {
+            let now = ranks(mind);
+            assert!(base.iter().all(|row| now.contains(row)), "every existing rank held: {now:?}");
+            now.len()
+        };
+        // The same document again in a new batch, and a rewrite of it.
+        let again = admit(&mut mind, vec![question_n(2)]);
+        assert!(!matches!(again, PipelineAdmissionOutcome::Committed { .. }), "{again:?}");
+        let mut rewritten = question_n(3);
+        let D::Question(body) = &mut rewritten else { unreachable!() };
+        body.question = "Another reading entirely?".into();
+        assert!(!matches!(admit(&mut mind, vec![rewritten]), PipelineAdmissionOutcome::Committed { .. }));
+        assert_eq!(held(&mind), 3);
+        // A batch replayed whole.
+        let batch = PipelineAdmissionBatch { instance: mind.instance().clone(), provenance: provenance(Faculty::Hands), documents: vec![question_n(7)] };
+        committed(mind.admit(batch.clone(), now()));
+        let replay = mind.admit(batch, now());
+        assert!(matches!(replay, PipelineAdmissionOutcome::AlreadyAdmitted { .. }), "{replay:?}");
+        assert_eq!(held(&mind), 4);
+        // A resolution of a question changes its status and not its rank.
+        let subject = PipelineRef { kind: PipelineKind::Question, id: s(&fork(2)) };
+        let withdrawn = crate::fixtures::resolution(subject, eureka_pipeline::ResolutionOutcome::Withdrawn { reason: "no".into() });
+        committed(admit(&mut mind, vec![withdrawn]));
+        assert_eq!(held(&mind), 4);
+        // A new question whose key sorts before them all is the newest.
+        committed(admit(&mut mind, vec![question_n(0)]));
+        assert_eq!(held(&mind), 5);
+        assert_eq!(ranks(&mind)[0], (fork(0), 4));
+        // An import carries the source's ordinal and the Mind's own receipt orders it: appended, last.
+        let source = crate::receipt::ImportSource {
+            instance: slug(INSTANCE),
+            receipt_id: s("mind-commit-source"),
+            ordinal: 1,
+            committed_at: s("2026-11-08T16:20:05Z"),
+            faculty: Faculty::Imagination,
+            agent: s("imagination"),
+            session: s("source-session"),
+            tool: s("huginn"),
+            external: vec![],
+        };
+        let mut abroad = question_n(1);
+        let D::Question(body) = &mut abroad else { unreachable!() };
+        body.campaign = slug("other-campaign");
+        let import = |documents: Vec<PipelineDocument>| PipelineAdmissionBatch {
+            instance: INSTANCE.into(),
+            provenance: crate::receipt::PipelineProvenance { faculty: Faculty::SelfFaculty, agent: s("self"), session: s("import-1"), tool: s("huginn"), imported_from: Some(source.clone()) },
+            documents,
+        };
+        let outcome = mind.admit(import(vec![abroad.clone()]), now());
+        let imported = matches!(outcome, PipelineAdmissionOutcome::Committed { .. });
+        assert_eq!(held(&mind), 5 + usize::from(imported), "{outcome:?}");
+        let replay = mind.admit(import(vec![abroad]), now());
+        assert!(!matches!(replay, PipelineAdmissionOutcome::Committed { .. }), "{replay:?}");
+        assert_eq!(held(&mind), 5 + usize::from(imported));
+        if imported {
+            assert_eq!(ranks(&mind)[0].1, 5, "the import is the newest, whatever ordinal its source gave it");
+        }
+    }
+
+    /// A closed card names the in-force ruling that answers THIS fork, never another fork's.
+    #[test]
+    fn a_closed_card_names_the_ruling_that_answers_it() {
+        let mut mind = desk(3);
+        close(&mut mind, &fork(1), "R9");
+        close(&mut mind, &fork(2), "R2");
+        let named = |n: u32| entry(mind.desk_fork(&list(&LIST), &fork(n))).0.card.ruling;
+        assert_eq!(named(1).as_deref(), Some("eureka-state:ruling:R9"));
+        assert_eq!(named(2).as_deref(), Some("eureka-state:ruling:R2"));
+        assert_eq!(named(3), None);
+    }
+
+    /// The response a page of the budget makes, in the worst envelope the door can echo (a 256-byte
+    /// message id, a 64-byte slug in the runtime id), is within the bound; the margin is real.
+    #[test]
+    fn a_page_at_the_budget_in_the_worst_envelope_is_within_the_response_bound() {
+        let mind = admitted_each(1..=50);
+        let worst = format!("huginn-{}", "s".repeat(64));
         let all = pages(&mind, 50);
-        let sizes: Vec<usize> = all.iter().map(|(_, page)| page.forks.len()).collect();
-        assert_eq!(sizes, [8, 21], "the eight newest fill the first page; the group of twenty does not fit beside them and moves whole");
-        for (response, page) in &all {
-            assert!(on_the_wire(response) <= DESK_MAX_RESPONSE_BYTES);
-            let group = page.forks.iter().filter(|entry| entry.card.order == docs_order(&mind, &fork(2))).count();
-            assert!(group == 0 || group == 20, "the group of 20 is whole or absent, not {group}");
+        assert!(all.len() > 1);
+        for (response, _) in &all {
+            let framed = 4 + encoded(&"m".repeat(256), &worst, response);
+            assert!(framed <= DESK_MAX_RESPONSE_BYTES, "{framed} bytes framed");
+            let overhead = encoded(&"m".repeat(256), &worst, response) - bare(response);
+            assert!(overhead > 0 && overhead < DESK_ENVELOPE_MARGIN, "the envelope is {overhead} bytes against a margin of {DESK_ENVELOPE_MARGIN}");
         }
+        // And the fullest page is within the margin's reach of the bound.
+        let fullest = all.iter().map(|(response, _)| bare(response)).max().unwrap();
+        assert!(fullest > DESK_PAGE_BUDGET - 3000, "the pages fill to the budget, not far short of it: {fullest}");
+    }
+
+    /// Libby's list scenarios (CultLib e57fbaee `listScenarios`) replayed through `desk_forks` over the
+    /// data the Mind stores: five forks in five commits, the first and third closed by a ruling, the
+    /// fifth answered, the third answered before and after it closed. What the Mind does not store the
+    /// same way is not compared: the ruling's id (the vectors name a `resolution`, the Mind a `ruling`),
+    /// `ruled_from` (always empty here), the answerers and their authority, timestamps and texts.
+    #[test]
+    fn libbys_list_scenarios_replay_through_desk_forks() {
+        let file = transport();
+        let mut replayed = 0;
+        for scenario in file["listScenarios"].as_array().unwrap() {
+            let mut mind = seeded();
+            if !scenario["entries"].as_array().unwrap().is_empty() {
+                for n in 1..=5 {
+                    committed(admit(&mut mind, vec![question_n(n)]));
+                }
+                for n in [3, 5] {
+                    let hash = hash_of(&mind, &fork(n));
+                    answer(&mut mind, "x", &LIST, &fork(n), &hash, None);
+                }
+                close(&mut mind, &fork(1), "R1");
+                close(&mut mind, &fork(3), "R3");
+                let hash = hash_of(&mind, &fork(3));
+                answer(&mut mind, "y", &LIST, &fork(3), &hash, None);
+            }
+            for step in scenario["steps"].as_array().unwrap() {
+                let (request, want) = (&step["request"], &step["response"]);
+                let status: Option<ListStatus> = serde_json::from_value(request["status"].clone()).unwrap();
+                // Her orders count from 1 (the admission ordinal) and the Mind's from 0 (a rank): every order
+                // and cursor in her scenarios is one more than the Mind's.
+                let cursor: Option<ForkCursor> = serde_json::from_value::<Option<ForkCursor>>(request["cursor"].clone()).unwrap().and_then(|her| ForkCursor::new(her.order() - 1));
+                let (got, _) = page(mind.desk_forks(&list(&LIST), status, cursor, limit(request["limit"].as_u64().unwrap() as u8)));
+                let name = &scenario["name"];
+                assert_eq!((got.open_count, got.recorded_count), (want["open_count"].as_u64().unwrap(), want["recorded_count"].as_u64().unwrap()), "{name}");
+                assert_eq!(serde_json::to_value(got.next_cursor.and_then(|ours| ForkCursor::new(ours.order() + 1))).unwrap(), want["next_cursor"], "{name}");
+                let wanted = want["forks"].as_array().unwrap();
+                assert_eq!(got.forks.len(), wanted.len(), "{name}");
+                for (have, want) in got.forks.iter().zip(wanted) {
+                    assert_eq!(have.card.order + 1, want["card"]["order"].as_u64().unwrap(), "{name}");
+                    assert_eq!(serde_json::to_value(have.card.status).unwrap(), want["card"]["status"], "{name}");
+                    assert_eq!(have.record.counted_answer_id.as_deref(), want["record"]["counted_answer_id"].as_str(), "{name}");
+                    let kept: Vec<_> = have.record.answers.iter().map(|answer| (answer.answer_id.as_str(), answer.outcome.as_str())).collect();
+                    let wanted: Vec<_> = want["record"]["answers"].as_array().unwrap().iter().map(|a| (a["answer_id"].as_str().unwrap(), a["outcome"].as_str().unwrap())).collect();
+                    assert_eq!(kept, wanted, "{name}");
+                }
+                replayed += 1;
+            }
+        }
+        assert_eq!(replayed, 7);
     }
 }
