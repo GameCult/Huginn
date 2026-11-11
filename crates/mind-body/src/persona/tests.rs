@@ -7845,8 +7845,10 @@ fn an_open_the_mouth_does_not_serve_is_told_as_not_sent() {
 fn the_daily_creation_policy_has_one_text_in_the_schema_and_the_notice() {
     let schema = reply_schema(&["swarm".to_string()], &[], true);
     let told = open_told("@ann:chat", Some(DirectOutcome::DailyLimit));
-    assert!(open_direct_description().contains(OPEN_DAILY_POLICY) && told.contains(OPEN_DAILY_POLICY), "{told}");
-    assert!(schema.contains(OPEN_DAILY_POLICY));
+    assert!(told.contains(OPEN_DAILY_POLICY), "{told}");
+    let schema: Value = serde_json::from_str(&schema).unwrap();
+    let described = schema.pointer("/properties/open_direct/anyOf/1/description").and_then(Value::as_str).unwrap_or_default();
+    assert!(described.contains(OPEN_DAILY_POLICY), "{described}");
 }
 
 #[test]

@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cultnet_rs::{CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions};
-use mind_body::chat_client::{self, MouthRefused, Refusal, REFUSAL, ACK, Chat, ChatAck, ChatOpenDirectReceipt, ChatOpenDirectRequest, DirectOutcome, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, READ, SEND_RECEIPT, SEND_REQUEST};
+use mind_body::chat_client::{self, ChatRefusal, MouthRefused, Refusal, REFUSAL, ACK, Chat, ChatAck, ChatOpenDirectReceipt, ChatOpenDirectRequest, DirectOutcome, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, READ, SEND_RECEIPT, SEND_REQUEST};
 use mind_body::chat_rudp::{RudpChat, connection_id};
 
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
@@ -24,6 +24,7 @@ const SEND_RECEIPT_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamec
 const SEND_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.nil-basis.msgpack");
 const OPEN_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_request.v1.msgpack");
 const UNKNOWN_KIND_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamecult.persona.chat_refusal.v1.unknown-kind.msgpack");
+const REFUSAL_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_refusal.v1.msgpack");
 const OPENED_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_receipt.v1.opened.msgpack");
 
 const KEY: &str = "connection-key-for-test";
@@ -261,4 +262,25 @@ fn a_refusal_for_another_persona_or_another_kind_does_not_satisfy_the_open() {
     let wrong_kind = opening_with((SEND_RECEIPT, Some("eureka"), SEND_RECEIPT_BYTES));
     let error = client(&wrong_kind, KEY, "eureka", Duration::from_millis(800)).open_direct(&request).unwrap_err();
     assert!(error.downcast_ref::<MouthRefused>().is_none(), "another kind is not heard: {error}");
+}
+
+#[test]
+fn a_refusal_of_another_kind_ends_the_wait_but_is_not_told_as_not_sent() {
+    // The fixture refusal is persona "ghost", UnknownPersona: the mouth refuses this Persona's open for a reason other than the kind.
+    let mouth = opening_with((REFUSAL, Some("ghost"), REFUSAL_BYTES));
+    let request = chat_client::decode::<ChatOpenDirectRequest>(OPEN_REQUEST_BYTES).unwrap();
+    let started = std::time::Instant::now();
+    let error = client(&mouth, KEY, "ghost", Duration::from_secs(20)).open_direct(&request).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(5), "the refusal ends the wait: {:?}", started.elapsed());
+    assert!(error.downcast_ref::<MouthRefused>().is_none(), "only UnknownKind is a known not-sent: {error}");
+    assert!(error.to_string().contains("UnknownPersona"), "{error}");
+}
+
+#[test]
+fn an_unknown_kind_refusal_keyed_by_this_persona_but_naming_another_is_not_heard_as_not_sent() {
+    let other = chat_client::encode(&ChatRefusal { persona: "someone-else".into(), refusal: Refusal::UnknownKind }).unwrap();
+    let mouth = opening_with((REFUSAL, Some("eureka"), Box::leak(other.into_boxed_slice())));
+    let request = chat_client::decode::<ChatOpenDirectRequest>(OPEN_REQUEST_BYTES).unwrap();
+    let error = client(&mouth, KEY, "eureka", Duration::from_secs(20)).open_direct(&request).unwrap_err();
+    assert!(error.downcast_ref::<MouthRefused>().is_none(), "the payload names another Persona: {error}");
 }
