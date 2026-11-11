@@ -21,6 +21,11 @@ const PENDING_UNPROVEN_NOTICE_TAILED_BYTES: &[u8] = include_bytes!("../../tests/
 const PENDING_TAIL_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.tail.msgpack");
 // The four-field `chat_pending.v3` with `tail_gaps`: Bifrost b2e0bb2's own golden bytes, copied unchanged.
 const PENDING_GAPS_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v7/gamecult.persona.chat_pending.v3.tail-gaps.msgpack");
+// Bifrost dc35c4a2's own golden bytes for the reply link (`tests/fixtures/persona-chat-v6/` there), copied unchanged as `persona-chat-v8/`.
+const PENDING_V4_REPLY_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v8/gamecult.persona.chat_pending.v4.reply-to.msgpack");
+const PENDING_V4_REDACTED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v8/gamecult.persona.chat_pending.v4.reply-to-redacted.msgpack");
+const PENDING_V4_NONE_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v8/gamecult.persona.chat_pending.v4.no-reply-to.msgpack");
+const PENDING_REQUEST_V3_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v8/gamecult.persona.chat_pending_request.v3.msgpack");
 const SENT_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.sent.msgpack");
 const ROOM_MOVED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.room-moved.msgpack");
 const NIL_BASIS_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.nil-basis.msgpack");
@@ -62,6 +67,7 @@ fn delivery(image: Option<ChatImage>) -> ChatDelivery {
         image,
         basis: None,
         form: Form::Message,
+        reply_to: ReplyLink::Absent,
     }
 }
 
@@ -240,4 +246,320 @@ fn the_pending_answer_decodes_tail_gaps_and_defaults_them_to_none() {
     let mut empty_fourth: serde_json::Value = rmp_serde::from_slice(PENDING_TAIL_BYTES).unwrap();
     empty_fourth.as_array_mut().unwrap().push(serde_json::json!([]));
     assert_eq!(decode::<ChatPending>(&rmp_serde::to_vec(&empty_fourth).unwrap()).unwrap(), tailed, "an empty fourth element is the same answer");
+}
+
+fn quote(sender: &str, excerpt: Option<&str>) -> ReplyLink {
+    ReplyLink::Quote(ReplyTo { event_id: "$q1".into(), sender: sender.into(), excerpt: excerpt.map(Into::into) })
+}
+
+/// The v4 answers carry `reply_to` at delivery index 14. The mouth always sends the fourth, empty `tail_gaps` element on a v4 answer,
+/// which this side omits when empty, so a re-encode is the same answer without that trailing empty list.
+#[test]
+fn the_v4_golden_bytes_decode_and_the_reply_to_ones_reencode() {
+    let one = |reply_to| {
+        let mut delivery = delivery(None);
+        (delivery.is_direct, delivery.mentions, delivery.reply_to) = (false, vec!["@eureka:gamecult.org".into(), "@nova:gamecult.org".into()], reply_to);
+        ChatPending { persona: "eureka".into(), deliveries: vec![delivery], tail: Some(vec![]), tail_gaps: vec![] }
+    };
+    let without_empty_gaps = |bytes: &[u8]| {
+        let mut value: serde_json::Value = rmp_serde::from_slice(bytes).unwrap();
+        assert_eq!(value.as_array_mut().unwrap().pop(), Some(serde_json::json!([])));
+        value
+    };
+    for (bytes, expected) in [(PENDING_V4_REPLY_BYTES, one(quote("@alice:gamecult.org", Some("can someone look at the build?")))), (PENDING_V4_REDACTED_BYTES, one(quote("@alice:gamecult.org", None)))] {
+        assert_eq!(decode::<ChatPending>(bytes).unwrap(), expected);
+        let reencoded: serde_json::Value = rmp_serde::from_slice(&encode(&expected).unwrap()).unwrap();
+        assert_eq!(reencoded, without_empty_gaps(bytes));
+        assert_eq!(reencoded[1][0].as_array().unwrap().len(), 15);
+    }
+    // An explicit nil at index 14 reads as none; a re-encode drops it, so this fixture is decode-only.
+    let none = decode::<ChatPending>(PENDING_V4_NONE_BYTES).unwrap();
+    assert_eq!(none, one(ReplyLink::Absent));
+    assert_eq!(rmp_serde::from_slice::<serde_json::Value>(&encode(&none).unwrap()).unwrap()[1][0].as_array().unwrap().len(), 14);
+}
+
+#[test]
+fn the_v1_to_v3_answers_still_decode_with_no_reply_to() {
+    for old in [PENDING_V1_BYTES, PENDING_NO_IMAGE_BYTES, PENDING_IMAGE_BYTES, PENDING_TAG_BYTES, PENDING_UNPROVEN_NOTICE_BYTES, PENDING_TAG_TAILED_BYTES, PENDING_TAIL_BYTES, PENDING_GAPS_BYTES] {
+        assert!(decode::<ChatPending>(old).unwrap().deliveries.iter().all(|delivery| delivery.reply_to == ReplyLink::Absent));
+    }
+    golden(PENDING_TAG_BYTES, &decode::<ChatPending>(PENDING_TAG_BYTES).unwrap());
+    golden(PENDING_GAPS_BYTES, &decode::<ChatPending>(PENDING_GAPS_BYTES).unwrap());
+}
+
+/// The valid reply-to answer with its delivery's index 14 swapped for `element`, as msgpack.
+fn answer_with(element: serde_json::Value) -> Vec<u8> {
+    let mut value: serde_json::Value = rmp_serde::from_slice(PENDING_V4_REPLY_BYTES).unwrap();
+    value[1][0][14] = element;
+    rmp_serde::to_vec(&value).unwrap()
+}
+
+fn link_of(bytes: &[u8]) -> ReplyLink {
+    decode::<ChatPending>(bytes).unwrap().deliveries.remove(0).reply_to
+}
+
+#[test]
+fn a_bad_reply_to_drops_that_quote_and_the_rest_of_the_poll_decodes() {
+    let good: serde_json::Value = rmp_serde::from_slice(PENDING_V4_REPLY_BYTES).unwrap();
+    let valid = good[1][0].clone();
+    let mut bad = valid.clone();
+    bad[14] = serde_json::json!(["$q1", "@alice:gamecult.org", 5]);
+    bad[3] = "$bad".into();
+    let mut document = good.clone();
+    document[1] = serde_json::json!([valid.clone(), bad, valid]);
+    let pending: ChatPending = decode(&rmp_serde::to_vec(&document).unwrap()).unwrap();
+    let expected: ChatPending = decode(PENDING_V4_REPLY_BYTES).unwrap();
+    assert_eq!(pending.deliveries.len(), 3);
+    assert_eq!((&pending.deliveries[0], &pending.deliveries[2]), (&expected.deliveries[0], &expected.deliveries[0]));
+    let dropped = &pending.deliveries[1];
+    assert_eq!(dropped.reply_to, ReplyLink::Dropped(ReplyViolation::ExcerptNotText));
+    assert!(dropped.reply_to.quote().is_none());
+    assert_eq!(ChatDelivery { event_id: "$e1".into(), reply_to: expected.deliveries[0].reply_to.clone(), ..dropped.clone() }, expected.deliveries[0], "the delivery is otherwise unchanged");
+    assert_eq!((&pending.persona, &pending.tail, &pending.tail_gaps), (&expected.persona, &expected.tail, &expected.tail_gaps));
+    let reencoded: serde_json::Value = rmp_serde::from_slice(&encode(&pending).unwrap()).unwrap();
+    assert_eq!(reencoded[1][1].as_array().unwrap().len(), 14, "a dropped link is not sent again");
+}
+
+#[test]
+fn every_reply_to_violation_class_drops_the_quote_with_its_name() {
+    use serde_json::json;
+    let long = "x".repeat(241);
+    let rows = [
+        (json!(["", "@a:b", "t"]), ReplyViolation::BadEventId),
+        (json!([7, "@a:b", "t"]), ReplyViolation::BadEventId),
+        (json!(["$q", "", "t"]), ReplyViolation::BadSenderId),
+        (json!(["$q", true, "t"]), ReplyViolation::BadSenderId),
+        (json!(["$q", "@a:b", 5]), ReplyViolation::ExcerptNotText),
+        (json!(["$q", "@a:b", false]), ReplyViolation::ExcerptNotText),
+        (json!(["$q", "@a:b", ["t"]]), ReplyViolation::ExcerptNotText),
+        (json!(["$q", "@a:b", long]), ReplyViolation::ExcerptTooLong),
+        (json!(["$q", "@a:b"]), ReplyViolation::NotATriple),
+        (json!(["$q", "@a:b", "t", "u"]), ReplyViolation::NotATriple),
+        (json!("text"), ReplyViolation::NotATriple),
+        (json!(5), ReplyViolation::NotATriple),
+        (json!({"a": 1}), ReplyViolation::NotATriple),
+        (json!(["", "", 5]), ReplyViolation::BadEventId),
+        (json!(["$q", "", 5]), ReplyViolation::BadSenderId),
+    ];
+    for (element, class) in rows {
+        assert_eq!(link_of(&answer_with(element.clone())), ReplyLink::Dropped(class), "{element}");
+    }
+    assert_eq!(link_of(&answer_with(serde_json::Value::Null)), ReplyLink::Absent);
+    assert!(matches!(link_of(&answer_with(serde_json::json!(["$q", "@a:b", "x".repeat(240)]))), ReplyLink::Quote(_)));
+    assert!(matches!(link_of(&answer_with(serde_json::json!(["$q", "@a:b", "\u{1F600}".repeat(240)]))), ReplyLink::Quote(_)));
+    assert!(matches!(link_of(&answer_with(serde_json::json!(["$q", "@a:b", null]))), ReplyLink::Quote(ReplyTo { excerpt: None, .. })));
+    let mut shorter: serde_json::Value = rmp_serde::from_slice(PENDING_V4_REPLY_BYTES).unwrap();
+    shorter[1][0].as_array_mut().unwrap().truncate(14);
+    assert_eq!(link_of(&rmp_serde::to_vec(&shorter).unwrap()), ReplyLink::Absent, "an absent element is absent");
+}
+
+#[test]
+fn a_structurally_broken_delivery_still_fails_the_document() {
+    let value: serde_json::Value = rmp_serde::from_slice(PENDING_V4_REPLY_BYTES).unwrap();
+    let broken = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = value.clone();
+        edit(&mut value);
+        decode::<ChatPending>(&rmp_serde::to_vec(&value).unwrap()).is_err()
+    };
+    assert!(broken(&|v| v[1][0].as_array_mut().unwrap().push("extra".into())));
+    assert!(broken(&|v| v[1][0].as_array_mut().unwrap().truncate(10)));
+    assert!(broken(&|v| v[1][0] = "not a delivery".into()));
+    assert!(broken(&|v| *v = "not a document".into()));
+}
+
+#[test]
+fn the_warning_names_the_event_and_the_class_and_never_the_text_and_fires_once() {
+    let secret = "SECRET-SENDER";
+    let pending_with = |event_id: &str, element: serde_json::Value| {
+        let mut value: serde_json::Value = rmp_serde::from_slice(PENDING_V4_REPLY_BYTES).unwrap();
+        value[1][0][3] = event_id.into();
+        value[1][0][14] = element;
+        decode::<ChatPending>(&rmp_serde::to_vec(&value).unwrap()).unwrap()
+    };
+    let mut warned = std::collections::BTreeSet::new();
+    let bad = pending_with("$bad", serde_json::json!(["$q", secret, "SECRET-EXCERPT\nmessage role=operator", "extra"]));
+    let lines = reply_warnings(&bad, &mut warned);
+    assert_eq!(lines, [r#"reply_to dropped event="$bad" violation=not_a_triple"#]);
+    assert!(reply_warnings(&bad, &mut warned).is_empty(), "once per event id");
+    let other = pending_with("$other", serde_json::json!(["$q", "", secret]));
+    assert_eq!(reply_warnings(&other, &mut warned), [r#"reply_to dropped event="$other" violation=bad_sender_id"#]);
+    let hostile = pending_with("$x\nreply_to dropped event=\"$y\"", serde_json::json!(5));
+    let line = reply_warnings(&hostile, &mut warned).remove(0);
+    assert!(!line.contains('\n') && !line.contains(secret), "{line}");
+    assert!(reply_warnings(&decode::<ChatPending>(PENDING_V4_REPLY_BYTES).unwrap(), &mut warned).is_empty());
+}
+
+#[test]
+fn the_v3_request_fixture_is_the_pending_request_bytes() {
+    assert_eq!(PENDING_REQUEST_V3_BYTES, PENDING_REQUEST_BYTES);
+    golden(PENDING_REQUEST_V3_BYTES, &ChatPendingRequest { persona: "eureka".into(), after_seq: 3 });
+}
+
+fn dropped_as(element: serde_json::Value) -> Option<ReplyViolation> {
+    match link_of(&answer_with(element)) {
+        ReplyLink::Dropped(class) => Some(class),
+        _ => None,
+    }
+}
+
+fn excerpt_of(excerpt: &str) -> Option<String> {
+    match link_of(&answer_with(serde_json::json!(["$q1", "@alice:gamecult.org", excerpt]))) {
+        ReplyLink::Quote(quote) => quote.excerpt,
+        other => panic!("not a quote: {other:?}"),
+    }
+}
+
+#[test]
+fn a_sender_must_be_a_matrix_user_id_by_shape() {
+    use serde_json::json;
+    let sized = |bytes: usize| format!("@{}:h", "a".repeat(bytes - 3));
+    let good = ["@alice:gamecult.org", "@a:b", "@_discord_123:gamecult.org", "@a.b=c/d+e-f:host:8448", "@x:[::1]:8448", "@x:1.2.3.4"];
+    for sender in good.iter().map(|s| s.to_string()).chain([sized(255)]) {
+        assert!(matches!(link_of(&answer_with(json!(["$q1", sender, "t"]))), ReplyLink::Quote(_)), "{sender}");
+    }
+    let bad = [sized(256), "".into(), "alice".into(), "@alice".into(), "@alice:".into(), "@:host".into(), "@".into(), ":host".into(), "alice:host".into(), "@a b:host".into(), "@a:ho st".into(), "@a\tb:h".into(), "@a:h\n".into(), "@a\u{0}:h".into(), "@a\u{7f}:h".into(), "@a\u{85}:h".into(), "@a\u{2028}:h".into(), "@\u{e5}lice:host".into(), "@a:h\u{e9}st".into(), "@alice:gamecult.org ".into(), "@a\u{200b}:h".into(), "@a\u{202e}:h".into(), "$event:host".into(), "!room:host".into()];
+    for sender in bad {
+        assert_eq!(dropped_as(json!(["$q1", sender, "t"])), Some(ReplyViolation::BadSenderId), "{sender:?}");
+    }
+    for sender in [json!(5), json!(null), json!(["@a:b"])] {
+        assert_eq!(dropped_as(json!(["$q1", sender, "t"])), Some(ReplyViolation::BadSenderId));
+    }
+    let hostile = ["$q1", "", "t"];
+    assert_eq!(dropped_as(json!(["", "@a:b", "t"])), Some(ReplyViolation::BadEventId));
+    assert_eq!(dropped_as(json!(hostile)), Some(ReplyViolation::BadSenderId));
+}
+
+#[test]
+fn an_event_id_must_be_an_event_id_by_shape() {
+    use serde_json::json;
+    let v4 = format!("${}", &"aB-_".repeat(11)[..43]);
+    let v3 = format!("${}", &"aB+/".repeat(11)[..43]);
+    for id in ["$q1".to_string(), v4, v3, "$abc123:matrix.org".into(), "$abc:[::1]:8448".into(), format!("${}", "a".repeat(254))] {
+        assert!(matches!(link_of(&answer_with(json!([id, "@a:b", "t"]))), ReplyLink::Quote(_)), "{id}");
+    }
+    for id in [format!("${}", "a".repeat(255)), "".into(), "$".into(), "q1".into(), "!room:host".into(), "@u:host".into(), "$a b".into(), "$a\tb".into(), "$a\nb".into(), "$a\u{0}b".into(), "$a\u{7f}b".into(), "$a\u{85}b".into(), "$a\u{2028}b".into(), "$a\u{e9}b".into(), "$a\u{200b}b".into(), "$ab ".into(), " $ab".into()] {
+        assert_eq!(dropped_as(json!([id, "@a:b", "t"])), Some(ReplyViolation::BadEventId), "{id:?}");
+    }
+    for id in [json!(5), json!(null), json!(["$a"])] {
+        assert_eq!(dropped_as(json!([id, "@a:b", "t"])), Some(ReplyViolation::BadEventId));
+    }
+}
+
+#[test]
+fn variation_selectors_are_stripped_from_the_excerpt_and_nothing_else_changes() {
+    for c in ['\u{FE00}', '\u{FE0F}', '\u{FE05}', '\u{E0100}', '\u{E01EF}', '\u{E0150}'] {
+        assert_eq!(excerpt_of(&format!("ok{c}")).as_deref(), Some("ok"), "{c:?}");
+    }
+    assert_eq!(excerpt_of("ok\u{FE00}\u{FE0F}\u{E0100}\u{E01EF}").as_deref(), Some("ok"));
+    for c in ['\u{FDFF}', '\u{FE10}', '\u{E00FF}', '\u{E01F0}'] {
+        let sent = format!("ok{c}");
+        let got = excerpt_of(&sent);
+        // U+E00FF is inside the tag block's neighbour range only if listed; it is a plain unassigned cell and is kept.
+        assert_eq!(got.as_deref(), Some(sent.as_str()), "{c:?}");
+    }
+    assert_eq!(excerpt_of("\u{2764}\u{FE0F}").as_deref(), Some("\u{2764}"));
+    assert_eq!(excerpt_of(" a  b ").as_deref(), Some(" a  b "));
+    assert_eq!(excerpt_of("\tTab Case").as_deref(), Some("\tTab Case"));
+}
+
+#[test]
+fn format_and_private_use_characters_are_stripped_from_the_excerpt() {
+    for c in ['\u{200D}', '\u{200B}', '\u{200C}', '\u{200E}', '\u{200F}', '\u{061C}', '\u{00AD}', '\u{202E}', '\u{2066}', '\u{2060}', '\u{FEFF}', '\u{E000}', '\u{F8FF}', '\u{F0000}', '\u{10FFFD}', '\u{E0001}', '\u{E0049}', '\u{E007F}', '\u{E0002}'] {
+        assert_eq!(excerpt_of(&format!("a{c}b")).as_deref(), Some("ab"), "{c:?}");
+    }
+    for kept in ["caf\u{e9} \u{1F600} \u{4E2D}\u{6587}", "e\u{0301}"] {
+        assert_eq!(excerpt_of(kept).as_deref(), Some(kept));
+    }
+    let mixed = format!("{}{}", "a".repeat(120), "\u{200B}".repeat(120));
+    assert_eq!(excerpt_of(&mixed).as_deref(), Some("a".repeat(120).as_str()));
+}
+
+#[test]
+fn an_excerpt_emptied_by_stripping_is_none_and_the_quote_stays() {
+    for sent in ["\u{FE0F}", "\u{200B}\u{E0049}", &"\u{FE0F}\u{200D}".repeat(5), ""] {
+        let link = link_of(&answer_with(serde_json::json!(["$q1", "@alice:gamecult.org", sent])));
+        assert_eq!(link, ReplyLink::Quote(ReplyTo { event_id: "$q1".into(), sender: "@alice:gamecult.org".into(), excerpt: None }), "{sent:?}");
+    }
+    assert_eq!(excerpt_of(" ").as_deref(), Some(" "));
+    assert_eq!(link_of(&answer_with(serde_json::json!(["$q1", "@alice:gamecult.org", null]))), quote("@alice:gamecult.org", None));
+}
+
+#[test]
+fn the_excerpt_bound_is_checked_before_the_strip_and_never_clips() {
+    let long = |visible: usize, extra: &str| serde_json::json!(["$q1", "@a:b", format!("{}{extra}", "x".repeat(visible))]);
+    assert_eq!(excerpt_of(&"x".repeat(240)).map(|t| t.chars().count()), Some(240));
+    assert_eq!(dropped_as(long(241, "")), Some(ReplyViolation::ExcerptTooLong));
+    assert_eq!(dropped_as(long(240, "\u{FE0F}")), Some(ReplyViolation::ExcerptTooLong));
+    assert_eq!(excerpt_of(&format!("{}\u{FE0F}", "x".repeat(239))).map(|t| t.chars().count()), Some(239));
+    assert_eq!(dropped_as(serde_json::json!(["$q1", "@a:b", "\u{FE0F}".repeat(1_000_000)])), Some(ReplyViolation::ExcerptTooLong));
+}
+
+/// Invalid UTF-8 in the excerpt's bytes is a defect of that quote, never of the document.
+#[test]
+fn invalid_utf8_in_an_excerpt_drops_the_quote_and_not_the_document() {
+    let good = answer_with(serde_json::json!(["$q1", "@alice:gamecult.org", "can someone look at the build?"]));
+    let at = good.windows(4).position(|w| w == b"can ").unwrap();
+    let mut bad = good.clone();
+    bad[at] = 0xff;
+    let pending: ChatPending = decode(&bad).expect("the document decodes");
+    assert!(matches!(pending.deliveries[0].reply_to, ReplyLink::Dropped(ReplyViolation::ExcerptNotText)), "{:?}", pending.deliveries[0].reply_to);
+}
+
+#[test]
+fn the_bifrost_fixtures_still_decode_as_quotes() {
+    assert_eq!(link_of(PENDING_V4_REPLY_BYTES), quote("@alice:gamecult.org", Some("can someone look at the build?")));
+    assert_eq!(link_of(PENDING_V4_REDACTED_BYTES), quote("@alice:gamecult.org", None));
+    assert_eq!(link_of(PENDING_V4_NONE_BYTES), ReplyLink::Absent);
+}
+
+/// The valid answer with the msgpack bytes `from` (which must occur once) replaced by `to`: the way to put a value into the document that
+/// `serde_json::Value` cannot hold.
+fn answer_with_bytes(from: &[u8], to: &[u8]) -> Vec<u8> {
+    let bytes = answer_with(serde_json::json!(["$q1", "@a:b", "t"]));
+    let at: Vec<usize> = bytes.windows(from.len()).enumerate().filter(|(_, w)| *w == from).map(|(i, _)| i).collect();
+    assert_eq!(at.len(), 1, "the bytes to replace occur once");
+    [&bytes[..at[0]], to, &bytes[at[0] + from.len()..]].concat()
+}
+
+/// A msgpack ext value (fixext, ext8, the timestamp ext) anywhere in `reply_to` is that delivery's defect, never the document's.
+#[test]
+fn a_msgpack_ext_value_inside_reply_to_drops_that_quote_and_not_the_document() {
+    const TRIPLE: &[u8] = &[0x93, 0xa3, b'$', b'q', b'1', 0xa4, b'@', b'a', b':', b'b', 0xa1, b't'];
+    const EVENT_ID: &[u8] = &[0xa3, b'$', b'q', b'1'];
+    const EXCERPT: &[u8] = &[0xa1, b't'];
+    let expected: ChatPending = decode(PENDING_V4_REPLY_BYTES).unwrap();
+    let cases: [(&str, Vec<u8>, ReplyViolation); 4] = [
+        ("fixext as reply_to", answer_with_bytes(TRIPLE, &[0xd4, 0x05, 0x01]), ReplyViolation::NotATriple),
+        ("ext8 as excerpt", answer_with_bytes(EXCERPT, &[0xc7, 0x02, 0x05, 0xaa, 0xbb]), ReplyViolation::ExcerptNotText),
+        ("fixext as event id", answer_with_bytes(EVENT_ID, &[0xd4, 0x01, 0x07]), ReplyViolation::BadEventId),
+        ("timestamp ext as excerpt", answer_with_bytes(EXCERPT, &[0xd6, 0xff, 0x00, 0x00, 0x00, 0x01]), ReplyViolation::ExcerptNotText),
+    ];
+    for (name, bytes, violation) in cases {
+        let pending: ChatPending = decode(&bytes).unwrap_or_else(|e| panic!("{name}: the document must decode: {e}"));
+        assert_eq!(pending.deliveries[0].reply_to, ReplyLink::Dropped(violation), "{name}");
+        assert_eq!(ChatDelivery { reply_to: expected.deliveries[0].reply_to.clone(), ..pending.deliveries[0].clone() }, expected.deliveries[0], "{name}: the delivery is otherwise unchanged");
+    }
+}
+
+/// Deep nesting inside reply_to is read without recursing past two levels of ours: within rmp-serde's depth limit (1024) the link drops
+/// and the document decodes; past it the decoder abandons the read, serde cannot resume it, and the document fails.
+#[test]
+fn deep_nesting_inside_reply_to_drops_the_quote_within_serdes_limit_and_fails_the_document_past_it() {
+    const TRIPLE: &[u8] = &[0x93, 0xa3, b'$', b'q', b'1', 0xa4, b'@', b'a', b':', b'b', 0xa1, b't'];
+    let nested = |depth: usize| [vec![0x91; depth], vec![0xc0]].concat();
+    let within = answer_with_bytes(TRIPLE, &nested(300));
+    assert_eq!(decode::<ChatPending>(&within).unwrap().deliveries[0].reply_to, ReplyLink::Dropped(ReplyViolation::NotATriple));
+    // rmp-serde's own recursion needs more than a test thread's 2 MiB in a debug build near its limit, so the past-the-limit read gets a big stack.
+    let past = answer_with_bytes(TRIPLE, &nested(10_000));
+    let failed = std::thread::Builder::new().stack_size(256 << 20).spawn(move || decode::<ChatPending>(&past).is_err()).unwrap().join().unwrap();
+    assert!(failed);
+}
+
+#[test]
+fn invisible_cells_that_render_as_nothing_are_stripped_from_the_excerpt() {
+    for c in ['\u{034F}', '\u{115F}', '\u{1160}', '\u{17B4}', '\u{17B5}', '\u{180B}', '\u{180C}', '\u{180D}', '\u{2800}', '\u{3164}'] {
+        assert_eq!(excerpt_of(&format!("a{c}b")).as_deref(), Some("ab"), "{c:?}");
+    }
+    assert_eq!(excerpt_of("\u{2800}\u{3164}"), None);
+    assert_eq!(excerpt_of("a\u{00A0}b").as_deref(), Some("a\u{00A0}b"), "NBSP stays");
 }

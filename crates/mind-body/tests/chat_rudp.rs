@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cultnet_rs::{CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions};
-use mind_body::chat_client::{self, Basis, Form, ChatRefusal, MouthRefused, Refusal, REFUSAL, ACK, Chat, ChatAck, ChatOpenDirectReceipt, ChatOpenDirectRequest, DirectOutcome, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_V1, PENDING_V2, READ, SEND_RECEIPT, SEND_REQUEST};
+use mind_body::chat_client::{self, ReplyLink, ReplyViolation, Basis, Form, ChatRefusal, MouthRefused, Refusal, REFUSAL, ACK, Chat, ChatAck, ChatOpenDirectReceipt, ChatOpenDirectRequest, DirectOutcome, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_REQUEST_V4, PENDING_V1, PENDING_V2, PENDING_V4, READ, SEND_RECEIPT, SEND_REQUEST};
 use mind_body::chat_rudp::{RudpChat, connection_id};
 
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
@@ -26,6 +26,8 @@ const PENDING_GAPS_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v7/gamec
 const PENDING_V2_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v3/gamecult.persona.chat_pending.v2.image.msgpack");
 const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v5/gamecult.persona.chat_pending_request.v2.msgpack");
 const PENDING_REQUEST_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
+// Bifrost dc35c4a2's own golden bytes for the reply link, copied unchanged as `persona-chat-v8/`.
+const PENDING_V4_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v8/gamecult.persona.chat_pending.v4.reply-to.msgpack");
 const SEND_RECEIPT_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.sent.msgpack");
 const SEND_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.nil-basis.msgpack");
 const OPEN_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_request.v1.msgpack");
@@ -89,6 +91,11 @@ fn imaged_mouth(key: &str) -> Mouth {
     serve(key, "127.0.0.1:0", PENDING_V2, PENDING_V2_BYTES, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES))
 }
 
+/// A mouth that answers the reply-link request (`chat_pending_request.v3`) with `chat_pending.v4`, and does not serve the older kinds.
+fn linked_mouth(key: &str) -> Mouth {
+    serve(key, "127.0.0.1:0", PENDING_V4, PENDING_V4_BYTES, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES))
+}
+
 /// The same mouth on a chosen address: a restart binds the address the old one held.
 fn mouth_at(key: &str, bind: &str) -> Mouth {
     serve(key, bind, PENDING, PENDING_BYTES, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES))
@@ -114,6 +121,9 @@ fn serve(key: &str, bind: &str, pending_kind: &'static str, pending_bytes: &'sta
             let reply = match document.schema_id.as_str() {
                 PENDING_REQUEST if for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => {
                     Some(if pending_kind == PENDING { answer(pending_kind, "eureka", pending_bytes) } else { answer(REFUSAL, "eureka", UNKNOWN_KIND_BYTES) })
+                }
+                PENDING_REQUEST_V4 if for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => {
+                    Some(if pending_kind == PENDING_V4 { answer(pending_kind, "eureka", pending_bytes) } else { answer(REFUSAL, "eureka", UNKNOWN_KIND_BYTES) })
                 }
                 PENDING_REQUEST_V1 if pending_kind != PENDING && for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => Some(answer(pending_kind, "eureka", pending_bytes)),
                 SEND_REQUEST if for_eureka(&chat_client::decode::<ChatSendRequest>(&document.payload).unwrap().persona) => Some(answer(SEND_RECEIPT, &document.record_key, SEND_RECEIPT_BYTES)),
@@ -246,6 +256,65 @@ fn a_current_mouth_answers_the_v2_request_with_basis_and_form() {
     assert_eq!((new[0].basis, new[0].form), (Some(Basis::Tag), Form::Message));
     let kinds: Vec<String> = current.seen.lock().unwrap().iter().map(|(kind, _)| kind.clone()).collect();
     assert_eq!(kinds, [PENDING_REQUEST], "no v1 request follows an answered v2 request");
+}
+
+fn kinds_seen(mouth: &Mouth) -> Vec<String> {
+    mouth.seen.lock().unwrap().iter().map(|(kind, _)| kind.clone()).collect()
+}
+
+#[test]
+fn a_flag_off_client_asks_only_the_v2_kind_and_a_flag_on_client_asks_v4_first() {
+    let current = mouth(KEY);
+    let off = client(&current, KEY, "eureka", Duration::from_millis(1500)).with_reply_link(false).pending(3).unwrap();
+    assert!(off.deliveries[0].reply_to.quote().is_none());
+    assert_eq!(kinds_seen(&current), [PENDING_REQUEST], "flag off sends exactly today's request");
+    assert_eq!(current.seen.lock().unwrap()[0].1, PENDING_REQUEST_BYTES);
+
+    let linked = linked_mouth(KEY);
+    let on = client(&linked, KEY, "eureka", Duration::from_millis(1500)).with_reply_link(true).pending(3).unwrap();
+    assert_eq!(kinds_seen(&linked), [PENDING_REQUEST_V4]);
+    let quote = on.deliveries[0].reply_to.quote().cloned().expect("the reply link crossed the wire");
+    assert_eq!((quote.event_id.as_str(), quote.sender.as_str(), quote.excerpt.as_deref()), ("$q1", "@alice:gamecult.org", Some("can someone look at the build?")));
+}
+
+#[test]
+fn a_bad_reply_to_over_rudp_delivers_the_poll_warns_once_and_counts() {
+    let mut value: serde_json::Value = rmp_serde::from_slice(PENDING_V4_BYTES).unwrap();
+    let valid = value[1][0].clone();
+    let mut bad = valid.clone();
+    bad[3] = "$bad".into();
+    bad[14] = serde_json::json!(["$q1", "@alice:gamecult.org", 5]);
+    value[1] = serde_json::json!([valid.clone(), bad, valid]);
+    let bytes: &'static [u8] = Box::leak(rmp_serde::to_vec(&value).unwrap().into_boxed_slice());
+    let check = |pending: chat_client::ChatPending| {
+        assert_eq!(pending.deliveries.len(), 3);
+        assert!(pending.deliveries[0].reply_to.quote().is_some() && pending.deliveries[2].reply_to.quote().is_some());
+        assert_eq!(pending.deliveries[1].reply_to, ReplyLink::Dropped(ReplyViolation::ExcerptNotText));
+    };
+    let mouth = serve(KEY, "127.0.0.1:0", PENDING_V4, bytes, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES));
+    let chat = client(&mouth, KEY, "eureka", Duration::from_millis(1500)).with_reply_link(true);
+    check(chat.pending(3).unwrap());
+    assert_eq!(chat.reply_defects(), 1);
+    check(chat.pending(3).unwrap());
+    assert_eq!(chat.reply_defects(), 1, "the same event is not counted again");
+    // The lenient decode does not depend on the request kind: a flag-off client reads the same bytes.
+    let current = serve(KEY, "127.0.0.1:0", PENDING, bytes, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES));
+    let off = client(&current, KEY, "eureka", Duration::from_millis(1500));
+    check(off.pending(3).unwrap());
+    assert_eq!(off.reply_defects(), 1);
+}
+
+#[test]
+fn a_flag_on_client_steps_down_from_a_mouth_that_refuses_the_v4_kind() {
+    let current = mouth(KEY);
+    let pending = client(&current, KEY, "eureka", Duration::from_millis(1500)).with_reply_link(true).pending(3).unwrap();
+    assert_eq!(kinds_seen(&current), [PENDING_REQUEST_V4, PENDING_REQUEST], "a flag-off mouth refuses v4 and answers v2");
+    assert!(pending.deliveries[0].reply_to.quote().is_none() && pending.deliveries[0].basis == Some(Basis::Tag));
+    for old in [legacy_mouth(KEY), imaged_mouth(KEY)] {
+        let pending = client(&old, KEY, "eureka", Duration::from_millis(1500)).with_reply_link(true).pending(3).unwrap();
+        assert_eq!(kinds_seen(&old), [PENDING_REQUEST_V4, PENDING_REQUEST, PENDING_REQUEST_V1]);
+        assert!(pending.deliveries[0].reply_to.quote().is_none());
+    }
 }
 
 #[test]

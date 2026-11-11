@@ -83,3 +83,15 @@ fn the_retired_max_turns_flag_is_refused_and_its_value_is_not_echoed() {
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("usage") && !stderr.contains("canary-turns"), "{stderr}");
 }
+
+/// The reply-link setting is the mouth's own rule: exactly `1` is on, anything else is off, and none of it ends the unit or reaches a message.
+#[test]
+fn a_v4_setting_other_than_exactly_1_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    for value in ["", "0", "true", "yes", " 1", "canary-v4"] {
+        let output = run(dir.path(), &[], &[("BIFROST_CHAT_PENDING_V4", value)], &["--instance", "eureka"]);
+        assert_eq!(output.status.code(), Some(0), "{value:?}: {}", text(&output.stderr));
+        assert!(!text(&output.stderr).contains("canary-v4") && !text(&output.stdout).contains("canary-v4"));
+    }
+    assert_eq!(run(dir.path(), &[], &[("BIFROST_CHAT_PENDING_V4", "1")], &["--instance", "eureka"]).status.code(), Some(0));
+}

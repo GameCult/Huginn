@@ -16,6 +16,7 @@
 //! request id, which the mouth treats as the same send (`chat_client`).
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::chat_client::{
-    ACK, Chat, ChatAck, ChatDelivery, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, MouthRefused, Refusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_V2, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
+    ACK, Chat, ChatAck, ChatDelivery, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, MouthRefused, Refusal, reply_warnings, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_REQUEST_V4, PENDING_V2, PENDING_V4, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
     SEND_REQUEST, decode, encode,
 };
 
@@ -61,6 +62,10 @@ pub struct RudpChat {
     connection_id: u32,
     persona: String,
     reply_timeout: Duration,
+    /// Ask for the answer with the reply link first. Off by default: a mouth that has not been told to answer it refuses the kind.
+    reply_link: bool,
+    /// Event ids whose dropped reply link has been warned of: one warning per event however often the answer is polled.
+    warned: RefCell<BTreeSet<String>>,
     link: RefCell<Option<Link>>,
 }
 
@@ -69,7 +74,18 @@ impl RudpChat {
     /// (`connection_id`), `persona` the instance the mouth serves. Nothing is
     /// sent until the first call.
     pub fn new(remote: SocketAddr, connection_id: u32, persona: impl Into<String>, reply_timeout: Duration) -> Self {
-        Self { remote, connection_id, persona: persona.into(), reply_timeout, link: RefCell::new(None) }
+        Self { remote, connection_id, persona: persona.into(), reply_timeout, reply_link: false, warned: RefCell::new(BTreeSet::new()), link: RefCell::new(None) }
+    }
+
+    /// Ask the mouth for the reply link (`chat_pending.v4`) first. A mouth that refuses the kind is asked the older way.
+    pub fn with_reply_link(mut self, on: bool) -> Self {
+        self.reply_link = on;
+        self
+    }
+
+    /// How many distinct events this process has seen arrive with a reply link out of the mouth's contract, dropped.
+    pub fn reply_defects(&self) -> usize {
+        self.warned.borrow().len()
     }
 
     fn open(&self) -> Result<Link> {
@@ -161,11 +177,15 @@ impl Chat for RudpChat {
     fn pending(&self, after_seq: u64) -> Result<ChatPending> {
         let request = ChatPendingRequest { persona: self.persona.clone(), after_seq };
         let p = self.persona.as_str();
-        let answers = [(PENDING, p), (PENDING_V2, p), (PENDING_V1, p), (REFUSAL, p)];
-        let (mut kind, mut payload) = self.exchange(PENDING_REQUEST, p, &request, Some(&answers))?.ok_or_else(|| anyhow!("no answer payload"))?;
-        // A mouth that does not serve the v2 request answers `UnknownKind`: ask it the v1 way, and its deliveries carry no addressing facts.
-        if kind == REFUSAL && decode::<ChatRefusal>(&payload)?.refusal == Refusal::UnknownKind {
-            (kind, payload) = self.exchange(PENDING_REQUEST_V1, p, &request, Some(&answers))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        let answers = [(PENDING_V4, p), (PENDING, p), (PENDING_V2, p), (PENDING_V1, p), (REFUSAL, p)];
+        // The newest kind first; a mouth that does not serve it answers `UnknownKind`, and is asked the next older way: v4 (reply link,
+        // only when on), v2 (addressing facts), v1 (none).
+        let asks: &[&str] = if self.reply_link { &[PENDING_REQUEST_V4, PENDING_REQUEST, PENDING_REQUEST_V1] } else { &[PENDING_REQUEST, PENDING_REQUEST_V1] };
+        let mut asked = asks.iter();
+        let (mut kind, mut payload) = self.exchange(asked.next().expect("at least one kind"), p, &request, Some(&answers))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        while kind == REFUSAL && decode::<ChatRefusal>(&payload)?.refusal == Refusal::UnknownKind {
+            let Some(older) = asked.next() else { break };
+            (kind, payload) = self.exchange(older, p, &request, Some(&answers))?.ok_or_else(|| anyhow!("no answer payload"))?;
         }
         if kind == REFUSAL {
             let refusal: ChatRefusal = decode(&payload)?;
@@ -174,6 +194,9 @@ impl Chat for RudpChat {
         let pending: ChatPending = decode(&payload)?;
         if pending.persona != self.persona {
             bail!("the mouth answered for another Persona");
+        }
+        for line in reply_warnings(&pending, &mut self.warned.borrow_mut()) {
+            eprintln!("mind-chat: {line}");
         }
         Ok(pending)
     }
