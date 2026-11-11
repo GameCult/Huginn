@@ -19,6 +19,8 @@ use mind_body::chat_rudp::{RudpChat, connection_id};
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
 const PENDING_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending.v1.msgpack");
 const PENDING_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v5/gamecult.persona.chat_pending.v3.tag.msgpack");
+const PENDING_TAILED_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.tag.msgpack");
+const PENDING_TAIL_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.tail.msgpack");
 const PENDING_V2_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v3/gamecult.persona.chat_pending.v2.image.msgpack");
 const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v5/gamecult.persona.chat_pending_request.v2.msgpack");
 const PENDING_REQUEST_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
@@ -305,4 +307,19 @@ fn an_unknown_kind_refusal_keyed_by_this_persona_but_naming_another_is_not_heard
     let request = chat_client::decode::<ChatOpenDirectRequest>(OPEN_REQUEST_BYTES).unwrap();
     let error = client(&mouth, KEY, "eureka", Duration::from_secs(20)).open_direct(&request).unwrap_err();
     assert!(error.downcast_ref::<MouthRefused>().is_none(), "the payload names another Persona: {error}");
+}
+
+/// The wire, not only the decoder: the three-field `chat_pending.v3` of Bifrost e8722d0 crosses a real RUDP session as `chat_pending.v3`,
+/// and the tail arrives; the two-field answer of the mouth before it (the fixture the other tests serve) arrives with none.
+#[test]
+fn the_three_field_v3_crosses_real_rudp_with_its_tail_and_the_two_field_one_with_none() {
+    let tailed = serve(KEY, "127.0.0.1:0", PENDING, PENDING_TAIL_BYTES, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES));
+    let got = client(&tailed, KEY, "eureka", Duration::from_secs(5)).pending(0).unwrap();
+    assert_eq!(got, chat_client::decode::<ChatPending>(PENDING_TAIL_BYTES).unwrap());
+    assert_eq!(got.tail.as_ref().map(Vec::len), Some(2));
+    let with_delivery = serve(KEY, "127.0.0.1:0", PENDING, PENDING_TAILED_BYTES, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES));
+    let got = client(&with_delivery, KEY, "eureka", Duration::from_secs(5)).pending(0).unwrap();
+    assert_eq!((got.deliveries.len(), got.tail), (1, Some(vec![])), "a delivery and an empty tail: the mouth had nothing to add");
+    let old = client(&mouth(KEY), KEY, "eureka", Duration::from_secs(5)).pending(0).unwrap();
+    assert_eq!((old.deliveries.len(), old.tail), (1, None), "the older mouth's two-field answer carries no tail");
 }
