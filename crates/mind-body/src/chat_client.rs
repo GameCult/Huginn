@@ -173,6 +173,10 @@ pub struct ChatPending {
     /// none; a mouth with nothing to show sends an empty list, and that is a different fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail: Option<Vec<TailLine>>,
+    /// The rooms whose lines are not all in `tail`, tuple index 3: a room the mouth could not read in time, or whose lines it trimmed. A
+    /// reader renders such a room as unknown, never quiet. An answer that ends before the field, or an empty list, names none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tail_gaps: Vec<String>,
 }
 
 /// One line of the room tail: `[room, event_id, at_unix_ms, sender, form, basis, body]`. `room` is the configured alias (the room id
