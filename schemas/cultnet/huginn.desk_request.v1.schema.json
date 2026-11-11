@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DeskRequest",
-  "description": "Every request the desk door answers. The fields are the wire names: the `mind` addressed\n(the persona and pipeline requests say `instance`; the sets are separate), the verified\n`subject` and `authority` Bifrost vouches for (door context, never body fields), and the\n`deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside the set refuses\nthe whole payload. The reads answer in follow-up desk-wire-reads.",
+  "description": "Every request the desk door answers. The fields are the wire names: the `mind` addressed\n(the persona and pipeline requests say `instance`; the sets are separate), the verified\n`subject` and `authority` Bifrost vouches for (door context, never body fields), and the\n`deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside\nthe set refuses the whole payload.\n\nThe reads, `Forks` and `Fork`, carry NO `authority` (CultLib `list_request` and\n`read_request` are closed and have none; one that names it is refused whole). Their `subject`\nand `deciders` gate nothing: `deciders` only fills the card's `deciders` and the showability\ngate, `subject` is read by no read. `Forks` takes the contract's `list_request` fields flat\nbeside them (`status`, `cursor`, `limit`), each key written, `null` where absent. Huginn\nanswers every read with the whole record and Bifrost applies visibility; see `DeskResponse`\nfor the trust boundary. These docs and the doc of `Mind::desk_forks`/`Mind::desk_fork` are the\nreads spec.",
   "oneOf": [
     {
       "type": "object",
@@ -52,6 +52,10 @@
         "Forks": {
           "type": "object",
           "properties": {
+            "cursor": {
+              "type": "string",
+              "pattern": "^c[1-9][0-9]*$"
+            },
             "deciders": {
               "type": "array",
               "items": {
@@ -61,8 +65,19 @@
               "minItems": 1,
               "uniqueItems": true
             },
+            "limit": {
+              "$ref": "#/$defs/ForkLimit"
+            },
             "mind": {
               "$ref": "#/$defs/Slug"
+            },
+            "status": {
+              "description": "Which forks a list asks for; absent is both. `recorded` is a closed card.",
+              "type": "string",
+              "enum": [
+                "open",
+                "recorded"
+              ]
             },
             "subject": {
               "$ref": "#/$defs/Short"
@@ -72,7 +87,10 @@
           "required": [
             "mind",
             "subject",
-            "deciders"
+            "deciders",
+            "status",
+            "cursor",
+            "limit"
           ]
         }
       },
@@ -184,6 +202,11 @@
         "answered_at",
         "request_id"
       ]
+    },
+    "ForkLimit": {
+      "type": "integer",
+      "maximum": 50,
+      "minimum": 0
     },
     "RequestSchema": {
       "description": "The request document's schema id; any other value fails to decode.",

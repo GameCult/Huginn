@@ -7,8 +7,7 @@
 //! request id). It builds one `desk_answer` and commits it through
 //! `admit_steps` with `Door::Desk`, the same commit primitive every other write
 //! uses; no other door may write the kind. `answer_desk` and `DeskStamp` are
-//! crate-private: only code inside this crate can stamp, so the verified door
-//! that will call them (follow-up desk-answer-door) widens them in its own cut.
+//! crate-private: only code inside this crate can stamp.
 //!
 //! The decider list is an input (`DeskStamp.deciders`, from the door); the Mind
 //! never reads one. Whether an answerer decides is membership in that list and
@@ -125,7 +124,7 @@ pub fn options_hash(question: &PipelineQuestion) -> Sha256Hex {
 }
 
 /// Every desk answer of one fork, with its key.
-fn answers_of<'a>(docs: &'a Docs<'_>, fork: &'a str) -> impl Iterator<Item = (&'a str, &'a PipelineDeskAnswer)> + 'a {
+pub(crate) fn answers_of<'a>(docs: &'a Docs<'_>, fork: &'a str) -> impl Iterator<Item = (&'a str, &'a PipelineDeskAnswer)> + 'a {
     docs.of_kind(PipelineKind::DeskAnswer).filter_map(move |(key, document)| match document {
         PipelineDocument::DeskAnswer(answer) if answer.fork.0 == fork => Some((key, answer)),
         _ => None,

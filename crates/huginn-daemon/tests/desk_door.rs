@@ -210,6 +210,17 @@ fn answer(who: &str, hash: &str, request_id: &str) -> DeskRequest {
     }
 }
 
+fn forks_request(who: &str, deciders: &[&str]) -> DeskRequest {
+    DeskRequest::Forks {
+        mind: INSTANCE.into(),
+        subject: short(who),
+        deciders: deciders.iter().map(|d| short(d)).collect(),
+        status: None,
+        cursor: None,
+        limit: huginn_mind::desk_wire::ForkLimit::new(50).unwrap(),
+    }
+}
+
 fn framed(message: &CultNetMessage) -> Vec<u8> {
     encode_frame(&encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap()).unwrap()
 }
@@ -266,14 +277,37 @@ fn the_binary_serves_both_doors_and_survives_restart() {
     let catalog = format!("{:?}", exchange(&desk, &framed(&catalog_request())).expect("a catalog"));
     assert!(catalog.contains("huginn.desk_request.v1") && catalog.contains("huginn.desk_response.v1"), "{catalog}");
     assert!(!catalog.contains("huginn.mind_request.v1"), "{catalog}");
-    // Reads are not built: Unavailable, nothing stored.
-    let forks = DeskRequest::Forks { mind: INSTANCE.into(), subject: short("x"), deciders: vec![short("x")] };
-    let fork = DeskRequest::Fork { mind: INSTANCE.into(), subject: short("x"), deciders: vec![short("x")], fork_id: FORK.into() };
-    for request in [forks, fork] {
-        let DeskResponse::Refused(huginn_mind::MindRefusal::Unavailable { detail }) = ask(&desk, "m-r", &request) else {
-            panic!("a read is refused unavailable")
+    // The reads answer, store nothing, and carry the whole record to a subject the deciders do not name.
+    let (list, listed_at) = match ask(&desk, "m-r1", &forks_request("x", &["x"])) {
+        DeskResponse::Forks { list, as_of } => (list, as_of),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((list.open_count, list.recorded_count, list.forks.len(), list.stamp.clone()), (1, 0, 1, format!("s{listed_at}")));
+    assert_eq!(list.forks[0].card.options_hash, hash);
+    let DeskResponse::Fork { entry, as_of } = ask(&desk, "m-r2", &DeskRequest::Fork { mind: INSTANCE.into(), subject: short("x"), deciders: vec![short("x")], fork_id: FORK.into() })
+    else {
+        panic!("a read of the seeded fork")
+    };
+    assert_eq!((entry, as_of), (list.forks[0].clone(), listed_at));
+    assert_eq!(daemon.documents(), seeded);
+    // `authority` is no field of a read: the payload is refused whole and nothing is answered or stored.
+    for (operation, request) in [("forks", forks_request("x", &["x"])), ("fork", DeskRequest::Fork { mind: INSTANCE.into(), subject: short("x"), deciders: vec![short("x")], fork_id: FORK.into() })] {
+        let mut value = serde_json::to_value(&request).unwrap();
+        let variant = if operation == "forks" { "Forks" } else { "Fork" };
+        value[variant]["authority"] = serde_json::json!("Operator");
+        let message = CultNetMessage::OperationRequest {
+            message_id: "m-ra".into(),
+            service_id: huginn_mind::desk_wire::DESK_SERVICE_ID.into(),
+            operation: operation.into(),
+            payload_schema: huginn_mind::desk_wire::DESK_REQUEST_SCHEMA.into(),
+            payload_encoding: "messagepack-base64".into(),
+            payload: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, rmp_serde::to_vec_named(&value).unwrap()),
+            source_runtime_id: None,
+            target_runtime_id: None,
         };
-        assert!(detail.contains("desk reads not built"), "{detail}");
+        let reply = exchange(&desk, &framed(&message)).expect("the door replied");
+        let failure = decode_desk_response(&reply).unwrap().1.unwrap_err();
+        assert_eq!(failure.code, "payload-not-a-request", "{operation}");
     }
     assert_eq!(daemon.documents(), seeded);
     // An answer, then a stale one.
@@ -285,6 +319,16 @@ fn the_binary_serves_both_doors_and_survives_restart() {
     assert_eq!((stale.code, counted_answer_id.as_deref()), (Some(ForkAnswerCode::StaleFork), Some("n1")));
     let stored = daemon.documents();
     assert_eq!(stored, seeded + 2);
+    // A subject the call's deciders do not name reads both answers, the first with its choice and the stale one with its code.
+    let DeskResponse::Fork { entry, .. } =
+        ask(&desk, "m-r3", &DeskRequest::Fork { mind: INSTANCE.into(), subject: short("outsider"), deciders: vec![short("y")], fork_id: FORK.into() })
+    else {
+        panic!("a read")
+    };
+    let seen: Vec<_> = entry.record.answers.iter().map(|answer| (answer.answer_id.as_str(), answer.answerer.as_str(), answer.code)).collect();
+    assert_eq!(seen, [("n1", "x", None), ("n2", "x", Some(ForkAnswerCode::StaleFork))]);
+    assert_eq!((entry.record.counted_answer_id.as_deref(), entry.card.deciders.as_slice()), (Some("n1"), ["y".to_string()].as_slice()));
+    assert_eq!(daemon.documents(), stored);
 
     // A stop takes the socket with it; the stored answers are the retry's memory.
     daemon.signal("TERM");

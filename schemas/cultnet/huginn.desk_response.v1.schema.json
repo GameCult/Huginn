@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DeskResponse",
-  "description": "What the door answers one desk request with. `Answered` is a stored answer, refused ones\nincluded (a stale fork, a non-decider and the rest are stored), fresh or replayed alike.\n`NotStored` is a request that stored nothing. `Refused` is any other Mind refusal; an\n`Unavailable` is Bifrost's to turn into its 503, and Huginn writes no document for it.",
+  "description": "What the door answers one desk request with. `Answered` is a stored answer, refused ones\nincluded (a stale fork, a non-decider and the rest are stored), fresh or replayed alike.\n`Forks` and `Fork` are the reads: one page of entries, or one entry, with the head they were\nall read at. `NotStored` is a request that stored nothing (an unknown fork included).\n`Refused` is any other Mind refusal; an `Unavailable` is Bifrost's to turn into its 503, and\nHuginn writes no document for it.\n\nThe trust boundary of the reads (ruling `desk-read-visibility-whole-record`): `Forks` and `Fork`\ncarry the WHOLE record, every answer's note included, to whatever the peer-checked socket\ncarries. Huginn strips nothing and gates nothing; Bifrost applies visibility at its door (a\nstripped read serves `note: null`, CultLib `fork-card.md`). Huginn must therefore be reachable\nonly by Bifrost's peer-checked socket: the peer-uid check IS the whole authentication, and a\nsecond reader of that socket is a note leak.",
   "oneOf": [
     {
       "type": "object",
@@ -38,6 +38,58 @@
     {
       "type": "object",
       "properties": {
+        "Forks": {
+          "type": "object",
+          "properties": {
+            "as_of": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "list": {
+              "$ref": "#/$defs/ForkList"
+            }
+          },
+          "required": [
+            "list",
+            "as_of"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Forks"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "Fork": {
+          "type": "object",
+          "properties": {
+            "as_of": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "entry": {
+              "$ref": "#/$defs/ForkEntry"
+            }
+          },
+          "required": [
+            "entry",
+            "as_of"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Fork"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
         "NotStored": {
           "$ref": "#/$defs/ForkRefusal"
         }
@@ -68,12 +120,136 @@
         "gamecult.desk_answer.v0"
       ]
     },
+    "CardSchema": {
+      "description": "The card document's schema id.",
+      "type": "string",
+      "enum": [
+        "gamecult.fork.card.v0"
+      ]
+    },
+    "CardStatus": {
+      "description": "Whether a ruling closed the fork.",
+      "type": "string",
+      "enum": [
+        "open",
+        "closed"
+      ]
+    },
     "DeskAuthority": {
       "type": "string",
       "enum": [
         "Operator",
         "Steward",
         "Member"
+      ]
+    },
+    "EntrySchema": {
+      "description": "The entry document's schema id.",
+      "type": "string",
+      "enum": [
+        "gamecult.fork.entry.v0"
+      ]
+    },
+    "ForkCard": {
+      "description": "`gamecult.fork.card.v0`: closed, her field order.",
+      "type": "object",
+      "properties": {
+        "context": {
+          "type": "string"
+        },
+        "deciders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "depends": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "flag": {
+          "type": "string"
+        },
+        "fork_id": {
+          "type": "string"
+        },
+        "leans": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ForkOption"
+          }
+        },
+        "options_hash": {
+          "type": "string"
+        },
+        "order": {
+          "description": "The question's rank: unique, 0-based, in (admission ordinal, key) order among all the Mind's\nquestions (see `Mind::desk_forks`; it deviates from \"the admission ordinal\" only in being unique).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "raised_in": {
+          "description": "A typed reference, as the question holds it (`raised_in`).",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        "recommendation": {
+          "type": "string"
+        },
+        "ruled_from": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ruling": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/CardSchema"
+        },
+        "status": {
+          "$ref": "#/$defs/CardStatus"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "fork_id",
+        "title",
+        "context",
+        "options",
+        "recommendation",
+        "depends",
+        "leans",
+        "flag",
+        "raised_in",
+        "deciders",
+        "status",
+        "ruling",
+        "ruled_from",
+        "order",
+        "options_hash"
       ]
     },
     "ForkDeskAnswer": {
@@ -158,6 +334,121 @@
         "request_id"
       ]
     },
+    "ForkEntry": {
+      "description": "`gamecult.fork.entry.v0`: a card and its record.",
+      "type": "object",
+      "properties": {
+        "card": {
+          "$ref": "#/$defs/ForkCard"
+        },
+        "record": {
+          "$ref": "#/$defs/ForkRecord"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/EntrySchema"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "card",
+        "record"
+      ]
+    },
+    "ForkList": {
+      "description": "`gamecult.fork.list.v0`: a page of entries, the counts over the showable set and the stamp.",
+      "type": "object",
+      "properties": {
+        "forks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ForkEntry"
+          }
+        },
+        "mind": {
+          "type": "string"
+        },
+        "next_cursor": {
+          "type": "string",
+          "pattern": "^c[1-9][0-9]*$"
+        },
+        "open_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "recorded_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/ListSchema"
+        },
+        "stamp": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "mind",
+        "stamp",
+        "open_count",
+        "recorded_count",
+        "forks",
+        "next_cursor"
+      ]
+    },
+    "ForkOption": {
+      "description": "One shown option.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "text"
+      ]
+    },
+    "ForkRecord": {
+      "description": "`gamecult.fork.record.v0`: the answers in admission order and the derived counted answer.",
+      "type": "object",
+      "properties": {
+        "answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ForkDeskAnswer"
+          }
+        },
+        "counted_answer_id": {
+          "type": "string"
+        },
+        "fork_id": {
+          "type": "string"
+        },
+        "options_hash": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/RecordSchema"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "fork_id",
+        "options_hash",
+        "counted_answer_id",
+        "answers"
+      ]
+    },
     "ForkRefusal": {
       "description": "`gamecult.fork.refusal.v0`. `error` is a fixed sentence, never an echo of what was sent;\nfor `body_invalid` it names the field.",
       "type": "object",
@@ -186,6 +477,13 @@
         "fork_unknown",
         "body_invalid",
         "request_id_conflict"
+      ]
+    },
+    "ListSchema": {
+      "description": "The list document's schema id.",
+      "type": "string",
+      "enum": [
+        "gamecult.fork.list.v0"
       ]
     },
     "MindRefusal": {
@@ -1265,6 +1563,45 @@
           ]
         },
         {
+          "description": "A desk page whose first entry alone is past the page budget: `fork` is that fork, `order` its\nrank (a caller goes on past it with the cursor `c<order>`, which returns the forks below it),\n`bytes` what the page holding it would encode to (without the envelope) and `limit` the page\nbudget it exceeds. Raised by the mind's page fill, which is why it is not `ResponseTooLarge`.",
+          "type": "object",
+          "properties": {
+            "DeskForkTooLarge": {
+              "type": "object",
+              "properties": {
+                "bytes": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "fork": {
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "order": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "fork",
+                "order",
+                "bytes",
+                "limit"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "DeskForkTooLarge"
+          ]
+        },
+        {
           "description": "A selection the substrate or the organ's value door refused: `field`\nis the selection field the client sent, `value` the offending part.",
           "type": "object",
           "properties": {
@@ -1495,6 +1832,13 @@
             "ForeignStore"
           ]
         }
+      ]
+    },
+    "RecordSchema": {
+      "description": "The record document's schema id.",
+      "type": "string",
+      "enum": [
+        "gamecult.fork.record.v0"
       ]
     },
     "RefusalSchema": {

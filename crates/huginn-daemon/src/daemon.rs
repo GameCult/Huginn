@@ -119,9 +119,6 @@ pub fn runtime_id(instance: &Slug) -> String {
     format!("huginn-{}", instance.0)
 }
 
-/// What a desk read is told until follow-up desk-door-reads builds the reads and deletes this.
-const DESK_READS_UNBUILT: &str = "desk reads not built";
-
 /// One mind and whatever indexes what lands in it.
 pub struct Daemon<S: MindStore, I: IndexSink<S>> {
     mind: Mind<S>,
@@ -238,16 +235,18 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
     /// One desk request, answered by the Mind method it names. The Mind is the instance's own
     /// (`mind` is checked against it); `deciders` is this call's list, handed to the Mind and
     /// dropped. A desk answer is not indexed (`index_text` gives it no text), so nothing here tells the index.
-    /// The reads wait on follow-up desk-door-reads and are refused until they exist.
+    /// The reads answer with the whole record and nothing here gates them (ruling
+    /// `desk-read-visibility-whole-record`): they are handed `deciders` and not `subject`.
     pub fn handle_desk(&mut self, request: DeskRequest, now: DateTime<Utc>) -> DeskResponse {
         if let Err(refusal) = self.mind.require_instance(request.mind()) {
             return DeskResponse::Refused(refusal);
         }
         match request {
             DeskRequest::Answer { subject, authority, deciders, request, .. } => {
-                self.mind.desk_answer(&deciders, subject, authority, request, now).0
+                self.mind.desk_answer(&deciders, subject, authority, request, now)
             }
-            DeskRequest::Forks { .. } | DeskRequest::Fork { .. } => DeskResponse::Refused(MindRefusal::Unavailable { detail: DESK_READS_UNBUILT.into() }),
+            DeskRequest::Forks { deciders, status, cursor, limit, .. } => self.mind.desk_forks(&deciders, status, cursor, limit),
+            DeskRequest::Fork { deciders, fork_id, .. } => self.mind.desk_fork(&deciders, &fork_id),
         }
     }
 

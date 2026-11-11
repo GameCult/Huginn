@@ -1,8 +1,10 @@
 //! The fork desk's answer wire, Huginn's half: Libby's answer-side documents
-//! (CultLib `contracts/cultnet/governance/`, the contract file and its vectors at 6231ecad)
+//! (CultLib `contracts/cultnet/governance/`, the contract file and its vectors at e57fbaee)
 //! as Rust types, the one conversion between her `n<seq>` answer ids and the
 //! record keys, the projection of a stored answer, the refusal mapping and the
 //! showability predicate, and `Mind::desk_answer`, the one call that runs them in order.
+//! The read side (card, record, entry and list, `Mind::desk_forks` and `Mind::desk_fork`)
+//! is the child module `reads`.
 //!
 //! `Mind::answer_desk` stays the only owner of an answer's outcome, sequence,
 //! request id lookup, replay and conflict; this module converts, projects and
@@ -11,7 +13,10 @@
 //! the response is read at, and nothing here stores it. Huginn writes
 //! `gamecult.desk_answer.v0` and its own refusals; the stale-fork display
 //! and the answer result are Bifrost's to attach and write. The request type, its
-//! constants and the published schemas are here; the reads and the socket are other cuts.
+//! constants and the published schemas are here; the socket is the daemon's.
+
+mod reads;
+pub use reads::{CardSchema, CardStatus, EntrySchema, ForkCard, ForkCursor, ForkEntry, ForkLimit, ForkList, ForkOption, ForkRecord, ForkRef, ListSchema, ListStatus, RecordSchema};
 
 use chrono::{DateTime, Utc};
 use eureka_pipeline::{
@@ -169,13 +174,24 @@ pub struct ForkRefusal {
 
 /// What the door answers one desk request with. `Answered` is a stored answer, refused ones
 /// included (a stale fork, a non-decider and the rest are stored), fresh or replayed alike.
-/// `NotStored` is a request that stored nothing. `Refused` is any other Mind refusal; an
-/// `Unavailable` is Bifrost's to turn into its 503, and Huginn writes no document for it.
+/// `Forks` and `Fork` are the reads: one page of entries, or one entry, with the head they were
+/// all read at. `NotStored` is a request that stored nothing (an unknown fork included).
+/// `Refused` is any other Mind refusal; an `Unavailable` is Bifrost's to turn into its 503, and
+/// Huginn writes no document for it.
+///
+/// The trust boundary of the reads (ruling `desk-read-visibility-whole-record`): `Forks` and `Fork`
+/// carry the WHOLE record, every answer's note included, to whatever the peer-checked socket
+/// carries. Huginn strips nothing and gates nothing; Bifrost applies visibility at its door (a
+/// stripped read serves `note: null`, CultLib `fork-card.md`). Huginn must therefore be reachable
+/// only by Bifrost's peer-checked socket: the peer-uid check IS the whole authentication, and a
+/// second reader of that socket is a note leak.
 // One value per call, built and encoded once; a box would only add a deref to every reader.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum DeskResponse {
     Answered { answer: ForkDeskAnswer, counted_answer_id: Option<String>, as_of: u64 },
+    Forks { list: ForkList, as_of: u64 },
+    Fork { entry: ForkEntry, as_of: u64 },
     NotStored(ForkRefusal),
     Refused(MindRefusal),
 }
@@ -184,7 +200,7 @@ impl DeskResponse {
     /// The envelope's status: `rejected` exactly when nothing was stored or the Mind refused.
     pub fn status(&self) -> &'static str {
         match self {
-            Self::Answered { .. } => "accepted",
+            Self::Answered { .. } | Self::Forks { .. } | Self::Fork { .. } => "accepted",
             Self::NotStored(_) | Self::Refused(_) => "rejected",
         }
     }
@@ -203,6 +219,11 @@ pub const DESK_RESPONSE_SCHEMA_JSON: &str = include_str!("../../../schemas/cultn
 /// The frame bounds the door enforces, on the encoded CultNet message.
 pub const DESK_MAX_REQUEST_BYTES: usize = 65536;
 pub const DESK_MAX_RESPONSE_BYTES: usize = 65536;
+/// What a page of forks leaves for the envelope around it: the echoed message id (at most 256
+/// bytes), the operation, the runtime id and the frame's own keys. `Mind::desk_forks` fills a page
+/// to `DESK_PAGE_BUDGET`, the response bound less this, measured on the bare message.
+pub const DESK_ENVELOPE_MARGIN: usize = 1024;
+pub const DESK_PAGE_BUDGET: usize = DESK_MAX_RESPONSE_BYTES - DESK_ENVELOPE_MARGIN;
 
 /// Most deciders one call carries (CultLib `card.deciders` `maxItems`).
 pub const DESK_DECIDERS_MAX: usize = 64;
@@ -249,8 +270,17 @@ fn deciders_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schem
 /// Every request the desk door answers. The fields are the wire names: the `mind` addressed
 /// (the persona and pipeline requests say `instance`; the sets are separate), the verified
 /// `subject` and `authority` Bifrost vouches for (door context, never body fields), and the
-/// `deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside the set refuses
-/// the whole payload. The reads answer in follow-up desk-wire-reads.
+/// `deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside
+/// the set refuses the whole payload.
+///
+/// The reads, `Forks` and `Fork`, carry NO `authority` (CultLib `list_request` and
+/// `read_request` are closed and have none; one that names it is refused whole). Their `subject`
+/// and `deciders` gate nothing: `deciders` only fills the card's `deciders` and the showability
+/// gate, `subject` is read by no read. `Forks` takes the contract's `list_request` fields flat
+/// beside them (`status`, `cursor`, `limit`), each key written, `null` where absent. Huginn
+/// answers every read with the whole record and Bifrost applies visibility; see `DeskResponse`
+/// for the trust boundary. These docs and the doc of `Mind::desk_forks`/`Mind::desk_fork` are the
+/// reads spec.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub enum DeskRequest {
@@ -269,6 +299,13 @@ pub enum DeskRequest {
         #[serde(deserialize_with = "deciders")]
         #[schemars(schema_with = "deciders_schema")]
         deciders: Vec<Short>,
+        #[serde(deserialize_with = "required")]
+        #[schemars(required)]
+        status: Option<ListStatus>,
+        #[serde(deserialize_with = "required")]
+        #[schemars(required)]
+        cursor: Option<ForkCursor>,
+        limit: ForkLimit,
     },
     Fork {
         mind: Slug,
@@ -446,9 +483,8 @@ fn showable(question: &PipelineQuestion, deciders: &[Short]) -> bool {
 
 impl<S: MindStore> Mind<S> {
     /// One desk answer from the door: the wire request converted, the question gated, the answer
-    /// decided and stored (or replayed) by `answer_desk`, and the stored answer projected with the
-    /// derived count at the head it was read at. The flag is `true` when nothing was committed (a
-    /// replay); it is for the door and is never encoded. `subject` and `authority` are the verified
+    /// decided and stored (or committed) by `answer_desk`, and the stored answer projected with the
+    /// derived count at the head it was read at. `subject` and `authority` are the verified
     /// caller's, `deciders` the door's list.
     pub fn desk_answer(
         &mut self,
@@ -457,10 +493,10 @@ impl<S: MindStore> Mind<S> {
         authority: DeskAuthority,
         request: ForkAnswerRequest,
         now: DateTime<Utc>,
-    ) -> (DeskResponse, bool) {
+    ) -> DeskResponse {
         match self.desk_response(deciders, subject, authority, &request, now) {
             Ok(done) => done,
-            Err(refused) => (door_refusal(refused), false),
+            Err(refused) => door_refusal(refused),
         }
     }
 
@@ -471,10 +507,10 @@ impl<S: MindStore> Mind<S> {
         authority: DeskAuthority,
         request: &ForkAnswerRequest,
         now: DateTime<Utc>,
-    ) -> Result<(DeskResponse, bool), MindRefusal> {
+    ) -> Result<DeskResponse, MindRefusal> {
         let sent = match request_of(request) {
             Ok(sent) => sent,
-            Err(refused) => return Ok((DeskResponse::NotStored(refused), false)),
+            Err(refused) => return Ok(DeskResponse::NotStored(refused)),
         };
         let image = self.image()?;
         let docs = Docs::at(image, image.head);
@@ -483,12 +519,11 @@ impl<S: MindStore> Mind<S> {
         let unshowable = bound_answer(&docs, &subject, &sent.request_id).is_none()
             && matches!(docs.find(PipelineKind::Question, &sent.fork.0), Some(PipelineDocument::Question(question)) if !showable(question, deciders));
         if unshowable {
-            return Ok((DeskResponse::NotStored(fork_unknown()), false));
+            return Ok(DeskResponse::NotStored(fork_unknown()));
         }
         let stamp = DeskStamp { answerer: subject, authority, deciders: deciders.to_vec() };
-        let (key, replayed) = match self.answer_desk(stamp, sent, now) {
-            DeskAnswerOutcome::Stored { answer, .. } => (answer.0, false),
-            DeskAnswerOutcome::Replayed { answer, .. } => (answer.0, true),
+        let key = match self.answer_desk(stamp, sent, now) {
+            DeskAnswerOutcome::Stored { answer, .. } | DeskAnswerOutcome::Replayed { answer, .. } => answer.0,
             DeskAnswerOutcome::Refused(refused) => return Err(refused),
         };
         let image = self.image()?;
@@ -496,7 +531,7 @@ impl<S: MindStore> Mind<S> {
         let Some(PipelineDocument::DeskAnswer(stored)) = docs.find(PipelineKind::DeskAnswer, &key) else { return Err(unreadable_key()) };
         let fork = stored.fork.0.as_str();
         let counted_answer_id = counted_answer(&docs, fork).map(|counted| answer_seq(fork, &counted).map(n_text).ok_or_else(unreadable_key)).transpose()?;
-        Ok((DeskResponse::Answered { answer: project(&key, stored)?, counted_answer_id, as_of: image.head }, replayed))
+        Ok((DeskResponse::Answered { answer: project(&key, stored)?, counted_answer_id, as_of: image.head }))
     }
 }
 
@@ -584,8 +619,12 @@ mod tests {
         list.iter().map(|who| s(who)).collect()
     }
 
+    /// The response and whether the call committed anything: a replay, a refused body and a gate
+    /// refusal store nothing, so the head does not move.
     fn ask_as(mind: &mut Mind<MemoryStore>, who: &str, list: &[&str], request: ForkAnswerRequest) -> (DeskResponse, bool) {
-        mind.desk_answer(&deciders(list), s(who), DeskAuthority::Member, request, now())
+        let before = head(mind);
+        let response = mind.desk_answer(&deciders(list), s(who), DeskAuthority::Member, request, now());
+        (response, head(mind) != before)
     }
 
     fn ask(mind: &mut Mind<MemoryStore>, who: &str, request: ForkAnswerRequest) -> (DeskResponse, bool) {
@@ -846,9 +885,9 @@ mod tests {
         assert_eq!((answer.outcome.as_str(), answer.retracts.as_deref(), counted.as_deref(), as_of), ("Retraction", Some("n1"), Some("n2"), head(&mind)));
         // The first request replayed: its stored word is still Counted, the count is read now.
         let before = head(&mind);
-        let (response, replayed) = ask(&mut mind, "x", first);
+        let (response, committed) = ask(&mut mind, "x", first);
         let (answer, counted, as_of) = answered(response);
-        assert!(replayed);
+        assert!(!committed);
         assert_eq!((answer.outcome.as_str(), answer.answer_id.as_str(), counted.as_deref(), as_of), ("Counted", "n1", Some("n2"), before));
         assert_eq!(head(&mind), before);
         // The second request replayed now counts, and its stored word is still Revision.
@@ -984,14 +1023,14 @@ mod tests {
         ];
         for (form, request) in forms.into_iter().enumerate() {
             let stored = stored_count(&mind, FORK);
-            let (response, replayed) = ask(&mut mind, "x", request.clone());
-            assert!(!replayed);
+            let (response, committed) = ask(&mut mind, "x", request.clone());
+            assert!(committed);
             let (answer, _, _) = answered(response.clone());
             assert_eq!((answer.outcome.as_str(), answer.code), ("Refused", Some(ForkAnswerCode::BadRetraction)), "form {form}");
             assert_eq!(stored_count(&mind, FORK), stored + 1, "form {form}");
             // The refusal is stored and bound: the same bytes replay, with no write.
             let before = head(&mind);
-            assert_eq!(ask(&mut mind, "x", request), (response, true), "form {form}");
+            assert_eq!(ask(&mut mind, "x", request), (response, false), "form {form}");
             assert_eq!(head(&mind), before);
         }
         // (i) and (iii) with equal answer and target differ only in `retracted`: one id, two bodies.
@@ -1117,14 +1156,14 @@ mod tests {
     fn a_stale_answer_carries_no_card() {
         let mut mind = desk();
         let stale = wire(FORK, &"e".repeat(64));
-        let (fresh, replayed) = ask(&mut mind, "x", stale.clone());
-        assert!(!replayed);
+        let (fresh, committed) = ask(&mut mind, "x", stale.clone());
+        assert!(committed);
         let (answer, _, _) = answered(fresh.clone());
         assert_eq!((answer.outcome.as_str(), answer.code), ("Refused", Some(ForkAnswerCode::StaleFork)));
         // After the fork closed, the retry still answers the stored refusal, with nothing added.
         close(&mut mind, FORK, "RQ1", "A");
-        let (again, replayed) = ask(&mut mind, "x", stale);
-        assert!(replayed);
+        let (again, committed) = ask(&mut mind, "x", stale);
+        assert!(!committed);
         let (again_answer, _, _) = answered(again.clone());
         assert_eq!(again_answer, answer);
         for response in [&fresh, &again] {
@@ -1139,7 +1178,7 @@ mod tests {
         let request = wire(FORK, &hash);
         let (fresh, first) = ask(&mut mind, "x", request.clone());
         let (replay, second) = ask(&mut mind, "x", request);
-        assert_eq!((first, second), (false, true));
+        assert_eq!((first, second), (true, false));
         assert_eq!(encode(&fresh), encode(&replay));
         assert_eq!(stored_count(&mind, FORK), 1);
     }
@@ -1188,17 +1227,17 @@ mod tests {
         let mut mind = desk();
         let hash = hash_of(&mind, FORK);
         let request = wire(FORK, &hash);
-        let (stored, replayed) = ask(&mut mind, "x", request.clone());
-        assert!(!replayed);
+        let (stored, committed) = ask(&mut mind, "x", request.clone());
+        assert!(committed);
         let before = head(&mind);
         // The list Bifrost passes is empty now; the stored request still gets its stored answer.
-        let (again, replayed) = ask_as(&mut mind, "x", &[], request.clone());
-        assert!(replayed);
+        let (again, committed) = ask_as(&mut mind, "x", &[], request.clone());
+        assert!(!committed);
         assert_eq!(encode(&again), encode(&stored));
         assert_eq!(head(&mind), before);
         // Another subject with the same bytes has stored nothing: the gate refuses it.
-        let (other, replayed) = ask_as(&mut mind, "y", &[], request);
-        assert_eq!((not_stored(other).code, replayed), (ForkRefusalCode::ForkUnknown, false));
+        let (other, committed) = ask_as(&mut mind, "y", &[], request);
+        assert_eq!((not_stored(other).code, committed), (ForkRefusalCode::ForkUnknown, false));
         // And a request nobody stored is fork_unknown while the list is empty.
         let fresh = wire(FORK, &hash);
         assert_eq!(not_stored(ask_as(&mut mind, "x", &[], fresh).0).code, ForkRefusalCode::ForkUnknown);
@@ -1206,22 +1245,22 @@ mod tests {
         // A stored refusal and a stored revision replay the same way: a stale hash is stored as a
         // refusal, a second answer by the same subject as a revision.
         let stale = wire(FORK, "0".repeat(hash.len()).as_str());
-        let (refused, replayed) = ask(&mut mind, "x", stale.clone());
-        assert!(!replayed);
+        let (refused, committed) = ask(&mut mind, "x", stale.clone());
+        assert!(committed);
         assert_eq!(answered(refused.clone()).0.outcome, "Refused");
         let revision = wire(FORK, &hash);
-        let (revised, replayed) = ask(&mut mind, "x", revision.clone());
-        assert!(!replayed);
+        let (revised, committed) = ask(&mut mind, "x", revision.clone());
+        assert!(committed);
         assert_eq!(answered(revised.clone()).0.outcome, "Revision");
         let before = head(&mind);
         for (request, stored) in [(stale, refused), (revision, revised)] {
-            let (again, replayed) = ask_as(&mut mind, "x", &[], request.clone());
-            assert!(replayed);
+            let (again, committed) = ask_as(&mut mind, "x", &[], request.clone());
+            assert!(!committed);
             // `as_of` is the head the replay was read at, so the stored answer is what is compared.
             assert_eq!(encode(&answered(again).0), encode(&answered(stored).0));
             assert_eq!(head(&mind), before);
-            let (other, replayed) = ask_as(&mut mind, "w", &[], request);
-            assert_eq!((not_stored(other).code, replayed), (ForkRefusalCode::ForkUnknown, false));
+            let (other, committed) = ask_as(&mut mind, "w", &[], request);
+            assert_eq!((not_stored(other).code, committed), (ForkRefusalCode::ForkUnknown, false));
             assert_eq!(head(&mind), before);
         }
     }
@@ -1285,16 +1324,16 @@ mod tests {
         let (first, _) = ask(&mut mind, "x", request.clone());
         // V12: the same bytes replay.
         let before = head(&mind);
-        assert_eq!(ask(&mut mind, "x", request.clone()), (first, true));
+        assert_eq!(ask(&mut mind, "x", request.clone()), (first, false));
         assert_eq!(head(&mind), before);
         // V13: only answered_at changed is a conflict, and nothing is stored.
         let moved = ForkAnswerRequest { answered_at: "2026-11-10T12:00:01Z".into(), ..request.clone() };
         assert_eq!(not_stored(ask(&mut mind, "x", moved).0).code, ForkRefusalCode::RequestIdConflict);
         assert_eq!((head(&mind), stored_count(&mind, FORK)), (before, 1));
         // V14: another subject with identical bytes is its own request: its own answer id, stamped with it.
-        let (other, replayed) = ask(&mut mind, "y", request.clone());
+        let (other, committed) = ask(&mut mind, "y", request.clone());
         let (other, _, _) = answered(other);
-        assert!(!replayed);
+        assert!(committed);
         assert_eq!((other.answer_id.as_str(), other.answerer.as_str(), other.outcome.as_str(), other.request_id.as_str()), ("n2", "y", "Revision", request.request_id.as_str()));
         let (original, _, _) = answered(ask(&mut mind, "x", request.clone()).0);
         assert_eq!((original.answer_id.as_str(), original.answerer.as_str()), ("n1", "x"));
@@ -1452,7 +1491,7 @@ mod tests {
                 let authority = serde_json::from_value(server["authority"].clone()).unwrap();
                 let at = DateTime::parse_from_rfc3339(server["received_at"].as_str().unwrap()).unwrap().to_utc();
                 let answerer = s(server["answerer"].as_str().unwrap());
-                let (mine, _) = mind.desk_answer(&deciders(&list), answerer, authority, request, at);
+                let mine = mind.desk_answer(&deciders(&list), answerer, authority, request, at);
                 if code == Some("unavailable") {
                     continue; // the door went down after the Mind stored: its answer was never seen
                 }
@@ -1508,9 +1547,9 @@ mod tests {
         let mut mind = desk();
         let hash = hash_of(&mind, FORK);
         // The operator's own account, off the list, is no decider; a member on the list is.
-        let off = mind.desk_answer(&deciders(&["x"]), s("op"), DeskAuthority::Operator, wire(FORK, &hash), now()).0;
+        let off = mind.desk_answer(&deciders(&["x"]), s("op"), DeskAuthority::Operator, wire(FORK, &hash), now());
         assert_eq!(answered(off).0.code, Some(ForkAnswerCode::NotADecider));
-        let on = mind.desk_answer(&deciders(&["m"]), s("m"), DeskAuthority::Member, wire(FORK, &hash), now()).0;
+        let on = mind.desk_answer(&deciders(&["m"]), s("m"), DeskAuthority::Member, wire(FORK, &hash), now());
         let (answer, _, _) = answered(on);
         assert_eq!((answer.outcome.as_str(), answer.authority, answer.answerer.as_str()), ("Counted", DeskAuthority::Member, "m"));
     }
@@ -1527,7 +1566,7 @@ mod tests {
     fn desk_requests(mind: &str, list: &[Short], hash: &str) -> [DeskRequest; 3] {
         [
             DeskRequest::Answer { mind: slug(mind), subject: s("d0"), authority: DeskAuthority::Member, deciders: list.to_vec(), request: wire(FORK, hash) },
-            DeskRequest::Forks { mind: slug(mind), subject: s("d0"), deciders: list.to_vec() },
+            DeskRequest::Forks { mind: slug(mind), subject: s("d0"), deciders: list.to_vec(), status: None, cursor: None, limit: ForkLimit::new(10).unwrap() },
             DeskRequest::Fork { mind: slug(mind), subject: s("d0"), deciders: list.to_vec(), fork_id: FORK.into() },
         ]
     }
@@ -1550,8 +1589,9 @@ mod tests {
         }
         // 64 deciders through to the Mind: the subject is listed and counts.
         let DeskRequest::Answer { subject, authority, deciders, request, .. } = through_the_door(&desk_requests(INSTANCE, &list_of(64), &hash)[0]).unwrap() else { panic!("not an answer") };
-        let (response, replayed) = mind.desk_answer(&deciders, subject, authority, request, now());
-        assert!(!replayed);
+        let before = head(&mind);
+        let response = mind.desk_answer(&deciders, subject, authority, request, now());
+        assert!(head(&mind) > before);
         assert_eq!(answered(response).0.outcome, "Counted");
 
         let (head_before, stored_before) = (head(&mind), stored_count(&mind, FORK));
@@ -1585,7 +1625,7 @@ mod tests {
         assert_eq!((head(&mind), stored_count(&mind, FORK)), before);
         // The Mind's showability gate is the second line: an empty list handed to it directly
         // still refuses the fork and stores nothing.
-        let refused = not_stored(mind.desk_answer(&[], s("d0"), DeskAuthority::Member, wire(FORK, &hash), now()).0);
+        let refused = not_stored(mind.desk_answer(&[], s("d0"), DeskAuthority::Member, wire(FORK, &hash), now()));
         assert_eq!(refused.code, ForkRefusalCode::ForkUnknown);
         assert_eq!((head(&mind), stored_count(&mind, FORK)), before);
     }
@@ -1606,6 +1646,6 @@ mod tests {
         // The same request to the mind it names is answered.
         let DeskRequest::Answer { mind: named, subject, authority, deciders, request } = through_the_door(&desk_requests(INSTANCE, &list_of(4), &hash)[0]).unwrap() else { panic!("not an answer") };
         mind.require_instance(&named).unwrap();
-        assert_eq!(answered(mind.desk_answer(&deciders, subject, authority, request, now()).0).0.outcome, "Counted");
+        assert_eq!(answered(mind.desk_answer(&deciders, subject, authority, request, now())).0.outcome, "Counted");
     }
 }

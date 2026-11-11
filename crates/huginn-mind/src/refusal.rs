@@ -109,6 +109,11 @@ pub enum MindRefusal {
     /// truncated or paginated on its behalf. The daemon owns it and its
     /// deferral bound decides it; no rule of the mind is involved.
     ResponseTooLarge { bytes: u64, limit: u64 },
+    /// A desk page whose first entry alone is past the page budget: `fork` is that fork, `order` its
+    /// rank (a caller goes on past it with the cursor `c<order>`, which returns the forks below it),
+    /// `bytes` what the page holding it would encode to (without the envelope) and `limit` the page
+    /// budget it exceeds. Raised by the mind's page fill, which is why it is not `ResponseTooLarge`.
+    DeskForkTooLarge { fork: String, order: u64, bytes: u64, limit: u64 },
     /// A selection the substrate or the organ's value door refused: `field`
     /// is the selection field the client sent, `value` the offending part.
     SelectionInvalid { field: String, value: Option<String>, message: String },
