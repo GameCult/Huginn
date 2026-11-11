@@ -827,3 +827,87 @@ fn a_read_of_an_oversize_fork_is_fork_too_large_naming_only_the_fork() {
     assert_eq!(code, "fork_too_large");
     assert!(text.contains(big) && text.contains("order 1") && text.contains("c1"), "{text}");
 }
+
+/// The encoded size of the reply to a read of `fork` sent under `id`, and the reply. The door echoes the id,
+/// so its length moves the reply one byte at a time where a record's growth moves it in base64 steps of four.
+fn read_size(desk: &Path, fork: &str, id: &str) -> (usize, CultNetMessage) {
+    let mut stream = UnixStream::connect(desk).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.write_all(&desk_bytes(id, &fork_read("x", fork))).unwrap();
+    let mut header = [0_u8; 4];
+    stream.read_exact(&mut header).unwrap();
+    let mut payload = vec![0_u8; u32::from_be_bytes(header) as usize];
+    stream.read_exact(&mut payload).unwrap();
+    (payload.len(), decode_cultnet_message_from_slice(&payload, CultNetWireContract::CultNetSchemaV0).unwrap())
+}
+
+/// The reply cap is exact on a READ: a reply of exactly DESK_MAX_RESPONSE_BYTES is the entry, and the same
+/// read one byte longer is `fork_too_large` naming the fork. The record is grown to within 250 bytes of the
+/// cap, then the echoed message id is padded byte by byte to land on it.
+#[test]
+fn a_read_reply_of_exactly_the_cap_is_the_entry_and_one_byte_more_is_fork_too_large() {
+    let _serial = serial();
+    let cap = huginn_mind::desk_wire::DESK_MAX_RESPONSE_BYTES;
+    let (_root, _run, hash, desk, _daemon) = three_forks();
+    let big = "eureka-state:question:Q2";
+    let mut sent = 0_u32;
+    loop {
+        let (size, reply) = read_size(&desk, big, "m-size");
+        assert!(matches!(decode_desk_response(&reply).unwrap().1, Ok(DeskResponse::Fork { .. })), "grew past the cap at {size}");
+        let remaining = cap - size;
+        if remaining <= 250 {
+            break;
+        }
+        // An answer costs about 513 plus 4/3 of its note (base64); aim the last one at 170 bytes short of the cap.
+        let note = if remaining > 5000 { 2000 } else { (remaining - 170 - 513) * 3 / 4 };
+        sent += 1;
+        let mut request = answer("x", &hash, &format!("00000000-0000-4000-8000-{sent:012}"));
+        if let DeskRequest::Answer { request, .. } = &mut request {
+            request.fork_id = big.into();
+            request.answer = Some(ForkAnswer { choice: None, note: Some("a".repeat(note)) });
+        }
+        assert!(matches!(ask(&desk, "m-w", &request), DeskResponse::Answered { .. }));
+    }
+    let sizes: Vec<(usize, String)> = (0..250).map(|pad| format!("m-size{}", "x".repeat(pad))).map(|id| (read_size(&desk, big, &id).0, id)).collect();
+    let (at_cap, id) = sizes.iter().find(|(size, _)| *size == cap).expect("a padded id lands exactly on the cap").clone();
+    let (_, reply) = read_size(&desk, big, &id);
+    let response = decode_desk_response(&reply).unwrap().1;
+    assert!(matches!(response, Ok(DeskResponse::Fork { .. })), "{at_cap} bytes: {response:?}");
+    let (over, reply) = read_size(&desk, big, &format!("{id}x"));
+    let (_, response) = decode_desk_response(&reply).unwrap();
+    let (code, text) = refusal_of(&response.unwrap()).expect("a not-stored refusal");
+    assert!(code == "fork_too_large" && text.contains(big) && !text.contains("cursor") && !text.contains("order"), "{text}");
+    assert!(over < cap, "the refusal itself is small: {over}");
+}
+
+/// A stale answer is STORED as a refusal (`stale_fork`), never counted, and its replay returns the same
+/// stored refusal from the door even once the fork is too large to read: nothing new is stored, and the
+/// reply is neither `fork_too_large` nor `ResponseTooLarge` (a stored record carries no card, so it is small).
+#[test]
+fn a_stale_answer_is_stored_refused_and_its_replay_survives_the_fork_growing_too_large() {
+    let _serial = serial();
+    let (_root, _run, hash, desk, daemon) = three_forks();
+    let fork = "eureka-state:question:Q2";
+    let mut stale = answer("x", &"0".repeat(64), "00000000-0000-4000-8000-0000ffff0001");
+    if let DeskRequest::Answer { request, .. } = &mut stale {
+        request.fork_id = fork.into();
+    }
+    let before = daemon.documents();
+    let DeskResponse::Answered { answer: first, counted_answer_id, .. } = ask(&desk, "m-s1", &stale) else { panic!("a stale answer is stored") };
+    assert_eq!((first.code, first.outcome.as_str(), counted_answer_id), (Some(ForkAnswerCode::StaleFork), "Refused", None));
+    let stored = daemon.documents();
+    assert_eq!(stored, before + 1, "the refusal is a stored record");
+    let DeskResponse::Fork { entry, .. } = ask(&desk, "m-s2", &fork_read("x", fork)) else { panic!("a read") };
+    assert!(entry.record.answers.iter().any(|a| a.answer_id == first.answer_id && a.code == Some(ForkAnswerCode::StaleFork)));
+    assert_eq!(entry.record.counted_answer_id, None);
+    // The fork grows until it cannot be read.
+    let reply = grown_until_read_overflows(&desk, &hash, fork);
+    let (_, response) = decode_desk_response(&reply).unwrap();
+    assert_eq!(refusal_of(&response.unwrap()).unwrap().0, "fork_too_large");
+    let grown = daemon.documents();
+    // The identical request replays the stored refusal: same answer id, nothing stored.
+    let DeskResponse::Answered { answer: replay, counted_answer_id, .. } = ask(&desk, "m-s1", &stale) else { panic!("the replay is the stored answer") };
+    assert_eq!((replay.answer_id.clone(), replay.code, replay.outcome.as_str()), (first.answer_id.clone(), Some(ForkAnswerCode::StaleFork), "Refused"));
+    assert_ne!(counted_answer_id.as_deref(), Some(replay.answer_id.as_str()), "the refusal is never the counted answer");
+    assert_eq!(daemon.documents(), grown, "the replay stored nothing");
+}
