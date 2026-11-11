@@ -951,14 +951,56 @@ fn describe_result(event: &serde_json::Map<String, Value>) -> String {
     format!("{}: {}", result_head(event), result_text(event))
 }
 
+/// A model id as one journal field: every byte outside `[A-Za-z0-9._:/-]` is `%XX`, so a space, `;`, `=` or newline in an id the CLI reports cannot split the line or forge a segment. Real ids pass unchanged.
+fn field_safe(id: &str) -> String {
+    id.bytes().map(|b| if b.is_ascii_alphanumeric() || b"._:/-".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// What a result spent, as one journal line: its tokens by model for this turn alone, read from
+/// `model_usage_since_last_result`. `modelUsage` is the session's running total on a resumed
+/// session, so it is never the source. Usage the result did not report, or reported
+/// incompletely, is said so and never written as zeros. `subagent_stats.spawned` is the
+/// session's count so far, not the turn's (the fixture's second result spawns none and still
+/// reads 1), so it is named for what it is. No text of the result enters the line. This line is
+/// observation for the journal: nothing in the run reads it.
+fn usage_line(event: &serde_json::Map<String, Value>) -> String {
+    let turn = event.get("result_index").and_then(Value::as_u64).map_or_else(|| "?".to_string(), |index| index.to_string());
+    let segments: Option<Vec<String>> = event.get("model_usage_since_last_result").and_then(Value::as_object).filter(|models| !models.is_empty()).and_then(|models| {
+        models
+            .iter()
+            .map(|(model, counts)| {
+                let count = |name: &str| counts.get(name).and_then(Value::as_u64);
+                // The 5m and 1h cache writes are priced apart; each is carried when the envelope has it and left out when it does not.
+                let ttl = |label: &str, name: &str| count(name).map(|n| format!(" cache_creation_{label} {n}")).unwrap_or_default();
+                Some(format!(
+                    "{} input {} cache_read {} cache_creation {} output {}{}{}",
+                    field_safe(model),
+                    count("inputTokens")?,
+                    count("cacheReadInputTokens")?,
+                    count("cacheCreationInputTokens")?,
+                    count("outputTokens")?,
+                    ttl("5m", "cacheCreationEphemeral5mInputTokens"),
+                    ttl("1h", "cacheCreationEphemeral1hInputTokens"),
+                ))
+            })
+            .collect()
+    });
+    let Some(segments) = segments else { return format!("usage turn {turn}: not reported") };
+    let spawned = event.get("subagent_stats").and_then(|stats| stats.get("spawned")).and_then(Value::as_u64);
+    let tail = spawned.map(|spawned| format!(" subagents_spawned_total {spawned}")).unwrap_or_default();
+    format!("usage turn {turn}: {}{tail}", segments.join("; "))
+}
+
 /// What `claude` concluded, written to the unit's stdout so it reaches the
 /// journal: the transcript is a cache, and the result's words are kept here.
+/// The result's per-turn usage follows as its own line.
 fn write_result(line: &str, out: &mut dyn Write) -> std::io::Result<()> {
     let Ok(Value::Object(event)) = serde_json::from_str::<Value>(line) else { return Ok(()) };
     if event.get("type").and_then(Value::as_str) != Some("result") {
         return Ok(());
     }
-    writeln!(out, "{}", describe_result(&event))
+    writeln!(out, "{}", describe_result(&event))?;
+    writeln!(out, "{}", usage_line(&event))
 }
 
 /// The real spawner: the `claude` on the unit's `PATH`, its stderr in the

@@ -496,6 +496,105 @@ fn a_result_events_text_reaches_the_journal_with_its_subtype_and_error_flag() {
     assert!(ran.out.contains("result subtype=success is_error=false: all done\n"), "{}", ran.out);
 }
 
+/// What the journal holds for one stream line.
+fn journal_of(line: &str) -> String {
+    let mut out = Vec::new();
+    write_result(line, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+/// The result envelopes of the real two-turn background-agent capture.
+fn bg_agent_results() -> Vec<String> {
+    include_str!("claude-2.1.312-live-session-bg-agent.jsonl")
+        .lines()
+        .filter_map(|entry| serde_json::from_str::<Value>(entry).ok()?.get("line")?.as_str().map(str::to_string))
+        .filter(|line| serde_json::from_str::<Value>(line).is_ok_and(|event| event["type"] == "result"))
+        .collect()
+}
+
+fn usage_lines(journal: &str) -> Vec<&str> {
+    journal.lines().filter(|line| line.starts_with("usage turn")).collect()
+}
+
+#[test]
+fn a_result_writes_its_per_turn_usage_and_not_the_sessions_total() {
+    let results = bg_agent_results();
+    assert_eq!(results.len(), 2);
+    let lines: Vec<String> = results.iter().map(|line| journal_of(line)).collect();
+    // The capture's modelUsage runs 20/10 then 40/20; the turn's own usage is 20/10 both times.
+    assert_eq!(usage_lines(&lines[0]), ["usage turn 0: claude-opus-5-5 input 20 cache_read 0 cache_creation 0 output 10 cache_creation_5m 0 cache_creation_1h 0 subagents_spawned_total 1"]);
+    assert_eq!(usage_lines(&lines[1]), ["usage turn 1: claude-opus-5-5 input 20 cache_read 0 cache_creation 0 output 10 cache_creation_5m 0 cache_creation_1h 0 subagents_spawned_total 1"]);
+}
+
+#[test]
+fn each_model_in_the_turns_usage_is_its_own_segment() {
+    let line = json!({
+        "type": "result", "result_index": 3,
+        "model_usage_since_last_result": {
+            "claude-haiku-4-5": {"inputTokens": 3, "cacheReadInputTokens": 4, "cacheCreationInputTokens": 5, "outputTokens": 6},
+            "claude-opus-5-5": {"inputTokens": 7, "cacheReadInputTokens": 8, "cacheCreationInputTokens": 9, "outputTokens": 10}
+        }
+    })
+    .to_string();
+    assert_eq!(
+        usage_lines(&journal_of(&line)),
+        ["usage turn 3: claude-haiku-4-5 input 3 cache_read 4 cache_creation 5 output 6; claude-opus-5-5 input 7 cache_read 8 cache_creation 9 output 10"]
+    );
+}
+
+#[test]
+fn a_model_id_cannot_split_the_line_or_forge_a_segment() {
+    let counts = json!({"inputTokens": 1, "cacheReadInputTokens": 2, "cacheCreationInputTokens": 3, "outputTokens": 4});
+    let line = json!({"type": "result", "result_index": 0, "model_usage_since_last_result": {"evil
+usage turn 9: x input 9; y=1": counts}}).to_string();
+    let journal = journal_of(&line);
+    assert_eq!(journal.lines().count(), 2, "{journal}");
+    assert_eq!(usage_lines(&journal), ["usage turn 0: evil%0Ausage%20turn%209:%20x%20input%209%3B%20y%3D1 input 1 cache_read 2 cache_creation 3 output 4"]);
+}
+
+#[test]
+fn the_cache_write_split_is_carried_when_reported_and_left_out_when_not() {
+    let mut entry = json!({"inputTokens": 1, "cacheReadInputTokens": 2, "cacheCreationInputTokens": 7, "outputTokens": 4});
+    let journal = |entry: &Value| journal_of(&json!({"type": "result", "result_index": 0, "model_usage_since_last_result": {"m": entry}}).to_string());
+    entry["cacheCreationEphemeral5mInputTokens"] = json!(3);
+    entry["cacheCreationEphemeral1hInputTokens"] = json!(4);
+    assert_eq!(usage_lines(&journal(&entry)), ["usage turn 0: m input 1 cache_read 2 cache_creation 7 output 4 cache_creation_5m 3 cache_creation_1h 4"]);
+    entry.as_object_mut().unwrap().remove("cacheCreationEphemeral5mInputTokens");
+    assert_eq!(usage_lines(&journal(&entry)), ["usage turn 0: m input 1 cache_read 2 cache_creation 7 output 4 cache_creation_1h 4"]);
+    entry.as_object_mut().unwrap().remove("cacheCreationEphemeral1hInputTokens");
+    assert_eq!(usage_lines(&journal(&entry)), ["usage turn 0: m input 1 cache_read 2 cache_creation 7 output 4"]);
+}
+
+#[test]
+fn an_unreported_usage_is_said_never_zero() {
+    let whole = json!({"inputTokens": 1, "cacheReadInputTokens": 2, "cacheCreationInputTokens": 3, "outputTokens": 4});
+    let mut cases = vec![json!({"type": "result", "result_index": 2}), json!({"type": "result", "result_index": 2, "model_usage_since_last_result": {}})];
+    for missing in ["inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "outputTokens"] {
+        let mut entry = whole.clone();
+        entry.as_object_mut().unwrap().remove(missing);
+        // The whole entry is unknown, even beside a model that reported everything.
+        cases.push(json!({"type": "result", "result_index": 2, "model_usage_since_last_result": {"a": whole, "b": entry}}));
+    }
+    for case in cases {
+        let journal = journal_of(&case.to_string());
+        assert_eq!(usage_lines(&journal), ["usage turn 2: not reported"], "{case}");
+    }
+}
+
+#[test]
+fn the_result_line_is_unchanged_and_first_and_the_usage_line_carries_none_of_its_text() {
+    let line = json!({
+        "type": "result", "subtype": "success", "is_error": false, "result": "all done", "result_index": 0,
+        "model_usage_since_last_result": {"m": {"inputTokens": 1, "cacheReadInputTokens": 2, "cacheCreationInputTokens": 3, "outputTokens": 4}}
+    })
+    .to_string();
+    let journal = journal_of(&line);
+    let lines: Vec<&str> = journal.lines().collect();
+    assert_eq!(lines, ["result subtype=success is_error=false: all done", "usage turn 0: m input 1 cache_read 2 cache_creation 3 output 4"]);
+    // A line that is not a result writes nothing.
+    assert_eq!(journal_of(&json!({"type": "assistant"}).to_string()), "");
+}
+
 #[test]
 fn a_long_result_reaches_the_journal_whole() {
     let text = format!("a{}", "é".repeat(5000));
@@ -720,6 +819,7 @@ fn a_jump_past_the_ceiling_plus_the_headroom_writes_the_flush_and_the_running_tu
 request 2 prefix 400000
 request 3 prefix 470000
 result subtype=success is_error=false: The answer.
+usage turn ?: not reported
 request 4 prefix 459999
 request 5 prefix 460000
 ");
@@ -939,6 +1039,7 @@ fn unreadable_and_foreign_lines_are_skipped_and_never_printed() {
     ]);
     assert_eq!(ran.lines(), "request 1 prefix 10
 result subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed
+usage turn 0: not reported
 ");
     let outcome = ran.outcome.as_ref().unwrap().to_string();
     assert!(!ran.out.contains(canary) && !outcome.contains(canary));
@@ -1142,6 +1243,7 @@ exit 0");
         assert_eq!(printed, "request 1 prefix 10
 request 2 prefix 300000
 result subtype=success is_error=false: The answer.
+usage turn ?: not reported
 ");
     }
 
