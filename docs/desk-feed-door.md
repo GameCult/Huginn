@@ -4,7 +4,8 @@ Status, 2026-11-11: the list and read wire described here is on `main` (`DeskReq
 `DeskRequest::Fork`, `DeskResponse::Forks`, `DeskResponse::Fork`; `crates/huginn-mind/src/desk_wire.rs`
 and `desk_wire/reads.rs`; the socket is `crates/huginn-daemon/src/desk_door.rs`). No running daemon
 binds a desk socket yet (follow-up `eureka-substrate:follow_up:desk-door-ops-root-run`). Two parts
-are planned and not built: `raised_at` on the card, and the listing gate that decides which forks a
+are planned and not built: the card's `raised_at`, `decider_count` and the record's `answerer_count`
+and nullable `answerer` (the shapes pinned below), and the listing gate that decides which forks a
 reader sees. They are cut specs `cut-desk-feed-raised-at` and `cut-desk-feed-listing` in the
 `eureka-substrate` campaign.
 
@@ -18,7 +19,8 @@ go live on a Mind that holds private questions.
 This page is the wire contract for the consumer, Bifrost's `UnixSocketDeskDoor` (Bifrost PR #67,
 `docs/desk-feed-design.md`). The golden bytes are in `crates/huginn-mind/tests/fixtures/desk-feed/`.
 Huginn's own encoders write them (`crates/huginn-mind/tests/desk_feed_fixtures.rs`), so a decoder
-that reads them reads the door. The document shapes inside the payload (`gamecult.fork.list.v0`,
+that reads them reads the door. The reader-count shapes are CultLib's bytes, vendored in
+`cultlib-3a51bbab/` (below). The document shapes inside the payload (`gamecult.fork.list.v0`,
 `gamecult.fork.entry.v0`, `gamecult.fork.card.v0`, `gamecult.fork.record.v0`,
 `gamecult.desk_answer.v0`, `gamecult.fork.refusal.v0`) are CultLib's
 (`contracts/cultnet/governance/fork-card.md`) and are not restated here.
@@ -106,7 +108,7 @@ shape at decode is owed by `cut-desk-feed-listing.r6`. The test
 `every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid` pins the grammar. The fixtures use
 synthetic UUIDs.
 
-## Account ids by reader (planned; needs a CultLib change)
+## Account ids by reader (shape pinned in CultLib; Huginn side planned)
 
 A reader is a **decider** when the call's `subject` is in the call's `deciders`, compared byte for
 byte; both values are in the account-id format above. Any other reader is a non-decider.
@@ -118,20 +120,42 @@ byte; both values are in the account-id format above. Any other reader is a non-
   Bifrost, withholds account ids from a non-decider and returns a count instead. Bifrost cannot do
   it, because the card is opaque to it. A decider sees the ids. The superseding ruling is in force:
   `eureka-substrate:ruling:desk-read-visibility-withheld-ids`.
-- **CultLib cannot carry this yet.** The card has 16 required keys in closed map-mode (17 once `raised_at` lands), and
-  `deciders` must hold at least one item. `answerer` is a required, non-null id. The proposal to
-  Libby (follow-up `cultlib-fork-card-reader-counts`):
-  - the card gains a required `decider_count` (an integer). A non-decider gets `deciders: []`; a
-    decider gets the ids. The count is the same for both.
-  - `answerer` becomes nullable: nil for a non-decider, with the key kept, as `note` is stripped.
-  - the record gains a required `answerer_count`, the number of distinct answerers.
-- **Proposed fixtures**, built from mirror types that exist only in the test:
-  - `card-viewers-decider.synthetic` and `card-viewers-non-decider.synthetic` hold only the two card
-    keys the proposal changes. They are not cards.
-  - `record-non-decider.proposed` is a whole record as the proposal shapes it.
-
-  The test `a_non_decider_gets_counts_and_no_ids_a_decider_gets_ids` checks that neither account id
-  appears anywhere in a non-decider's bytes. `record-whole` is the decider's view.
+- **The shape**, pinned to CultLib commit `3a51bbabad244a56ec4521080530d88744001ce4` (#117 "Fork card:
+  decider_count, answerer_count, nullable answerer (reader views)", on `af914253` #115 `raised_at`;
+  ruling `eureka-substrate:ruling:desk-reader-counts-shape`). The bytes are CultLib's own vectors
+  (`contracts/cultnet/governance/fork-card-vectors.json`, `messagePackHex`), vendored unedited in
+  `crates/huginn-mind/tests/fixtures/desk-feed/cultlib-3a51bbab/` (its README lists each file and
+  its vector name). Read off those bytes:
+  - **Card:** 18 keys, header `DE 00 12` (map16): `schemaVersion` plus 17 fields, in this order:
+    `fork_id, title, context, options, recommendation, depends, leans, flag, raised_in, raised_at,
+    deciders, decider_count, status, ruling, ruled_from, order, options_hash`. `raised_at` is an
+    RFC3339 string or nil, always written. `decider_count` is an integer from 1 to 64 right after
+    `deciders`. An empty `deciders` means the ids are withheld from this reader, never "no
+    deciders"; a non-empty list holds exactly `decider_count` ids.
+  - **Record:** 6 keys, header `86`: `schemaVersion, fork_id, options_hash, counted_answer_id,
+    answerer_count, answers`, so `answerer_count` is the fifth key, right before `answers`. It is
+    the number of distinct answerers over ALL the fork's stored answers, refusals included, and is
+    the same for both readers. In a non-decider's view every answerer is nil, and the count is then
+    between 1 and the number of answers (0 with no answers).
+  - **Answer:** `gamecult.desk_answer.v0` keeps its 16 keys (header `DE 00 10`); `answerer` is a
+    string or nil, nil only in a non-decider's view, with the key kept. The bytes pin a nil `answerer`
+    on two variants, `Counted` (`answer-withheld-answerer`) and `Refused` (the withheld entries). That
+    it is nullable on all four variants (`Counted`, `Revision`, `Retraction`, `Refused`) is the ruling
+    `eureka-substrate:ruling:desk-reader-counts-shape`, not a vector: CultLib's `revision` and
+    `retraction` vectors carry a string `answerer` and no CultLib vector has either nulled. Stored
+    answers always carry it.
+  - **Entry:** header `83` (`schemaVersion, card, record`). The view is read off `deciders`: a
+    non-empty `deciders` names every answerer, an empty one names none.
+  - `options_hash` does not change (still five members).
+  - **Consumers:** Bifrost branch `heimdall/desk-card-repin` (`f977a43`) vendors Huginn's desk
+    fixtures from `79d954c` and needs a re-pin after this PR. Bifrost's `DeskDocuments.cs` marks
+    `answerer_count` `JsonRequired`, so its merge must wait for `cut-desk-feed-listing`: today's door
+    does not send the field.
+  - Huginn's real types do not carry these shapes yet: `ForkCard` has no `raised_at` or
+    `decider_count`, `ForkRecord` no `answerer_count`, `ForkDeskAnswer.answerer` is a non-null
+    string, and each type refuses unknown keys. The test
+    `huginn_types_do_not_yet_carry_the_pinned_shapes` pins that gap, and
+    `cut-desk-feed-listing` closes it by decoding these same bytes into the real types.
 
 Response (`huginn.desk_response.v1`):
 
@@ -179,23 +203,21 @@ affected, because each Mind has its own socket and the client asks per Mind:
 
 An empty list is never served in place of a failure. `open_count: 0` means zero open forks.
 
-## Card fields (pending CultLib's re-pinned card vectors)
+## Card fields
 
-`raised_at` is ruled by CultLib's steward (2026-11-11). It is a required card key whose value is an
-RFC3339 string or nil, which takes the card from 16 to 17 keys in closed map-mode. Nil means unknown.
-A string is the question's first-admission time, which never moves. It is outside `options_hash`,
-which keeps its five members, so the hash vectors do not change. Huginn derives it from the
-question's admission: the `committed_at` of the receipt that first admitted the question, or for an
-imported question the source mind's `committed_at` (`imported_from.committed_at`). A value that does not
-parse as RFC3339 is served as nil. One known limit: after a campaign has moved twice (A to B to C),
-C sees B's admission time, because an import quotes its source's receipt and B's receipt is B's
+`raised_at` is a required card key whose value is an RFC3339 string or nil (CultLib #115, `af914253`).
+Nil means unknown. A string is the question's first-admission time, which never moves. It is outside
+`options_hash`, which keeps its five members, so the hash vectors do not change. Huginn derives it
+from the question's admission: the `committed_at` of the receipt that first admitted the question, or
+for an imported question the source mind's `committed_at` (`imported_from.committed_at`). A value that
+does not parse as RFC3339 is served as nil. One known limit: after a campaign has moved twice (A to B
+to C), C sees B's admission time, because an import quotes its source's receipt and B's receipt is B's
 own (follow-up `desk-raised-at-import-chain`).
 
-**No fixture here carries card bytes.** The card's key order and hex wait on the CultLib commit that
-re-pins the card vectors with `raised_at`. Until then the card is opaque to these fixtures, and
-every pinned response carries no entry. The entry-bearing fixtures (an open list page and a read
-with `raised_at` as a string and as nil) are added by `cut-desk-feed-raised-at` against that
-CultLib commit.
+The card's key order and bytes are pinned by the vendored CultLib vectors (above): `card-operator-fork`
+(`raised_at` a string), `card-raised-at-nil` and `card-withheld-deciders`. The fixtures Huginn's own
+encoders write carry no entry; entry-bearing list and read fixtures from Huginn's output are added by
+`cut-desk-feed-raised-at` and `cut-desk-feed-listing`.
 
 ## Trust boundary: what Huginn sends, what Bifrost does
 
