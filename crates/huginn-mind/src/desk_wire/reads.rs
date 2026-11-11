@@ -1,17 +1,19 @@
 //! The fork desk's read side: the card, the record, the entry and the list as Libby's closed
-//! map-mode documents (CultLib `fork-card.schema.json` at e57fbaee), their projection from the
+//! map-mode documents (CultLib `fork-card.schema.json` at d3025d3c), their projection from the
 //! stored question and desk answers, and the two Mind calls the door dispatches to,
 //! `Mind::desk_forks` and `Mind::desk_fork`. These docs, the doc of `DeskRequest` and the doc of
 //! `DeskResponse` are the reads spec.
 //!
 //! Everything in one response is read at ONE snapshot, `image.head`, returned as `as_of`; the
-//! list's `stamp` is `s<as_of>`. The calls take the call's `deciders` and nothing about who is
-//! asking: `deciders` fills each card's `deciders` and is the showability gate's input, and no
-//! call is handed the subject, so no rule here can read who the reader is. Huginn returns the
-//! whole record, every note included; Bifrost applies visibility (ruling
-//! `desk-read-visibility-whole-record`). Nothing is stored.
+//! list's `stamp` is `s<as_of>`. The calls take the call's `subject` and `deciders`: the reader is
+//! a decider when the subject is in the deciders (compared exactly, computed once per call, never
+//! stored). A decider is told the decider ids and every answerer; any other reader gets `deciders`
+//! empty, `answerer` nil, and the counts (`decider_count`, `answerer_count`) in their place (ruling
+//! `desk-read-visibility-withheld-ids`, shape `desk-reader-counts-shape`). Notes stay whole on the
+//! wire; Bifrost strips them. Nothing is stored.
 
 use super::*;
+use chrono::SecondsFormat;
 use crate::desk::answers_of;
 use crate::desk::options_hash;
 
@@ -69,7 +71,7 @@ pub enum CardStatus {
 
 /// `gamecult.fork.card.v0`: closed, her field order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "CardFields")]
 pub struct ForkCard {
     #[serde(rename = "schemaVersion")]
     pub schema_version: CardSchema,
@@ -88,7 +90,15 @@ pub struct ForkCard {
     #[serde(deserialize_with = "required")]
     #[schemars(required)]
     pub raised_in: Option<ForkRef>,
+    /// RFC3339 (UTC, seconds, `Z`) of the question's first admission, or nil when unknown. Outside `options_hash`.
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
+    pub raised_at: Option<String>,
+    /// The call's decider ids for a decider; empty for any other reader (the ids are withheld, never "no deciders").
     pub deciders: Vec<String>,
+    /// How many deciders the call names, 1 to 64, whoever the reader is. A non-empty `deciders` holds exactly this many.
+    #[schemars(range(min = 1, max = 64))]
+    pub decider_count: u64,
     pub status: CardStatus,
     #[serde(deserialize_with = "required")]
     #[schemars(required)]
@@ -98,6 +108,81 @@ pub struct ForkCard {
     /// questions (see `Mind::desk_forks`; it deviates from "the admission ordinal" only in being unique).
     pub order: u64,
     pub options_hash: String,
+}
+
+/// The card as the wire carries it, before the count is checked against the ids: `ForkCard` decodes
+/// through this and refuses a count outside 1..64 or a non-empty `deciders` of another length.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CardFields {
+    #[serde(rename = "schemaVersion")]
+    schema_version: CardSchema,
+    fork_id: String,
+    title: String,
+    context: String,
+    options: Vec<ForkOption>,
+    recommendation: String,
+    depends: Vec<String>,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
+    leans: Option<String>,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
+    flag: Option<String>,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
+    raised_in: Option<ForkRef>,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
+    /// RFC3339 (UTC, seconds, `Z`) of the question's first admission, or nil when unknown. Outside `options_hash`.
+    raised_at: Option<String>,
+    /// The call's decider ids for a decider; empty for any other reader (the ids are withheld, never "no deciders").
+    deciders: Vec<String>,
+    /// How many deciders the call names, 1 to 64, whoever the reader is. A non-empty `deciders` holds exactly this many.
+    #[schemars(range(min = 1, max = 64))]
+    decider_count: u64,
+    status: CardStatus,
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
+    ruling: Option<String>,
+    ruled_from: Vec<String>,
+    /// The question's rank: unique, 0-based, in (admission ordinal, key) order among all the Mind's
+    /// questions (see `Mind::desk_forks`; it deviates from "the admission ordinal" only in being unique).
+    order: u64,
+    options_hash: String,
+}
+
+impl TryFrom<CardFields> for ForkCard {
+    type Error = String;
+
+    fn try_from(card: CardFields) -> Result<Self, String> {
+        if !(1..=DESK_DECIDERS_MAX as u64).contains(&card.decider_count) {
+            return Err(format!("decider_count is 1 to {DESK_DECIDERS_MAX}"));
+        }
+        if !card.deciders.is_empty() && card.deciders.len() as u64 != card.decider_count {
+            return Err("deciders, when not withheld, holds exactly decider_count ids".into());
+        }
+        Ok(Self {
+            schema_version: card.schema_version,
+            fork_id: card.fork_id,
+            title: card.title,
+            context: card.context,
+            options: card.options,
+            recommendation: card.recommendation,
+            depends: card.depends,
+            leans: card.leans,
+            flag: card.flag,
+            raised_in: card.raised_in,
+            raised_at: card.raised_at,
+            deciders: card.deciders,
+            decider_count: card.decider_count,
+            status: card.status,
+            ruling: card.ruling,
+            ruled_from: card.ruled_from,
+            order: card.order,
+            options_hash: card.options_hash,
+        })
+    }
 }
 
 /// `gamecult.fork.record.v0`: the answers in admission order and the derived counted answer.
@@ -111,6 +196,8 @@ pub struct ForkRecord {
     #[serde(deserialize_with = "required")]
     #[schemars(required)]
     pub counted_answer_id: Option<String>,
+    /// Distinct answerers over ALL the fork's stored answers, refusals included; the same for every reader.
+    pub answerer_count: u64,
     pub answers: Vec<ForkDeskAnswer>,
 }
 
@@ -227,8 +314,9 @@ impl JsonSchema for ForkLimit {
     }
 }
 
-/// The card of a question held at the snapshot `docs` reads, shown to the call's `deciders`.
-fn card_of(docs: &Docs<'_>, key: &str, order: u64, question: &PipelineQuestion, deciders: &[Short]) -> ForkCard {
+/// The card of a question held at the snapshot `docs` reads, for the call's `deciders`. A reader who
+/// is a decider gets the ids; any other reader gets `deciders` empty and the count alone.
+fn card_of(docs: &Docs<'_>, key: &str, order: u64, question: &PipelineQuestion, deciders: &[Short], decider: bool) -> ForkCard {
     let open = docs.in_force(PipelineKind::Question, key);
     // The ruling that closed the fork: the in-force one that answers it (the key order picks if a second ever does).
     let ruling = (!open)
@@ -253,7 +341,9 @@ fn card_of(docs: &Docs<'_>, key: &str, order: u64, question: &PipelineQuestion, 
         leans: None,
         flag: None,
         raised_in: question.raised_in.as_ref().map(|raised| ForkRef { kind: format!("{:?}", raised.kind), id: raised.id.0.clone() }),
-        deciders: deciders.iter().map(|decider| decider.0.clone()).collect(),
+        raised_at: docs.first_admitted_at(PipelineKind::Question, key).map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        deciders: if decider { deciders.iter().map(|id| id.0.clone()).collect() } else { Vec::new() },
+        decider_count: deciders.len() as u64,
         status: if open { CardStatus::Open } else { CardStatus::Closed },
         ruling,
         ruled_from: Vec::new(),
@@ -276,12 +366,18 @@ fn ranked<'d>(docs: &'d Docs<'_>) -> Result<Vec<(u64, &'d str, &'d PipelineQuest
 }
 
 /// The record of a fork: its answers in admission order and the answer that counts at this snapshot.
-fn record_of(docs: &Docs<'_>, key: &str, options_hash: &str) -> Result<ForkRecord, MindRefusal> {
+/// `answerer_count` is over every stored answer, refusals included, for every reader; only a decider
+/// is told who the answerers are.
+fn record_of(docs: &Docs<'_>, key: &str, options_hash: &str, decider: bool) -> Result<ForkRecord, MindRefusal> {
     let mut stored: Vec<_> = answers_of(docs, key).collect();
     stored.sort_by_key(|(_, answer)| answer.sequence);
-    let answers = stored.into_iter().map(|(answer_key, answer)| project(answer_key, answer)).collect::<Result<Vec<_>, _>>()?;
+    let answerer_count = stored.iter().map(|(_, answer)| answer.answerer.0.as_str()).collect::<std::collections::BTreeSet<_>>().len() as u64;
+    let answers = stored
+        .into_iter()
+        .map(|(answer_key, answer)| project(answer_key, answer).map(|shown| if decider { shown } else { ForkDeskAnswer { answerer: None, ..shown } }))
+        .collect::<Result<Vec<_>, _>>()?;
     let counted_answer_id = counted_answer(docs, key).map(|counted| answer_seq(key, &counted).map(n_text).ok_or_else(unreadable_key)).transpose()?;
-    Ok(ForkRecord { schema_version: RecordSchema::V0, fork_id: key.into(), options_hash: options_hash.into(), counted_answer_id, answers })
+    Ok(ForkRecord { schema_version: RecordSchema::V0, fork_id: key.into(), options_hash: options_hash.into(), counted_answer_id, answerer_count, answers })
 }
 
 /// What `response` encodes to as a CultNet message with one-byte ids; `DESK_ENVELOPE_MARGIN` covers
@@ -300,9 +396,9 @@ fn held(response: &mut DeskResponse) -> &mut ForkList {
     }
 }
 
-fn entry_of(docs: &Docs<'_>, key: &str, order: u64, question: &PipelineQuestion, deciders: &[Short]) -> Result<ForkEntry, MindRefusal> {
-    let card = card_of(docs, key, order, question, deciders);
-    let record = record_of(docs, key, &card.options_hash)?;
+fn entry_of(docs: &Docs<'_>, key: &str, order: u64, question: &PipelineQuestion, deciders: &[Short], decider: bool) -> Result<ForkEntry, MindRefusal> {
+    let card = card_of(docs, key, order, question, deciders, decider);
+    let record = record_of(docs, key, &card.options_hash, decider)?;
     Ok(ForkEntry { schema_version: EntrySchema::V0, card, record })
 }
 
@@ -331,22 +427,23 @@ impl<S: MindStore> Mind<S> {
     /// The fork itself is still its whole entry on `desk_fork`; if that entry is past the reply cap the door
     /// answers the read with `fork_too_large` naming the fork (no order, no cursor), not `ResponseTooLarge`. Nothing is dropped silently.
     ///
-    /// The call is handed the call's `deciders` and no subject: they fill each card's `deciders` and
-    /// feed the showability gate, and gate nothing else. The record is whole, notes included
-    /// (ruling `desk-read-visibility-whole-record`: Bifrost applies visibility, Huginn strips nothing).
-    pub fn desk_forks(&self, deciders: &[Short], status: Option<ListStatus>, cursor: Option<ForkCursor>, limit: ForkLimit) -> DeskResponse {
-        self.forks_page(deciders, status, cursor, limit).unwrap_or_else(door_refusal)
+    /// The call's `deciders` feed the showability gate; the call's `subject` decides which view of each entry
+    /// is built (a decider's, with ids, or a non-decider's, with counts). It gates no fork. Notes stay whole
+    /// (Bifrost strips them).
+    pub fn desk_forks(&self, subject: &Short, deciders: &[Short], status: Option<ListStatus>, cursor: Option<ForkCursor>, limit: ForkLimit) -> DeskResponse {
+        self.forks_page(subject, deciders, status, cursor, limit).unwrap_or_else(door_refusal)
     }
 
     /// One fork, as the entry a page carries, read at one snapshot. A fork that is not held, is not a
-    /// question or is not showable is `fork_unknown`, the answer path's refusal. Whole record, as `desk_forks`.
-    pub fn desk_fork(&self, deciders: &[Short], fork_id: &str) -> DeskResponse {
-        self.fork_entry(deciders, fork_id).unwrap_or_else(door_refusal)
+    /// question or is not showable is `fork_unknown`, the answer path's refusal. The view is the reader's, as `desk_forks`.
+    pub fn desk_fork(&self, subject: &Short, deciders: &[Short], fork_id: &str) -> DeskResponse {
+        self.fork_entry(subject, deciders, fork_id).unwrap_or_else(door_refusal)
     }
 
-    fn forks_page(&self, deciders: &[Short], status: Option<ListStatus>, cursor: Option<ForkCursor>, limit: ForkLimit) -> Result<DeskResponse, MindRefusal> {
+    fn forks_page(&self, subject: &Short, deciders: &[Short], status: Option<ListStatus>, cursor: Option<ForkCursor>, limit: ForkLimit) -> Result<DeskResponse, MindRefusal> {
         let image = self.image()?;
         let docs = Docs::at(image, image.head);
+        let decider = deciders.contains(subject);
         let mut shown: Vec<_> = ranked(&docs)?.into_iter().filter(|(_, _, question)| showable(question, deciders)).map(|(order, key, question)| (order, key, question, docs.in_force(PipelineKind::Question, key))).collect();
         shown.reverse();
         let open_count = shown.iter().filter(|fork| fork.3).count() as u64;
@@ -378,7 +475,7 @@ impl<S: MindStore> Mind<S> {
             if held(&mut response).forks.len() == limit.get() as usize {
                 break;
             }
-            held(&mut response).forks.push(entry_of(&docs, key, *order, question, deciders)?);
+            held(&mut response).forks.push(entry_of(&docs, key, *order, question, deciders, decider)?);
             let before = held(&mut response).next_cursor;
             held(&mut response).next_cursor = if at + 1 < matching.len() { ForkCursor::new(*order) } else { None };
             let bytes = page_bytes(&response)?;
@@ -395,16 +492,17 @@ impl<S: MindStore> Mind<S> {
         Ok(response)
     }
 
-    fn fork_entry(&self, deciders: &[Short], fork_id: &str) -> Result<DeskResponse, MindRefusal> {
+    fn fork_entry(&self, subject: &Short, deciders: &[Short], fork_id: &str) -> Result<DeskResponse, MindRefusal> {
         let image = self.image()?;
         let docs = Docs::at(image, image.head);
+        let decider = deciders.contains(subject);
         let Some((order, key, question)) = ranked(&docs)?.into_iter().find(|(_, key, _)| *key == fork_id) else {
             return Ok(DeskResponse::NotStored(fork_unknown()));
         };
         if !showable(question, deciders) {
             return Ok(DeskResponse::NotStored(fork_unknown()));
         }
-        Ok(DeskResponse::Fork { entry: entry_of(&docs, key, order, question, deciders)?, as_of: image.head })
+        Ok(DeskResponse::Fork { entry: entry_of(&docs, key, order, question, deciders, decider)?, as_of: image.head })
     }
 }
 
@@ -413,6 +511,7 @@ mod tests {
     use super::*;
     use crate::envelope::{decode_desk_request, encode_desk_request, encode_desk_response};
     use crate::fixtures::*;
+    use chrono::TimeZone;
     use crate::store::test_stores::MemoryStore;
     use crate::{Faculty, PipelineAdmissionBatch, PipelineAdmissionOutcome};
     use eureka_pipeline::{Line, PipelineRef, QuestionOption};
@@ -506,7 +605,7 @@ mod tests {
     }
 
     fn all(mind: &Mind<MemoryStore>, n: u8) -> ForkList {
-        page(mind.desk_forks(&list(&LIST), None, None, limit(n))).0
+        page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(n))).0
     }
 
     // ---- the reads, one snapshot ----
@@ -517,7 +616,7 @@ mod tests {
         let stale = answer(&mut mind, "x", &LIST, &fork(1), &"0".repeat(64), None);
         let DeskResponse::Answered { answer: stale, .. } = stale else { panic!("a stale answer is stored") };
         assert_eq!(stale.code, Some(ForkAnswerCode::StaleFork));
-        let (shown, _) = entry(mind.desk_fork(&list(&LIST), &fork(1)));
+        let (shown, _) = entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(1)));
         assert_eq!(shown.card.options_hash, hash_of(&mind, &fork(1)));
         assert_ne!(shown.card.options_hash, "0".repeat(64));
         assert_eq!((shown.record.answers.len(), shown.record.counted_answer_id.clone()), (1, None));
@@ -528,7 +627,7 @@ mod tests {
         };
         assert_eq!((counted.outcome.as_str(), counted.answer_id.as_str()), ("Counted", "n2"));
         assert_eq!(counted_answer_id.as_deref(), Some("n2"));
-        let (after, _) = entry(mind.desk_fork(&list(&LIST), &fork(1)));
+        let (after, _) = entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(1)));
         assert_eq!(after.record.counted_answer_id.as_deref(), Some("n2"));
         let names: Vec<_> = after.record.answers.iter().map(|answer| answer.answer_id.as_str()).collect();
         assert_eq!(names, ["n1", "n2"], "answers in admission order, named n<seq>");
@@ -537,23 +636,23 @@ mod tests {
     #[test]
     fn list_then_read_at_one_stamp() {
         let mut mind = desk(3);
-        let (first, as_of) = page(mind.desk_forks(&list(&LIST), None, None, limit(2)));
+        let (first, as_of) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(2)));
         assert_eq!(as_of, head(&mind));
         assert_eq!(first.stamp, format!("s{as_of}"));
         assert_eq!(first.mind, INSTANCE);
         assert_eq!(ids(&first), [fork(3), fork(2)]);
         let next = first.next_cursor.expect("one more fork waits");
         assert_eq!(next.order(), first.forks[1].card.order);
-        let (second, _) = page(mind.desk_forks(&list(&LIST), None, Some(next), limit(2)));
+        let (second, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, Some(next), limit(2)));
         assert_eq!((ids(&second), second.next_cursor), (vec![fork(1)], None));
         // The read at that stamp is the entry the list carried.
-        let (read, read_at) = entry(mind.desk_fork(&list(&LIST), &fork(2)));
+        let (read, read_at) = entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(2)));
         assert_eq!(read_at, as_of);
         assert_eq!(read, first.forks[1]);
         // Writing moves the stamp, and only then.
         let hash = hash_of(&mind, &fork(2));
         answer(&mut mind, "x", &LIST, &fork(2), &hash, None);
-        let (moved, moved_at) = page(mind.desk_forks(&list(&LIST), None, None, limit(2)));
+        let (moved, moved_at) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(2)));
         assert_eq!((moved.stamp.clone(), moved_at), (format!("s{}", head(&mind)), head(&mind)));
         assert_ne!(moved.stamp, first.stamp);
         assert_eq!(moved.forks[1].record.answers.len(), 1);
@@ -572,17 +671,17 @@ mod tests {
         assert_eq!(ForkCursor::new(0), None, "no cursor names rank 0: nothing is below it");
         for (at, expected) in [(0, 3), (1, 2), (2, 1)] {
             let below = ForkCursor::new(orders[at]).unwrap();
-            let (rest, _) = page(mind.desk_forks(&list(&LIST), None, Some(below), limit(50)));
+            let (rest, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, Some(below), limit(50)));
             assert_eq!(rest.forks.len(), expected, "below order {}", orders[at]);
             assert!(rest.forks.iter().all(|entry| entry.card.order < orders[at]));
         }
         // A page that stops short names the last order it returned.
-        let (short, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(1)));
+        let (short, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(1)));
         assert_eq!((ids(&short), short.next_cursor.map(ForkCursor::order)), (vec![fork(4)], Some(orders[0])));
         // A page that ends exactly on the last fork has no cursor.
-        let (exact, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(4)));
+        let (exact, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(4)));
         assert_eq!((exact.forks.len(), exact.next_cursor), (4, None));
-        let (over, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(50)));
+        let (over, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(50)));
         assert_eq!(over.forks.len(), 4);
     }
 
@@ -595,7 +694,7 @@ mod tests {
         for status in [None, Some(ListStatus::Open), Some(ListStatus::Recorded)] {
             for cursor in [None, ForkCursor::new(1), ForkCursor::new(3), ForkCursor::new(1000)] {
                 for size in [0, 1, 50] {
-                    let (shown, _) = page(mind.desk_forks(&list(&LIST), status, cursor, limit(size)));
+                    let (shown, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), status, cursor, limit(size)));
                     assert_eq!((shown.open_count, shown.recorded_count), expected, "{status:?} {cursor:?} {size}");
                     assert!(shown.forks.len() <= size as usize);
                     for entry in &shown.forks {
@@ -609,31 +708,31 @@ mod tests {
                 }
             }
         }
-        let (open, _) = page(mind.desk_forks(&list(&LIST), Some(ListStatus::Open), None, limit(50)));
+        let (open, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), Some(ListStatus::Open), None, limit(50)));
         assert_eq!(ids(&open), [fork(5), fork(3), fork(2)]);
-        let (recorded, _) = page(mind.desk_forks(&list(&LIST), Some(ListStatus::Recorded), None, limit(50)));
+        let (recorded, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), Some(ListStatus::Recorded), None, limit(50)));
         assert_eq!(ids(&recorded), [fork(4), fork(1)]);
         // A cursor and a status together: the cards below the cursor that have the status.
         let below_four = ForkCursor::new(recorded.forks[0].card.order);
-        let (rest, _) = page(mind.desk_forks(&list(&LIST), Some(ListStatus::Open), below_four, limit(50)));
+        let (rest, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), Some(ListStatus::Open), below_four, limit(50)));
         assert_eq!(ids(&rest), [fork(3), fork(2)]);
     }
 
     #[test]
     fn limit_zero_is_the_counts_and_the_stamp_and_no_entries() {
         let mind = desk(3);
-        let (counts, as_of) = page(mind.desk_forks(&list(&LIST), None, None, limit(0)));
+        let (counts, as_of) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(0)));
         assert_eq!((counts.forks.len(), counts.next_cursor), (0, None));
         assert_eq!((counts.open_count, counts.recorded_count), (3, 0));
         assert_eq!((counts.stamp, as_of), (format!("s{}", head(&mind)), head(&mind)));
-        let (one, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(1)));
+        let (one, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(1)));
         assert_eq!(one.forks.len(), 1, "limit 1 is one entry, not none");
     }
 
     #[test]
     fn a_desk_with_no_forks_is_an_empty_page() {
         let mind = seeded();
-        let (empty, as_of) = page(mind.desk_forks(&list(&LIST), None, None, limit(10)));
+        let (empty, as_of) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(10)));
         assert_eq!((empty.open_count, empty.recorded_count, empty.forks.len(), empty.next_cursor), (0, 0, 0, None));
         assert_eq!(empty.stamp, format!("s{as_of}"));
     }
@@ -658,11 +757,11 @@ mod tests {
         let shown = all(&mind, 50);
         assert_eq!(ids(&shown), [fork(2), fork(1)]);
         assert_eq!((shown.open_count, shown.recorded_count), (2, 0), "the count is over the showable set");
-        unknown(mind.desk_fork(&list(&LIST), &unshowable));
+        unknown(mind.desk_fork(&s(LIST[0]), &list(&LIST), &unshowable));
         // No decider, nothing is shown at all: the gate needs one.
-        let (none, _) = page(mind.desk_forks(&[], None, None, limit(50)));
+        let (none, _) = page(mind.desk_forks(&s(LIST[0]), &[], None, None, limit(50)));
         assert_eq!((none.forks.len(), none.open_count, none.recorded_count), (0, 0, 0));
-        unknown(mind.desk_fork(&[], &fork(1)));
+        unknown(mind.desk_fork(&s(LIST[0]), &[], &fork(1)));
     }
 
     #[test]
@@ -671,37 +770,235 @@ mod tests {
         close(&mut mind, &fork(1), "R1");
         let ruling_key = format!("{CAMPAIGN_ROOT}:ruling:R1");
         for id in [fork(9).as_str(), "", "Q1", "no-colons", "eureka-state:question:", ruling_key.as_str(), &"x".repeat(5000), "other-campaign:question:Q1"] {
-            unknown(mind.desk_fork(&list(&LIST), id));
+            unknown(mind.desk_fork(&s(LIST[0]), &list(&LIST), id));
         }
         // And nothing was written by looking.
         let before = head(&mind);
-        let _ = mind.desk_fork(&list(&LIST), &fork(1));
-        let _ = mind.desk_forks(&list(&LIST), None, None, limit(50));
+        let _ = mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(1));
+        let _ = mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(50));
         assert_eq!(head(&mind), before);
     }
 
-    // ---- the trust boundary: the whole record, whoever asks ----
+    // ---- the reader's view: ids for a decider, counts for anyone else ----
 
-    #[test]
-    fn the_whole_record_comes_back_whoever_the_deciders_list_leaves_out() {
+    const ANNA: &str = "00000000-0000-4000-8000-0000000000a1";
+    const BEN: &str = "00000000-0000-4000-8000-0000000000b2";
+    const CORA: &str = "00000000-0000-4000-8000-0000000000c3";
+    const DAN: &str = "00000000-0000-4000-8000-0000000000d4";
+
+    /// Two forks. Fork 1: Anna answers, Ben revises over her, Cora (not on the call's list) is refused,
+    /// and Ben answers a second time (a retraction): four stored answers, three answerers.
+    fn answered_desk() -> Mind<MemoryStore> {
         let mut mind = desk(2);
         let hash = hash_of(&mind, &fork(1));
-        let note = "Keep it local: a slot mark is the author's call.";
-        // Y, a decider of that call, answers with a note; a stranger is refused with a note too.
-        answer(&mut mind, "y", &LIST, &fork(1), &hash, Some(note));
-        answer(&mut mind, "stranger", &LIST, &fork(1), &hash, Some("a refused person's words"));
-        // The reads carry another list that names neither of them: no call is handed a subject.
-        let narrow = list(&["x"]);
-        let (read, _) = entry(mind.desk_fork(&narrow, &fork(1)));
-        let notes: Vec<_> = read.record.answers.iter().map(|answer| (answer.answerer.as_str(), answer.note.as_deref())).collect();
-        assert_eq!(notes, [("y", Some(note)), ("stranger", Some("a refused person's words"))]);
-        let (listed, _) = page(mind.desk_forks(&narrow, None, None, limit(50)));
-        assert_eq!(listed.forks[1], read, "the list carries the same whole record");
-        // The list only fills the card.
-        assert_eq!(read.card.deciders, ["x"]);
-        let (wide, _) = entry(mind.desk_fork(&list(&["x", "y", "z"]), &fork(1)));
-        assert_eq!(wide.card.deciders, ["x", "y", "z"]);
-        assert_eq!(ForkEntry { card: ForkCard { deciders: read.card.deciders.clone(), ..wide.card.clone() }, ..wide }, read, "nothing else moved");
+        let deciders = [ANNA, BEN];
+        answer(&mut mind, ANNA, &deciders, &fork(1), &hash, Some("Anna's note"));
+        answer(&mut mind, BEN, &deciders, &fork(1), &hash, Some("Ben's note"));
+        answer(&mut mind, CORA, &deciders, &fork(1), &hash, Some("Cora's note"));
+        answer(&mut mind, BEN, &deciders, &fork(1), &hash, Some("Ben again"));
+        // Ben retracts Anna's first answer: a Retraction row, so the non-decider view must null it too.
+        let retraction = ForkAnswerRequest {
+            schema_version: RequestSchema::V0,
+            fork_id: fork(1),
+            options_hash: hash.clone(),
+            answer: None,
+            retracted: true,
+            retracts: Some("n1".into()),
+            answered_at: "2026-09-16T11:00:00Z".into(),
+            request_id: request_id(),
+        };
+        mind.desk_answer(&list(&deciders), s(BEN), DeskAuthority::Member, retraction, now());
+        mind
+    }
+
+    fn reader(mind: &Mind<MemoryStore>, subject: &str, deciders: &[&str]) -> (ForkList, ForkEntry, Vec<u8>) {
+        let (page, _) = page(mind.desk_forks(&s(subject), &list(deciders), None, None, limit(50)));
+        let response = mind.desk_fork(&s(subject), &list(deciders), &fork(1));
+        let bytes = encode_desk_response("m", "fork", &response, "r").unwrap();
+        let bytes = cultnet_rs::encode_cultnet_message_to_vec(&bytes, cultnet_rs::CultNetWireContract::CultNetSchemaV0).unwrap();
+        let (entry, _) = entry(response);
+        (page, entry, bytes)
+    }
+
+    fn holds(bytes: &[u8], text: &str) -> bool {
+        bytes.windows(text.len()).any(|window| window == text.as_bytes())
+    }
+
+    /// Negative first: whoever is not a decider is told no account id, in the card, the record or the bytes.
+    #[test]
+    fn a_non_decider_is_told_no_account_id_only_counts() {
+        let mind = answered_desk();
+        let (listed, read, bytes) = reader(&mind, DAN, &[ANNA, BEN]);
+        for id in [ANNA, BEN, CORA, DAN] {
+            assert!(!holds(&bytes, id), "the read carries {id}");
+            let list_bytes = rmp_serde::to_vec_named(&listed).unwrap();
+            assert!(!holds(&list_bytes, id), "the list carries {id}");
+        }
+        for card in listed.forks.iter().map(|entry| &entry.card).chain([&read.card]) {
+            assert!(card.deciders.is_empty(), "withheld, never no deciders");
+            assert_eq!(card.decider_count, 2);
+        }
+        assert_eq!(read.record.answers.len(), 5);
+        assert!(read.record.answers.iter().any(|shown| shown.outcome == "Retraction"), "the retraction row is there and nulled too");
+        assert!(read.record.answers.iter().all(|shown| shown.answerer.is_none()), "the key is written, null");
+        assert_eq!(read.record.answerer_count, 3, "Anna, Ben and the refused Cora");
+        // The other fork has no answers: zero answerers.
+        assert_eq!(listed.forks.iter().find(|entry| entry.card.fork_id == fork(2)).unwrap().record.answerer_count, 0);
+        // Notes stay whole on the wire.
+        assert_eq!(read.record.answers[0].note.as_deref(), Some("Anna's note"));
+    }
+
+    #[test]
+    fn a_decider_is_told_the_ids_and_the_same_counts() {
+        let mind = answered_desk();
+        let (_, as_decider, _) = reader(&mind, ANNA, &[ANNA, BEN]);
+        let (_, as_other, _) = reader(&mind, DAN, &[ANNA, BEN]);
+        assert_eq!(as_decider.card.deciders, [ANNA, BEN]);
+        assert_eq!(as_decider.card.decider_count, 2);
+        let named: Vec<_> = as_decider.record.answers.iter().map(|shown| shown.answerer.as_deref().unwrap()).collect();
+        assert_eq!(named, [ANNA, BEN, CORA, BEN, BEN]);
+        assert_eq!(as_decider.record.answerer_count, 3);
+        // Nothing else differs between the two views.
+        let blind = ForkEntry {
+            card: ForkCard { deciders: Vec::new(), ..as_decider.card.clone() },
+            record: ForkRecord { answers: as_decider.record.answers.iter().map(|shown| ForkDeskAnswer { answerer: None, ..shown.clone() }).collect(), ..as_decider.record.clone() },
+            ..as_decider
+        };
+        assert_eq!(blind, as_other);
+    }
+
+    #[test]
+    fn decider_means_subject_in_this_calls_deciders() {
+        let mind = answered_desk();
+        let (_, with, _) = reader(&mind, DAN, &[ANNA, DAN]);
+        assert_eq!(with.card.deciders, [ANNA, DAN]);
+        let (_, without, _) = reader(&mind, DAN, &[ANNA, BEN]);
+        assert!(without.card.deciders.is_empty());
+        // Exact, byte for byte: a longer or different-case subject is not a decider.
+        let (_, longer, _) = reader(&mind, &format!("{ANNA}0"), &[ANNA, BEN]);
+        assert!(longer.card.deciders.is_empty());
+    }
+
+    #[test]
+    fn the_answer_path_still_names_its_answerer() {
+        let mut mind = desk(1);
+        let hash = hash_of(&mind, &fork(1));
+        let DeskResponse::Answered { answer, .. } = answer(&mut mind, ANNA, &[ANNA], &fork(1), &hash, None) else { panic!("an answer") };
+        assert_eq!(answer.answerer.as_deref(), Some(ANNA));
+    }
+
+    // ---- raised_at: the question's first admission ----
+
+    fn raised_at(mind: &Mind<MemoryStore>, fork_id: &str) -> Option<String> {
+        entry(mind.desk_fork(&s(ANNA), &list(&[ANNA]), fork_id)).0.card.raised_at
+    }
+
+    #[test]
+    fn raised_at_is_the_first_admission_and_never_moves() {
+        let mut mind = seeded();
+        let first = chrono::Utc.with_ymd_and_hms(2026, 10, 1, 8, 30, 0).unwrap();
+        committed(admit_at(&mut mind, vec![question_n(1)], first));
+        assert_eq!(raised_at(&mind, &fork(1)).as_deref(), Some("2026-10-01T08:30:00Z"));
+        // Later admissions: an answer, a ruling that closes it, other questions.
+        let hash = hash_of(&mind, &fork(1));
+        answer(&mut mind, ANNA, &[ANNA], &fork(1), &hash, None);
+        close(&mut mind, &fork(1), "R1");
+        committed(admit(&mut mind, vec![question_n(2)]));
+        assert_eq!(raised_at(&mind, &fork(1)).as_deref(), Some("2026-10-01T08:30:00Z"));
+        assert_eq!(raised_at(&mind, &fork(2)).as_deref(), Some("2026-09-16T12:00:00Z"));
+    }
+
+    fn imported_question(mind: &mut Mind<MemoryStore>, committed_at: &str) -> String {
+        let source = |ordinal: u64, committed_at: &str| crate::receipt::ImportSource {
+            instance: slug(crate::fixtures::OTHER_INSTANCE),
+            receipt_id: s(&format!("mind-commit-source-{ordinal}")),
+            ordinal,
+            committed_at: s(committed_at),
+            faculty: Faculty::Imagination,
+            agent: s("imagination"),
+            session: s("source-session"),
+            tool: s("huginn"),
+            external: vec![],
+        };
+        let import = |source, documents: Vec<PipelineDocument>| PipelineAdmissionBatch {
+            instance: INSTANCE.into(),
+            provenance: crate::receipt::PipelineProvenance { faculty: Faculty::SelfFaculty, agent: s("self"), session: s("import-1"), tool: s("huginn"), imported_from: Some(source) },
+            documents,
+        };
+        let D::Campaign(mut other) = campaign(&[REPO]) else { unreachable!() };
+        other.slug = slug("other-campaign");
+        committed(mind.admit(import(source(1, "2026-11-08T16:00:00Z"), vec![D::Campaign(other)]), now()));
+        let D::Question(mut doc) = question_n(7) else { unreachable!() };
+        doc.campaign = slug("other-campaign");
+        committed(mind.admit(import(source(2, committed_at), vec![D::Question(doc)]), now()));
+        "other-campaign:question:Q7".into()
+    }
+
+    #[test]
+    fn an_imported_question_keeps_its_source_time() {
+        let mut mind = seeded();
+        let id = imported_question(&mut mind, "2026-11-08T16:20:05+02:00");
+        assert_eq!(raised_at(&mind, &id).as_deref(), Some("2026-11-08T14:20:05Z"), "the source's time, in UTC, not the import's");
+    }
+
+    /// CultLib's instant has four year digits: a time whose UTC year leaves 0..=9999 is served nil.
+    #[test]
+    fn an_import_time_outside_year_0_to_9999_in_utc_is_nil() {
+        for committed_at in ["0000-01-01T00:00:00+05:00", "9999-12-31T23:59:59-05:00"] {
+            let mut mind = seeded();
+            let id = imported_question(&mut mind, committed_at);
+            assert_eq!(raised_at(&mind, &id), None, "{committed_at}");
+        }
+        let mut mind = seeded();
+        let id = imported_question(&mut mind, "9999-12-31T23:59:59Z");
+        assert_eq!(raised_at(&mind, &id).as_deref(), Some("9999-12-31T23:59:59Z"));
+    }
+
+    #[test]
+    fn an_unparseable_import_time_is_nil() {
+        let mut mind = seeded();
+        let id = imported_question(&mut mind, "last tuesday");
+        assert_eq!(raised_at(&mind, &id), None);
+    }
+
+    #[test]
+    fn raised_at_is_outside_options_hash() {
+        let mind = desk(1);
+        let (read, _) = entry(mind.desk_fork(&s(ANNA), &list(&[ANNA]), &fork(1)));
+        let moved = ForkCard { raised_at: Some("2020-01-01T00:00:00Z".into()), ..read.card.clone() };
+        assert_ne!(moved.raised_at, read.card.raised_at);
+        assert_eq!(moved.options_hash, read.card.options_hash);
+        assert_eq!(read.card.options_hash, hash_of(&mind, &fork(1)));
+    }
+
+    // ---- the card refuses a count that does not match ----
+
+    fn card_with(deciders: usize, decider_count: u64) -> Vec<u8> {
+        let mind = desk(1);
+        let (read, _) = entry(mind.desk_fork(&s(ANNA), &list(&[ANNA]), &fork(1)));
+        let ids: Vec<String> = (0..deciders).map(|n| format!("00000000-0000-4000-8000-{n:012x}")).collect();
+        rmp_serde::to_vec_named(&ForkCard { deciders: ids, decider_count, ..read.card }).unwrap()
+    }
+
+    #[test]
+    fn a_card_whose_deciders_do_not_match_its_count_is_refused() {
+        let decode = |bytes: &[u8]| rmp_serde::from_slice::<ForkCard>(bytes);
+        for (deciders, count) in [(2, 3), (3, 2), (1, 0), (0, 0), (0, 65), (65, 65), (2, 1)] {
+            assert!(decode(&card_with(deciders, count)).is_err(), "{deciders} ids, count {count}");
+        }
+        for (deciders, count) in [(0, 1), (0, 64), (1, 1), (2, 2), (64, 64)] {
+            assert!(decode(&card_with(deciders, count)).is_ok(), "{deciders} ids, count {count}");
+        }
+    }
+
+    #[test]
+    fn a_card_without_raised_at_is_refused() {
+        let bytes = card_with(1, 1);
+        let mut value: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+        value.as_object_mut().unwrap().remove("raised_at");
+        assert!(rmp_serde::from_slice::<ForkCard>(&rmp_serde::to_vec_named(&value).unwrap()).is_err());
+        value.as_object_mut().unwrap().insert("raised_at".into(), serde_json::Value::Null);
+        assert!(rmp_serde::from_slice::<ForkCard>(&rmp_serde::to_vec_named(&value).unwrap()).is_ok());
     }
 
     // ---- the projection ----
@@ -718,7 +1015,7 @@ mod tests {
         held.raised_in = Some(PipelineRef { kind: PipelineKind::Ruling, id: s("eureka-state:ruling:R0") });
         committed(admit(&mut mind, vec![D::Ruling(ruling("R0"))]));
         committed(admit(&mut mind, vec![shown]));
-        let (read, _) = entry(mind.desk_fork(&list(&LIST), &fork(1)));
+        let (read, _) = entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(1)));
         let card = &read.card;
         assert_eq!((card.fork_id.as_str(), card.title.as_str(), card.context.as_str()), (fork(1).as_str(), "Share the mark?", "Should a slot mark be shared?"));
         let options: Vec<_> = card.options.iter().map(|option| (option.id.as_str(), option.text.as_str())).collect();
@@ -738,9 +1035,9 @@ mod tests {
     fn a_ruling_closes_the_card_and_names_itself() {
         let mut mind = desk(2);
         close(&mut mind, &fork(1), "R1");
-        let (closed, _) = entry(mind.desk_fork(&list(&LIST), &fork(1)));
+        let (closed, _) = entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(1)));
         assert_eq!((closed.card.status, closed.card.ruling.as_deref()), (CardStatus::Closed, Some("eureka-state:ruling:R1")));
-        let (open, _) = entry(mind.desk_fork(&list(&LIST), &fork(2)));
+        let (open, _) = entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(2)));
         assert_eq!((open.card.status, open.card.ruling), (CardStatus::Open, None));
     }
 
@@ -750,7 +1047,7 @@ mod tests {
         let hash = hash_of(&mind, &fork(1));
         answer(&mut mind, "x", &LIST, &fork(1), &hash, None);
         answer(&mut mind, "y", &LIST, &fork(1), &hash, None);
-        let (read, _) = entry(mind.desk_fork(&list(&LIST), &fork(1)));
+        let (read, _) = entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(1)));
         assert_eq!(read.record.counted_answer_id.as_deref(), Some("n1"));
         let outcomes: Vec<_> = read.record.answers.iter().map(|answer| (answer.outcome.as_str(), answer.of.as_deref())).collect();
         assert_eq!(outcomes, [("Counted", None), ("Revision", Some("n1"))]);
@@ -767,7 +1064,7 @@ mod tests {
         };
         let stored = mind.desk_answer(&list(&LIST), s("x"), DeskAuthority::Member, retract, now());
         assert!(matches!(stored, DeskResponse::Answered { .. }));
-        let (after, _) = entry(mind.desk_fork(&list(&LIST), &fork(1)));
+        let (after, _) = entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(1)));
         assert_eq!(after.record.counted_answer_id.as_deref(), Some("n2"));
     }
 
@@ -789,7 +1086,7 @@ mod tests {
     fn entry_and_list_vectors_round_trip_byte_for_byte() {
         let file = transport();
         let entries = file["entry"]["valid"].as_array().unwrap();
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 8);
         for row in entries {
             let bytes = bytes_of(row["messagePackHex"].as_str().unwrap());
             let decoded: ForkEntry = rmp_serde::from_slice(&bytes).unwrap();
@@ -797,7 +1094,7 @@ mod tests {
             assert_eq!(decoded, serde_json::from_value::<ForkEntry>(row["message"].clone()).unwrap(), "{}", row["name"]);
         }
         let scenarios = file["listScenarios"].as_array().unwrap();
-        assert_eq!(scenarios.len(), 6);
+        assert_eq!(scenarios.len(), 9);
         let mut steps = 0;
         for scenario in scenarios {
             for step in scenario["steps"].as_array().unwrap() {
@@ -808,7 +1105,7 @@ mod tests {
                 steps += 1;
             }
         }
-        assert_eq!(steps, 9);
+        assert_eq!(steps, 12);
     }
 
     /// CultLib f6c9bf5f: the short-page and too-large vectors. What Huginn can judge replays: the short
@@ -1058,7 +1355,7 @@ mod tests {
     fn pages(mind: &Mind<MemoryStore>, size: u8) -> Vec<(DeskResponse, ForkList)> {
         let (mut cursor, mut out) = (None, Vec::new());
         loop {
-            let response = mind.desk_forks(&list(&LIST), None, cursor, limit(size));
+            let response = mind.desk_forks(&s(LIST[0]), &list(&LIST), None, cursor, limit(size));
             let (page, _) = page(response.clone());
             cursor = page.next_cursor;
             out.push((response, page));
@@ -1109,7 +1406,7 @@ mod tests {
             }
             mind
         };
-        let first_page = |mind: &Mind<MemoryStore>| page(mind.desk_forks(&list(&LIST), None, None, limit(50))).0;
+        let first_page = |mind: &Mind<MemoryStore>| page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(50))).0;
         // The most forks that fit one page with the oldest one's text short.
         let fits = (2..=50).take_while(|forks| first_page(&build(*forks, 300)).forks.len() == *forks as usize).last().expect("two fit");
         assert!(fits < 50, "the desk outgrows a page");
@@ -1120,18 +1417,18 @@ mod tests {
             if first_page(&build(fits, mid)).forks.len() == fits as usize { low = mid } else { high = mid }
         }
         let (in_page, over) = (build(fits, low), build(fits, low + 1));
-        let held = page(in_page.desk_forks(&list(&LIST), None, None, limit(50)));
+        let held = page(in_page.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(50)));
         assert_eq!((held.0.forks.len(), held.0.next_cursor), (fits as usize, None));
         let size = bare(&DeskResponse::Forks { list: held.0, as_of: held.1 });
         // The wire grows in steps of up to three bytes per text byte, so "exact" is within one step.
         assert!(size <= DESK_PAGE_BUDGET && DESK_PAGE_BUDGET - size < 4, "{size} against {DESK_PAGE_BUDGET}");
-        let (moved, _) = page(over.desk_forks(&list(&LIST), None, None, limit(50)));
+        let (moved, _) = page(over.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(50)));
         assert_eq!(moved.forks.len(), fits as usize - 1, "one byte more and the oldest fork goes to the next page");
         // The page it would have been, composed from the single reads, is past the budget.
-        let would_be = ForkList { forks: (1..=fits).rev().map(|n| entry(over.desk_fork(&list(&LIST), &fork(n))).0).collect(), next_cursor: None, ..moved.clone() };
+        let would_be = ForkList { forks: (1..=fits).rev().map(|n| entry(over.desk_fork(&s(LIST[0]), &list(&LIST), &fork(n))).0).collect(), next_cursor: None, ..moved.clone() };
         assert!(bare(&DeskResponse::Forks { list: would_be, as_of: head(&over) }) > DESK_PAGE_BUDGET);
         assert_eq!(moved.next_cursor.map(ForkCursor::order), moved.forks.last().map(|entry| entry.card.order));
-        let (rest, _) = page(over.desk_forks(&list(&LIST), None, moved.next_cursor, limit(50)));
+        let (rest, _) = page(over.desk_forks(&s(LIST[0]), &list(&LIST), None, moved.next_cursor, limit(50)));
         assert_eq!(ids(&rest), [fork(1)]);
     }
 
@@ -1140,7 +1437,7 @@ mod tests {
         let hash = hash_of(mind, &fork(n));
         let note = "a long reason, ".repeat(60);
         let mut added = 0;
-        while bare(&mind.desk_fork(&list(&LIST), &fork(n))) <= bytes {
+        while bare(&mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(n))) <= bytes {
             let DeskResponse::Answered { .. } = answer(mind, "x", &LIST, &fork(n), &hash, Some(&note)) else { panic!("the note was not stored") };
             added += 1;
             assert!(added < 200, "the record does not grow");
@@ -1160,18 +1457,18 @@ mod tests {
         let mut mind = desk(3);
         grown_past(&mut mind, 2, DESK_PAGE_BUDGET);
         // The newest fork pages alone: the oversize one would bust the page beside it.
-        let (first, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(50)));
+        let (first, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(50)));
         assert_eq!(ids(&first), [fork(3)]);
         assert_eq!(first.next_cursor.map(ForkCursor::order), Some(2));
-        let response = mind.desk_forks(&list(&LIST), None, first.next_cursor, limit(50));
+        let response = mind.desk_forks(&s(LIST[0]), &list(&LIST), None, first.next_cursor, limit(50));
         let DeskResponse::NotStored(refusal) = response else { panic!("{response:?}") };
         assert_eq!(refusal.code, ForkRefusalCode::ForkTooLarge);
         let order = 1;
         assert_eq!(refusal.error, fork_too_large(&fork(2), order).error);
         assert!(refusal.error.contains(&fork(2)) && refusal.error.contains("order 1"), "{refusal:?}");
         // The order the refusal names is the order of the fork it names; its cursor goes on past it.
-        assert_eq!(entry(mind.desk_fork(&list(&LIST), &fork(2))).0.card.order, order);
-        let (rest, _) = page(mind.desk_forks(&list(&LIST), None, ForkCursor::new(order), limit(50)));
+        assert_eq!(entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(2))).0.card.order, order);
+        let (rest, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, ForkCursor::new(order), limit(50)));
         assert_eq!((ids(&rest), rest.next_cursor), (vec![fork(1)], None));
     }
 
@@ -1202,13 +1499,13 @@ mod tests {
     fn a_rank_is_stable_when_more_questions_are_admitted() {
         let mut mind = seeded();
         committed(admit(&mut mind, (1..=5).map(question_n).collect()));
-        let (first, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(2)));
+        let (first, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(2)));
         assert_eq!((orders(&first), first.next_cursor.map(ForkCursor::order)), (vec![4, 3], Some(3)));
         let held = first.next_cursor;
-        let (before, _) = page(mind.desk_forks(&list(&LIST), None, held, limit(50)));
+        let (before, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, held, limit(50)));
         committed(admit(&mut mind, vec![question_n(6)]));
         committed(admit(&mut mind, vec![question_n(0)]));
-        let (after, _) = page(mind.desk_forks(&list(&LIST), None, held, limit(50)));
+        let (after, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, held, limit(50)));
         assert_eq!((after.forks, after.next_cursor), (before.forks, before.next_cursor), "the cursor from before resumes the same forks");
         let everything = all(&mind, 50);
         assert_eq!(ids(&everything), [fork(0), fork(6), fork(5), fork(4), fork(3), fork(2), fork(1)]);
@@ -1237,9 +1534,9 @@ mod tests {
         admit_unshowable(&mut mind, "Q2");
         committed(admit(&mut mind, vec![question_n(3)]));
         for who in [&LIST[..], &["x"][..], &["z"][..]] {
-            let (shown, _) = page(mind.desk_forks(&list(who), None, None, limit(50)));
+            let (shown, _) = page(mind.desk_forks(&s(LIST[0]), &list(who), None, None, limit(50)));
             assert_eq!((ids(&shown), orders(&shown)), (vec![fork(3), fork(1)], vec![2, 0]), "{who:?}: rank 1 is the gap");
-            assert_eq!(entry(mind.desk_fork(&list(who), &fork(3))).0.card.order, 2, "{who:?}");
+            assert_eq!(entry(mind.desk_fork(&s(LIST[0]), &list(who), &fork(3))).0.card.order, 2, "{who:?}");
         }
         committed(admit(&mut mind, vec![question_n(4)]));
         assert_eq!(orders(&all(&mind, 50)), [3, 2, 0]);
@@ -1252,11 +1549,11 @@ mod tests {
         let mut mind = desk(2);
         for n in [1, 2] {
             grown_past(&mut mind, n, DESK_PAGE_BUDGET * 55 / 100);
-            assert!(bare(&mind.desk_fork(&list(&LIST), &fork(n))) <= DESK_PAGE_BUDGET, "each fork alone fits");
+            assert!(bare(&mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(n))) <= DESK_PAGE_BUDGET, "each fork alone fits");
         }
-        let (one, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(50)));
+        let (one, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, None, limit(50)));
         assert_eq!((ids(&one), one.next_cursor.map(ForkCursor::order)), (vec![fork(2)], Some(1)));
-        let (rest, _) = page(mind.desk_forks(&list(&LIST), None, one.next_cursor, limit(50)));
+        let (rest, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, one.next_cursor, limit(50)));
         assert_eq!((ids(&rest), rest.next_cursor), (vec![fork(1)], None));
     }
 
@@ -1287,9 +1584,9 @@ mod tests {
         assert_eq!(after.len(), 70);
         assert_eq!(after.iter().map(|(_, order)| *order).collect::<std::collections::BTreeSet<_>>(), (0..70).collect());
         // The page boundary at c1: the page ending at order 1 names c1, and the next page is order 0 alone.
-        let (upper, _) = page(mind.desk_forks(&list(&LIST), None, ForkCursor::new(3), limit(2)));
+        let (upper, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, ForkCursor::new(3), limit(2)));
         assert_eq!((orders(&upper), upper.next_cursor.map(ForkCursor::order)), (vec![2, 1], Some(1)));
-        let (last, _) = page(mind.desk_forks(&list(&LIST), None, upper.next_cursor, limit(50)));
+        let (last, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), None, upper.next_cursor, limit(50)));
         assert_eq!((orders(&last), last.next_cursor), (vec![0], None));
     }
 
@@ -1373,7 +1670,7 @@ mod tests {
         let mut mind = desk(3);
         close(&mut mind, &fork(1), "R9");
         close(&mut mind, &fork(2), "R2");
-        let named = |n: u32| entry(mind.desk_fork(&list(&LIST), &fork(n))).0.card.ruling;
+        let named = |n: u32| entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(n))).0.card.ruling;
         assert_eq!(named(1).as_deref(), Some("eureka-state:ruling:R9"));
         assert_eq!(named(2).as_deref(), Some("eureka-state:ruling:R2"));
         assert_eq!(named(3), None);
@@ -1398,7 +1695,7 @@ mod tests {
         assert!(fullest > DESK_PAGE_BUDGET - 3000, "the pages fill to the budget, not far short of it: {fullest}");
     }
 
-    /// Libby's list scenarios (CultLib 9d6ee72e `listScenarios`) replayed through `desk_forks` over the
+    /// Libby's list scenarios (CultLib `listScenarios`, d3025d3c) replayed through `desk_forks` over the
     /// data the Mind stores: a question for every order the scenario's cards hold, an unshowable one
     /// (a rank nobody sees) for every order below the highest that none holds, the closed cards closed
     /// by a ruling and the answers she records answered, the closed card's second one after it closed.
@@ -1432,15 +1729,31 @@ mod tests {
                 if entry["card"]["status"] == "closed" {
                     close(&mut mind, &key, &format!("R{order}"));
                 }
-                for _ in answers.iter().skip(1) {
-                    answer(&mut mind, "y", &LIST, &key, &hash, None);
+                for later in answers.iter().skip(1) {
+                    if later["outcome"] == "Retraction" {
+                        let retraction = ForkAnswerRequest {
+                            schema_version: RequestSchema::V0,
+                            fork_id: key.clone(),
+                            options_hash: hash.clone(),
+                            answer: None,
+                            retracted: true,
+                            retracts: later["retracts"].as_str().map(str::to_string),
+                            answered_at: "2026-09-16T11:00:00Z".into(),
+                            request_id: request_id(),
+                        };
+                        mind.desk_answer(&list(&LIST), s("x"), DeskAuthority::Member, retraction, now());
+                    } else {
+                        answer(&mut mind, "y", &LIST, &key, &hash, None);
+                    }
                 }
             }
+            // A `twin` scenario is a non-decider's view: the reader is not on the call's list.
+            let subject = if scenario.get("twin").is_some() { "z" } else { "x" };
             for step in scenario["steps"].as_array().unwrap() {
                 let (request, want) = (&step["request"], &step["response"]);
                 let status: Option<ListStatus> = serde_json::from_value(request["status"].clone()).unwrap();
                 let cursor: Option<ForkCursor> = serde_json::from_value(request["cursor"].clone()).unwrap();
-                let (got, _) = page(mind.desk_forks(&list(&LIST), status, cursor, limit(request["limit"].as_u64().unwrap() as u8)));
+                let (got, _) = page(mind.desk_forks(&s(subject), &list(&["x"]), status, cursor, limit(request["limit"].as_u64().unwrap() as u8)));
                 let name = &scenario["name"];
                 assert_eq!((got.open_count, got.recorded_count), (want["open_count"].as_u64().unwrap(), want["recorded_count"].as_u64().unwrap()), "{name}");
                 assert_eq!(serde_json::to_value(got.next_cursor).unwrap(), want["next_cursor"], "{name}");
@@ -1450,6 +1763,9 @@ mod tests {
                     assert_eq!(have.card.order, want["card"]["order"].as_u64().unwrap(), "{name}");
                     assert_eq!(serde_json::to_value(have.card.status).unwrap(), want["card"]["status"], "{name}");
                     assert_eq!(have.record.counted_answer_id.as_deref(), want["record"]["counted_answer_id"].as_str(), "{name}");
+                    assert_eq!(serde_json::to_value(&have.card.deciders).unwrap().as_array().unwrap().len(), want["card"]["deciders"].as_array().unwrap().len(), "{name}: withheld or named");
+                    assert_eq!(have.card.decider_count, want["card"]["decider_count"].as_u64().unwrap(), "{name}");
+                    assert!(have.record.answers.iter().all(|answer| answer.answerer.is_some() == (subject == "x")), "{name}: answerers are named for a decider only");
                     let kept: Vec<_> = have.record.answers.iter().map(|answer| (answer.answer_id.as_str(), answer.outcome.as_str())).collect();
                     let wanted: Vec<_> = want["record"]["answers"].as_array().unwrap().iter().map(|a| (a["answer_id"].as_str().unwrap(), a["outcome"].as_str().unwrap())).collect();
                     assert_eq!(kept, wanted, "{name}");
@@ -1457,7 +1773,7 @@ mod tests {
                 replayed += 1;
             }
         }
-        assert_eq!(replayed, 9);
+        assert_eq!(replayed, 12);
     }
 
     /// `two_cards_share_one_order` is not a document the schema can refuse (CultLib: "not expressible in
@@ -1486,7 +1802,7 @@ mod tests {
         // Every third fork is closed; the batch's ranks follow its keys, so the closed ranks are read, not computed.
         let mut closed = std::collections::BTreeSet::new();
         for n in (1..=24).step_by(3) {
-            closed.insert(entry(mind.desk_fork(&list(&LIST), &fork(n))).0.card.order);
+            closed.insert(entry(mind.desk_fork(&s(LIST[0]), &list(&LIST), &fork(n))).0.card.order);
             close(&mut mind, &fork(n), &format!("R{n}"));
         }
         for status in [None, Some(ListStatus::Open), Some(ListStatus::Recorded)] {
@@ -1499,7 +1815,7 @@ mod tests {
             for size in 1..=24_u8 {
                 let (mut cursor, mut walked, mut pages) = (None, Vec::new(), 0);
                 loop {
-                    let (page, _) = page(mind.desk_forks(&list(&LIST), status, cursor, limit(size)));
+                    let (page, _) = page(mind.desk_forks(&s(LIST[0]), &list(&LIST), status, cursor, limit(size)));
                     pages += 1;
                     assert!(page.forks.len() <= size as usize && pages < 100);
                     walked.extend(orders(&page));

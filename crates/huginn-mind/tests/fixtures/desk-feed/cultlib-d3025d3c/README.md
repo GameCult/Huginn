@@ -3,7 +3,7 @@
 Source: `GameCult/CultLib` at commit `d3025d3c19674803ad32eb2335461b8cbc22bd28` (#118, on
 `3a51bbab` #117, on `af914253` #115), file `contracts/cultnet/governance/fork-card-vectors.json`. Each `.msgpack` file is
 the vector's `messagePackHex` decoded to bytes, nothing else changed. Do not edit them or rewrite them
-from Huginn's encoders: Huginn's own types do not carry these shapes yet (see
+from Huginn's encoders: they are the reference Huginn's types are checked against (see
 `docs/desk-feed-door.md`). To re-pin, take the new commit's vectors and update the sha here, in
 `docs/desk-feed-door.md` and in `CULTLIB_SHA` in `desk_feed_fixtures.rs`.
 
@@ -25,4 +25,4 @@ from Huginn's encoders: Huginn's own types do not carry these shapes yet (see
 | `entry-withheld-closed-with-ruling-and-a-refusal` | `transport.entry.valid` `withheld_closed_with_ruling_and_a_refusal` | its non-decider twin, count 2 |
 
 The test `desk_feed_fixtures.rs` checks each file's SHA-256, decodes it with a decoder of its own
-(not `rmp_serde`), and then tries Huginn's real types.
+(not `rmp_serde`), then decodes it into Huginn's real type and re-encodes it, byte for byte.

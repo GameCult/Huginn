@@ -855,10 +855,10 @@ mod door_smoke {
         }
     }
 
-    /// Ruling `desk-read-visibility-whole-record`: Huginn returns the whole record, notes included, to
-    /// whoever the socket carries. The subject is not in the deciders; the decider's note is there.
+    /// Ruling `desk-read-visibility-withheld-ids`: a subject the call's deciders do not name gets counts
+    /// and no account id, over the socket too; notes stay whole (Bifrost strips them). A decider gets the ids.
     #[test]
-    fn a_subject_not_in_deciders_reads_the_whole_record_with_the_notes() {
+    fn a_subject_not_in_deciders_gets_counts_and_no_account_id() {
         let mut rig = rig(my_uid());
         let hash = rig.hash.clone();
         let note = "Keep it local: the author's call.";
@@ -875,9 +875,15 @@ mod door_smoke {
         for entry in [&list.forks[0], &read] {
             assert_eq!(entry.record.answers.len(), 1);
             assert_eq!(entry.record.answers[0].note.as_deref(), Some(note));
-            assert_eq!(entry.record.answers[0].answerer, "y");
-            assert_eq!(entry.card.deciders, ["x"], "the list is the call's, and only fills the card");
+            assert_eq!(entry.record.answers[0].answerer, None);
+            assert_eq!(entry.record.answerer_count, 1);
+            assert!(entry.card.deciders.is_empty());
+            assert_eq!(entry.card.decider_count, 1);
         }
+        let seen = rig.serving(|path| reply_of(path, "m-4", &fork_read("x", &["x"], FORK)));
+        let (seen, _) = entry_of(seen);
+        assert_eq!(seen.card.deciders, ["x"]);
+        assert_eq!(seen.record.answers[0].answerer.as_deref(), Some("y"));
     }
 
     #[test]

@@ -25,6 +25,12 @@ lands (see `docs/desk-feed-door.md`).
 | `list-open-cursor.request` | Bifrost to Huginn | `Forks`, status open, cursor `c42`, limit 50 |
 | `list-counts.request` | Bifrost to Huginn | `Forks`, status open, limit 0 (counts and stamp only) |
 | `read.request` | Bifrost to Huginn | `Fork` for one fork id |
+| `list-non-decider.request` | Bifrost to Huginn | `Forks` as above, from a subject who is not on the call's deciders |
+| `read-non-decider.request` | Bifrost to Huginn | `Fork`, from a subject who is not on the call's deciders |
+| `list-open.response` | Huginn to Bifrost | a decider's page of one open fork: card with `raised_at` a string, `decider_count` 2 and both ids, record with `answerer_count` 3 and every `answerer` named |
+| `list-open-non-decider.response` | Huginn to Bifrost | the same page for a non-decider: `deciders` empty, `decider_count` 2, every `answerer` nil, `answerer_count` 3; no account id anywhere in its bytes |
+| `read.response` | Huginn to Bifrost | a decider's read of one fork, `raised_at` nil |
+| `read-non-decider.response` | Huginn to Bifrost | the same read for a non-decider, `raised_at` nil, no account id |
 | `list-empty.response` | Huginn to Bifrost | an empty Mind, or nothing listed to this reader: counts 0, `forks: []` |
 | `list-counts.response` | Huginn to Bifrost | the limit-0 answer: open 3, recorded 5, `forks: []` |
 | `read-unknown.response` | Huginn to Bifrost | `NotStored` `fork_unknown` (Bifrost: 404) |
@@ -35,10 +41,10 @@ lands (see `docs/desk-feed-door.md`).
 | `unavailable.response` | Huginn to Bifrost | `Refused` `Unavailable` (Bifrost: 503 for this Mind) |
 | `failure.response` | Huginn to Bifrost | operation failure, `payloadSchema` `gamecult.cultnet.operation_failure.v1` (Bifrost: 503) |
 | `error.response` | Huginn to Bifrost | CultNet `Error` message, no payload (Bifrost: 503) |
-| `record-whole` | fragment | `gamecult.fork.record.v0` with all four answer variants (Counted, Revision, Refused, Retraction) by three accounts, answerer ids and notes whole: what the door sends today (5 keys, no `answerer_count`) |
+| `record-whole` | fragment | `gamecult.fork.record.v0` in a decider's view: all four answer variants (Counted, Revision, Refused, Retraction) by three accounts, answerer ids and notes whole, `answerer_count` 3 (6 keys) |
+| `record-withheld` | fragment | the same record in a non-decider's view: every `answerer` nil, notes whole, `answerer_count` 3 |
 
 The reader-count shapes (`raised_at`, `decider_count`, `answerer_count`, nullable `answerer`) are
-CultLib's own bytes, vendored unedited in `cultlib-d3025d3c/` (see its README for the pinned commit and
-each vector). They are not Huginn's output: Huginn's types do not carry those shapes yet.
-`cut-desk-feed-listing` and `cut-desk-feed-raised-at` replace them with entry-bearing fixtures the
-encoders write, after decoding these bytes into the real types.
+also CultLib's own bytes, vendored unedited in `cultlib-d3025d3c/` (see its README for the pinned
+commit and each vector). Huginn's types decode every one of them and re-encode it byte for byte;
+the fixtures above are what Huginn's encoders write for the same shapes.

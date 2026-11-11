@@ -3,24 +3,22 @@
 Status, 2026-11-11: the list and read wire described here is on `main` (`DeskRequest::Forks`,
 `DeskRequest::Fork`, `DeskResponse::Forks`, `DeskResponse::Fork`; `crates/huginn-mind/src/desk_wire.rs`
 and `desk_wire/reads.rs`; the socket is `crates/huginn-daemon/src/desk_door.rs`). No running daemon
-binds a desk socket yet (follow-up `eureka-substrate:follow_up:desk-door-ops-root-run`). Two parts
-are planned and not built: the card's `raised_at`, `decider_count` and the record's `answerer_count`
-and nullable `answerer` (the shapes pinned below), and the listing gate that decides which forks a
-reader sees. They are cut specs `cut-desk-feed-raised-at` and `cut-desk-feed-listing` in the
-`eureka-substrate` campaign.
+binds a desk socket yet (follow-up `eureka-substrate:follow_up:desk-door-ops-root-run`). The reader
+shapes are built: the card's `raised_at` and `decider_count`, the record's `answerer_count`, the
+nullable `answerer`, and the withholding of account ids from a non-decider (below). One part is
+planned and not built: the listing gate that decides which forks a reader sees (cut spec
+`cut-desk-feed-listing` in the `eureka-substrate` campaign).
 
 **Not live: the listing gate.** On `main` today every showable question is returned to every
-reader, whatever the call's `deciders` say (pinned by
-`the_whole_record_comes_back_whoever_the_deciders_list_leaves_out` in `desk_wire/reads.rs`).
-The default of not listed, described under Listing below, holds only once `cut-desk-feed-listing`
-lands. Until then, neither Bifrost's receiver nor the ops root-run (`desk-door-ops-root-run`) may
-go live on a Mind that holds private questions.
+reader, whatever the call's `deciders` say. The default of not listed, described under Listing below,
+holds only once `cut-desk-feed-listing` lands. Until then, neither Bifrost's receiver nor the ops
+root-run (`desk-door-ops-root-run`) may go live on a Mind that holds private questions.
 
 This page is the wire contract for the consumer, Bifrost's `UnixSocketDeskDoor` (Bifrost PR #67,
 `docs/desk-feed-design.md`). The golden bytes are in `crates/huginn-mind/tests/fixtures/desk-feed/`.
 Huginn's own encoders write them (`crates/huginn-mind/tests/desk_feed_fixtures.rs`), so a decoder
 that reads them reads the door. The reader-count shapes are CultLib's bytes, vendored in
-`cultlib-d3025d3c/` (below). The document shapes inside the payload (`gamecult.fork.list.v0`,
+`cultlib-d3025d3c/` (below); Huginn's types decode and re-encode every vendored vector byte for byte. The document shapes inside the payload (`gamecult.fork.list.v0`,
 `gamecult.fork.entry.v0`, `gamecult.fork.card.v0`, `gamecult.fork.record.v0`,
 `gamecult.desk_answer.v0`, `gamecult.fork.refusal.v0`) are CultLib's
 (`contracts/cultnet/governance/fork-card.md`) and are not restated here.
@@ -104,21 +102,19 @@ refuses any decider not in that form). That is the same grammar Huginn names for
 handle is never one of them. Bifrost enforces the grammar; Huginn's door does not yet: it reads these
 fields as `Short` (any text up to 200 bytes) and would accept `@x:server` or an email. A subject
 is stored as `answerer` on an answer, so a wrong value would enter the mind. Refusing every other
-shape at decode is owed by `cut-desk-feed-listing.r6`. The test
+shape at decode is owed by `cut-desk-feed-listing`. The test
 `every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid` pins the grammar. The fixtures use
 synthetic UUIDs.
 
-## Account ids by reader (shape pinned in CultLib; Huginn side planned)
+## Account ids by reader
 
 A reader is a **decider** when the call's `subject` is in the call's `deciders`, compared byte for
-byte; both values are in the account-id format above. Any other reader is a non-decider.
+byte; both values are in the account-id format above. Any other reader is a non-decider. The
+reader is worked out per call and stored nowhere.
 
-- **On `main` today**, every reader gets the ids. `card.deciders` carries the call's decider list on
-  every card, and every answer carries its `answerer` id. This is not live yet: no receiver is
-  deployed.
 - **Ruled (Persona, 2026-11-11; follow-up `chat-mind-20261111T150417226Z-t167`):** the door, not
   Bifrost, withholds account ids from a non-decider and returns a count instead. Bifrost cannot do
-  it, because the card is opaque to it. A decider sees the ids. The superseding ruling is in force:
+  it, because the card is opaque to it. A decider sees the ids. The ruling is
   `eureka-substrate:ruling:desk-read-visibility-withheld-ids`.
 - **The shape**, pinned to CultLib commit `d3025d3c19674803ad32eb2335461b8cbc22bd28` (#118 "null-answerer vectors for
   Revision and Retraction", additive over `3a51bbab` #117 "Fork card: decider_count, answerer_count,
@@ -126,13 +122,16 @@ byte; both values are in the account-id format above. Any other reader is a non-
   ruling `eureka-substrate:ruling:desk-reader-counts-shape`). The bytes are CultLib's own vectors
   (`contracts/cultnet/governance/fork-card-vectors.json`, `messagePackHex`), vendored unedited in
   `crates/huginn-mind/tests/fixtures/desk-feed/cultlib-d3025d3c/` (its README lists each file and
-  its vector name). Read off those bytes:
+  its vector name). Huginn's `ForkCard`, `ForkRecord`, `ForkDeskAnswer` and `ForkEntry` decode all
+  14 of them and re-encode them byte for byte. Read off those bytes:
   - **Card:** 18 keys, header `DE 00 12` (map16): `schemaVersion` plus 17 fields, in this order:
     `fork_id, title, context, options, recommendation, depends, leans, flag, raised_in, raised_at,
     deciders, decider_count, status, ruling, ruled_from, order, options_hash`. `raised_at` is an
     RFC3339 string or nil, always written. `decider_count` is an integer from 1 to 64 right after
-    `deciders`. An empty `deciders` means the ids are withheld from this reader, never "no
-    deciders"; a non-empty list holds exactly `decider_count` ids.
+    `deciders`: the length of the call's list, for every reader. An empty `deciders` means the ids
+    are withheld from this reader, never "no deciders"; a non-empty list holds exactly
+    `decider_count` ids. The card decoder refuses a count outside 1..64 or a non-empty list of
+    another length.
   - **Record:** 6 keys, header `86`: `schemaVersion, fork_id, options_hash, counted_answer_id,
     answerer_count, answers`, so `answerer_count` is the fifth key, right before `answers`. It is
     the number of distinct answerers over ALL the fork's stored answers, refusals included, and is
@@ -142,21 +141,19 @@ byte; both values are in the account-id format above. Any other reader is a non-
     string or nil, nil only in a non-decider's view, with the key kept. The bytes pin a nil `answerer`
     on all four variants, `Counted` (`answer-withheld-answerer`), `Revision`
     (`answer-withheld-answerer-revision`), `Retraction` (`answer-withheld-answerer-retraction`) and
-    `Refused` (the withheld entries), beside each variant's string-`answerer` vector; ruling
-    `eureka-substrate:ruling:desk-reader-counts-shape` is the reason, no longer the only evidence. Stored
-    answers always carry it.
+    `Refused` (the withheld entries), beside each variant's string-`answerer` vector. Stored answers
+    always carry it, and so does the reply to an answer (`Answered`), which goes to the answerer.
   - **Entry:** header `83` (`schemaVersion, card, record`). The view is read off `deciders`: a
     non-empty `deciders` names every answerer, an empty one names none.
   - `options_hash` does not change (still five members).
+  - **Fixtures:** Huginn's own encoders write entry-bearing fixtures for both views:
+    `list-open.response` and `read.response` (a decider's; `read.response` has `raised_at` nil),
+    `list-open-non-decider.response`, `read-non-decider.response` and `record-withheld`, with the
+    requests `list-non-decider.request` and `read-non-decider.request`. A test searches the
+    non-decider payloads' bytes for every account id and finds none.
   - **Consumers:** Bifrost branch `heimdall/desk-card-repin` (`f977a43`) vendors Huginn's desk
-    fixtures from `79d954c` and needs a re-pin after this PR. Bifrost's `DeskDocuments.cs` marks
-    `answerer_count` `JsonRequired`, so its merge must wait for `cut-desk-feed-listing`: today's door
-    does not send the field.
-  - Huginn's real types do not carry these shapes yet: `ForkCard` has no `raised_at` or
-    `decider_count`, `ForkRecord` no `answerer_count`, `ForkDeskAnswer.answerer` is a non-null
-    string, and each type refuses unknown keys. The test
-    `huginn_types_do_not_yet_carry_the_pinned_shapes` pins that gap, and
-    `cut-desk-feed-listing` closes it by decoding these same bytes into the real types.
+    fixtures from `79d954c` and needs a re-pin to this change. Bifrost's `DeskDocuments.cs` marks
+    `answerer_count` `JsonRequired`; the door now sends it.
 
 Response (`huginn.desk_response.v1`):
 
@@ -207,7 +204,7 @@ An empty list is never served in place of a failure. `open_count: 0` means zero 
 ## Card fields
 
 `raised_at` is a required card key whose value is an RFC3339 string or nil (CultLib #115, `af914253`).
-Nil means unknown. A string is the question's first-admission time, which never moves. It is outside
+Nil means unknown. A string is the question's first-admission time, which never moves: a UTC `Z` instant at seconds resolution (the form CultLib requires), and nil when the time is unknown, does not parse, or its UTC year is outside 0..9999. It is outside
 `options_hash`, which keeps its five members, so the hash vectors do not change. Huginn derives it
 from the question's admission: the `committed_at` of the receipt that first admitted the question, or
 for an imported question the source mind's `committed_at` (`imported_from.committed_at`). A value that
@@ -216,17 +213,15 @@ to C), C sees B's admission time, because an import quotes its source's receipt 
 own (follow-up `desk-raised-at-import-chain`).
 
 The card's key order and bytes are pinned by the vendored CultLib vectors (above): `card-operator-fork`
-(`raised_at` a string), `card-raised-at-nil` and `card-withheld-deciders`. The fixtures Huginn's own
-encoders write carry no entry; entry-bearing list and read fixtures from Huginn's output are added by
-`cut-desk-feed-raised-at` and `cut-desk-feed-listing`.
+(`raised_at` a string), `card-raised-at-nil` and `card-withheld-deciders`, and Huginn's own entry-bearing
+fixtures carry it (`list-open.response` a string, `read.response` nil).
 
 ## Trust boundary: what Huginn sends, what Bifrost does
 
 - The peer-uid check is the whole authentication, so the socket must belong to Bifrost's uid alone.
-- Today Huginn sends every record whole: every `answerer` id, every note and the card's
-  `deciders` (fixture `record-whole`).
-- Once `cut-desk-feed-listing` and the CultLib change land, Huginn withholds the account ids from a
-  non-decider (above). Notes stay whole on the wire.
+- Huginn sends each record with every answer's note (fixture `record-whole`, a decider's view) and
+  withholds the account ids from a non-decider (above, fixture `record-withheld`). Notes stay whole
+  on the wire.
 - Bifrost owns three things: the per-request membership check, the `desk.read` token, and
   stripping notes for a reader who is not a decider (`DeskNotes`). It no longer masks answerer
   ids.

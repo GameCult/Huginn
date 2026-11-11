@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DeskResponse",
-  "description": "What the door answers one desk request with. `Answered` is a stored answer, refused ones\nincluded (a stale fork, a non-decider and the rest are stored), fresh or replayed alike.\n`Forks` and `Fork` are the reads: one page of entries, or one entry, with the head they were\nall read at. `NotStored` is a request that stored nothing (an unknown fork included).\n`Refused` is any other Mind refusal; an `Unavailable` is Bifrost's to turn into its 503, and\nHuginn writes no document for it.\n\nThe trust boundary of the reads (ruling `desk-read-visibility-whole-record`): `Forks` and `Fork`\ncarry the WHOLE record, every answer's note included, to whatever the peer-checked socket\ncarries. Huginn strips nothing and gates nothing; Bifrost applies visibility at its door (a\nstripped read serves `note: null`, CultLib `fork-card.md`). Huginn must therefore be reachable\nonly by Bifrost's peer-checked socket: the peer-uid check IS the whole authentication, and a\nsecond reader of that socket is a note leak.",
+  "description": "What the door answers one desk request with. `Answered` is a stored answer, refused ones\nincluded (a stale fork, a non-decider and the rest are stored), fresh or replayed alike.\n`Forks` and `Fork` are the reads: one page of entries, or one entry, with the head they were\nall read at. `NotStored` is a request that stored nothing (an unknown fork included).\n`Refused` is any other Mind refusal; an `Unavailable` is Bifrost's to turn into its 503, and\nHuginn writes no document for it.\n\nThe trust boundary of the reads (ruling `desk-read-visibility-withheld-ids`): `Forks` and `Fork`\ncarry every answer's note, to whatever the peer-checked socket carries; Bifrost strips notes\nat its door (a stripped read serves `note: null`, CultLib `fork-card.md`). Huginn itself\nwithholds the account ids from a reader who is not a decider (`deciders` empty, `answerer` nil,\ncounts in their place). Huginn must be reachable only by Bifrost's peer-checked socket: the\npeer-uid check IS the whole authentication, and a second reader of that socket is a note leak.",
   "oneOf": [
     {
       "type": "object",
@@ -157,7 +157,15 @@
         "context": {
           "type": "string"
         },
+        "decider_count": {
+          "description": "How many deciders the call names, 1 to 64, whoever the reader is. A non-empty `deciders` holds exactly this many.",
+          "type": "integer",
+          "format": "uint64",
+          "maximum": 64,
+          "minimum": 1
+        },
         "deciders": {
+          "description": "The call's decider ids for a decider; empty for any other reader (the ids are withheld, never \"no deciders\").",
           "type": "array",
           "items": {
             "type": "string"
@@ -192,6 +200,10 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "raised_at": {
+          "description": "RFC3339 (UTC, seconds, `Z`) of the question's first admission, or nil when unknown. Outside `options_hash`.",
+          "type": "string"
         },
         "raised_in": {
           "description": "A typed reference, as the question holds it (`raised_in`).",
@@ -244,7 +256,9 @@
         "leans",
         "flag",
         "raised_in",
+        "raised_at",
         "deciders",
+        "decider_count",
         "status",
         "ruling",
         "ruled_from",
@@ -263,6 +277,7 @@
           "type": "string"
         },
         "answerer": {
+          "description": "The answering account, or nil in a non-decider's view (the key is kept). A stored answer always has one.",
           "type": "string"
         },
         "authority": {
@@ -421,6 +436,12 @@
       "description": "`gamecult.fork.record.v0`: the answers in admission order and the derived counted answer.",
       "type": "object",
       "properties": {
+        "answerer_count": {
+          "description": "Distinct answerers over ALL the fork's stored answers, refusals included; the same for every reader.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
         "answers": {
           "type": "array",
           "items": {
@@ -446,6 +467,7 @@
         "fork_id",
         "options_hash",
         "counted_answer_id",
+        "answerer_count",
         "answers"
       ]
     },

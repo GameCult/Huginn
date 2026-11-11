@@ -549,7 +549,7 @@ mod tests {
                 answered_at: "2026-11-10T12:00:00Z".into(),
                 received_at: "2026-11-10T12:00:01Z".into(),
                 claim_in_future: false,
-                answerer: "user-7".into(),
+                answerer: Some("user-7".into()),
                 authority: DeskAuthority::Member,
                 request_id: "00000000-0000-4000-8000-000000000001".into(),
             },
@@ -623,7 +623,7 @@ mod tests {
             answered_at: "2026-11-10T12:00:00.123456789+00:00".into(),
             received_at: "2026-11-10T12:00:00.123456789+00:00".into(),
             claim_in_future: true,
-            answerer: long(200),
+            answerer: Some(long(200)),
             authority: DeskAuthority::Operator,
             request_id: "00000000-0000-4000-8000-000000000001".into(),
         };
