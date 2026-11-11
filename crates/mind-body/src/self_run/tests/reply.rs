@@ -150,11 +150,52 @@ fn a_credential_in_a_url_reaches_neither_the_journal_nor_the_admitted_reply() {
 #[test]
 fn a_credential_split_by_the_reply_limit_is_redacted_before_the_cut() {
     let mind = live_mind();
-    let said = format!("{}https://u:{CANARY}@h/x", "a".repeat(REPLY_TEXT_LIMIT - 25));
+    let said = format!("{}https://u:{CANARY}@h/x{}", "a".repeat(REPLY_TEXT_LIMIT - 25), "b".repeat(100));
     mind_run(&mind, vec![Out(echo()), Out(saying(&said))]).outcome.unwrap();
-    for n in 1..=2 {
-        if let Some(reply) = reply_of(&mind, n) {
-            assert!(!reply.text.0.contains("CANARY"), "{}", reply.text.0);
+    let first = reply_of(&mind, 1).expect("the long result was admitted in pieces");
+    assert!(reply_of(&mind, 2).is_some(), "the credential's place straddles the cut");
+    assert!(!first.text.0.contains("CANARY") && !reply_of(&mind, 2).unwrap().text.0.contains("CANARY"));
+}
+
+#[test]
+fn delimiters_inside_a_secret_leak_none_of_it_and_the_bare_and_scheme_less_forms_are_covered() {
+    let r = redact_url_userinfo;
+    for secret in ["pa/ssT", "pa?ssT", "pa#ssT", "pa\"ssT", "pa'ssT", "pa)ssT", "pa<ssT", "pa]ssT", "[u]"] {
+        let out = r(&format!("x https://u:{secret}@h/x"));
+        assert!(out.starts_with("x https://<redacted>@h"), "{secret:?} -> {out:?}");
+        assert!(!out.contains("ssT"), "{secret:?} -> {out:?}");
+    }
+    // Whitespace of any kind ends a candidate run, so a secret holding it is cut there.
+    assert_eq!(r("https://u:pa\u{a0}ssT@h/x"), "https://u:pa\u{a0}ssT@h/x");
+    assert_eq!(r("HTTPS://TOKEN@h"), "HTTPS://<redacted>@h");
+    assert_eq!(r("[l](https://T@h/x) <https://T@h> `https://u:T@h`"), "[l](https://<redacted>@h/x) <https://<redacted>@h> `https://<redacted>@h`");
+    assert_eq!(r("a //u:T@host/x b //T@host c"), "a //<redacted>@host/x b //<redacted>@host c");
+    assert_eq!(r("user:T@host.tld/path and a:b@c and mail me@x.org/ and https://h/a//b"), "<redacted>@host.tld/path and a:b@c and mail me@x.org/ and https://h/a//b");
+    assert_eq!(r("ssh://git@host/r.git ssh://git@h:22/r"), "ssh://git@host/r.git ssh://git@h:22/r");
+}
+
+#[test]
+fn multibyte_text_never_panics_the_redaction() {
+    let r = redact_url_userinfo;
+    for case in ["see \u{201c}https://h/x", "\u{2192}https://h/x", "docs\u{ff1a}https://h/x", "\u{e9}://x", "\u{65e5}\u{672c}://u:T@h", "https://x/\u{e9}://", "\u{e9}//u:T@h", "\u{e9}:u:T@h.tld/"] {
+        let _ = r(case);
+    }
+    assert_eq!(r("\u{65e5}\u{672c}://u:T@h"), "\u{65e5}\u{672c}://<redacted>@h");
+    assert_eq!(r("\u{2192}https://u:T@h/x"), "\u{2192}https://<redacted>@h/x");
+    let seed = "\u{201c}\u{2192}\u{ff1a}\u{e9}\u{65e5}\u{a0}https://u:T@h/x//y:z@a.b/ ://@ //";
+    let chars: Vec<char> = seed.chars().collect();
+    for start in 0..=chars.len() {
+        for end in start..=chars.len() {
+            let _ = r(&chars[start..end].iter().collect::<String>());
         }
     }
+}
+
+#[test]
+fn persona_and_sleep_structured_output_is_redacted_string_by_string() {
+    let line = json!({"type": "result", "structured_output": {"say": format!("https://u:{CANARY}@h/x,"), "n": 3, "list": [format!("https://{CANARY}@h")]}}).to_string();
+    let text = crate::persona::structured_output(&line).unwrap();
+    assert!(!text.contains(CANARY), "{text}");
+    let back: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, json!({"say": "https://<redacted>@h/x,", "n": 3, "list": ["https://<redacted>@h"]}));
 }

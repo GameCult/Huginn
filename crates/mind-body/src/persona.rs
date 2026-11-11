@@ -1939,10 +1939,22 @@ fn refused_note(why: Failure) -> String {
     format!("Your last reply was refused ({why}), so nothing in it was said or kept: answer the same messages again, as one reply.")
 }
 
+/// Every string of `value` through the one URL-credential redaction, so JSON structure is never inside a candidate run.
+fn redact_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = crate::self_run::redact_url_userinfo(text),
+        Value::Array(items) => items.iter_mut().for_each(redact_strings),
+        Value::Object(map) => map.values_mut().for_each(redact_strings),
+        _ => {}
+    }
+}
+
 /// The structured output of a result line, as the text `decode_reply` reads; none when it has none.
 pub(crate) fn structured_output(line: &str) -> Option<String> {
     let event: Value = serde_json::from_str(line).ok()?;
-    event.get("structured_output").filter(|output| !output.is_null()).map(Value::to_string)
+    let mut output = event.get("structured_output").filter(|output| !output.is_null())?.clone();
+    redact_strings(&mut output);
+    Some(output.to_string())
 }
 
 impl<C: ControlSource, S: ControlSource> PersonaInbox<'_, C, S> {
