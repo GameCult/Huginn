@@ -569,3 +569,136 @@ fn a_busy_pass_is_not_followed_by_the_idle_sleep() {
     let gap = answered[4] - answered[3];
     assert!(gap < Duration::from_millis(300), "the second batch waited {gap:?}: the loop slept after a busy pass ({answered:?})");
 }
+
+// ---- fork_too_large over the real socket ----
+
+fn forks_page(who: &str, cursor: Option<&str>) -> DeskRequest {
+    let mut value = serde_json::to_value(forks_request(who, &[who])).unwrap();
+    value["Forks"]["cursor"] = cursor.map_or(serde_json::Value::Null, |text| serde_json::json!(text));
+    serde_json::from_value(value).unwrap()
+}
+
+fn fork_read(who: &str, fork_id: &str) -> DeskRequest {
+    DeskRequest::Fork { mind: INSTANCE.into(), subject: short(who), deciders: vec![short(who)], fork_id: fork_id.into() }
+}
+
+/// The wire spelling of a not-stored refusal's code, and its text.
+fn refusal_of(response: &DeskResponse) -> Option<(String, String)> {
+    let DeskResponse::NotStored(refusal) = response else { return None };
+    Some((serde_json::to_value(refusal.code).unwrap().as_str().unwrap().to_string(), refusal.error.clone()))
+}
+
+/// Three forks, the middle one's record grown over the socket until its card alone is past the page
+/// budget. The list names it and its order (`fork_too_large`), the cursor `c<order>` walks on to the
+/// older fork and ends at order 0, a READ of it never returns that code (an entry while it fits the
+/// response bound, the door's named response-too-large past it), and `authority` on a read is still
+/// refused.
+#[test]
+fn a_fork_too_large_to_page_is_named_by_the_list_and_never_by_the_read() {
+    let _serial = serial();
+    assert_ne!(my_uid(), 0, "the door refuses uid 0, so this test cannot run as root");
+    let (root, run) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let hash = seed(root.path());
+    {
+        let mut mind = Mind::open(root.path(), &INSTANCE.into()).unwrap();
+        let documents = ["Q2", "Q3"]
+            .into_iter()
+            .map(|label| PipelineDocument::Question(PipelineQuestion {
+                campaign: "eureka-state".into(),
+                label: label.into(),
+                title: Title("Who owns the state?".into()),
+                question: "Who owns the state?".into(),
+                options: vec![
+                    QuestionOption { label: "A".into(), text: "the organ".into() },
+                    QuestionOption { label: "B".into(), text: "the client".into() },
+                ],
+                recommended: "A".into(),
+                depends: vec![],
+                raised_in: None,
+                asked_on: Date("2026-09-16".into()),
+            }))
+            .collect();
+        let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: short("claude"), session: short("session-2"), tool: short("admit"), imported_from: None };
+        let outcome = mind.admit(PipelineAdmissionBatch { instance: INSTANCE.into(), provenance, documents }, Utc.with_ymd_and_hms(2026, 9, 16, 12, 5, 0).unwrap());
+        assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+    }
+    let (desk, log) = (run.path().join("desk.sock"), run.path().join("daemon.log"));
+    let _daemon = spawn(root.path(), &desk, my_uid(), &log);
+    let (older, big, newer) = (FORK, "eureka-state:question:Q2", "eureka-state:question:Q3");
+
+    // Notes of about 300 bytes, until the big fork's list page is the refusal.
+    let note = "a long reason, ".repeat(20);
+    let mut sent = 0_u32;
+    let refused = loop {
+        let listed = ask(&desk, "m-g", &forks_page("x", Some("c2")));
+        if refusal_of(&listed).is_some() {
+            break listed;
+        }
+        assert!(matches!(listed, DeskResponse::Forks { .. }), "{listed:?}");
+        sent += 1;
+        assert!(sent < 400, "the record does not grow");
+        let mut grow = answer("x", &hash, &format!("00000000-0000-4000-8000-{sent:012}"));
+        if let DeskRequest::Answer { request, .. } = &mut grow {
+            request.fork_id = big.into();
+            request.answer = Some(ForkAnswer { choice: None, note: Some(note.clone()) });
+        }
+        assert!(matches!(ask(&desk, "m-w", &grow), DeskResponse::Answered { .. }));
+    };
+
+    // (1) The list names the fork and its order, and nothing else is new in the text.
+    let (code, text) = refusal_of(&refused).unwrap();
+    assert_eq!(code, "fork_too_large", "{refused:?}");
+    assert!(text.contains(big) && text.contains("order 1"), "{text}");
+
+    // (2) The cursor c<order> resumes to the older fork, and order 0 is the end. The newest fork pages
+    // alone ahead of it; the big one is named from the first page too.
+    let first = ask(&desk, "m-p0", &forks_page("x", None));
+    let DeskResponse::Forks { list, .. } = first else { panic!("{first:?}") };
+    assert_eq!((list.forks.iter().map(|e| e.card.fork_id.as_str().to_string()).collect::<Vec<_>>(), list.next_cursor.map(|c| c.order())), (vec![newer.to_string()], Some(2)));
+    let rest = ask(&desk, "m-p1", &forks_page("x", Some("c1")));
+    let DeskResponse::Forks { list, .. } = rest else { panic!("{rest:?}") };
+    assert_eq!((list.forks.iter().map(|e| e.card.fork_id.as_str().to_string()).collect::<Vec<_>>(), list.next_cursor.is_none()), (vec![older.to_string()], true));
+    assert_eq!(list.forks[0].card.order, 0);
+
+    // (3) A read of the same fork: its whole entry while it fits the response bound.
+    let read = ask(&desk, "m-r", &fork_read("x", big));
+    let DeskResponse::Fork { entry, .. } = &read else { panic!("a read of the oversize fork is its entry, not a refusal: {read:?}") };
+    assert_eq!((entry.card.fork_id.as_str(), entry.card.order), (big, 1));
+    // Past DESK_MAX_RESPONSE_BYTES the read is the door's named response-too-large refusal, still not fork_too_large.
+    let mut more = 0_u32;
+    let too_big = loop {
+        let read = ask(&desk, "m-r", &fork_read("x", big));
+        if matches!(read, DeskResponse::Refused(_)) {
+            break read;
+        }
+        assert!(matches!(read, DeskResponse::Fork { .. }), "{read:?}");
+        more += 1;
+        assert!(more < 400, "the record does not grow");
+        let mut grow = answer("x", &hash, &format!("00000000-0000-4000-8000-{:012}", 1000 + more));
+        if let DeskRequest::Answer { request, .. } = &mut grow {
+            request.fork_id = big.into();
+            request.answer = Some(ForkAnswer { choice: None, note: Some(note.clone()) });
+        }
+        assert!(matches!(ask(&desk, "m-w", &grow), DeskResponse::Answered { .. }));
+    };
+    assert!(matches!(too_big, DeskResponse::Refused(huginn_mind::MindRefusal::ResponseTooLarge { .. })), "{too_big:?}");
+    assert!(refusal_of(&ask(&desk, "m-g", &forks_page("x", Some("c2")))).is_some_and(|(code, _)| code == "fork_too_large"));
+
+    // (4) `authority` on a read is still refused whole (the contract's request_invalid is the door's payload-not-a-request).
+    for (operation, request) in [("forks", forks_request("x", &["x"])), ("fork", fork_read("x", big))] {
+        let mut value = serde_json::to_value(&request).unwrap();
+        value[if operation == "forks" { "Forks" } else { "Fork" }]["authority"] = serde_json::json!("Operator");
+        let message = CultNetMessage::OperationRequest {
+            message_id: "m-ra".into(),
+            service_id: huginn_mind::desk_wire::DESK_SERVICE_ID.into(),
+            operation: operation.into(),
+            payload_schema: huginn_mind::desk_wire::DESK_REQUEST_SCHEMA.into(),
+            payload_encoding: "messagepack-base64".into(),
+            payload: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, rmp_serde::to_vec_named(&value).unwrap()),
+            source_runtime_id: None,
+            target_runtime_id: None,
+        };
+        let reply = exchange(&desk, &framed(&message)).expect("the door replied");
+        assert_eq!(decode_desk_response(&reply).unwrap().1.unwrap_err().code, "payload-not-a-request", "{operation}");
+    }
+}
