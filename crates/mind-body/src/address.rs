@@ -6,7 +6,7 @@
 
 use eureka_pipeline::{OrgRepo, Short};
 
-use crate::chat_client::ChatDelivery;
+use crate::chat_client::{Basis, ChatDelivery, Form};
 
 /// A word a message may call a Mind or her project by.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,9 +46,17 @@ pub(crate) fn localpart(matrix_id: &str) -> &str {
     id.split_once(':').map_or(id, |(local, _)| local)
 }
 
-/// Whether a delivery is for `who`: tagged, or named by a word of hers.
+/// Whether a delivery is for `who` by what it says: only a message can be (a notice or an edit never is, whatever else it says), and
+/// then a tag of hers in its mentions or a word of hers in the text. What Matrix says about the Persona that polled (`Basis`) is not
+/// here: it is a fact about that one Persona, not about every Mind in the table (`is_for`).
 pub(crate) fn addresses(who: &Addressee, delivery: &ChatDelivery) -> bool {
-    delivery.mentions.contains(&who.matrix_id) || who.names.iter().any(|name| names_whole_word(&delivery.text, &name.text, name.exact))
+    delivery.form == Form::Message && (delivery.mentions.contains(&who.matrix_id) || who.names.iter().any(|name| names_whole_word(&delivery.text, &name.text, name.exact)))
+}
+
+/// Whether a delivery the mouth gave `own` is for her: her DM (`is_direct`, which every mouth sends, so an old mouth's DM is hers too),
+/// Matrix's word that it is a tag of hers or a reply to her, or what it says (`addresses`). The basis `Room` (`@room`) is for no one, and no basis is unproven, not "not for her": the names still decide.
+pub(crate) fn is_for(own: &Addressee, delivery: &ChatDelivery) -> bool {
+    (delivery.form == Form::Message && (delivery.is_direct || matches!(delivery.basis, Some(Basis::Direct | Basis::Tag | Basis::Reply)))) || addresses(own, delivery)
 }
 
 /// The chat names of one stewarded repo. Listed names are exactly those, each matched exactly as the steward wrote it (capitalization

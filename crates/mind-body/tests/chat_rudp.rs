@@ -13,13 +13,15 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cultnet_rs::{CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions};
-use mind_body::chat_client::{self, ChatRefusal, MouthRefused, Refusal, REFUSAL, ACK, Chat, ChatAck, ChatOpenDirectReceipt, ChatOpenDirectRequest, DirectOutcome, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_V1, READ, SEND_RECEIPT, SEND_REQUEST};
+use mind_body::chat_client::{self, Basis, Form, ChatRefusal, MouthRefused, Refusal, REFUSAL, ACK, Chat, ChatAck, ChatOpenDirectReceipt, ChatOpenDirectRequest, DirectOutcome, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_V1, PENDING_V2, READ, SEND_RECEIPT, SEND_REQUEST};
 use mind_body::chat_rudp::{RudpChat, connection_id};
 
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
 const PENDING_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending.v1.msgpack");
-const PENDING_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v3/gamecult.persona.chat_pending.v2.image.msgpack");
-const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
+const PENDING_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v5/gamecult.persona.chat_pending.v3.tag.msgpack");
+const PENDING_V2_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v3/gamecult.persona.chat_pending.v2.image.msgpack");
+const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v5/gamecult.persona.chat_pending_request.v2.msgpack");
+const PENDING_REQUEST_V1_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
 const SEND_RECEIPT_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.sent.msgpack");
 const SEND_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.nil-basis.msgpack");
 const OPEN_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_request.v1.msgpack");
@@ -73,9 +75,14 @@ fn mouth(key: &str) -> Mouth {
     mouth_at(key, "127.0.0.1:0")
 }
 
-/// A mouth that has no image field yet: it answers a pending request in the v1 kind.
+/// A mouth that has no image field yet: it answers a pending request in the v1 kind, and does not serve the v2 request.
 fn legacy_mouth(key: &str) -> Mouth {
     serve(key, "127.0.0.1:0", PENDING_V1, PENDING_V1_BYTES, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES))
+}
+
+/// A mouth that has the image field and not the addressing facts: it answers the v1 request in the v2 kind, and does not serve the v2 request.
+fn imaged_mouth(key: &str) -> Mouth {
+    serve(key, "127.0.0.1:0", PENDING_V2, PENDING_V2_BYTES, (OPEN_DIRECT_RECEIPT, None, OPENED_BYTES))
 }
 
 /// The same mouth on a chosen address: a restart binds the address the old one held.
@@ -101,7 +108,10 @@ fn serve(key: &str, bind: &str, pending_kind: &'static str, pending_bytes: &'sta
             log.lock().unwrap().push((document.schema_id.clone(), document.payload.clone()));
             let for_eureka = |persona: &str| persona == "eureka";
             let reply = match document.schema_id.as_str() {
-                PENDING_REQUEST if for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => Some(answer(pending_kind, "eureka", pending_bytes)),
+                PENDING_REQUEST if for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => {
+                    Some(if pending_kind == PENDING { answer(pending_kind, "eureka", pending_bytes) } else { answer(REFUSAL, "eureka", UNKNOWN_KIND_BYTES) })
+                }
+                PENDING_REQUEST_V1 if pending_kind != PENDING && for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => Some(answer(pending_kind, "eureka", pending_bytes)),
                 SEND_REQUEST if for_eureka(&chat_client::decode::<ChatSendRequest>(&document.payload).unwrap().persona) => Some(answer(SEND_RECEIPT, &document.record_key, SEND_RECEIPT_BYTES)),
                 OPEN_DIRECT_REQUEST if for_eureka(&chat_client::decode::<ChatOpenDirectRequest>(&document.payload).unwrap().persona) => Some(answer(open.0, open.1.unwrap_or(&document.record_key), open.2)),
                 _ => None,
@@ -211,15 +221,25 @@ fn a_send_that_timed_out_is_not_repeated_by_the_client() {
 }
 
 #[test]
-fn a_v1_mouths_pending_answer_still_reads_with_no_image_and_a_v2_one_carries_it() {
-    let legacy = legacy_mouth(KEY);
-    let old = client(&legacy, KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap();
-    assert_eq!(old.len(), 1);
-    assert!(old[0].image.is_none());
+fn a_mouth_without_the_v2_request_is_asked_the_v1_way_and_its_deliveries_carry_no_addressing_facts() {
+    for (mouth, text) in [(legacy_mouth(KEY), "v1 answer"), (imaged_mouth(KEY), "v2 answer")] {
+        let old = client(&mouth, KEY, "eureka", Duration::from_millis(1500)).pending(3).unwrap();
+        assert_eq!(old.len(), 1, "{text}");
+        assert_eq!((old[0].basis, old[0].form), (None, Form::Message), "{text}");
+        let seen: Vec<String> = mouth.seen.lock().unwrap().iter().map(|(kind, _)| kind.clone()).collect();
+        assert_eq!(seen, [PENDING_REQUEST, PENDING_REQUEST_V1], "{text}: the v2 request first, refused as an unknown kind, then the v1 request");
+        assert_eq!(mouth.seen.lock().unwrap()[1].1, PENDING_REQUEST_V1_BYTES, "{text}");
+    }
+    assert!(client(&imaged_mouth(KEY), KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap()[0].image.is_some());
+}
+
+#[test]
+fn a_current_mouth_answers_the_v2_request_with_basis_and_form() {
     let current = mouth(KEY);
-    let new = client(&current, KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap();
-    assert_eq!(new[0].image.as_ref().map(|image| (image.mime.as_str(), image.size)), Some(("image/png", 2048)));
-    assert_eq!(new[0].text, old[0].text, "the same message, with its attachment");
+    let new = client(&current, KEY, "eureka", Duration::from_millis(1500)).pending(3).unwrap();
+    assert_eq!((new[0].basis, new[0].form), (Some(Basis::Tag), Form::Message));
+    let kinds: Vec<String> = current.seen.lock().unwrap().iter().map(|(kind, _)| kind.clone()).collect();
+    assert_eq!(kinds, [PENDING_REQUEST], "no v1 request follows an answered v2 request");
 }
 
 #[test]

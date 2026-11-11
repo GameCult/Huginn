@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::chat_client::{
-    ACK, Chat, ChatAck, ChatDelivery, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, MouthRefused, Refusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
+    ACK, Chat, ChatAck, ChatDelivery, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, MouthRefused, Refusal, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_V2, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
     SEND_REQUEST, decode, encode,
 };
 
@@ -161,7 +161,12 @@ impl Chat for RudpChat {
     fn pending(&self, after_seq: u64) -> Result<Vec<ChatDelivery>> {
         let request = ChatPendingRequest { persona: self.persona.clone(), after_seq };
         let p = self.persona.as_str();
-        let (kind, payload) = self.exchange(PENDING_REQUEST, p, &request, Some(&[(PENDING, p), (PENDING_V1, p), (REFUSAL, p)]))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        let answers = [(PENDING, p), (PENDING_V2, p), (PENDING_V1, p), (REFUSAL, p)];
+        let (mut kind, mut payload) = self.exchange(PENDING_REQUEST, p, &request, Some(&answers))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        // A mouth that does not serve the v2 request answers `UnknownKind`: ask it the v1 way, and its deliveries carry no addressing facts.
+        if kind == REFUSAL && decode::<ChatRefusal>(&payload)?.refusal == Refusal::UnknownKind {
+            (kind, payload) = self.exchange(PENDING_REQUEST_V1, p, &request, Some(&answers))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        }
         if kind == REFUSAL {
             let refusal: ChatRefusal = decode(&payload)?;
             bail!("the mouth refused the pending request: {}", refusal.refusal.name());

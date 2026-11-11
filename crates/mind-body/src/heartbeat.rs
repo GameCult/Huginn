@@ -39,7 +39,7 @@ use cultnet_rs::Selection;
 use eureka_pipeline::{PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
 use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
 
-use crate::address::{Addressee, Name, addresses, project_names};
+use crate::address::{Addressee, Name, is_for, project_names};
 use crate::chat_client::{Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, open_and_launch, slot};
@@ -503,7 +503,7 @@ fn newest(mind: &dyn MindPort, selection: Selection) -> Result<Option<PipelineDo
 }
 
 /// The chat names of every repo she stewards in force: one query on her mind.
-fn project_names_of(mind: &dyn MindPort) -> Result<Vec<Name>> {
+pub(crate) fn project_names_of(mind: &dyn MindPort) -> Result<Vec<Name>> {
     let mut names = Vec::new();
     for header in headers(mind, &in_force(of_kind(PipelineKind::Stewardship)))? {
         if let PipelineFacts::Stewardship { repo, names: listed, .. } = &header.facts {
@@ -518,7 +518,7 @@ fn project_names_of(mind: &dyn MindPort) -> Result<Vec<Name>> {
 fn wakes(config: &Config, who: &Addressee, delivery: &ChatDelivery) -> bool {
     let from_operator = config.operators.contains(&delivery.sender);
     let from_other_mind = delivery.sender != who.matrix_id() && config.personas.iter().any(|mind| mind.matrix_id == delivery.sender);
-    (from_operator || from_other_mind) && addresses(who, delivery)
+    (from_operator || from_other_mind) && is_for(who, delivery)
 }
 
 /// The mouth pages a pending answer, so fewer deliveries may come than wait.
@@ -633,7 +633,7 @@ impl Row<'_> {
 
     /// A member (not the operator) has a pending message that names or tags her.
     fn addressed_by_member(&self, config: &Config) -> bool {
-        self.pending.iter().any(|delivery| !config.operators.contains(&delivery.sender) && addresses(&self.addressee, delivery))
+        self.pending.iter().any(|delivery| !config.operators.contains(&delivery.sender) && is_for(&self.addressee, delivery))
     }
 }
 

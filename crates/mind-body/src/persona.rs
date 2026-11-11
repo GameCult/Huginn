@@ -84,12 +84,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::address::{Addressee, Name, addresses, localpart, project_names};
+use crate::address::{Addressee, Name, addresses, is_for, localpart, project_names};
 use crate::chat_image::{self, Image, MAX_PER_LINE};
 use crate::chat_client::{Chat, ChatDelivery, MouthRefused, ChatOpenDirectRequest, ChatRead, DirectOutcome, ChatSendRequest, ContextLine, Refusal, SendBasis};
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
-use crate::heartbeat::{HeartbeatView, PollTrace};
+use crate::heartbeat::{HeartbeatView, PollTrace, project_names_of};
 use crate::lease_client::{Lease, LeaseRequest, Lender, Lent};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
 use crate::queue::{MindPort, any_of, citing, headers, in_force, live_claims, of_kind};
@@ -886,13 +886,26 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
             progress.failure = Some(Failure::Held(reason));
             break;
         }
-        let Ok(pending) = organs.chat.pending(progress.acked) else {
+        let Ok(mut pending) = organs.chat.pending(progress.acked) else {
             progress.failure = Some(Failure::Chat);
             break;
         };
         // A mind that cannot be asked for her Self's replies still serves her chat.
         let routes = reply_routes(organs.mind, &BTreeSet::new()).unwrap_or_default();
         let addressing = addressing_of(config, organs.heartbeat, &own_addressee(config));
+        pending.sort_by_key(|delivery| delivery.seq);
+        // Her names as the heartbeat's table has them, and her projects' names as her mind holds them now: the table is saved after the
+        // heartbeat launches her, so it may not yet hold a project a message names.
+        let table = addressing.iter().find(|mind| mind.matrix_id() == config.own_sender).cloned().unwrap_or_else(|| own_addressee(config));
+        let fresh = own_addressee(config).with_projects(project_names_of(organs.mind).unwrap_or_default());
+        if let Some(through) = quiet_through(&[&table, &fresh], &pending, 0) {
+            if organs.chat.ack(through).is_err() {
+                progress.failure = Some(Failure::Ack);
+                break;
+            }
+            progress.acked = through;
+            pending.retain(|delivery| delivery.seq > through);
+        }
         let Some(session) = next_session(config, &addressing, pending, &routes, &mut opened_alone, process, unix_ms(organs.clock.now())) else { break };
         let remaining_s = i64::try_from(organs.run_cap_s).unwrap_or(i64::MAX).saturating_sub((organs.clock.now() - started).num_seconds());
         if process > 0 && remaining_s <= ROTATE_MARGIN_S {
@@ -1593,6 +1606,22 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         self.note_repo_changes();
         let mut pending = self.organs.chat.pending(self.progress.acked)?;
         pending.sort_by_key(|delivery| delivery.seq);
+        // Whom a delivery is for is the heartbeat's table as it stands, her own row first: it knows her projects' names before her
+        // first line has read them.
+        if !pending.is_empty() {
+            self.addressing = addressing_of(self.config, self.organs.heartbeat, &self.addressee);
+        }
+        let row = self.addressing.iter().find(|mind| mind.matrix_id() == self.config.own_sender).cloned().unwrap_or_else(|| self.addressee.clone());
+        let own = [&row, &self.addressee];
+        // Not while a stale send waits for the messages that interrupted it: they are what the revision line shows her. A failed ack is
+        // tried again at the next poll; it is not a reason to end the session.
+        if self.revision.is_none()
+            && let Some(through) = quiet_through(&own, &pending, self.told_through)
+            && self.organs.chat.ack(through).is_ok()
+        {
+            self.progress.acked = through;
+            pending.retain(|delivery| delivery.seq > through);
+        }
         if let Some(revision) = &mut self.revision {
             revision.polls += 1;
             revision.ready |= revision.polls >= REVISION_POLLS || revision.awaiting.iter().all(|id| pending.iter().any(|delivery| delivery.event_id == *id));
@@ -1611,10 +1640,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
             self.first_seen.entry(delivery.seq).or_insert(now);
         }
         let any_untold = !untold.is_empty();
-        if any_untold {
-            self.addressing = addressing_of(self.config, self.organs.heartbeat, &self.addressee);
-        }
-        let due = revision_ready || untold.iter().any(|delivery| now >= self.first_seen[&delivery.seq] + stagger_ms(self.config, &self.addressing, delivery));
+        let due = revision_ready || untold.iter().any(|delivery| own.iter().any(|who| is_for(who, delivery)) && now >= self.first_seen[&delivery.seq] + stagger_ms(self.config, &self.addressing, delivery));
         self.waiting = if due { one_line_of(untold, |batch| message_lines(self.config, &self.addressee, &self.addressing, batch, &self.earlier(batch)).len()) } else { Vec::new() };
         Ok(self.polled(!self.waiting.is_empty() || self.retell.is_some() || revision_ready || !self.notices.is_empty() || !self.waiting_replies.is_empty(), any_untold))
     }
@@ -1972,6 +1998,16 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
     Ok(Step::Answered(started, reply.intent, opened, notice))
 }
 
+/// The seq an ack may pass because nothing in it is for her: the leading run of `pending` (oldest first) that is not addressed to any of
+/// `own` (her rows as the heartbeat's table, her projects' names and her session know them) and lies above `told_through`, so no
+/// delivery she was told and has not answered is passed. None when the front is addressed, or already told. Such a delivery wakes and
+/// tells no one; it is acked in sequence so the mouth's position moves (it stops reading at 500 unacked) and is not lost: Matrix keeps
+/// it, and the `context` of the next addressed delivery shows it.
+fn quiet_through(own: &[&Addressee], pending: &[ChatDelivery], told_through: u64) -> Option<u64> {
+    let run: Vec<&ChatDelivery> = pending.iter().take_while(|delivery| delivery.seq > told_through && !own.iter().any(|who| is_for(who, delivery))).collect();
+    run.last().map(|last| last.seq)
+}
+
 /// How long after a poll first sees `delivery` a live session is told it: none in a direct message, otherwise her rank times the
 /// step. The Minds the message is for (tagged, named, or named by a project, by `address::addresses` over the swarm's addressing)
 /// rank first, by a hash of the Mind and the event, and the rest follow them, ranked the same way: the first addressed Mind hears
@@ -1986,7 +2022,7 @@ fn stagger_ms(config: &Config, addressing: &[Addressee], delivery: &ChatDelivery
     let mut minds: Vec<&Addressee> = addressing.iter().filter(|mind| mind.matrix_id() != delivery.sender).collect();
     minds.sort_unstable_by_key(|mind| mind.matrix_id());
     minds.dedup_by_key(|mind| mind.matrix_id());
-    let (addressed, others): (Vec<&Addressee>, Vec<&Addressee>) = minds.into_iter().partition(|mind| addresses(mind, delivery));
+    let (addressed, others): (Vec<&Addressee>, Vec<&Addressee>) = minds.into_iter().partition(|mind| if mind.matrix_id() == config.own_sender { is_for(mind, delivery) } else { addresses(mind, delivery) });
     let own_is_addressed = addressed.iter().any(|mind| mind.matrix_id() == config.own_sender);
     let (set, before) = if own_is_addressed { (&addressed, 0) } else { (&others, addressed.len()) };
     let mine = (stagger_hash(&config.own_sender, &delivery.event_id), config.own_sender.as_str());
@@ -2725,7 +2761,7 @@ struct Addressees {
 }
 
 fn addressees(own: &Addressee, addressing: &[Addressee], delivery: &ChatDelivery, names: &BTreeMap<&str, &str>) -> Addressees {
-    let to_you = addresses(own, delivery);
+    let to_you = is_for(own, delivery);
     let mut ids: Vec<&str> = delivery.mentions.iter().map(String::as_str).filter(|id| *id != own.matrix_id()).collect();
     for row in addressing {
         let id = row.matrix_id();
