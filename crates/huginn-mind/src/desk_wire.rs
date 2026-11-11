@@ -383,10 +383,11 @@ fn fork_unknown() -> ForkRefusal {
     fork_refusal(ForkRefusalCode::ForkUnknown, "fork_unknown: no such fork".into())
 }
 
-/// A list page whose first entry alone is past the page budget: names that fork and its `order`; a
-/// client continues with the cursor `c<order>` and has reached the end at order 0.
+/// A list page whose first entry alone is past the page budget: names that fork and its `order`. A
+/// client continues with the cursor `c<order>`; at order 0 there is no such cursor and the list ends.
 fn fork_too_large(fork: &str, order: u64) -> ForkRefusal {
-    fork_refusal(ForkRefusalCode::ForkTooLarge, format!("fork_too_large: fork {fork} at order {order} is past the page budget by itself; continue with cursor c{order}"))
+    let onward = if order == 0 { "this is the end of the list".to_string() } else { format!("continue with cursor c{order}") };
+    fork_refusal(ForkRefusalCode::ForkTooLarge, format!("fork_too_large: fork {fork} at order {order} is past the page budget by itself; {onward}"))
 }
 
 fn body_invalid(field: &str) -> ForkRefusal {
