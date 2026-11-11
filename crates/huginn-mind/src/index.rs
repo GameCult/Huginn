@@ -250,6 +250,15 @@ More documents.");
         assert_eq!(INDEX_TEXT_VERSION, 1);
     }
 
+    /// A Steward ruling is found by the words the peer said as well as by its title and ruling.
+    #[test]
+    fn a_steward_rulings_words_are_indexed() {
+        let mut peer = ruling("R1");
+        peer.operator_quote = None;
+        peer.authority = RulingAuthority::Steward { steward: s("@heimdall:chat"), repo: eureka_pipeline::OrgRepo(REPO.into()), words: "refuse leading zeros".into(), event: None };
+        assert!(index_text(&D::Ruling(peer)).unwrap().lines().any(|line| line == "refuse leading zeros"));
+    }
+
     fn texts(mind: &Mind<MemoryStore>) -> BTreeMap<String, String> {
         mind.index_entries(None).unwrap().into_iter().map(|entry| (entry.id.id.0, entry.text)).collect()
     }

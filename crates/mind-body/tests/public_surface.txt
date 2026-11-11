@@ -189,7 +189,7 @@ mind_body::lease_client: struct SocketLender  pub-fields[]
 mind_body::lease_client: struct TokenFd  pub-fields[]
 mind_body::lease_client::socket: impl Lease for Granted
 mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq , Serialize , Deserialize)] # [serde (rename_all = "lowercase")] pub enum SettleOutcome { Done , Declined , Wrong , }
-mind_body::persona: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Doctrine , DoctrineTooLarge , Lease , Session , Undecodable , OutOfBounds (& 'static str) , RoomNotAllowed , Send , SelfRun , Memory , Ack , }
+mind_body::persona: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Failure { Held (HeldReason) , Chat , Persona , Doctrine , DoctrineTooLarge , Lease , Session , Undecodable , OutOfBounds (& 'static str) , RuleRepo (String) , RoomNotAllowed , Send , SelfRun , Memory , Ack , }
 mind_body::persona: # [derive (Debug , PartialEq , Eq)] pub enum Outcome { Dead (HeldReason) , NoRun , Served { run : PipelineRef , answered : u32 , failure : Option < Failure > , self_run : Option < PipelineRef > } , }
 mind_body::persona: const AGENT : & str
 mind_body::persona: const DOCTRINE_MAX_BYTES : usize

@@ -165,8 +165,8 @@ const OPEN_DIRECT_TEXT_MAX_BYTES: usize = 4000;
 const RULE_BY_OWN_FAULT: &str = "rule.by: your own decision is not a rule";
 const RULE_BY_OPERATOR_FAULT: &str = "rule.by: rule records a Mind's decision in her stewardship";
 const RULE_BY_UNKNOWN_FAULT: &str = "rule.by: not a Mind of the swarm";
-const RULE_WORDS_FAULT: &str = "rule.words: copy them exactly from one of her lines in this session";
-const RULE_REPO_FAULT: &str = "rule.repo: not a repo the Mind named stewards";
+const RULE_WORDS_FAULT: &str = "rule.words: copy them exactly, at least 12 bytes, from one of her lines in this session, outside any quotation";
+const RULE_REPO_OWN_FAULT: &str = "rule.repo: inside your own stewardship, where a Mind's word is a respected contributor's: weigh it and decide, it is not a rule";
 const RULE_REPO_UNREAD_FAULT: &str = "rule.repo: no stewardship of the Mind named has been read yet";
 const RULE_BOUNDS_FAULT: &str = "rule: more entries than one reply may carry, or a field blank or over its length bound";
 const RULE_CAMPAIGN_FAULT: &str = "rule.campaign: not a campaign in force";
@@ -176,6 +176,8 @@ const REMEMBER_MAX: usize = 8;
 const SETTLE_MAX: usize = 8;
 /// The most rulings of other Minds one reply records.
 const RULE_MAX: usize = 4;
+/// The fewest bytes of her line `words` must copy: a clause, not a letter.
+const RULE_WORDS_MIN_BYTES: usize = 12;
 const RULE_TITLE_MAX_BYTES: usize = 200;
 const RULE_TEXT_MAX_BYTES: usize = 4000;
 /// A memory's text in bytes, the people it is about, and a settle's reason in characters.
@@ -750,7 +752,7 @@ pub struct Organs<'a> {
 }
 
 /// Why a start did not complete.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
     Held(HeldReason),
     Chat,
@@ -766,6 +768,8 @@ pub enum Failure {
     Undecodable,
     /// A reply that parsed and broke the bound of the field this names: the organ's words, never the reply's.
     OutOfBounds(&'static str),
+    /// A rule named a repo the decider does not steward: the organ's own words, naming what the heartbeat's table says she stewards.
+    RuleRepo(String),
     RoomNotAllowed,
     Send,
     SelfRun,
@@ -786,6 +790,7 @@ impl fmt::Display for Failure {
             Self::Session => f.write_str("your session could not be started or ended without answering"),
             Self::Undecodable => f.write_str("the reply is not a persona reply"),
             Self::OutOfBounds(field) => f.write_str(field),
+            Self::RuleRepo(told) => f.write_str(told),
             Self::RoomNotAllowed => f.write_str("the reply speaks outside your rooms"),
             Self::Send => f.write_str("a send was refused or failed"),
             Self::SelfRun => f.write_str("the Self run could not be started"),
@@ -856,7 +861,7 @@ struct Progress {
 }
 
 /// A refused batch as the start remembers it. The mouth still holds its deliveries, so this needs only their lowest seq.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Refused {
     lowest: u64,
     why: Failure,
@@ -966,7 +971,7 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
             break;
         }
     }
-    close_run(organs, &run, progress.answered, progress.last_intent.as_deref(), progress.failure, noted.failures.get())?;
+    close_run(organs, &run, progress.answered, progress.last_intent.as_deref(), progress.failure.clone(), noted.failures.get())?;
     Ok(Outcome::Served { run, answered: progress.answered, failure: progress.failure, self_run: progress.self_run })
 }
 
@@ -1663,7 +1668,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
     fn start_line(&mut self) -> Result<String> {
         self.read_replies();
         let batch = std::mem::take(&mut self.start);
-        let (note, refusals) = self.progress.refused.map_or((None, 0), |Refused { why, refusals, .. }| (Some(refused_note(why)), refusals));
+        let (note, refusals) = self.progress.refused.clone().map_or((None, 0), |Refused { why, refusals, .. }| (Some(refused_note(why)), refusals));
         let line = self.whole_line(&batch, note.as_deref())?;
         Ok(self.write(batch, line, refusals))
     }
@@ -1828,7 +1833,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 // Her final answer lands after she took in every line, so a revision still waiting is answered by it and its note, that a send was not sent, would be false.
                 let spent = if final_reply { self.revision.take().map(|revision| revision.batch) } else { None };
                 self.answered_through = self.answered_through.max(batch.iter().chain(spent.iter().flatten()).map(|delivery| delivery.seq).max().unwrap_or(0));
-                if self.progress.refused.is_some_and(|refused| batch.iter().any(|delivery| delivery.seq == refused.lowest)) {
+                if self.progress.refused.as_ref().is_some_and(|refused| batch.iter().any(|delivery| delivery.seq == refused.lowest)) {
                     self.progress.refused = None;
                 }
                 let unanswered = self
@@ -1898,9 +1903,10 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 merged.dedup_by_key(|delivery| delivery.seq);
                 // A line in flight may hold a batch at a higher count than this result's, so the start's record only rises. A refusal always has a batch: the result that carries none is a flush alone, and a flush is written alone only when no refused batch waits, so one in flight has its own result first, whose refusal puts it back in the retell this one merges.
                 let held = self.progress.refused.take();
+                let held = held.as_ref();
                 self.progress.refused = merged
                     .first()
-                    .map(|first| Refused { lowest: held.map_or(first.seq, |held| held.lowest.min(first.seq)), why, refusals: held.map_or(most, |held| held.refusals.max(most)) });
+                    .map(|first| Refused { lowest: held.map_or(first.seq, |held| held.lowest.min(first.seq)), why: why.clone(), refusals: held.map_or(most, |held| held.refusals.max(most)) });
                 self.retell = Some(Retell { batch: merged, why, refusals: most, revision });
                 Ok((true, false))
             }
@@ -1974,6 +1980,13 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
         Err(why) => return refuse(why),
     };
 
+    // A campaign closed since the schema was fixed refuses the reply before any say or open has gone out, so the retell repeats no effect.
+    if !reply.rule.is_empty() {
+        let in_force = campaigns_in_force(organs.mind)?;
+        if reply.rule.iter().any(|rule| !in_force.iter().any(|(slug, _)| *slug == rule.campaign)) {
+            return refuse(Failure::OutOfBounds(RULE_CAMPAIGN_FAULT));
+        }
+    }
     // Request ids name the batch of deliveries and the say, so a repeat is the same send.
     let batch_id = match (batch.iter().map(|delivery| delivery.seq).min(), batch.iter().map(|delivery| delivery.seq).max()) {
         (Some(first), Some(last)) => format!("s{first}-{last}"),
@@ -2047,12 +2060,6 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
     // The one origin of this turn: its memories and its brief record the same conversation.
     let origin = origin_of(config, batch, &inbox.origin);
     let memories = build_memories(&instance, run, turn, &reply, &origin);
-    if !reply.rule.is_empty() {
-        let in_force = campaigns_in_force(organs.mind)?;
-        if reply.rule.iter().any(|rule| !in_force.iter().any(|(slug, _)| *slug == rule.campaign)) {
-            return refuse(Failure::OutOfBounds(RULE_CAMPAIGN_FAULT));
-        }
-    }
     let rulings = build_rulings(run, turn, &reply, &inbox.seen, date(now));
     for rule in &reply.rule {
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("rule {} {}: {}", rule.by, rule.repo, rule.title) });
@@ -2220,34 +2227,64 @@ fn memory_fault(reply: &PersonaReply, people: &[String], open: &[String]) -> Opt
 /// The field a rule breaks, if any: it records a peer Mind's decision, so `by` is a Mind of the table (neither herself nor the
 /// operator), `words` are the Mind's own, copied from one of her lines this session showed, and `repo` is one the table says she stewards.
 /// What the words mean, and whether they fall inside that repo, is her reading; the organ checks the line and the stewardship.
-fn rule_fault(reply: &PersonaReply, shown: &Shown, addressing: &[Addressee], config: &Config) -> Option<&'static str> {
+fn rule_fault(reply: &PersonaReply, shown: &Shown, addressing: &[Addressee], config: &Config) -> Option<Failure> {
+    use Failure::OutOfBounds as Out;
     if reply.rule.len() > RULE_MAX {
-        return Some(RULE_BOUNDS_FAULT);
+        return Some(Out(RULE_BOUNDS_FAULT));
     }
     for rule in &reply.rule {
         let text_ok = |text: &str, max: usize| (1..=max).contains(&text.len()) && !text.trim().is_empty();
         let title_ok = text_ok(&rule.title, RULE_TITLE_MAX_BYTES) && rule.title.chars().any(char::is_alphanumeric) && !rule.title.chars().any(char::is_control);
         if rule.by.len() > SHORT_MAX_BYTES || !title_ok || !text_ok(&rule.ruling, RULE_TEXT_MAX_BYTES) || !text_ok(&rule.words, RULE_TEXT_MAX_BYTES) || !repo_in_bounds(&rule.repo) || !campaign_in_bounds(&rule.campaign) {
-            return Some(RULE_BOUNDS_FAULT);
+            return Some(Out(RULE_BOUNDS_FAULT));
         }
         match sender_role(config, addressing, &rule.by) {
-            Sender::Persona => return Some(RULE_BY_OWN_FAULT),
-            Sender::Operator => return Some(RULE_BY_OPERATOR_FAULT),
-            Sender::Member => return Some(RULE_BY_UNKNOWN_FAULT),
+            Sender::Persona => return Some(Out(RULE_BY_OWN_FAULT)),
+            Sender::Operator => return Some(Out(RULE_BY_OPERATOR_FAULT)),
+            Sender::Member => return Some(Out(RULE_BY_UNKNOWN_FAULT)),
             Sender::Mind => {}
         }
-        if !shown.said.iter().any(|said| said.sender == rule.by && said.text.contains(&rule.words)) {
-            return Some(RULE_WORDS_FAULT);
+        if !shown.said.iter().any(|said| said.sender == rule.by && in_her_own_voice(&said.text, &rule.words)) {
+            return Some(Out(RULE_WORDS_FAULT));
         }
         let stewarded = addressing.iter().find(|row| row.matrix_id() == rule.by).map(Addressee::repos).unwrap_or_default();
         if stewarded.is_empty() {
-            return Some(RULE_REPO_UNREAD_FAULT);
+            return Some(Out(RULE_REPO_UNREAD_FAULT));
         }
-        if !stewarded.contains(&OrgRepo(rule.repo.clone())) {
-            return Some(RULE_REPO_FAULT);
+        let repo = OrgRepo(rule.repo.clone());
+        if !stewarded.contains(&repo) {
+            let list = stewarded.iter().map(|repo| repo.0.as_str()).collect::<Vec<_>>().join(", ");
+            return Some(Failure::RuleRepo(format!("rule.repo: {} stewards {list}", rule.by)));
+        }
+        if addressing.iter().find(|row| row.matrix_id() == config.own_sender).is_some_and(|own| own.repos().contains(&repo)) {
+            return Some(Out(RULE_REPO_OWN_FAULT));
         }
     }
     None
+}
+
+/// Whether `words` are her own: at least `RULE_WORDS_MIN_BYTES`, copied from `line` on whole-word boundaries and outside any quotation
+/// (straight or curly), so a letter of a greeting, or what she was quoting (the operator's words included), is not hers.
+fn in_her_own_voice(line: &str, words: &str) -> bool {
+    if words.trim().len() < RULE_WORDS_MIN_BYTES {
+        return false;
+    }
+    line.match_indices(words).any(|(at, found)| {
+        let before = line[..at].chars().next_back();
+        let after = line[at + found.len()..].chars().next();
+        let edge = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
+        let (mut straight, mut curly) = (false, 0i32);
+        for c in line[..at].chars() {
+            match c {
+                '"' => straight = !straight,
+                '\u{201C}' => curly += 1,
+                '\u{201D}' => curly = (curly - 1).max(0),
+                _ => {}
+            }
+        }
+        let quoted = straight || curly > 0 || found.contains(['"', '\u{201C}', '\u{201D}']);
+        edge(before) && edge(after) && !quoted
+    })
 }
 
 /// Whether an open is hers to ask: from a public conversation, of a person this session showed who is neither a Mind nor herself, with
@@ -2277,8 +2314,8 @@ fn decode_reply(text: &str, rooms: &[String], seen: &Shown, conversation: &Conve
     if let Some(field) = memory_fault(&reply, &seen.people, &seen.open) {
         return Err(Failure::OutOfBounds(field));
     }
-    if let Some(field) = rule_fault(&reply, seen, addressing, config) {
-        return Err(Failure::OutOfBounds(field));
+    if let Some(failure) = rule_fault(&reply, seen, addressing, config) {
+        return Err(failure);
     }
     if reply.open_direct.as_ref().is_some_and(|ask| !open_in_bounds(ask, conversation, config, addressing, &seen.people)) {
         return Err(Failure::OutOfBounds(OPEN_DIRECT_FAULT));

@@ -2008,8 +2008,9 @@ mod tests {
             refused(|a| if let RulingAuthority::Steward { steward, .. } = a { steward.0 = String::new() }),
             refused(|a| if let RulingAuthority::Steward { repo, .. } = a { repo.0 = "nope".into() }),
             refused(|a| if let RulingAuthority::Steward { words, .. } = a { words.0 = "w".repeat(4001) }),
+            refused(|a| if let RulingAuthority::Steward { event, .. } = a { *event = Some("e".repeat(201).as_str().into()) }),
         ];
-        for (fault, field) in fields.iter().zip(["authority.words", "authority.steward", "authority.repo", "authority.words"]) {
+        for (fault, field) in fields.iter().zip(["authority.words", "authority.steward", "authority.repo", "authority.words", "authority.event"]) {
             assert!(fault.contains(field), "{fault}");
         }
     }
