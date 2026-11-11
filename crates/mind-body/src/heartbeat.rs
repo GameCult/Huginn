@@ -503,7 +503,7 @@ fn newest(mind: &dyn MindPort, selection: Selection) -> Result<Option<PipelineDo
 }
 
 /// The chat names of every repo she stewards in force: one query on her mind.
-fn project_names_of(mind: &dyn MindPort) -> Result<Vec<Name>> {
+pub(crate) fn project_names_of(mind: &dyn MindPort) -> Result<Vec<Name>> {
     let mut names = Vec::new();
     for header in headers(mind, &in_force(of_kind(PipelineKind::Stewardship)))? {
         if let PipelineFacts::Stewardship { repo, names: listed, .. } = &header.facts {

@@ -76,6 +76,8 @@ struct FakeChat {
     speaker: RefCell<String>,
     /// Acks are recorded and the deliveries stay, where several sessions share one pending.
     keep_on_ack: Cell<bool>,
+    /// The mouth refuses every ack.
+    fail_ack: Cell<bool>,
     /// The opens asked of the mouth, in order.
     opens: RefCell<Vec<ChatOpenDirectRequest>>,
     /// How the fake mouth answers an open; none is a transport error.
@@ -169,6 +171,9 @@ impl Chat for FakeChat {
     }
 
     fn ack(&self, through_seq: u64) -> Result<()> {
+        if self.fail_ack.get() {
+            return Err(anyhow!("the mouth is down"));
+        }
         self.log.borrow_mut().push("ack".into());
         self.acked.borrow_mut().push(through_seq);
         if !self.keep_on_ack.get() {
@@ -459,6 +464,7 @@ impl Rig {
                 landed: RefCell::default(),
                 speaker: RefCell::new("@eureka:chat".into()),
                 keep_on_ack: Cell::new(false),
+                fail_ack: Cell::new(false),
                 opens: RefCell::default(),
                 open_outcome: Cell::new(Some(DirectOutcome::Opened)),
                 open_unserved: Cell::new(false),
@@ -7947,13 +7953,13 @@ fn a_leading_run_of_what_is_not_hers_is_quiet_and_an_ack_never_passes_what_is_to
     let own = own_addressee(&config());
     let room = |seq| heard(seq, "anyone around", Some(Basis::Room), Form::Message);
     let unproven = |seq| heard(seq, "anyone around", None, Form::Message);
-    assert_eq!(quiet_through(&own, &[unproven(1), room(2), unproven(3)], 0), Some(3), "a nil basis and an @room are not hers");
+    assert_eq!(quiet_through(&[&own], &[unproven(1), room(2), unproven(3)], 0), Some(3), "a nil basis and an @room are not hers");
     let hers = heard(4, "anyone around", Some(Basis::Reply), Form::Message);
-    assert_eq!(quiet_through(&own, &[unproven(1), hers.clone(), unproven(5)], 0), Some(1), "the run stops at the first that is hers");
-    assert_eq!(quiet_through(&own, &[hers, unproven(5)], 0), None);
-    assert_eq!(quiet_through(&own, &[unproven(1), unproven(2)], 1), None, "the front was told and is not answered: nothing passes it");
-    assert_eq!(quiet_through(&own, &[unproven(5), unproven(6)], 5), None);
-    assert_eq!(quiet_through(&own, &[], 0), None);
+    assert_eq!(quiet_through(&[&own], &[unproven(1), hers.clone(), unproven(5)], 0), Some(1), "the run stops at the first that is hers");
+    assert_eq!(quiet_through(&[&own], &[hers, unproven(5)], 0), None);
+    assert_eq!(quiet_through(&[&own], &[unproven(1), unproven(2)], 1), None, "the front was told and is not answered: nothing passes it");
+    assert_eq!(quiet_through(&[&own], &[unproven(5), unproven(6)], 5), None);
+    assert_eq!(quiet_through(&[&own], &[], 0), None);
 }
 
 /// A notice or an edit never addresses her, whatever else it says; a nil basis does not mean "not for her": her name still does.
@@ -7964,10 +7970,10 @@ fn a_notice_and_an_edit_are_quiet_whatever_they_say_and_a_nil_basis_with_her_nam
     for (basis, form) in [(Some(Basis::Direct), Form::Notice), (Some(Basis::Tag), Form::Edit), (Some(Basis::Reply), Form::Notice), (None, Form::Edit)] {
         let mut line = heard(1, "eureka, look", basis, form);
         line.mentions = vec!["@eureka:chat".into()];
-        assert_eq!(quiet_through(&own, &[line], 0), Some(1), "{basis:?} {form:?}");
+        assert_eq!(quiet_through(&[&own], &[line], 0), Some(1), "{basis:?} {form:?}");
     }
-    assert_eq!(quiet_through(&own, &[heard(1, "Eureka, look", None, Form::Message)], 0), None, "an old mouth's delivery, named in the text");
-    assert_eq!(quiet_through(&own, &[heard(1, "look", Some(Basis::Direct), Form::Message)], 0), None);
+    assert_eq!(quiet_through(&[&own], &[heard(1, "Eureka, look", None, Form::Message)], 0), None, "an old mouth's delivery, named in the text");
+    assert_eq!(quiet_through(&[&own], &[heard(1, "look", Some(Basis::Direct), Form::Message)], 0), None);
 }
 
 /// Two unaddressed lines ahead of an addressed one are acked at the start, in one ack, and the turn is told the addressed one alone.
@@ -8010,4 +8016,46 @@ fn a_v1_mouths_deliveries_still_wake_her_by_name_and_by_tag() {
     assert_eq!(failure_of(outcome), None);
     assert_eq!(acked, [2]);
     assert!(first_line(&writes).contains("Eureka, look"));
+}
+
+/// An old mouth sends no basis, but every mouth sends `is_direct`: a DM that names no one is hers, is told, and is not acked as quiet.
+#[test]
+fn a_direct_message_from_an_old_mouth_is_hers_with_no_basis() {
+    use crate::chat_client::Form;
+    let dm = ChatDelivery { is_direct: true, ..heard(1, "can you look at this", None, Form::Message) };
+    assert_eq!(quiet_through(&[&own_addressee(&config())], &[dm.clone()], 0), None);
+    let rig = Rig::new(vec![dm], &[says(&[("operator", "ok")])]);
+    rig.clock.step.set(0);
+    let (child, writes) = answering(&rig, reply_saying("ok"));
+    let (_, acked) = carry_children(&rig, vec![child]);
+    assert!(first_line(&writes).contains("can you look at this"));
+    assert_eq!(acked, [1]);
+}
+
+/// A message naming only a project she stewards is hers by her mind's records, though no heartbeat table holds the name yet: it is told, not
+/// acked as quiet at the start.
+#[test]
+fn a_message_naming_only_her_project_is_told_though_no_table_holds_the_name() {
+    use crate::chat_client::Form;
+    let rig = Rig::new(vec![heard(1, "is the bad day simulator green?", None, Form::Message)], &[says(&[])]);
+    rig.mind.committed(vec![steward_naming("GameCult/BadDaySimulator", &[])]);
+    rig.clock.step.set(0);
+    let (child, writes) = answering(&rig, reply_saying("ok"));
+    let (_, acked) = carry_children(&rig, vec![child]);
+    assert!(first_line(&writes).contains("bad day simulator"), "{}", first_line(&writes));
+    assert_eq!(acked, [1], "acked once, after it was answered");
+}
+
+/// A refused ack at the start ends the start with the ack failure, and nothing is told.
+#[test]
+fn a_refused_quiet_ack_ends_the_start_and_tells_nothing() {
+    use crate::chat_client::Form;
+    let rig = Rig::new(vec![heard(1, "chatter", None, Form::Message), heard(2, "more chatter", None, Form::Message)], &[]);
+    rig.chat.fail_ack.set(true);
+    rig.clock.step.set(0);
+    let (child, writes) = answering(&rig, empty_reply());
+    let (outcome, acked) = carry_children(&rig, vec![child]);
+    assert_eq!(failure_of(outcome), Some(Failure::Ack));
+    assert!(acked.is_empty());
+    assert!(writes.borrow().is_empty());
 }

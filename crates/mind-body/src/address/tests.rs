@@ -128,3 +128,12 @@ fn only_a_message_can_address_and_the_mouths_basis_stands_for_the_polling_mind_a
     assert!(is_for(&nibu, &with(None, Form::Message, "nibu, look", &[])), "unproven is not 'not for her': her name decides");
     assert!(is_for(&nibu, &with(Some(Basis::Room), Form::Message, "nibu, look", &[])), "an @room that also names her is named");
 }
+
+#[test]
+fn a_direct_message_is_for_her_whatever_the_basis() {
+    let nibu = steward("GameCult/Thing", &[]);
+    let dm = ChatDelivery { is_direct: true, ..said("nothing named", &[]) };
+    assert!(is_for(&nibu, &dm), "an old mouth sends no basis; the DM is hers");
+    assert!(!is_for(&nibu, &ChatDelivery { form: Form::Notice, ..dm.clone() }));
+    assert!(!is_for(&nibu, &ChatDelivery { form: Form::Edit, ..dm }));
+}
