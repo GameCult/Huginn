@@ -7,10 +7,14 @@
 //! the library never does.
 //!
 //! Environment: `HUGINN_ENDPOINT` (`rudp://<ip>:<port>`, her own daemon), `EUREKA_INSTANCE`
-//! (when `--instance` is not given), `MIND_STREAM_ENDPOINT` (`http://<loopback>:<port>`, the
-//! model host), `MIND_STREAM_PROJECTOR_MODEL` and `MIND_STREAM_BASE_MODEL`.
+//! (when `--instance` is not given), `MIND_STREAM_CONNECTOR_ENDPOINT` (`<loopback ip>:<port>`, the
+//! connector kit the Projector is asked through), `MIND_STREAM_PROJECTOR_MODEL` (the model id the
+//! kit's caller row allows), `MIND_STREAM_ENDPOINT` (`http://<loopback>:<port>`, the model host) and
+//! `MIND_STREAM_BASE_MODEL`. The connector key is the file `connector-key` in `CREDENTIALS_DIRECTORY`
+//! (systemd's `LoadCredential`), read once; the caller id is the instance.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -20,13 +24,23 @@ use eureka_pipeline::Slug;
 use eureka_state::HuginnClient;
 use mind_body::control::read_effective;
 use mind_body::queue::HuginnMind;
-use mind_body::stream::{HuginnPersonaSource, Mode, OllamaStream, Organs, Outcome, STREAM_MIN_GAP_S, STREAM_POLL_S, tick};
+use mind_body::stream::{HuginnPersonaSource, KitProjector, Mode, OllamaContinuer, Organs, Outcome, STREAM_MIN_GAP_S, STREAM_POLL_S, tick};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the kit may take to answer one Projector turn.
+const PROJECTOR_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[allow(clippy::disallowed_methods, reason = "the binary reads its own environment, and hands it to the library")]
 fn setting(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// The connector key: the credential file, read once and trimmed. An absence names the variable, never a value.
+#[allow(clippy::disallowed_methods, reason = "the binary reads its own environment, and hands it to the library")]
+fn connector_key() -> Result<String> {
+    let directory = std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from).ok_or_else(|| anyhow!("CREDENTIALS_DIRECTORY is not set"))?;
+    let key = std::fs::read_to_string(directory.join("connector-key")).map_err(|_| anyhow!("the connector-key credential could not be read"))?;
+    Ok(key.trim().to_owned())
 }
 
 fn required(name: &str) -> Result<String> {
@@ -63,10 +77,12 @@ fn run() -> Result<()> {
         .ok_or_else(|| anyhow!("HUGINN_ENDPOINT is not rudp://<ip>:<port>"))?;
     let projector_model = required("MIND_STREAM_PROJECTOR_MODEL")?;
     let base_model = required("MIND_STREAM_BASE_MODEL")?;
-    let model = OllamaStream::open(&required("MIND_STREAM_ENDPOINT")?, &projector_model, &base_model)?;
+    let connector: SocketAddr = required("MIND_STREAM_CONNECTOR_ENDPOINT")?.parse().map_err(|_| anyhow!("MIND_STREAM_CONNECTOR_ENDPOINT is not <ip>:<port>"))?;
+    let projector = KitProjector::open(connector, connector_key()?, &instance.0, &projector_model, PROJECTOR_TIMEOUT)?;
+    let continuer = OllamaContinuer::open(&required("MIND_STREAM_ENDPOINT")?, &base_model)?;
     let mind = HuginnMind::new(HuginnClient::new(address, instance.clone(), TIMEOUT));
     let persona = HuginnPersonaSource::new(HuginnClient::new(address, instance.clone(), TIMEOUT));
-    let organs = Organs { mind: &mind, persona: &persona, model: &model, projector_model: &projector_model, base_model: &base_model };
+    let organs = Organs { mind: &mind, persona: &persona, projector: &projector, continuer: &continuer, projector_model: &projector_model, base_model: &base_model };
     let mode = if args.dry_run { Mode::DryRun } else { Mode::Live };
     let once = args.once || args.dry_run;
     loop {

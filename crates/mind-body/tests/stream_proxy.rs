@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use mind_body::stream::{OllamaStream, StreamModel};
+use mind_body::stream::{Continuer, OllamaContinuer, Sampling};
 
 /// Counts the connections a loopback listener accepts, answering each with `reply` when given.
 fn listen(reply: Option<String>) -> (String, Arc<AtomicUsize>) {
@@ -67,7 +67,8 @@ fn the_stream_agent_ignores_the_proxy_environment() {
             let plain: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(2))).build().into();
             let _ = plain.get(&endpoint).call();
         } else {
-            let _ = OllamaStream::open(&endpoint, "p", "b").unwrap().project("hello");
+            let sampling = Sampling { temperature_permille: 1000, min_p_permille: 50, max_tokens: 16 };
+            let _ = OllamaContinuer::open(&endpoint, "b").unwrap().continue_raw("hello", &sampling, 1);
         }
         return;
     }
