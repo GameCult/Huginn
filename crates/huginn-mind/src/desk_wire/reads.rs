@@ -355,7 +355,7 @@ fn card_of(docs: &Docs<'_>, key: &str, order: u64, question: &PipelineQuestion, 
 /// Whether a reader may see this fork at all: a decider sees every showable fork (they must, to answer
 /// it); anyone else only while the Mind's `desk_listing` for it is in force (derived from the
 /// resolutions on every read; no status is stored). A fork nobody may see reads as a missing one.
-fn visible(docs: &Docs<'_>, key: &str, decider: bool) -> bool {
+pub(super) fn visible(docs: &Docs<'_>, key: &str, decider: bool) -> bool {
     decider || {
         let (root, label) = root_and_local(key);
         let listing = format!("{root}:desk_listing:{label}");
@@ -1101,6 +1101,30 @@ mod tests {
         let before = head(&mind);
         assert!(matches!(admit(&mut mind, vec![D::DeskListing(other)]), PipelineAdmissionOutcome::Refused(_)));
         assert_eq!(head(&mind), before);
+    }
+
+    /// The answer path is no oracle: a non-decider answering a hidden fork gets the bytes of answering
+    /// one that never existed, and nothing is stored. A listed fork still stores the NotADecider refusal.
+    #[test]
+    fn a_non_decider_answering_a_hidden_fork_learns_nothing_and_stores_nothing() {
+        let mut mind = desk(2);
+        let hash = hash_of(&mind, &fork(1));
+        let before = (head(&mind), stored_answers(&mind));
+        let hidden = answer(&mut mind, DAN, &[ANNA, BEN], &fork(1), &hash, None);
+        let missing = answer(&mut mind, DAN, &[ANNA, BEN], &fork(99), &hash, None);
+        unknown(hidden.clone());
+        assert_eq!(rmp_serde::to_vec_named(&hidden).unwrap(), rmp_serde::to_vec_named(&missing).unwrap());
+        assert_eq!((head(&mind), stored_answers(&mind)), before, "nothing stored");
+        list_it(&mut mind, 1);
+        let listed = answer(&mut mind, DAN, &[ANNA, BEN], &fork(1), &hash, None);
+        let DeskResponse::Answered { answer: refused, .. } = listed else { panic!("a listed fork stores the refusal: {listed:?}") };
+        assert_eq!(refused.code, Some(ForkAnswerCode::NotADecider));
+        assert_eq!(stored_answers(&mind), before.1 + 1);
+    }
+
+    fn stored_answers(mind: &Mind<MemoryStore>) -> usize {
+        let image = mind.image().unwrap();
+        Docs::at(image, image.head).of_kind(PipelineKind::DeskAnswer).count()
     }
 
     #[test]

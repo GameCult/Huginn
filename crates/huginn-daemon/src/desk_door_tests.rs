@@ -211,6 +211,13 @@ fn rig(peer_uid: u32) -> Rig {
 }
 
 impl Rig {
+    /// The Mind lists the seeded fork, on its own door, so a non-decider reaches it.
+    fn list_the_fork(&mut self) {
+        let listing = PipelineDocument::DeskListing(huginn_mind::eureka_pipeline::PipelineDeskListing { campaign: slug("eureka-state"), listed: short(FORK), reason: "Listed.".into() });
+        let admitted = self.daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![listing])), now()).answered();
+        assert!(matches!(admitted, HuginnMindResponse::Admit(huginn_mind::PipelineAdmissionOutcome::Committed { .. })), "{admitted:?}");
+    }
+
     /// Runs `client` on its own thread while this one serves the door, then drains what is still waiting.
     fn serving<T: Send>(&mut self, client: impl FnOnce(&Path) -> T + Send) -> T {
         let path = self.path.clone();
@@ -607,6 +614,7 @@ mod door_smoke {
     #[test]
     fn deciders_ride_each_request() {
         let mut rig = rig(my_uid());
+        rig.list_the_fork();
         let (before, hash) = (rig.state(), rig.hash.clone());
         let out = rig.serving(|path| {
             let ask = |id: &str, who: &str, deciders: &[&str], request_id: &str| {
@@ -782,6 +790,7 @@ mod door_smoke {
     #[test]
     fn a_mind_refusal_and_a_stored_refusal_are_typed_replies() {
         let mut rig = rig(my_uid());
+        rig.list_the_fork();
         let (before, hash) = (rig.state(), rig.hash.clone());
         let mut foreign = answer("x", DeskAuthority::Member, &["x"], wire(&hash, R1));
         let DeskRequest::Answer { mind, .. } = &mut foreign else { unreachable!() };

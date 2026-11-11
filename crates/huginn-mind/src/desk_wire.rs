@@ -549,10 +549,12 @@ impl<S: MindStore> Mind<S> {
         };
         let image = self.image()?;
         let docs = Docs::at(image, image.head);
+        // A fork this reader may not see is unshowable here too, by the read side's own `visible`: the answer path
+        // must not tell a hidden fork from a missing one, nor store a refusal for it.
         // A request already stored replays whatever the list is now: the lookup is `answer_desk`'s,
         // asked here only so the gate does not shadow it.
         let unshowable = bound_answer(&docs, &subject, &sent.request_id).is_none()
-            && matches!(docs.find(PipelineKind::Question, &sent.fork.0), Some(PipelineDocument::Question(question)) if !showable(question, deciders));
+            && matches!(docs.find(PipelineKind::Question, &sent.fork.0), Some(PipelineDocument::Question(question)) if !showable(question, deciders) || !reads::visible(&docs, &sent.fork.0, deciders.contains(&subject)));
         if unshowable {
             return Ok(DeskResponse::NotStored(fork_unknown()));
         }
@@ -616,6 +618,11 @@ mod tests {
     fn desk() -> Mind<MemoryStore> {
         let mut mind = seeded();
         committed(admit(&mut mind, vec![question_n(1), question_n(2)]));
+        // Listed, so a reader who is not a decider reaches them (an unlisted fork is the reads' own tests').
+        for fork in [FORK, FORK2] {
+            let listing = D::DeskListing(eureka_pipeline::PipelineDeskListing { campaign: slug("eureka-state"), listed: s(fork), reason: "Listed.".into() });
+            committed(admit(&mut mind, vec![listing]));
+        }
         mind
     }
 
@@ -1491,6 +1498,7 @@ mod tests {
             assert_eq!(shown_hash(&question).0, her_hash, "{name}: the card's hash");
             let mut mind = seeded();
             committed(admit(&mut mind, vec![D::Question(question)]));
+            committed(admit(&mut mind, vec![D::DeskListing(eureka_pipeline::PipelineDeskListing { campaign: slug("eureka-state"), listed: s(FORK), reason: "Listed.".into() })]));
             let list: Vec<&str> = card["deciders"].as_array().unwrap().iter().map(|who| who.as_str().unwrap()).collect();
             if card["status"] == "closed" {
                 close(&mut mind, FORK, "RQ1", "no");
