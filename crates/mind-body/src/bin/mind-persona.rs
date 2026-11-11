@@ -18,7 +18,8 @@
 //! process's fresh configuration; `CLAUDE_LEASE_SOCKET` is the connector's lease socket (the token itself
 //! is never in this process's environment, only the descriptor a lease grants); `RUNTIME_DIRECTORY` (the
 //! unit's `RuntimeDirectory=`) holds each process's configuration and instructions; `BIFROST_CHAT_ENDPOINT`
-//! (`rudp://<ip>:<port>`, the mouth) and `BIFROST_CHAT_KEY_FILE`. Without
+//! (`rudp://<ip>:<port>`, the mouth) and `BIFROST_CHAT_KEY_FILE`; `BIFROST_CHAT_PENDING_V4` set to exactly `1` asks the mouth for the
+//! reply link (`chat_pending.v4`), anything else or unset does not. Without
 //! `--endpoint` the daemon is `HUGINN_ENDPOINT`; the trace is `persona-trace.cc`
 //! under `STATE_DIRECTORY`, and her sandbox is `STATE_DIRECTORY/sandbox`. The key file is read here and its
 //! text goes to the transport, which holds it; nothing is printed.
@@ -76,7 +77,8 @@ fn run() -> Result<String> {
         .strip_prefix("rudp://")
         .and_then(|address| address.parse().ok())
         .ok_or_else(|| anyhow!("BIFROST_CHAT_ENDPOINT is not rudp://<ip>:<port>"))?;
-    let chat = RudpChat::new(chat_endpoint, connection_id(&credential("BIFROST_CHAT_KEY_FILE")?), instance.0.clone(), CHAT_TIMEOUT);
+    let reply_link = setting("BIFROST_CHAT_PENDING_V4").as_deref() == Some("1");
+    let chat = RudpChat::new(chat_endpoint, connection_id(&credential("BIFROST_CHAT_KEY_FILE")?), instance.0.clone(), CHAT_TIMEOUT).with_reply_link(reply_link);
     let run_cap_s: u64 = setting(ENV_RUN_CAP).and_then(|seconds| seconds.parse().ok()).filter(|seconds| *seconds > 0).ok_or_else(|| anyhow!("{ENV_RUN_CAP} is not set to the unit's RuntimeMaxSec in seconds"))?;
     let scratch = PathBuf::from(required(SCRATCH_VARIABLE)?);
     let sandbox = Path::new(&state).join(SANDBOX_DIR);
