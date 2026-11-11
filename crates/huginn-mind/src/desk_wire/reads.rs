@@ -328,7 +328,8 @@ impl<S: MindStore> Mind<S> {
     /// less the envelope margin); counts and stamp are unaffected. A page whose FIRST entry alone is past
     /// the budget is the `fork_too_large` refusal, naming that fork and its order: the caller goes on
     /// with the cursor `c<order>`, which returns the forks below it, so no older fork is unreachable.
-    /// The fork itself is still its whole entry on `desk_fork`. Nothing is dropped silently.
+    /// The fork itself is still its whole entry on `desk_fork`; if that entry is past the reply cap the door
+    /// answers the read with `fork_too_large` naming the fork (no order, no cursor), not `ResponseTooLarge`. Nothing is dropped silently.
     ///
     /// The call is handed the call's `deciders` and no subject: they fill each card's `deciders` and
     /// feed the showability gate, and gate nothing else. The record is whole, notes included

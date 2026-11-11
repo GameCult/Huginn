@@ -590,8 +590,8 @@ fn refusal_of(response: &DeskResponse) -> Option<(String, String)> {
 
 /// Three forks, the middle one's record grown over the socket until its card alone is past the page
 /// budget. The list names it and its order (`fork_too_large`), the cursor `c<order>` walks on to the
-/// older fork and ends at order 0, a READ of it never returns that code (an entry while it fits the
-/// response bound, the door's named response-too-large past it), and `authority` on a read is still
+/// older fork and ends at order 0, a READ of it never carries an order or cursor (an entry while it fits the
+/// response bound, the fork-only `fork_too_large` past it), and `authority` on a read is still
 /// refused.
 #[test]
 fn a_fork_too_large_to_page_is_named_by_the_list_and_never_by_the_read() {
@@ -664,11 +664,11 @@ fn a_fork_too_large_to_page_is_named_by_the_list_and_never_by_the_read() {
     let read = ask(&desk, "m-r", &fork_read("x", big));
     let DeskResponse::Fork { entry, .. } = &read else { panic!("a read of the oversize fork is its entry, not a refusal: {read:?}") };
     assert_eq!((entry.card.fork_id.as_str(), entry.card.order), (big, 1));
-    // Past DESK_MAX_RESPONSE_BYTES the read is the door's named response-too-large refusal, still not fork_too_large.
+    // Past DESK_MAX_RESPONSE_BYTES the read is the fork-only fork_too_large (no order, no cursor).
     let mut more = 0_u32;
     let too_big = loop {
         let read = ask(&desk, "m-r", &fork_read("x", big));
-        if matches!(read, DeskResponse::Refused(_)) {
+        if matches!(read, DeskResponse::NotStored(_)) {
             break read;
         }
         assert!(matches!(read, DeskResponse::Fork { .. }), "{read:?}");
@@ -681,7 +681,8 @@ fn a_fork_too_large_to_page_is_named_by_the_list_and_never_by_the_read() {
         }
         assert!(matches!(ask(&desk, "m-w", &grow), DeskResponse::Answered { .. }));
     };
-    assert!(matches!(too_big, DeskResponse::Refused(huginn_mind::MindRefusal::ResponseTooLarge { .. })), "{too_big:?}");
+    let (code, text) = refusal_of(&too_big).unwrap();
+    assert!(code == "fork_too_large" && text.contains(big) && !text.contains("order"), "{text}");
     assert!(refusal_of(&ask(&desk, "m-g", &forks_page("x", Some("c2")))).is_some_and(|(code, _)| code == "fork_too_large"));
 
     // (4) `authority` on a read is still refused whole (the contract's request_invalid is the door's payload-not-a-request).
