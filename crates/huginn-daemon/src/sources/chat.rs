@@ -15,3 +15,27 @@ pub const CHAT_PURGE_PREFIX: &str = "chat-purge:";
 pub fn is_chat_key(key: &str) -> bool {
     key.starts_with(CHAT_CURSOR_PREFIX) || key.starts_with(CHAT_PURGE_PREFIX)
 }
+
+/// What one room event is to the ingest. Only text, notice and emote messages
+/// become `Message`; everything else (encrypted, media, state, server-redacted)
+/// is `Other` and is never stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    Message { body: String },
+    /// A replacement of `target`'s body.
+    Edit { target: String, body: String },
+    Redaction { target: String },
+    Other,
+}
+
+/// One event of a room, as the port hands it over: the Matrix client maps its
+/// JSON to this and filters nothing. `content_keys` are the top-level keys of
+/// the event's content (the scope reads them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomEvent {
+    pub event_id: String,
+    pub sender: String,
+    pub ts_ms: u64,
+    pub content_keys: Vec<String>,
+    pub kind: EventKind,
+}

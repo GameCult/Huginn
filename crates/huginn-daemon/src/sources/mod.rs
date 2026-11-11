@@ -20,9 +20,11 @@
 //! The cursors object is written whole by this job alone, once per repo.
 
 pub mod chat;
+pub mod chat_chunk;
 pub mod chunk;
 pub mod forge;
 pub mod git;
+pub mod room_scope;
 
 #[cfg(test)]
 mod tests;
