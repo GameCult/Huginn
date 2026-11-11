@@ -41,15 +41,22 @@ or search path.**
 | Decision | Owner | Forbidden writers |
 | --- | --- | --- |
 | Which events exist, who sent them, redactions | Synapse | Huginn, Bifrost mouth |
-| Which rooms are in the corpus | Huginn `sources` config: an **allowlist** of public community room ids | any Persona, any query |
+| Which rooms are in the corpus | Huginn `sources` config: the rooms the reader user is joined to, minus an in-code exclusion (DM flag; `#users`, `#members`, `#patrons` by id and alias) as a second lock (`gamecult-chat:ruling:chat-index-minds-rooms`) | any Persona, any query |
 | Chunks, vectors, cursors for rooms | `sources::refresh`, the one writer | the daemon's `search`, Persona units |
 | Query embedding and rank fusion | `sources::search` | the caller (Persona, CLI) |
 | What a Persona sees from chat | her own lookup: she runs `huginn sources`; no recall lane, nothing is pushed into her input | the index writer, any per-turn injection |
-| Discord exclusion | the allowlist plus an ingest refusal (below), both in `refresh` | nothing downstream may be relied on to filter |
+| Reader roster (which rooms the reader joins) | one owner per thing: mechanism `gamecult-chat:follow_up:chat-reader-roster-script-r3`, data `gamecult-chat:follow_up:chat-reader-roster-rooms-r4` | the ingest job, any Persona |
+| Discord exclusion | the room scope plus an ingest refusal (below), both in `refresh` | nothing downstream may be relied on to filter |
 
 One cursor map, keyed by source id (`repo name` or `room id`); a room cursor is
 the last event the collection holds, advanced only after acknowledged upserts,
-exactly as a repo's commit is. Payload gains `corpus` (`forge` or `chat`) so a
+exactly as a repo's commit is. Two further key kinds live in the same map:
+`chat:` room cursors carry the chat version, which includes the credential
+scrub version (`huginn_mind::redact`, applied to every body before chunking),
+and `chat-purge:<room id>` tombstones record steward purge windows, applied by
+the next run. The `chat-purge` subcommand needs only host-level run rights;
+host admin is the trust root (`gamecult-chat:follow_up:chat-reader-roster-script-r3`).
+Chat search indexes text and links only, never audio or other media. Payload gains `corpus` (`forge` or `chat`) so a
 query can filter; `SourcesMeta.corpus` becomes the set both write under, which
 is a collection rebuild once (the meta already forces rebuild on mismatch).
 
@@ -75,9 +82,9 @@ deletes the chunk window's points and re-chunks the window without it.
    duplicated text does not double-count; more than 8 texts or an empty one is
    refused naming the field.
 2. **chat-ingest**. Port `RoomHistory` (rooms, events after a token); chunker
-   for message windows; room cursors; redaction; allowlist. Negative checks,
-   each a test that fails when the rule breaks: a room not on the allowlist is
-   never read; a room carrying a bridge state event (`m.bridge` /
+   for message windows; room cursors; redaction; joined-room scope. Negative checks,
+   each a test that fails when the rule breaks: a room the reader has not joined,
+   or an excluded room, is never read; a room carrying a bridge state event (`m.bridge` /
    `uk.half-shot.bridge`) or a sender in a bridge's puppet namespace is refused
    whole and named in the journal; an encrypted event is skipped, never stored
    as ciphertext; a DM room is refused even if listed; a redacted event's text
@@ -86,7 +93,8 @@ deletes the chunk window's points and re-chunks the window without it.
    puppet pattern returns nothing.
 3. **persona-chat-recall: dropped.** No recall lane; a Persona has a shell
    and runs `huginn sources` (`gamecult-chat:ruling:chat-recall-lookup-not-memory-dms-out`).
-   The recall lane's DM check went with it; cut 2's DM refusal above stands, and the index is public-only.
+   The recall lane's DM check went with it; cut 2's DM refusal above stands, and the index covers joined rooms minus DMs and
+   `#users`/`#members`/`#patrons`, Discord never.
 
 Cut 1 ships alone and improves every `huginn sources` caller. Cut 2 waits on
 questions 1 and 2 (both answered, see Status).
@@ -96,12 +104,14 @@ questions 1 and 2 (both answered, see Status).
 1. Credential: who reads Synapse? Answered
    (`gamecult-chat:ruling:chat-index-synapse-credential`, "I take both recs."):
    the recommendation below stands. Recommend a read-only service user, joined
-   only to allowlisted public rooms, its token a systemd credential on the
+   only to the rooms that qualify under question 2's ruling, its token a systemd credential on the
    refresh job only. Alternatives: Bifrost exports history over typed CultNet
    (one more server in the path), or Synapse admin API (broader than needed).
 2. Scope: public community rooms only (recommended) or also Persona-visible
-   private rooms. DMs stay out either way. Answered: public-only
-   (`gamecult-chat:ruling:chat-index-room-scope`).
+   private rooms. DMs stay out either way. Answered public-only
+   (`gamecult-chat:ruling:chat-index-room-scope`); superseded for rooms by
+   `gamecult-chat:ruling:chat-index-minds-rooms`: every room the reader is
+   joined to, minus DMs, `#users`, `#members` and `#patrons`; Discord never.
 3. Recall tension: answered. Lookup, not memory, no recall lane
    (`gamecult-chat:ruling:chat-recall-lookup-not-memory-dms-out`).
 
@@ -119,7 +129,7 @@ What changed since the map was written:
 - Questions 1 and 2 are answered with the recommendations
   (`gamecult-chat:ruling:chat-index-synapse-credential`, operator 2026-11-03,
   "I take both recs."; `gamecult-chat:ruling:chat-index-room-scope`,
-  public-only). Question 3 is ruled (see Ruling below).
+  public-only, since superseded by `gamecult-chat:ruling:chat-index-minds-rooms`). Question 3 is ruled (see Ruling below).
 - Cut 3 is dropped (see Ruling below).
 
 ## Ruling (2026-11-11)
@@ -129,6 +139,8 @@ What changed since the map was written:
 - Chat retrieval is conversation lookup, not memory. There is no Persona recall
   lane; Personas have a shell and run `huginn sources`. What a Mind keeps is
   written memory (`persona-memory-written-not-transcript`).
-- DMs and private rooms never enter the index: public rooms only, Discord never.
+- DMs never enter the index; the index covers the rooms the reader is joined to,
+  minus DMs and `#users`/`#members`/`#patrons`
+  (`gamecult-chat:ruling:chat-index-minds-rooms`), Discord never.
 - A Mind that must remember DM content writes a memory citing the chat or room
   id as its source; the index is not where DM content is kept.
