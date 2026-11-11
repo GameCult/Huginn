@@ -528,7 +528,7 @@ fn read_pending(chat: &dyn Chat) -> Result<Vec<ChatDelivery>> {
     let mut all: Vec<ChatDelivery> = Vec::new();
     let mut after = 0;
     for _ in 0..PENDING_PAGES {
-        let page = chat.pending(after)?;
+        let page = chat.pending(after)?.deliveries;
         let Some(top) = page.iter().map(|delivery| delivery.seq).max() else {
             break;
         };

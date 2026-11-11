@@ -51,13 +51,13 @@ mind_body::chat_client: impl< 'de > Deserialize < 'de > for Basis
 mind_body::chat_client: impl< 'de > Deserialize < 'de > for DirectOutcome
 mind_body::chat_client: impl< 'de > Deserialize < 'de > for Form
 mind_body::chat_client: impl< 'de > Deserialize < 'de > for Refusal
-mind_body::chat_client: pub trait Chat { fn pending (& self , after_seq : u64) -> Result < Vec < ChatDelivery > > ; fn send (& self , request : & ChatSendRequest) -> Result < ChatSendReceipt > ; fn open_direct (& self , request : & ChatOpenDirectRequest) -> Result < ChatOpenDirectReceipt > ; fn ack (& self , through_seq : u64) -> Result < () > ; fn read (& self , read : & ChatRead) -> Result < () > ; }
+mind_body::chat_client: pub trait Chat { fn pending (& self , after_seq : u64) -> Result < ChatPending > ; fn send (& self , request : & ChatSendRequest) -> Result < ChatSendReceipt > ; fn open_direct (& self , request : & ChatOpenDirectRequest) -> Result < ChatOpenDirectReceipt > ; fn ack (& self , through_seq : u64) -> Result < () > ; fn read (& self , read : & ChatRead) -> Result < () > ; }
 mind_body::chat_client: struct ChatAck # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, through_seq: u64]
 mind_body::chat_client: struct ChatDelivery # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seq: u64, room_alias: String, room_id: String, event_id: String, sender: String, sender_display: String, text: String, at_unix_ms: u64, context: Vec < ContextLine >, mentions: Vec < String >, is_direct: bool, image: Option < ChatImage >, basis: Option < Basis >, form: Form]
 mind_body::chat_client: struct ChatImage # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[path: String, mime: String, size: u64, sha256: String]
 mind_body::chat_client: struct ChatOpenDirectReceipt # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, outcome: DirectOutcome, room_id: Option < String >, event_id: Option < String >]
 mind_body::chat_client: struct ChatOpenDirectRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, persona: String, user_id: String, text: String]
-mind_body::chat_client: struct ChatPending # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, deliveries: Vec < ChatDelivery >]
+mind_body::chat_client: struct ChatPending # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, deliveries: Vec < ChatDelivery >, tail: Option < Vec < TailLine > >]
 mind_body::chat_client: struct ChatPendingRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, after_seq: u64]
 mind_body::chat_client: struct ChatRead # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, room: String, event_id: String, at_unix_ms: u64]
 mind_body::chat_client: struct ChatRefusal # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, refusal: Refusal]
@@ -66,6 +66,7 @@ mind_body::chat_client: struct ChatSendRequest # [derive (Clone , Debug , Partia
 mind_body::chat_client: struct ContextLine # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[sender: String, text: String, at_unix_ms: u64]
 mind_body::chat_client: struct MouthRefused # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub-fields[0: Refusal]
 mind_body::chat_client: struct SendBasis # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seen_event_id: Option < String >, since_unix_ms: u64]
+mind_body::chat_client: struct TailLine # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[room: String, event_id: String, at_unix_ms: u64, sender: String, form: Form, basis: Option < Basis >, body: String]
 mind_body::chat_image: impl Skip
 mind_body::chat_rudp: fn connection_id (key_file_text : & str) -> u32
 mind_body::chat_rudp: impl Chat for RudpChat
@@ -211,7 +212,6 @@ mind_body::persona: impl Config: fn from_args_and_env (args : & [String] , looku
 mind_body::persona: impl Conversation
 mind_body::persona: impl FileTrace
 mind_body::persona: impl FileTrace: fn new (path : impl Into < PathBuf >) -> Self
-mind_body::persona: impl Heard
 mind_body::persona: impl HuginnPersona
 mind_body::persona: impl HuginnPersona: fn new (client : HuginnClient) -> Self
 mind_body::persona: impl PersonaState for HuginnPersona

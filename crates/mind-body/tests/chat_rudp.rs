@@ -141,7 +141,7 @@ fn pending_send_and_ack_cross_a_real_rudp_session_in_the_mouths_bytes() {
     let mouth = mouth(KEY);
     let chat = client(&mouth, KEY, "eureka", Duration::from_secs(5));
 
-    let deliveries = chat.pending(3).unwrap();
+    let deliveries = chat.pending(3).unwrap().deliveries;
     assert_eq!(deliveries, chat_client::decode::<ChatPending>(PENDING_BYTES).unwrap().deliveries);
     assert_eq!(deliveries[0].seq, 7);
 
@@ -203,8 +203,8 @@ fn a_client_recovers_from_a_restarted_mouth_on_its_next_call() {
     drop(first);
     let second = mouth_at(KEY, &address.to_string());
     assert!(chat.pending(0).is_err(), "the restarted mouth ignores a link it never saw: the call times out");
-    assert_eq!(chat.pending(0).unwrap(), chat_client::decode::<ChatPending>(PENDING_BYTES).unwrap().deliveries, "the next call opens a fresh link");
-    assert_eq!(chat.pending(0).unwrap().len(), 1, "and keeps it");
+    assert_eq!(chat.pending(0).unwrap(), chat_client::decode::<ChatPending>(PENDING_BYTES).unwrap(), "the next call opens a fresh link");
+    assert_eq!(chat.pending(0).unwrap().deliveries.len(), 1, "and keeps it");
     let reads = second.seen.lock().unwrap().iter().filter(|(kind, _)| kind == PENDING_REQUEST).count();
     assert_eq!(reads, 2, "the restarted mouth read the two requests that reached it on a fresh link");
 }
@@ -224,19 +224,21 @@ fn a_send_that_timed_out_is_not_repeated_by_the_client() {
 fn a_mouth_without_the_v2_request_is_asked_the_v1_way_and_its_deliveries_carry_no_addressing_facts() {
     for (mouth, text) in [(legacy_mouth(KEY), "v1 answer"), (imaged_mouth(KEY), "v2 answer")] {
         let old = client(&mouth, KEY, "eureka", Duration::from_millis(1500)).pending(3).unwrap();
+        assert_eq!(old.tail, None, "{text}: a v1 request is answered with no tail");
+        let old = old.deliveries;
         assert_eq!(old.len(), 1, "{text}");
         assert_eq!((old[0].basis, old[0].form), (None, Form::Message), "{text}");
         let seen: Vec<String> = mouth.seen.lock().unwrap().iter().map(|(kind, _)| kind.clone()).collect();
         assert_eq!(seen, [PENDING_REQUEST, PENDING_REQUEST_V1], "{text}: the v2 request first, refused as an unknown kind, then the v1 request");
         assert_eq!(mouth.seen.lock().unwrap()[1].1, PENDING_REQUEST_V1_BYTES, "{text}");
     }
-    assert!(client(&imaged_mouth(KEY), KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap()[0].image.is_some());
+    assert!(client(&imaged_mouth(KEY), KEY, "eureka", Duration::from_millis(1500)).pending(0).unwrap().deliveries[0].image.is_some());
 }
 
 #[test]
 fn a_current_mouth_answers_the_v2_request_with_basis_and_form() {
     let current = mouth(KEY);
-    let new = client(&current, KEY, "eureka", Duration::from_millis(1500)).pending(3).unwrap();
+    let new = client(&current, KEY, "eureka", Duration::from_millis(1500)).pending(3).unwrap().deliveries;
     assert_eq!((new[0].basis, new[0].form), (Some(Basis::Tag), Form::Message));
     let kinds: Vec<String> = current.seen.lock().unwrap().iter().map(|(kind, _)| kind.clone()).collect();
     assert_eq!(kinds, [PENDING_REQUEST], "no v1 request follows an answered v2 request");

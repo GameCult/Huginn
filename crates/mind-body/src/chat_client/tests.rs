@@ -14,6 +14,11 @@ const PENDING_REQUEST_BYTES: &[u8] = include_bytes!("../../tests/fixtures/person
 const PENDING_REQUEST_V1_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v1/gamecult.persona.chat_pending_request.v1.msgpack");
 const PENDING_TAG_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v5/gamecult.persona.chat_pending.v3.tag.msgpack");
 const PENDING_UNPROVEN_NOTICE_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v5/gamecult.persona.chat_pending.v3.unproven-notice.msgpack");
+// The three-field `chat_pending.v3` of a mouth with the room tail: Bifrost e8722d0's own golden bytes (`tests/fixtures/persona-chat-v5/`
+// there), written by its encoder `pendingV3Tuple`, copied here unchanged. The v5 files above are the two-field answer of a mouth before it.
+const PENDING_TAG_TAILED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.tag.msgpack");
+const PENDING_UNPROVEN_NOTICE_TAILED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.unproven-notice.msgpack");
+const PENDING_TAIL_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v6/gamecult.persona.chat_pending.v3.tail.msgpack");
 const SENT_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.sent.msgpack");
 const ROOM_MOVED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_receipt.v2.room-moved.msgpack");
 const NIL_BASIS_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v2/gamecult.persona.chat_send_request.v2.nil-basis.msgpack");
@@ -66,13 +71,13 @@ fn image() -> ChatImage {
 #[test]
 fn a_v1_pending_answer_still_decodes_with_no_image() {
     let pending: ChatPending = decode(PENDING_V1_BYTES).unwrap();
-    assert_eq!(pending, ChatPending { persona: "eureka".into(), deliveries: vec![delivery(None)] });
+    assert_eq!(pending, ChatPending { persona: "eureka".into(), deliveries: vec![delivery(None)], tail: None });
     assert_eq!(PENDING_V1_BYTES[0] & 0xf0, 0x90, "a positional tuple");
 }
 
 #[test]
 fn a_v2_pending_answer_decodes_with_the_image_at_tuple_index_11_and_no_addressing_facts() {
-    let expected = |image| ChatPending { persona: "eureka".into(), deliveries: vec![delivery(image)] };
+    let expected = |image| ChatPending { persona: "eureka".into(), deliveries: vec![delivery(image)], tail: None };
     assert_eq!(decode::<ChatPending>(PENDING_NO_IMAGE_BYTES).unwrap(), expected(None));
     assert_eq!(decode::<ChatPending>(PENDING_IMAGE_BYTES).unwrap(), expected(Some(image())));
     // Index 11 of the delivery tuple, by position: 12 elements, the last an array of [path, mime, size, sha256].
@@ -88,7 +93,7 @@ fn a_v3_pending_answer_is_the_golden_bytes_with_basis_and_form_at_tuple_indices_
     let one = |is_direct, mentions: &[&str], basis, form| {
         let mut delivery = delivery(None);
         (delivery.is_direct, delivery.mentions, delivery.basis, delivery.form) = (is_direct, mentions.iter().map(|id| (*id).to_string()).collect(), basis, form);
-        ChatPending { persona: "eureka".into(), deliveries: vec![delivery] }
+        ChatPending { persona: "eureka".into(), deliveries: vec![delivery], tail: None }
     };
     golden(PENDING_TAG_BYTES, &one(false, &["@eureka:gamecult.org", "@nova:gamecult.org"], Some(Basis::Tag), Form::Message));
     golden(PENDING_UNPROVEN_NOTICE_BYTES, &one(false, &[], None, Form::Notice));
@@ -99,6 +104,27 @@ fn a_v3_pending_answer_is_the_golden_bytes_with_basis_and_form_at_tuple_indices_
     };
     assert_eq!(fields(PENDING_TAG_BYTES), (14, "tag".into(), "message".into()));
     assert_eq!(fields(PENDING_UNPROVEN_NOTICE_BYTES), (14, serde_json::Value::Null, "notice".into()));
+}
+
+/// Deploy safety: an old mouth's two-field v3 and a new mouth's three-field v3 both decode; only the new one has a tail.
+#[test]
+fn the_pending_answer_decodes_with_the_tail_field_and_without_it() {
+    let one = |is_direct, mentions: &[&str], basis, form, tail| {
+        let mut delivery = delivery(None);
+        (delivery.is_direct, delivery.mentions, delivery.basis, delivery.form) = (is_direct, mentions.iter().map(|id| (*id).to_string()).collect(), basis, form);
+        ChatPending { persona: "eureka".into(), deliveries: vec![delivery], tail }
+    };
+    for old in [PENDING_TAG_BYTES, PENDING_UNPROVEN_NOTICE_BYTES, PENDING_V1_BYTES, PENDING_NO_IMAGE_BYTES] {
+        assert_eq!(decode::<ChatPending>(old).unwrap().tail, None, "a mouth with no tail sends none");
+    }
+    golden(PENDING_TAG_TAILED_BYTES, &one(false, &["@eureka:gamecult.org", "@nova:gamecult.org"], Some(Basis::Tag), Form::Message, Some(vec![])));
+    golden(PENDING_UNPROVEN_NOTICE_TAILED_BYTES, &one(false, &[], None, Form::Notice, Some(vec![])));
+    let tailed: ChatPending = decode(PENDING_TAIL_BYTES).unwrap();
+    assert!(tailed.deliveries.is_empty());
+    let line = |event: &str, at, form, basis, body: &str| TailLine { room: "#operator:gamecult.org".into(), event_id: event.into(), at_unix_ms: at, sender: "@meta:gamecult.org".into(), form, basis, body: body.into() };
+    assert_eq!(tailed.tail, Some(vec![line("$e0", 1_700_000_000_000, Form::Message, None, "earlier"), line("$e1", 1_700_000_001_000, Form::Notice, Some(Basis::Tag), "hello eureka")]));
+    golden(PENDING_TAIL_BYTES, &tailed);
+    assert_eq!(rmp_serde::from_slice::<serde_json::Value>(PENDING_TAIL_BYTES).unwrap()[2][0].as_array().unwrap().len(), 7, "a tail line is seven fields");
 }
 
 #[test]

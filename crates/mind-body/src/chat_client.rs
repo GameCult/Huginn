@@ -168,6 +168,24 @@ pub struct ChatPendingRequest {
 pub struct ChatPending {
     pub persona: String,
     pub deliveries: Vec<ChatDelivery>,
+    /// The mouth's room tail, tuple index 2 of `chat_pending.v3`: recent lines of the rooms she may speak in, oldest first, whether
+    /// or not delivered or acked. An answer of a mouth that has none (v1, v2, or a v3 before the tail) ends before it and reads as
+    /// none; a mouth with nothing to show sends an empty list, and that is a different fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<Vec<TailLine>>,
+}
+
+/// One line of the room tail: `[room, event_id, at_unix_ms, sender, form, basis, body]`. `room` is the configured alias (the room id
+/// for a DM); `basis` is what Matrix says on the event itself, none being unproven; `body` is untrusted text clipped by the mouth.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLine {
+    pub room: String,
+    pub event_id: String,
+    pub at_unix_ms: u64,
+    pub sender: String,
+    pub form: Form,
+    pub basis: Option<Basis>,
+    pub body: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,9 +430,9 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 
 /// The Persona organ's chat: what is waiting, what to say, what is done.
 pub trait Chat {
-    /// Deliveries after `after_seq`, oldest first. A `chat_refusal` answer is an
+    /// Deliveries after `after_seq`, oldest first, with the mouth's room tail. A `chat_refusal` answer is an
     /// error that names the refusal.
-    fn pending(&self, after_seq: u64) -> Result<Vec<ChatDelivery>>;
+    fn pending(&self, after_seq: u64) -> Result<ChatPending>;
     fn send(&self, request: &ChatSendRequest) -> Result<ChatSendReceipt>;
     /// Ask the mouth to open a DM. A refusal is a receipt; only a transport fault or a mouth that does not serve the kind is an error.
     fn open_direct(&self, request: &ChatOpenDirectRequest) -> Result<ChatOpenDirectReceipt>;
