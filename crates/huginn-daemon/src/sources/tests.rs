@@ -936,3 +936,41 @@ fn the_chat_read_path_holds_no_discord_matrix_or_second_fuse() {
     }
     assert_eq!(source.matches("pub fn fuse").count(), 1);
 }
+
+/// An old forge-only collection answers both searches with the stale-index
+/// error until the rebuild lands, not with an empty page.
+#[test]
+fn an_old_corpus_collection_is_refused_until_it_is_rebuilt() {
+    let (mut rig, mut embedder) = chat_rig(three_rooms());
+    let Some(DescribedSources::Labelled { mut meta, cursors }) = rig.index.state.lock().unwrap().described.clone() else { panic!() };
+    meta.corpus = "forge:GameCult".into();
+    rig.index.plant(DescribedSources::Labelled { meta, cursors });
+    let error = format!("{:#}", search(&mut embedder, &mut rig.index, &query("one", 3, None), WITHIN).unwrap_err());
+    assert!(error.contains("stale") && error.contains("forge:GameCult") && error.contains("rebuild is pending"), "{error}");
+    for texts in [&[][..], &["topic-0"][..]] {
+        let error = format!("{:#}", search_chat(&mut embedder, &mut rig.index, &chat_query(texts, &[], None, None, 3), WITHIN).unwrap_err());
+        assert!(error.contains("stale") && error.contains("rebuild is pending"), "{error}");
+    }
+}
+
+/// A message exactly on `after` or `before` is in the span, and so is a chunk
+/// whose end is exactly `after` or whose start is exactly `before`.
+#[test]
+fn the_span_bounds_are_inclusive_for_chunks_and_for_messages() {
+    let (mut rig, mut embedder) = chat_rig(three_rooms());
+    let mut hits = |after, before| {
+        let found = search_chat(&mut embedder, &mut rig.index, &chat_query(&[], &["#swarm:x"], after, before, 10), WITHIN).unwrap();
+        found.hits.iter().map(|hit| (hit.first_event_id.clone(), hit.messages.len())).collect::<Vec<_>>()
+    };
+    let owned = |pairs: &[(&str, usize)]| pairs.iter().map(|(id, n)| ((*id).to_owned(), *n)).collect::<Vec<_>>();
+    // Chunk $a1..$a2 ends at 200: after=200 keeps it, trimmed to the message on the bound.
+    assert_eq!(hits(Some(200), None), owned(&[("$a2", 1), ("$a3", 2)]));
+    // Chunk $a3..$a4 starts at 300: before=300 keeps it, trimmed to the message on the bound.
+    assert_eq!(hits(None, Some(300)), owned(&[("$a1", 2), ("$a3", 1)]));
+    // Both bounds on one message.
+    assert_eq!(hits(Some(200), Some(200)), owned(&[("$a2", 1)]));
+
+    let filter = ChatFilter { rooms: vec![], after_ms: Some(200), before_ms: Some(300) };
+    assert!(filter.keeps("!a:x", None, 100, 200) && filter.keeps("!a:x", None, 300, 400));
+    assert!(!filter.keeps("!a:x", None, 100, 199) && !filter.keeps("!a:x", None, 301, 400));
+}

@@ -157,3 +157,9 @@ ingest lands the collection holds no chat points and a chat search answers empty
 In a listing across rooms, the last hit's `ts_end_ms + 1` can repeat messages of
 an earlier-starting longer chunk of another room; within one room it continues
 exactly.
+
+Known limits (owner of the fix: cut chat-window). Hits are ordered by their
+trimmed start, not by the stored chunk start, and a long chunk trimmed to a span
+that crosses rooms can be listed again by the continuation `--after`. Behaviour
+is deliberately unchanged here; the event-id window in cut chat-window replaces
+the time cursor.

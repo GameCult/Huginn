@@ -2055,7 +2055,7 @@ fn a_worker_stuck_on_the_minds_collection_still_answers_a_source_search() {
     index.plant(&collection_name(&slug(INSTANCE)), mind_label);
     let meta = SourcesMeta {
         managed_by: MANAGED_BY.into(),
-        corpus: "forge:GameCult".into(),
+        corpus: crate::sources::CORPUS.into(),
         model: "model".into(),
         model_digest: "d1".into(),
         dimensions: 4,
@@ -2169,4 +2169,48 @@ fn source_searches_have_distinct_tickets_share_the_queue_bound_and_abandon_by_ti
     assert!(ask_sink(&mut sink, "over", 3).is_err(), "and refuses both kinds");
     abandon(&mut sink, second);
     assert!(ask_sink(&mut sink, "now", 3).is_ok(), "a freed slot is a slot");
+}
+
+/// The chat reads state their request: a scroll is the filter, oldest chunk
+/// start first; a nearest search is the filter too.
+#[test]
+fn qdrant_chat_scroll_and_nearest_send_the_filter_and_the_order() {
+    use crate::sources::{ChatFilter, SourceIndex};
+    let filter = ChatFilter { rooms: vec!["!r:x".into()], after_ms: Some(5), before_ms: None };
+    let scrolling = stub(&[("POST /collections/", 200, r#"{"result":{"points":[]}}"#)]);
+    QdrantIndex::new(&scrolling.url).chat_scroll(&filter, 7, TIME).unwrap();
+    let scroll: serde_json::Value = serde_json::from_str(&scrolling.seen.lock().unwrap()[0].2).unwrap();
+    assert_eq!(scroll["order_by"], serde_json::json!({ "key": "ts_start_ms", "direction": "asc" }));
+    assert_eq!(scroll["filter"]["must"][0], serde_json::json!({ "key": "corpus", "match": { "value": "chat" } }));
+    assert_eq!(scroll["filter"]["must"][1]["range"], serde_json::json!({ "gte": 5 }));
+    assert_eq!(scroll["limit"], 7);
+
+    let searching = stub(&[("POST /collections/", 200, r#"{"result":[]}"#)]);
+    QdrantIndex::new(&searching.url).chat_nearest(&[1.0, 0.0], &filter, 3, TIME).unwrap();
+    let near: serde_json::Value = serde_json::from_str(&searching.seen.lock().unwrap()[0].2).unwrap();
+    assert_eq!(near["filter"]["must"][0], serde_json::json!({ "key": "corpus", "match": { "value": "chat" } }));
+    assert_eq!(near["filter"]["must"][1]["range"], serde_json::json!({ "gte": 5 }));
+    assert_eq!(near["limit"], 3);
+}
+
+/// A new source collection indexes `corpus` as a keyword and both times as
+/// integers, which the range filters and ordered scroll need.
+#[test]
+fn qdrant_recreate_sources_creates_the_corpus_and_time_indexes() {
+    use crate::sources::{CORPUS, SourceIndex, SourcesMeta};
+    let building = stub(&[("DELETE /collections/", 200, "{}"), ("PUT /collections/", 200, r#"{"result":true}"#)]);
+    let meta = SourcesMeta { managed_by: MANAGED_BY.into(), corpus: CORPUS.into(), model: "m".into(), model_digest: "d".into(), dimensions: 4, chunker_version: 1 };
+    QdrantIndex::new(&building.url).recreate_sources(&meta).unwrap();
+    let seen = building.seen.lock().unwrap();
+    let indexed: Vec<(String, String)> = seen
+        .iter()
+        .filter(|(_, path, _)| path.contains("/index"))
+        .map(|(_, _, body)| {
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            (body["field_name"].as_str().unwrap().to_owned(), body["field_schema"].as_str().unwrap().to_owned())
+        })
+        .collect();
+    let has = |field: &str, schema: &str| indexed.iter().any(|(f, s)| f == field && s == schema);
+    assert!(has("corpus", "keyword"), "{indexed:?}");
+    assert!(has("ts_start_ms", "integer") && has("ts_end_ms", "integer"), "{indexed:?}");
 }

@@ -568,7 +568,9 @@ fn distinct_texts(asked: Vec<&str>) -> Vec<&str> {
 /// The label of the collection a daemon is about to read, if it was built
 /// under the model this daemon embeds with. Absent, unlabelled and other-model
 /// collections are loud refusals: vectors of two models do not compare, and an
-/// empty page is not an answer.
+/// empty page is not an answer. A collection built for another corpus set (an
+/// old forge-only one) is refused the same way until the rebuild lands, since
+/// it would answer a chat search with an empty page.
 fn readable_under_this_model<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, budget: &Budget) -> Result<(SourcesMeta, ModelIdentity)> {
     let built = built_label(index, budget)?;
     let identity = embedder.model_identity(budget.left()?).context("reading the embedding model's identity")?;
@@ -589,7 +591,14 @@ fn built_label<S: SourceIndex>(index: &mut S, budget: &Budget) -> Result<Sources
     match index.describe_sources(budget.left()?).context("describing the source collection")? {
         DescribedSources::Absent => bail!("source index not built"),
         DescribedSources::Unlabelled => bail!("source index not built: {COLLECTION} carries no Huginn metadata"),
-        DescribedSources::Labelled { meta, .. } => Ok(meta),
+        DescribedSources::Labelled { meta, .. } => {
+            ensure!(
+                meta.corpus == CORPUS,
+                "the source index is stale: it was built for corpus {} and this daemon reads {CORPUS}; the rebuild is pending",
+                meta.corpus
+            );
+            Ok(meta)
+        }
     }
 }
 

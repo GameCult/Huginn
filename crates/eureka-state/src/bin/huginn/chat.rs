@@ -13,7 +13,7 @@ pub fn instant_ms(flag: &str, text: &str, now: DateTime<Utc>) -> Result<u64, Tro
     let moment = if let Ok(time) = DateTime::parse_from_rfc3339(text) {
         time.with_timezone(&Utc)
     } else {
-        let (digits, unit) = text.split_at(text.len().saturating_sub(1));
+        let (digits, unit) = text.split_at(text.char_indices().next_back().map_or(0, |(at, _)| at));
         if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(wrong());
         }
@@ -26,7 +26,7 @@ pub fn instant_ms(flag: &str, text: &str, now: DateTime<Utc>) -> Result<u64, Tro
             "w" => 604_800,
             _ => return Err(wrong()),
         };
-        now - chrono::Duration::try_seconds(i64::from(count) * seconds).ok_or_else(wrong)?
+        now.checked_sub_signed(chrono::Duration::try_seconds(i64::from(count) * seconds).ok_or_else(wrong)?).ok_or_else(wrong)?
     };
     u64::try_from(moment.timestamp_millis()).map_err(|_| wrong())
 }
@@ -50,7 +50,7 @@ mod tests {
         assert_eq!(at("6h").unwrap(), "2026-11-11T06:00:00.000Z");
         assert_eq!(at("2d").unwrap(), "2026-11-09T12:00:00.000Z");
         assert_eq!(at("90s").unwrap(), "2026-11-11T11:58:30.000Z");
-        for bad in ["", "h", "6", "6x", "-2d", "yesterday", "1e3h", "+2d"] {
+        for bad in ["", "h", "6", "6x", "-2d", "yesterday", "1e3h", "+2d", "6日", "日", "4000000000w", "99999999999999999999d"] {
             assert!(matches!(at(bad), Err(Trouble::InvalidInput(ref detail)) if detail.contains("--after")), "{bad}");
         }
     }

@@ -74,7 +74,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum ChatCommand {
-    /// Chunks of the joined rooms (never DMs or Discord), each citing its room,
+    /// Chunks of the indexed rooms, each citing its room,
     /// event ids and times. With texts, ranked by meaning; with none, a listing
     /// oldest first, at most --top-k, ending in the `--after` to continue from.
     Search {
