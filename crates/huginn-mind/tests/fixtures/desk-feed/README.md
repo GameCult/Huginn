@@ -35,7 +35,10 @@ lands (see `docs/desk-feed-door.md`).
 | `unavailable.response` | Huginn to Bifrost | `Refused` `Unavailable` (Bifrost: 503 for this Mind) |
 | `failure.response` | Huginn to Bifrost | operation failure, `payloadSchema` `gamecult.cultnet.operation_failure.v1` (Bifrost: 503) |
 | `error.response` | Huginn to Bifrost | CultNet `Error` message, no payload (Bifrost: 503) |
-| `record-whole` | fragment | `gamecult.fork.record.v0` with a counted answer and a revision, answerer ids and notes raw, as the door sends them (Bifrost masks for a reader who is not a decider) |
+| `record-whole` | fragment | `gamecult.fork.record.v0` with a counted answer and a revision, answerer ids and notes whole: what the door sends today, and a decider's view |
+| `record-non-decider.proposed` | fragment | PROPOSED non-decider record: every `answerer` nil, `answerer_count` 2. Needs CultLib change `cultlib-fork-card-reader-counts`; not Huginn output yet |
+| `card-viewers-decider.synthetic` | fragment | SYNTHETIC: only `{deciders: [two ids], decider_count: 2}`. Not a card |
+| `card-viewers-non-decider.synthetic` | fragment | SYNTHETIC: only `{deciders: [], decider_count: 2}`. Not a card |
 
 No case carries a card (`gamecult.fork.card.v0`). The card's bytes wait on CultLib's re-pinned card
 vectors for `raised_at`, so no entry-bearing list page or read is pinned yet.

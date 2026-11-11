@@ -94,6 +94,45 @@ Request (`huginn.desk_request.v1`):
 Huginn keeps no copy. `subject` is the verified Bifrost account id of the reader. The reads carry
 no `authority`, and a payload that names it is refused whole.
 
+**Account ids.** `subject`, every `deciders` entry and every stored `answerer` are Bifrost account ids:
+`UserAccount.Id` in lowercase D-format, 8-4-4-4-12 lowercase hex (Bifrost renders it in
+`DeskEndpoints.cs` with `accountId.Value.ToString("D")`, and `StartupConfigurationValidator.cs`
+refuses any decider not in that form). That is the same grammar Huginn names for `RequestId`
+(`uuid_text`). These ids are opaque random UUIDs. A Matrix id, an email, a display name or any other
+handle is never one of them. Bifrost enforces the grammar; Huginn's door does not yet: it reads these
+fields as `Short` (any text up to 200 bytes) and would accept `@x:server` or an email. A subject
+is stored as `answerer` on an answer, so a wrong value would enter the mind. Refusing every other
+shape at decode is owed by `cut-desk-feed-listing.r6`. The test
+`every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid` pins the grammar. The fixtures use
+synthetic UUIDs.
+
+## Account ids by reader (planned; needs a CultLib change)
+
+A reader is a **decider** when the call's `subject` is in the call's `deciders`, compared byte for
+byte; both values are in the account-id format above. Any other reader is a non-decider.
+
+- **On `main` today**, every reader gets the ids. `card.deciders` carries the call's decider list on
+  every card, and every answer carries its `answerer` id. This is not live yet: no receiver is
+  deployed.
+- **Ruled (Persona, 2026-11-11; follow-up `chat-mind-20261111T150417226Z-t167`):** the door, not
+  Bifrost, withholds account ids from a non-decider and returns a count instead. Bifrost cannot do
+  it, because the card is opaque to it. A decider sees the ids. The superseding ruling is in force:
+  `eureka-substrate:ruling:desk-read-visibility-withheld-ids`.
+- **CultLib cannot carry this yet.** The card has 16 required keys in closed map-mode (17 once `raised_at` lands), and
+  `deciders` must hold at least one item. `answerer` is a required, non-null id. The proposal to
+  Libby (follow-up `cultlib-fork-card-reader-counts`):
+  - the card gains a required `decider_count` (an integer). A non-decider gets `deciders: []`; a
+    decider gets the ids. The count is the same for both.
+  - `answerer` becomes nullable: nil for a non-decider, with the key kept, as `note` is stripped.
+  - the record gains a required `answerer_count`, the number of distinct answerers.
+- **Proposed fixtures**, built from mirror types that exist only in the test:
+  - `card-viewers-decider.synthetic` and `card-viewers-non-decider.synthetic` hold only the two card
+    keys the proposal changes. They are not cards.
+  - `record-non-decider.proposed` is a whole record as the proposal shapes it.
+
+  The test `a_non_decider_gets_counts_and_no_ids_a_decider_gets_ids` checks that neither account id
+  appears anywhere in a non-decider's bytes. `record-whole` is the decider's view.
+
 Response (`huginn.desk_response.v1`):
 
 | variant | meaning | Bifrost answers |
@@ -158,16 +197,16 @@ every pinned response carries no entry. The entry-bearing fixtures (an open list
 with `raised_at` as a string and as nil) are added by `cut-desk-feed-raised-at` against that
 CultLib commit.
 
-## Trust boundary: what Huginn sends raw, what Bifrost does
+## Trust boundary: what Huginn sends, what Bifrost does
 
-- Huginn sends every record whole over the peer-checked socket: every answer's `answerer` id and
-  every note, unmasked (fixture `record-whole`). The peer-uid check means only Bifrost's uid reads
-  them. A second reader of the socket would leak answerer ids and notes, so the socket must belong
-  to Bifrost's uid alone.
+- The peer-uid check is the whole authentication, so the socket must belong to Bifrost's uid alone.
+- Today Huginn sends every record whole: every `answerer` id, every note and the card's
+  `deciders` (fixture `record-whole`).
+- Once `cut-desk-feed-listing` and the CultLib change land, Huginn withholds the account ids from a
+  non-decider (above). Notes stay whole on the wire.
 - Bifrost owns three things: the per-request membership check, the `desk.read` token, and
-  masking on what the door returns. It masks answerer ids for a reader who is not a decider (X3,
-  Heimdall 2026-11-11) and strips notes (ruling `desk-read-visibility-listed`, `DeskNotes`).
-  Huginn masks nothing.
+  stripping notes for a reader who is not a decider (`DeskNotes`). It no longer masks answerer
+  ids.
 
 ## Listing: which forks a reader sees (Huginn's; NOT live, see the status above)
 
