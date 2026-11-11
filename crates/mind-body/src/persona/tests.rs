@@ -1056,6 +1056,95 @@ fn a_mind_only_the_table_lists_may_be_named_and_is_no_one_she_may_open_a_direct_
     assert!(open("@guest:chat", &table).is_ok());
 }
 
+/// A rig's Persona runs with no heartbeat table, so her session addressing is the fallback: `config()`'s Minds, Libby among them.
+const LIBBY: &str = "@libby:chat";
+
+#[test]
+fn a_minds_message_is_traced_as_mind_in_an_answered_turn_and_in_a_refused_one() {
+    let rig = Rig::new(vec![delivery(1, "swarm", LIBBY, "hi")], &[says(&[("swarm", "ok")])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let answered: Vec<_> = rig.trace.0.borrow().iter().flat_map(|trace| trace.inputs.iter().map(|item| item.provenance.clone())).collect();
+    assert_eq!(answered, ["mind"], "act");
+    let rig = Rig::new(vec![delivery(1, "swarm", LIBBY, "hi")], &thrice("null".to_string()));
+    rig.go();
+    let refused: Vec<_> = rig.trace.0.borrow().iter().flat_map(|trace| trace.inputs.iter().map(|item| item.provenance.clone())).collect();
+    assert_eq!(refused, ["mind", "mind", "mind"], "record_refusal");
+}
+
+#[test]
+fn a_minds_earlier_line_and_tail_line_read_role_mind() {
+    let said = with_context(operator_says(1, "and you?"), vec![earlier(LIBBY, "before")]);
+    let rig = Rig::new(vec![said], &[says(&[])]);
+    assert_eq!(failure_of(rig.go()), None);
+    let earlier_lines = earlier_lines(&input_of(&rig, 0));
+    assert!(earlier_lines.len() == 1 && earlier_lines[0].contains(r#"sender="@libby:chat" role=mind"#), "{earlier_lines:?}");
+    let input = tail_input(Some(vec![tl("swarm", 1, LIBBY, "from the tail")]));
+    assert!(input.contains(r#"sender="@libby:chat" role=mind"#), "{input}");
+}
+
+#[test]
+fn the_tail_size_budget_measures_a_mind_line_as_the_line_it_prints() {
+    let c = config();
+    let table = addressing_of(&c, None, &own_addressee(&c));
+    let rooms = ["swarm".to_string()];
+    let lines = |pad: usize| -> Vec<TailLine> { (1..=TAIL_PER_ROOM as u64).map(|n| tl("swarm", n, LIBBY, &format!("{n:02} {}", "t".repeat(pad)))).collect() };
+    let budget = TAIL_MAX_BYTES - (TAIL_HEADER.len() + 160);
+    let pad = (1..2000).rev().find(|&pad| lines(pad).iter().map(|line| tail_line(&c, &table, line).len()).sum::<usize>() <= budget).expect("a pad fits");
+    let tail = render_tail(&c, &table, Some(lines(pad)), &rooms, &[], &[]);
+    assert_eq!(tail.text.matches("tail room=").count(), TAIL_PER_ROOM, "every line fits when measured as printed");
+    assert_eq!(tail.text.matches("role=mind").count(), TAIL_PER_ROOM);
+}
+
+/// Seven Libby messages that fill a line to within a few bytes of its bound, measured as printed.
+fn libby_fill(seq: u64, pad: usize) -> ChatDelivery {
+    delivery(seq, "swarm", LIBBY, &format!("{seq:03} {}", "b".repeat(pad)))
+}
+
+fn libby_pad_filling_seven() -> usize {
+    let c = config();
+    let table = addressing_of(&c, None, &own_addressee(&c));
+    (0..LINE_MESSAGES_MAX_BYTES / 7).rev().find(|&pad| message_lines(&c, &own_addressee(&c), &table, &(1..=7).map(|seq| libby_fill(seq, pad)).collect::<Vec<_>>(), &vec![vec![]; 7]).len() <= LINE_MESSAGES_MAX_BYTES).expect("a pad fits")
+}
+
+#[test]
+fn a_burst_of_minds_is_bound_by_the_lines_as_printed_at_a_start_and_in_a_session() {
+    let pad = libby_pad_filling_seven();
+    let carried = |line: &str| line.lines().filter(|line| line.starts_with("message ")).count();
+    let rig = Rig::new((1..=10).map(|seq| libby_fill(seq, pad)).collect(), &[says(&[]), says(&[])]);
+    assert_eq!(failure_of(rig.go()), None);
+    assert_eq!(told(&rig).iter().map(|line| carried(line)).collect::<Vec<_>>(), [7, 3], "at a start");
+    let rig = Rig::new(vec![operator_says(1, "first")], &[says(&[]), says(&[]), says(&[])]);
+    rig.clock.step.set(0);
+    let (deliveries, now, arrived) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(false));
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        if !arrived.replace(true) {
+            deliveries.borrow_mut().extend((2..=11).map(|seq| libby_fill(seq, pad)));
+        }
+        now.set(now.get() + 6_000);
+    }));
+    assert_eq!(failure_of(rig.go()), None);
+    let lines = told(&rig);
+    assert_eq!((carried(&lines[1]), carried(&lines[2])), (7, 3), "in a session");
+}
+
+#[test]
+fn a_tell_lists_the_swarms_minds_among_the_people_a_memory_may_name_and_an_open_to_a_mind_is_refused() {
+    let keep = reply(&[("swarm", "noted")], json!([keeps("Idea", "Libby knows", &[LIBBY])]), json!([]), json!(null));
+    let rig = Rig::new(vec![operator_says(1, "first")], &[says(&[]), keep]);
+    rig.clock.step.set(0);
+    let (deliveries, now, arrived) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(false));
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        if !arrived.replace(true) {
+            deliveries.borrow_mut().push(operator_says(2, "second"));
+        }
+        now.set(now.get() + 6_000);
+    }));
+    assert_eq!(failure_of(rig.go()), None, "the tell's people hold the swarm's Minds");
+    assert_eq!(memories(&rig).len(), 1);
+    let rig = Rig::new(vec![operator_says(1, "go")], &thrice(opening(&[("swarm", "hi")], LIBBY, "come over")));
+    assert_eq!(failure_of(rig.go()), Some(Failure::OutOfBounds(OPEN_DIRECT_FAULT)), "a Mind of the table is nobody she opens a direct with");
+}
+
 #[test]
 fn no_text_forges_role_mind() {
     let c = config();
@@ -7149,6 +7238,26 @@ fn a_poll_with_untold_messages_reads_the_heartbeats_table_again() {
     // The first was not hers and is acked; the heartbeat now says a project of hers is named, and she is told the next at once.
     arrives(&rig, &unaddressed_at_rank(2, 2, "who takes the bad day simulator?"));
     assert!(inbox.poll().unwrap().pending, "the heartbeat now says the message names her project: she is told at once");
+}
+
+#[test]
+fn a_tell_shows_the_people_of_the_table_as_the_poll_read_it() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let config = config();
+    let view = FakeHeartbeat(RefCell::new(Some(crate::heartbeat::Addressing { minds: table_of(&["@eureka:chat", "@nibu:chat"]) })));
+    let (sandbox, scratch) = (rig.sandbox(), rig.scratch());
+    let mut organs = rig.organs(&sandbox, &scratch);
+    organs.heartbeat = Some(&view);
+    let (control, swarm, run) = (FileSource::new(rig.store()), FileSource::new(rig.swarm_store()), rig.the_run());
+    let mut progress = Progress::default();
+    let started_ms = unix_ms(rig.clock.now());
+    let mut inbox = PersonaInbox::new(&organs, &control, &swarm, &config, &run, &mut progress, session_of(&config, vec![]), started_ms, String::new());
+    arrives(&rig, &operator_says(1, "who is around?"));
+    assert!(inbox.poll().unwrap().pending);
+    inbox.tell(false).unwrap();
+    let people = &inbox.written.as_ref().expect("a line was written").shown.people;
+    assert!(people.contains(&"@nibu:chat".to_string()) && !people.contains(&"@libby:chat".to_string()), "the table's Minds, not config.minds: {people:?}");
 }
 
 #[test]
