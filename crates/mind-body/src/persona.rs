@@ -1854,7 +1854,6 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 // Her final answer lands after she took in every line, so a revision still waiting is answered by it and its note, that a send was not sent, would be false.
                 let spent = if final_reply { self.revision.take().map(|revision| revision.batch) } else { None };
                 self.answered_through = self.answered_through.max(batch.iter().chain(spent.iter().flatten()).map(|delivery| delivery.seq).max().unwrap_or(0));
-                self.progress.answered_events.extend(batch.iter().chain(spent.iter().flatten()).map(|delivery| delivery.event_id.clone()));
                 if self.progress.refused.as_ref().is_some_and(|refused| batch.iter().any(|delivery| delivery.seq == refused.lowest)) {
                     self.progress.refused = None;
                 }
@@ -1873,6 +1872,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                         return Ok((false, true));
                     }
                     self.progress.acked = self.answered_through;
+                    // Only what the ack passed is answered for good: a retold or held batch is told again, whatever its seq.
+                    self.progress.answered_events.extend(batch.iter().chain(spent.iter().flatten()).map(|delivery| delivery.event_id.clone()));
                 }
                 if let Some((run, _)) = started {
                     self.progress.self_run = Some(run);
