@@ -158,21 +158,41 @@ fn a_credential_split_by_the_reply_limit_is_redacted_before_the_cut() {
 }
 
 #[test]
-fn delimiters_inside_a_secret_leak_none_of_it_and_the_bare_and_scheme_less_forms_are_covered() {
+fn a_secret_is_redacted_whole_by_the_authority_rule_and_commonplace_urls_are_left_alone() {
     let r = redact_url_userinfo;
-    for secret in ["pa/ssT", "pa?ssT", "pa#ssT", "pa\"ssT", "pa'ssT", "pa)ssT", "pa\u{a0}ssT", "pa\u{2028}ssT", "pa<ssT", "pa]ssT", "[u]"] {
+    // Raw @, percent-encoding and non-ASCII (NBSP, U+2028) stay inside userinfo.
+    for secret in ["pa@ssT", "pa%40ssT", "pa\u{a0}ssT", "pa\u{2028}ssT", "pa:ssT", "\u{e9}\u{65e5}ssT"] {
         let out = r(&format!("x https://u:{secret}@h/x"));
-        assert!(out.starts_with("x https://<redacted>@h"), "{secret:?} -> {out:?}");
-        assert!(!out.contains("ssT"), "{secret:?} -> {out:?}");
+        assert_eq!(out, "x https://<redacted>@h/x", "{secret:?}");
     }
-    // Only ASCII whitespace ends a candidate run.
+    // The authority ends at / ? # \\ quotes, brackets and ASCII whitespace: no parser reads those as userinfo, so what follows is path.
+    assert_eq!(r("https://u:pa/ssT@h/x"), "https://u:pa/ssT@h/x");
     assert_eq!(r("https://u:pa ssT@h/x"), "https://u:pa ssT@h/x");
-    assert_eq!(r("https://u:pa\ttoken@h/x"), "https://u:pa\ttoken@h/x");
+    assert_eq!(r("https://u:pa?ssT@h"), "https://u:pa?ssT@h");
+    // Ordinary URLs with @ in the path are byte-identical.
+    for same in [
+        "https://github.com/@user/repo",
+        "https://medium.com/@name/post-1",
+        "https://registry.npmjs.org/@scope/pkg",
+        "https://h/pkg@1.2.3",
+        "a//b@c",
+        "see //cdn.h/@x/y and https://h/?mail=a@b.c#f@g",
+        "https://h:8080/p git@github.com:org/r.git ssh://git@host/r.git ssh://git@h:22/r git://git@h/x",
+    ] {
+        assert_eq!(r(same), same);
+    }
+    // Compact JSON: only the credentialed URL changes.
+    let json = format!(r#"{{"a":"https://u:{CANARY}@h/x","b":"https://h2/@v","c":"https://h3/p@1"}}"#);
+    assert_eq!(r(&json), r#"{"a":"https://<redacted>@h/x","b":"https://h2/@v","c":"https://h3/p@1"}"#);
+    assert_eq!(r("a/https://u:T@h/x,https://v:T@h2"), "a/https://<redacted>@h/x,https://<redacted>@h2");
     assert_eq!(r("HTTPS://TOKEN@h"), "HTTPS://<redacted>@h");
     assert_eq!(r("[l](https://T@h/x) <https://T@h> `https://u:T@h`"), "[l](https://<redacted>@h/x) <https://<redacted>@h> `https://<redacted>@h`");
-    assert_eq!(r("a //u:T@host/x b //T@host c"), "a //<redacted>@host/x b //<redacted>@host c");
-    assert_eq!(r("user:T@host.tld/path and a:b@c and mail me@x.org/ and https://h/a//b"), "<redacted>@host.tld/path and a:b@c and mail me@x.org/ and https://h/a//b");
-    assert_eq!(r("ssh://git@host/r.git ssh://git@h:22/r"), "ssh://git@host/r.git ssh://git@h:22/r");
+    assert_eq!(r("a //u:T@host/x b //T@host c \"//T@h\" (//T@h)"), "a //<redacted>@host/x b //<redacted>@host c \"//<redacted>@h\" (//<redacted>@h)");
+    // Scheme-less: only word:secret@host.tld/ . Each guard of the shape has its own case.
+    assert_eq!(r("user:T@host.tld/path"), "<redacted>@host.tld/path");
+    for same in ["a:b@c", "a:b@host/x", "a:b@ho_st.tld/x", "u$er:T@host.tld/x", "a:@host.tld/x", "mail me@x.org/ and :T@host.tld/x"] {
+        assert_eq!(r(same), same);
+    }
 }
 
 #[test]

@@ -933,41 +933,41 @@ fn result_text(event: &serde_json::Map<String, Value>) -> String {
 /// the Self result (`result_text`: journal line and Reply) and the structured output of a Persona or Sleep result
 /// (`persona::structured_output`, string by string). It does not cover claude's stderr (inherited) or the CLI's transcript files.
 ///
-/// A forge token rides in a remote URL, so every `scheme://`, and every protocol-relative `//`, opens a candidate: the run up to the next
-/// ASCII whitespace. Its userinfo is everything before the run's LAST `@`, whatever delimiters sit inside (fail closed: a path holding
-/// `@` is redacted too). The userinfo becomes `<redacted>`: `scheme://<redacted>@host`. With a colon (user:password) it is always
-/// redacted; without one it is a bare token on http, https, ftp, ftps and protocol-relative `//`, and a plain username on any other scheme
-/// (`ssh://git@host`), which stays. Scheme-less credentials are covered only in the shape `word:secret@host.tld/` at the start of a
-/// whitespace-delimited word. Syntax only; no reading of meaning.
+/// A forge token rides in a remote URL, so every `scheme://` and every protocol-relative `//` opens an authority, read as git, curl and
+/// RFC 3986 read it: it ends at the first `/`, `?`, `#`, backslash, quote, backtick, parenthesis, bracket, angle bracket or ASCII whitespace
+/// (`is_authority_end`). Its userinfo is everything before the authority's LAST `@` (a raw `@` in a password still redacts), and non-ASCII
+/// characters, NBSP and U+2028 included, stay inside it. The userinfo becomes `<redacted>`: `scheme://<redacted>@host`. With a colon it is
+/// always redacted; without one it is a bare token on http, https, ftp, ftps, protocol-relative `//` and an unparseable scheme, and a plain
+/// username on any other scheme (`ssh://git@host`), which stays. A `@` after the authority (`github.com/@user`, `pkg@1.2.3`) is path, not
+/// userinfo, and is left alone. Scheme-less credentials are covered only in the shape `word:secret@host.tld/` at the start of an
+/// ASCII-whitespace-delimited word. Not covered: a password holding `/ ? # ` a quote or ASCII whitespace (no parser reads it as userinfo),
+/// scp-style `user:secret@host:path`, tokens in query strings, claude's stderr, the kept transcripts. Syntax only; no reading of meaning.
 pub(crate) fn redact_url_userinfo(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find("//") {
         let (before, after) = rest.split_at(at);
         let body = &after[2..];
-        let end = body.find(is_break).unwrap_or(body.len());
-        let run = &body[..end];
         out.push_str(before);
         out.push_str("//");
+        // The scheme is the ASCII run before `:`. Without a colon, `//` opens an authority only at a word start (`a//b@c` is not one).
         let scheme = match before.strip_suffix(':') {
-            Some(head) => {
-                // Only ASCII bytes match, so the byte after the last non-match is a character boundary.
-                let start = head.bytes().rposition(|c| !(c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))).map_or(0, |i| i + 1);
-                Some(head[start..].to_ascii_lowercase())
+            // Only ASCII bytes match, so the byte after the last non-match is a character boundary.
+            Some(head) => head[head.bytes().rposition(|c| !(c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))).map_or(0, |i| i + 1)..].to_ascii_lowercase(),
+            None if before.chars().next_back().is_none_or(|c| is_break(c) || matches!(c, '"' | '\'' | '`' | '(' | '[' | '{' | '<' | '=' | ',')) => String::new(),
+            None => {
+                rest = body;
+                continue;
             }
-            None => Some(String::new()),
         };
-        match (scheme, run.rfind('@')) {
-            (Some(scheme), Some(i)) => {
-                let secret = run[..i].contains(':') || matches!(scheme.as_str(), "" | "http" | "https" | "ftp" | "ftps");
-                if secret && i > 0 {
-                    out.push_str("<redacted>");
-                    out.push_str(&run[i..]);
-                } else {
-                    out.push_str(run);
-                }
+        let end = body.find(is_authority_end).unwrap_or(body.len());
+        let authority = &body[..end];
+        match authority.rfind('@') {
+            Some(i) if i > 0 && (authority[..i].contains(':') || matches!(scheme.as_str(), "" | "http" | "https" | "ftp" | "ftps")) => {
+                out.push_str("<redacted>");
+                out.push_str(&authority[i..]);
             }
-            _ => out.push_str(run),
+            _ => out.push_str(authority),
         }
         rest = &body[end..];
     }
@@ -975,9 +975,14 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
     redact_schemeless(&out)
 }
 
-/// ASCII whitespace ends a candidate; NBSP, U+2028 and other Unicode whitespace do not, so a secret holding them is redacted whole.
+/// ASCII whitespace; NBSP, U+2028 and other Unicode whitespace are not, so a secret holding them is redacted whole.
 fn is_break(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c')
+}
+
+/// The end of a URL's authority.
+fn is_authority_end(c: char) -> bool {
+    is_break(c) || matches!(c, '/' | '?' | '#' | '\\' | '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')
 }
 
 /// `word:secret@host.tld/` at the start of a whitespace-delimited word that holds no `//` becomes `<redacted>@host.tld/`.
