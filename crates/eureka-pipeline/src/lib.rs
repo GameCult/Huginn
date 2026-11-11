@@ -759,7 +759,6 @@ unit_enums! {
     ClaimOutcome { Holds, Falsified, Unproven }
     FindingConfidence { Confirmed, Plausible }
     FindingSeverity { Blocker, High, Medium, Low }
-    RulingAuthority { Operator, Standing, Defaulted, Mind }
     FindingOrigin { Introduced, PreExisting }
     RunOperator { Operator, Mind }
     RunTurn { PersonaTurn, SelfRun, Sleep }
@@ -1123,6 +1122,55 @@ impl Bounded for ResearchSource {
             }
             Self::Observed { evidence } => evidence.validate(&format!("{field}.evidence")),
             Self::Document { reference } => reference.validate(&format!("{field}.reference")),
+        }
+    }
+}
+
+/// Who decided a ruling, and under what. `Mind` is this mind's own decision, admitted by her Self. `Steward` is
+/// a named peer's decision inside the peer's stewardship, as this mind heard it: `steward` is the deciding Mind's
+/// Matrix id, `repo` the stewardship she decided under, `words` her own words copied from the line this mind heard,
+/// `event` that line's Matrix event id when it was a delivery. The four unit variants stay bare strings on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum RulingAuthority {
+    Operator,
+    Standing,
+    Defaulted,
+    Mind,
+    Steward { steward: Short, repo: OrgRepo, words: Para, event: Option<Short> },
+}
+
+impl RulingAuthority {
+    /// The variants' spellings, in declaration order: the names the wire and listings use.
+    pub const NAMES: &'static [&'static str] = &["Operator", "Standing", "Defaulted", "Mind", "Steward"];
+
+    /// The variant's spelling, for rows, headers and listings.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Operator => "Operator",
+            Self::Standing => "Standing",
+            Self::Defaulted => "Defaulted",
+            Self::Mind => "Mind",
+            Self::Steward { .. } => "Steward",
+        }
+    }
+}
+
+impl Bounded for RulingAuthority {
+    fn validate(&self, field: &str) -> Result<(), PipelineRefusal> {
+        match self {
+            Self::Steward { steward, repo, words, event } => {
+                steward.validate(&format!("{field}.steward"))?;
+                if steward.0.trim().is_empty() {
+                    return Err(format_error(&format!("{field}.steward"), "a steward naming no Mind"));
+                }
+                repo.validate(&format!("{field}.repo"))?;
+                words.validate(&format!("{field}.words"))?;
+                if words.0.trim().is_empty() {
+                    return Err(format_error(&format!("{field}.words"), "a steward ruling with no words"));
+                }
+                event.validate(&format!("{field}.event"))
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -1923,6 +1971,49 @@ mod tests {
         ruling
     }
 
+    fn steward_ruling() -> PipelineRuling {
+        let mut ruling = mind_ruling();
+        ruling.authority = RulingAuthority::Steward {
+            steward: "@heimdall:chat".into(),
+            repo: OrgRepo("GameCult/Bifrost".into()),
+            words: "refuse leading zeros".into(),
+            event: Some("$ev1".into()),
+        };
+        ruling
+    }
+
+    #[test]
+    fn a_steward_ruling_round_trips_and_leaves_the_unit_authorities_bare_strings() -> Result<()> {
+        let cache = schema_cache()?;
+        let document = PipelineDocument::Ruling(steward_ruling());
+        document.validate()?;
+        assert_eq!(PipelineDocument::decode(&document.prepare(&cache)?)?, document);
+        let json = serde_json::to_value(&document)?;
+        assert_eq!(json["value"]["authority"]["Steward"]["steward"], "@heimdall:chat");
+        let mut unit = ruling_sample();
+        unit.authority = RulingAuthority::Defaulted;
+        assert_eq!(serde_json::to_value(PipelineDocument::Ruling(unit))?["value"]["authority"], "Defaulted");
+        Ok(())
+    }
+
+    #[test]
+    fn a_steward_ruling_refuses_blank_words_blank_steward_and_a_bad_repo() {
+        let refused = |edit: fn(&mut RulingAuthority)| {
+            let mut ruling = steward_ruling();
+            edit(&mut ruling.authority);
+            PipelineDocument::Ruling(ruling).validate().expect_err("refused").to_string()
+        };
+        let fields = [
+            refused(|a| if let RulingAuthority::Steward { words, .. } = a { words.0 = " ".into() }),
+            refused(|a| if let RulingAuthority::Steward { steward, .. } = a { steward.0 = String::new() }),
+            refused(|a| if let RulingAuthority::Steward { repo, .. } = a { repo.0 = "nope".into() }),
+            refused(|a| if let RulingAuthority::Steward { words, .. } = a { words.0 = "w".repeat(4001) }),
+        ];
+        for (fault, field) in fields.iter().zip(["authority.words", "authority.steward", "authority.repo", "authority.words"]) {
+            assert!(fault.contains(field), "{fault}");
+        }
+    }
+
     /// A withdrawal is a pulse that says only `tempo_vote_withdrawn`: it must survive
     /// encoding to an envelope, JSON and named MessagePack as a withdrawal, and an
     /// unwithdrawn pulse must not write the key.
@@ -1967,7 +2058,7 @@ mod tests {
 
     #[test]
     fn unit_enum_names_are_the_variants_in_declaration_order() {
-        assert_eq!(RulingAuthority::NAMES, ["Operator", "Standing", "Defaulted", "Mind"]);
+        assert_eq!(RulingAuthority::NAMES, ["Operator", "Standing", "Defaulted", "Mind", "Steward"]);
         assert_eq!(FindingOrigin::NAMES, ["Introduced", "PreExisting"]);
     }
 
@@ -2044,6 +2135,7 @@ mod tests {
             out.push((format!("finding.severity-{name}"), D::Finding(f)));
         }
         out.push(("ruling.authority-mind".into(), D::Ruling(mind_ruling())));
+        out.push(("ruling.authority-steward".into(), D::Ruling(steward_ruling())));
         let PipelineDocument::CutSpec(mut spec) = samples().remove(4).0 else { unreachable!() };
         spec.file_changes[0].location.symbol = Some("value_types".into());
         spec.reads = vec![
