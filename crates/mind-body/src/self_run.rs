@@ -150,6 +150,8 @@ const ENV_SCRUB_VARIABLE: &str = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB";
 /// Optional, set by the unit: `off` turns that scrub off for a run whose user holds root, where it
 /// protects nothing and its sandbox's no_new_privs would only stop `sudo`. Anything else keeps it on.
 const SCRUB_VARIABLE: &str = "MIND_SELF_SCRUB";
+/// The variable the child's `huginn` reads its `--session` from: the run's label, the id the start message names.
+const SESSION_VARIABLE: &str = "HUGINN_SESSION";
 /// The name the start message tells her to admit as.
 pub const AGENT: &str = "mind-self-run";
 /// The namespace of the session id: the run id is the name in it.
@@ -225,6 +227,12 @@ fn flush_text(why: Why) -> String {
         Why::Idle => "This session ends because nothing is waiting and its cache would lapse.",
     };
     format!("{cause} {FLUSH_MESSAGE} Close each brief that is done by the closing rule; a brief whose change is not on its default branch stays open, or is superseded by your own follow-up when it waits on someone else, and the next session continues it.")
+}
+
+/// The label of a run, the last segment of its id (`<instance>:run:<label>`): what the opening receipt of every run already carries as its session
+/// (`launch::run_label`), so a `huginn` admission and the run's own receipts name one session in one spelling.
+fn run_label(run: &PipelineRef) -> &str {
+    run.id.0.rsplit(':').next().unwrap_or(&run.id.0)
 }
 
 /// The session id of a run: UUIDv5 over the run's id. Derived, never stored.
@@ -464,8 +472,10 @@ pub struct Kept {
 }
 
 pub trait Spawner {
-    /// Starts the child with `token` as its credential descriptor.
-    fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>>;
+    /// Starts the child with `token` as its credential descriptor and, when `session` is given, that label
+    /// as its `HUGINN_SESSION`: the session its `huginn` admissions are attributed to. A child with no run
+    /// label (the Persona's) is given none.
+    fn spawn(&self, args: &[String], token: &TokenFd, session: Option<&str>) -> Result<Box<dyn Child>>;
 
     /// The organ's one kept conversation, if any. A spawner that keeps nothing says none.
     fn kept(&self) -> Option<Kept> {
@@ -728,7 +738,7 @@ fn lend_and_drive(mind: &dyn MindPort, clock: &dyn Clock, lender: &dyn Lender, s
         heard.resumed = Some(kept.session);
         writeln!(out, "session resumed {} warm until {}", kept.session, kept.warm_until.to_rfc3339_opts(SecondsFormat::Secs, true))?;
     }
-    let child = spawner.spawn(&claude_args(session_id(run), resume.as_ref().map(|kept| kept.transcript.as_path())), lease.token())?;
+    let child = spawner.spawn(&claude_args(session_id(run), resume.as_ref().map(|kept| kept.transcript.as_path())), lease.token(), Some(run_label(run)))?;
     let mut inbox = SelfInbox::new(mind, (run, claims), task, (lease.plan_quota(), started_ms), (told, conversation), heard, resume.is_some());
     let ran = drive(clock, child, &mut inbox, run_cap_s, out);
     inbox.admit_unadmitted();
@@ -1090,13 +1100,13 @@ impl Spawner for ClaudeSpawner {
         clear_kept_dir(dir, &[KEPT_RECORD.to_string(), format!("{session}.jsonl")]).context("the conversation before it could not be removed")
     }
 
-    fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
+    fn spawn(&self, args: &[String], token: &TokenFd, session: Option<&str>) -> Result<Box<dyn Child>> {
         let config = FreshConfig::create(&self.scratch, self.seed.as_deref(), self.keep.clone())?;
-        let Some(sandbox) = &self.sandbox else { return spawn_program(Path::new("claude"), args, token, &self.unit_environment, config) };
+        let Some(sandbox) = &self.sandbox else { return spawn_program(Path::new("claude"), args, token, (&self.unit_environment, session), config) };
         let mut wrapped = sandbox_args(sandbox, &self.scratch);
         wrapped.push("claude".into());
         wrapped.extend(args.iter().cloned());
-        spawn_program(Path::new("bwrap"), &wrapped, token, &self.unit_environment, config)
+        spawn_program(Path::new("bwrap"), &wrapped, token, (&self.unit_environment, session), config)
     }
 }
 
@@ -1274,6 +1284,7 @@ fn copy_level(root: &Path, from: &Path, to: &Path) -> std::io::Result<()> {
 /// `CLAUDE_CONFIG_DIR` are its fresh configuration directory, set by the spawn.
 /// `EUREKA_INSTANCE` and `HUGINN_ENDPOINT` are the `huginn` CLI's whole identity
 /// (ruling `eureka-body:ruling:cli-over-mcp-agent-surface`): a name and an address, no secret.
+/// Its session, `HUGINN_SESSION`, is set by the spawn from the run, never passed through.
 fn child_may_see(name: &OsStr) -> bool {
     let name = name.to_string_lossy();
     matches!(name.as_ref(), "PATH" | "LANG" | "TERM" | "EUREKA_INSTANCE" | "HUGINN_ENDPOINT") || name.starts_with("LC_")
@@ -1295,13 +1306,17 @@ fn scrub_is_off(unit: &[(OsString, OsString)]) -> bool {
 /// token. `claude` reads it to the end once at startup, so what its own children
 /// inherit is an emptied pipe whose write end exists nowhere. The child's
 /// environment is cleared and rebuilt from `unit`'s allow-listed variables.
-fn spawn_program(program: &Path, args: &[String], token: &TokenFd, unit: &[(OsString, OsString)], config: FreshConfig) -> Result<Box<dyn Child>> {
+fn spawn_program(program: &Path, args: &[String], token: &TokenFd, (unit, session): (&[(OsString, OsString)], Option<&str>), config: FreshConfig) -> Result<Box<dyn Child>> {
     let inheritable = token.inheritable().context("the credential descriptor could not be placed")?;
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     command.env_clear().envs(child_environment(unit));
     command.env("HOME", &config.dir).env(CONFIG_DIR_VARIABLE, &config.dir);
     command.env(DISABLE_COMPACT_VARIABLE, "1").env(TOKEN_FD_VARIABLE, inheritable.number().to_string()).env(ENV_SCRUB_VARIABLE, if scrub_is_off(unit) { "0" } else { "1" });
+    // The unit's own `HUGINN_SESSION` is not on the allow-list: the only value the child can hold is the one its run was given.
+    if let Some(session) = session {
+        command.env(SESSION_VARIABLE, session);
+    }
     // Its own process group, so that a signal reaches what the child started too.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);

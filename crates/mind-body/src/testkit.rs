@@ -660,6 +660,8 @@ impl Child for Scripted {
 pub(crate) struct Fake {
     pub(crate) child: RefCell<Option<Scripted>>,
     pub(crate) spawns: RefCell<Vec<Vec<String>>>,
+    /// The `HUGINN_SESSION` each spawn was given, in order with `spawns`.
+    pub(crate) sessions: RefCell<Vec<Option<String>>>,
     pub(crate) refuse: bool,
     /// The conversation the spawner reports as kept; a test sets it.
     pub(crate) kept: RefCell<Option<Kept>>,
@@ -670,7 +672,7 @@ pub(crate) struct Fake {
 impl Fake {
     pub(crate) fn with(child: Option<Scripted>, refuse: bool) -> Self {
         let log = child.as_ref().map(|child| child.log.clone());
-        Self { child: RefCell::new(child), spawns: RefCell::new(Vec::new()), refuse, kept: RefCell::new(None), log }
+        Self { child: RefCell::new(child), spawns: RefCell::new(Vec::new()), sessions: RefCell::new(Vec::new()), refuse, kept: RefCell::new(None), log }
     }
 }
 
@@ -686,8 +688,9 @@ impl Spawner for Fake {
         Ok(())
     }
 
-    fn spawn(&self, args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
+    fn spawn(&self, args: &[String], _token: &TokenFd, session: Option<&str>) -> Result<Box<dyn Child>> {
         self.spawns.borrow_mut().push(args.to_vec());
+        self.sessions.borrow_mut().push(session.map(str::to_string));
         if self.refuse {
             return Err(anyhow!("refused"));
         }

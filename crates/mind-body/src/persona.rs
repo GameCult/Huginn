@@ -1006,7 +1006,7 @@ pub(crate) fn start_session(
         Ok(Lent::Granted(lease)) => lease,
         Ok(Lent::Refused(_)) | Err(_) => return Ok(Err(Failure::Lease)),
     };
-    let Ok(child) = organs.spawner.spawn(&persona_args(session_id, &config.model, &schema, &prompt), lease.token()) else { return Ok(Err(Failure::Session)) };
+    let Ok(child) = organs.spawner.spawn(&persona_args(session_id, &config.model, &schema, &prompt), lease.token(), None) else { return Ok(Err(Failure::Session)) };
     Ok(Ok(Started { child, lease, started_ms }))
 }
 
