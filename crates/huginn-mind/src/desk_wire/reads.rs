@@ -811,6 +811,63 @@ mod tests {
         assert_eq!(steps, 9);
     }
 
+    /// CultLib f6c9bf5f: the short-page and too-large vectors. What Huginn can judge replays: the short
+    /// pages are strict nonempty prefixes that resume below their last entry, and every refusal document
+    /// (list step, read, doorRefusals) is a `ForkRefusal` that round-trips byte for byte with code
+    /// `fork_too_large`. HTTP statuses, `doorFaults` and `request_id_conflict` being answer-only are
+    /// Bifrost's mapping; Huginn has no judge for them.
+    #[test]
+    fn short_page_and_too_large_vectors_replay_byte_for_byte() {
+        let file = transport();
+        let mut short = 0;
+        let mut refusals = 0;
+        for scenario in file["listShortPages"].as_array().unwrap() {
+            let name = scenario["name"].as_str().unwrap();
+            for step in scenario["steps"].as_array().unwrap() {
+                if let Some(hex) = step["responseHex"].as_str() {
+                    let bytes = bytes_of(hex);
+                    let page: ForkList = rmp_serde::from_slice(&bytes).unwrap();
+                    assert_eq!(encode(&page), bytes, "{name}");
+                    if let Some(cursor) = page.next_cursor {
+                        let last = page.forks.last().unwrap().card.order;
+                        assert_eq!(cursor.order(), last, "{name}: next_cursor resumes below the last entry returned");
+                        assert!((page.forks.len() as u64) < step["request"]["limit"].as_u64().unwrap(), "{name}: a short page");
+                        short += 1;
+                    }
+                } else {
+                    let bytes = bytes_of(step["refusalHex"].as_str().unwrap());
+                    let refusal: ForkRefusal = rmp_serde::from_slice(&bytes).unwrap();
+                    assert_eq!(encode(&refusal), bytes, "{name}");
+                    assert_eq!(refusal.code, ForkRefusalCode::ForkTooLarge);
+                    refusals += 1;
+                }
+            }
+        }
+        assert_eq!((short, refusals), (2, 2));
+        let read = &file["readTooLarge"][0];
+        let bytes = bytes_of(read["refusalHex"].as_str().unwrap());
+        let refusal: ForkRefusal = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!((encode(&refusal), refusal.code), (bytes, ForkRefusalCode::ForkTooLarge));
+        let top: Value = serde_json::from_str(include_str!("../../vectors/fork-card-vectors.json")).unwrap();
+        let door = top["doorRefusals"].as_array().unwrap().iter().find(|row| row["name"] == "fork_too_large").unwrap();
+        let bytes = bytes_of(door["messagePackHex"].as_str().unwrap());
+        assert_eq!(encode(&rmp_serde::from_slice::<ForkRefusal>(&bytes).unwrap()), bytes);
+    }
+
+    /// The contract's refusal texts: the list names the fork and `(order N)`, the read names the fork
+    /// alone, both end `alone is past the response budget`. Huginn's own texts are compared to them.
+    #[test]
+    fn the_refusal_texts_are_the_vectors() {
+        let file = transport();
+        let step = &file["listShortPages"][1]["steps"][0];
+        let (fork_id, order) = (step["fork_id"].as_str().unwrap(), step["order"].as_u64().unwrap());
+        assert_eq!(fork_too_large(fork_id, order).error, step["refusal"]["error"].as_str().unwrap(), "list text");
+        let read = &file["readTooLarge"][0];
+        assert_eq!(fork_too_large_read(read["fork_id"].as_str().unwrap()).error, read["refusal"]["error"].as_str().unwrap(), "read text");
+        let order_zero = &file["listShortPages"][2]["steps"][1];
+        assert_eq!(fork_too_large(order_zero["fork_id"].as_str().unwrap(), 0).error, order_zero["refusal"]["error"].as_str().unwrap(), "order 0 text");
+    }
+
     #[test]
     fn invalid_entries_and_lists_do_not_decode_as_documents() {
         let file = transport();
