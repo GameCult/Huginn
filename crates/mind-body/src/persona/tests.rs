@@ -8820,3 +8820,26 @@ fn the_trace_holds_the_quote_line_she_was_shown() {
     assert_eq!(inputs[0].text, format!("yes\n{quote}"));
     assert_eq!(inputs[1].text, "plain");
 }
+
+/// The mouth restarts while a told batch is unacked: its seq counter survives, the unacked events come back from the homeserver under
+/// fresh, higher seqs (here 3 and 4 for events first numbered 1 and 2), and the same events must not be told to the Mind twice, while an
+/// event that really is new alongside them is told once.
+#[test]
+fn events_a_restarted_mouth_renumbers_are_told_once_and_nothing_new_is_lost() {
+    let rig = Rig::new(vec![delivery_of(1, "swarm", "@op:chat", "first", "$e1"), delivery_of(2, "swarm", "@op:chat", "second", "$e2")], &[says(&[("operator", "one")]), says(&[("operator", "two")])]);
+    let (deliveries, restarted) = (rig.chat.deliveries.clone(), Cell::new(false));
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        if !restarted.replace(true) {
+            *deliveries.borrow_mut() = vec![
+                delivery_of(3, "swarm", "@op:chat", "first", "$e1"),
+                delivery_of(4, "swarm", "@op:chat", "second", "$e2"),
+                delivery_of(5, "swarm", "@op:chat", "third", "$e3"),
+            ];
+        }
+    }));
+    rig.go();
+    let told: String = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect::<Vec<_>>().join("\n");
+    for (text, times) in [("first", 1), ("second", 1), ("third", 1)] {
+        assert_eq!(told.matches(&format!("text=\"{text}\"")).count(), times, "{text} is told {times} time(s): {told}");
+    }
+}
