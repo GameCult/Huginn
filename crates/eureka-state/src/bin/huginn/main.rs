@@ -99,8 +99,11 @@ enum Command {
     },
     /// Search the public forge repos' code and docs by meaning.
     Sources {
-        /// What to find, in words.
-        text: String,
+        /// What to find, in words: one to eight texts. Each is a topic; the
+        /// ranked lists of several are fused, so a brief with many topics
+        /// retrieves by every one.
+        #[arg(required = true, num_args = 1..=8)]
+        texts: Vec<String>,
         /// Look in this repo alone (its forge name).
         #[arg(long)]
         repo: Option<String>,
@@ -275,12 +278,12 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
             query(settings, selection, semantic, None, documents)
         }
         Command::Sources {
-            text,
+            texts,
             repo,
             front,
             top_k,
             json,
-        } => sources(settings, text, repo, front, top_k, json),
+        } => sources(settings, texts, repo, front, top_k, json),
         Command::Recipe(Recipe::Blocked { spec_id, page }) => {
             blocked(settings, &spec_id, page.cursor, page.documents)
         }
@@ -438,15 +441,15 @@ fn blocked(
 
 fn sources(
     settings: &Settings,
-    text: String,
+    texts: Vec<String>,
     repo: Option<String>,
     front: bool,
     top_k: Option<u32>,
     json: bool,
 ) -> Result<u8, Trouble> {
     let query = SourceQuery {
-        text: Line(text),
-        texts: vec![],
+        text: Line::default(),
+        texts: texts.into_iter().map(Line).collect(),
         top_k: top_k.unwrap_or(DEFAULT_TOP_K),
         repo: repo.map(Short),
         front,
