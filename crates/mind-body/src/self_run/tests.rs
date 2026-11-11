@@ -522,8 +522,8 @@ fn a_result_writes_its_per_turn_usage_and_not_the_sessions_total() {
     assert_eq!(results.len(), 2);
     let lines: Vec<String> = results.iter().map(|line| journal_of(line)).collect();
     // The capture's modelUsage runs 20/10 then 40/20; the turn's own usage is 20/10 both times.
-    assert_eq!(usage_lines(&lines[0]), ["usage turn 0: claude-opus-5-5 input 20 cache_read 0 cache_creation 0 output 10 subagents_spawned_total 1"]);
-    assert_eq!(usage_lines(&lines[1]), ["usage turn 1: claude-opus-5-5 input 20 cache_read 0 cache_creation 0 output 10 subagents_spawned_total 1"]);
+    assert_eq!(usage_lines(&lines[0]), ["usage turn 0: claude-opus-5-5 input 20 cache_read 0 cache_creation 0 output 10 cache_creation_5m 0 cache_creation_1h 0 subagents_spawned_total 1"]);
+    assert_eq!(usage_lines(&lines[1]), ["usage turn 1: claude-opus-5-5 input 20 cache_read 0 cache_creation 0 output 10 cache_creation_5m 0 cache_creation_1h 0 subagents_spawned_total 1"]);
 }
 
 #[test]
