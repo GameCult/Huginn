@@ -472,6 +472,19 @@ pub fn fuse<T>(lists: Vec<Vec<T>>, key: impl Fn(&T) -> String, k: u32, top_k: us
     fused
 }
 
+/// The texts a query searches by: `texts`, or an old client's `text` as a list
+/// of one, trimmed, and each distinct text once, in the order asked.
+fn query_texts(query: &SourceQuery) -> Vec<&str> {
+    let asked: Vec<&str> = if query.texts.is_empty() { vec![query.text.0.as_str()] } else { query.texts.iter().map(|text| text.0.as_str()).collect() };
+    let mut distinct: Vec<&str> = Vec::with_capacity(asked.len());
+    for text in asked {
+        if !distinct.iter().any(|seen| seen.trim() == text.trim()) {
+            distinct.push(text);
+        }
+    }
+    distinct
+}
+
 /// A source search, which a daemon answers from the collection as it finds it:
 /// it embeds the query with its own embedder, and refuses if the collection
 /// was built under another model, because vectors of two models do not compare.
@@ -493,12 +506,23 @@ pub fn search<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, quer
         identity.digest,
         identity.dimensions
     );
-    let text = format!("Instruct: {SOURCE_QUERY_INSTRUCTION}\nQuery: {}", query.text.0);
-    let mut vectors = embedder.embed(&[text], budget.left()?).context("embedding the query")?;
-    ensure!(vectors.len() == 1, "the embedder returned {} vectors for one query", vectors.len());
-    let vector = vectors.remove(0);
-    ensure!(vector.len() == identity.dimensions as usize, "the embedder returned a query vector of {} where the collection holds {}", vector.len(), identity.dimensions);
-    let rows = index.search_sources(&vector, query.repo.as_ref().map(|repo| repo.0.as_str()), query.front, query.top_k, budget.left()?)?;
+    let topics = query_texts(query);
+    let prompts: Vec<String> = topics.iter().map(|topic| format!("Instruct: {SOURCE_QUERY_INSTRUCTION}\nQuery: {topic}")).collect();
+    let vectors = embedder.embed(&prompts, budget.left()?).context("embedding the query")?;
+    ensure!(vectors.len() == prompts.len(), "the embedder returned {} vectors for {} query texts", vectors.len(), prompts.len());
+    let repo = query.repo.as_ref().map(|repo| repo.0.as_str());
+    let depth = if vectors.len() == 1 { query.top_k } else { FUSE_DEPTH };
+    let mut lists = Vec::with_capacity(vectors.len());
+    for vector in &vectors {
+        ensure!(vector.len() == identity.dimensions as usize, "the embedder returned a query vector of {} where the collection holds {}", vector.len(), identity.dimensions);
+        lists.push(index.search_sources(vector, repo, query.front, depth, budget.left()?)?);
+    }
+    let rows = if lists.len() == 1 {
+        lists.remove(0)
+    } else {
+        let key = |row: &SourceRow| chunk_id(&row.payload.repo, &row.payload.path, &row.payload.blob, row.payload.chunk_index);
+        fuse(lists, key, FUSE_K, query.top_k as usize).into_iter().map(|(score, row)| SourceRow { score, ..row }).collect()
+    };
     Ok(SourceHits {
         indexed_under: SourceModel { name: built.model, digest: built.model_digest },
         hits: rows

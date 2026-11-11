@@ -631,3 +631,127 @@ fn a_fused_list_is_cut_to_top_k() {
     assert_eq!(fused(&[&["a", "b", "c"]], 2).len(), 2);
     assert!(fused(&[], 5).is_empty());
 }
+
+/// An embedder whose vector is the axis of the topic a text names (`topic-N`
+/// anywhere in it), so a test says which chunk each text is near.
+struct TopicEmbedder(FakeEmbedder);
+
+impl Embedder for TopicEmbedder {
+    fn model_identity(&mut self, within: Duration) -> Result<crate::index::ModelIdentity> {
+        self.0.model_identity(within)
+    }
+
+    fn embed(&mut self, texts: &[String], within: Duration) -> Result<Vec<Vec<f32>>> {
+        self.0.embed(texts, within)?;
+        let dimensions = self.0.state.lock().unwrap().identity.dimensions as usize;
+        Ok(texts
+            .iter()
+            .map(|text| {
+                let axis: usize = text.split("topic-").nth(1).and_then(|rest| rest.get(..1)).and_then(|digit| digit.parse().ok()).expect("a text names topic-N");
+                (0..dimensions).map(|at| if at == axis { 1.0 } else { 0.0 }).collect()
+            })
+            .collect())
+    }
+}
+
+/// A rig whose collection holds one chunk per axis, `chunk-N` near `topic-N`,
+/// built under an embedder of `dimensions`.
+fn topic_rig(dimensions: u32) -> (Rig, TopicEmbedder) {
+    let remote = Remote::new();
+    remote.commit(&[("seed.rs", b"seed\n")], &[]);
+    let mut rig = Rig::new();
+    rig.embedder.state.lock().unwrap().identity.dimensions = dimensions;
+    rig.converged(&mut FakeForge::of(&[("Demo", &remote)]));
+    {
+        let mut state = rig.index.state.lock().unwrap();
+        state.points.clear();
+        for axis in 0..dimensions as usize {
+            let payload = SourcePayload {
+                repo: "Demo".into(),
+                path: format!("chunk-{axis}.rs"),
+                commit: "c".into(),
+                blob: format!("b{axis}"),
+                line_start: 1,
+                line_end: 1,
+                chunk_index: 0,
+                ext: "rs".into(),
+                text: format!("chunk {axis}"),
+            };
+            let id = chunk_id(&payload.repo, &payload.path, &payload.blob, 0);
+            state.points.insert(id.clone(), SourcePoint { id, vector: (0..dimensions as usize).map(|at| if at == axis { 1.0 } else { 0.0 }).collect(), payload });
+        }
+        state.searches.clear();
+    }
+    rig.embedder.state.lock().unwrap().embedded.clear();
+    let embedder = TopicEmbedder(rig.embedder.clone());
+    (rig, embedder)
+}
+
+fn queries(texts: &[&str], top_k: u32) -> SourceQuery {
+    SourceQuery { text: Line::default(), texts: texts.iter().map(|text| Line((*text).into())).collect(), top_k, repo: None, front: false }
+}
+
+fn paths(hits: &SourceHits) -> Vec<&str> {
+    hits.hits.iter().map(|hit| hit.path.as_str()).collect()
+}
+
+/// One text answers exactly as it did before texts existed, whether it came in
+/// `text` or in `texts`: the index's own cosine scores, unfused, top_k deep.
+#[test]
+fn one_text_answers_exactly_as_before() {
+    let (mut rig, mut embedder) = topic_rig(4);
+    let within = Duration::from_secs(5);
+    let old = search(&mut embedder, &mut rig.index, &query("topic-2", 3, None), within).unwrap();
+    let new = search(&mut embedder, &mut rig.index, &queries(&["topic-2"], 3), within).unwrap();
+    assert_eq!(old, new);
+    assert_eq!(old.hits.len(), 3);
+    assert_eq!((old.hits[0].path.as_str(), old.hits[0].score), ("chunk-2.rs", 1.0), "the cosine, not a reciprocal-rank sum");
+    assert!(old.hits[1..].iter().all(|hit| hit.score == 0.0));
+    let searches = rig.index.state.lock().unwrap().searches.clone();
+    assert_eq!(searches, [(None, 3), (None, 3)], "unfused, so asked for top_k and no more");
+}
+
+/// Two texts that are equal once trimmed are one text: one search, and the
+/// answer of the single text.
+#[test]
+fn a_duplicated_text_does_not_double_count() {
+    let (mut rig, mut embedder) = topic_rig(4);
+    let within = Duration::from_secs(5);
+    let single = search(&mut embedder, &mut rig.index, &queries(&["topic-1"], 4), within).unwrap();
+    rig.index.state.lock().unwrap().searches.clear();
+    let twice = search(&mut embedder, &mut rig.index, &queries(&["topic-1", "  topic-1\n"], 4), within).unwrap();
+    assert_eq!(twice, single);
+    assert_eq!(rig.index.state.lock().unwrap().searches.len(), 1);
+}
+
+/// n distinct texts are one embed call of n prompts and n searches, each
+/// `FUSE_DEPTH` deep; the answer is fused and cut to top_k.
+#[test]
+fn n_texts_make_n_searches_and_one_embed_call() {
+    let (mut rig, mut embedder) = topic_rig(4);
+    let within = Duration::from_secs(5);
+    let found = search(&mut embedder, &mut rig.index, &queries(&["topic-0", "topic-1", "topic-3"], 2), within).unwrap();
+    let embedded = rig.embedder.state.lock().unwrap().embedded.clone();
+    assert_eq!(embedded.len(), 1, "one embed call");
+    assert_eq!(embedded[0].len(), 3);
+    assert!(embedded[0].iter().all(|prompt| prompt.starts_with("Instruct: ")));
+    let searches = rig.index.state.lock().unwrap().searches.clone();
+    assert_eq!(searches, vec![(None, FUSE_DEPTH); 3]);
+    assert_eq!(found.hits.len(), 2);
+    assert!(found.hits.iter().all(|hit| hit.score >= 1.0 / 61.0), "a reciprocal-rank sum, at least the 1/(60+1) of a first place");
+    assert!(found.hits[0].score >= found.hits[1].score);
+}
+
+/// The reason the cut exists: a brief of eight 1,000-byte topics reaches the
+/// chunk that only its last topic is near.
+#[test]
+fn a_long_brief_of_eight_topics_reaches_the_chunk_only_the_last_is_near() {
+    let (mut rig, mut embedder) = topic_rig(8);
+    let within = Duration::from_secs(5);
+    let topics: Vec<String> = (0..8).map(|n| format!("topic-{n} {}", "x".repeat(1000 - 8))).collect();
+    assert!(topics.iter().all(|topic| topic.len() == 1000));
+    let refs: Vec<&str> = topics.iter().map(String::as_str).collect();
+    let found = search(&mut embedder, &mut rig.index, &queries(&refs, 8), within).unwrap();
+    assert!(paths(&found).contains(&"chunk-7.rs"), "{:?}", paths(&found));
+    assert_eq!(paths(&found).len(), 8);
+}
