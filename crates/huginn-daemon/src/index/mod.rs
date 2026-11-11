@@ -107,7 +107,7 @@ use sha2::{Digest, Sha256};
 
 use crate::daemon::{Found, Hits, IndexSink, SearchTicket};
 use crate::sources::{self, SourceIndex};
-use huginn_mind::{ChatQuery, SourceQuery};
+use huginn_mind::{ChatQuery, ChatWindowQuery, SourceQuery};
 use ollama::QUERY_INSTRUCTION;
 
 /// The `managed_by` a collection carries when this organ made it.
@@ -689,6 +689,7 @@ struct Queued {
 enum SourceAsk {
     Sources(SourceQuery),
     Chat(ChatQuery),
+    Window(ChatWindowQuery),
 }
 
 /// A source or chat search waiting for the worker. It is not the mind's:
@@ -833,6 +834,7 @@ fn serve_source_search<E: Embedder, V: VectorIndex + SourceIndex>(projector: &mu
     let found = match ask {
         SourceAsk::Sources(query) => sources::search(&mut projector.embedder, &mut projector.index, &query, within).map(Found::Sources),
         SourceAsk::Chat(query) => sources::search_chat(&mut projector.embedder, &mut projector.index, &query, within).map(Found::Chat),
+        SourceAsk::Window(query) => sources::window(&mut projector.index, &query, within).map(|window| window.map_or_else(Found::Refused, Found::Window)),
     }
     .unwrap_or_else(|error| Found::Failed(format!("{error:#}")));
     lock(shared).sources_found.push((ticket, found));
@@ -1119,6 +1121,10 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
 
     fn search_chat(&mut self, query: &ChatQuery) -> Result<SearchTicket, String> {
         self.queue_source_ask(SourceAsk::Chat(query.clone()))
+    }
+
+    fn chat_window(&mut self, query: &ChatWindowQuery) -> Result<SearchTicket, String> {
+        self.queue_source_ask(SourceAsk::Window(query.clone()))
     }
 
     fn sources_searched(&mut self) -> Vec<(SearchTicket, Found)> {

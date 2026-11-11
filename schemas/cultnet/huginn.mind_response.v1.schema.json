@@ -128,6 +128,18 @@
     {
       "type": "object",
       "properties": {
+        "ChatWindow": {
+          "$ref": "#/$defs/ChatWindow"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ChatWindow"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
         "Activity": {
           "$ref": "#/$defs/RepoActivity"
         }
@@ -350,6 +362,43 @@
         "sender",
         "ts_ms",
         "body"
+      ]
+    },
+    "ChatWindow": {
+      "description": "The answer to a chat window: `messages` chronological with the anchor in\nthem once, all of `room_id`, each carrying the citations a hit's do.\n`more_before` and `more_after` say messages exist beyond the cut.",
+      "type": "object",
+      "properties": {
+        "anchor_event_id": {
+          "type": "string"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChatMessage"
+          }
+        },
+        "more_after": {
+          "type": "boolean"
+        },
+        "more_before": {
+          "type": "boolean"
+        },
+        "room_alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "room_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "room_id",
+        "anchor_event_id",
+        "messages",
+        "more_before",
+        "more_after"
       ]
     },
     "CitationRole": {

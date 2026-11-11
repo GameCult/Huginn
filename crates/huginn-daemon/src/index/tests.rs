@@ -2175,10 +2175,10 @@ fn source_searches_have_distinct_tickets_share_the_queue_bound_and_abandon_by_ti
 /// start first; a nearest search is the filter too.
 #[test]
 fn qdrant_chat_scroll_and_nearest_send_the_filter_and_the_order() {
-    use crate::sources::{ChatFilter, SourceIndex};
-    let filter = ChatFilter { rooms: vec!["!r:x".into()], after_ms: Some(5), before_ms: None };
+    use crate::sources::{ChatFilter, ChatOrder, SourceIndex};
+    let filter = ChatFilter { rooms: vec!["!r:x".into()], after_ms: Some(5), before_ms: None, ..ChatFilter::default() };
     let scrolling = stub(&[("POST /collections/", 200, r#"{"result":{"points":[]}}"#)]);
-    QdrantIndex::new(&scrolling.url).chat_scroll(&filter, 7, TIME).unwrap();
+    QdrantIndex::new(&scrolling.url).chat_scroll(&filter, ChatOrder::OldestFirst, 7, TIME).unwrap();
     let scroll: serde_json::Value = serde_json::from_str(&scrolling.seen.lock().unwrap()[0].2).unwrap();
     assert_eq!(scroll["order_by"], serde_json::json!({ "key": "ts_start_ms", "direction": "asc" }));
     assert_eq!(scroll["filter"]["must"][0], serde_json::json!({ "key": "corpus", "match": { "value": "chat" } }));

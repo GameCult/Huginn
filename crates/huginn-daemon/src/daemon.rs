@@ -8,7 +8,7 @@ use crate::sources::forge::HttpForge;
 use huginn_mind::desk_wire::{DeskRequest, DeskResponse};
 use huginn_mind::eureka_pipeline::{PipelineRef, Slug};
 use huginn_mind::wire::{ACTIVITY_REPOS_MAX, HuginnMindRequest, HuginnMindResponse, IndexStatus};
-use huginn_mind::{ChatHits, ChatQuery, Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery, SourceHits, SourceQuery};
+use huginn_mind::{ChatHits, ChatQuery, ChatWindow, ChatWindowQuery, Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery, SourceHits, SourceQuery};
 
 /// Where the index attaches. Called after a batch commits, with the refs the
 /// batch landed, derived writes included; the sink may read each through
@@ -37,6 +37,8 @@ pub trait IndexSink<S: MindStore> {
     /// Starts a chat search: the same queue and worker as a source search,
     /// over the same collection.
     fn search_chat(&mut self, query: &ChatQuery) -> Result<SearchTicket, String>;
+    /// Starts a chat window: the same queue and worker, no embedding.
+    fn chat_window(&mut self, query: &ChatWindowQuery) -> Result<SearchTicket, String>;
     /// Every source or chat search that finished since the last call, by
     /// ticket: `Found::Sources`, `Found::Chat` or `Found::Failed`.
     fn sources_searched(&mut self) -> Vec<(SearchTicket, Found)>;
@@ -83,6 +85,9 @@ pub enum Found {
     Mind(Hits),
     Sources(SourceHits),
     Chat(ChatHits),
+    Window(ChatWindow),
+    /// The index answered with a typed refusal rather than failing.
+    Refused(MindRefusal),
     Failed(String),
 }
 
@@ -219,6 +224,15 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
                     Err(detail) => Handled::Answered(HuginnMindResponse::Refused(MindRefusal::Unavailable { detail })),
                 };
             }
+            HuginnMindRequest::ChatWindow { query, .. } => {
+                if let Err(refusal) = query.check() {
+                    return Handled::Answered(HuginnMindResponse::Refused(refusal));
+                }
+                return match self.index.chat_window(&query) {
+                    Ok(ticket) => Handled::Searching(Search { ticket, mind: None }),
+                    Err(detail) => Handled::Answered(HuginnMindResponse::Refused(MindRefusal::Unavailable { detail })),
+                };
+            }
             HuginnMindRequest::StewardedActivity { instance, repos, after } => {
                 let refused = |message: &str| MindRefusal::SelectionInvalid { field: "repos".into(), value: None, message: message.into() };
                 if repos.len() > ACTIVITY_REPOS_MAX {
@@ -314,6 +328,8 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
             (_, Found::Failed(detail)) => return unavailable(detail),
             (None, Found::Sources(hits)) => return HuginnMindResponse::Sources(hits),
             (None, Found::Chat(hits)) => return HuginnMindResponse::Chat(hits),
+            (None, Found::Window(window)) => return HuginnMindResponse::ChatWindow(window),
+            (None, Found::Refused(refusal)) => return HuginnMindResponse::Refused(refusal),
             (Some(asked), Found::Mind(hits)) => (asked.selection, asked.semantic, asked.members, hits),
             _ => return unavailable("the index answered another kind of search than the one asked".into()),
         };
@@ -599,6 +615,10 @@ pub(crate) mod tests {
             Err("this index cannot search".into())
         }
 
+        fn chat_window(&mut self, _query: &ChatWindowQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
         fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
@@ -639,6 +659,10 @@ pub(crate) mod tests {
         }
 
         fn search_chat(&mut self, _query: &ChatQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
+        fn chat_window(&mut self, _query: &ChatWindowQuery) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
 
@@ -768,6 +792,10 @@ pub(crate) mod tests {
             Err("this index cannot search".into())
         }
 
+        fn chat_window(&mut self, _query: &ChatWindowQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
         fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
@@ -803,6 +831,10 @@ pub(crate) mod tests {
         }
 
         fn search_chat(&mut self, _query: &ChatQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
+        fn chat_window(&mut self, _query: &ChatWindowQuery) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
 

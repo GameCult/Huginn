@@ -97,6 +97,10 @@ impl<S: MindStore> IndexSink<S> for Inert {
         Err("this index cannot search".into())
     }
 
+    fn chat_window(&mut self, _query: &huginn_mind::ChatWindowQuery) -> Result<SearchTicket, String> {
+        Err("this index cannot search".into())
+    }
+
     fn search_sources(&mut self, _query: &huginn_mind::SourceQuery) -> Result<SearchTicket, String> {
         Err("this index cannot search".into())
     }

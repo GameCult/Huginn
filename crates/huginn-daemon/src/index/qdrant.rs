@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use huginn_mind::ChatMessage;
 
 use crate::sources::{
-    COLLECTION, CORPUS_CHAT, CORPUS_FORGE, ChatFilter, ChatPayload, ChatPoint, ChatRow, DescribedSources, FRONT_PAGE_FILES, SourceIndex, SourcePayload, SourcePoint, SourceRow,
+    COLLECTION, CORPUS_CHAT, CORPUS_FORGE, ChatFilter, ChatOrder, ChatPayload, ChatPoint, ChatRow, DescribedSources, FRONT_PAGE_FILES, SourceIndex, SourcePayload, SourcePoint, SourceRow,
     SourcesMeta,
 };
 
@@ -204,6 +204,15 @@ fn chat_filter(filter: &ChatFilter) -> Value {
     }
     if let Some(before) = filter.before_ms {
         must.push(json!({ "key": "ts_start_ms", "range": { "lte": before } }));
+    }
+    if let Some(from) = filter.starts_from_ms {
+        must.push(json!({ "key": "ts_start_ms", "range": { "gte": from } }));
+    }
+    if let Some(to) = filter.starts_to_ms {
+        must.push(json!({ "key": "ts_start_ms", "range": { "lte": to } }));
+    }
+    if let Some(event_id) = &filter.event_id {
+        must.push(json!({ "key": "event_ids", "match": { "value": event_id } }));
     }
     let mut out = json!({ "must": must });
     let (ids, aliases): (Vec<&String>, Vec<&String>) = filter.rooms.iter().partition(|room| room.starts_with('!'));
@@ -440,13 +449,13 @@ impl SourceIndex for QdrantIndex {
             .collect()
     }
 
-    fn chat_scroll(&mut self, filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatPayload>> {
+    fn chat_scroll(&mut self, filter: &ChatFilter, order: ChatOrder, limit: u32, within: Duration) -> Result<Vec<ChatPayload>> {
         let collection = self.sources.clone();
         let http = self.http.bounded(within);
         let body = json!({
             "filter": chat_filter(filter),
             "limit": limit,
-            "order_by": { "key": "ts_start_ms", "direction": "asc" },
+            "order_by": { "key": "ts_start_ms", "direction": match order { ChatOrder::OldestFirst => "asc", ChatOrder::NewestFirst => "desc" } },
             "with_payload": true,
             "with_vector": false,
         });
@@ -521,7 +530,7 @@ mod source_filter_tests {
     /// by id and alias, and the two ranges that keep an overlapping span.
     #[test]
     fn the_chat_filter_is_corpus_rooms_and_overlap() {
-        let filter = chat_filter(&ChatFilter { rooms: vec!["!r:x".into(), "#a:x".into(), "#b:x".into()], after_ms: Some(5), before_ms: Some(9) });
+        let filter = chat_filter(&ChatFilter { rooms: vec!["!r:x".into(), "#a:x".into(), "#b:x".into()], after_ms: Some(5), before_ms: Some(9), ..ChatFilter::default() });
         assert_eq!(
             filter,
             json!({
@@ -537,5 +546,23 @@ mod source_filter_tests {
             })
         );
         assert_eq!(chat_filter(&ChatFilter::default()), json!({ "must": [{ "key": "corpus", "match": { "value": "chat" } }] }));
+    }
+
+    /// An event id is a match on the keyword array, and the start bounds are
+    /// ranges on the chunk's own start.
+    #[test]
+    fn the_chat_filter_matches_an_event_and_bounds_chunk_starts() {
+        let filter = chat_filter(&ChatFilter { event_id: Some("$e".into()), starts_from_ms: Some(3), starts_to_ms: Some(8), ..ChatFilter::default() });
+        assert_eq!(
+            filter["must"],
+            json!([
+                { "key": "corpus", "match": { "value": "chat" } },
+                { "key": "ts_start_ms", "range": { "gte": 3 } },
+                { "key": "ts_start_ms", "range": { "lte": 8 } },
+                { "key": "event_ids", "match": { "value": "$e" } },
+            ])
+        );
+        let corpus = json!({ "key": "corpus", "match": { "value": "chat" } });
+        assert_eq!(filter["must"][0], corpus, "a point with no corpus, or another, does not match: the chat corpus clause is always first");
     }
 }

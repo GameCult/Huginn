@@ -1310,20 +1310,24 @@ impl huginn_daemon::sources::SourceIndex for Desk {
         limit: u32,
         _within: Duration,
     ) -> anyhow::Result<Vec<huginn_daemon::sources::ChatRow>> {
-        Ok(self.chat_scroll(filter, limit, _within)?.into_iter().map(|payload| huginn_daemon::sources::ChatRow { score: 0.9, payload }).collect())
+        Ok(self.chat_scroll(filter, huginn_daemon::sources::ChatOrder::OldestFirst, limit, _within)?.into_iter().map(|payload| huginn_daemon::sources::ChatRow { score: 0.9, payload }).collect())
     }
 
-    fn chat_scroll(&mut self, filter: &huginn_daemon::sources::ChatFilter, limit: u32, _within: Duration) -> anyhow::Result<Vec<huginn_daemon::sources::ChatPayload>> {
+    fn chat_scroll(&mut self, filter: &huginn_daemon::sources::ChatFilter, order: huginn_daemon::sources::ChatOrder, limit: u32, _within: Duration) -> anyhow::Result<Vec<huginn_daemon::sources::ChatPayload>> {
         let mut kept: Vec<_> = self
             .chat
             .iter()
             .filter(|payload| {
                 let times = payload.messages.iter().map(|message| message.ts_ms);
-                filter.keeps(&payload.room_id, payload.room_alias.as_deref(), times.clone().min().unwrap(), times.max().unwrap())
+                filter.event_id.as_ref().is_none_or(|id| payload.messages.iter().any(|message| &message.event_id == id))
+                    && filter.keeps(&payload.room_id, payload.room_alias.as_deref(), times.clone().min().unwrap(), times.max().unwrap())
             })
             .cloned()
             .collect();
         kept.sort_by_key(|payload| payload.messages[0].ts_ms);
+        if order == huginn_daemon::sources::ChatOrder::NewestFirst {
+            kept.reverse();
+        }
         kept.truncate(limit as usize);
         Ok(kept)
     }
@@ -1354,6 +1358,17 @@ impl<S: MindStore> IndexSink<S> for Desk {
         let mut embedder = Flat(self.embeds_under);
         let found = huginn_daemon::sources::search_chat(&mut embedder, self, query, Duration::from_secs(5))
             .map_or_else(|error| huginn_daemon::daemon::Found::Failed(format!("{error:#}")), huginn_daemon::daemon::Found::Chat);
+        self.done.push((ticket, found));
+        Ok(ticket)
+    }
+    fn chat_window(&mut self, query: &huginn_mind::ChatWindowQuery) -> Result<SearchTicket, String> {
+        self.tickets += 1;
+        let ticket = SearchTicket(self.tickets);
+        let found = match huginn_daemon::sources::window(self, query, Duration::from_secs(5)) {
+            Ok(Ok(window)) => huginn_daemon::daemon::Found::Window(window),
+            Ok(Err(refusal)) => huginn_daemon::daemon::Found::Refused(refusal),
+            Err(error) => huginn_daemon::daemon::Found::Failed(format!("{error:#}")),
+        };
         self.done.push((ticket, found));
         Ok(ticket)
     }
@@ -2948,7 +2963,7 @@ fn chat_search_prints_cited_messages_and_sends_its_selectors() {
     assert_eq!(
         found.out,
         "#swarm:gamecult.org (!r:gamecult.org) $e1..$e2 2023-11-14T22:13:20.000Z..2023-11-14T22:14:20.000Z\n\
-         2023-11-14T22:13:20.000Z @nibu:gamecult.org $e1 ship the cut\nthen rest\n\
+         2023-11-14T22:13:20.000Z @nibu:gamecult.org $e1 ship the cut\\nthen rest\n\
          2023-11-14T22:14:20.000Z @eureka:gamecult.org $e2 done\n\n"
     );
     let other = at(server.addr, &["chat", "search", "--room", "!elsewhere:gamecult.org"], None);
@@ -2973,4 +2988,36 @@ fn chat_search_prints_cited_messages_and_sends_its_selectors() {
         let ran = at(server.addr, bad, None);
         assert_eq!(ran.code, 1, "{bad:?} is a refusal by the daemon's door: {}", ran.err);
     }
+}
+
+/// `huginn chat window` end to end: an unknown or malformed event id is a
+/// refusal naming the field; a known one prints the room header and the
+/// messages with the anchor marked `>`; the flags reach the request.
+#[test]
+fn chat_window_prints_the_anchor_marked_and_refuses_what_the_index_lacks() {
+    let server = source_daemon("d1", "d1");
+    for (bad, field) in [("$unknown:gamecult.org", "event_id"), ("e1", "event_id")] {
+        let ran = at(server.addr, &["chat", "window", bad], None);
+        assert_eq!(ran.code, 1, "{}", ran.err);
+        assert!(ran.out.starts_with("Refused SelectionInvalid") && ran.out.contains(field), "no window for an id the index lacks: {}", ran.out);
+    }
+    let found = at(server.addr, &["chat", "window", "$e2"], None);
+    assert_eq!(found.code, 0, "{}", found.err);
+    assert_eq!(
+        found.out,
+        "#swarm:gamecult.org (!r:gamecult.org)\n\
+         \x20 2023-11-14T22:13:20.000Z @nibu:gamecult.org $e1 ship the cut\\nthen rest\n\
+         > 2023-11-14T22:14:20.000Z @eureka:gamecult.org $e2 done\n"
+    );
+    let over = at(server.addr, &["chat", "window", "$e2", "--before", "51"], None);
+    assert_eq!(over.code, 1, "{}", over.err);
+
+    let (spy, seen) = replying(
+        "chat_window",
+        HuginnMindResponse::ChatWindow(huginn_mind::ChatWindow { room_id: "!r:x".into(), room_alias: None, anchor_event_id: "$a".into(), messages: vec![], more_before: false, more_after: false }),
+    );
+    let ran = at(spy.addr, &["chat", "window", "$a", "--before", "3", "--after", "0"], None);
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    let HuginnMindRequest::ChatWindow { query, .. } = seen.lock().unwrap().remove(0) else { panic!("a chat window") };
+    assert_eq!((query.event_id.0.as_str(), query.before, query.after), ("$a", 3, 0));
 }

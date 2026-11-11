@@ -163,3 +163,9 @@ trimmed start, not by the stored chunk start, and a long chunk trimmed to a span
 that crosses rooms can be listed again by the continuation `--after`. Behaviour
 is deliberately unchanged here; the event-id window in cut chat-window replaces
 the time cursor.
+
+`huginn chat window <EVENT_ID> [--before N] [--after N]` (cut chat-window) reads
+the cited message and its neighbours in the same room from this index, no
+embedder and no Synapse; an id the index lacks is refused naming `event_id`.
+The listing limit above is not changed by it: the cut spec does not assign that
+fix, so it stays open.

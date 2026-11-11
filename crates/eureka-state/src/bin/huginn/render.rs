@@ -3,7 +3,7 @@
 use std::fmt::Write;
 
 use huginn_mind::eureka_pipeline::{PipelineResolution, ResolutionOutcome};
-use huginn_mind::{ChatHits, SourceHits, IndexStatus, PersonaStatus, PipelineDocumentSummary, PipelineDocumentView, PipelineStatus, PipelineStatusSummary};
+use huginn_mind::{ChatHits, ChatWindow, SourceHits, IndexStatus, PersonaStatus, PipelineDocumentSummary, PipelineDocumentView, PipelineStatus, PipelineStatusSummary};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -150,8 +150,8 @@ pub fn source_hits(found: &SourceHits) -> String {
 /// Chat hits as the CLI prints them. Per hit the organ's own header line,
 /// `#alias (!room) first..last time..time score` (the alias and the score only
 /// when there are some), then one `time sender event_id body` line per message,
-/// the body exactly as the room held it: quoted data under our header, never a
-/// message framed as if sent to the reader. A blank line between hits; a
+/// the body as the room held it with line breaks written `\n`: quoted data
+/// under our header, never a message framed as if sent to the reader. A blank line between hits; a
 /// truncated listing ends with the `--after` that continues it.
 pub fn chat_hits(found: &ChatHits) -> String {
     let mut out: Vec<String> = found
@@ -168,7 +168,7 @@ pub fn chat_hits(found: &ChatHits) -> String {
                 crate::chat::shown(hit.ts_end_ms)
             );
             for message in &hit.messages {
-                let _ = writeln!(text, "{} {} {} {}", crate::chat::shown(message.ts_ms), message.sender, message.event_id, message.body);
+                let _ = writeln!(text, "{} {} {} {}", crate::chat::shown(message.ts_ms), message.sender, message.event_id, one_line(&message.body));
             }
             text
         })
@@ -179,6 +179,34 @@ pub fn chat_hits(found: &ChatHits) -> String {
         out.push(format!("truncated: more follow, continue with --after {}\n", crate::chat::shown(last.ts_end_ms + 1)));
     }
     out.join("\n")
+}
+
+/// A message body on one line: a line break is written `\n` (and a carriage
+/// return `\r`), so a body cannot start a line of its own. `--json` has the
+/// body exactly.
+fn one_line(body: &str) -> String {
+    body.replace('\r', "\\r").replace('\n', "\\n")
+}
+
+/// A chat window as the CLI prints it: `#alias (!room)` (the id alone with no
+/// alias), then one `time sender event_id body` line per message, the anchor
+/// marked `>` and the rest indented to match; a line says when messages lie
+/// beyond either end.
+pub fn chat_window(found: &ChatWindow) -> String {
+    let room = found.room_alias.as_ref().map_or_else(|| found.room_id.clone(), |alias| format!("{alias} ({})", found.room_id));
+    let mut out = format!("{room}\n");
+    if found.more_before {
+        out.push_str("  (earlier messages exist)\n");
+    }
+    for message in &found.messages {
+        let mark = if message.event_id == found.anchor_event_id { '>' } else { ' ' };
+        let _ = writeln!(out, "{mark} {} {} {} {}", crate::chat::shown(message.ts_ms), message.sender, message.event_id, one_line(&message.body));
+    }
+    if found.more_after {
+        out.push_str("  (later messages exist)\n");
+    }
+    out.pop();
+    out
 }
 
 /// A fact as one token: a string, a number, a flag, a reference's id, or a

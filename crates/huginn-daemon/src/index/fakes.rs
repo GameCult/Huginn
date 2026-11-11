@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail, ensure};
 
-use crate::sources::{ChatFilter, ChatPayload, ChatPoint, ChatRow, DescribedSources, SourceIndex, SourcePoint, SourceRow, SourcesMeta};
+use crate::sources::{ChatFilter, ChatOrder, ChatPayload, ChatPoint, ChatRow, DescribedSources, SourceIndex, SourcePoint, SourceRow, SourcesMeta};
 
 use super::{CollectionMeta, Described, Embedder, Hit, ModelIdentity, Point, VectorIndex, point_id};
 
@@ -395,10 +395,13 @@ impl SourceIndex for FakeSources {
         Ok(rows)
     }
 
-    fn chat_scroll(&mut self, filter: &ChatFilter, limit: u32, _within: Duration) -> Result<Vec<ChatPayload>> {
+    fn chat_scroll(&mut self, filter: &ChatFilter, order: ChatOrder, limit: u32, _within: Duration) -> Result<Vec<ChatPayload>> {
         let state = self.state.lock().unwrap();
         let mut kept: Vec<&ChatPayload> = state.chat.values().map(|point| &point.payload).filter(|payload| chat_kept(filter, payload)).collect();
         kept.sort_by_key(|payload| payload.messages.iter().map(|message| message.ts_ms).min());
+        if order == ChatOrder::NewestFirst {
+            kept.reverse();
+        }
         Ok(kept.into_iter().take(limit as usize).cloned().collect())
     }
 }
@@ -407,7 +410,7 @@ impl SourceIndex for FakeSources {
 fn chat_kept(filter: &ChatFilter, payload: &ChatPayload) -> bool {
     let times = || payload.messages.iter().map(|message| message.ts_ms);
     match (times().min(), times().max()) {
-        (Some(start), Some(end)) => filter.keeps(&payload.room_id, payload.room_alias.as_deref(), start, end),
+        (Some(start), Some(end)) => filter.event_id.as_ref().is_none_or(|id| payload.messages.iter().any(|message| &message.event_id == id)) && filter.keeps(&payload.room_id, payload.room_alias.as_deref(), start, end),
         _ => false,
     }
 }
@@ -437,7 +440,7 @@ impl SourceIndex for FakeIndex {
     fn chat_nearest(&mut self, vector: &[f32], filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatRow>> {
         self.sources.chat_nearest(vector, filter, limit, within)
     }
-    fn chat_scroll(&mut self, filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatPayload>> {
-        self.sources.chat_scroll(filter, limit, within)
+    fn chat_scroll(&mut self, filter: &ChatFilter, order: ChatOrder, limit: u32, within: Duration) -> Result<Vec<ChatPayload>> {
+        self.sources.chat_scroll(filter, order, limit, within)
     }
 }

@@ -41,7 +41,7 @@ use huginn_mind::eureka_pipeline::{
     Line, PipelineDocument, PipelineRef, Short, Slug, pipeline_key,
 };
 use huginn_mind::{
-    BATCH_MAX, ChatQuery, Faculty, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionBatch, PipelineAdmissionOutcome,
+    BATCH_MAX, ChatQuery, ChatWindowQuery, Faculty, HuginnMindRequest, HuginnMindResponse, MindRefusal, PipelineAdmissionBatch, PipelineAdmissionOutcome,
     PersonaPutOutcome, PipelinePageItems, PipelineProvenance, PipelineSelectionPage, SemanticQuery, SourceQuery,
 };
 use serde_json::Value;
@@ -56,6 +56,7 @@ const DEFAULT_LIMIT: u32 = 50;
 const HOLD_CHECK: Duration = Duration::from_secs(10);
 /// The neighbours `--near` asks for when `--top-k` is not given.
 const DEFAULT_TOP_K: u32 = 10;
+const DEFAULT_WINDOW: u32 = 10;
 
 const ADMIT_HELP: &str = "\
 The file is a JSON array of 1 to 64 documents, each {\"kind\": <kind>, \"value\": {...}}, or - for stdin; one document object alone is a batch of one. \
@@ -94,6 +95,22 @@ enum ChatCommand {
         /// How many chunks (default 10, at most 50).
         #[arg(long)]
         top_k: Option<u32>,
+        /// Print the answer as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// One indexed message and the messages around it in the same room, by the
+    /// event id a chat hit cites. Read from the index, so a removed message is
+    /// refused, not shown.
+    Window {
+        /// The event id, beginning `$`.
+        event_id: String,
+        /// Messages before it (default 10, at most 50).
+        #[arg(long)]
+        before: Option<u32>,
+        /// Messages after it (default 10, at most 50).
+        #[arg(long)]
+        after: Option<u32>,
         /// Print the answer as JSON.
         #[arg(long)]
         json: bool,
@@ -321,6 +338,7 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
         Command::Chat { command: ChatCommand::Search { texts, rooms, after, before, top_k, json } } => {
             chat_search(settings, texts, rooms, after.as_deref(), before.as_deref(), top_k, json)
         }
+        Command::Chat { command: ChatCommand::Window { event_id, before, after, json } } => chat_window(settings, event_id, before, after, json),
         Command::Recipe(Recipe::Blocked { spec_id, page }) => {
             blocked(settings, &spec_id, page.cursor, page.documents)
         }
@@ -531,6 +549,22 @@ fn chat_search(
                 say(serde_json::to_string_pretty(&found).map_err(|error| Trouble::Internal(error.to_string()))?);
             } else {
                 say(render::chat_hits(&found));
+            }
+            Ok(0)
+        }
+        HuginnMindResponse::Refused(refusal) => Ok(refused(&refusal)),
+        other => Err(unexpected(&other)),
+    }
+}
+
+fn chat_window(settings: &Settings, event_id: String, before: Option<u32>, after: Option<u32>, json: bool) -> Result<u8, Trouble> {
+    let query = ChatWindowQuery { event_id: Short(event_id), before: before.unwrap_or(DEFAULT_WINDOW), after: after.unwrap_or(DEFAULT_WINDOW) };
+    match settings.ask(|instance| HuginnMindRequest::ChatWindow { instance: instance.clone(), query })? {
+        HuginnMindResponse::ChatWindow(found) => {
+            if json {
+                say(serde_json::to_string_pretty(&found).map_err(|error| Trouble::Internal(error.to_string()))?);
+            } else {
+                say(render::chat_window(&found));
             }
             Ok(0)
         }
@@ -757,6 +791,7 @@ fn unexpected(answer: &HuginnMindResponse) -> Trouble {
         HuginnMindResponse::PersonaPut(_) => "a persona put",
         HuginnMindResponse::Sources(_) => "source hits",
         HuginnMindResponse::Chat(_) => "chat hits",
+        HuginnMindResponse::ChatWindow(_) => "a chat window",
         HuginnMindResponse::Activity(_) => "repo activity",
         HuginnMindResponse::RootsTouched(_) => "roots touched",
         HuginnMindResponse::Refused(_) => "a refusal",
