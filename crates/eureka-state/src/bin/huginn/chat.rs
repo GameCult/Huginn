@@ -14,7 +14,10 @@ pub fn instant_ms(flag: &str, text: &str, now: DateTime<Utc>) -> Result<u64, Tro
         time.with_timezone(&Utc)
     } else {
         let (digits, unit) = text.split_at(text.len().saturating_sub(1));
-        let count: i64 = digits.parse().map_err(|_| wrong())?;
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(wrong());
+        }
+        let count: u32 = digits.parse().map_err(|_| wrong())?;
         let seconds = match unit {
             "s" => 1,
             "m" => 60,
@@ -23,7 +26,7 @@ pub fn instant_ms(flag: &str, text: &str, now: DateTime<Utc>) -> Result<u64, Tro
             "w" => 604_800,
             _ => return Err(wrong()),
         };
-        now - chrono::Duration::try_seconds(count.checked_mul(seconds).ok_or_else(wrong)?).ok_or_else(wrong)?
+        now - chrono::Duration::try_seconds(i64::from(count) * seconds).ok_or_else(wrong)?
     };
     u64::try_from(moment.timestamp_millis()).map_err(|_| wrong())
 }
@@ -47,7 +50,7 @@ mod tests {
         assert_eq!(at("6h").unwrap(), "2026-11-11T06:00:00.000Z");
         assert_eq!(at("2d").unwrap(), "2026-11-09T12:00:00.000Z");
         assert_eq!(at("90s").unwrap(), "2026-11-11T11:58:30.000Z");
-        for bad in ["", "h", "6", "6x", "-2d", "yesterday", "1e3h"] {
+        for bad in ["", "h", "6", "6x", "-2d", "yesterday", "1e3h", "+2d"] {
             assert!(matches!(at(bad), Err(Trouble::InvalidInput(ref detail)) if detail.contains("--after")), "{bad}");
         }
     }
