@@ -592,8 +592,7 @@ fn request_ids_name_the_tick_and_a_dry_run_never_takes_the_live_one() {
         let model = Fake::saying("I turn it over.", &["A drift"]);
         let wrap = Wrap::over(&mind, &[0.1]);
         tick(&organs(&wrap, &persona, &model), &|| released(), mode, now).unwrap();
-        let id = model.projected.borrow()[0].0.clone();
-        id
+        model.projected.into_inner().remove(0).0
     };
     let live = run(Mode::Live, at);
     assert_eq!(live, format!("mind-stream:{INSTANCE}:t{}", at.timestamp()));
