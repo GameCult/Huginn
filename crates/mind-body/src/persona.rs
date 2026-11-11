@@ -858,6 +858,9 @@ struct Progress {
     self_run: Option<PipelineRef>,
     /// The batch refused and not yet answered: a session restart does not reset its count or what she is told.
     refused: Option<Refused>,
+    /// The event ids of every delivery answered in this start. A mouth that restarts re-delivers its unacked events under fresh seqs
+    /// (its counter survives, its pending does not), so a seq says nothing of whether an event was answered; the event id does.
+    answered_events: BTreeSet<String>,
 }
 
 /// A refused batch as the start remembers it. The mouth still holds its deliveries, so this needs only their lowest seq.
@@ -944,6 +947,13 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
         let table = addressing.iter().find(|mind| mind.matrix_id() == config.own_sender).cloned().unwrap_or_else(|| own_addressee(config));
         let (fresh_names, fresh_repos) = stewardships_of(organs.mind).unwrap_or_default();
         let fresh = own_addressee(config).with_stewardships(fresh_names, fresh_repos);
+        if let Some(through) = drop_answered(&progress.answered_events, &mut pending).filter(|through| *through > progress.acked) {
+            if organs.chat.ack(through).is_err() {
+                progress.failure = Some(Failure::Ack);
+                break;
+            }
+            progress.acked = through;
+        }
         if let Some(through) = quiet_through(&[&table, &fresh], &pending, 0) {
             if organs.chat.ack(through).is_err() {
                 progress.failure = Some(Failure::Ack);
@@ -1696,6 +1706,11 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         self.note_repo_changes();
         let mut pending = self.organs.chat.pending(self.progress.acked)?.deliveries;
         pending.sort_by_key(|delivery| delivery.seq);
+        if let Some(through) = drop_answered(&self.progress.answered_events, &mut pending).filter(|through| *through > self.progress.acked)
+            && self.organs.chat.ack(through).is_ok()
+        {
+            self.progress.acked = through;
+        }
         // Whom a delivery is for is the heartbeat's table as it stands, her own row first: it knows her projects' names before her
         // first line has read them.
         if !pending.is_empty() {
@@ -1839,6 +1854,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 // Her final answer lands after she took in every line, so a revision still waiting is answered by it and its note, that a send was not sent, would be false.
                 let spent = if final_reply { self.revision.take().map(|revision| revision.batch) } else { None };
                 self.answered_through = self.answered_through.max(batch.iter().chain(spent.iter().flatten()).map(|delivery| delivery.seq).max().unwrap_or(0));
+                self.progress.answered_events.extend(batch.iter().chain(spent.iter().flatten()).map(|delivery| delivery.event_id.clone()));
                 if self.progress.refused.as_ref().is_some_and(|refused| batch.iter().any(|delivery| delivery.seq == refused.lowest)) {
                     self.progress.refused = None;
                 }
@@ -2120,6 +2136,15 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
 fn quiet_through(own: &[&Addressee], pending: &[ChatDelivery], told_through: u64) -> Option<u64> {
     let run: Vec<&ChatDelivery> = pending.iter().take_while(|delivery| delivery.seq > told_through && !own.iter().any(|who| is_for(who, delivery))).collect();
     run.last().map(|last| last.seq)
+}
+
+/// Takes out of `pending` every delivery whose event was already answered (a mouth that restarted numbered it again) and returns the seq an
+/// ack may pass for them: the end of the leading run of such deliveries, which no unanswered one lies below. The rest are passed by the next
+/// ack, which is above them.
+fn drop_answered(answered: &BTreeSet<String>, pending: &mut Vec<ChatDelivery>) -> Option<u64> {
+    let through = pending.iter().take_while(|delivery| answered.contains(&delivery.event_id)).last().map(|delivery| delivery.seq);
+    pending.retain(|delivery| !answered.contains(&delivery.event_id));
+    through
 }
 
 /// How long after a poll first sees `delivery` a live session is told it: none in a direct message, otherwise her rank times the
