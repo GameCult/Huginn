@@ -269,6 +269,22 @@ fn record_of(docs: &Docs<'_>, key: &str, options_hash: &str) -> Result<ForkRecor
     Ok(ForkRecord { schema_version: RecordSchema::V0, fork_id: key.into(), options_hash: options_hash.into(), counted_answer_id, answers })
 }
 
+/// What `response` encodes to as a CultNet message with one-byte ids; `DESK_ENVELOPE_MARGIN` covers
+/// the rest of the envelope (the door's reply with the longest id it echoes is under the bound).
+fn page_bytes(response: &DeskResponse) -> Result<usize, MindRefusal> {
+    let unavailable = |error: &dyn std::fmt::Display| MindRefusal::Unavailable { detail: format!("a desk page cannot be measured: {error}") };
+    let message = crate::envelope::encode_desk_response("m", "forks", response, "r").map_err(|error| unavailable(&error))?;
+    cultnet_rs::encode_cultnet_message_to_vec(&message, cultnet_rs::CultNetWireContract::CultNetSchemaV0).map(|bytes| bytes.len()).map_err(|error| unavailable(&error))
+}
+
+/// The page a response under construction carries.
+fn held(response: &mut DeskResponse) -> &mut ForkList {
+    match response {
+        DeskResponse::Forks { list, .. } => list,
+        _ => unreachable!("a page is built as a page"),
+    }
+}
+
 fn entry_of(docs: &Docs<'_>, key: &str, question: &PipelineQuestion, deciders: &[Short]) -> Result<ForkEntry, MindRefusal> {
     let card = card_of(docs, key, question, deciders)?;
     let record = record_of(docs, key, &card.options_hash)?;
@@ -283,9 +299,17 @@ impl<S: MindStore> Mind<S> {
     /// that whole set whatever `status`, `cursor` and `limit` ask. The page is the forks newest first by
     /// `order` (the question's admission ordinal), those with the asked `status` (`None` is both) and
     /// an order strictly below the cursor's; `limit` 0 returns no entries. `next_cursor` names the last
-    /// order returned and is `None` when no further fork matches. Several questions admitted in one
-    /// commit share an order, and a page that ends between them skips the rest (the contract's cursor
-    /// has no tie-break).
+    /// order returned and is `None` when no further fork matches.
+    ///
+    /// A page is filled until `limit` entries are held or the next entry would push the encoded
+    /// response past `DESK_PAGE_BUDGET` (the one `DESK_MAX_RESPONSE_BYTES` less the envelope margin), so
+    /// it may hold fewer than `limit`; counts and stamp are unaffected. Questions admitted in one commit
+    /// share an `order`, and the contract's cursor ("an order strictly below N") has no tie-break, so
+    /// this is Huginn's rule pending a CultLib contract note: a page never splits such a group. When
+    /// `limit` or the budget would end the page inside a group the whole group is taken (the page may
+    /// pass `limit` by the group's size), or, when the budget forbids that, the whole group is left for
+    /// the next page. A page that cannot hold its first group is refused as
+    /// `MindRefusal::DeskForkTooLarge`, naming that group's first fork; nothing is dropped silently.
     ///
     /// The call is handed the call's `deciders` and no subject: they fill each card's `deciders` and
     /// feed the showability gate, and gate nothing else. The record is whole, notes included
@@ -315,27 +339,52 @@ impl<S: MindStore> Mind<S> {
         shown.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(left.1)));
         let open_count = shown.iter().filter(|fork| fork.3).count() as u64;
         let recorded_count = shown.len() as u64 - open_count;
-        let mut matching = shown.iter().filter(|(order, _, _, open)| {
-            cursor.is_none_or(|cursor| *order < cursor.order())
-                && match status {
-                    None => true,
-                    Some(ListStatus::Open) => *open,
-                    Some(ListStatus::Recorded) => !*open,
-                }
-        });
-        let page: Vec<_> = matching.by_ref().take(limit.get() as usize).collect();
-        let next_cursor = if matching.next().is_some() { page.last().and_then(|(order, ..)| ForkCursor::new(*order)) } else { None };
-        let forks = page.into_iter().map(|(_, key, question, _)| entry_of(&docs, key, question, deciders)).collect::<Result<Vec<_>, _>>()?;
-        let list = ForkList {
-            schema_version: ListSchema::V0,
-            mind: self.instance().0.clone(),
-            stamp: format!("s{}", image.head),
-            open_count,
-            recorded_count,
-            forks,
-            next_cursor,
+        let matching: Vec<_> = shown
+            .iter()
+            .filter(|(order, _, _, open)| {
+                cursor.is_none_or(|cursor| *order < cursor.order())
+                    && match status {
+                        None => true,
+                        Some(ListStatus::Open) => *open,
+                        Some(ListStatus::Recorded) => !*open,
+                    }
+            })
+            .collect();
+        let mut response = DeskResponse::Forks {
+            list: ForkList {
+                schema_version: ListSchema::V0,
+                mind: self.instance().0.clone(),
+                stamp: format!("s{}", image.head),
+                open_count,
+                recorded_count,
+                forks: Vec::new(),
+                next_cursor: None,
+            },
+            as_of: image.head,
         };
-        Ok(DeskResponse::Forks { list, as_of: image.head })
+        let (mut taken, mut last_order) = (0, None);
+        while taken < matching.len() && held(&mut response).forks.len() < limit.get() as usize {
+            // A group admitted in one commit shares an order and goes whole (see the doc comment).
+            let order = matching[taken].0;
+            let end = taken + matching[taken..].iter().take_while(|fork| fork.0 == order).count();
+            let kept = held(&mut response).forks.len();
+            for (_, key, question, _) in &matching[taken..end] {
+                held(&mut response).forks.push(entry_of(&docs, key, question, deciders)?);
+            }
+            held(&mut response).next_cursor = if end < matching.len() { ForkCursor::new(order) } else { None };
+            let bytes = page_bytes(&response)?;
+            let list = held(&mut response);
+            if bytes > DESK_PAGE_BUDGET {
+                if kept == 0 {
+                    return Ok(DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: matching[taken].1.to_string(), bytes: bytes as u64, limit: DESK_PAGE_BUDGET as u64 }));
+                }
+                list.forks.truncate(kept);
+                list.next_cursor = last_order.and_then(ForkCursor::new);
+                break;
+            }
+            (taken, last_order) = (end, Some(order));
+        }
+        Ok(response)
     }
 
     fn fork_entry(&self, deciders: &[Short], fork_id: &str) -> Result<DeskResponse, MindRefusal> {
@@ -961,9 +1010,14 @@ mod tests {
         let (in_page, over) = (build(fits, low), build(fits, low + 1));
         let held = page(in_page.desk_forks(&list(&LIST), None, None, limit(50)));
         assert_eq!((held.0.forks.len(), held.0.next_cursor), (fits as usize, None));
-        assert_eq!(bare(&DeskResponse::Forks { list: held.0, as_of: held.1 }), DESK_PAGE_BUDGET, "the last byte that fits");
+        let size = bare(&DeskResponse::Forks { list: held.0, as_of: held.1 });
+        // The wire grows in steps of up to three bytes per text byte, so "exact" is within one step.
+        assert!(size <= DESK_PAGE_BUDGET && DESK_PAGE_BUDGET - size < 4, "{size} against {DESK_PAGE_BUDGET}");
         let (moved, _) = page(over.desk_forks(&list(&LIST), None, None, limit(50)));
         assert_eq!(moved.forks.len(), fits as usize - 1, "one byte more and the oldest fork goes to the next page");
+        // The page it would have been, composed from the single reads, is past the budget.
+        let would_be = ForkList { forks: (1..=fits).rev().map(|n| entry(over.desk_fork(&list(&LIST), &fork(n))).0).collect(), next_cursor: None, ..moved.clone() };
+        assert!(bare(&DeskResponse::Forks { list: would_be, as_of: head(&over) }) > DESK_PAGE_BUDGET);
         assert_eq!(moved.next_cursor.map(ForkCursor::order), moved.forks.last().map(|entry| entry.card.order));
         let (rest, _) = page(over.desk_forks(&list(&LIST), None, moved.next_cursor, limit(50)));
         assert_eq!(ids(&rest), [fork(1)]);
@@ -1035,16 +1089,17 @@ mod tests {
         assert!(named.starts_with("eureka-state:question:Q"));
         let mut mind = seeded();
         committed(admit(&mut mind, vec![wordy(1)]));
-        committed(admit(&mut mind, (2..=30).map(wordy).collect()));
-        committed(admit(&mut mind, vec![wordy(31)]));
+        committed(admit(&mut mind, (2..=21).map(wordy).collect()));
+        for n in 22..=29 {
+            committed(admit(&mut mind, vec![wordy(n)]));
+        }
         let all = pages(&mind, 50);
         let sizes: Vec<usize> = all.iter().map(|(_, page)| page.forks.len()).collect();
-        assert!(sizes.len() > 1, "{sizes:?}");
-        assert_eq!(sizes.iter().sum::<usize>(), 31);
+        assert_eq!(sizes, [8, 21], "the eight newest fill the first page; the group of twenty does not fit beside them and moves whole");
         for (response, page) in &all {
             assert!(on_the_wire(response) <= DESK_MAX_RESPONSE_BYTES);
             let group = page.forks.iter().filter(|entry| entry.card.order == docs_order(&mind, &fork(2))).count();
-            assert!(group == 0 || group == 29, "the group of 29 is whole or absent, not {group}");
+            assert!(group == 0 || group == 20, "the group of 20 is whole or absent, not {group}");
         }
     }
 }
