@@ -96,6 +96,9 @@ pub enum HuginnMindRequest {
     /// have, by room, by time span and by meaning. Read-only, like
     /// `SearchSources`, and queued with it.
     SearchChat { instance: Slug, query: ChatQuery },
+    /// A chat message and its neighbours in the same room, read from the chat
+    /// index (never from Synapse), by the event id a chat hit cites.
+    ChatWindow { instance: Slug, query: ChatWindowQuery },
     /// What others did in `repos` on the forge since the `after` cursor: the
     /// daemon reads the forge and no document of the mind, and answers
     /// `Refused(Unavailable)` when it has no forge or the forge does not answer
@@ -364,6 +367,50 @@ pub struct ChatHits {
     pub hits: Vec<ChatHit>,
 }
 
+/// The most messages a chat window reaches to either side of its anchor.
+pub const CHAT_WINDOW_MAX: u32 = 50;
+
+/// The longest event id a chat window takes.
+pub const EVENT_ID_MAX: usize = 200;
+
+/// A chat window: the message `event_id` names and up to `before` messages
+/// ahead of it and `after` behind it, in its room.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatWindowQuery {
+    pub event_id: Short,
+    pub before: u32,
+    pub after: u32,
+}
+
+impl ChatWindowQuery {
+    /// The door. A refusal names the field.
+    pub fn check(&self) -> Result<(), MindRefusal> {
+        let refused = |field: &str, value: String, message: &str| MindRefusal::SelectionInvalid { field: field.into(), value: Some(value), message: message.into() };
+        if !self.event_id.0.starts_with('$') || self.event_id.0.len() > EVENT_ID_MAX {
+            return Err(refused("event_id", self.event_id.0.clone(), "an event id begins `$` and is at most 200 bytes"));
+        }
+        for (field, count) in [("before", self.before), ("after", self.after)] {
+            if count > CHAT_WINDOW_MAX {
+                return Err(refused(field, count.to_string(), "a chat window reaches 0 to 50 messages to each side"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The answer to a chat window: `messages` chronological with the anchor in
+/// them once, all of `room_id`, each carrying the citations a hit's do.
+/// `more_before` and `more_after` say messages exist beyond the cut.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatWindow {
+    pub room_id: String,
+    pub room_alias: Option<String>,
+    pub anchor_event_id: String,
+    pub messages: Vec<ChatMessage>,
+    pub more_before: bool,
+    pub more_after: bool,
+}
+
 impl HuginnMindRequest {
     /// The envelope's `operation`.
     pub fn operation(&self) -> &'static str {
@@ -376,6 +423,7 @@ impl HuginnMindRequest {
             Self::PersonaPut { .. } => "persona_put",
             Self::SearchSources { .. } => "search_sources",
             Self::SearchChat { .. } => "search_chat",
+            Self::ChatWindow { .. } => "chat_window",
             Self::StewardedActivity { .. } => "stewarded_activity",
             Self::RootsTouched { .. } => "roots_touched",
         }
@@ -392,6 +440,7 @@ impl HuginnMindRequest {
             | Self::PersonaPut { instance, .. }
             | Self::SearchSources { instance, .. }
             | Self::SearchChat { instance, .. }
+            | Self::ChatWindow { instance, .. }
             | Self::StewardedActivity { instance, .. }
             | Self::RootsTouched { instance } => Some(instance),
         }
@@ -412,6 +461,7 @@ pub enum HuginnMindResponse {
     PersonaPut(PersonaPutOutcome),
     Sources(SourceHits),
     Chat(ChatHits),
+    ChatWindow(ChatWindow),
     Activity(RepoActivity),
     RootsTouched(Vec<RootTouched>),
     /// The answer did not fit one send and is being held for the client to
@@ -551,6 +601,7 @@ mod tests {
                 instance: slug(INSTANCE),
                 query: ChatQuery { texts: vec![Line("release".into())], rooms: vec![Short("#swarm:gamecult.org".into())], after_ms: Some(1), before_ms: None, top_k: 5 },
             },
+            HuginnMindRequest::ChatWindow { instance: slug(INSTANCE), query: ChatWindowQuery { event_id: Short("$a".into()), before: 5, after: 0 } },
             HuginnMindRequest::RootsTouched { instance: slug(INSTANCE) },
         ]
     }
@@ -615,6 +666,14 @@ mod tests {
                     messages: vec![ChatMessage { event_id: "$a".into(), sender: "@x:gamecult.org".into(), ts_ms: 1, body: "hi".into() }],
                 }],
             }),
+            HuginnMindResponse::ChatWindow(ChatWindow {
+                room_id: "!r:gamecult.org".into(),
+                room_alias: Some("#swarm:gamecult.org".into()),
+                anchor_event_id: "$a".into(),
+                messages: vec![ChatMessage { event_id: "$a".into(), sender: "@x:gamecult.org".into(), ts_ms: 1, body: "hi".into() }],
+                more_before: false,
+                more_after: true,
+            }),
             HuginnMindResponse::RootsTouched(seeded().roots_touched().unwrap()),
             HuginnMindResponse::Deferred(DeferredAnswer {
                 manifest: cultnet_rs::pack_content("huginn.mind_response", "package", "", "", "", b"body", 4)
@@ -630,7 +689,7 @@ mod tests {
     #[test]
     fn the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response() {
         let names: Vec<&str> = requests().iter().map(|request| request.operation()).collect();
-        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources", "search_sources", "search_chat", "roots_touched"]);
+        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources", "search_sources", "search_chat", "chat_window", "roots_touched"]);
         for request in requests() {
             let declared = request.instance().is_none();
             assert_eq!(declared, matches!(request, HuginnMindRequest::Whoami), "{request:?}");
@@ -765,6 +824,27 @@ mod tests {
         }
         let message: Vec<&str> = response["$defs"]["ChatMessage"]["required"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(message, ["event_id", "sender", "ts_ms", "body"]);
+    }
+
+    /// A chat window is refused by field at the door.
+    #[test]
+    fn a_chat_window_query_is_refused_by_field() {
+        let ok = ChatWindowQuery { event_id: Short("$a".into()), before: 50, after: 0 };
+        assert!(ok.check().is_ok());
+        let field = |query: ChatWindowQuery| match query.check() {
+            Err(MindRefusal::SelectionInvalid { field, .. }) => field,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(field(ChatWindowQuery { before: 51, ..ok.clone() }), "before");
+        assert_eq!(field(ChatWindowQuery { after: 51, ..ok.clone() }), "after");
+        assert_eq!(field(ChatWindowQuery { event_id: Short("a".into()), ..ok.clone() }), "event_id");
+        assert_eq!(field(ChatWindowQuery { event_id: Short(format!("${}", "a".repeat(200))), ..ok.clone() }), "event_id");
+        assert!(ChatWindowQuery { event_id: Short(format!("${}", "a".repeat(199))), ..ok }.check().is_ok());
+        let response = serde_json::to_value(schemars::schema_for!(HuginnMindResponse)).unwrap();
+        let required: Vec<&str> = response["$defs"]["ChatWindow"]["required"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        for field in ["room_id", "anchor_event_id", "messages", "more_before", "more_after"] {
+            assert!(required.contains(&field), "{field} must be required");
+        }
     }
 
     /// The two files the catalog publishes are the derivation of the two

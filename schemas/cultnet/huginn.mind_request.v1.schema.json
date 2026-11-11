@@ -184,6 +184,31 @@
       ]
     },
     {
+      "description": "A chat message and its neighbours in the same room, read from the chat\nindex (never from Synapse), by the event id a chat hit cites.",
+      "type": "object",
+      "properties": {
+        "ChatWindow": {
+          "type": "object",
+          "properties": {
+            "instance": {
+              "$ref": "#/$defs/Slug"
+            },
+            "query": {
+              "$ref": "#/$defs/ChatWindowQuery"
+            }
+          },
+          "required": [
+            "instance",
+            "query"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ChatWindow"
+      ]
+    },
+    {
       "description": "What others did in `repos` on the forge since the `after` cursor: the\ndaemon reads the forge and no document of the mind, and answers\n`Refused(Unavailable)` when it has no forge or the forge does not answer\nin time. The repos are the asker's to name (her stewardships); the\ninstance's own login is dropped from the answer.",
       "type": "object",
       "properties": {
@@ -339,6 +364,30 @@
         "texts",
         "rooms",
         "top_k"
+      ]
+    },
+    "ChatWindowQuery": {
+      "description": "A chat window: the message `event_id` names and up to `before` messages\nahead of it and `after` behind it, in its room.",
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "before": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "event_id": {
+          "$ref": "#/$defs/Short"
+        }
+      },
+      "required": [
+        "event_id",
+        "before",
+        "after"
       ]
     },
     "ClaimOutcome": {

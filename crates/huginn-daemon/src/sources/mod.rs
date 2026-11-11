@@ -32,7 +32,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use huginn_mind::{ChatHit, ChatHits, ChatMessage, ChatQuery, SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery};
+use huginn_mind::{ChatHit, ChatHits, ChatMessage, ChatQuery, ChatWindow, ChatWindowQuery, MindRefusal, SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery};
 
 use crate::index::{BATCH, BULK_EMBED_TIMEOUT, Budget, Embedder, INDEX_CALL_TIMEOUT, MANAGED_BY, ModelIdentity, point_id};
 use chunk::{CHUNKER_VERSION, embedded_text};
@@ -157,12 +157,24 @@ pub struct ChatRow {
 
 /// Which chat chunks a read keeps; the selectors compose as AND. `rooms` are
 /// any-of room ids (`!`) or aliases (`#`); the span keeps chunks whose own
-/// span overlaps [`after_ms`, `before_ms`].
+/// span overlaps [`after_ms`, `before_ms`]. `event_id` keeps the chunk holding
+/// that message. `starts_from_ms` and `starts_to_ms` bound a chunk's own start
+/// (inclusive), which is what a neighbour read walks by.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChatFilter {
     pub rooms: Vec<String>,
     pub after_ms: Option<u64>,
     pub before_ms: Option<u64>,
+    pub event_id: Option<String>,
+    pub starts_from_ms: Option<u64>,
+    pub starts_to_ms: Option<u64>,
+}
+
+/// Which end of the room's history a chat scroll begins at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatOrder {
+    OldestFirst,
+    NewestFirst,
 }
 
 impl ChatFilter {
@@ -173,6 +185,8 @@ impl ChatFilter {
         (self.rooms.is_empty() || self.rooms.iter().any(|room| room == room_id || Some(room.as_str()) == room_alias))
             && self.after_ms.is_none_or(|after| end >= after)
             && self.before_ms.is_none_or(|before| start <= before)
+            && self.starts_from_ms.is_none_or(|from| start >= from)
+            && self.starts_to_ms.is_none_or(|to| start <= to)
     }
 }
 
@@ -210,9 +224,9 @@ pub trait SourceIndex {
     /// The `limit` chat chunks nearest `vector`, best first, among those
     /// `filter` keeps. Reads only `corpus=chat` points; the daemon's.
     fn chat_nearest(&mut self, vector: &[f32], filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatRow>>;
-    /// Up to `limit` chat chunks `filter` keeps, oldest first by span start.
+    /// Up to `limit` chat chunks `filter` keeps, by span start in `order`.
     /// Reads only `corpus=chat` points; the daemon's.
-    fn chat_scroll(&mut self, filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatPayload>>;
+    fn chat_scroll(&mut self, filter: &ChatFilter, order: ChatOrder, limit: u32, within: Duration) -> Result<Vec<ChatPayload>>;
 }
 
 /// A repo the forge lists as indexable.
@@ -651,12 +665,12 @@ pub fn search<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, quer
 /// span and first and last ids recomputed from what is left. Never writes.
 pub fn search_chat<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, query: &ChatQuery, within: Duration) -> Result<ChatHits> {
     let budget = Budget::new(within);
-    let filter = ChatFilter { rooms: query.rooms.iter().map(|room| room.0.clone()).collect(), after_ms: query.after_ms, before_ms: query.before_ms };
+    let filter = ChatFilter { rooms: query.rooms.iter().map(|room| room.0.clone()).collect(), after_ms: query.after_ms, before_ms: query.before_ms, ..ChatFilter::default() };
     let top_k = query.top_k as usize;
     let topics = distinct_texts(query.texts.iter().map(|text| text.0.as_str()).collect());
     let (built, rows, truncated) = if topics.is_empty() {
         let built = built_label(index, &budget)?;
-        let mut held = index.chat_scroll(&filter, query.top_k + 1, budget.left()?)?;
+        let mut held = index.chat_scroll(&filter, ChatOrder::OldestFirst, query.top_k + 1, budget.left()?)?;
         let truncated = held.len() > top_k;
         held.truncate(top_k);
         (built, held.into_iter().map(|payload| (None, payload)).collect::<Vec<_>>(), truncated)
@@ -684,6 +698,95 @@ pub fn search_chat<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S,
         truncated,
         hits: rows.into_iter().filter_map(|(score, payload)| chat_hit(score, payload, &filter)).collect(),
     })
+}
+
+/// Chunks a neighbour read asks for at a time, and the most such reads each way.
+const WINDOW_CHUNKS_PER_SCROLL: u32 = 5;
+const WINDOW_SCROLLS_MAX: usize = 6;
+
+/// The message a chat window is about and its neighbours, read from the chat
+/// index alone: the chunk holding `event_id`, then chunks of that room before
+/// and after it until the asked count of messages is held, the room ends or
+/// `WINDOW_SCROLLS_MAX` reads are spent. An id the index does not hold is a
+/// typed refusal naming `event_id`, never an empty window; an id in two chunks
+/// is an index fault. Needs no embedder. Never writes.
+pub fn window<S: SourceIndex>(index: &mut S, query: &ChatWindowQuery, within: Duration) -> Result<Result<ChatWindow, MindRefusal>> {
+    let budget = Budget::new(within);
+    built_label(index, &budget)?;
+    let id = query.event_id.0.as_str();
+    let anchor_filter = ChatFilter { event_id: Some(id.to_owned()), ..ChatFilter::default() };
+    let mut found = index.chat_scroll(&anchor_filter, ChatOrder::OldestFirst, 2, budget.left()?)?;
+    ensure!(found.len() < 2, "the chat index holds event {id} in two chunks: an ingest fault, not a window");
+    let Some(anchor) = found.pop() else {
+        return Ok(Err(MindRefusal::SelectionInvalid {
+            field: "event_id".into(),
+            value: Some(id.to_owned()),
+            message: "the chat index does not hold this event: it may not be ingested yet, it may have been removed (redacted, or purged by a steward request), or it may be in a room the index does not read (a DM, #users, #members, #patrons, any room the reader has not joined)".into(),
+        }));
+    };
+    let start_of = |chunk: &ChatPayload| chunk.messages.iter().map(|message| message.ts_ms).min().unwrap_or(0);
+    let first_id = |chunk: &ChatPayload| chunk.messages.first().map(|message| message.event_id.clone());
+    let room = ChatFilter { rooms: vec![anchor.room_id.clone()], ..ChatFilter::default() };
+    let at = anchor.messages.iter().position(|message| message.event_id == id).context("the chat index returned a chunk that does not hold the event it was asked for")?;
+    let mut held = vec![first_id(&anchor)];
+    // Each side walks chunks of the anchor's room only, away from the anchor,
+    // until it holds more messages than asked (so the cut can tell whether
+    // more exist), the room ends, or the reads are spent.
+    let mut walk = |forward: bool, want: usize, mine: usize| -> Result<(Vec<Vec<ChatMessage>>, bool)> {
+        let (mut chunks, mut count, mut edge, mut exhausted) = (Vec::new(), mine, start_of(&anchor), false);
+        for _ in 0..WINDOW_SCROLLS_MAX {
+            if count > want {
+                break;
+            }
+            let (filter, order) = if forward {
+                (ChatFilter { starts_from_ms: Some(edge), ..room.clone() }, ChatOrder::OldestFirst)
+            } else {
+                (ChatFilter { starts_to_ms: Some(edge), ..room.clone() }, ChatOrder::NewestFirst)
+            };
+            let read = index.chat_scroll(&filter, order, WINDOW_CHUNKS_PER_SCROLL, budget.left()?)?;
+            exhausted = (read.len() as u32) < WINDOW_CHUNKS_PER_SCROLL;
+            let mut gained = false;
+            for chunk in read {
+                let first = first_id(&chunk);
+                if held.contains(&first) {
+                    continue;
+                }
+                held.push(first);
+                gained = true;
+                edge = if forward { start_of(&chunk).max(edge) } else { start_of(&chunk).min(edge) };
+                count += chunk.messages.len();
+                chunks.push(chunk.messages);
+            }
+            if exhausted || !gained {
+                break;
+            }
+        }
+        // Stopping short of the asked count without reaching the room's end
+        // means messages remain that this read did not reach.
+        Ok((chunks, count <= want && !exhausted))
+    };
+    let (earlier, unreached_before) = walk(false, query.before as usize, at)?;
+    let (later, unreached_after) = walk(true, query.after as usize, anchor.messages.len() - at - 1)?;
+    // Chronological: furthest earlier chunk first, the anchor's chunk, then later ones;
+    // stable by ts_ms, so ties keep chunk order and position.
+    let ordered = earlier.into_iter().rev().chain(std::iter::once(anchor.messages.clone())).chain(later).flatten();
+    let (mut seen, mut messages) = (std::collections::BTreeSet::new(), Vec::new());
+    for message in ordered {
+        if seen.insert(message.event_id.clone()) {
+            messages.push(message);
+        }
+    }
+    messages.sort_by_key(|message| message.ts_ms);
+    let at = messages.iter().position(|message| message.event_id == id).context("the anchor fell out of its own window")?;
+    let (lo, hi) = (at.saturating_sub(query.before as usize), (at + 1 + query.after as usize).min(messages.len()));
+    Ok(Ok(ChatWindow {
+        room_id: anchor.room_id,
+        room_alias: anchor.room_alias,
+        anchor_event_id: id.to_owned(),
+        more_before: unreached_before || lo > 0,
+        more_after: unreached_after || hi < messages.len(),
+        messages: messages[lo..hi].to_vec(),
+    }))
 }
 
 /// A held chunk as a hit: only the messages inside the asked span, the span and

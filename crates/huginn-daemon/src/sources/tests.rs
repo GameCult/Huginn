@@ -7,7 +7,7 @@ use std::process::Command;
 
 use anyhow::Result;
 use huginn_mind::eureka_pipeline::{Line, Short};
-use huginn_mind::{ChatHits, ChatQuery, SourceQuery};
+use huginn_mind::{ChatHits, ChatQuery, ChatWindow, ChatWindowQuery, MindRefusal, SourceQuery};
 
 use super::*;
 use crate::index::fakes::{FakeEmbedder, FakeSources};
@@ -970,7 +970,120 @@ fn the_span_bounds_are_inclusive_for_chunks_and_for_messages() {
     // Both bounds on one message.
     assert_eq!(hits(Some(200), Some(200)), owned(&[("$a2", 1)]));
 
-    let filter = ChatFilter { rooms: vec![], after_ms: Some(200), before_ms: Some(300) };
+    let filter = ChatFilter { rooms: vec![], after_ms: Some(200), before_ms: Some(300), ..ChatFilter::default() };
     assert!(filter.keeps("!a:x", None, 100, 200) && filter.keeps("!a:x", None, 300, 400));
     assert!(!filter.keeps("!a:x", None, 100, 199) && !filter.keeps("!a:x", None, 301, 400));
+}
+
+// ---- chat window ----
+
+fn wq(event_id: &str, before: u32, after: u32) -> ChatWindowQuery {
+    ChatWindowQuery { event_id: Short(event_id.into()), before, after }
+}
+
+/// Room `!a`: five two-message chunks, $a0..$a9 at 100..1000. Room `!b`:
+/// chunks whose times fall between them ($b0 at 450, $b1 at 550).
+fn window_rig() -> Rig {
+    let mut points: Vec<ChatPoint> = (0..5)
+        .map(|chunk| {
+            let (first, second) = (format!("$a{}", chunk * 2), format!("$a{}", chunk * 2 + 1));
+            let at = chunk as u64 * 200;
+            chat_point("!a:x", Some("#swarm:x"), 0, 4, &[(&first, at + 100), (&second, at + 200)])
+        })
+        .collect();
+    points.push(chat_point("!b:x", None, 0, 4, &[("$b0", 450), ("$b1", 550)]));
+    chat_rig(points).0
+}
+
+fn window_ids(window: &ChatWindow) -> Vec<&str> {
+    window.messages.iter().map(|message| message.event_id.as_str()).collect()
+}
+
+fn refusal_field(answer: Result<Result<ChatWindow, MindRefusal>>) -> (String, String) {
+    match answer.unwrap() {
+        Err(MindRefusal::SelectionInvalid { field, message, .. }) => (field, message),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_unknown_event_id_is_refused_naming_the_field_and_the_three_reasons() {
+    let mut rig = window_rig();
+    let (field, message) = refusal_field(window(&mut rig.index, &wq("$nope", 3, 3), WITHIN));
+    assert_eq!(field, "event_id");
+    for reason in ["not be ingested yet", "removed (redacted, or purged", "a room the index does not read"] {
+        assert!(message.contains(reason), "{message}");
+    }
+}
+
+#[test]
+fn a_redacted_event_is_refused_and_absent_from_its_neighbours_window() {
+    // The refresh re-chunked the window without $a5: the index holds only $a4.
+    let mut rig = chat_rig(vec![chat_point("!a:x", None, 0, 4, &[("$a3", 300), ("$a4", 400)]), chat_point("!a:x", None, 0, 4, &[("$a6", 600)])]).0;
+    assert_eq!(refusal_field(window(&mut rig.index, &wq("$a5", 3, 3), WITHIN)).0, "event_id");
+    let around = window(&mut rig.index, &wq("$a4", 3, 3), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&around), ["$a3", "$a4", "$a6"]);
+}
+
+#[test]
+fn an_event_in_two_chunks_is_an_index_fault_not_a_window() {
+    let mut rig = chat_rig(vec![chat_point("!a:x", None, 0, 4, &[("$a1", 100), ("$a2", 200)]), chat_point("!a:x", None, 0, 4, &[("$a2", 200), ("$a3", 300)])]).0;
+    let error = window(&mut rig.index, &wq("$a2", 1, 1), WITHIN).unwrap_err().to_string();
+    assert!(error.contains("$a2") && error.contains("two chunks"), "{error}");
+}
+
+#[test]
+fn a_window_stays_in_the_anchors_room_though_another_room_is_time_adjacent() {
+    let mut rig = window_rig();
+    let around = window(&mut rig.index, &wq("$a4", 4, 4), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&around), ["$a0", "$a1", "$a2", "$a3", "$a4", "$a5", "$a6", "$a7", "$a8"], "no $b between them");
+    assert_eq!((around.room_id.as_str(), around.room_alias.as_deref()), ("!a:x", Some("#swarm:x")));
+    let other = window(&mut rig.index, &wq("$b1", 5, 5), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&other), ["$b0", "$b1"], "the other room's window holds none of !a");
+    assert!(!other.more_before && !other.more_after && other.room_alias.is_none());
+}
+
+#[test]
+fn a_window_across_chunks_has_exactly_before_and_after_in_order_with_the_anchor_once() {
+    let mut rig = window_rig();
+    let around = window(&mut rig.index, &wq("$a4", 3, 3), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&around), ["$a1", "$a2", "$a3", "$a4", "$a5", "$a6", "$a7"]);
+    assert_eq!(around.anchor_event_id, "$a4");
+    assert!(around.more_before && around.more_after);
+    assert!(around.messages.iter().all(|message| !message.event_id.is_empty() && !message.sender.is_empty() && message.ts_ms > 0));
+    let exact = window(&mut rig.index, &wq("$a4", 4, 5), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&exact).len(), 10);
+    assert!(!exact.more_before && !exact.more_after, "nothing remains beyond exactly the room's ends");
+    let alone = window(&mut rig.index, &wq("$a4", 0, 0), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&alone), ["$a4"]);
+    assert!(alone.more_before && alone.more_after);
+}
+
+#[test]
+fn a_window_at_a_rooms_edge_returns_fewer_and_says_nothing_more_lies_beyond() {
+    let mut rig = window_rig();
+    let start = window(&mut rig.index, &wq("$a0", 5, 1), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&start), ["$a0", "$a1"]);
+    assert!(!start.more_before && start.more_after);
+    let end = window(&mut rig.index, &wq("$a9", 1, 5), WITHIN).unwrap().unwrap();
+    assert_eq!(window_ids(&end), ["$a8", "$a9"]);
+    assert!(end.more_before && !end.more_after);
+}
+
+#[test]
+fn a_window_stops_after_six_reads_and_says_more_remain() {
+    let points: Vec<ChatPoint> = (0..80).map(|n| chat_point("!a:x", None, 0, 4, &[(&format!("$m{n:02}"), 1000 + n as u64)])).collect();
+    let mut rig = chat_rig(points).0;
+    let around = window(&mut rig.index, &wq("$m70", 50, 0), WITHIN).unwrap().unwrap();
+    assert!(around.messages.len() < 51, "six reads of five chunks reach at most 30 earlier messages");
+    assert_eq!(around.messages.last().unwrap().event_id, "$m70");
+    assert!(around.more_before && around.more_after, "the cap is not the room's start, and $m71 follows the anchor");
+}
+
+#[test]
+fn a_window_asks_the_index_only_and_needs_no_embedder() {
+    let source = include_str!("mod.rs");
+    let signature = &source[source.find("pub fn window").unwrap()..];
+    let signature = &signature[..signature.find('{').unwrap()];
+    assert!(!signature.contains("Embedder"), "{signature}");
 }
