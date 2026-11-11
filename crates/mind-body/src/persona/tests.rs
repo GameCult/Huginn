@@ -8840,3 +8840,22 @@ fn events_a_restarted_mouth_renumbers_are_told_once_and_nothing_new_is_lost() {
         assert_eq!(told.matches(&format!("text=\"{text}\"")).count(), times, "{text} is told {times} time(s): {told}");
     }
 }
+
+/// An event told and not yet answered, numbered again by a mouth that restarts during the turn, is not told a second time.
+#[test]
+fn an_event_told_and_unanswered_that_the_mouth_renumbers_is_not_told_again() {
+    let first = operator_says(1, "first");
+    let rig = Rig::new(vec![first.clone()], &[says(&[("operator", "one")]), says(&[("operator", "two")])]);
+    rig.clock.step.set(0);
+    let (deliveries, now, count) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(0));
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        count.set(count.get() + 1);
+        if count.get() == 1 {
+            now.set(now.get() + 6_000);
+            *deliveries.borrow_mut() = vec![ChatDelivery { seq: 3, ..first.clone() }];
+        }
+    }));
+    rig.go();
+    let told: String = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect::<Vec<_>>().join("\n");
+    assert_eq!(told.matches("text=\"first\"").count(), 1, "{told}");
+}

@@ -1364,6 +1364,9 @@ struct PersonaInbox<'a, C: ControlSource, S: ControlSource> {
     waiting: Vec<ChatDelivery>,
     /// The highest seq written to the child.
     told_through: u64,
+    /// The event ids of every delivery this process told. A restarted mouth numbers an event again; the seq alone would tell it twice. Not
+    /// the answered set: a batch told and left unanswered is retold by the next process, which starts with none.
+    told_events: BTreeSet<String>,
     /// The highest seq an answered result carried in this process. A result acks only through
     /// the lowest seq still told and unanswered, so this can lie above the mouth's ack until the
     /// retold batch is answered; a process that ends first leaves the mouth's ack, the truth.
@@ -1447,6 +1450,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
             start: first,
             waiting: Vec::new(),
             told_through: 0,
+            told_events: BTreeSet::new(),
             answered_through: 0,
             written: None,
             echoed: Vec::new(),
@@ -1531,6 +1535,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         if let Some(through) = batch.iter().map(|delivery| delivery.seq).max() {
             self.told_through = self.told_through.max(through);
         }
+        self.told_events.extend(batch.iter().map(|delivery| delivery.event_id.clone()));
         self.told.extend(told);
         self.written = Some(Written { batch, shown, refusals, revision: false, replies });
         input
@@ -1736,7 +1741,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
         if Conversation::of(oldest) != self.conversation {
             return Ok(Polled { pending: false, other: false, other_first: false, yield_now: true });
         }
-        let untold: Vec<ChatDelivery> = pending.into_iter().filter(|delivery| delivery.seq > self.told_through).take_while(|delivery| Conversation::of(delivery) == self.conversation).collect();
+        let untold: Vec<ChatDelivery> = pending.into_iter().filter(|delivery| delivery.seq > self.told_through && !self.told_events.contains(&delivery.event_id)).take_while(|delivery| Conversation::of(delivery) == self.conversation).collect();
         // A delivery's stagger runs from the poll that first saw it, so a stream of newer messages moves nobody's clock. The line
         // is told once any delivery in it is due, whole: she is never shown a message and kept from the ones before it.
         let now = unix_ms(self.organs.clock.now());
