@@ -878,22 +878,173 @@ mod tests {
         shown
     }
 
-    #[test]
-    fn a_page_is_measured_against_the_response_bound_and_the_bound_is_the_door_s() {
+    fn encoded(message_id: &str, runtime: &str, response: &DeskResponse) -> usize {
+        let message = encode_desk_response(message_id, "forks", response, runtime).unwrap();
+        cultnet_rs::encode_cultnet_message_to_vec(&message, cultnet_rs::CultNetWireContract::CultNetSchemaV0).unwrap().len()
+    }
+
+    /// The reply as the door sends it: the longest message id it echoes, the daemon's runtime id.
+    fn on_the_wire(response: &DeskResponse) -> usize {
+        encoded(&"m".repeat(256), &format!("huginn-{INSTANCE}"), response)
+    }
+
+    /// The reply as the page fill measures it: the message with one-byte ids.
+    fn bare(response: &DeskResponse) -> usize {
+        encoded("m", "r", response)
+    }
+
+    /// Every page from the newest fork on, following the cursors, with the response each came in.
+    fn pages(mind: &Mind<MemoryStore>, size: u8) -> Vec<(DeskResponse, ForkList)> {
+        let (mut cursor, mut out) = (None, Vec::new());
+        loop {
+            let response = mind.desk_forks(&list(&LIST), None, cursor, limit(size));
+            let (page, _) = page(response.clone());
+            cursor = page.next_cursor;
+            out.push((response, page));
+            assert!(out.len() < 200, "the cursors do not advance");
+            if cursor.is_none() {
+                return out;
+            }
+        }
+    }
+
+    fn admitted_each(range: std::ops::RangeInclusive<u32>) -> Mind<MemoryStore> {
         let mut mind = seeded();
-        for n in 1..=50 {
+        for n in range {
             committed(admit(&mut mind, vec![wordy(n)]));
         }
-        let encoded = |size: u8| {
-            let response = mind.desk_forks(&list(&LIST), None, None, limit(size));
-            let message = encode_desk_response("m-1", "forks", &response, "huginn-test").unwrap();
-            cultnet_rs::encode_cultnet_message_to_vec(&message, cultnet_rs::CultNetWireContract::CultNetSchemaV0).unwrap().len()
+        mind
+    }
+
+    #[test]
+    fn a_page_stops_at_the_response_budget_and_the_pages_are_every_fork_once_in_order() {
+        let mind = admitted_each(1..=50);
+        let all = pages(&mind, 50);
+        assert!(all.len() > 1, "fifty wordy cards do not fit one page");
+        let seen: Vec<String> = all.iter().flat_map(|(_, page)| ids(page)).collect();
+        assert_eq!(seen, (1..=50).rev().map(fork).collect::<Vec<_>>(), "every fork once, newest first");
+        let first = &all[0].1;
+        for (response, page) in &all {
+            assert!(on_the_wire(response) <= DESK_MAX_RESPONSE_BYTES, "{} bytes", on_the_wire(response));
+            assert!(bare(response) <= DESK_PAGE_BUDGET);
+            assert!(!page.forks.is_empty() && page.forks.len() < 50, "short of the limit by bytes");
+            assert_eq!((page.open_count, page.recorded_count, &page.stamp), (50, 0, &first.stamp), "counts and stamp are the whole desk's");
+        }
+        assert!(all[..all.len() - 1].iter().all(|(_, page)| page.next_cursor.is_some()) && all.last().unwrap().1.next_cursor.is_none());
+    }
+
+    /// The last entry of the page moves to the next page when one more byte of its text would take
+    /// the page past the budget, and not a byte sooner.
+    #[test]
+    fn the_page_budget_is_exact() {
+        let build = |forks: u32, text: usize| {
+            let mut mind = seeded();
+            let mut oldest = wordy(1);
+            let D::Question(held) = &mut oldest else { unreachable!() };
+            held.question = "z".repeat(text).as_str().into();
+            committed(admit(&mut mind, vec![oldest]));
+            for n in 2..=forks {
+                committed(admit(&mut mind, vec![wordy(n)]));
+            }
+            mind
         };
-        let (zero, ten, fifty) = (encoded(0), encoded(10), encoded(50));
-        // The counts always fit; a page fits while its cards do. Fifty cards with a 800-byte context each
-        // and no answers at all do not: the door refuses that page by name, and the page size is the client's to lower.
-        assert!(zero < 1000, "{zero}");
-        assert!(ten < DESK_MAX_RESPONSE_BYTES, "{ten}");
-        assert!(fifty > DESK_MAX_RESPONSE_BYTES, "{fifty} (a limit-50 page of realistic cards is over the bound)");
+        let first_page = |mind: &Mind<MemoryStore>| page(mind.desk_forks(&list(&LIST), None, None, limit(50))).0;
+        // The most forks that fit one page with the oldest one's text short.
+        let fits = (2..=50).take_while(|forks| first_page(&build(*forks, 300)).forks.len() == *forks as usize).last().expect("two fit");
+        assert!(fits < 50, "the desk outgrows a page");
+        // Grow the oldest fork's text one byte at a time; the page holds it until the budget is exact.
+        let (mut low, mut high) = (300_usize, 6000_usize);
+        while high - low > 1 {
+            let mid = (low + high) / 2;
+            if first_page(&build(fits, mid)).forks.len() == fits as usize { low = mid } else { high = mid }
+        }
+        let (in_page, over) = (build(fits, low), build(fits, low + 1));
+        let held = page(in_page.desk_forks(&list(&LIST), None, None, limit(50)));
+        assert_eq!((held.0.forks.len(), held.0.next_cursor), (fits as usize, None));
+        assert_eq!(bare(&DeskResponse::Forks { list: held.0, as_of: held.1 }), DESK_PAGE_BUDGET, "the last byte that fits");
+        let (moved, _) = page(over.desk_forks(&list(&LIST), None, None, limit(50)));
+        assert_eq!(moved.forks.len(), fits as usize - 1, "one byte more and the oldest fork goes to the next page");
+        assert_eq!(moved.next_cursor.map(ForkCursor::order), moved.forks.last().map(|entry| entry.card.order));
+        let (rest, _) = page(over.desk_forks(&list(&LIST), None, moved.next_cursor, limit(50)));
+        assert_eq!(ids(&rest), [fork(1)]);
+    }
+
+    /// A fork whose entry alone is past the budget cannot be paged: it is refused by name, never dropped.
+    #[test]
+    fn a_lone_oversize_entry_is_refused_by_name() {
+        let mut mind = desk(3);
+        let hash = hash_of(&mind, &fork(2));
+        let note = "a long reason, ".repeat(60);
+        let mut grown = 0;
+        while bare(&mind.desk_fork(&list(&LIST), &fork(2))) <= DESK_PAGE_BUDGET {
+            let DeskResponse::Answered { .. } = answer(&mut mind, "x", &LIST, &fork(2), &hash, Some(&note)) else { panic!("the note was not stored") };
+            grown += 1;
+            assert!(grown < 200, "the record does not grow");
+        }
+        // The newest fork pages; the one with the long record is refused when its page is asked for.
+        let response = mind.desk_forks(&list(&LIST), None, ForkCursor::new(docs_order(&mind, &fork(3))), limit(50));
+        let DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: named, bytes, limit: bound }) = response else { panic!("{response:?}") };
+        assert_eq!((named, bound), (fork(2), DESK_PAGE_BUDGET as u64));
+        assert!(bytes > bound);
+        // And a read of that fork alone is still its whole entry.
+        entry(mind.desk_fork(&list(&LIST), &fork(2)));
+    }
+
+    fn docs_order(mind: &Mind<MemoryStore>, key: &str) -> u64 {
+        let image = mind.image().unwrap();
+        Docs::at(image, image.head).ordinal_of(PipelineKind::Question, key).unwrap()
+    }
+
+    /// Questions admitted in one commit share an order, and the cursor is "strictly below an order":
+    /// a page never ends inside such a group (the page may pass `limit` by the group's size).
+    #[test]
+    fn a_page_never_splits_a_group_admitted_in_one_commit() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![question_n(1)]));
+        committed(admit(&mut mind, (2..=6).map(question_n).collect()));
+        committed(admit(&mut mind, vec![question_n(7)]));
+        // Newest first; the key breaks a tie inside the group.
+        let mut group: Vec<String> = (2..=6).map(fork).collect();
+        group.sort();
+        group.reverse();
+        let expected: Vec<String> = std::iter::once(fork(7)).chain(group).chain(std::iter::once(fork(1))).collect();
+        for size in [1, 2, 3, 5, 6] {
+            let all = pages(&mind, size);
+            let seen: Vec<String> = all.iter().flat_map(|(_, page)| ids(page)).collect();
+            assert_eq!(seen, expected, "limit {size}: no fork skipped or repeated");
+            for (_, page) in &all {
+                let orders: Vec<u64> = page.forks.iter().map(|entry| entry.card.order).collect();
+                let group = orders.iter().filter(|order| **order == docs_order(&mind, &fork(2))).count();
+                assert!(group == 0 || group == 5, "limit {size}: the group of five is whole or absent, not {group}");
+            }
+        }
+        // The first page at limit 2 runs past the limit to finish the group it ends in.
+        let (first, _) = page(mind.desk_forks(&list(&LIST), None, None, limit(2)));
+        assert_eq!(first.forks.len(), 6);
+        assert_eq!(first.next_cursor.map(ForkCursor::order), Some(docs_order(&mind, &fork(2))));
+    }
+
+    /// A group the page budget would end inside goes whole to the next page; one that is over the
+    /// budget by itself is refused by name of its first fork.
+    #[test]
+    fn a_group_past_the_byte_budget_moves_whole_or_is_refused() {
+        let mut mind = seeded();
+        committed(admit(&mut mind, (1..=50).map(wordy).collect()));
+        let response = mind.desk_forks(&list(&LIST), None, None, limit(50));
+        let DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: named, .. }) = response else { panic!("{response:?}") };
+        assert!(named.starts_with("eureka-state:question:Q"));
+        let mut mind = seeded();
+        committed(admit(&mut mind, vec![wordy(1)]));
+        committed(admit(&mut mind, (2..=30).map(wordy).collect()));
+        committed(admit(&mut mind, vec![wordy(31)]));
+        let all = pages(&mind, 50);
+        let sizes: Vec<usize> = all.iter().map(|(_, page)| page.forks.len()).collect();
+        assert!(sizes.len() > 1, "{sizes:?}");
+        assert_eq!(sizes.iter().sum::<usize>(), 31);
+        for (response, page) in &all {
+            assert!(on_the_wire(response) <= DESK_MAX_RESPONSE_BYTES);
+            let group = page.forks.iter().filter(|entry| entry.card.order == docs_order(&mind, &fork(2))).count();
+            assert!(group == 0 || group == 29, "the group of 29 is whole or absent, not {group}");
+        }
     }
 }

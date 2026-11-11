@@ -2060,6 +2060,39 @@
           ]
         },
         {
+          "description": "A desk page that cannot hold even its first entry (or the whole group of forks admitted\nin one commit that the cursor will not split): `fork` is the first fork of that group, `bytes`\nwhat the page holding it would encode to (without the envelope) and `limit` the page budget\nit exceeds. Raised by the mind's page fill, which is why it is not `ResponseTooLarge`.",
+          "type": "object",
+          "properties": {
+            "DeskForkTooLarge": {
+              "type": "object",
+              "properties": {
+                "bytes": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "fork": {
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "fork",
+                "bytes",
+                "limit"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "DeskForkTooLarge"
+          ]
+        },
+        {
           "description": "A selection the substrate or the organ's value door refused: `field`\nis the selection field the client sent, `value` the offending part.",
           "type": "object",
           "properties": {

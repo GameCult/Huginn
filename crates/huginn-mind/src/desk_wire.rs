@@ -219,6 +219,11 @@ pub const DESK_RESPONSE_SCHEMA_JSON: &str = include_str!("../../../schemas/cultn
 /// The frame bounds the door enforces, on the encoded CultNet message.
 pub const DESK_MAX_REQUEST_BYTES: usize = 65536;
 pub const DESK_MAX_RESPONSE_BYTES: usize = 65536;
+/// What a page of forks leaves for the envelope around it: the echoed message id (at most 256
+/// bytes), the operation, the runtime id and the frame's own keys. `Mind::desk_forks` fills a page
+/// to `DESK_PAGE_BUDGET`, the response bound less this, measured on the bare message.
+pub const DESK_ENVELOPE_MARGIN: usize = 1024;
+pub const DESK_PAGE_BUDGET: usize = DESK_MAX_RESPONSE_BYTES - DESK_ENVELOPE_MARGIN;
 
 /// Most deciders one call carries (CultLib `card.deciders` `maxItems`).
 pub const DESK_DECIDERS_MAX: usize = 64;
