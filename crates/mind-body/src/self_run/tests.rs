@@ -1016,7 +1016,7 @@ fn unreadable_and_foreign_lines_are_skipped_and_never_printed() {
     ]);
     assert_eq!(ran.lines(), "request 1 prefix 10
 result subtype=success is_error=true: Failed to authenticate: OAuth session expired and could not be refreshed
-usage turn ?: not reported
+usage turn 0: not reported
 ");
     let outcome = ran.outcome.as_ref().unwrap().to_string();
     assert!(!ran.out.contains(canary) && !outcome.contains(canary));
