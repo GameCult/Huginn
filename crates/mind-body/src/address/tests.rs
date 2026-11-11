@@ -1,6 +1,7 @@
 //! The one addressing rule: a tag, or a name as a whole word; a listed name exactly as written, a derived one-word repo name as the repo spells it, a split phrase or a Mind's own in any case.
 
 use super::*;
+use crate::chat_client::{Basis, Form};
 
 fn said(text: &str, mentions: &[&str]) -> ChatDelivery {
     ChatDelivery {
@@ -10,6 +11,8 @@ fn said(text: &str, mentions: &[&str]) -> ChatDelivery {
         room_alias: "swarm".into(),
         is_direct: false,
         image: None,
+        basis: None,
+        form: Form::Message,
         sender: "@op:chat".into(),
         sender_display: "Op".into(),
         at_unix_ms: 0,
@@ -107,4 +110,21 @@ fn a_name_that_overlaps_itself_is_found_where_a_whole_word_hit_follows_a_failed_
 fn the_localpart_is_the_name_between_the_at_and_the_colon() {
     assert_eq!(localpart("@eureka:chat.gamecult.org"), "eureka");
     assert_eq!(localpart("eureka"), "eureka");
+}
+
+#[test]
+fn only_a_message_can_address_and_the_mouths_basis_stands_for_the_polling_mind_alone() {
+    let nibu = steward("GameCult/Thing", &[]);
+    let with = |basis, form, text: &str, mentions: &[&str]| ChatDelivery { basis, form, ..said(text, mentions) };
+    for basis in [Basis::Direct, Basis::Tag, Basis::Reply] {
+        assert!(is_for(&nibu, &with(Some(basis), Form::Message, "nothing named", &[])), "{basis:?}");
+        assert!(!addresses(&nibu, &with(Some(basis), Form::Message, "nothing named", &[])), "a basis is a fact about the Persona that polled, not about every Mind: {basis:?}");
+        assert!(!is_for(&nibu, &with(Some(basis), Form::Notice, "nothing named", &[])), "a notice is for no one: {basis:?}");
+        assert!(!is_for(&nibu, &with(Some(basis), Form::Edit, "nibu, look", &["@nibu:chat"])), "nor an edit, tagged and named: {basis:?}");
+        assert!(!addresses(&nibu, &with(None, Form::Edit, "nibu, look", &["@nibu:chat"])), "{basis:?}");
+    }
+    assert!(!is_for(&nibu, &with(Some(Basis::Room), Form::Message, "nothing named", &[])), "@room is for no one");
+    assert!(!is_for(&nibu, &with(None, Form::Message, "nothing named", &[])), "unproven and unnamed");
+    assert!(is_for(&nibu, &with(None, Form::Message, "nibu, look", &[])), "unproven is not 'not for her': her name decides");
+    assert!(is_for(&nibu, &with(Some(Basis::Room), Form::Message, "nibu, look", &[])), "an @room that also names her is named");
 }

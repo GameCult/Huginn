@@ -4,8 +4,8 @@
 //! The mouth is Bifrost's chat ear and mouth (cut `persona-mouth`). Five CultNet document kinds cross
 //! it, each a positional MessagePack tuple (fields in declaration order, `rmp_serde::to_vec`; the mouth refuses maps): the pending request and its answer, the
 //! ack, and the send request with its receipt. Their field order is the mouth's, pinned
-//! by its golden fixtures (`tests/fixtures/persona-chat-v1/` for the pending, ack and refusal kinds, `persona-chat-v2/` for the send
-//! and its receipt) in both directions. `chat_rudp::RudpChat` is
+//! by its golden fixtures (`tests/fixtures/persona-chat-v1/` for the ack and refusal kinds, `persona-chat-v2/` for the send
+//! and its receipt, `persona-chat-v5/` for the pending request and its answer) in both directions. `chat_rudp::RudpChat` is
 //! the RUDP transport that carries them; `Chat` is its seam, and `encode` and
 //! `decode` are its codec. Room aliases are the mouth's
 //! full aliases (`#operator:gamecult.org`), which the caller's `--rooms` carries.
@@ -17,9 +17,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Document kinds, as the mouth names them.
-pub const PENDING_REQUEST: &str = "gamecult.persona.chat_pending_request.v1";
-pub const PENDING: &str = "gamecult.persona.chat_pending.v2";
-/// The pending answer of a mouth that has no image field yet: its deliveries decode with `image: None`.
+/// The pending request as a mouth without the addressing facts reads it: `[persona, after_seq]`, answered with `chat_pending.v2`.
+pub const PENDING_REQUEST_V1: &str = "gamecult.persona.chat_pending_request.v1";
+/// The pending request, the same tuple. Asking by this kind is asking for the answer with the addressing facts.
+pub const PENDING_REQUEST: &str = "gamecult.persona.chat_pending_request.v2";
+/// The answer to it: a delivery with its `basis` and `form` at tuple indices 12 and 13.
+pub const PENDING: &str = "gamecult.persona.chat_pending.v3";
+/// The answer a mouth gives a v1 request: no addressing facts, decoded as `basis: None, form: Message`.
+pub const PENDING_V2: &str = "gamecult.persona.chat_pending.v2";
+/// The pending answer of a mouth that has no image field either: its deliveries decode with `image: None`.
 pub const PENDING_V1: &str = "gamecult.persona.chat_pending.v1";
 pub const ACK: &str = "gamecult.persona.chat_ack.v1";
 /// Her read receipt: the newest event of a room that went into her model's input.
@@ -58,6 +64,87 @@ pub struct ChatDelivery {
     /// The attachment the mouth stored for an image event. Tuple index 11; a v1 record ends at 10 and reads as none.
     #[serde(default)]
     pub image: Option<ChatImage>,
+    /// Why Matrix says the message is for this Persona: tuple index 12. None is unproven, never "not for her"; an answer of an
+    /// older mouth ends before it and reads as none.
+    #[serde(default)]
+    pub basis: Option<Basis>,
+    /// What kind of event it is: tuple index 13. An answer of an older mouth ends before it and reads as a message.
+    #[serde(default)]
+    pub form: Form,
+}
+
+/// Why the mouth found a delivery to be for the Persona, by what Matrix says (Bifrost `docs/bridge.md` "Addressing facts"). `Tag` and
+/// `Room` are the sender's claim in `m.mentions`; `Reply` is checked against the event it targets. Evidence, not authority: the
+/// runtime's own rule (`address::addresses`) weighs it. `Room` is reported and wakes no one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Basis {
+    Direct,
+    Tag,
+    Reply,
+    Room,
+}
+
+impl Basis {
+    const ALL: [Self; 4] = [Self::Direct, Self::Tag, Self::Reply, Self::Room];
+
+    /// The mouth's spelling: a MessagePack string.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Tag => "tag",
+            Self::Reply => "reply",
+            Self::Room => "room",
+        }
+    }
+}
+
+impl Serialize for Basis {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for Basis {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::ALL.into_iter().find(|basis| basis.name() == name).ok_or_else(|| serde::de::Error::custom("the mouth named a basis this side does not know"))
+    }
+}
+
+/// The kind of event a delivery is. Only a `Message` can address anyone: a `Notice` is an automated line and an `Edit` revises an
+/// earlier message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Form {
+    #[default]
+    Message,
+    Notice,
+    Edit,
+}
+
+impl Form {
+    const ALL: [Self; 3] = [Self::Message, Self::Notice, Self::Edit];
+
+    /// The mouth's spelling: a MessagePack string.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Notice => "notice",
+            Self::Edit => "edit",
+        }
+    }
+}
+
+impl Serialize for Form {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for Form {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::ALL.into_iter().find(|form| form.name() == name).ok_or_else(|| serde::de::Error::custom("the mouth named a form this side does not know"))
+    }
 }
 
 /// An image the mouth fetched and stored, by reference: never its bytes. The path is relative to the Persona's image

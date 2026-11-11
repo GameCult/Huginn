@@ -12,6 +12,7 @@ use chrono::{Duration, TimeZone};
 use eureka_pipeline::PipelineKind as K;
 use huginn_mind::PipelineSelectionPage;
 use tempfile::TempDir;
+use crate::address::addresses;
 
 use super::*;
 use crate::control::{Brake, ControlState, SwarmState};
@@ -161,6 +162,8 @@ fn delivery(seq: u64, sender: &str, text: &str, mentions: &[&str]) -> ChatDelive
         mentions: mentions.iter().map(|id| (*id).to_string()).collect(),
         is_direct: false,
         image: None,
+        basis: None,
+        form: crate::chat_client::Form::Message,
     }
 }
 
@@ -1555,4 +1558,35 @@ fn a_sleeping_mind_is_not_eligible_for_the_beat() {
     rig.pulse(ANN, 5, None, Some(1000));
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into()), Slug("bob".into())] });
     assert_eq!(started_turns(&rig), vec![("ann".to_string(), RunTurn::Sleep), ("bob".to_string(), RunTurn::PersonaTurn)], "the beat went to the Mind who was awake, though ann's urgency was the higher");
+}
+
+/// Matrix's word that a message is her DM, a tag or a reply wakes her off the beat from the operator; a notice or an edit never does,
+/// whatever its basis, and a stranger's direct message is delivered but wakes no one.
+#[test]
+fn matrixs_addressing_facts_wake_her_off_the_beat_only_on_a_message_from_the_roster() {
+    use crate::chat_client::{Basis, Form};
+    let with = |seq, sender: &str, basis, form| ChatDelivery { basis, form, ..delivery(seq, sender, "no name here", &[]) };
+    for (basis, form, wakes) in [
+        (Some(Basis::Direct), Form::Message, true),
+        (Some(Basis::Tag), Form::Message, true),
+        (Some(Basis::Reply), Form::Message, true),
+        (Some(Basis::Room), Form::Message, false),
+        (None, Form::Message, false),
+        (Some(Basis::Direct), Form::Notice, false),
+        (Some(Basis::Tag), Form::Edit, false),
+    ] {
+        let rig = Rig::new();
+        rig.turn(ANN, 10);
+        rig.turn(BOB, 10);
+        rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+        rig.say(BOB, with(1, "@op:chat", basis, form));
+        let launched = if wakes { vec![Slug("bob".into())] } else { vec![] };
+        assert_eq!(rig.poll(), Outcome::Polled { launched }, "{basis:?} {form:?}");
+    }
+    let rig = Rig::new();
+    rig.turn(ANN, 10);
+    rig.turn(BOB, 10);
+    rig.store.save(&HeartbeatState { last_beat_at: rig.now(), handled_mentions: vec![] }).unwrap();
+    rig.say(BOB, with(1, "@stranger:chat", Some(Basis::Direct), Form::Message));
+    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "the sender gate stays: a stranger's DM is delivered and wakes no one off the beat");
 }
