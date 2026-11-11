@@ -655,7 +655,7 @@ pub(crate) mod tests {
         let mut daemon = Daemon::new(mind, SourcesIndex { asked: Arc::clone(&asked), hits: hits.clone() });
         let request = |instance: &str, top_k: u32| HuginnMindRequest::SearchSources {
             instance: slug(instance),
-            query: SourceQuery { text: huginn_mind::eureka_pipeline::Line("find".into()), top_k, repo: None, front: false },
+            query: SourceQuery { text: huginn_mind::eureka_pipeline::Line("find".into()), texts: vec![], top_k, repo: None, front: false },
         };
 
         let Handled::Searching(search) = daemon.handle(request(INSTANCE, 5), now()) else { panic!("a well-formed source search is a search") };

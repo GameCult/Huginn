@@ -446,6 +446,7 @@ fn sources(
 ) -> Result<u8, Trouble> {
     let query = SourceQuery {
         text: Line(text),
+        texts: vec![],
         top_k: top_k.unwrap_or(DEFAULT_TOP_K),
         repo: repo.map(Short),
         front,

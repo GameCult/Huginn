@@ -505,7 +505,7 @@ fn front_query(text: &str, top_k: u32, repo: Option<&str>) -> SourceQuery {
 }
 
 fn query(text: &str, top_k: u32, repo: Option<&str>) -> SourceQuery {
-    SourceQuery { text: Line(text.into()), top_k, repo: repo.map(|repo| Short(repo.into())), front: false }
+    SourceQuery { text: Line(text.into()), texts: vec![], top_k, repo: repo.map(|repo| Short(repo.into())), front: false }
 }
 
 /// A daemon whose embedder is not the one the collection was built under

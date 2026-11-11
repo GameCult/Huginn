@@ -181,13 +181,23 @@ pub struct RepoMoved {
 /// The most hits a source search answers.
 pub const SOURCE_TOP_K_MAX: u32 = 50;
 
-/// A source search: the text to find chunks near, how many, optionally the
-/// one forge repo (by name) to look in, and whether to look only in repos'
-/// front-page files (`FRONT_PAGE_FILES` at the repo root). An old client's
-/// request has no `front` and means false.
+/// The most texts one source search takes.
+pub const SOURCE_TEXTS_MAX: usize = 8;
+
+/// A source search: the texts to find chunks near (one to `SOURCE_TEXTS_MAX`,
+/// each a topic; several answer with their ranked lists fused), how many,
+/// optionally the one forge repo (by name) to look in, and whether to look
+/// only in repos' front-page files (`FRONT_PAGE_FILES` at the repo root). An
+/// old client's request has no `front` and means false.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SourceQuery {
+    /// Transitional: an old client's single text, read as `texts` of one. Exactly
+    /// one of `text` and `texts` is given. To be deleted once no client sends it.
+    #[serde(default)]
     pub text: Line,
+    /// The topics to search by, one to `SOURCE_TEXTS_MAX`.
+    #[serde(default)]
+    pub texts: Vec<Line>,
     pub top_k: u32,
     pub repo: Option<Short>,
     #[serde(default)]
@@ -195,7 +205,8 @@ pub struct SourceQuery {
 }
 
 impl SourceQuery {
-    /// The door: text that says something, and between one and
+    /// The door: exactly one of `text` and `texts`, each text saying something,
+    /// at most `SOURCE_TEXTS_MAX` texts, and between one and
     /// `SOURCE_TOP_K_MAX` hits. A refusal names the field.
     pub fn check(&self) -> Result<(), MindRefusal> {
         let refused = |field: &str, value: Option<String>, message: &str| MindRefusal::SelectionInvalid {
@@ -203,8 +214,20 @@ impl SourceQuery {
             value,
             message: message.into(),
         };
-        if self.text.0.trim().is_empty() {
+        if !self.text.0.is_empty() && !self.texts.is_empty() {
+            return Err(refused("texts", Some(self.texts.len().to_string()), "a source search takes `text` or `texts`, not both"));
+        }
+        if self.texts.is_empty() && self.text.0.is_empty() {
+            return Err(refused("texts", None, "a source search needs texts to find"));
+        }
+        if self.texts.is_empty() && self.text.0.trim().is_empty() {
             return Err(refused("text", None, "a source search needs text to find"));
+        }
+        if self.texts.len() > SOURCE_TEXTS_MAX {
+            return Err(refused("texts", Some(self.texts.len().to_string()), "a source search takes 1 to 8 texts"));
+        }
+        if self.texts.iter().any(|text| text.0.trim().is_empty()) {
+            return Err(refused("texts", None, "every text of a source search says something"));
         }
         if !(1..=SOURCE_TOP_K_MAX).contains(&self.top_k) {
             return Err(refused("top_k", Some(self.top_k.to_string()), "a source search asks for 1 to 50 hits"));
@@ -234,6 +257,8 @@ pub struct SourceHit {
     pub commit: String,
     pub line_start: u32,
     pub line_end: u32,
+    /// Cosine similarity for a search of one text; the reciprocal-rank sum
+    /// (k = 60) over the texts' lists for a search of several.
     pub score: f32,
     pub text: String,
 }
@@ -419,7 +444,11 @@ mod tests {
             },
             HuginnMindRequest::SearchSources {
                 instance: slug(INSTANCE),
-                query: SourceQuery { text: Line("reconcile".into()), top_k: 5, repo: Some(Short("Huginn".into())), front: true },
+                query: SourceQuery { text: Line("reconcile".into()), texts: vec![], top_k: 5, repo: Some(Short("Huginn".into())), front: true },
+            },
+            HuginnMindRequest::SearchSources {
+                instance: slug(INSTANCE),
+                query: SourceQuery { text: Line::default(), texts: vec![Line("reconcile".into()), Line("fuse".into())], top_k: 5, repo: None, front: false },
             },
             HuginnMindRequest::RootsTouched { instance: slug(INSTANCE) },
         ]
@@ -486,7 +515,7 @@ mod tests {
     #[test]
     fn the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response() {
         let names: Vec<&str> = requests().iter().map(|request| request.operation()).collect();
-        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources", "roots_touched"]);
+        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources", "search_sources", "roots_touched"]);
         for request in requests() {
             let declared = request.instance().is_none();
             assert_eq!(declared, matches!(request, HuginnMindRequest::Whoami), "{request:?}");
@@ -518,6 +547,7 @@ mod tests {
     fn a_source_query_without_text_or_within_one_to_fifty_hits_is_refused_by_field() {
         let query = |text: &str, top_k: u32, repo: Option<&str>| SourceQuery {
             text: Line(text.into()),
+            texts: vec![],
             top_k,
             repo: repo.map(|repo| Short(repo.into())),
             front: false,
@@ -529,6 +559,17 @@ mod tests {
         assert_eq!(query("x", 1, None).check(), Ok(()));
         assert_eq!(query("x", SOURCE_TOP_K_MAX, Some("Huginn")).check(), Ok(()));
         assert_eq!(field(query("  ", 5, None)), "text");
+        let many = |texts: &[&str]| SourceQuery { text: Line::default(), texts: texts.iter().map(|text| Line((*text).into())).collect(), ..query("", 5, None) };
+        assert_eq!(many(&["a", "b"]).check(), Ok(()));
+        assert_eq!(many(&["a"; SOURCE_TEXTS_MAX]).check(), Ok(()));
+        assert_eq!(field(query("", 5, None)), "texts", "neither text nor texts");
+        assert_eq!(field(many(&[])), "texts");
+        assert_eq!(field(SourceQuery { text: Line("x".into()), ..many(&["a"]) }), "texts", "both");
+        assert_eq!(field(many(&["a", " "])), "texts", "a blank entry");
+        match many(&["a"; SOURCE_TEXTS_MAX + 1]).check() {
+            Err(MindRefusal::SelectionInvalid { field, value, .. }) => assert_eq!((field.as_str(), value.as_deref()), ("texts", Some("9"))),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
         assert_eq!(field(query("x", 0, None)), "top_k");
         assert_eq!(field(query("x", SOURCE_TOP_K_MAX + 1, None)), "top_k");
         assert_eq!(field(query("x", 5, Some(" "))), "repo");
@@ -547,6 +588,23 @@ mod tests {
         let old = OldQuery { text: Line("x".into()), top_k: 3, repo: None };
         let bytes = rmp_serde::to_vec_named(&old).unwrap();
         assert!(!rmp_serde::from_slice::<SourceQuery>(&bytes).unwrap().front);
+    }
+
+    /// An old client's search has `text` and no `texts`: it decodes as the one
+    /// text it sent, and passes the door.
+    #[test]
+    fn a_source_query_encoded_without_texts_decodes_as_its_one_text() {
+        #[derive(Serialize)]
+        struct OldQuery {
+            text: Line,
+            top_k: u32,
+            repo: Option<Short>,
+            front: bool,
+        }
+        let old = OldQuery { text: Line("x".into()), top_k: 3, repo: None, front: false };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        let query = rmp_serde::from_slice::<SourceQuery>(&bytes).unwrap();
+        assert_eq!((query.text.0.as_str(), query.texts.len(), query.check()), ("x", 0, Ok(())));
     }
 
     /// A new client reads an old daemon's page: the five fields it had, no

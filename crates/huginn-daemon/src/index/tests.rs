@@ -1995,7 +1995,7 @@ fn the_sink_owns_the_searchs_deadline_and_tells_the_loop() {
 }
 
 fn ask_sources(sink: &mut WorkerSink, text: &str) -> Result<SearchTicket, String> {
-    let query = SourceQuery { text: huginn_mind::eureka_pipeline::Line(text.into()), top_k: 5, repo: None, front: false };
+    let query = SourceQuery { text: huginn_mind::eureka_pipeline::Line(text.into()), texts: vec![], top_k: 5, repo: None, front: false };
     <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search_sources(sink, &query)
 }
 
