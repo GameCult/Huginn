@@ -854,6 +854,33 @@ mod tests {
         assert_eq!(encode(&rmp_serde::from_slice::<ForkRefusal>(&bytes).unwrap()), bytes);
     }
 
+    /// CultLib de8a062a: `transport.answerTooLarge`. The request is a well-formed answer whose hash is not the
+    /// fork's current card hash, so Huginn stores it `Refused(stale_fork)`; the vector's door response is the
+    /// read-form `fork_too_large` refusal (422) over that stored outcome, uncounted. What Huginn can judge
+    /// replays: the request decodes, its hash is stale against the fork's card in the vector, the refusal
+    /// round-trips byte for byte with code `fork_too_large`, and the text (informational) names the fork and
+    /// carries no order or cursor. The stored outcome itself is pinned by
+    /// `a_stale_answer_then_the_read_cards_hash_counts` and the socket tests.
+    #[test]
+    fn the_answer_too_large_vector_replays_over_a_stale_answer() {
+        let file = transport();
+        let cases = file["answerTooLarge"].as_array().unwrap();
+        assert_eq!(cases.len(), 1);
+        let case = &cases[0];
+        let request: ForkAnswerRequest = serde_json::from_value(case["request"].clone()).unwrap();
+        let current = case["entries"].as_array().unwrap().iter().find(|entry| entry["card"]["fork_id"] == case["fork_id"]).unwrap();
+        assert_eq!(request.fork_id, case["fork_id"].as_str().unwrap());
+        assert_ne!(request.options_hash, current["card"]["options_hash"].as_str().unwrap(), "a stale answer");
+        let bytes = bytes_of(case["refusalHex"].as_str().unwrap());
+        let refusal: ForkRefusal = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(encode(&refusal), bytes);
+        assert_eq!(refusal.code, ForkRefusalCode::ForkTooLarge);
+        let fork_id = case["fork_id"].as_str().unwrap();
+        assert!(refusal.error.contains(fork_id) && !refusal.error.contains("order") && !refusal.error.contains("cursor"), "{}", refusal.error);
+        assert_eq!(fork_too_large_read(fork_id).code, refusal.code);
+        assert_eq!((case["httpStatus"].as_u64(), case["outcome"].as_str(), case["code"].as_str(), case["counted"].as_bool()), (Some(422), Some("Refused"), Some("stale_fork"), Some(false)));
+    }
+
     /// The contract pins no exact text for `fork_too_large`: the vector's `error` string is
     /// Huginn-independent, and a judge checks that the refusal names the entry the page would open
     /// with. So for each vector case Huginn's refusal is code `fork_too_large`, its text contains the
