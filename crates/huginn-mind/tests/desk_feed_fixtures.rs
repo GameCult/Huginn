@@ -11,6 +11,8 @@
 
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 use cultnet_rs::{CultNetMessage, CultNetWireContract, encode_cultnet_message_to_vec, encode_frame};
 use huginn_mind::MindRefusal;
 use huginn_mind::desk_wire::{
@@ -104,6 +106,106 @@ fn record() -> ForkRecord {
     }
 }
 
+// ---- PROPOSED reader views (ruling: the door withholds account ids from readers who are not
+// deciders, and returns counts). CultLib's card and desk_answer cannot carry this yet (card
+// `deciders` has minItems 1 and no count key; `answerer` is a required non-null id), so these are
+// fragments in the shape proposed to Libby (follow-up `cultlib-fork-card-reader-counts`), built from
+// mirror types that exist only here. They are not Huginn's output until that contract lands and
+// `cut-desk-feed-listing` builds it. ----
+
+/// The two card keys the proposal changes, as a fragment: a decider gets the ids, anyone else `[]`
+/// and the count. Not a card.
+#[derive(Serialize)]
+struct CardViewers {
+    deciders: Vec<String>,
+    decider_count: u64,
+}
+
+fn card_viewers(decider: bool) -> CardViewers {
+    let ids = vec![READER.to_string(), OTHER_DECIDER.to_string()];
+    CardViewers { decider_count: ids.len() as u64, deciders: if decider { ids } else { Vec::new() } }
+}
+
+/// `gamecult.desk_answer.v0` as proposed for a reader who is not a decider: `answerer` nil, key kept.
+#[derive(Serialize)]
+struct WithheldAnswer {
+    #[serde(rename = "schemaVersion")]
+    schema_version: AnswerSchema,
+    answer_id: String,
+    fork_id: String,
+    outcome: String,
+    of: Option<String>,
+    retracts: Option<String>,
+    code: Option<huginn_mind::desk_wire::ForkAnswerCode>,
+    options_hash: String,
+    choice: Option<String>,
+    note: Option<String>,
+    answered_at: String,
+    received_at: String,
+    claim_in_future: bool,
+    answerer: Option<String>,
+    authority: DeskAuthority,
+    request_id: String,
+}
+
+/// `gamecult.fork.record.v0` as proposed for a reader who is not a decider: every `answerer` nil and
+/// `answerer_count`, the number of distinct answerers, in their place.
+#[derive(Serialize)]
+struct WithheldRecord {
+    #[serde(rename = "schemaVersion")]
+    schema_version: RecordSchema,
+    fork_id: String,
+    options_hash: String,
+    counted_answer_id: Option<String>,
+    answerer_count: u64,
+    answers: Vec<WithheldAnswer>,
+}
+
+fn withheld(record: ForkRecord) -> WithheldRecord {
+    let mut answerers: Vec<&str> = record.answers.iter().map(|answer| answer.answerer.as_str()).collect();
+    answerers.sort_unstable();
+    answerers.dedup();
+    let answerer_count = answerers.len() as u64;
+    WithheldRecord {
+        schema_version: record.schema_version,
+        fork_id: record.fork_id,
+        options_hash: record.options_hash,
+        counted_answer_id: record.counted_answer_id,
+        answerer_count,
+        answers: record
+            .answers
+            .into_iter()
+            .map(|answer| WithheldAnswer {
+                schema_version: answer.schema_version,
+                answer_id: answer.answer_id,
+                fork_id: answer.fork_id,
+                outcome: answer.outcome,
+                of: answer.of,
+                retracts: answer.retracts,
+                code: answer.code,
+                options_hash: answer.options_hash,
+                choice: answer.choice,
+                note: answer.note,
+                answered_at: answer.answered_at,
+                received_at: answer.received_at,
+                claim_in_future: answer.claim_in_future,
+                answerer: None,
+                authority: answer.authority,
+                request_id: answer.request_id,
+            })
+            .collect(),
+    }
+}
+
+/// The proposed fragments by reader kind: (file stem, bytes).
+fn reader_views() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("card-viewers-decider.synthetic", rmp_serde::to_vec_named(&card_viewers(true)).unwrap()),
+        ("card-viewers-non-decider.synthetic", rmp_serde::to_vec_named(&card_viewers(false)).unwrap()),
+        ("record-non-decider.proposed", rmp_serde::to_vec_named(&withheld(record())).unwrap()),
+    ]
+}
+
 /// The named MessagePack payload a CultNet operation message carries (base64 in the envelope).
 fn payload(message: &CultNetMessage) -> Vec<u8> {
     use base64::Engine;
@@ -175,6 +277,10 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
     let whole = rmp_serde::to_vec_named(&record()).unwrap();
     files.push(("record-whole.payload.msgpack".into(), whole.clone()));
     files.push(("record-whole.payload.hex".into(), hex(&whole).into_bytes()));
+    for (name, bytes) in reader_views() {
+        files.push((format!("{name}.payload.msgpack"), bytes.clone()));
+        files.push((format!("{name}.payload.hex"), hex(&bytes).into_bytes()));
+    }
     files
 }
 
@@ -223,4 +329,28 @@ fn every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid() {
     for shape in ["@heimdall:gamecult.org", "meta@gamecult.org", "heimdall", "7", "5F0C2B1E-8A4D-4C3B-9E7F-1A2B3C4D5E6F", "{5f0c2b1e-8a4d-4c3b-9e7f-1a2b3c4d5e6f}", ""] {
         assert!(!account_id(shape), "{shape} is not an account id");
     }
+}
+
+fn holds(bytes: &[u8], text: &str) -> bool {
+    bytes.windows(text.len()).any(|window| window == text.as_bytes())
+}
+
+/// A reader who is not a decider gets counts and no account id at all: neither UUID appears
+/// anywhere in its fragments' bytes. A decider gets every id. (Proposed shapes; the build cut pins
+/// the same on Huginn's real list and read responses.)
+#[test]
+fn a_non_decider_gets_counts_and_no_ids_a_decider_gets_ids() {
+    let views = reader_views();
+    let bytes = |name: &str| views.iter().find(|(stem, _)| *stem == name).unwrap().1.clone();
+    for name in ["card-viewers-non-decider.synthetic", "record-non-decider.proposed"] {
+        let view = bytes(name);
+        assert!(!holds(&view, READER) && !holds(&view, OTHER_DECIDER), "{name} carries an account id");
+    }
+    let non_decider = card_viewers(false);
+    assert_eq!((non_decider.deciders.len(), non_decider.decider_count), (0, 2));
+    assert_eq!(withheld(record()).answerer_count, 2);
+    let decider = bytes("card-viewers-decider.synthetic");
+    assert!(holds(&decider, READER) && holds(&decider, OTHER_DECIDER));
+    let whole = rmp_serde::to_vec_named(&record()).unwrap();
+    assert!(holds(&whole, READER) && holds(&whole, OTHER_DECIDER), "a decider's record keeps the answerer ids");
 }
