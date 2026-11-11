@@ -116,8 +116,8 @@ byte; both values are in the account-id format above. Any other reader is a non-
   deployed.
 - **Ruled (Persona, 2026-11-11; follow-up `chat-mind-20261111T150417226Z-t167`):** the door, not
   Bifrost, withholds account ids from a non-decider and returns a count instead. Bifrost cannot do
-  it, because the card is opaque to it. A decider sees the ids. The superseding ruling is drafted
-  as `desk-read-visibility-withheld-ids`.
+  it, because the card is opaque to it. A decider sees the ids. The superseding ruling is in force:
+  `eureka-substrate:ruling:desk-read-visibility-withheld-ids`.
 - **CultLib cannot carry this yet.** The card has 16 required keys in closed map-mode (17 once `raised_at` lands), and
   `deciders` must hold at least one item. `answerer` is a required, non-null id. The proposal to
   Libby (follow-up `cultlib-fork-card-reader-counts`):
