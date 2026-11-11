@@ -188,6 +188,11 @@ fn a_secret_is_redacted_whole_by_the_authority_rule_and_commonplace_urls_are_lef
     assert_eq!(r("HTTPS://TOKEN@h"), "HTTPS://<redacted>@h");
     assert_eq!(r("[l](https://T@h/x) <https://T@h> `https://u:T@h`"), "[l](https://<redacted>@h/x) <https://<redacted>@h> `https://<redacted>@h`");
     assert_eq!(r("a //u:T@host/x b //T@host c \"//T@h\" (//T@h)"), "a //<redacted>@host/x b //<redacted>@host c \"//<redacted>@h\" (//<redacted>@h)");
+    // Token-bearing schemes beyond http: +http/+https wrappers and ws/wss redact a bare token; git+ssh and ssh keep their username.
+    assert_eq!(r("git+https://T@github.com/a/b GIT+HTTPS://T@h wss://T@h/ ws://T@h/"), "git+https://<redacted>@github.com/a/b GIT+HTTPS://<redacted>@h wss://<redacted>@h/ ws://<redacted>@h/");
+    for same in ["git+ssh://git@host/x", "ssh://git@host/x"] {
+        assert_eq!(r(same), same);
+    }
     // Scheme-less: only word:secret@host.tld/ . Each guard of the shape has its own case.
     assert_eq!(r("user:T@host.tld/path"), "<redacted>@host.tld/path");
     for same in ["a:b@c", "a:b@host/x", "a:b@ho_st.tld/x", "u$er:T@host.tld/x", "a:@host.tld/x", "mail me@x.org/ and :T@host.tld/x"] {

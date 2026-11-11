@@ -937,7 +937,7 @@ fn result_text(event: &serde_json::Map<String, Value>) -> String {
 /// RFC 3986 read it: it ends at the first `/`, `?`, `#`, backslash, quote, backtick, parenthesis, bracket, angle bracket or ASCII whitespace
 /// (`is_authority_end`). Its userinfo is everything before the authority's LAST `@` (a raw `@` in a password still redacts), and non-ASCII
 /// characters, NBSP and U+2028 included, stay inside it. The userinfo becomes `<redacted>`: `scheme://<redacted>@host`. With a colon it is
-/// always redacted; without one it is a bare token on http, https, ftp, ftps, protocol-relative `//` and an unparseable scheme, and a plain
+/// always redacted; without one it is a bare token on http, https, ftp, ftps, ws, wss, any `+http`/`+https` scheme (`git+https`), protocol-relative `//` and an unparseable scheme, and a plain
 /// username on any other scheme (`ssh://git@host`), which stays. A `@` after the authority (`github.com/@user`, `pkg@1.2.3`) is path, not
 /// userinfo, and is left alone. Scheme-less credentials are covered only in the shape `word:secret@host.tld/` at the start of an
 /// ASCII-whitespace-delimited word. Not covered: a password holding `/ ? # ` a quote or ASCII whitespace (no parser reads it as userinfo),
@@ -963,7 +963,7 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
         let end = body.find(is_authority_end).unwrap_or(body.len());
         let authority = &body[..end];
         match authority.rfind('@') {
-            Some(i) if i > 0 && (authority[..i].contains(':') || matches!(scheme.as_str(), "" | "http" | "https" | "ftp" | "ftps")) => {
+            Some(i) if i > 0 && (authority[..i].contains(':') || carries_bare_token(&scheme)) => {
                 out.push_str("<redacted>");
                 out.push_str(&authority[i..]);
             }
@@ -973,6 +973,11 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
     }
     out.push_str(rest);
     redact_schemeless(&out)
+}
+
+/// Schemes whose lone userinfo is a token, not a username: web and ftp schemes, `ws`/`wss`, and `x+http`/`x+https` wrappers; `scheme` is lowercase.
+fn carries_bare_token(scheme: &str) -> bool {
+    matches!(scheme, "" | "http" | "https" | "ftp" | "ftps" | "ws" | "wss") || scheme.ends_with("+http") || scheme.ends_with("+https")
 }
 
 /// ASCII whitespace; NBSP, U+2028 and other Unicode whitespace are not, so a secret holding them is redacted whole.
