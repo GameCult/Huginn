@@ -6569,6 +6569,33 @@ fn a_process_that_ends_with_a_revision_waiting_leaves_the_batch_unacked() {
 }
 
 #[test]
+fn a_flush_answer_does_not_spend_a_revision_she_was_never_told() {
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let (ask, answer) = (delivery(1, "swarm", "@op:chat", "question"), delivery(2, "swarm", "@libby:chat", "answer"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config(), vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &answer);
+        inbox.result(&reply_result(&says(&[("swarm", "mine")])), true, false).unwrap();
+        assert!(inbox.revision.is_some());
+        inbox.flush_text(Why::Idle);
+        inbox.echoed();
+        inbox.result(&reply_result(&says(&[("swarm", "last words")])), true, false).unwrap();
+        assert_eq!(rig.chat.sent.borrow().last().unwrap().basis, None, "a flush send is never refused");
+        assert!(inbox.revision.is_some(), "the flush never showed her the revision line");
+    });
+    assert!(rig.chat.acked.borrow().is_empty());
+    let next = next_batch(&config(), &[], rig.chat.pending(0).unwrap().deliveries, 0);
+    assert_eq!(next.len(), 2);
+    with_inbox(&rig, &config(), next, |inbox| {
+        let line = inbox.start_line().unwrap();
+        assert!(line.contains("question") && line.contains("answer") && !line.contains("was not sent"), "{line}");
+    });
+}
+
+#[test]
 fn an_undecodable_revision_stays_final() {
     let rig = Rig::new(vec![], &[]);
     rig.clock.step.set(0);

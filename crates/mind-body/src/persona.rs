@@ -1856,8 +1856,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 // failed (a batch's third refusal leaves no retell to hold the ack back). Deliveries are
                 // told in seq order, so while one is unanswered below an answered seq, everything
                 // answered lies above it and nothing is acked; the ack follows its answer.
-                // Her final answer lands after she took in every line, so a revision still waiting is answered by it and its note, that a send was not sent, would be false.
-                let spent = if final_reply { self.revision.take().map(|revision| revision.batch) } else { None };
+                // Only an answer to the revision line spends a waiting revision: a flush answer never saw it, so its batch stays unacked for the next process.
+                let spent = if revised { self.revision.take().map(|revision| revision.batch) } else { None };
                 self.answered_through = self.answered_through.max(batch.iter().chain(spent.iter().flatten()).map(|delivery| delivery.seq).max().unwrap_or(0));
                 if self.progress.refused.as_ref().is_some_and(|refused| batch.iter().any(|delivery| delivery.seq == refused.lowest)) {
                     self.progress.refused = None;
