@@ -263,8 +263,8 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
     /// One desk request, answered by the Mind method it names. The Mind is the instance's own
     /// (`mind` is checked against it); `deciders` is this call's list, handed to the Mind and
     /// dropped. A desk answer is not indexed (`index_text` gives it no text), so nothing here tells the index.
-    /// The reads answer with the whole record and nothing here gates them (ruling
-    /// `desk-read-visibility-whole-record`): they are handed `deciders` and not `subject`.
+    /// The reads are handed `subject` and `deciders`: the Mind builds a decider's view or a
+    /// non-decider's (ruling `desk-read-visibility-withheld-ids`).
     pub fn handle_desk(&mut self, request: DeskRequest, now: DateTime<Utc>) -> DeskResponse {
         if let Err(refusal) = self.mind.require_instance(request.mind()) {
             return DeskResponse::Refused(refusal);
@@ -273,8 +273,8 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
             DeskRequest::Answer { subject, authority, deciders, request, .. } => {
                 self.mind.desk_answer(&deciders, subject, authority, request, now)
             }
-            DeskRequest::Forks { deciders, status, cursor, limit, .. } => self.mind.desk_forks(&deciders, status, cursor, limit),
-            DeskRequest::Fork { deciders, fork_id, .. } => self.mind.desk_fork(&deciders, &fork_id),
+            DeskRequest::Forks { subject, deciders, status, cursor, limit, .. } => self.mind.desk_forks(&subject, &deciders, status, cursor, limit),
+            DeskRequest::Fork { subject, deciders, fork_id, .. } => self.mind.desk_fork(&subject, &deciders, &fork_id),
         }
     }
 

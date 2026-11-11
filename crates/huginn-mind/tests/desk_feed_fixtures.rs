@@ -3,9 +3,10 @@
 //! are what the door speaks. `docs/desk-feed-door.md` is the contract they pin; the README in the
 //! fixtures directory lists them.
 //!
-//! No fixture written here carries a card: Huginn's types do not carry `raised_at`, `decider_count`,
-//! `answerer_count` or a nullable `answerer` yet. Those shapes are CultLib's own bytes, vendored at
-//! one commit in `fixtures/desk-feed/cultlib-d3025d3c/` and checked below.
+//! The entry-bearing fixtures carry the reader-count shapes (`raised_at`, `decider_count`,
+//! `answerer_count`, a nullable `answerer`), a decider's view and a non-decider's. CultLib's own bytes
+//! for those shapes are vendored at one commit in `fixtures/desk-feed/cultlib-d3025d3c/`; Huginn's
+//! real types decode and re-encode every one of them byte for byte (checked below).
 //!
 //! `cargo test -p huginn-mind --test desk_feed_fixtures` compares every file with what the
 //! encoders produce now. `HUGINN_WRITE_DESK_FIXTURES=1` rewrites them instead.
@@ -17,8 +18,8 @@ use sha2::{Digest, Sha256};
 use cultnet_rs::{CultNetMessage, CultNetWireContract, encode_cultnet_message_to_vec, encode_frame};
 use huginn_mind::MindRefusal;
 use huginn_mind::desk_wire::{
-    fork_too_large_read, AnswerSchema, DeskRequest, DeskResponse, ForkCursor, ForkDeskAnswer, ForkLimit, ForkList, ForkRecord, ForkRefusal, ForkRefusalCode,
-    ListSchema, ListStatus, RecordSchema,
+    fork_too_large_read, AnswerSchema, CardSchema, CardStatus, DeskRequest, DeskResponse, EntrySchema, ForkCard, ForkCursor, ForkDeskAnswer, ForkEntry, ForkLimit,
+    ForkList, ForkOption, ForkRecord, ForkRefusal, ForkRefusalCode, ForkRef, ListSchema, ListStatus, RecordSchema,
 };
 use huginn_mind::envelope::{OperationFailure, encode_desk_failure, encode_desk_request, encode_desk_response};
 use huginn_mind::eureka_pipeline::{DeskAuthority, Short, Slug};
@@ -31,6 +32,8 @@ const READER: &str = "5f0c2b1e-8a4d-4c3b-9e7f-1a2b3c4d5e6f";
 const OTHER_DECIDER: &str = "0b9d7e3a-6c21-4f58-a0d4-9e8f7a6b5c4d";
 /// A member who answered but is not a decider: their answer is stored `Refused(not_a_decider)`.
 const OUTSIDER: &str = "c3a1f2e4-7b6d-4e8f-9a0b-1c2d3e4f5a6b";
+/// A member the call's deciders do not name, who reads as a non-decider.
+const NON_DECIDER: &str = "9e8d7c6b-5a49-4382-b1a0-f9e8d7c6b5a4";
 /// A question Eureka's mind holds (asked 2026-11-11). The answers, notes and hash in `record()` are
 /// synthetic: the hash is CultLib's sample digest, not this question's.
 const FORK: &str = "eureka-substrate:question:desk-listing-authority";
@@ -54,6 +57,22 @@ fn read() -> DeskRequest {
     DeskRequest::Fork { mind: Slug("eureka".into()), subject: s(READER), deciders: vec![s(READER), s(OTHER_DECIDER)], fork_id: FORK.into() }
 }
 
+/// The same reads from a subject the call's deciders do not name: a non-decider.
+fn forks_as_non_decider() -> DeskRequest {
+    DeskRequest::Forks {
+        mind: Slug("eureka".into()),
+        subject: s(NON_DECIDER),
+        deciders: vec![s(READER), s(OTHER_DECIDER)],
+        status: Some(ListStatus::Open),
+        cursor: None,
+        limit: ForkLimit::new(50).unwrap(),
+    }
+}
+
+fn read_as_non_decider() -> DeskRequest {
+    DeskRequest::Fork { mind: Slug("eureka".into()), subject: s(NON_DECIDER), deciders: vec![s(READER), s(OTHER_DECIDER)], fork_id: FORK.into() }
+}
+
 fn list(open_count: u64, recorded_count: u64) -> DeskResponse {
     DeskResponse::Forks {
         list: ForkList {
@@ -73,7 +92,7 @@ fn refusal(code: ForkRefusalCode, error: &str) -> DeskResponse {
     DeskResponse::NotStored(ForkRefusal { schema_version: huginn_mind::desk_wire::RefusalSchema::V0, code, error: error.into() })
 }
 
-fn answer(id: &str, outcome: &str, of: Option<&str>, answerer: &str, note: &str, received_at: &str) -> ForkDeskAnswer {
+fn answer(id: &str, outcome: &str, of: Option<&str>, answerer: Option<&str>, note: &str, received_at: &str) -> ForkDeskAnswer {
     ForkDeskAnswer {
         schema_version: AnswerSchema::V0,
         answer_id: id.into(),
@@ -88,32 +107,73 @@ fn answer(id: &str, outcome: &str, of: Option<&str>, answerer: &str, note: &str,
         answered_at: received_at.into(),
         received_at: received_at.into(),
         claim_in_future: false,
-        answerer: answerer.into(),
+        answerer: answerer.map(str::to_string),
         authority: DeskAuthority::Member,
         request_id: format!("00000000-0000-4000-8000-00000000000{}", &id[1..]),
     }
 }
 
-/// A fork's record with a counted answer and a decider's revision, answerer ids raw: the door sends
-/// them raw and Bifrost masks them for a reader who is not a decider.
-fn record() -> ForkRecord {
+/// A fork's record with a counted answer, a decider's revision, a refusal and a retraction: four
+/// answers by three accounts. A decider's view names every answerer; a non-decider's names none and
+/// keeps the count.
+fn record(decider: bool) -> ForkRecord {
+    let who = |id: &'static str| decider.then_some(id);
     ForkRecord {
         schema_version: RecordSchema::V0,
         fork_id: FORK.into(),
-        options_hash: "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48".into(),
+        options_hash: HASH.into(),
         counted_answer_id: Some("n1".into()),
+        answerer_count: 3,
         answers: vec![
-            answer("n1", "Counted", None, READER, "The asker lists her own forks.", "2026-11-11T17:00:00Z"),
-            answer("n2", "Revision", Some("n1"), OTHER_DECIDER, "Agreed.", "2026-11-11T17:05:00Z"),
-            ForkDeskAnswer { code: Some(huginn_mind::desk_wire::ForkAnswerCode::NotADecider), ..answer("n3", "Refused", None, OUTSIDER, "Me too.", "2026-11-11T17:06:00Z") },
+            answer("n1", "Counted", None, who(READER), "The asker lists her own forks.", "2026-11-11T17:00:00Z"),
+            answer("n2", "Revision", Some("n1"), who(OTHER_DECIDER), "Agreed.", "2026-11-11T17:05:00Z"),
+            ForkDeskAnswer { code: Some(huginn_mind::desk_wire::ForkAnswerCode::NotADecider), ..answer("n3", "Refused", None, who(OUTSIDER), "Me too.", "2026-11-11T17:06:00Z") },
             // A second answer by an account already counted: four answers, three answerers.
             ForkDeskAnswer {
                 retracts: Some("n2".into()),
                 choice: None,
                 note: None,
-                ..answer("n4", "Retraction", None, OTHER_DECIDER, "", "2026-11-11T17:07:00Z")
+                ..answer("n4", "Retraction", None, who(OTHER_DECIDER), "", "2026-11-11T17:07:00Z")
             },
         ],
+    }
+}
+
+const HASH: &str = "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48";
+
+/// The fork's card. A decider's view lists the call's ids; a non-decider's lists none and keeps the count.
+fn card(decider: bool, raised_at: Option<&str>) -> ForkCard {
+    ForkCard {
+        schema_version: CardSchema::V0,
+        fork_id: FORK.into(),
+        title: "Who may list a fork?".into(),
+        context: "A fork is read by members only once it is listed.".into(),
+        options: vec![ForkOption { id: "asking-mind".into(), text: "The asking Mind lists her own forks.".into() }, ForkOption { id: "operator".into(), text: "An operator lists them.".into() }],
+        recommendation: "asking-mind".into(),
+        depends: Vec::new(),
+        leans: None,
+        flag: None,
+        raised_in: Some(ForkRef { kind: "Idea".into(), id: "eureka-substrate:idea:desk-door-map".into() }),
+        raised_at: raised_at.map(str::to_string),
+        deciders: if decider { vec![READER.into(), OTHER_DECIDER.into()] } else { Vec::new() },
+        decider_count: 2,
+        status: CardStatus::Open,
+        ruling: None,
+        ruled_from: Vec::new(),
+        order: 41,
+        options_hash: HASH.into(),
+    }
+}
+
+fn entry(decider: bool, raised_at: Option<&str>) -> ForkEntry {
+    ForkEntry { schema_version: EntrySchema::V0, card: card(decider, raised_at), record: record(decider) }
+}
+
+/// One open fork on the page; the counts are the page's visible set.
+fn list_of(entry: ForkEntry) -> DeskResponse {
+    DeskResponse::Forks {
+        list: ForkList { schema_version: ListSchema::V0, mind: "eureka".into(), stamp: "s10190".into(), open_count: 1, recorded_count: 0, forks: vec![entry], next_cursor: None },
+        as_of: 10190,
     }
 }
 
@@ -154,6 +214,13 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
     message("list-open-cursor.request", encode_desk_request("m-2", &forks(Some(ListStatus::Open), Some(42), 50), None).unwrap());
     message("list-counts.request", encode_desk_request("m-3", &forks(Some(ListStatus::Open), None, 0), None).unwrap());
     message("read.request", encode_desk_request("m-4", &read(), None).unwrap());
+    message("list-non-decider.request", encode_desk_request("m-5", &forks_as_non_decider(), None).unwrap());
+    message("read-non-decider.request", encode_desk_request("m-6", &read_as_non_decider(), None).unwrap());
+    message("list-open.response", encode_desk_response("m-1", "forks", &list_of(entry(true, Some("2026-11-11T16:40:12Z"))), RUNTIME).unwrap());
+    message("list-open-non-decider.response", encode_desk_response("m-5", "forks", &list_of(entry(false, Some("2026-11-11T16:40:12Z"))), RUNTIME).unwrap());
+    // raised_at nil: the question's first admission is unknown.
+    message("read.response", encode_desk_response("m-4", "fork", &DeskResponse::Fork { entry: entry(true, None), as_of: 10190 }, RUNTIME).unwrap());
+    message("read-non-decider.response", encode_desk_response("m-6", "fork", &DeskResponse::Fork { entry: entry(false, None), as_of: 10190 }, RUNTIME).unwrap());
     message("list-empty.response", encode_desk_response("m-1", "forks", &list(0, 0), RUNTIME).unwrap());
     message("list-counts.response", encode_desk_response("m-3", "forks", &list(3, 5), RUNTIME).unwrap());
     message(
@@ -185,9 +252,11 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
         encode_desk_failure("m-1", "forks", &OperationFailure { code: "payload-not-a-request".into(), message: "field Forks.limit: out-of-range".into() }, RUNTIME),
     );
     message("error.response", CultNetMessage::Error { error: "huginn.desk refuses a message_id over 256 bytes".into(), code: None, details: None });
-    let whole = rmp_serde::to_vec_named(&record()).unwrap();
-    files.push(("record-whole.payload.msgpack".into(), whole.clone()));
-    files.push(("record-whole.payload.hex".into(), hex(&whole).into_bytes()));
+    for (name, decider) in [("record-whole", true), ("record-withheld", false)] {
+        let bytes = rmp_serde::to_vec_named(&record(decider)).unwrap();
+        files.push((format!("{name}.payload.msgpack"), bytes.clone()));
+        files.push((format!("{name}.payload.hex"), hex(&bytes).into_bytes()));
+    }
     files
 }
 
@@ -232,7 +301,7 @@ fn every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid() {
         assert!(account_id(&subject.0), "subject");
         assert!(request.deciders().iter().all(|decider| account_id(&decider.0)), "deciders");
     }
-    assert!(record().answers.iter().all(|answer| account_id(&answer.answerer)), "answerer");
+    assert!(record(true).answers.iter().all(|answer| account_id(answer.answerer.as_deref().unwrap())), "answerer");
     for shape in [
         "@heimdall:gamecult.org",
         "meta@gamecult.org",
@@ -503,28 +572,60 @@ impl Value {
     }
 }
 
-/// Huginn's real types against CultLib's bytes. A decider's answers already decode (the answer keeps
-/// its 16 keys). The card and the record do not: `ForkCard` has no `raised_at` or `decider_count`,
-/// `ForkRecord` no `answerer_count`, and `ForkDeskAnswer.answerer` is a non-null string, and each type
-/// refuses unknown keys. This pins the gap `cut-desk-feed-listing` closes; when it does, these
-/// refusals become successful decodes of the same bytes and this test changes with them.
+/// Huginn's real types against CultLib's bytes: each of the 14 vendored vectors decodes into the type
+/// that names it and re-encodes to the same bytes.
 #[test]
-fn huginn_types_do_not_yet_carry_the_pinned_shapes() {
-    use huginn_mind::desk_wire::ForkCard;
-    for name in ["answer-counted", "answer-refused-stale"] {
-        rmp_serde::from_slice::<ForkDeskAnswer>(&vendored(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
+fn huginn_types_decode_and_re_encode_every_vendored_vector_byte_for_byte() {
+    fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(name: &str) {
+        let bytes = vendored(name);
+        let value = rmp_serde::from_slice::<T>(&bytes).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(rmp_serde::to_vec_named(&value).unwrap() == bytes, "{name} does not re-encode byte for byte");
     }
-    fn refused<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> String {
-        rmp_serde::from_slice::<T>(bytes).err().expect("the real type refuses these bytes").to_string()
+    assert_eq!(VENDORED.len(), 14);
+    for (name, _) in VENDORED {
+        match name.split('-').next().unwrap() {
+            "card" => round_trip::<ForkCard>(name),
+            "answer" => round_trip::<ForkDeskAnswer>(name),
+            "entry" => round_trip::<ForkEntry>(name),
+            other => panic!("{name}: no type for {other}"),
+        }
     }
-    assert!(refused::<ForkCard>(&vendored("card-operator-fork")).contains("raised_at"));
-    assert!(refused::<ForkCard>(&vendored("card-withheld-deciders")).contains("raised_at"));
-    for name in ["answer-withheld-answerer", "answer-withheld-answerer-revision", "answer-withheld-answerer-retraction"] {
-        assert!(refused::<ForkDeskAnswer>(&vendored(name)).contains("string"), "{name}");
+}
+
+/// Negative first: a non-decider's bytes hold no account id, in any fixture Huginn writes for that view.
+#[test]
+fn a_non_decider_fixture_holds_no_account_id() {
+    let ids = [READER, OTHER_DECIDER, OUTSIDER, NON_DECIDER];
+    let withheld = |bytes: &[u8]| ids.iter().filter(|id| holds(bytes, id)).count();
+    let files = fixtures();
+    let bytes_of = |name: &str| files.iter().find(|(file, _)| file == name).unwrap_or_else(|| panic!("no fixture {name}")).1.clone();
+    for name in ["list-open-non-decider.response.payload.msgpack", "read-non-decider.response.payload.msgpack", "record-withheld.payload.msgpack"] {
+        let bytes = bytes_of(name);
+        assert_eq!(withheld(&bytes), 0, "{name} carries an account id");
     }
-    // The record is the entry's last key: its bytes run from the `86` after the key to the end.
-    let entry = vendored("entry-open-counted");
-    let key = [&[0xa6u8][..], b"record", &[0x86]].concat();
-    let at = entry.windows(key.len()).position(|window| window == key).expect("the record key") + key.len() - 1;
-    assert!(refused::<ForkRecord>(&entry[at..]).contains("answerer_count"));
+    // The decider's twins do name them, so the search above can fail.
+    for name in ["list-open.response.payload.msgpack", "record-whole.payload.msgpack"] {
+        assert!(withheld(&bytes_of(name)) >= 3, "{name}");
+    }
+}
+
+/// The record header is `86` with `answerer_count` fifth, the card `DE 00 12` with `raised_at` and
+/// `decider_count` where CultLib puts them, in Huginn's own bytes.
+#[test]
+fn huginns_own_card_and_record_bytes_have_the_pinned_headers_and_keys() {
+    let card_bytes = rmp_serde::to_vec_named(&card(true, Some("2026-11-11T16:40:12Z"))).unwrap();
+    assert_eq!(card_bytes[..3], [0xde, 0x00, 0x12]);
+    assert_eq!(decode(&card_bytes).keys(), CARD_KEYS);
+    check_card(&decode(&card_bytes), false);
+    let withheld_bytes = rmp_serde::to_vec_named(&card(false, None)).unwrap();
+    check_card(&decode(&withheld_bytes), true);
+    assert_eq!(decode(&withheld_bytes).get("raised_at"), &Value::Nil);
+    for decider in [true, false] {
+        let record_bytes = rmp_serde::to_vec_named(&record(decider)).unwrap();
+        assert_eq!(record_bytes[0], 0x86);
+        let decoded = decode(&record_bytes);
+        assert_eq!(decoded.keys(), RECORD_KEYS);
+        assert_eq!(decoded.get("answerer_count").int(), 3);
+        decoded.list_of_answers().iter().for_each(|answer| check_answer(answer, decider));
+    }
 }

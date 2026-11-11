@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(counted(&mind, FORK), Some(answer));
     }
 
-    /// Libby's vectors (CultLib 6231ecad, `contracts/cultnet/governance/fork-card-vectors.json`, the `optionsHash` array):
+    /// Libby's vectors (CultLib d3025d3c, `contracts/cultnet/governance/fork-card-vectors.json`, the `optionsHash` array):
     /// the seven of the binding file, A to G, and the eight she adds. Each is recomputed from its shown members.
     fn vectors() -> Vec<serde_json::Value> {
         let file: serde_json::Value = serde_json::from_str(include_str!("../vectors/fork-card-vectors.json")).unwrap();

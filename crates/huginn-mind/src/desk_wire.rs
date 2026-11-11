@@ -1,5 +1,5 @@
 //! The fork desk's answer wire, Huginn's half: Libby's answer-side documents
-//! (CultLib `contracts/cultnet/governance/`, the contract file and its vectors at e57fbaee)
+//! (CultLib `contracts/cultnet/governance/`, the contract file and its vectors at d3025d3c)
 //! as Rust types, the one conversion between her `n<seq>` answer ids and the
 //! record keys, the projection of a stored answer, the refusal mapping and the
 //! showability predicate, and `Mind::desk_answer`, the one call that runs them in order.
@@ -147,7 +147,10 @@ pub struct ForkDeskAnswer {
     pub answered_at: String,
     pub received_at: String,
     pub claim_in_future: bool,
-    pub answerer: String,
+    /// The answering account, or nil in a non-decider's view (the key is kept). A stored answer always has one.
+    #[serde(deserialize_with = "required")]
+    #[schemars(required)]
+    pub answerer: Option<String>,
     pub authority: DeskAuthority,
     pub request_id: String,
 }
@@ -180,12 +183,12 @@ pub struct ForkRefusal {
 /// `Refused` is any other Mind refusal; an `Unavailable` is Bifrost's to turn into its 503, and
 /// Huginn writes no document for it.
 ///
-/// The trust boundary of the reads (ruling `desk-read-visibility-whole-record`): `Forks` and `Fork`
-/// carry the WHOLE record, every answer's note included, to whatever the peer-checked socket
-/// carries. Huginn strips nothing and gates nothing; Bifrost applies visibility at its door (a
-/// stripped read serves `note: null`, CultLib `fork-card.md`). Huginn must therefore be reachable
-/// only by Bifrost's peer-checked socket: the peer-uid check IS the whole authentication, and a
-/// second reader of that socket is a note leak.
+/// The trust boundary of the reads (ruling `desk-read-visibility-withheld-ids`): `Forks` and `Fork`
+/// carry every answer's note, to whatever the peer-checked socket carries; Bifrost strips notes
+/// at its door (a stripped read serves `note: null`, CultLib `fork-card.md`). Huginn itself
+/// withholds the account ids from a reader who is not a decider (`deciders` empty, `answerer` nil,
+/// counts in their place). Huginn must be reachable only by Bifrost's peer-checked socket: the
+/// peer-uid check IS the whole authentication, and a second reader of that socket is a note leak.
 // One value per call, built and encoded once; a box would only add a deref to every reader.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -275,12 +278,11 @@ fn deciders_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schem
 /// the set refuses the whole payload.
 ///
 /// The reads, `Forks` and `Fork`, carry NO `authority` (CultLib `list_request` and
-/// `read_request` are closed and have none; one that names it is refused whole). Their `subject`
-/// and `deciders` gate nothing: `deciders` only fills the card's `deciders` and the showability
-/// gate, `subject` is read by no read. `Forks` takes the contract's `list_request` fields flat
-/// beside them (`status`, `cursor`, `limit`), each key written, `null` where absent. Huginn
-/// answers every read with the whole record and Bifrost applies visibility; see `DeskResponse`
-/// for the trust boundary. These docs and the doc of `Mind::desk_forks`/`Mind::desk_fork` are the
+/// `read_request` are closed and have none; one that names it is refused whole). Their `deciders`
+/// feed the showability gate, and `subject` decides the view: a subject in `deciders` is a decider
+/// and is told the ids; any other is told counts in their place. `Forks` takes the contract's `list_request` fields flat
+/// beside them (`status`, `cursor`, `limit`), each key written, `null` where absent. Bifrost
+/// strips notes; see `DeskResponse` for the trust boundary. These docs and the doc of `Mind::desk_forks`/`Mind::desk_fork` are the
 /// reads spec.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -459,7 +461,7 @@ fn project(key: &str, stored: &PipelineDeskAnswer) -> Result<ForkDeskAnswer, Min
         answered_at: stored.answered_at.0.clone(),
         received_at: stored.received_at.0.clone(),
         claim_in_future: stored.claim_in_future,
-        answerer: stored.answerer.0.clone(),
+        answerer: Some(stored.answerer.0.clone()),
         authority: stored.authority,
         request_id: stored.request_id.0.clone(),
     })
@@ -566,7 +568,7 @@ mod tests {
     const LIST: [&str; 4] = ["x", "y", "z", "op"];
     const AT: &str = "2026-11-10T12:00:00Z";
 
-    // ---- Libby's vectors: CultLib 6231ecad, `contracts/cultnet/governance/fork-card-vectors.json` ----
+    // ---- Libby's vectors: CultLib d3025d3c, `contracts/cultnet/governance/fork-card-vectors.json` ----
 
     fn vectors() -> Value {
         serde_json::from_str(include_str!("../vectors/fork-card-vectors.json")).unwrap()
@@ -776,7 +778,8 @@ mod tests {
             claim_in_future: message["claim_in_future"].as_bool().unwrap(),
             request_id: RequestId(text("request_id").unwrap()),
             body_sha256: Sha256Hex("0".repeat(64)),
-            answerer: Short(text("answerer").unwrap()),
+            // A withheld vector names no answerer: store a placeholder, the vector is the non-decider's view of it.
+            answerer: Short(text("answerer").unwrap_or_else(|| "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f".into())),
             authority,
             outcome,
         };
@@ -787,10 +790,14 @@ mod tests {
     fn stored_answers_project_to_the_desk_answer_vectors() {
         let file = vectors();
         let valid = rows(&file["deskAnswer"]["valid"]);
-        assert_eq!(valid.len(), 5);
+        assert_eq!(valid.len(), 8);
         for (name, message, bytes) in &valid {
             let (key, stored) = stored_from(message);
-            let projected = project(&key, &stored).unwrap();
+            let mut projected = project(&key, &stored).unwrap();
+            // A null answerer is a non-decider's view of the stored answer.
+            if message["answerer"].is_null() {
+                projected.answerer = None;
+            }
             assert_eq!(&encode(&projected), bytes, "{name}");
         }
         // Each answer inside her results is the projection of an equivalent record too.
@@ -1348,9 +1355,9 @@ mod tests {
         let (other, committed) = ask(&mut mind, "y", request.clone());
         let (other, _, _) = answered(other);
         assert!(committed);
-        assert_eq!((other.answer_id.as_str(), other.answerer.as_str(), other.outcome.as_str(), other.request_id.as_str()), ("n2", "y", "Revision", request.request_id.as_str()));
+        assert_eq!((other.answer_id.as_str(), other.answerer.as_deref().unwrap(), other.outcome.as_str(), other.request_id.as_str()), ("n2", "y", "Revision", request.request_id.as_str()));
         let (original, _, _) = answered(ask(&mut mind, "x", request.clone()).0);
-        assert_eq!((original.answer_id.as_str(), original.answerer.as_str()), ("n1", "x"));
+        assert_eq!((original.answer_id.as_str(), original.answerer.as_deref().unwrap()), ("n1", "x"));
         // V17 and V18: an id that is no lowercase D-format UUID is body_invalid naming request_id, and binds nothing.
         let before = head(&mind);
         for bad in ["retry-1", "0000000A-0000-4000-8000-00000000000B", "{00000000-0000-4000-8000-000000000001}", "00000000-0000-4000-8000-0000000000010", "", " 00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000001 ", "00000000-0000-4000-8000-000000000001\n", "00000000-0000-4000-8000-000000000001x"] {
@@ -1565,7 +1572,7 @@ mod tests {
         assert_eq!(answered(off).0.code, Some(ForkAnswerCode::NotADecider));
         let on = mind.desk_answer(&deciders(&["m"]), s("m"), DeskAuthority::Member, wire(FORK, &hash), now());
         let (answer, _, _) = answered(on);
-        assert_eq!((answer.outcome.as_str(), answer.authority, answer.answerer.as_str()), ("Counted", DeskAuthority::Member, "m"));
+        assert_eq!((answer.outcome.as_str(), answer.authority, answer.answerer.as_deref().unwrap()), ("Counted", DeskAuthority::Member, "m"));
     }
 
     // ---- the desk request on the wire: deciders ride each call, at most 64, never stored ----

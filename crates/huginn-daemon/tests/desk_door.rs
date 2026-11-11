@@ -319,15 +319,16 @@ fn the_binary_serves_both_doors_and_survives_restart() {
     assert_eq!((stale.code, counted_answer_id.as_deref()), (Some(ForkAnswerCode::StaleFork), Some("n1")));
     let stored = daemon.documents();
     assert_eq!(stored, seeded + 2);
-    // A subject the call's deciders do not name reads both answers, the first with its choice and the stale one with its code.
+    // A subject the call's deciders do not name reads both answers, the first with its choice and the stale one with its code, and is told no account id.
     let DeskResponse::Fork { entry, .. } =
         ask(&desk, "m-r3", &DeskRequest::Fork { mind: INSTANCE.into(), subject: short("outsider"), deciders: vec![short("y")], fork_id: FORK.into() })
     else {
         panic!("a read")
     };
-    let seen: Vec<_> = entry.record.answers.iter().map(|answer| (answer.answer_id.as_str(), answer.answerer.as_str(), answer.code)).collect();
-    assert_eq!(seen, [("n1", "x", None), ("n2", "x", Some(ForkAnswerCode::StaleFork))]);
-    assert_eq!((entry.record.counted_answer_id.as_deref(), entry.card.deciders.as_slice()), (Some("n1"), ["y".to_string()].as_slice()));
+    let seen: Vec<_> = entry.record.answers.iter().map(|answer| (answer.answer_id.as_str(), answer.answerer.as_deref(), answer.code)).collect();
+    assert_eq!(seen, [("n1", None, None), ("n2", None, Some(ForkAnswerCode::StaleFork))]);
+    assert_eq!((entry.record.counted_answer_id.as_deref(), entry.record.answerer_count), (Some("n1"), 1));
+    assert_eq!((entry.card.deciders.as_slice(), entry.card.decider_count), (&[][..], 1));
     assert_eq!(daemon.documents(), stored);
 
     // A stop takes the socket with it; the stored answers are the retry's memory.

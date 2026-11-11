@@ -74,6 +74,17 @@ impl<'i> Docs<'i> {
         self.image.id_of(kind, id).filter(|row| self.visible(*row)).map(|row| self.image.row(row).ordinal)
     }
 
+    /// When the document was first admitted, in UTC: an imported document's source receipt
+    /// (`imported_from.committed_at`) wins over this mind's own `admitted_at`. `None` when the
+    /// document is not held at this snapshot or the time does not parse as RFC3339 (an import's
+    /// `committed_at` is only checked as non-empty text at admission).
+    pub(crate) fn first_admitted_at(&self, kind: PipelineKind, id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        let row = self.image.id_of(kind, id).filter(|row| self.visible(*row))?;
+        let admission = &self.image.row(row).view.admission;
+        let text = admission.provenance.imported_from.as_ref().map_or(admission.admitted_at.as_str(), |source| source.committed_at.0.as_str());
+        chrono::DateTime::parse_from_rfc3339(text).ok().map(|time| time.with_timezone(&chrono::Utc))
+    }
+
     pub(crate) fn find(&self, kind: PipelineKind, id: &str) -> Option<&PipelineDocument> {
         self.in_batch(kind, id).or_else(|| self.in_image(kind, id))
     }
