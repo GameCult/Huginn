@@ -590,8 +590,8 @@ fn refusal_of(response: &DeskResponse) -> Option<(String, String)> {
 
 /// Three forks, the middle one's record grown over the socket until its card alone is past the page
 /// budget. The list names it and its order (`fork_too_large`), the cursor `c<order>` walks on to the
-/// older fork and ends at order 0, a READ of it never returns that code (an entry while it fits the
-/// response bound, the door's named response-too-large past it), and `authority` on a read is still
+/// older fork and ends at order 0, a READ of it never carries an order or cursor (an entry while it fits the
+/// response bound, the fork-only `fork_too_large` past it), and `authority` on a read is still
 /// refused.
 #[test]
 fn a_fork_too_large_to_page_is_named_by_the_list_and_never_by_the_read() {
@@ -664,11 +664,11 @@ fn a_fork_too_large_to_page_is_named_by_the_list_and_never_by_the_read() {
     let read = ask(&desk, "m-r", &fork_read("x", big));
     let DeskResponse::Fork { entry, .. } = &read else { panic!("a read of the oversize fork is its entry, not a refusal: {read:?}") };
     assert_eq!((entry.card.fork_id.as_str(), entry.card.order), (big, 1));
-    // Past DESK_MAX_RESPONSE_BYTES the read is the door's named response-too-large refusal, still not fork_too_large.
+    // Past DESK_MAX_RESPONSE_BYTES the read is the fork-only fork_too_large (no order, no cursor).
     let mut more = 0_u32;
     let too_big = loop {
         let read = ask(&desk, "m-r", &fork_read("x", big));
-        if matches!(read, DeskResponse::Refused(_)) {
+        if matches!(read, DeskResponse::NotStored(_)) {
             break read;
         }
         assert!(matches!(read, DeskResponse::Fork { .. }), "{read:?}");
@@ -681,7 +681,8 @@ fn a_fork_too_large_to_page_is_named_by_the_list_and_never_by_the_read() {
         }
         assert!(matches!(ask(&desk, "m-w", &grow), DeskResponse::Answered { .. }));
     };
-    assert!(matches!(too_big, DeskResponse::Refused(huginn_mind::MindRefusal::ResponseTooLarge { .. })), "{too_big:?}");
+    let (code, text) = refusal_of(&too_big).unwrap();
+    assert!(code == "fork_too_large" && text.contains(big) && !text.contains("order"), "{text}");
     assert!(refusal_of(&ask(&desk, "m-g", &forks_page("x", Some("c2")))).is_some_and(|(code, _)| code == "fork_too_large"));
 
     // (4) `authority` on a read is still refused whole (the contract's request_invalid is the door's payload-not-a-request).
@@ -782,4 +783,47 @@ fn the_newest_fork_too_large_is_named_and_its_cursor_resumes_to_the_older_forks(
     assert!(text.contains(newest) && text.contains("order 2") && text.contains("c2"), "{text}");
     let rest = page_ids(ask(&desk, "m-p", &forks_page("x", Some("c2"))));
     assert_eq!(rest, (vec!["eureka-state:question:Q2".to_string(), FORK.to_string()], None));
+}
+
+/// Grows `fork` over the socket until a READ of it no longer fits the reply cap; returns the raw reply.
+fn grown_until_read_overflows(desk: &Path, hash: &str, fork: &str) -> CultNetMessage {
+    let note = "a long reason, ".repeat(60);
+    for sent in 1..400_u32 {
+        let reply = exchange(desk, &desk_bytes("m-read", &fork_read("x", fork))).expect("the door replied");
+        if !matches!(decode_desk_response(&reply).unwrap().1, Ok(DeskResponse::Fork { .. })) {
+            return reply;
+        }
+        let mut grow = answer("x", hash, &format!("00000000-0000-4000-8000-{sent:012}"));
+        if let DeskRequest::Answer { request, .. } = &mut grow {
+            request.fork_id = fork.into();
+            request.answer = Some(ForkAnswer { choice: None, note: Some(note.clone()) });
+        }
+        assert!(matches!(ask(desk, "m-w", &grow), DeskResponse::Answered { .. }));
+    }
+    panic!("the record does not grow")
+}
+
+/// A READ of a fork whose entry is past the reply cap is `fork_too_large` naming the fork, with no
+/// order and no cursor; a fitting fork still reads; the list's refusal is unchanged; the generic
+/// response-too-large stays for every other reply.
+#[test]
+fn a_read_of_an_oversize_fork_is_fork_too_large_naming_only_the_fork() {
+    let _serial = serial();
+    let (_root, _run, hash, desk, _daemon) = three_forks();
+    let big = "eureka-state:question:Q2";
+    let reply = grown_until_read_overflows(&desk, &hash, big);
+    let (id, response) = decode_desk_response(&reply).unwrap();
+    assert_eq!(id, "m-read");
+    let (code, text) = refusal_of(&response.unwrap()).expect("a not-stored refusal");
+    assert_eq!(code, "fork_too_large");
+    assert!(text.contains(big) && !text.contains("order") && !text.contains("cursor") && !text.contains(" c1"), "{text}");
+    // Fitting forks read, the others untouched.
+    for fork in [FORK, "eureka-state:question:Q3"] {
+        assert!(matches!(ask(&desk, "m-ok", &fork_read("x", fork)), DeskResponse::Fork { .. }));
+    }
+    // The list still names the fork and its order, and the cursor goes on.
+    let listed = ask(&desk, "m-l", &forks_page("x", Some("c2")));
+    let (code, text) = refusal_of(&listed).unwrap();
+    assert_eq!(code, "fork_too_large");
+    assert!(text.contains(big) && text.contains("order 1") && text.contains("c1"), "{text}");
 }

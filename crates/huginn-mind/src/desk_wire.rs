@@ -390,6 +390,12 @@ fn fork_too_large(fork: &str, order: u64) -> ForkRefusal {
     fork_refusal(ForkRefusalCode::ForkTooLarge, format!("fork_too_large: fork {fork} at order {order} is past the page budget by itself; {onward}"))
 }
 
+/// A READ of one fork whose entry is past the reply cap: names the fork, nothing else (a read has no
+/// order to continue from and no cursor). The door raises it where it measures the reply.
+pub fn fork_too_large_read(fork: &str) -> ForkRefusal {
+    fork_refusal(ForkRefusalCode::ForkTooLarge, format!("fork_too_large: fork {fork} is past the response bound by itself"))
+}
+
 fn body_invalid(field: &str) -> ForkRefusal {
     fork_refusal(ForkRefusalCode::BodyInvalid, format!("body_invalid: the body does not satisfy gamecult.fork.answer_request.v0 ({field})"))
 }

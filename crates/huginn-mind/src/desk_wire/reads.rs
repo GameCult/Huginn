@@ -328,7 +328,8 @@ impl<S: MindStore> Mind<S> {
     /// less the envelope margin); counts and stamp are unaffected. A page whose FIRST entry alone is past
     /// the budget is the `fork_too_large` refusal, naming that fork and its order: the caller goes on
     /// with the cursor `c<order>`, which returns the forks below it, so no older fork is unreachable.
-    /// The fork itself is still its whole entry on `desk_fork`. Nothing is dropped silently.
+    /// The fork itself is still its whole entry on `desk_fork`; if that entry is past the reply cap the door
+    /// answers the read with `fork_too_large` naming the fork (no order, no cursor), not `ResponseTooLarge`. Nothing is dropped silently.
     ///
     /// The call is handed the call's `deciders` and no subject: they fill each card's `deciders` and
     /// feed the showability gate, and gate nothing else. The record is whole, notes included
@@ -808,6 +809,81 @@ mod tests {
             }
         }
         assert_eq!(steps, 9);
+    }
+
+    /// CultLib f6c9bf5f: the short-page and too-large vectors. What Huginn can judge replays: the short
+    /// pages are strict nonempty prefixes that resume below their last entry, and every refusal document
+    /// (list step, read, doorRefusals) is a `ForkRefusal` that round-trips byte for byte with code
+    /// `fork_too_large`. HTTP statuses, `doorFaults` and `request_id_conflict` being answer-only are
+    /// Bifrost's mapping; Huginn has no judge for them.
+    #[test]
+    fn short_page_and_too_large_vectors_replay_byte_for_byte() {
+        let file = transport();
+        let mut short = 0;
+        let mut refusals = 0;
+        for scenario in file["listShortPages"].as_array().unwrap() {
+            let name = scenario["name"].as_str().unwrap();
+            for step in scenario["steps"].as_array().unwrap() {
+                if let Some(hex) = step["responseHex"].as_str() {
+                    let bytes = bytes_of(hex);
+                    let page: ForkList = rmp_serde::from_slice(&bytes).unwrap();
+                    assert_eq!(encode(&page), bytes, "{name}");
+                    if let Some(cursor) = page.next_cursor {
+                        let last = page.forks.last().unwrap().card.order;
+                        assert_eq!(cursor.order(), last, "{name}: next_cursor resumes below the last entry returned");
+                        assert!((page.forks.len() as u64) < step["request"]["limit"].as_u64().unwrap(), "{name}: a short page");
+                        short += 1;
+                    }
+                } else {
+                    let bytes = bytes_of(step["refusalHex"].as_str().unwrap());
+                    let refusal: ForkRefusal = rmp_serde::from_slice(&bytes).unwrap();
+                    assert_eq!(encode(&refusal), bytes, "{name}");
+                    assert_eq!(refusal.code, ForkRefusalCode::ForkTooLarge);
+                    refusals += 1;
+                }
+            }
+        }
+        assert_eq!((short, refusals), (2, 2));
+        let read = &file["readTooLarge"][0];
+        let bytes = bytes_of(read["refusalHex"].as_str().unwrap());
+        let refusal: ForkRefusal = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!((encode(&refusal), refusal.code), (bytes, ForkRefusalCode::ForkTooLarge));
+        let top: Value = serde_json::from_str(include_str!("../../vectors/fork-card-vectors.json")).unwrap();
+        let door = top["doorRefusals"].as_array().unwrap().iter().find(|row| row["name"] == "fork_too_large").unwrap();
+        let bytes = bytes_of(door["messagePackHex"].as_str().unwrap());
+        assert_eq!(encode(&rmp_serde::from_slice::<ForkRefusal>(&bytes).unwrap()), bytes);
+    }
+
+    /// The contract pins no exact text for `fork_too_large`: the vector's `error` string is
+    /// Huginn-independent, and a judge checks that the refusal names the entry the page would open
+    /// with. So for each vector case Huginn's refusal is code `fork_too_large`, its text contains the
+    /// fork id, the list form contains the order (and at order 0 never a `c0` cursor), and the read
+    /// form contains the fork id and no `order` or `cursor` wording.
+    #[test]
+    fn the_refusals_name_the_fork_the_vectors_name_and_by_the_contracts_form() {
+        let file = transport();
+        let mut listed = 0;
+        for scenario in file["listShortPages"].as_array().unwrap() {
+            for step in scenario["steps"].as_array().unwrap().iter().filter(|step| step.get("refusal").is_some()) {
+                let (fork_id, order) = (step["fork_id"].as_str().unwrap(), step["order"].as_u64().unwrap());
+                let refusal = fork_too_large(fork_id, order);
+                assert_eq!(refusal.code, ForkRefusalCode::ForkTooLarge);
+                assert!(refusal.error.contains(fork_id) && refusal.error.contains(&format!("order {order}")), "{}", refusal.error);
+                if order == 0 {
+                    assert!(!refusal.error.contains("c0"), "{}", refusal.error);
+                }
+                listed += 1;
+            }
+        }
+        assert_eq!(listed, 2);
+        let order_zero = fork_too_large("gamecult-chat:question:q1", 0);
+        assert!(!order_zero.error.contains("c0") && order_zero.error.contains("end of the list"), "{}", order_zero.error);
+        for read in file["readTooLarge"].as_array().unwrap() {
+            let fork_id = read["fork_id"].as_str().unwrap();
+            let refusal = fork_too_large_read(fork_id);
+            assert_eq!(refusal.code, ForkRefusalCode::ForkTooLarge);
+            assert!(refusal.error.contains(fork_id) && !refusal.error.contains("order") && !refusal.error.contains("cursor"), "{}", refusal.error);
+        }
     }
 
     #[test]

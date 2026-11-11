@@ -2692,6 +2692,16 @@
         "error": "request_invalid: the request does not satisfy its document"
       },
       "messagePackHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AF726571756573745F696E76616C6964A56572726F72D93A726571756573745F696E76616C69643A20746865207265717565737420646F6573206E6F7420736174697366792069747320646F63756D656E74"
+    },
+    {
+      "name": "fork_too_large",
+      "httpStatus": 422,
+      "message": {
+        "schemaVersion": "gamecult.fork.refusal.v0",
+        "code": "fork_too_large",
+        "error": "fork_too_large: fork gamecult-chat:question:q3 (order 3) alone is past the response budget"
+      },
+      "messagePackHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D95A666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713320286F7264657220332920616C6F6E6520697320706173742074686520726573706F6E736520627564676574"
     }
   ],
   "unavailable": [
@@ -6559,6 +6569,1177 @@
             "responseHex": "87AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E6C6973742E7630A46D696E64A46E696275A57374616D70A27337AA6F70656E5F636F756E7400AE7265636F726465645F636F756E7400A5666F726B7390AB6E6578745F637572736F72C0"
           }
         ]
+      }
+    ],
+    "listShortPages": [
+      {
+        "name": "a_short_page_resumes_below_its_last_entry",
+        "ordinal": 9,
+        "entries": [
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q3",
+              "title": "Fork 3",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 3,
+              "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q3",
+              "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q2",
+              "title": "Fork 2",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 2,
+              "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q2",
+              "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "title": "Fork 1",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 1,
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "title": "Fork 0",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 0,
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          }
+        ],
+        "steps": [
+          {
+            "request": {
+              "schemaVersion": "gamecult.fork.list_request.v0",
+              "mind": "gamecult-chat",
+              "status": null,
+              "cursor": null,
+              "limit": 3
+            },
+            "response": {
+              "schemaVersion": "gamecult.fork.list.v0",
+              "mind": "gamecult-chat",
+              "stamp": "s9",
+              "open_count": 4,
+              "recorded_count": 0,
+              "forks": [
+                {
+                  "schemaVersion": "gamecult.fork.entry.v0",
+                  "card": {
+                    "schemaVersion": "gamecult.fork.card.v0",
+                    "fork_id": "gamecult-chat:question:q3",
+                    "title": "Fork 3",
+                    "context": "Should a slot mark be shared?",
+                    "options": [
+                      {
+                        "id": "yes",
+                        "text": "Share it."
+                      },
+                      {
+                        "id": "no",
+                        "text": "Keep it local."
+                      }
+                    ],
+                    "recommendation": "no",
+                    "depends": [
+                      "gamecult-chat:question:file-zone-audience"
+                    ],
+                    "leans": null,
+                    "flag": null,
+                    "raised_in": {
+                      "kind": "CutSpec",
+                      "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+                    },
+                    "deciders": [
+                      "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+                    ],
+                    "status": "open",
+                    "ruling": null,
+                    "ruled_from": [],
+                    "order": 3,
+                    "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2"
+                  },
+                  "record": {
+                    "schemaVersion": "gamecult.fork.record.v0",
+                    "fork_id": "gamecult-chat:question:q3",
+                    "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2",
+                    "counted_answer_id": null,
+                    "answers": []
+                  }
+                },
+                {
+                  "schemaVersion": "gamecult.fork.entry.v0",
+                  "card": {
+                    "schemaVersion": "gamecult.fork.card.v0",
+                    "fork_id": "gamecult-chat:question:q2",
+                    "title": "Fork 2",
+                    "context": "Should a slot mark be shared?",
+                    "options": [
+                      {
+                        "id": "yes",
+                        "text": "Share it."
+                      },
+                      {
+                        "id": "no",
+                        "text": "Keep it local."
+                      }
+                    ],
+                    "recommendation": "no",
+                    "depends": [
+                      "gamecult-chat:question:file-zone-audience"
+                    ],
+                    "leans": null,
+                    "flag": null,
+                    "raised_in": {
+                      "kind": "CutSpec",
+                      "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+                    },
+                    "deciders": [
+                      "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+                    ],
+                    "status": "open",
+                    "ruling": null,
+                    "ruled_from": [],
+                    "order": 2,
+                    "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79"
+                  },
+                  "record": {
+                    "schemaVersion": "gamecult.fork.record.v0",
+                    "fork_id": "gamecult-chat:question:q2",
+                    "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79",
+                    "counted_answer_id": null,
+                    "answers": []
+                  }
+                }
+              ],
+              "next_cursor": "c2"
+            },
+            "responseHex": "87AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E6C6973742E7630A46D696E64AD67616D6563756C742D63686174A57374616D70A27339AA6F70656E5F636F756E7404AE7265636F726465645F636F756E7400A5666F726B739283AD736368656D6156657273696F6EB667616D6563756C742E666F726B2E656E7472792E7630A463617264DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7133A57469746C65A6466F726B2033A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647391D92967616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A46F70656EA672756C696E67C0AA72756C65645F66726F6D90A56F7264657203AC6F7074696F6E735F68617368D94063656438393265623636336332326533643765636536303237303830343365653534356635366239643465343432316437663562666161383663343138636532A67265636F726485AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7133AC6F7074696F6E735F68617368D94063656438393265623636336332326533643765636536303237303830343365653534356635366239643465343432316437663562666161383663343138636532B1636F756E7465645F616E737765725F6964C0A7616E73776572739083AD736368656D6156657273696F6EB667616D6563756C742E666F726B2E656E7472792E7630A463617264DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7132A57469746C65A6466F726B2032A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647391D92967616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A46F70656EA672756C696E67C0AA72756C65645F66726F6D90A56F7264657202AC6F7074696F6E735F68617368D94035633763323934356538653836383963366339323862313164376530613033333634306230633636616662376663666662396537343063303139643633653739A67265636F726485AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7132AC6F7074696F6E735F68617368D94035633763323934356538653836383963366339323862313164376530613033333634306230633636616662376663666662396537343063303139643633653739B1636F756E7465645F616E737765725F6964C0A7616E737765727390AB6E6578745F637572736F72A26332"
+          },
+          {
+            "request": {
+              "schemaVersion": "gamecult.fork.list_request.v0",
+              "mind": "gamecult-chat",
+              "status": null,
+              "cursor": "c2",
+              "limit": 3
+            },
+            "response": {
+              "schemaVersion": "gamecult.fork.list.v0",
+              "mind": "gamecult-chat",
+              "stamp": "s9",
+              "open_count": 4,
+              "recorded_count": 0,
+              "forks": [
+                {
+                  "schemaVersion": "gamecult.fork.entry.v0",
+                  "card": {
+                    "schemaVersion": "gamecult.fork.card.v0",
+                    "fork_id": "gamecult-chat:question:q1",
+                    "title": "Fork 1",
+                    "context": "Should a slot mark be shared?",
+                    "options": [
+                      {
+                        "id": "yes",
+                        "text": "Share it."
+                      },
+                      {
+                        "id": "no",
+                        "text": "Keep it local."
+                      }
+                    ],
+                    "recommendation": "no",
+                    "depends": [
+                      "gamecult-chat:question:file-zone-audience"
+                    ],
+                    "leans": null,
+                    "flag": null,
+                    "raised_in": {
+                      "kind": "CutSpec",
+                      "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+                    },
+                    "deciders": [
+                      "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+                    ],
+                    "status": "open",
+                    "ruling": null,
+                    "ruled_from": [],
+                    "order": 1,
+                    "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a"
+                  },
+                  "record": {
+                    "schemaVersion": "gamecult.fork.record.v0",
+                    "fork_id": "gamecult-chat:question:q1",
+                    "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a",
+                    "counted_answer_id": null,
+                    "answers": []
+                  }
+                },
+                {
+                  "schemaVersion": "gamecult.fork.entry.v0",
+                  "card": {
+                    "schemaVersion": "gamecult.fork.card.v0",
+                    "fork_id": "gamecult-chat:question:q0",
+                    "title": "Fork 0",
+                    "context": "Should a slot mark be shared?",
+                    "options": [
+                      {
+                        "id": "yes",
+                        "text": "Share it."
+                      },
+                      {
+                        "id": "no",
+                        "text": "Keep it local."
+                      }
+                    ],
+                    "recommendation": "no",
+                    "depends": [
+                      "gamecult-chat:question:file-zone-audience"
+                    ],
+                    "leans": null,
+                    "flag": null,
+                    "raised_in": {
+                      "kind": "CutSpec",
+                      "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+                    },
+                    "deciders": [
+                      "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+                    ],
+                    "status": "open",
+                    "ruling": null,
+                    "ruled_from": [],
+                    "order": 0,
+                    "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d"
+                  },
+                  "record": {
+                    "schemaVersion": "gamecult.fork.record.v0",
+                    "fork_id": "gamecult-chat:question:q0",
+                    "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d",
+                    "counted_answer_id": null,
+                    "answers": []
+                  }
+                }
+              ],
+              "next_cursor": null
+            },
+            "responseHex": "87AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E6C6973742E7630A46D696E64AD67616D6563756C742D63686174A57374616D70A27339AA6F70656E5F636F756E7404AE7265636F726465645F636F756E7400A5666F726B739283AD736368656D6156657273696F6EB667616D6563756C742E666F726B2E656E7472792E7630A463617264DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7131A57469746C65A6466F726B2031A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647391D92967616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A46F70656EA672756C696E67C0AA72756C65645F66726F6D90A56F7264657201AC6F7074696F6E735F68617368D94036313935393936346264323134656131623936313535346334336563343661396661663135366464353437636335306338633136626264636435356632323361A67265636F726485AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7131AC6F7074696F6E735F68617368D94036313935393936346264323134656131623936313535346334336563343661396661663135366464353437636335306338633136626264636435356632323361B1636F756E7465645F616E737765725F6964C0A7616E73776572739083AD736368656D6156657273696F6EB667616D6563756C742E666F726B2E656E7472792E7630A463617264DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7130A57469746C65A6466F726B2030A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647391D92967616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A46F70656EA672756C696E67C0AA72756C65645F66726F6D90A56F7264657200AC6F7074696F6E735F68617368D94031373737626430366666616664663665383162656435393739663337313933633462346537633364323530346639303465393133313031326630373637613964A67265636F726485AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7130AC6F7074696F6E735F68617368D94031373737626430366666616664663665383162656435393739663337313933633462346537633364323530346639303465393133313031326630373637613964B1636F756E7465645F616E737765725F6964C0A7616E737765727390AB6E6578745F637572736F72C0"
+          }
+        ]
+      },
+      {
+        "name": "a_first_entry_past_the_budget_is_fork_too_large_and_the_client_continues_below_its_order",
+        "ordinal": 9,
+        "entries": [
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q3",
+              "title": "Fork 3",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 3,
+              "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q3",
+              "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q2",
+              "title": "Fork 2",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 2,
+              "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q2",
+              "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "title": "Fork 1",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 1,
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "title": "Fork 0",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 0,
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          }
+        ],
+        "steps": [
+          {
+            "request": {
+              "schemaVersion": "gamecult.fork.list_request.v0",
+              "mind": "gamecult-chat",
+              "status": null,
+              "cursor": null,
+              "limit": 3
+            },
+            "refusal": {
+              "schemaVersion": "gamecult.fork.refusal.v0",
+              "code": "fork_too_large",
+              "error": "fork_too_large: fork gamecult-chat:question:q3 (order 3) alone is past the response budget"
+            },
+            "refusalHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D95A666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713320286F7264657220332920616C6F6E6520697320706173742074686520726573706F6E736520627564676574",
+            "httpStatus": 422,
+            "fork_id": "gamecult-chat:question:q3",
+            "order": 3
+          },
+          {
+            "request": {
+              "schemaVersion": "gamecult.fork.list_request.v0",
+              "mind": "gamecult-chat",
+              "status": null,
+              "cursor": "c3",
+              "limit": 3
+            },
+            "response": {
+              "schemaVersion": "gamecult.fork.list.v0",
+              "mind": "gamecult-chat",
+              "stamp": "s9",
+              "open_count": 4,
+              "recorded_count": 0,
+              "forks": [
+                {
+                  "schemaVersion": "gamecult.fork.entry.v0",
+                  "card": {
+                    "schemaVersion": "gamecult.fork.card.v0",
+                    "fork_id": "gamecult-chat:question:q2",
+                    "title": "Fork 2",
+                    "context": "Should a slot mark be shared?",
+                    "options": [
+                      {
+                        "id": "yes",
+                        "text": "Share it."
+                      },
+                      {
+                        "id": "no",
+                        "text": "Keep it local."
+                      }
+                    ],
+                    "recommendation": "no",
+                    "depends": [
+                      "gamecult-chat:question:file-zone-audience"
+                    ],
+                    "leans": null,
+                    "flag": null,
+                    "raised_in": {
+                      "kind": "CutSpec",
+                      "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+                    },
+                    "deciders": [
+                      "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+                    ],
+                    "status": "open",
+                    "ruling": null,
+                    "ruled_from": [],
+                    "order": 2,
+                    "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79"
+                  },
+                  "record": {
+                    "schemaVersion": "gamecult.fork.record.v0",
+                    "fork_id": "gamecult-chat:question:q2",
+                    "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79",
+                    "counted_answer_id": null,
+                    "answers": []
+                  }
+                },
+                {
+                  "schemaVersion": "gamecult.fork.entry.v0",
+                  "card": {
+                    "schemaVersion": "gamecult.fork.card.v0",
+                    "fork_id": "gamecult-chat:question:q1",
+                    "title": "Fork 1",
+                    "context": "Should a slot mark be shared?",
+                    "options": [
+                      {
+                        "id": "yes",
+                        "text": "Share it."
+                      },
+                      {
+                        "id": "no",
+                        "text": "Keep it local."
+                      }
+                    ],
+                    "recommendation": "no",
+                    "depends": [
+                      "gamecult-chat:question:file-zone-audience"
+                    ],
+                    "leans": null,
+                    "flag": null,
+                    "raised_in": {
+                      "kind": "CutSpec",
+                      "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+                    },
+                    "deciders": [
+                      "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+                    ],
+                    "status": "open",
+                    "ruling": null,
+                    "ruled_from": [],
+                    "order": 1,
+                    "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a"
+                  },
+                  "record": {
+                    "schemaVersion": "gamecult.fork.record.v0",
+                    "fork_id": "gamecult-chat:question:q1",
+                    "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a",
+                    "counted_answer_id": null,
+                    "answers": []
+                  }
+                },
+                {
+                  "schemaVersion": "gamecult.fork.entry.v0",
+                  "card": {
+                    "schemaVersion": "gamecult.fork.card.v0",
+                    "fork_id": "gamecult-chat:question:q0",
+                    "title": "Fork 0",
+                    "context": "Should a slot mark be shared?",
+                    "options": [
+                      {
+                        "id": "yes",
+                        "text": "Share it."
+                      },
+                      {
+                        "id": "no",
+                        "text": "Keep it local."
+                      }
+                    ],
+                    "recommendation": "no",
+                    "depends": [
+                      "gamecult-chat:question:file-zone-audience"
+                    ],
+                    "leans": null,
+                    "flag": null,
+                    "raised_in": {
+                      "kind": "CutSpec",
+                      "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+                    },
+                    "deciders": [
+                      "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+                    ],
+                    "status": "open",
+                    "ruling": null,
+                    "ruled_from": [],
+                    "order": 0,
+                    "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d"
+                  },
+                  "record": {
+                    "schemaVersion": "gamecult.fork.record.v0",
+                    "fork_id": "gamecult-chat:question:q0",
+                    "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d",
+                    "counted_answer_id": null,
+                    "answers": []
+                  }
+                }
+              ],
+              "next_cursor": null
+            },
+            "responseHex": "87AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E6C6973742E7630A46D696E64AD67616D6563756C742D63686174A57374616D70A27339AA6F70656E5F636F756E7404AE7265636F726465645F636F756E7400A5666F726B739383AD736368656D6156657273696F6EB667616D6563756C742E666F726B2E656E7472792E7630A463617264DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7132A57469746C65A6466F726B2032A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647391D92967616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A46F70656EA672756C696E67C0AA72756C65645F66726F6D90A56F7264657202AC6F7074696F6E735F68617368D94035633763323934356538653836383963366339323862313164376530613033333634306230633636616662376663666662396537343063303139643633653739A67265636F726485AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7132AC6F7074696F6E735F68617368D94035633763323934356538653836383963366339323862313164376530613033333634306230633636616662376663666662396537343063303139643633653739B1636F756E7465645F616E737765725F6964C0A7616E73776572739083AD736368656D6156657273696F6EB667616D6563756C742E666F726B2E656E7472792E7630A463617264DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7131A57469746C65A6466F726B2031A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647391D92967616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A46F70656EA672756C696E67C0AA72756C65645F66726F6D90A56F7264657201AC6F7074696F6E735F68617368D94036313935393936346264323134656131623936313535346334336563343661396661663135366464353437636335306338633136626264636435356632323361A67265636F726485AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7131AC6F7074696F6E735F68617368D94036313935393936346264323134656131623936313535346334336563343661396661663135366464353437636335306338633136626264636435356632323361B1636F756E7465645F616E737765725F6964C0A7616E73776572739083AD736368656D6156657273696F6EB667616D6563756C742E666F726B2E656E7472792E7630A463617264DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7130A57469746C65A6466F726B2030A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647391D92967616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A46F70656EA672756C696E67C0AA72756C65645F66726F6D90A56F7264657200AC6F7074696F6E735F68617368D94031373737626430366666616664663665383162656435393739663337313933633462346537633364323530346639303465393133313031326630373637613964A67265636F726485AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7130AC6F7074696F6E735F68617368D94031373737626430366666616664663665383162656435393739663337313933633462346537633364323530346639303465393133313031326630373637613964B1636F756E7465645F616E737765725F6964C0A7616E737765727390AB6E6578745F637572736F72C0"
+          }
+        ]
+      },
+      {
+        "name": "fork_too_large_on_order_zero_leaves_nothing_below",
+        "ordinal": 9,
+        "entries": [
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "title": "Fork 1",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 1,
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "title": "Fork 0",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 0,
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          }
+        ],
+        "steps": [
+          {
+            "request": {
+              "schemaVersion": "gamecult.fork.list_request.v0",
+              "mind": "gamecult-chat",
+              "status": null,
+              "cursor": null,
+              "limit": 5
+            },
+            "response": {
+              "schemaVersion": "gamecult.fork.list.v0",
+              "mind": "gamecult-chat",
+              "stamp": "s9",
+              "open_count": 2,
+              "recorded_count": 0,
+              "forks": [
+                {
+                  "schemaVersion": "gamecult.fork.entry.v0",
+                  "card": {
+                    "schemaVersion": "gamecult.fork.card.v0",
+                    "fork_id": "gamecult-chat:question:q1",
+                    "title": "Fork 1",
+                    "context": "Should a slot mark be shared?",
+                    "options": [
+                      {
+                        "id": "yes",
+                        "text": "Share it."
+                      },
+                      {
+                        "id": "no",
+                        "text": "Keep it local."
+                      }
+                    ],
+                    "recommendation": "no",
+                    "depends": [
+                      "gamecult-chat:question:file-zone-audience"
+                    ],
+                    "leans": null,
+                    "flag": null,
+                    "raised_in": {
+                      "kind": "CutSpec",
+                      "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+                    },
+                    "deciders": [
+                      "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+                    ],
+                    "status": "open",
+                    "ruling": null,
+                    "ruled_from": [],
+                    "order": 1,
+                    "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a"
+                  },
+                  "record": {
+                    "schemaVersion": "gamecult.fork.record.v0",
+                    "fork_id": "gamecult-chat:question:q1",
+                    "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a",
+                    "counted_answer_id": null,
+                    "answers": []
+                  }
+                }
+              ],
+              "next_cursor": "c1"
+            },
+            "responseHex": "87AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E6C6973742E7630A46D696E64AD67616D6563756C742D63686174A57374616D70A27339AA6F70656E5F636F756E7402AE7265636F726465645F636F756E7400A5666F726B739183AD736368656D6156657273696F6EB667616D6563756C742E666F726B2E656E7472792E7630A463617264DE0010AD736368656D6156657273696F6EB567616D6563756C742E666F726B2E636172642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7131A57469746C65A6466F726B2031A7636F6E74657874BD53686F756C64206120736C6F74206D61726B206265207368617265643FA76F7074696F6E739282A26964A3796573A474657874A953686172652069742E82A26964A26E6FA474657874AE4B656570206974206C6F63616C2EAE7265636F6D6D656E646174696F6EA26E6FA7646570656E647391D92967616D6563756C742D636861743A7175657374696F6E3A66696C652D7A6F6E652D61756469656E6365A56C65616E73C0A4666C6167C0A97261697365645F696E82A46B696E64A743757453706563A26964D92B63756C746C69622D676170733A6375745F737065633A6375742D736C6F742D746F6C6572616E63652E7234A8646563696465727391D92465306431633262332D613439352D343638372D383837392D366135623463336432653166A6737461747573A46F70656EA672756C696E67C0AA72756C65645F66726F6D90A56F7264657201AC6F7074696F6E735F68617368D94036313935393936346264323134656131623936313535346334336563343661396661663135366464353437636335306338633136626264636435356632323361A67265636F726485AD736368656D6156657273696F6EB767616D6563756C742E666F726B2E7265636F72642E7630A7666F726B5F6964B967616D6563756C742D636861743A7175657374696F6E3A7131AC6F7074696F6E735F68617368D94036313935393936346264323134656131623936313535346334336563343661396661663135366464353437636335306338633136626264636435356632323361B1636F756E7465645F616E737765725F6964C0A7616E737765727390AB6E6578745F637572736F72A26331"
+          },
+          {
+            "request": {
+              "schemaVersion": "gamecult.fork.list_request.v0",
+              "mind": "gamecult-chat",
+              "status": null,
+              "cursor": "c1",
+              "limit": 5
+            },
+            "refusal": {
+              "schemaVersion": "gamecult.fork.refusal.v0",
+              "code": "fork_too_large",
+              "error": "fork_too_large: fork gamecult-chat:question:q0 (order 0) alone is past the response budget"
+            },
+            "refusalHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D95A666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713020286F7264657220302920616C6F6E6520697320706173742074686520726573706F6E736520627564676574",
+            "httpStatus": 422,
+            "fork_id": "gamecult-chat:question:q0",
+            "order": 0
+          }
+        ]
+      }
+    ],
+    "readTooLarge": [
+      {
+        "name": "a_read_whose_entry_is_past_the_cap_is_fork_too_large_without_an_order",
+        "ordinal": 9,
+        "entries": [
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q3",
+              "title": "Fork 3",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 3,
+              "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q3",
+              "options_hash": "ced892eb663c22e3d7ece602708043ee545f56b9d4e4421d7f5bfaa86c418ce2",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q2",
+              "title": "Fork 2",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 2,
+              "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q2",
+              "options_hash": "5c7c2945e8e8689c6c928b11d7e0a033640b0c66afb7fcffb9e740c019d63e79",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "title": "Fork 1",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 1,
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q1",
+              "options_hash": "61959964bd214ea1b961554c43ec46a9faf156dd547cc50c8c16bbdcd55f223a",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          },
+          {
+            "schemaVersion": "gamecult.fork.entry.v0",
+            "card": {
+              "schemaVersion": "gamecult.fork.card.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "title": "Fork 0",
+              "context": "Should a slot mark be shared?",
+              "options": [
+                {
+                  "id": "yes",
+                  "text": "Share it."
+                },
+                {
+                  "id": "no",
+                  "text": "Keep it local."
+                }
+              ],
+              "recommendation": "no",
+              "depends": [
+                "gamecult-chat:question:file-zone-audience"
+              ],
+              "leans": null,
+              "flag": null,
+              "raised_in": {
+                "kind": "CutSpec",
+                "id": "cultlib-gaps:cut_spec:cut-slot-tolerance.r4"
+              },
+              "deciders": [
+                "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f"
+              ],
+              "status": "open",
+              "ruling": null,
+              "ruled_from": [],
+              "order": 0,
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d"
+            },
+            "record": {
+              "schemaVersion": "gamecult.fork.record.v0",
+              "fork_id": "gamecult-chat:question:q0",
+              "options_hash": "1777bd06ffafdf6e81bed5979f37193c4b4e7c3d2504f904e9131012f0767a9d",
+              "counted_answer_id": null,
+              "answers": []
+            }
+          }
+        ],
+        "request": {
+          "schemaVersion": "gamecult.fork.read_request.v0",
+          "mind": "gamecult-chat",
+          "fork_id": "gamecult-chat:question:q3"
+        },
+        "refusal": {
+          "schemaVersion": "gamecult.fork.refusal.v0",
+          "code": "fork_too_large",
+          "error": "fork_too_large: fork gamecult-chat:question:q3 alone is past the response budget"
+        },
+        "refusalHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465AE666F726B5F746F6F5F6C61726765A56572726F72D950666F726B5F746F6F5F6C617267653A20666F726B2067616D6563756C742D636861743A7175657374696F6E3A713320616C6F6E6520697320706173742074686520726573706F6E736520627564676574",
+        "httpStatus": 422,
+        "fork_id": "gamecult-chat:question:q3"
+      }
+    ],
+    "doorFaults": [
+      {
+        "name": "read_door_answers_request_id_conflict_the_client_sees_unavailable",
+        "route": "read",
+        "doorCode": "request_id_conflict",
+        "httpStatus": 503,
+        "response": {
+          "schemaVersion": "gamecult.fork.unavailable.v0",
+          "code": "unavailable",
+          "error": "unavailable: the outcome is not confirmed, try again with the same request_id",
+          "retryAfterSeconds": 30
+        },
+        "responseHex": "84AD736368656D6156657273696F6EBC67616D6563756C742E666F726B2E756E617661696C61626C652E7630A4636F6465AB756E617661696C61626C65A56572726F72D94D756E617661696C61626C653A20746865206F7574636F6D65206973206E6F7420636F6E6669726D65642C2074727920616761696E2077697468207468652073616D6520726571756573745F6964B1726574727941667465725365636F6E64731E"
+      },
+      {
+        "name": "list_door_answers_request_id_conflict_the_client_sees_unavailable",
+        "route": "list",
+        "doorCode": "request_id_conflict",
+        "httpStatus": 503,
+        "response": {
+          "schemaVersion": "gamecult.fork.unavailable.v0",
+          "code": "unavailable",
+          "error": "unavailable: the outcome is not confirmed, try again with the same request_id",
+          "retryAfterSeconds": 30
+        },
+        "responseHex": "84AD736368656D6156657273696F6EBC67616D6563756C742E666F726B2E756E617661696C61626C652E7630A4636F6465AB756E617661696C61626C65A56572726F72D94D756E617661696C61626C653A20746865206F7574636F6D65206973206E6F7420636F6E6669726D65642C2074727920616761696E2077697468207468652073616D6520726571756573745F6964B1726574727941667465725365636F6E64731E"
+      },
+      {
+        "name": "answer_door_answers_request_id_conflict_the_client_sees_it",
+        "route": "answer",
+        "doorCode": "request_id_conflict",
+        "httpStatus": 409,
+        "response": {
+          "schemaVersion": "gamecult.fork.refusal.v0",
+          "code": "request_id_conflict",
+          "error": "request_id_conflict: this request_id was used for a different body"
+        },
+        "responseHex": "83AD736368656D6156657273696F6EB867616D6563756C742E666F726B2E7265667573616C2E7630A4636F6465B3726571756573745F69645F636F6E666C696374A56572726F72D942726571756573745F69645F636F6E666C6963743A207468697320726571756573745F696420776173207573656420666F72206120646966666572656E7420626F6479"
       }
     ],
     "mindRoutes": {

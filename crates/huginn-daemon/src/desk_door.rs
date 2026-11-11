@@ -7,7 +7,8 @@
 //! bounds: one request per connection, one reply, a header over `DESK_MAX_REQUEST_BYTES` refused
 //! before anything is allocated, one `DESK_CONNECTION_DEADLINE` for the whole connection (every
 //! read and write spends what is left of it, so a peer that trickles bytes is cut off at the
-//! deadline like one that is silent), a reply past `DESK_MAX_RESPONSE_BYTES` refused by name.
+//! deadline like one that is silent), a reply past `DESK_MAX_RESPONSE_BYTES` refused by name (a read of one
+//! fork past it is that fork's `fork_too_large`).
 //!
 //! The trust boundary of the reads (ruling `desk-read-visibility-whole-record`). The peer-uid check
 //! IS the whole authentication: Huginn must be reachable only by Bifrost's peer-checked socket, so
@@ -46,7 +47,7 @@ use cultnet_rs::{
 };
 use huginn_mind::desk_wire::{
     DESK_MAX_REQUEST_BYTES, DESK_MAX_RESPONSE_BYTES, DESK_REQUEST_SCHEMA, DESK_REQUEST_SCHEMA_JSON, DESK_RESPONSE_SCHEMA,
-    DESK_RESPONSE_SCHEMA_JSON, DESK_SERVICE_ID, DeskResponse,
+    DESK_RESPONSE_SCHEMA_JSON, DESK_SERVICE_ID, DeskResponse, fork_too_large_read,
 };
 use huginn_mind::envelope::{OperationFailure, decode_desk_request, encode_desk_failure, encode_desk_response};
 use huginn_mind::{MindRefusal, MindStore};
@@ -321,7 +322,11 @@ pub(crate) fn respond(response: &DeskResponse, message_id: &str, operation: &str
     };
     bounded(reply, limit, |size| match size {
         Ok(bytes) => {
-            let refusal = DeskResponse::Refused(MindRefusal::ResponseTooLarge { bytes: bytes as u64, limit: limit as u64 });
+            // A read of one fork past the cap is that fork's refusal; every other reply is the generic one.
+            let refusal = match response {
+                DeskResponse::Fork { entry, .. } => DeskResponse::NotStored(fork_too_large_read(entry.card.fork_id.as_str())),
+                _ => DeskResponse::Refused(MindRefusal::ResponseTooLarge { bytes: bytes as u64, limit: limit as u64 }),
+            };
             encode_desk_response(message_id, operation, &refusal, runtime_id).unwrap_or_else(|error| not_encodable(format!("{error:#}")))
         }
         Err(detail) => not_encodable(detail),
