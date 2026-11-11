@@ -5,7 +5,7 @@
 //!
 //! No fixture written here carries a card: Huginn's types do not carry `raised_at`, `decider_count`,
 //! `answerer_count` or a nullable `answerer` yet. Those shapes are CultLib's own bytes, vendored at
-//! one commit in `fixtures/desk-feed/cultlib-3a51bbab/` and checked below.
+//! one commit in `fixtures/desk-feed/cultlib-d3025d3c/` and checked below.
 //!
 //! `cargo test -p huginn-mind --test desk_feed_fixtures` compares every file with what the
 //! encoders produce now. `HUGINN_WRITE_DESK_FIXTURES=1` rewrites them instead.
@@ -255,8 +255,8 @@ fn every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid() {
 
 // ---- CultLib's bytes: the reader-count shapes, pinned at one commit. ----
 
-/// The CultLib commit the vendored vectors come from (#117 on #115). Re-pin: see the README beside them.
-const CULTLIB_SHA: &str = "3a51bbabad244a56ec4521080530d88744001ce4";
+/// The CultLib commit the vendored vectors come from (#118 on #117 on #115). Re-pin: see the README beside them.
+const CULTLIB_SHA: &str = "d3025d3c19674803ad32eb2335461b8cbc22bd28";
 
 /// Each vendored vector and the SHA-256 of its bytes.
 const VENDORED: &[(&str, &str)] = &[
@@ -267,6 +267,8 @@ const VENDORED: &[(&str, &str)] = &[
     ("answer-revision", "19d7289395ae68cbaf6de1c0a1ef6c843211b2caf9462e1d2268cd0883386315"),
     ("answer-retraction", "89156f41ec3ea54f5d47bd3318913ff013785f4727916875be97785935cb7735"),
     ("answer-withheld-answerer", "b66b4f921cdd374be04af3de34c59e254a5e542027ae8c57f196a3ea3406e427"),
+    ("answer-withheld-answerer-revision", "93f7c875f963a7cfeab2a5980b6d5ce81e6753fc9f3f8bf0d7353f3f388144b7"),
+    ("answer-withheld-answerer-retraction", "7d0cc555bf9b6f7c345b0da7c504bcd1ed7b46040ff51d1e57c84b2f56655213"),
     ("answer-refused-stale", "3183bc9c483f4a625332cda11ef22a9c8560868a7728b77daa63a1960a3cd3d6"),
     ("entry-open-counted", "b51f499e8dd0465cf5df9d68d8fccbe94dd1339fd3157969693dd0d4ecb2549b"),
     ("entry-withheld-open-counted", "62ccad7a9f41262d6e35d0247315d0bb75d1313b3c9dabe8a99d1aa1b844607f"),
@@ -275,7 +277,7 @@ const VENDORED: &[(&str, &str)] = &[
 ];
 
 fn vendored(name: &str) -> Vec<u8> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/desk-feed/cultlib-3a51bbab").join(format!("{name}.msgpack"));
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/desk-feed/cultlib-d3025d3c").join(format!("{name}.msgpack"));
     std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
@@ -379,7 +381,7 @@ const RECORD_KEYS: [&str; 6] = ["schemaVersion", "fork_id", "options_hash", "cou
 #[test]
 fn the_vendored_cultlib_vectors_are_the_pinned_bytes() {
     assert_eq!(CULTLIB_SHA.len(), 40);
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/desk-feed/cultlib-3a51bbab");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/desk-feed/cultlib-d3025d3c");
     let docs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/desk-feed-door.md");
     for path in [dir.join("README.md"), docs] {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
@@ -420,8 +422,8 @@ fn the_cards_are_eighteen_keys_with_raised_at_and_decider_count() {
 }
 
 /// `answerer` is a string or nil on every answer; `Value::Nil` only when `named` is false. The bytes
-/// null it on `Counted` and `Refused` only; nullable on all four variants is the ruling
-/// `desk-reader-counts-shape`, and CultLib has no vector with a `Revision` or `Retraction` nulled.
+/// null it on all four variants (`Counted`, `Revision`, `Retraction`, `Refused`), by ruling
+/// `desk-reader-counts-shape` and now by vector.
 fn check_answer(answer: &Value, named: bool) {
     assert_eq!(answer.keys().len(), 16);
     assert_eq!(answer.keys()[13], "answerer");
@@ -434,12 +436,12 @@ fn check_answer(answer: &Value, named: bool) {
 
 #[test]
 fn the_answers_keep_sixteen_keys_and_answerer_is_a_string_or_nil() {
-    for (name, named) in [("answer-counted", true), ("answer-revision", true), ("answer-retraction", true), ("answer-refused-stale", true), ("answer-withheld-answerer", false)] {
+    for (name, named) in [("answer-counted", true), ("answer-revision", true), ("answer-retraction", true), ("answer-refused-stale", true), ("answer-withheld-answerer", false), ("answer-withheld-answerer-revision", false), ("answer-withheld-answerer-retraction", false)] {
         let bytes = vendored(name);
         assert_eq!(bytes[..3], [0xde, 0x00, 0x10], "{name}: header");
         check_answer(&decode(&bytes), named);
     }
-    for (name, outcome) in [("answer-counted", "Counted"), ("answer-revision", "Revision"), ("answer-retraction", "Retraction"), ("answer-refused-stale", "Refused")] {
+    for (name, outcome) in [("answer-counted", "Counted"), ("answer-revision", "Revision"), ("answer-retraction", "Retraction"), ("answer-refused-stale", "Refused"), ("answer-withheld-answerer-revision", "Revision"), ("answer-withheld-answerer-retraction", "Retraction")] {
         assert_eq!(decode(&vendored(name)).get("outcome").str(), outcome);
     }
 }
@@ -517,7 +519,9 @@ fn huginn_types_do_not_yet_carry_the_pinned_shapes() {
     }
     assert!(refused::<ForkCard>(&vendored("card-operator-fork")).contains("raised_at"));
     assert!(refused::<ForkCard>(&vendored("card-withheld-deciders")).contains("raised_at"));
-    assert!(refused::<ForkDeskAnswer>(&vendored("answer-withheld-answerer")).contains("string"));
+    for name in ["answer-withheld-answerer", "answer-withheld-answerer-revision", "answer-withheld-answerer-retraction"] {
+        assert!(refused::<ForkDeskAnswer>(&vendored(name)).contains("string"), "{name}");
+    }
     // The record is the entry's last key: its bytes run from the `86` after the key to the end.
     let entry = vendored("entry-open-counted");
     let key = [&[0xa6u8][..], b"record", &[0x86]].concat();

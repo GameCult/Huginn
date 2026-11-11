@@ -38,7 +38,7 @@ lands (see `docs/desk-feed-door.md`).
 | `record-whole` | fragment | `gamecult.fork.record.v0` with all four answer variants (Counted, Revision, Refused, Retraction) by three accounts, answerer ids and notes whole: what the door sends today (5 keys, no `answerer_count`) |
 
 The reader-count shapes (`raised_at`, `decider_count`, `answerer_count`, nullable `answerer`) are
-CultLib's own bytes, vendored unedited in `cultlib-3a51bbab/` (see its README for the pinned commit and
+CultLib's own bytes, vendored unedited in `cultlib-d3025d3c/` (see its README for the pinned commit and
 each vector). They are not Huginn's output: Huginn's types do not carry those shapes yet.
 `cut-desk-feed-listing` and `cut-desk-feed-raised-at` replace them with entry-bearing fixtures the
 encoders write, after decoding these bytes into the real types.

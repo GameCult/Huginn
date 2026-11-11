@@ -20,7 +20,7 @@ This page is the wire contract for the consumer, Bifrost's `UnixSocketDeskDoor` 
 `docs/desk-feed-design.md`). The golden bytes are in `crates/huginn-mind/tests/fixtures/desk-feed/`.
 Huginn's own encoders write them (`crates/huginn-mind/tests/desk_feed_fixtures.rs`), so a decoder
 that reads them reads the door. The reader-count shapes are CultLib's bytes, vendored in
-`cultlib-3a51bbab/` (below). The document shapes inside the payload (`gamecult.fork.list.v0`,
+`cultlib-d3025d3c/` (below). The document shapes inside the payload (`gamecult.fork.list.v0`,
 `gamecult.fork.entry.v0`, `gamecult.fork.card.v0`, `gamecult.fork.record.v0`,
 `gamecult.desk_answer.v0`, `gamecult.fork.refusal.v0`) are CultLib's
 (`contracts/cultnet/governance/fork-card.md`) and are not restated here.
@@ -120,11 +120,12 @@ byte; both values are in the account-id format above. Any other reader is a non-
   Bifrost, withholds account ids from a non-decider and returns a count instead. Bifrost cannot do
   it, because the card is opaque to it. A decider sees the ids. The superseding ruling is in force:
   `eureka-substrate:ruling:desk-read-visibility-withheld-ids`.
-- **The shape**, pinned to CultLib commit `3a51bbabad244a56ec4521080530d88744001ce4` (#117 "Fork card:
-  decider_count, answerer_count, nullable answerer (reader views)", on `af914253` #115 `raised_at`;
+- **The shape**, pinned to CultLib commit `d3025d3c19674803ad32eb2335461b8cbc22bd28` (#118 "null-answerer vectors for
+  Revision and Retraction", additive over `3a51bbab` #117 "Fork card: decider_count, answerer_count,
+  nullable answerer (reader views)", on `af914253` #115 `raised_at`;
   ruling `eureka-substrate:ruling:desk-reader-counts-shape`). The bytes are CultLib's own vectors
   (`contracts/cultnet/governance/fork-card-vectors.json`, `messagePackHex`), vendored unedited in
-  `crates/huginn-mind/tests/fixtures/desk-feed/cultlib-3a51bbab/` (its README lists each file and
+  `crates/huginn-mind/tests/fixtures/desk-feed/cultlib-d3025d3c/` (its README lists each file and
   its vector name). Read off those bytes:
   - **Card:** 18 keys, header `DE 00 12` (map16): `schemaVersion` plus 17 fields, in this order:
     `fork_id, title, context, options, recommendation, depends, leans, flag, raised_in, raised_at,
@@ -139,10 +140,10 @@ byte; both values are in the account-id format above. Any other reader is a non-
     between 1 and the number of answers (0 with no answers).
   - **Answer:** `gamecult.desk_answer.v0` keeps its 16 keys (header `DE 00 10`); `answerer` is a
     string or nil, nil only in a non-decider's view, with the key kept. The bytes pin a nil `answerer`
-    on two variants, `Counted` (`answer-withheld-answerer`) and `Refused` (the withheld entries). That
-    it is nullable on all four variants (`Counted`, `Revision`, `Retraction`, `Refused`) is the ruling
-    `eureka-substrate:ruling:desk-reader-counts-shape`, not a vector: CultLib's `revision` and
-    `retraction` vectors carry a string `answerer` and no CultLib vector has either nulled. Stored
+    on all four variants, `Counted` (`answer-withheld-answerer`), `Revision`
+    (`answer-withheld-answerer-revision`), `Retraction` (`answer-withheld-answerer-retraction`) and
+    `Refused` (the withheld entries), beside each variant's string-`answerer` vector; ruling
+    `eureka-substrate:ruling:desk-reader-counts-shape` is the reason, no longer the only evidence. Stored
     answers always carry it.
   - **Entry:** header `83` (`schemaVersion, card, record`). The view is read off `deciders`: a
     non-empty `deciders` names every answerer, an empty one names none.
