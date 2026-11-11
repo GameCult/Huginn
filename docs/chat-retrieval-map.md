@@ -29,7 +29,8 @@ or search path.**
   and "reads no chat"; ruling `persona-memory-written-not-transcript` says what
   she must keep is written as memory, not recovered from a transcript. The
   Persona call was tool-less when this was written and retrieval had to arrive
-  in her input; that premise no longer holds, see Status below.
+  in her input; that premise no longer holds: Personas have a shell and run
+  `huginn sources` (see Ruling below).
 - Matrix: Synapse is the truth of events. Only the Bifrost mouth holds Matrix
   tokens; no Persona unit holds a credential. Rooms are plain (F2 recommends
   encrypted DMs only), DMs exist, and the Discord bridge is a later campaign.
@@ -43,7 +44,7 @@ or search path.**
 | Which rooms are in the corpus | Huginn `sources` config: an **allowlist** of public community room ids | any Persona, any query |
 | Chunks, vectors, cursors for rooms | `sources::refresh`, the one writer | the daemon's `search`, Persona units |
 | Query embedding and rank fusion | `sources::search` | the caller (Persona, CLI) |
-| What a turn shows from chat | Persona `recall` lane, within a byte budget | the model, the retrieval hit text itself |
+| What a Persona sees from chat | her own lookup: she runs `huginn sources`; no recall lane, nothing is pushed into her input | the index writer, any per-turn injection |
 | Discord exclusion | the allowlist plus an ingest refusal (below), both in `refresh` | nothing downstream may be relied on to filter |
 
 One cursor map, keyed by source id (`repo name` or `room id`); a room cursor is
@@ -57,9 +58,9 @@ is a collection rebuild once (the meta already forces rebuild on mismatch).
 A chat chunk is a window of consecutive messages in one room (bounded by bytes
 and a time gap), so a hit cites: room id and alias, the first and last event id
 in the window, each message's sender mxid and timestamp inside the chunk text.
-A hit renders as quoted data with the organ's own provenance tag; the organ,
-never the text, decides what looks like a framed message (the existing
-`message_line` rule in persona.rs). Edits replace by event id; a redaction
+Hits are `huginn sources` output, cited by room alias or id, event id and
+timestamp; the caller reads them as lookup results, and nothing renders them
+into a Persona turn. Edits replace by event id; a redaction
 deletes the chunk window's points and re-chunks the window without it.
 
 ## Cuts, smallest first
@@ -83,28 +84,26 @@ deletes the chunk window's points and re-chunks the window without it.
    is absent from every point after the next refresh; a failed upsert leaves
    the cursor where it was. A grep over the collection payload for the Discord
    puppet pattern returns nothing.
-3. **persona-chat-recall**. A recall lane built from the batch's messages as
-   the `texts` of cut 1, `corpus=chat`, own byte budget, not shown for text
-   already in the batch, shown as conversation (not memory). Negative checks: a
-   hit from a room the sender could not read is never shown (DM rule, persona.rs
-   `next_batch`); a hit whose text imitates a `message` line or `role=operator`
-   is rendered quoted and carries no role; the lane failing leaves the turn
-   going without it (as `Search::Unavailable`).
+3. **persona-chat-recall: dropped.** No recall lane; a Persona has a shell
+   and runs `huginn sources` (`gamecult-chat:ruling:chat-recall-lookup-not-memory-dms-out`).
+   The recall lane's DM check went with it; cut 2's DM refusal above stands, and the index is public-only.
 
 Cut 1 ships alone and improves every `huginn sources` caller. Cut 2 waits on
-questions 1 and 2. Cut 3 waits on 2 and 3.
+questions 1 and 2 (both answered, see Status).
 
 ## Questions (put to the operator; admitted as questions)
 
-1. Credential: who reads Synapse? Recommend a read-only service user, joined
+1. Credential: who reads Synapse? Answered
+   (`gamecult-chat:ruling:chat-index-synapse-credential`, "I take both recs."):
+   the recommendation below stands. Recommend a read-only service user, joined
    only to allowlisted public rooms, its token a systemd credential on the
    refresh job only. Alternatives: Bifrost exports history over typed CultNet
    (one more server in the path), or Synapse admin API (broader than needed).
 2. Scope: public community rooms only (recommended) or also Persona-visible
-   private rooms. DMs stay out either way.
-3. Recall tension: does transcript search in a Persona turn contradict
-   `persona-memory-written-not-transcript`? Recommend no: it is lookup, labelled
-   conversation, not memory; what she must keep is still written.
+   private rooms. DMs stay out either way. Answered: public-only
+   (`gamecult-chat:ruling:chat-index-room-scope`).
+3. Recall tension: answered. Lookup, not memory, no recall lane
+   (`gamecult-chat:ruling:chat-recall-lookup-not-memory-dms-out`).
 
 Confidence: cut 1 and the owner decision, high. The window chunker size and
 k=60 are calibration, not design; RRF over a handful of lists is the
@@ -120,11 +119,16 @@ What changed since the map was written:
 - Questions 1 and 2 are answered with the recommendations
   (`gamecult-chat:ruling:chat-index-synapse-credential`, operator 2026-11-03,
   "I take both recs."; `gamecult-chat:ruling:chat-index-room-scope`,
-  public-only). Question 3 (`chat-recall-vs-memory-ruling`) is still open.
-- **Cut 3's premise is stale.** A Persona now carries a live session under
-  bubblewrap with a shell and the web (`mind-body/src/persona.rs:53`, `--tools`;
-  rulings `persona-session-full-sandbox`, `live-mind-sessions`). She can run
-  `huginn sources` herself, so a pushed recall lane is no longer the only path.
-  Re-map cut 3 on that before it is specced: whether to push chat hits into her
-  input at all, and under which budget, is open again. Cuts 1 and 2 are
-  unaffected.
+  public-only). Question 3 is ruled (see Ruling below).
+- Cut 3 is dropped (see Ruling below).
+
+## Ruling (2026-11-11)
+
+`gamecult-chat:ruling:chat-recall-lookup-not-memory-dms-out`:
+
+- Chat retrieval is conversation lookup, not memory. There is no Persona recall
+  lane; Personas have a shell and run `huginn sources`. What a Mind keeps is
+  written memory (`persona-memory-written-not-transcript`).
+- DMs and private rooms never enter the index: public rooms only, Discord never.
+- A Mind that must remember DM content writes a memory citing the chat or room
+  id as its source; the index is not where DM content is kept.
