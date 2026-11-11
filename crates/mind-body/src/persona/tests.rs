@@ -8494,21 +8494,21 @@ fn rulings_in(mind: &dyn MindPort) -> Vec<eureka_pipeline::PipelineRuling> {
 
 #[test]
 fn a_rule_from_a_minds_own_line_inside_her_stewardship_is_admitted_as_steward_with_the_deliverys_event() {
-    let heard = delivery(1, "swarm", "@libby:chat", "I decided: refuse leading zeros in the importer");
-    let rig = Rig::new(vec![heard.clone()], &[reply_with_rule(rule_json("@libby:chat", "refuse leading zeros", "GameCult/Bifrost"))]);
+    let heard = delivery(1, "swarm", "@libby:chat", "I decided: always refuse leading zeros in the importer");
+    let rig = Rig::new(vec![heard.clone()], &[reply_with_rule(rule_json("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost"))]);
     *rig.table.0.borrow_mut() = Some(crate::heartbeat::Addressing { minds: table_with_libby("GameCult/Bifrost") });
     assert_eq!(failure_of(rig.go()), None);
     let [ruling] = rulings_in(&rig.mind).try_into().expect("one ruling");
     assert_eq!(
         ruling.authority,
-        RulingAuthority::Steward { steward: "@libby:chat".into(), repo: OrgRepo("GameCult/Bifrost".into()), words: "refuse leading zeros".into(), event: Some(Short(heard.event_id)) }
+        RulingAuthority::Steward { steward: "@libby:chat".into(), repo: OrgRepo("GameCult/Bifrost".into()), words: "always refuse leading zeros".into(), event: Some(Short(heard.event_id)) }
     );
     assert_eq!((ruling.operator_quote, ruling.answers, ruling.choice), (None, None, None));
 }
 
 #[test]
 fn a_rule_naming_a_repo_the_decider_does_not_steward_is_told_back_and_admits_nothing() {
-    let rig = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "refuse leading zeros")], &thrice(reply_with_rule(rule_json("@libby:chat", "refuse leading zeros", "GameCult/CultLib"))));
+    let rig = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "always refuse leading zeros")], &thrice(reply_with_rule(rule_json("@libby:chat", "always refuse leading zeros", "GameCult/CultLib"))));
     *rig.table.0.borrow_mut() = Some(crate::heartbeat::Addressing { minds: table_with_libby("GameCult/Bifrost") });
     assert_eq!(failure_of(rig.go()), Some(Failure::RuleRepo("rule.repo: @libby:chat stewards GameCult/Bifrost".into())));
     assert!(rulings_in(&rig.mind).is_empty());
@@ -8519,13 +8519,13 @@ fn a_rule_is_refused_when_the_words_the_decider_never_said_or_the_decider_is_not
     let c = config();
     let decode = |by: &str, words: &str, repo: &str, shown: &Shown, table: &[Addressee]| decode_reply(&reply_with_rule(rule_json(by, words, repo)), &c.rooms, shown, &Conversation::Public, &c, table).err();
     let table = table_with_libby("GameCult/Bifrost");
-    let said = libby_said("we refuse leading zeros", Some("$e1"));
-    assert_eq!(decode("@libby:chat", "refuse leading zeros", "GameCult/Bifrost", &said, &table), None);
+    let said = libby_said("we always refuse leading zeros", Some("$e1"));
+    assert_eq!(decode("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost", &said, &table), None);
     assert_eq!(decode("@libby:chat", "accept leading zeros", "GameCult/Bifrost", &said, &table), Some(Failure::OutOfBounds(RULE_WORDS_FAULT)));
     // Her words, quoted by someone else, are not hers.
-    let quoted = Shown { said: vec![Said { sender: "@guest:chat".into(), text: "refuse leading zeros".into(), event: Some("$e2".into()) }], ..Shown::default() };
-    assert_eq!(decode("@libby:chat", "refuse leading zeros", "GameCult/Bifrost", &quoted, &table), Some(Failure::OutOfBounds(RULE_WORDS_FAULT)));
-    assert_eq!(decode("@libby:chat", "refuse leading zeros", "GameCult/Bifrost", &said, &table_with_libby("")), Some(Failure::OutOfBounds(RULE_REPO_UNREAD_FAULT)));
+    let quoted = Shown { said: vec![Said { sender: "@guest:chat".into(), text: "always refuse leading zeros".into(), event: Some("$e2".into()) }], ..Shown::default() };
+    assert_eq!(decode("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost", &quoted, &table), Some(Failure::OutOfBounds(RULE_WORDS_FAULT)));
+    assert_eq!(decode("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost", &said, &table_with_libby("")), Some(Failure::OutOfBounds(RULE_REPO_UNREAD_FAULT)));
     assert_eq!(decode("@eureka:chat", "x", "GameCult/Bifrost", &said, &table), Some(Failure::OutOfBounds(RULE_BY_OWN_FAULT)));
     assert_eq!(decode("@op:chat", "x", "GameCult/Bifrost", &said, &table), Some(Failure::OutOfBounds(RULE_BY_OPERATOR_FAULT)));
     assert_eq!(decode("@guest:chat", "x", "GameCult/Bifrost", &said, &table), Some(Failure::OutOfBounds(RULE_BY_UNKNOWN_FAULT)));
@@ -8534,7 +8534,7 @@ fn a_rule_is_refused_when_the_words_the_decider_never_said_or_the_decider_is_not
 #[test]
 fn words_found_only_in_an_earlier_line_carry_no_event() {
     let run = PipelineRef { kind: PipelineKind::Run, id: format!("{INSTANCE}:run:mind-1").as_str().into() };
-    let reply: PersonaReply = serde_json::from_str(&reply_with_rule(rule_json("@libby:chat", "refuse leading zeros", "GameCult/Bifrost"))).unwrap();
+    let reply: PersonaReply = serde_json::from_str(&reply_with_rule(rule_json("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost"))).unwrap();
     let event_of = |shown: &Shown| match build_rulings(&run, 1, &reply, shown, Date("2026-11-11".into())).remove(0) {
         PipelineDocument::Ruling(ruling) => match ruling.authority {
             RulingAuthority::Steward { event, .. } => event,
@@ -8542,9 +8542,9 @@ fn words_found_only_in_an_earlier_line_carry_no_event() {
         },
         other => panic!("{other:?}"),
     };
-    assert_eq!(event_of(&libby_said("refuse leading zeros", None)), None);
-    assert_eq!(event_of(&libby_said("refuse leading zeros", Some("$e9"))), Some(Short("$e9".into())));
-    let both = Shown { said: [libby_said("refuse leading zeros", Some("$e9")).said, libby_said("refuse leading zeros", None).said].concat(), ..Shown::default() };
+    assert_eq!(event_of(&libby_said("always refuse leading zeros", None)), None);
+    assert_eq!(event_of(&libby_said("always refuse leading zeros", Some("$e9"))), Some(Short("$e9".into())));
+    let both = Shown { said: [libby_said("always refuse leading zeros", Some("$e9")).said, libby_said("always refuse leading zeros", None).said].concat(), ..Shown::default() };
     assert_eq!(event_of(&both), Some(Short("$e9".into())), "a delivery that held the words names its event even when an earlier line repeats them");
 }
 
@@ -8555,14 +8555,84 @@ fn rule_words_must_be_a_clause_of_her_own_line_outside_any_quotation() {
     let table = table_with_libby("GameCult/Bifrost");
     let decode = |line: &str, words: &str| decode_reply(&reply_with_rule(rule_json("@libby:chat", words, "GameCult/Bifrost")), &c.rooms, &libby_said(line, Some("$e1")), &Conversation::Public, &c, &table).err();
     let fault = Some(Failure::OutOfBounds(RULE_WORDS_FAULT));
-    assert_eq!(decode("refuse leading zeros", "refuse leading zeros"), None, "the whole line");
-    assert_eq!(decode("he said \"no\" and we refuse leading zeros", "refuse leading zeros"), None, "after a closed quotation");
+    let words = "always refuse leading zeros";
+    assert_eq!(decode(words, words), None, "the whole line");
+    assert_eq!(decode("he said \"no\" and we always refuse leading zeros", words), None, "after a closed quotation");
+    assert_eq!(decode("Libby's rule, and we don't budge: always refuse leading zeros", words), None, "an apostrophe inside a word is no quotation");
+    assert_eq!(decode("the op said 'fine'. always refuse leading zeros", words), None, "after a closed single quotation");
     assert_eq!(decode("hello everyone, nice weather today", "e"), fault, "a letter of a greeting");
-    assert_eq!(decode("refuse leading zeros", "refuse"), fault, "under the floor");
-    assert_eq!(decode("xrefuse leading zerosy", "refuse leading zeros"), fault, "inside words");
-    assert_eq!(decode("The operator told me: \"refuse leading zeros\"", "refuse leading zeros"), fault, "the operator's words in straight quotes");
-    assert_eq!(decode("The operator told me: \u{201C}refuse leading zeros\u{201D}", "refuse leading zeros"), fault, "in curly quotes");
-    assert_eq!(decode("she said \"x\"; refuse leading zeros", "x\"; refuse leading"), fault, "words that carry a quotation mark");
+    assert_eq!(decode(words, "always refuse"), fault, "under the floor");
+    assert_eq!(decode("xalways refuse leading zerosy", words), fault, "inside words");
+    assert_eq!(decode("a \"b\" always refuse leading zeros", "\"b\" always refuse leading zeros"), fault, "words that carry a quotation mark");
+}
+
+/// What a Persona is shown is the raw text of a line, so a Mind relaying someone else's decision writes it in one of these forms.
+#[test]
+fn rule_words_quoted_in_any_form_a_line_carries_are_not_the_minds_own() {
+    let c = config();
+    let table = table_with_libby("GameCult/Bifrost");
+    let words = "ship the importer now please";
+    let fault = Some(Failure::OutOfBounds(RULE_WORDS_FAULT));
+    let decode = |line: &str| decode_reply(&reply_with_rule(rule_json("@libby:chat", words, "GameCult/Bifrost")), &c.rooms, &libby_said(line, Some("$e1")), &Conversation::Public, &c, &table).err();
+    for (form, line) in [
+        ("straight double", "the op said \"ship the importer now please\""),
+        ("curly double", "the op said \u{201C}ship the importer now please\u{201D}"),
+        ("single", "the op said 'ship the importer now please'"),
+        ("curly single", "the op said \u{2018}ship the importer now please\u{2019}"),
+        ("backtick", "the op said `ship the importer now please`"),
+        ("guillemet", "the op said \u{00AB}ship the importer now please\u{00BB}"),
+        ("blockquote", "> ship the importer now please\n\nagreed"),
+        ("reply fallback", "> <@op:chat> ship the importer now please\n\nagreed, going ahead"),
+        ("indented blockquote", "ok\n  > ship the importer now please"),
+    ] {
+        assert_eq!(decode(line), fault, "{form}");
+    }
+    assert_eq!(decode("> <@op:chat> hold on\n\nagreed, so ship the importer now please"), None, "her own text after a quoted reply is hers");
+}
+
+#[test]
+fn rule_words_need_four_words_of_content_not_four_bytes() {
+    let c = config();
+    let table = table_with_libby("GameCult/Bifrost");
+    let decode = |words: &str| decode_reply(&reply_with_rule(rule_json("@libby:chat", words, "GameCult/Bifrost")), &c.rooms, &libby_said(&format!("{words} and more"), Some("$e1")), &Conversation::Public, &c, &table).err();
+    let fault = Some(Failure::OutOfBounds(RULE_WORDS_FAULT));
+    assert_eq!(decode("\u{1F600} \u{1F600} \u{1F600} \u{1F600}"), fault, "symbols are not words");
+    assert_eq!(decode("I think that"), fault, "three words");
+    assert_eq!(decode("- - - - always refuse"), fault, "punctuation is not a word");
+    assert_eq!(decode("we always refuse zeros"), None);
+}
+
+#[test]
+fn a_rule_title_with_a_control_character_is_refused() {
+    let c = config();
+    let table = table_with_libby("GameCult/Bifrost");
+    let decode = |title: &str| {
+        let mut rule = rule_json("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost");
+        rule["title"] = json!(title);
+        decode_reply(&reply_with_rule(rule), &c.rooms, &libby_said("we always refuse leading zeros", Some("$e1")), &Conversation::Public, &c, &table).err()
+    };
+    assert_eq!(decode("Refuse\nzeros"), Some(Failure::OutOfBounds(RULE_BOUNDS_FAULT)));
+    assert_eq!(decode("Refuse\u{7}zeros"), Some(Failure::OutOfBounds(RULE_BOUNDS_FAULT)));
+    assert_eq!(decode("Refuse zeros"), None);
+}
+
+#[test]
+fn a_rule_may_quote_a_line_delivered_after_the_sessions_first_line() {
+    let rig = Rig::new(vec![operator_says(1, "first")], &[says(&[]), reply_with_rule(rule_json("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost"))]);
+    rig.clock.step.set(0);
+    *rig.table.0.borrow_mut() = Some(crate::heartbeat::Addressing { minds: table_with_libby("GameCult/Bifrost") });
+    let (deliveries, now, arrived) = (rig.chat.deliveries.clone(), rig.clock.now.clone(), Cell::new(false));
+    let later = delivery(2, "swarm", "@libby:chat", "we always refuse leading zeros");
+    let event = later.event_id.clone();
+    *rig.model.after_echo.borrow_mut() = Some(Box::new(move || {
+        if !arrived.replace(true) {
+            deliveries.borrow_mut().push(later.clone());
+        }
+        now.set(now.get() + 6_000);
+    }));
+    assert_eq!(failure_of(rig.go()), None);
+    let [ruling] = rulings_in(&rig.mind).try_into().expect("one ruling");
+    assert!(matches!(ruling.authority, RulingAuthority::Steward { event: Some(Short(ref e)), .. } if *e == event));
 }
 
 #[test]
@@ -8570,18 +8640,18 @@ fn a_rule_inside_the_followers_own_stewardship_is_not_a_rule_even_when_the_decid
     let c = config();
     let mut table = table_with_libby("GameCult/Thing");
     table[0] = own_addressee(&c).with_stewardships([], [OrgRepo("GameCult/Thing".into())]);
-    let said = libby_said("we refuse leading zeros", Some("$e1"));
-    let decode = |repo: &str, table: &[Addressee]| decode_reply(&reply_with_rule(rule_json("@libby:chat", "refuse leading zeros", repo)), &c.rooms, &said, &Conversation::Public, &c, table).err();
+    let said = libby_said("we always refuse leading zeros", Some("$e1"));
+    let decode = |repo: &str, table: &[Addressee]| decode_reply(&reply_with_rule(rule_json("@libby:chat", "always refuse leading zeros", repo)), &c.rooms, &said, &Conversation::Public, &c, table).err();
     assert_eq!(decode("GameCult/Thing", &table), Some(Failure::OutOfBounds(RULE_REPO_OWN_FAULT)));
     assert_eq!(decode("GameCult/Thing", &table_with_libby("GameCult/Thing")), None, "a repo she does not steward herself stands");
 }
 
 #[test]
 fn a_rule_whose_campaign_is_not_in_force_is_refused_before_any_say_goes_out() {
-    let mut rule = rule_json("@libby:chat", "refuse leading zeros", "GameCult/Bifrost");
+    let mut rule = rule_json("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost");
     rule["campaign"] = json!("closed-since");
     let reply = json!({ "intent": "Record it", "say": [{ "room": "swarm", "text": "noted" }], "open_direct": null, "start_self_run": null, "remember": [], "rule": [rule], "settle": [], "urgency_permille": null }).to_string();
-    let rig = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "we refuse leading zeros")], &thrice(reply));
+    let rig = Rig::new(vec![delivery(1, "swarm", "@libby:chat", "we always refuse leading zeros")], &thrice(reply));
     *rig.table.0.borrow_mut() = Some(crate::heartbeat::Addressing { minds: table_with_libby("GameCult/Bifrost") });
     assert_eq!(failure_of(rig.go()), Some(Failure::OutOfBounds(RULE_CAMPAIGN_FAULT)));
     assert!(rig.sent_texts().is_empty(), "no say goes out under a refused reply: {:?}", rig.sent_texts());
@@ -8592,9 +8662,9 @@ fn a_rule_whose_campaign_is_not_in_force_is_refused_before_any_say_goes_out() {
 fn one_reply_records_at_most_four_rules() {
     let c = config();
     let table = table_with_libby("GameCult/Bifrost");
-    let said = libby_said("we refuse leading zeros", Some("$e1"));
+    let said = libby_said("we always refuse leading zeros", Some("$e1"));
     let many = |n: usize| {
-        let rules: Vec<_> = (0..n).map(|_| rule_json("@libby:chat", "refuse leading zeros", "GameCult/Bifrost")).collect();
+        let rules: Vec<_> = (0..n).map(|_| rule_json("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost")).collect();
         json!({ "intent": "x", "say": [], "open_direct": null, "start_self_run": null, "remember": [], "rule": rules, "settle": [], "urgency_permille": null }).to_string()
     };
     assert!(decode_reply(&many(4), &c.rooms, &said, &Conversation::Public, &c, &table).is_ok());
@@ -8604,8 +8674,8 @@ fn one_reply_records_at_most_four_rules() {
 #[test]
 fn the_event_is_the_newest_delivery_and_said_holds_every_line_a_session_showed_in_print_order() {
     let run = PipelineRef { kind: PipelineKind::Run, id: format!("{INSTANCE}:run:mind-1").as_str().into() };
-    let reply: PersonaReply = serde_json::from_str(&reply_with_rule(rule_json("@libby:chat", "refuse leading zeros", "GameCult/Bifrost"))).unwrap();
-    let said = |event: &str| Said { sender: "@libby:chat".into(), text: "refuse leading zeros".into(), event: Some(event.into()) };
+    let reply: PersonaReply = serde_json::from_str(&reply_with_rule(rule_json("@libby:chat", "always refuse leading zeros", "GameCult/Bifrost"))).unwrap();
+    let said = |event: &str| Said { sender: "@libby:chat".into(), text: "always refuse leading zeros".into(), event: Some(event.into()) };
     let shown = Shown { said: vec![said("$old"), said("$new")], ..Shown::default() };
     let PipelineDocument::Ruling(ruling) = build_rulings(&run, 1, &reply, &shown, Date("2026-11-11".into())).remove(0) else { panic!() };
     assert!(matches!(ruling.authority, RulingAuthority::Steward { event: Some(Short(ref e)), .. } if e == "$new"));

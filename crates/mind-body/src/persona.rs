@@ -165,7 +165,7 @@ const OPEN_DIRECT_TEXT_MAX_BYTES: usize = 4000;
 const RULE_BY_OWN_FAULT: &str = "rule.by: your own decision is not a rule";
 const RULE_BY_OPERATOR_FAULT: &str = "rule.by: rule records a Mind's decision in her stewardship";
 const RULE_BY_UNKNOWN_FAULT: &str = "rule.by: not a Mind of the swarm";
-const RULE_WORDS_FAULT: &str = "rule.words: copy them exactly, at least 12 bytes, from one of her lines in this session, outside any quotation";
+const RULE_WORDS_FAULT: &str = "rule.words: copy them exactly, at least 4 words, from one of her own lines in this session, outside any quotation or quoted reply";
 const RULE_REPO_OWN_FAULT: &str = "rule.repo: inside your own stewardship, where a Mind's word is a respected contributor's: weigh it and decide, it is not a rule";
 const RULE_REPO_UNREAD_FAULT: &str = "rule.repo: no stewardship of the Mind named has been read yet";
 const RULE_BOUNDS_FAULT: &str = "rule: more entries than one reply may carry, or a field blank or over its length bound";
@@ -176,8 +176,8 @@ const REMEMBER_MAX: usize = 8;
 const SETTLE_MAX: usize = 8;
 /// The most rulings of other Minds one reply records.
 const RULE_MAX: usize = 4;
-/// The fewest bytes of her line `words` must copy: a clause, not a letter.
-const RULE_WORDS_MIN_BYTES: usize = 12;
+/// The fewest words of her line `words` must copy: a clause, not a letter or a stopword.
+const RULE_WORDS_MIN_WORDS: usize = 4;
 const RULE_TITLE_MAX_BYTES: usize = 200;
 const RULE_TEXT_MAX_BYTES: usize = 4000;
 /// A memory's text in bytes, the people it is about, and a settle's reason in characters.
@@ -2269,28 +2269,47 @@ fn rule_fault(reply: &PersonaReply, shown: &Shown, addressing: &[Addressee], con
     None
 }
 
-/// Whether `words` are her own: at least `RULE_WORDS_MIN_BYTES`, copied from `line` on whole-word boundaries and outside any quotation
-/// (straight or curly), so a letter of a greeting, or what she was quoting (the operator's words included), is not hers.
+/// Whether `words` are her own: a clause of at least `RULE_WORDS_MIN_WORDS` words, copied on word boundaries from `line` as she wrote it
+/// herself. A quoted line of a reply (`>` lines, the Matrix reply fallback) is not hers, and neither is anything inside a quotation:
+/// straight, curly or single quotes, backticks and guillemets. A scanner of the forms a chat line takes, not a reading of meaning: it
+/// stops the ordinary ways a Mind relays someone else's decision, and says nothing of a quotation written some other way.
 fn in_her_own_voice(line: &str, words: &str) -> bool {
-    if words.trim().len() < RULE_WORDS_MIN_BYTES {
+    if words.split_whitespace().filter(|word| word.chars().any(char::is_alphanumeric)).count() < RULE_WORDS_MIN_WORDS || words.contains(QUOTE_MARKS) {
         return false;
     }
-    line.match_indices(words).any(|(at, found)| {
-        let before = line[..at].chars().next_back();
-        let after = line[at + found.len()..].chars().next();
+    let own = line.lines().filter(|line| !line.trim_start().starts_with('>')).collect::<Vec<_>>().join("\n");
+    own.match_indices(words).any(|(at, found)| {
         let edge = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
-        let (mut straight, mut curly) = (false, 0i32);
-        for c in line[..at].chars() {
-            match c {
-                '"' => straight = !straight,
-                '\u{201C}' => curly += 1,
-                '\u{201D}' => curly = (curly - 1).max(0),
-                _ => {}
-            }
-        }
-        let quoted = straight || curly > 0 || found.contains(['"', '\u{201C}', '\u{201D}']);
-        edge(before) && edge(after) && !quoted
+        edge(own[..at].chars().next_back()) && edge(own[at + found.len()..].chars().next()) && !inside_quotation(&own, at)
     })
+}
+
+/// Every character that opens or closes a quotation in a chat line.
+const QUOTE_MARKS: [char; 9] = ['"', '\'', '`', '\u{201C}', '\u{201D}', '\u{2018}', '\u{2019}', '\u{00AB}', '\u{00BB}'];
+
+/// Whether byte `upto` of `text` is inside an unclosed quotation. A single quote opens one only at the start of a word and closes it only
+/// at the end of one, so an apostrophe inside a word (don't, Libby's) is none.
+fn inside_quotation(text: &str, upto: usize) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let upto = text[..upto].chars().count();
+    let mut closer: Option<char> = None;
+    for (at, c) in chars.iter().copied().enumerate().take(upto) {
+        let (prev, next) = (at.checked_sub(1).map(|p| chars[p]), chars.get(at + 1).copied());
+        let word_before = prev.is_some_and(char::is_alphanumeric);
+        let word_after = next.is_some_and(char::is_alphanumeric);
+        closer = match (closer, c) {
+            (None, '"') => Some('"'),
+            (None, '`') => Some('`'),
+            (None, '\u{201C}') => Some('\u{201D}'),
+            (None, '\u{00AB}') => Some('\u{00BB}'),
+            (None, '\u{2018}') => Some('\u{2019}'),
+            (None, '\'') if !word_before && word_after => Some('\''),
+            (Some('\u{2019}'), '\u{2019}') | (Some('\''), '\'') if !word_after => None,
+            (Some(open), c) if open == c && !matches!(c, '\'' | '\u{2019}') => None,
+            (kept, _) => kept,
+        };
+    }
+    closer.is_some()
 }
 
 /// Whether an open is hers to ask: from a public conversation, of a person this session showed who is neither a Mind nor herself, with
