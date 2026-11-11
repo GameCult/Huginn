@@ -264,6 +264,8 @@ const VENDORED: &[(&str, &str)] = &[
     ("card-raised-at-nil", "b81bb825790ffe03fabe63c3f8a61c36bd50ca268aa6dff67b5bcfad3957e58c"),
     ("card-withheld-deciders", "d13b9b77461cfdf78f943ef56c6aeab852ab6b6f0b355e26c5b361f99c79c7f7"),
     ("answer-counted", "55d69ae3cc7ebbeeae7d501e8641640e115c3fb5aac399ea760588bca343b9e6"),
+    ("answer-revision", "19d7289395ae68cbaf6de1c0a1ef6c843211b2caf9462e1d2268cd0883386315"),
+    ("answer-retraction", "89156f41ec3ea54f5d47bd3318913ff013785f4727916875be97785935cb7735"),
     ("answer-withheld-answerer", "b66b4f921cdd374be04af3de34c59e254a5e542027ae8c57f196a3ea3406e427"),
     ("answer-refused-stale", "3183bc9c483f4a625332cda11ef22a9c8560868a7728b77daa63a1960a3cd3d6"),
     ("entry-open-counted", "b51f499e8dd0465cf5df9d68d8fccbe94dd1339fd3157969693dd0d4ecb2549b"),
@@ -377,6 +379,13 @@ const RECORD_KEYS: [&str; 6] = ["schemaVersion", "fork_id", "options_hash", "cou
 #[test]
 fn the_vendored_cultlib_vectors_are_the_pinned_bytes() {
     assert_eq!(CULTLIB_SHA.len(), 40);
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/desk-feed/cultlib-3a51bbab");
+    let docs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/desk-feed-door.md");
+    for path in [dir.join("README.md"), docs] {
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        assert!(text.contains(CULTLIB_SHA), "{} does not name the pinned sha {CULTLIB_SHA}", path.display());
+    }
+    assert!(dir.to_str().unwrap().ends_with(&format!("cultlib-{}", &CULTLIB_SHA[..8])), "the directory is named for the pin");
     for (name, sha) in VENDORED {
         let digest: String = Sha256::digest(vendored(name)).iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(&digest, sha, "{name} is not CultLib {CULTLIB_SHA}'s bytes");
@@ -410,7 +419,9 @@ fn the_cards_are_eighteen_keys_with_raised_at_and_decider_count() {
     assert_eq!(decode(&vendored("card-withheld-deciders")).get("decider_count").int(), 2);
 }
 
-/// `answerer` is a string or nil on every answer; `Value::Nil` only when `named` is false.
+/// `answerer` is a string or nil on every answer; `Value::Nil` only when `named` is false. The bytes
+/// null it on `Counted` and `Refused` only; nullable on all four variants is the ruling
+/// `desk-reader-counts-shape`, and CultLib has no vector with a `Revision` or `Retraction` nulled.
 fn check_answer(answer: &Value, named: bool) {
     assert_eq!(answer.keys().len(), 16);
     assert_eq!(answer.keys()[13], "answerer");
@@ -423,12 +434,14 @@ fn check_answer(answer: &Value, named: bool) {
 
 #[test]
 fn the_answers_keep_sixteen_keys_and_answerer_is_a_string_or_nil() {
-    for (name, named) in [("answer-counted", true), ("answer-refused-stale", true), ("answer-withheld-answerer", false)] {
+    for (name, named) in [("answer-counted", true), ("answer-revision", true), ("answer-retraction", true), ("answer-refused-stale", true), ("answer-withheld-answerer", false)] {
         let bytes = vendored(name);
         assert_eq!(bytes[..3], [0xde, 0x00, 0x10], "{name}: header");
         check_answer(&decode(&bytes), named);
     }
-    assert_eq!(decode(&vendored("answer-refused-stale")).get("outcome").str(), "Refused");
+    for (name, outcome) in [("answer-counted", "Counted"), ("answer-revision", "Revision"), ("answer-retraction", "Retraction"), ("answer-refused-stale", "Refused")] {
+        assert_eq!(decode(&vendored(name)).get("outcome").str(), outcome);
+    }
 }
 
 /// The entry is `83` and its record `86`, `answerer_count` the fifth key. In a decider's view the count

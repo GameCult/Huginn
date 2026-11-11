@@ -138,11 +138,19 @@ byte; both values are in the account-id format above. Any other reader is a non-
     the same for both readers. In a non-decider's view every answerer is nil, and the count is then
     between 1 and the number of answers (0 with no answers).
   - **Answer:** `gamecult.desk_answer.v0` keeps its 16 keys (header `DE 00 10`); `answerer` is a
-    string or nil on all four variants (`Counted`, `Revision`, `Retraction`, `Refused`), nil only in a
-    non-decider's view, with the key kept. Stored answers always carry it.
+    string or nil, nil only in a non-decider's view, with the key kept. The bytes pin a nil `answerer`
+    on two variants, `Counted` (`answer-withheld-answerer`) and `Refused` (the withheld entries). That
+    it is nullable on all four variants (`Counted`, `Revision`, `Retraction`, `Refused`) is the ruling
+    `eureka-substrate:ruling:desk-reader-counts-shape`, not a vector: CultLib's `revision` and
+    `retraction` vectors carry a string `answerer` and no CultLib vector has either nulled. Stored
+    answers always carry it.
   - **Entry:** header `83` (`schemaVersion, card, record`). The view is read off `deciders`: a
     non-empty `deciders` names every answerer, an empty one names none.
   - `options_hash` does not change (still five members).
+  - **Consumers:** Bifrost branch `heimdall/desk-card-repin` (`f977a43`) vendors Huginn's desk
+    fixtures from `79d954c` and needs a re-pin after this PR. Bifrost's `DeskDocuments.cs` marks
+    `answerer_count` `JsonRequired`, so its merge must wait for `cut-desk-feed-listing`: today's door
+    does not send the field.
   - Huginn's real types do not carry these shapes yet: `ForkCard` has no `raised_at` or
     `decider_count`, `ForkRecord` no `answerer_count`, `ForkDeskAnswer.answerer` is a non-null
     string, and each type refuses unknown keys. The test

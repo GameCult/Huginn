@@ -13,6 +13,8 @@ from Huginn's encoders: Huginn's own types do not carry these shapes yet (see
 | `card-raised-at-nil` | `card.valid` `raised_at_nil` | `raised_at` nil, key kept |
 | `card-withheld-deciders` | `card.valid` `withheld_deciders` | empty `deciders`, `decider_count` 2 |
 | `answer-counted` | `deskAnswer.valid` `counted` | 16 keys (`DE 00 10`), `answerer` a string |
+| `answer-revision` | `deskAnswer.valid` `revision` | a `Revision`, `answerer` a string (no CultLib vector nulls a Revision) |
+| `answer-retraction` | `deskAnswer.valid` `retraction` | a `Retraction`, `answerer` a string (no CultLib vector nulls a Retraction) |
 | `answer-withheld-answerer` | `deskAnswer.valid` `withheld_answerer` | `answerer` nil |
 | `answer-refused-stale` | `deskAnswer.valid` `refused_stale` | a `Refused` answer, `answerer` a string |
 | `entry-open-counted` | `transport.entry.valid` `open_counted` | decider view: entry `83`, record `86`, `answerer_count` 1 |
