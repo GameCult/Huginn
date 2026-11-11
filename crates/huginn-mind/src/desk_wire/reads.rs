@@ -854,18 +854,36 @@ mod tests {
         assert_eq!(encode(&rmp_serde::from_slice::<ForkRefusal>(&bytes).unwrap()), bytes);
     }
 
-    /// The contract's refusal texts: the list names the fork and `(order N)`, the read names the fork
-    /// alone, both end `alone is past the response budget`. Huginn's own texts are compared to them.
+    /// The contract pins no exact text for `fork_too_large`: the vector's `error` string is
+    /// Huginn-independent, and a judge checks that the refusal names the entry the page would open
+    /// with. So for each vector case Huginn's refusal is code `fork_too_large`, its text contains the
+    /// fork id, the list form contains the order (and at order 0 never a `c0` cursor), and the read
+    /// form contains the fork id and no `order` or `cursor` wording.
     #[test]
-    fn the_refusal_texts_are_the_vectors() {
+    fn the_refusals_name_the_fork_the_vectors_name_and_by_the_contracts_form() {
         let file = transport();
-        let step = &file["listShortPages"][1]["steps"][0];
-        let (fork_id, order) = (step["fork_id"].as_str().unwrap(), step["order"].as_u64().unwrap());
-        assert_eq!(fork_too_large(fork_id, order).error, step["refusal"]["error"].as_str().unwrap(), "list text");
-        let read = &file["readTooLarge"][0];
-        assert_eq!(fork_too_large_read(read["fork_id"].as_str().unwrap()).error, read["refusal"]["error"].as_str().unwrap(), "read text");
-        let order_zero = &file["listShortPages"][2]["steps"][1];
-        assert_eq!(fork_too_large(order_zero["fork_id"].as_str().unwrap(), 0).error, order_zero["refusal"]["error"].as_str().unwrap(), "order 0 text");
+        let mut listed = 0;
+        for scenario in file["listShortPages"].as_array().unwrap() {
+            for step in scenario["steps"].as_array().unwrap().iter().filter(|step| step.get("refusal").is_some()) {
+                let (fork_id, order) = (step["fork_id"].as_str().unwrap(), step["order"].as_u64().unwrap());
+                let refusal = fork_too_large(fork_id, order);
+                assert_eq!(refusal.code, ForkRefusalCode::ForkTooLarge);
+                assert!(refusal.error.contains(fork_id) && refusal.error.contains(&format!("order {order}")), "{}", refusal.error);
+                if order == 0 {
+                    assert!(!refusal.error.contains("c0"), "{}", refusal.error);
+                }
+                listed += 1;
+            }
+        }
+        assert_eq!(listed, 2);
+        let order_zero = fork_too_large("gamecult-chat:question:q1", 0);
+        assert!(!order_zero.error.contains("c0") && order_zero.error.contains("end of the list"), "{}", order_zero.error);
+        for read in file["readTooLarge"].as_array().unwrap() {
+            let fork_id = read["fork_id"].as_str().unwrap();
+            let refusal = fork_too_large_read(fork_id);
+            assert_eq!(refusal.code, ForkRefusalCode::ForkTooLarge);
+            assert!(refusal.error.contains(fork_id) && !refusal.error.contains("order") && !refusal.error.contains("cursor"), "{}", refusal.error);
+        }
     }
 
     #[test]
