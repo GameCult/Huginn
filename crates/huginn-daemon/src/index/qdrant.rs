@@ -11,7 +11,7 @@ use huginn_mind::ChatMessage;
 
 use crate::sources::{
     COLLECTION, CORPUS_CHAT, CORPUS_FORGE, ChatFilter, ChatOrder, ChatPayload, ChatPoint, ChatRow, DescribedSources, FRONT_PAGE_FILES, SourceIndex, SourcePayload, SourcePoint, SourceRow,
-    SourcesMeta,
+    SourcesMeta, StoredChat,
 };
 
 use super::{CollectionMeta, INDEX_CALL_TIMEOUT, Described, Hit, Http, Method, Point, VectorIndex};
@@ -464,6 +464,70 @@ impl SourceIndex for QdrantIndex {
         let found = answer["result"]["points"].as_array().context("Qdrant's scroll has no points")?;
         found.iter().map(|point| chat_payload_of(&point["payload"])).collect()
     }
+
+    fn chat_tail(&mut self, room_id: &str) -> Result<Option<StoredChat>> {
+        let order = json!({ "key": "ts_end_ms", "direction": "desc" });
+        Ok(self.scroll_chat(chat_room_filter(room_id, vec![]), Some((order, 1)))?.into_iter().next())
+    }
+
+    fn chat_chunks_holding(&mut self, room_id: &str, event_ids: &[String]) -> Result<Vec<StoredChat>> {
+        if event_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.scroll_chat(chat_room_filter(room_id, vec![json!({ "key": "event_ids", "match": { "any": event_ids } })]), None)
+    }
+
+    fn chat_chunks_overlapping(&mut self, room_id: &str, from_ms: u64, to_ms: u64) -> Result<Vec<StoredChat>> {
+        let span = vec![json!({ "key": "ts_end_ms", "range": { "gte": from_ms } }), json!({ "key": "ts_start_ms", "range": { "lt": to_ms } })];
+        self.scroll_chat(chat_room_filter(room_id, span), None)
+    }
+
+    fn delete_chat(&mut self, room_id: &str, ids: Option<&[String]>) -> Result<()> {
+        let collection = self.sources.clone();
+        let body = json!({ "filter": chat_delete_filter(room_id, ids) });
+        self.ask(Method::Post, &format!("/collections/{collection}/points/delete?wait=true"), Some(&body), &[200])?;
+        Ok(())
+    }
+}
+
+impl QdrantIndex {
+    /// Every chat chunk `filter` keeps, with its point id, paged; or, given an
+    /// order and a limit, the first of them in that order.
+    fn scroll_chat(&mut self, filter: Value, ordered: Option<(Value, u64)>) -> Result<Vec<StoredChat>> {
+        let collection = self.sources.clone();
+        let mut out = Vec::new();
+        let mut offset = Value::Null;
+        loop {
+            let mut body = json!({ "filter": filter, "limit": SCROLL_PAGE, "with_payload": true, "with_vector": false });
+            if let Some((order, limit)) = &ordered {
+                body["order_by"] = order.clone();
+                body["limit"] = json!(limit);
+            } else if !offset.is_null() {
+                body["offset"] = offset;
+            }
+            let (_, answer) = self.ask(Method::Post, &format!("/collections/{collection}/points/scroll"), Some(&body), &[200])?;
+            for point in answer["result"]["points"].as_array().context("Qdrant's scroll has no points")? {
+                out.push(StoredChat { id: point["id"].as_str().context("a point id is not a string")?.to_owned(), payload: chat_payload_of(&point["payload"])? });
+            }
+            offset = answer["result"]["next_page_offset"].clone();
+            if ordered.is_some() || offset.is_null() {
+                return Ok(out);
+            }
+        }
+    }
+}
+
+/// What a chat delete removes: the room's chat points, all of them or those with `ids`. The corpus
+/// and room conditions hold either way, so a forge point or another room's point cannot match.
+fn chat_delete_filter(room_id: &str, ids: Option<&[String]>) -> Value {
+    chat_room_filter(room_id, ids.map(|ids| json!({ "has_id": ids })).into_iter().collect())
+}
+
+/// The chat points of one room, narrowed by `more` conditions.
+fn chat_room_filter(room_id: &str, more: Vec<Value>) -> Value {
+    let mut must = vec![json!({ "key": "corpus", "match": { "value": CORPUS_CHAT } }), json!({ "key": "room_id", "match": { "value": room_id } })];
+    must.extend(more);
+    json!({ "must": must })
 }
 
 #[cfg(test)]
@@ -524,6 +588,29 @@ mod source_filter_tests {
         let forge = payload_json(&SourcePayload { repo: "r".into(), path: "p".into(), commit: "c".into(), blob: "b".into(), line_start: 1, line_end: 2, chunk_index: 0, ext: "rs".into(), text: "t".into() });
         assert_eq!(forge["corpus"], "forge");
         assert!(chat_payload_of(&forge).is_err());
+    }
+
+    /// The writer-side filters name the chat corpus and the room, so a forge point never matches.
+    #[test]
+    fn the_writer_filters_are_always_chat_corpus_and_the_room() {
+        let filter = chat_room_filter("!r:x", vec![json!({ "key": "event_ids", "match": { "any": ["$a"] } })]);
+        assert_eq!(
+            filter,
+            json!({ "must": [
+                { "key": "corpus", "match": { "value": "chat" } },
+                { "key": "room_id", "match": { "value": "!r:x" } },
+                { "key": "event_ids", "match": { "any": ["$a"] } },
+            ] })
+        );
+    }
+
+    #[test]
+    fn a_chat_delete_names_the_corpus_and_room_with_or_without_ids() {
+        let all = chat_delete_filter("!r:x", None);
+        assert_eq!(all["must"].as_array().unwrap().len(), 2);
+        let some = chat_delete_filter("!r:x", Some(&["p1".to_owned()]));
+        assert_eq!(some["must"][2], json!({ "has_id": ["p1"] }));
+        assert_eq!(some["must"][0], json!({ "key": "corpus", "match": { "value": "chat" } }));
     }
 
     /// The chat filter is the chat corpus, the rooms as an any-of `should` split

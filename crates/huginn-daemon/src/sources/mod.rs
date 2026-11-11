@@ -193,6 +193,14 @@ impl ChatFilter {
     }
 }
 
+/// A chat chunk as the index holds it, with its point id: what the ingest job
+/// reads back to rewrite a chunk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredChat {
+    pub id: String,
+    pub payload: ChatPayload,
+}
+
 /// One chunk a vector search returned and how near it scored.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceRow {
@@ -230,6 +238,16 @@ pub trait SourceIndex {
     /// Up to `limit` chat chunks `filter` keeps, by span start in `order`.
     /// Reads only `corpus=chat` points; the daemon's.
     fn chat_scroll(&mut self, filter: &ChatFilter, order: ChatOrder, limit: u32, within: Duration) -> Result<Vec<ChatPayload>>;
+    /// The room's chunk with the greatest `ts_end_ms`, if it has any. The ingest job's alone.
+    fn chat_tail(&mut self, room_id: &str) -> Result<Option<StoredChat>>;
+    /// The room's chunks holding any of `event_ids`. The ingest job's alone.
+    fn chat_chunks_holding(&mut self, room_id: &str, event_ids: &[String]) -> Result<Vec<StoredChat>>;
+    /// The room's chunks whose span reaches into [`from_ms`, `to_ms`): `ts_end_ms >= from_ms`
+    /// and `ts_start_ms < to_ms`. The ingest job's alone.
+    fn chat_chunks_overlapping(&mut self, room_id: &str, from_ms: u64, to_ms: u64) -> Result<Vec<StoredChat>>;
+    /// Deletes a room's chat chunks: those with the point ids `ids`, or all of them when `None`.
+    /// Acknowledged before it returns. Never touches a forge point. The ingest job's alone.
+    fn delete_chat(&mut self, room_id: &str, ids: Option<&[String]>) -> Result<()>;
 }
 
 /// A repo the forge lists as indexable.
