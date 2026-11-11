@@ -702,3 +702,84 @@ fn a_fork_too_large_to_page_is_named_by_the_list_and_never_by_the_read() {
         assert_eq!(decode_desk_response(&reply).unwrap().1.unwrap_err().code, "payload-not-a-request", "{operation}");
     }
 }
+
+/// Q1 (order 0), Q2, Q3 held; the daemon up. Returns what the tests need.
+fn three_forks() -> (tempfile::TempDir, tempfile::TempDir, String, PathBuf, Daemon) {
+    let (root, run) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let hash = seed(root.path());
+    {
+        let mut mind = Mind::open(root.path(), &INSTANCE.into()).unwrap();
+        let documents = ["Q2", "Q3"]
+            .into_iter()
+            .map(|label| PipelineDocument::Question(PipelineQuestion {
+                campaign: "eureka-state".into(),
+                label: label.into(),
+                title: Title("Who owns the state?".into()),
+                question: "Who owns the state?".into(),
+                options: vec![
+                    QuestionOption { label: "A".into(), text: "the organ".into() },
+                    QuestionOption { label: "B".into(), text: "the client".into() },
+                ],
+                recommended: "A".into(),
+                depends: vec![],
+                raised_in: None,
+                asked_on: Date("2026-09-16".into()),
+            }))
+            .collect();
+        let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: short("claude"), session: short("session-2"), tool: short("admit"), imported_from: None };
+        let outcome = mind.admit(PipelineAdmissionBatch { instance: INSTANCE.into(), provenance, documents }, Utc.with_ymd_and_hms(2026, 9, 16, 12, 5, 0).unwrap());
+        assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
+    }
+    let (desk, log) = (run.path().join("desk.sock"), run.path().join("daemon.log"));
+    let daemon = spawn(root.path(), &desk, my_uid(), &log);
+    (root, run, hash, desk, daemon)
+}
+
+/// Grows `fork`'s record over the socket until the list page at `cursor` is the refusal; returns it.
+fn grown_until_refused(desk: &Path, hash: &str, fork: &str, cursor: Option<&str>) -> DeskResponse {
+    let note = "a long reason, ".repeat(20);
+    for sent in 1..400_u32 {
+        let listed = ask(desk, "m-g", &forks_page("x", cursor));
+        if refusal_of(&listed).is_some() {
+            return listed;
+        }
+        assert!(matches!(listed, DeskResponse::Forks { .. }), "{listed:?}");
+        let mut grow = answer("x", hash, &format!("00000000-0000-4000-8000-{sent:012}"));
+        if let DeskRequest::Answer { request, .. } = &mut grow {
+            request.fork_id = fork.into();
+            request.answer = Some(ForkAnswer { choice: None, note: Some(note.clone()) });
+        }
+        assert!(matches!(ask(desk, "m-w", &grow), DeskResponse::Answered { .. }));
+    }
+    panic!("the record does not grow")
+}
+
+fn page_ids(response: DeskResponse) -> (Vec<String>, Option<u64>) {
+    let DeskResponse::Forks { list, .. } = response else { panic!("{response:?}") };
+    (list.forks.iter().map(|e| e.card.fork_id.as_str().to_string()).collect(), list.next_cursor.map(|c| c.order()))
+}
+
+/// The oldest fork (order 0) oversize: the list names it and its order, and says it is the end, not a cursor.
+#[test]
+fn the_oldest_fork_too_large_says_the_list_ends_and_names_no_cursor() {
+    let _serial = serial();
+    let (_root, _run, hash, desk, _daemon) = three_forks();
+    let refused = grown_until_refused(&desk, &hash, FORK, Some("c1"));
+    let (code, text) = refusal_of(&refused).unwrap();
+    assert_eq!(code, "fork_too_large");
+    assert!(text.contains(FORK) && text.contains("order 0") && !text.contains("c0"), "{text}");
+}
+
+/// The newest fork (order 2) oversize: the first page is the refusal, and c2 resumes to the older forks.
+#[test]
+fn the_newest_fork_too_large_is_named_and_its_cursor_resumes_to_the_older_forks() {
+    let _serial = serial();
+    let (_root, _run, hash, desk, _daemon) = three_forks();
+    let newest = "eureka-state:question:Q3";
+    let refused = grown_until_refused(&desk, &hash, newest, None);
+    let (code, text) = refusal_of(&refused).unwrap();
+    assert_eq!(code, "fork_too_large");
+    assert!(text.contains(newest) && text.contains("order 2") && text.contains("c2"), "{text}");
+    let rest = page_ids(ask(&desk, "m-p", &forks_page("x", Some("c2"))));
+    assert_eq!(rest, (vec!["eureka-state:question:Q2".to_string(), FORK.to_string()], None));
+}
