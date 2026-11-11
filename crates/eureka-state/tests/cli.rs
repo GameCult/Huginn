@@ -49,6 +49,7 @@ fn run(env: &[(&str, &str)], args: &[&str], stdin: Option<&str>) -> Run {
     command
         .env_remove("EUREKA_INSTANCE")
         .env_remove("HUGINN_ENDPOINT")
+        .env_remove("HUGINN_SESSION")
         .envs(env.iter().copied())
         .args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
@@ -2781,4 +2782,82 @@ fn import_wrong_endpoint_is_foreign_instance() {
     let own = importing(&taker, TAKER, taker.addr);
     assert_eq!(own.code, 2, "{}{}", own.out, own.err);
     assert!(own.err.starts_with("InvalidInput: --from heimdall is this process's own instance"), "{}", own.err);
+}
+
+/// Configured for the test instance against a daemon at `addr`, with `HUGINN_SESSION` as given.
+fn with_session(addr: SocketAddr, session: &str, args: &[&str], stdin: Option<&str>) -> Run {
+    let endpoint = format!("rudp://{addr}");
+    run(&[("EUREKA_INSTANCE", INSTANCE), ("HUGINN_ENDPOINT", &endpoint), ("HUGINN_SESSION", session)], args, stdin)
+}
+
+fn admit_without_session(file: &str) -> Vec<&str> {
+    vec!["admit", "--faculty", "Hands", "--agent", "claude", file]
+}
+
+#[test]
+fn the_session_is_the_flag_else_huginn_session_else_a_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "campaign.json", &json!([campaign_json()]));
+    let server = live();
+
+    // Neither: refused before any send, nothing admitted.
+    let neither = at(server.addr, &admit_without_session(&file), None);
+    assert_eq!(neither.code, 2, "{}", neither.err);
+    assert!(neither.err.starts_with("InvalidInput: --session is required"), "{}", neither.err);
+    assert_eq!(neither.out, "");
+    let count = at(server.addr, &["whoami"], None);
+    assert!(count.out.contains("receipts 2 "), "{}", count.out);
+
+    // An empty variable is absent.
+    let empty = with_session(server.addr, "", &admit_without_session(&file), None);
+    assert_eq!(empty.code, 2, "{}", empty.err);
+    assert!(empty.err.starts_with("InvalidInput: --session is required"), "{}", empty.err);
+    assert!(at(server.addr, &["whoami"], None).out.contains("receipts 2 "));
+
+    // The variable alone: the receipt carries it.
+    let env_only = with_session(server.addr, "mind-20261111T072944197Z", &admit_without_session(&file), None);
+    assert_eq!(env_only.code, 0, "{}", env_only.err);
+    let viewed = at(server.addr, &["view", &format!("{CAMPAIGN}:campaign:self")], None);
+    assert!(viewed.out.contains(" Hands/claude session mind-20261111T072944197Z tool huginn "), "{}", viewed.out);
+    assert!(at(server.addr, &["whoami"], None).out.contains("receipts 3 "));
+
+    // The persona door takes it the same way.
+    let persona_file = write(&dir, "persona.json", &persona(INSTANCE, "2026-10-10T10:00:00Z"));
+    let put = with_session(server.addr, "mind-run-p", &["persona", "put", "--faculty", "SelfFaculty", "--agent", "claude", &persona_file], None);
+    assert_eq!(put.code, 0, "{}", put.err);
+    let receipt = put.out.strip_prefix("Committed ").and_then(|rest| rest.strip_suffix('\n')).expect(&put.out);
+    let got = at(server.addr, &["persona", "get"], None);
+    assert!(got.out.contains(&format!("receipt {receipt}")), "{}", got.out);
+}
+
+#[test]
+fn the_flag_wins_over_huginn_session() {
+    let (server, seen) = replying("admit", HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { receipt_id: "mind-commit-x".into(), committed_at: "2026-11-11T00:00:00Z".into(), writes: vec![] }));
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "campaign.json", &json!([campaign_json()]));
+    let _ = with_session(server.addr, "from-env", &admit_args(&file), None);
+    let seen = seen.lock().unwrap();
+    let sessions: Vec<&str> = seen
+        .iter()
+        .filter_map(|request| if let HuginnMindRequest::Admit(batch) = request { Some(batch.provenance.session.0.as_str()) } else { None })
+        .collect();
+    assert_eq!(sessions, ["session-7"]);
+}
+
+#[test]
+fn a_malformed_huginn_session_is_refused_naming_the_variable_without_echoing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "campaign.json", &json!([campaign_json()]));
+    let (server, count) = counting(HuginnMindResponse::View(None), "view");
+    let long = "L".repeat(201);
+    let ran = with_session(server.addr, &long, &admit_without_session(&file), None);
+    assert_eq!(ran.code, 2, "{}", ran.err);
+    assert!(ran.err.starts_with("InvalidInput: HUGINN_SESSION is longer than 200 bytes"), "{}", ran.err);
+    assert!(!ran.err.contains("LLLL"), "{}", ran.err);
+    assert_eq!(*count.lock().unwrap(), 0, "nothing was sent");
+
+    // The bound itself is allowed.
+    let live = live();
+    let edge = with_session(live.addr, &"E".repeat(200), &admit_without_session(&file), None);
+    assert_eq!(edge.code, 0, "{}", edge.err);
 }
