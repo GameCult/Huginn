@@ -326,7 +326,7 @@ impl<S: MindStore> Mind<S> {
     /// A page holds at most `limit` entries (never more than 50) and stops short only when the next
     /// entry would push the encoded response past `DESK_PAGE_BUDGET` (the one `DESK_MAX_RESPONSE_BYTES`
     /// less the envelope margin); counts and stamp are unaffected. A page whose FIRST entry alone is past
-    /// the budget is `MindRefusal::DeskForkTooLarge`, naming that fork and its order: the caller goes on
+    /// the budget is the `fork_too_large` refusal, naming that fork and its order: the caller goes on
     /// with the cursor `c<order>`, which returns the forks below it, so no older fork is unreachable.
     /// The fork itself is still its whole entry on `desk_fork`. Nothing is dropped silently.
     ///
@@ -384,7 +384,7 @@ impl<S: MindStore> Mind<S> {
             if bytes > DESK_PAGE_BUDGET {
                 let list = held(&mut response);
                 if list.forks.len() == 1 {
-                    return Ok(DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: key.to_string(), order: *order, bytes: bytes as u64, limit: DESK_PAGE_BUDGET as u64 }));
+                    return Ok(DeskResponse::NotStored(fork_too_large(key, *order)));
                 }
                 list.forks.pop();
                 list.next_cursor = before;
@@ -1061,9 +1061,11 @@ mod tests {
         assert_eq!(ids(&first), [fork(3)]);
         assert_eq!(first.next_cursor.map(ForkCursor::order), Some(2));
         let response = mind.desk_forks(&list(&LIST), None, first.next_cursor, limit(50));
-        let DeskResponse::Refused(MindRefusal::DeskForkTooLarge { fork: named, order, bytes, limit: bound }) = response else { panic!("{response:?}") };
-        assert_eq!((named, order, bound), (fork(2), 1, DESK_PAGE_BUDGET as u64));
-        assert!(bytes > bound);
+        let DeskResponse::NotStored(refusal) = response else { panic!("{response:?}") };
+        assert_eq!(refusal.code, ForkRefusalCode::ForkTooLarge);
+        let order = 1;
+        assert_eq!(refusal.error, fork_too_large(&fork(2), order).error);
+        assert!(refusal.error.contains(&fork(2)) && refusal.error.contains("order 1"), "{refusal:?}");
         // The order the refusal names is the order of the fork it names; its cursor goes on past it.
         assert_eq!(entry(mind.desk_fork(&list(&LIST), &fork(2))).0.card.order, order);
         let (rest, _) = page(mind.desk_forks(&list(&LIST), None, ForkCursor::new(order), limit(50)));

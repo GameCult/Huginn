@@ -152,13 +152,14 @@ pub struct ForkDeskAnswer {
     pub request_id: String,
 }
 
-/// The three requests Huginn refuses without storing, by code.
+/// The refusals Huginn sends without storing, by code. `ForkTooLarge` is the list's alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ForkRefusalCode {
     ForkUnknown,
     BodyInvalid,
     RequestIdConflict,
+    ForkTooLarge,
 }
 
 /// `gamecult.fork.refusal.v0`. `error` is a fixed sentence, never an echo of what was sent;
@@ -380,6 +381,13 @@ fn fork_refusal(code: ForkRefusalCode, error: String) -> ForkRefusal {
 
 fn fork_unknown() -> ForkRefusal {
     fork_refusal(ForkRefusalCode::ForkUnknown, "fork_unknown: no such fork".into())
+}
+
+/// A list page whose first entry alone is past the page budget: names that fork and its `order`. A
+/// client continues with the cursor `c<order>`; at order 0 there is no such cursor and the list ends.
+fn fork_too_large(fork: &str, order: u64) -> ForkRefusal {
+    let onward = if order == 0 { "this is the end of the list".to_string() } else { format!("continue with cursor c{order}") };
+    fork_refusal(ForkRefusalCode::ForkTooLarge, format!("fork_too_large: fork {fork} at order {order} is past the page budget by itself; {onward}"))
 }
 
 fn body_invalid(field: &str) -> ForkRefusal {
