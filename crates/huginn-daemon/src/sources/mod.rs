@@ -19,6 +19,7 @@
 //! the delete and the upserts leaves no cursor, and the repo is ingested whole.
 //! The cursors object is written whole by this job alone, once per repo.
 
+pub mod chat;
 pub mod chunk;
 pub mod forge;
 pub mod git;
@@ -395,7 +396,7 @@ fn retire<S: SourceIndex>(
     failed: &mut Vec<String>,
 ) {
     let listed = |name: &str| catalog.iter().any(|repo| repo.name == name);
-    let mut gone: BTreeSet<String> = cursors.keys().filter(|name| !listed(name)).cloned().collect();
+    let mut gone: BTreeSet<String> = cursors.keys().filter(|name| !chat::is_chat_key(name) && !listed(name)).cloned().collect();
     if let Ok(entries) = std::fs::read_dir(mirrors) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_string_lossy().strip_suffix(".git")
