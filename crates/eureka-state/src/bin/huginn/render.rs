@@ -3,7 +3,7 @@
 use std::fmt::Write;
 
 use huginn_mind::eureka_pipeline::{PipelineResolution, ResolutionOutcome};
-use huginn_mind::{SourceHits, IndexStatus, PersonaStatus, PipelineDocumentSummary, PipelineDocumentView, PipelineStatus, PipelineStatusSummary};
+use huginn_mind::{ChatHits, SourceHits, IndexStatus, PersonaStatus, PipelineDocumentSummary, PipelineDocumentView, PipelineStatus, PipelineStatusSummary};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -145,6 +145,40 @@ pub fn source_hits(found: &SourceHits) -> String {
         .collect::<Vec<_>>()
         .join("
 ")
+}
+
+/// Chat hits as the CLI prints them. Per hit the organ's own header line,
+/// `#alias (!room) first..last time..time score` (the alias and the score only
+/// when there are some), then one `time sender event_id body` line per message,
+/// the body exactly as the room held it: quoted data under our header, never a
+/// message framed as if sent to the reader. A blank line between hits; a
+/// truncated listing ends with the `--after` that continues it.
+pub fn chat_hits(found: &ChatHits) -> String {
+    let mut out: Vec<String> = found
+        .hits
+        .iter()
+        .map(|hit| {
+            let room = hit.room_alias.as_ref().map_or_else(|| hit.room_id.clone(), |alias| format!("{alias} ({})", hit.room_id));
+            let score = hit.score.map_or_else(String::new, |score| format!(" {score:.3}"));
+            let mut text = format!(
+                "{room} {}..{} {}..{}{score}\n",
+                hit.first_event_id,
+                hit.last_event_id,
+                crate::chat::shown(hit.ts_start_ms),
+                crate::chat::shown(hit.ts_end_ms)
+            );
+            for message in &hit.messages {
+                let _ = writeln!(text, "{} {} {} {}", crate::chat::shown(message.ts_ms), message.sender, message.event_id, message.body);
+            }
+            text
+        })
+        .collect();
+    if found.truncated
+        && let Some(last) = found.hits.last()
+    {
+        out.push(format!("truncated: more follow, continue with --after {}\n", crate::chat::shown(last.ts_end_ms + 1)));
+    }
+    out.join("\n")
 }
 
 /// A fact as one token: a string, a number, a flag, a reference's id, or a

@@ -72,7 +72,7 @@ pub use store::{MindStore, OwnedRedbMessagePackBackingStore};
 pub use wire::{
     DeferredAnswer, HuginnMindRequest, HuginnMindResponse, IndexStatus, MAX_DEFERRED_BODY_BYTES, MIND_REQUEST_SCHEMA, MIND_REQUEST_SCHEMA_JSON,
     MIND_RESPONSE_SCHEMA, MIND_RESPONSE_SCHEMA_JSON, MIND_SERVICE_ID, MindStatus, PersonaStatus,
-    ACTIVITY_REPOS_MAX, OpenPr, PrAction, RepoActivity, RepoChange, RepoEvent, RepoMoved, SOURCE_TEXTS_MAX, SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery,
+    ACTIVITY_REPOS_MAX, CHAT_ROOMS_MAX, ChatHit, ChatHits, ChatMessage, ChatQuery, OpenPr, PrAction, RepoActivity, RepoChange, RepoEvent, RepoMoved, SOURCE_TEXTS_MAX, SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery,
 };
 
 /// The leaf, whole, through the one crate that pins its rev: the daemon and

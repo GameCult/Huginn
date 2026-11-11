@@ -116,6 +116,18 @@
     {
       "type": "object",
       "properties": {
+        "Chat": {
+          "$ref": "#/$defs/ChatHits"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Chat"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
         "Activity": {
           "$ref": "#/$defs/RepoActivity"
         }
@@ -234,6 +246,110 @@
         "forbidden_writers",
         "shared_paths",
         "deletion_line"
+      ]
+    },
+    "ChatHit": {
+      "description": "One chunk of consecutive messages in one room. Every citation is\nrequired: only the room's alias may be absent, because a room may have\nnone. The span and the first and last ids are those of `messages` as\nreturned, after any trimming to the asked span.",
+      "type": "object",
+      "properties": {
+        "first_event_id": {
+          "type": "string"
+        },
+        "last_event_id": {
+          "type": "string"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChatMessage"
+          }
+        },
+        "room_alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "room_id": {
+          "type": "string"
+        },
+        "score": {
+          "description": "Cosine similarity for one text, the reciprocal-rank sum for several,\nnone in a listing.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "ts_end_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ts_start_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "room_id",
+        "first_event_id",
+        "last_event_id",
+        "ts_start_ms",
+        "ts_end_ms",
+        "messages"
+      ]
+    },
+    "ChatHits": {
+      "description": "The answer to a chat search: oldest first in a listing, nearest first with\ntexts.",
+      "type": "object",
+      "properties": {
+        "hits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChatHit"
+          }
+        },
+        "indexed_under": {
+          "$ref": "#/$defs/SourceModel"
+        },
+        "truncated": {
+          "description": "A listing had more chunks than `top_k`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "indexed_under",
+        "truncated",
+        "hits"
+      ]
+    },
+    "ChatMessage": {
+      "description": "One message of a chunk, as the room held it.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "sender": {
+          "description": "The sender's Matrix id.",
+          "type": "string"
+        },
+        "ts_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "event_id",
+        "sender",
+        "ts_ms",
+        "body"
       ]
     },
     "CitationRole": {

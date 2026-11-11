@@ -7,7 +7,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
-use crate::sources::{COLLECTION, FRONT_PAGE_FILES, DescribedSources, SourceIndex, SourcePayload, SourcePoint, SourceRow, SourcesMeta};
+use huginn_mind::ChatMessage;
+
+use crate::sources::{
+    COLLECTION, CORPUS_CHAT, CORPUS_FORGE, ChatFilter, ChatPayload, ChatPoint, ChatRow, DescribedSources, FRONT_PAGE_FILES, SourceIndex, SourcePayload, SourcePoint, SourceRow,
+    SourcesMeta,
+};
 
 use super::{CollectionMeta, INDEX_CALL_TIMEOUT, Described, Hit, Http, Method, Point, VectorIndex};
 
@@ -175,21 +180,94 @@ impl VectorIndex for QdrantIndex {
     }
 }
 
-/// The payload filter of a source search: the repo, and the front-page paths
-/// (exact matches on the keyword-indexed `path`), both when both are asked.
-fn source_filter(repo: Option<&str>, front: bool) -> Option<Value> {
-    let mut must = Vec::new();
+/// The payload filter of a source search: forge points only, then the repo and
+/// the front-page paths (exact matches on the keyword-indexed `path`) when
+/// asked. A chat point carries no repo or path and can never pass it.
+fn source_filter(repo: Option<&str>, front: bool) -> Value {
+    let mut must = vec![json!({ "key": "corpus", "match": { "value": CORPUS_FORGE } })];
     if let Some(repo) = repo {
         must.push(json!({ "key": "repo", "match": { "value": repo } }));
     }
     if front {
         must.push(json!({ "key": "path", "match": { "any": FRONT_PAGE_FILES } }));
     }
-    (!must.is_empty()).then(|| json!({ "must": must }))
+    json!({ "must": must })
+}
+
+/// The payload filter of a chat read: chat points only; the rooms any-of by id
+/// (`!`) or alias (`#`) as a `should`; the span as ranges that keep a chunk
+/// overlapping [after, before].
+fn chat_filter(filter: &ChatFilter) -> Value {
+    let mut must = vec![json!({ "key": "corpus", "match": { "value": CORPUS_CHAT } })];
+    if let Some(after) = filter.after_ms {
+        must.push(json!({ "key": "ts_end_ms", "range": { "gte": after } }));
+    }
+    if let Some(before) = filter.before_ms {
+        must.push(json!({ "key": "ts_start_ms", "range": { "lte": before } }));
+    }
+    let mut out = json!({ "must": must });
+    let (ids, aliases): (Vec<&String>, Vec<&String>) = filter.rooms.iter().partition(|room| room.starts_with('!'));
+    let mut should = Vec::new();
+    if !ids.is_empty() {
+        should.push(json!({ "key": "room_id", "match": { "any": ids } }));
+    }
+    if !aliases.is_empty() {
+        should.push(json!({ "key": "room_alias", "match": { "any": aliases } }));
+    }
+    if !should.is_empty() {
+        out["should"] = Value::Array(should);
+    }
+    out
+}
+
+/// A chat chunk's payload. The span, first and last ids and the id list are
+/// derived from `messages`, so they cannot disagree with them.
+fn chat_payload_json(payload: &ChatPayload) -> Result<Value> {
+    let (Some(first), Some(last)) = (payload.messages.first(), payload.messages.last()) else {
+        anyhow::bail!("a chat chunk of {} carries no messages", payload.room_id);
+    };
+    let mut out = json!({
+        "corpus": CORPUS_CHAT,
+        "room_id": payload.room_id,
+        "ts_start_ms": payload.messages.iter().map(|message| message.ts_ms).min(),
+        "ts_end_ms": payload.messages.iter().map(|message| message.ts_ms).max(),
+        "first_event_id": first.event_id,
+        "last_event_id": last.event_id,
+        "event_ids": payload.messages.iter().map(|message| &message.event_id).collect::<Vec<_>>(),
+        "messages": payload.messages.iter().map(|message| json!({
+            "event_id": message.event_id, "sender": message.sender, "ts_ms": message.ts_ms, "body": message.body,
+        })).collect::<Vec<_>>(),
+        "text": payload.text,
+    });
+    if let Some(alias) = &payload.room_alias {
+        out["room_alias"] = json!(alias);
+    }
+    Ok(out)
+}
+
+fn chat_payload_of(payload: &Value) -> Result<ChatPayload> {
+    ensure!(payload["corpus"] == CORPUS_CHAT, "a chat read was handed a point of another corpus");
+    let text = |value: &Value, key: &str| value[key].as_str().map(str::to_owned).with_context(|| format!("a chat chunk carries no {key}"));
+    let messages = payload["messages"]
+        .as_array()
+        .context("a chat chunk carries no messages")?
+        .iter()
+        .map(|message| {
+            Ok(ChatMessage {
+                event_id: text(message, "event_id")?,
+                sender: text(message, "sender")?,
+                ts_ms: message["ts_ms"].as_u64().context("a chat message carries no ts_ms")?,
+                body: text(message, "body")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(!messages.is_empty(), "a chat chunk carries no messages");
+    Ok(ChatPayload { room_id: text(payload, "room_id")?, room_alias: payload["room_alias"].as_str().map(str::to_owned), messages, text: text(payload, "text")? })
 }
 
 fn payload_json(payload: &SourcePayload) -> Value {
     json!({
+        "corpus": CORPUS_FORGE,
         "repo": payload.repo,
         "path": payload.path,
         "commit": payload.commit,
@@ -270,8 +348,17 @@ impl SourceIndex for QdrantIndex {
             },
         });
         self.ask(Method::Put, &format!("{path}?wait=true"), Some(&body), &[200])?;
-        for field in ["repo", "path"] {
-            let index = json!({ "field_name": field, "field_schema": "keyword" });
+        for (field, schema) in [
+            ("repo", "keyword"),
+            ("path", "keyword"),
+            ("corpus", "keyword"),
+            ("room_id", "keyword"),
+            ("room_alias", "keyword"),
+            ("event_ids", "keyword"),
+            ("ts_start_ms", "integer"),
+            ("ts_end_ms", "integer"),
+        ] {
+            let index = json!({ "field_name": field, "field_schema": schema });
             self.ask(Method::Put, &format!("{path}/index?wait=true"), Some(&index), &[200])?;
         }
         Ok(())
@@ -315,9 +402,7 @@ impl SourceIndex for QdrantIndex {
         let collection = self.sources.clone();
         let http = self.http.bounded(within);
         let mut body = json!({ "vector": vector, "limit": limit, "with_payload": true, "with_vector": false });
-        if let Some(filter) = source_filter(repo, front) {
-            body["filter"] = filter;
-        }
+        body["filter"] = source_filter(repo, front);
         let (_, answer) =
             self.ask_with(&http, Method::Post, &format!("/collections/{collection}/points/search"), Some(&body), &[200])?;
         let found = answer["result"].as_array().context("Qdrant's search has no result")?;
@@ -331,6 +416,45 @@ impl SourceIndex for QdrantIndex {
             })
             .collect()
     }
+
+    fn upsert_chat(&mut self, points: &[ChatPoint]) -> Result<()> {
+        let collection = self.sources.clone();
+        let points: Vec<Value> = points
+            .iter()
+            .map(|point| Ok(json!({ "id": point.id, "vector": point.vector, "payload": chat_payload_json(&point.payload)? })))
+            .collect::<Result<_>>()?;
+        self.ask(Method::Put, &format!("/collections/{collection}/points?wait=true"), Some(&json!({ "points": points })), &[200])?;
+        Ok(())
+    }
+
+    fn chat_nearest(&mut self, vector: &[f32], filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatRow>> {
+        let collection = self.sources.clone();
+        let http = self.http.bounded(within);
+        let body = json!({ "vector": vector, "limit": limit, "filter": chat_filter(filter), "with_payload": true, "with_vector": false });
+        let (_, answer) =
+            self.ask_with(&http, Method::Post, &format!("/collections/{collection}/points/search"), Some(&body), &[200])?;
+        let found = answer["result"].as_array().context("Qdrant's search has no result")?;
+        found
+            .iter()
+            .map(|point| Ok(ChatRow { score: point["score"].as_f64().context("a hit carries no score")? as f32, payload: chat_payload_of(&point["payload"])? }))
+            .collect()
+    }
+
+    fn chat_scroll(&mut self, filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatPayload>> {
+        let collection = self.sources.clone();
+        let http = self.http.bounded(within);
+        let body = json!({
+            "filter": chat_filter(filter),
+            "limit": limit,
+            "order_by": { "key": "ts_start_ms", "direction": "asc" },
+            "with_payload": true,
+            "with_vector": false,
+        });
+        let (_, answer) =
+            self.ask_with(&http, Method::Post, &format!("/collections/{collection}/points/scroll"), Some(&body), &[200])?;
+        let found = answer["result"]["points"].as_array().context("Qdrant's scroll has no points")?;
+        found.iter().map(|point| chat_payload_of(&point["payload"])).collect()
+    }
 }
 
 #[cfg(test)]
@@ -339,9 +463,10 @@ mod source_filter_tests {
 
     /// No ask, no filter; a repo alone is the repo's match.
     #[test]
-    fn no_ask_is_no_filter_and_a_repo_is_its_own_match() {
-        assert_eq!(source_filter(None, false), None);
-        assert_eq!(source_filter(Some("Huginn"), false), Some(json!({ "must": [{ "key": "repo", "match": { "value": "Huginn" } }] })));
+    fn no_ask_is_the_forge_corpus_and_a_repo_is_its_own_match() {
+        let forge = json!({ "key": "corpus", "match": { "value": "forge" } });
+        assert_eq!(source_filter(None, false), json!({ "must": [forge] }));
+        assert_eq!(source_filter(Some("Huginn"), false), json!({ "must": [forge, { "key": "repo", "match": { "value": "Huginn" } }] }));
     }
 
     /// The front filter matches the path against exactly the front-page files
@@ -354,15 +479,63 @@ mod source_filter_tests {
             assert_eq!(path.len(), 1);
             path[0]["match"]["any"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_owned()).collect()
         };
-        let front = source_filter(None, true).unwrap();
+        let front = source_filter(None, true);
         assert_eq!(any(&front), ["README.md", "README", "readme.md", "README.markdown", "CLAUDE.md", "AGENTS.md"]);
-        assert_eq!(front["must"].as_array().unwrap().len(), 1, "no repo condition when none was asked");
+        assert_eq!(front["must"].as_array().unwrap().len(), 2, "the corpus and the path; no repo condition when none was asked");
 
-        let both = source_filter(Some("Zyphos"), true).unwrap();
+        let both = source_filter(Some("Zyphos"), true);
         assert_eq!(any(&both), any(&front));
         let repos: Vec<&Value> = both["must"].as_array().unwrap().iter().filter(|c| c["key"] == "repo").collect();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0]["match"]["value"], "Zyphos");
-        assert_eq!(both["must"].as_array().unwrap().len(), 2);
+        assert_eq!(both["must"].as_array().unwrap().len(), 3);
+    }
+
+    fn payload() -> ChatPayload {
+        let message = |id: &str, ts: u64| ChatMessage { event_id: id.into(), sender: "@a:gamecult.org".into(), ts_ms: ts, body: format!("body {id}") };
+        ChatPayload { room_id: "!r:gamecult.org".into(), room_alias: Some("#swarm:gamecult.org".into()), messages: vec![message("$a", 10), message("$b", 20)], text: "swarm\n10 @a: body".into() }
+    }
+
+    /// The chat codec is its own inverse, writes the contract's fields derived
+    /// from the messages, and refuses a chunk with none and a point of another corpus.
+    #[test]
+    fn the_chat_payload_round_trips_the_contract() {
+        let written = chat_payload_json(&payload()).unwrap();
+        assert_eq!(written["corpus"], "chat");
+        assert_eq!((written["ts_start_ms"].as_u64(), written["ts_end_ms"].as_u64()), (Some(10), Some(20)));
+        assert_eq!((written["first_event_id"].as_str(), written["last_event_id"].as_str()), (Some("$a"), Some("$b")));
+        assert_eq!(written["event_ids"], json!(["$a", "$b"]));
+        assert_eq!(written["room_alias"], "#swarm:gamecult.org");
+        assert_eq!(chat_payload_of(&written).unwrap(), payload());
+        let mut no_alias = payload();
+        no_alias.room_alias = None;
+        assert!(chat_payload_json(&no_alias).unwrap().get("room_alias").is_none());
+        assert_eq!(chat_payload_of(&chat_payload_json(&no_alias).unwrap()).unwrap(), no_alias);
+        assert!(chat_payload_json(&ChatPayload { messages: vec![], ..payload() }).is_err());
+        let forge = payload_json(&SourcePayload { repo: "r".into(), path: "p".into(), commit: "c".into(), blob: "b".into(), line_start: 1, line_end: 2, chunk_index: 0, ext: "rs".into(), text: "t".into() });
+        assert_eq!(forge["corpus"], "forge");
+        assert!(chat_payload_of(&forge).is_err());
+    }
+
+    /// The chat filter is the chat corpus, the rooms as an any-of `should` split
+    /// by id and alias, and the two ranges that keep an overlapping span.
+    #[test]
+    fn the_chat_filter_is_corpus_rooms_and_overlap() {
+        let filter = chat_filter(&ChatFilter { rooms: vec!["!r:x".into(), "#a:x".into(), "#b:x".into()], after_ms: Some(5), before_ms: Some(9) });
+        assert_eq!(
+            filter,
+            json!({
+                "must": [
+                    { "key": "corpus", "match": { "value": "chat" } },
+                    { "key": "ts_end_ms", "range": { "gte": 5 } },
+                    { "key": "ts_start_ms", "range": { "lte": 9 } },
+                ],
+                "should": [
+                    { "key": "room_id", "match": { "any": ["!r:x"] } },
+                    { "key": "room_alias", "match": { "any": ["#a:x", "#b:x"] } },
+                ],
+            })
+        );
+        assert_eq!(chat_filter(&ChatFilter::default()), json!({ "must": [{ "key": "corpus", "match": { "value": "chat" } }] }));
     }
 }

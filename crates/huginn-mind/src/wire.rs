@@ -92,6 +92,10 @@ pub enum HuginnMindRequest {
     /// docs, which no mind holds. The daemon embeds the text and asks the
     /// index it does not write.
     SearchSources { instance: Slug, query: SourceQuery },
+    /// Search of the chat index: chunks of the rooms the Minds are meant to
+    /// have, by room, by time span and by meaning. Read-only, like
+    /// `SearchSources`, and queued with it.
+    SearchChat { instance: Slug, query: ChatQuery },
     /// What others did in `repos` on the forge since the `after` cursor: the
     /// daemon reads the forge and no document of the mind, and answers
     /// `Refused(Unavailable)` when it has no forge or the forge does not answer
@@ -270,6 +274,96 @@ pub struct SourceHits {
     pub hits: Vec<SourceHit>,
 }
 
+/// The most rooms one chat search names.
+pub const CHAT_ROOMS_MAX: usize = 16;
+
+/// A chat search. The selectors compose as AND. `rooms` are any-of: a value
+/// beginning `!` is a room id, `#` a canonical alias. `after_ms` and
+/// `before_ms` (Unix milliseconds) keep the chunks whose span overlaps
+/// [after, before]. `texts` (none to `SOURCE_TEXTS_MAX`) is the meaning match,
+/// several fused as in a source search; with none the search is a listing:
+/// chunks oldest first, at most `top_k`, `ChatHits.truncated` saying more
+/// exist, and the caller narrows with `after_ms` = the last hit's
+/// `ts_end_ms + 1`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatQuery {
+    pub texts: Vec<Line>,
+    pub rooms: Vec<Short>,
+    pub after_ms: Option<u64>,
+    pub before_ms: Option<u64>,
+    pub top_k: u32,
+}
+
+impl ChatQuery {
+    /// The door. A refusal names the field.
+    pub fn check(&self) -> Result<(), MindRefusal> {
+        let refused = |field: &str, value: Option<String>, message: &str| MindRefusal::SelectionInvalid {
+            field: field.into(),
+            value,
+            message: message.into(),
+        };
+        if self.texts.len() > SOURCE_TEXTS_MAX {
+            return Err(refused("texts", Some(self.texts.len().to_string()), "a chat search takes 0 to 8 texts"));
+        }
+        if self.texts.iter().any(|text| text.0.trim().is_empty()) {
+            return Err(refused("texts", None, "every text of a chat search says something"));
+        }
+        if self.rooms.len() > CHAT_ROOMS_MAX {
+            return Err(refused("rooms", Some(self.rooms.len().to_string()), "a chat search names at most 16 rooms"));
+        }
+        if let Some(room) = self.rooms.iter().find(|room| !(room.0.starts_with('!') || room.0.starts_with('#')) || room.0.len() < 2) {
+            return Err(refused("rooms", Some(room.0.clone()), "a room is a room id beginning `!` or a canonical alias beginning `#`"));
+        }
+        if let (Some(after), Some(before)) = (self.after_ms, self.before_ms)
+            && before < after
+        {
+            return Err(refused("before_ms", Some(before.to_string()), "before_ms is not earlier than after_ms"));
+        }
+        if !(1..=SOURCE_TOP_K_MAX).contains(&self.top_k) {
+            return Err(refused("top_k", Some(self.top_k.to_string()), "a chat search asks for 1 to 50 hits"));
+        }
+        Ok(())
+    }
+}
+
+/// One message of a chunk, as the room held it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatMessage {
+    pub event_id: String,
+    /// The sender's Matrix id.
+    pub sender: String,
+    pub ts_ms: u64,
+    pub body: String,
+}
+
+/// One chunk of consecutive messages in one room. Every citation is
+/// required: only the room's alias may be absent, because a room may have
+/// none. The span and the first and last ids are those of `messages` as
+/// returned, after any trimming to the asked span.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatHit {
+    pub room_id: String,
+    pub room_alias: Option<String>,
+    pub first_event_id: String,
+    pub last_event_id: String,
+    pub ts_start_ms: u64,
+    pub ts_end_ms: u64,
+    /// Cosine similarity for one text, the reciprocal-rank sum for several,
+    /// none in a listing.
+    pub score: Option<f32>,
+    pub messages: Vec<ChatMessage>,
+}
+
+/// The answer to a chat search: oldest first in a listing, nearest first with
+/// texts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChatHits {
+    pub indexed_under: SourceModel,
+    /// A listing had more chunks than `top_k`.
+    pub truncated: bool,
+    pub hits: Vec<ChatHit>,
+}
+
 impl HuginnMindRequest {
     /// The envelope's `operation`.
     pub fn operation(&self) -> &'static str {
@@ -281,6 +375,7 @@ impl HuginnMindRequest {
             Self::PersonaGet { .. } => "persona_get",
             Self::PersonaPut { .. } => "persona_put",
             Self::SearchSources { .. } => "search_sources",
+            Self::SearchChat { .. } => "search_chat",
             Self::StewardedActivity { .. } => "stewarded_activity",
             Self::RootsTouched { .. } => "roots_touched",
         }
@@ -296,6 +391,7 @@ impl HuginnMindRequest {
             | Self::PersonaGet { instance }
             | Self::PersonaPut { instance, .. }
             | Self::SearchSources { instance, .. }
+            | Self::SearchChat { instance, .. }
             | Self::StewardedActivity { instance, .. }
             | Self::RootsTouched { instance } => Some(instance),
         }
@@ -315,6 +411,7 @@ pub enum HuginnMindResponse {
     Persona(Option<PersonaStateView>),
     PersonaPut(PersonaPutOutcome),
     Sources(SourceHits),
+    Chat(ChatHits),
     Activity(RepoActivity),
     RootsTouched(Vec<RootTouched>),
     /// The answer did not fit one send and is being held for the client to
@@ -450,6 +547,10 @@ mod tests {
                 instance: slug(INSTANCE),
                 query: SourceQuery { text: Line::default(), texts: vec![Line("reconcile".into()), Line("fuse".into())], top_k: 5, repo: None, front: false },
             },
+            HuginnMindRequest::SearchChat {
+                instance: slug(INSTANCE),
+                query: ChatQuery { texts: vec![Line("release".into())], rooms: vec![Short("#swarm:gamecult.org".into())], after_ms: Some(1), before_ms: None, top_k: 5 },
+            },
             HuginnMindRequest::RootsTouched { instance: slug(INSTANCE) },
         ]
     }
@@ -500,6 +601,20 @@ mod tests {
                     text: "x".into(),
                 }],
             }),
+            HuginnMindResponse::Chat(ChatHits {
+                indexed_under: SourceModel { name: "m".into(), digest: "d".into() },
+                truncated: false,
+                hits: vec![ChatHit {
+                    room_id: "!r:gamecult.org".into(),
+                    room_alias: None,
+                    first_event_id: "$a".into(),
+                    last_event_id: "$a".into(),
+                    ts_start_ms: 1,
+                    ts_end_ms: 1,
+                    score: None,
+                    messages: vec![ChatMessage { event_id: "$a".into(), sender: "@x:gamecult.org".into(), ts_ms: 1, body: "hi".into() }],
+                }],
+            }),
             HuginnMindResponse::RootsTouched(seeded().roots_touched().unwrap()),
             HuginnMindResponse::Deferred(DeferredAnswer {
                 manifest: cultnet_rs::pack_content("huginn.mind_response", "package", "", "", "", b"body", 4)
@@ -515,7 +630,7 @@ mod tests {
     #[test]
     fn the_wire_vocabulary_is_the_minds_methods_and_status_is_derived_from_the_response() {
         let names: Vec<&str> = requests().iter().map(|request| request.operation()).collect();
-        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources", "search_sources", "roots_touched"]);
+        assert_eq!(names, ["whoami", "admit", "view", "query", "persona_get", "persona_put", "search_sources", "search_sources", "search_chat", "roots_touched"]);
         for request in requests() {
             let declared = request.instance().is_none();
             assert_eq!(declared, matches!(request, HuginnMindRequest::Whoami), "{request:?}");
@@ -623,6 +738,33 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&old).unwrap();
         let page = rmp_serde::from_slice::<PipelineSelectionPage>(&bytes).unwrap();
         assert_eq!((page.matched, page.as_of, page.scores), (0, 7, None));
+    }
+
+    /// A chat search is refused by field at the door, and the published
+    /// response marks every citation required.
+    #[test]
+    fn a_chat_query_is_refused_by_field_and_a_hit_cites_room_ids_and_times() {
+        let ok = ChatQuery { texts: vec![], rooms: vec![Short("!a:b".into()), Short("#c:b".into())], after_ms: Some(1), before_ms: Some(1), top_k: 50 };
+        assert!(ok.check().is_ok());
+        let field = |query: ChatQuery| match query.check() {
+            Err(MindRefusal::SelectionInvalid { field, .. }) => field,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(field(ChatQuery { rooms: vec![Short("swarm".into())], ..ok.clone() }), "rooms");
+        assert_eq!(field(ChatQuery { rooms: vec![Short("#".into())], ..ok.clone() }), "rooms");
+        assert_eq!(field(ChatQuery { before_ms: Some(0), ..ok.clone() }), "before_ms");
+        assert_eq!(field(ChatQuery { top_k: 0, ..ok.clone() }), "top_k");
+        assert_eq!(field(ChatQuery { top_k: 51, ..ok.clone() }), "top_k");
+        assert_eq!(field(ChatQuery { texts: vec![Line(" ".into())], ..ok.clone() }), "texts");
+        assert_eq!(field(ChatQuery { texts: vec![Line("x".into()); 9], ..ok.clone() }), "texts");
+        assert_eq!(field(ChatQuery { rooms: vec![Short("!a:b".into()); 17], ..ok }), "rooms");
+        let response = serde_json::to_value(schemars::schema_for!(HuginnMindResponse)).unwrap();
+        let required: Vec<&str> = response["$defs"]["ChatHit"]["required"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        for field in ["room_id", "first_event_id", "last_event_id", "ts_start_ms", "ts_end_ms", "messages"] {
+            assert!(required.contains(&field), "{field} must be required");
+        }
+        let message: Vec<&str> = response["$defs"]["ChatMessage"]["required"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(message, ["event_id", "sender", "ts_ms", "body"]);
     }
 
     /// The two files the catalog publishes are the derivation of the two

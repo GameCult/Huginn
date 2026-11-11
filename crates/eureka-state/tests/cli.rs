@@ -1233,7 +1233,8 @@ struct Desk {
     embeds_under: &'static str,
     held: Vec<huginn_daemon::sources::SourcePayload>,
     tickets: u64,
-    done: Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)>,
+    chat: Vec<huginn_daemon::sources::ChatPayload>,
+    done: Vec<(SearchTicket, huginn_daemon::daemon::Found)>,
 }
 
 /// An embedder that sends every text to one vector, under a digest.
@@ -1297,6 +1298,35 @@ impl huginn_daemon::sources::SourceIndex for Desk {
             .map(|payload| huginn_daemon::sources::SourceRow { score: 0.9, payload: payload.clone() })
             .collect())
     }
+
+    fn upsert_chat(&mut self, _points: &[huginn_daemon::sources::ChatPoint]) -> anyhow::Result<()> {
+        anyhow::bail!("a daemon never writes the source index")
+    }
+
+    fn chat_nearest(
+        &mut self,
+        _vector: &[f32],
+        filter: &huginn_daemon::sources::ChatFilter,
+        limit: u32,
+        _within: Duration,
+    ) -> anyhow::Result<Vec<huginn_daemon::sources::ChatRow>> {
+        Ok(self.chat_scroll(filter, limit, _within)?.into_iter().map(|payload| huginn_daemon::sources::ChatRow { score: 0.9, payload }).collect())
+    }
+
+    fn chat_scroll(&mut self, filter: &huginn_daemon::sources::ChatFilter, limit: u32, _within: Duration) -> anyhow::Result<Vec<huginn_daemon::sources::ChatPayload>> {
+        let mut kept: Vec<_> = self
+            .chat
+            .iter()
+            .filter(|payload| {
+                let times = payload.messages.iter().map(|message| message.ts_ms);
+                filter.keeps(&payload.room_id, payload.room_alias.as_deref(), times.clone().min().unwrap(), times.max().unwrap())
+            })
+            .cloned()
+            .collect();
+        kept.sort_by_key(|payload| payload.messages[0].ts_ms);
+        kept.truncate(limit as usize);
+        Ok(kept)
+    }
 }
 
 impl<S: MindStore> IndexSink<S> for Desk {
@@ -1313,11 +1343,21 @@ impl<S: MindStore> IndexSink<S> for Desk {
         self.tickets += 1;
         let ticket = SearchTicket(self.tickets);
         let mut embedder = Flat(self.embeds_under);
-        let found = huginn_daemon::sources::search(&mut embedder, self, query, Duration::from_secs(5)).map_err(|error| format!("{error:#}"));
+        let found = huginn_daemon::sources::search(&mut embedder, self, query, Duration::from_secs(5))
+            .map_or_else(|error| huginn_daemon::daemon::Found::Failed(format!("{error:#}")), huginn_daemon::daemon::Found::Sources);
         self.done.push((ticket, found));
         Ok(ticket)
     }
-    fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)> {
+    fn search_chat(&mut self, query: &huginn_mind::ChatQuery) -> Result<SearchTicket, String> {
+        self.tickets += 1;
+        let ticket = SearchTicket(self.tickets);
+        let mut embedder = Flat(self.embeds_under);
+        let found = huginn_daemon::sources::search_chat(&mut embedder, self, query, Duration::from_secs(5))
+            .map_or_else(|error| huginn_daemon::daemon::Found::Failed(format!("{error:#}")), huginn_daemon::daemon::Found::Chat);
+        self.done.push((ticket, found));
+        Ok(ticket)
+    }
+    fn sources_searched(&mut self) -> Vec<(SearchTicket, huginn_daemon::daemon::Found)> {
         std::mem::take(&mut self.done)
     }
     fn search_deadline(&self) -> Duration {
@@ -1351,6 +1391,15 @@ fn source_daemon(built_under: &'static str, embeds_under: &'static str) -> Serve
             chunk("Demo", "README.md", 1, 2, "# Demo"),
             chunk("Other", "x.rs", 1, 1, "fn other() {}"),
         ],
+        chat: vec![huginn_daemon::sources::ChatPayload {
+            room_id: "!r:gamecult.org".into(),
+            room_alias: Some("#swarm:gamecult.org".into()),
+            messages: vec![
+                huginn_mind::ChatMessage { event_id: "$e1".into(), sender: "@nibu:gamecult.org".into(), ts_ms: 1_700_000_000_000, body: "ship the cut\nthen rest".into() },
+                huginn_mind::ChatMessage { event_id: "$e2".into(), sender: "@eureka:gamecult.org".into(), ts_ms: 1_700_000_060_000, body: "done".into() },
+            ],
+            text: "swarm".into(),
+        }],
         tickets: 0,
         done: Vec::new(),
     };
@@ -2885,4 +2934,43 @@ fn a_malformed_huginn_session_is_refused_naming_the_variable_without_echoing_it(
     let live = live();
     let edge = with_session(live.addr, &"E".repeat(200), &admit_without_session(&file), None);
     assert_eq!(edge.code, 0, "{}", edge.err);
+}
+
+/// `huginn chat search` end to end: a listing through the daemon's worker path
+/// prints the organ's header line and each message verbatim with its event id,
+/// a room that holds nothing prints nothing, and the flags reach the request as
+/// the instants and rooms they name.
+#[test]
+fn chat_search_prints_cited_messages_and_sends_its_selectors() {
+    let server = source_daemon("d1", "d1");
+    let found = at(server.addr, &["chat", "search", "--room", "#swarm:gamecult.org", "--after", "2023-11-14T22:00:00Z"], None);
+    assert_eq!(found.code, 0, "{}", found.err);
+    assert_eq!(
+        found.out,
+        "#swarm:gamecult.org (!r:gamecult.org) $e1..$e2 2023-11-14T22:13:20.000Z..2023-11-14T22:14:20.000Z\n\
+         2023-11-14T22:13:20.000Z @nibu:gamecult.org $e1 ship the cut\nthen rest\n\
+         2023-11-14T22:14:20.000Z @eureka:gamecult.org $e2 done\n\n"
+    );
+    let other = at(server.addr, &["chat", "search", "--room", "!elsewhere:gamecult.org"], None);
+    assert_eq!((other.code, other.out.trim()), (0, ""));
+    let by_meaning = at(server.addr, &["chat", "search", "who shipped it", "--top-k", "1"], None);
+    assert!(by_meaning.out.starts_with("#swarm:gamecult.org (!r:gamecult.org) $e1..$e2 ") && by_meaning.out.lines().next().unwrap().ends_with(" 0.900"), "{}", by_meaning.out);
+
+    let (spy, seen) = replying(
+        "search_chat",
+        HuginnMindResponse::Chat(huginn_mind::ChatHits { indexed_under: huginn_mind::SourceModel { name: "m".into(), digest: "d".into() }, truncated: false, hits: vec![] }),
+    );
+    let ran = at(spy.addr, &["chat", "search", "a", "b", "--room", "!x:y", "--room", "#z:y", "--after", "2023-11-14T22:13:20Z", "--before", "2023-11-14T22:14:20Z", "--top-k", "3"], None);
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    let HuginnMindRequest::SearchChat { query, .. } = seen.lock().unwrap().remove(0) else { panic!("a chat search") };
+    let texts: Vec<&str> = query.texts.iter().map(|text| text.0.as_str()).collect();
+    let rooms: Vec<&str> = query.rooms.iter().map(|room| room.0.as_str()).collect();
+    assert_eq!((texts, rooms, query.after_ms, query.before_ms, query.top_k), (vec!["a", "b"], vec!["!x:y", "#z:y"], Some(1_700_000_000_000), Some(1_700_000_060_000), 3));
+
+    assert_ne!(at(spy.addr, &["chat", "search", "--after", "yesterday"], None).code, 0);
+    assert!(seen.lock().unwrap().is_empty(), "a bad instant never left the CLI");
+    for bad in [&["chat", "search", "--room", "swarm"][..], &["chat", "search", "--top-k", "0"]] {
+        let ran = at(server.addr, bad, None);
+        assert_eq!(ran.code, 1, "{bad:?} is a refusal by the daemon's door: {}", ran.err);
+    }
 }

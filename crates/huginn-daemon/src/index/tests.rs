@@ -1999,10 +1999,19 @@ fn ask_sources(sink: &mut WorkerSink, text: &str) -> Result<SearchTicket, String
     <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search_sources(sink, &query)
 }
 
-fn sources_answers(sink: &mut WorkerSink, count: usize) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+fn sources_answers(sink: &mut WorkerSink, count: usize) -> Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)> {
     let mut all = Vec::new();
     eventually("the source searches being answered", || {
-        all.extend(<WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::sources_searched(sink));
+        all.extend(<WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::sources_searched(sink).into_iter().map(|(ticket, found)| {
+            (
+                ticket,
+                match found {
+                    crate::daemon::Found::Sources(hits) => Ok(hits),
+                    crate::daemon::Found::Failed(why) => Err(why),
+                    other => panic!("a source search was answered with another kind: {}", matches!(other, crate::daemon::Found::Chat(_))),
+                },
+            )
+        }));
         all.len() >= count
     });
     all
@@ -2046,7 +2055,7 @@ fn a_worker_stuck_on_the_minds_collection_still_answers_a_source_search() {
     index.plant(&collection_name(&slug(INSTANCE)), mind_label);
     let meta = SourcesMeta {
         managed_by: MANAGED_BY.into(),
-        corpus: "forge:GameCult".into(),
+        corpus: crate::sources::CORPUS.into(),
         model: "model".into(),
         model_digest: "d1".into(),
         dimensions: 4,
@@ -2081,6 +2090,60 @@ fn a_worker_stuck_on_the_minds_collection_still_answers_a_source_search() {
     assert_eq!(answered.indexed_under.digest, "d1");
 }
 
+/// A chat search rides the same queue and worker as a source search, answers
+/// from the same collection while the mind's own collection is stuck, and comes
+/// back as chat hits.
+#[test]
+fn a_worker_answers_a_chat_search_from_the_shared_collection() {
+    use crate::sources::{ChatPayload, ChatPoint, DescribedSources, SourcesMeta};
+    use huginn_mind::ChatMessage;
+    let (embedder, index) = pair();
+    index.plant(
+        &collection_name(&slug(INSTANCE)),
+        Described::Labelled(CollectionMeta {
+            managed_by: MANAGED_BY.into(),
+            instance: INSTANCE.into(),
+            mind: "another-mind".into(),
+            model: "model".into(),
+            model_digest: "d1".into(),
+            dimensions: 4,
+            index_text_version: INDEX_TEXT_VERSION,
+        }),
+    );
+    let meta = SourcesMeta { managed_by: MANAGED_BY.into(), corpus: crate::sources::CORPUS.into(), model: "model".into(), model_digest: "d1".into(), dimensions: 4, chunker_version: 1 };
+    index.sources.plant(DescribedSources::Labelled { meta, cursors: Default::default() });
+    index
+        .sources
+        .state
+        .lock()
+        .unwrap()
+        .chat
+        .insert(
+            "c1".into(),
+            ChatPoint {
+                id: "c1".into(),
+                vector: vec![1.0; 4],
+                payload: ChatPayload {
+                    room_id: "!r:x".into(),
+                    room_alias: None,
+                    messages: vec![ChatMessage { event_id: "$e".into(), sender: "@a:x".into(), ts_ms: 5, body: "hi".into() }],
+                    text: "t".into(),
+                },
+            },
+        );
+    let mut sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), Some(MIND.into()), entries_of(1), quick());
+    sink.wait_status(|status| matches!(status, IndexStatus::Refused { .. }));
+    let query = huginn_mind::ChatQuery { texts: vec![], rooms: vec![], after_ms: None, before_ms: None, top_k: 5 };
+    let ticket = <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search_chat(&mut sink, &query).unwrap();
+    let mut found = Vec::new();
+    eventually("the chat search being answered", || {
+        found.extend(<WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::sources_searched(&mut sink));
+        !found.is_empty()
+    });
+    let (answered, Found::Chat(hits)) = found.remove(0) else { panic!("a chat ask is answered with chat hits") };
+    assert_eq!((answered, hits.hits.len(), hits.hits[0].first_event_id.as_str(), hits.truncated), (ticket, 1, "$e", false));
+}
+
 /// Source searches take their own tickets, share the queue's bound with the
 /// mind's searches, and an abandon removes the one ticket named from either.
 #[test]
@@ -2106,4 +2169,48 @@ fn source_searches_have_distinct_tickets_share_the_queue_bound_and_abandon_by_ti
     assert!(ask_sink(&mut sink, "over", 3).is_err(), "and refuses both kinds");
     abandon(&mut sink, second);
     assert!(ask_sink(&mut sink, "now", 3).is_ok(), "a freed slot is a slot");
+}
+
+/// The chat reads state their request: a scroll is the filter, oldest chunk
+/// start first; a nearest search is the filter too.
+#[test]
+fn qdrant_chat_scroll_and_nearest_send_the_filter_and_the_order() {
+    use crate::sources::{ChatFilter, SourceIndex};
+    let filter = ChatFilter { rooms: vec!["!r:x".into()], after_ms: Some(5), before_ms: None };
+    let scrolling = stub(&[("POST /collections/", 200, r#"{"result":{"points":[]}}"#)]);
+    QdrantIndex::new(&scrolling.url).chat_scroll(&filter, 7, TIME).unwrap();
+    let scroll: serde_json::Value = serde_json::from_str(&scrolling.seen.lock().unwrap()[0].2).unwrap();
+    assert_eq!(scroll["order_by"], serde_json::json!({ "key": "ts_start_ms", "direction": "asc" }));
+    assert_eq!(scroll["filter"]["must"][0], serde_json::json!({ "key": "corpus", "match": { "value": "chat" } }));
+    assert_eq!(scroll["filter"]["must"][1]["range"], serde_json::json!({ "gte": 5 }));
+    assert_eq!(scroll["limit"], 7);
+
+    let searching = stub(&[("POST /collections/", 200, r#"{"result":[]}"#)]);
+    QdrantIndex::new(&searching.url).chat_nearest(&[1.0, 0.0], &filter, 3, TIME).unwrap();
+    let near: serde_json::Value = serde_json::from_str(&searching.seen.lock().unwrap()[0].2).unwrap();
+    assert_eq!(near["filter"]["must"][0], serde_json::json!({ "key": "corpus", "match": { "value": "chat" } }));
+    assert_eq!(near["filter"]["must"][1]["range"], serde_json::json!({ "gte": 5 }));
+    assert_eq!(near["limit"], 3);
+}
+
+/// A new source collection indexes `corpus` as a keyword and both times as
+/// integers, which the range filters and ordered scroll need.
+#[test]
+fn qdrant_recreate_sources_creates_the_corpus_and_time_indexes() {
+    use crate::sources::{CORPUS, SourceIndex, SourcesMeta};
+    let building = stub(&[("DELETE /collections/", 200, "{}"), ("PUT /collections/", 200, r#"{"result":true}"#)]);
+    let meta = SourcesMeta { managed_by: MANAGED_BY.into(), corpus: CORPUS.into(), model: "m".into(), model_digest: "d".into(), dimensions: 4, chunker_version: 1 };
+    QdrantIndex::new(&building.url).recreate_sources(&meta).unwrap();
+    let seen = building.seen.lock().unwrap();
+    let indexed: Vec<(String, String)> = seen
+        .iter()
+        .filter(|(_, path, _)| path.contains("/index"))
+        .map(|(_, _, body)| {
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            (body["field_name"].as_str().unwrap().to_owned(), body["field_schema"].as_str().unwrap().to_owned())
+        })
+        .collect();
+    let has = |field: &str, schema: &str| indexed.iter().any(|(f, s)| f == field && s == schema);
+    assert!(has("corpus", "keyword"), "{indexed:?}");
+    assert!(has("ts_start_ms", "integer") && has("ts_end_ms", "integer"), "{indexed:?}");
 }

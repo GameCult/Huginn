@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail, ensure};
 
-use crate::sources::{DescribedSources, SourceIndex, SourcePoint, SourceRow, SourcesMeta};
+use crate::sources::{ChatFilter, ChatPayload, ChatPoint, ChatRow, DescribedSources, SourceIndex, SourcePoint, SourceRow, SourcesMeta};
 
 use super::{CollectionMeta, Described, Embedder, Hit, ModelIdentity, Point, VectorIndex, point_id};
 
@@ -253,6 +253,8 @@ pub(crate) fn pair() -> (FakeEmbedder, FakeIndex) {
 pub(crate) struct SourcesState {
     pub(crate) described: Option<DescribedSources>,
     pub(crate) points: BTreeMap<String, SourcePoint>,
+    /// The chat points, by id: the same collection, the other corpus.
+    pub(crate) chat: BTreeMap<String, ChatPoint>,
     /// How many times the collection was recreated.
     pub(crate) recreated: u32,
     pub(crate) upsert_calls: u32,
@@ -317,6 +319,7 @@ impl SourceIndex for FakeSources {
         let mut state = self.state.lock().unwrap();
         state.recreated += 1;
         state.points.clear();
+        state.chat.clear();
         state.described = Some(DescribedSources::Labelled { meta: meta.clone(), cursors: BTreeMap::new() });
         Ok(())
     }
@@ -369,6 +372,44 @@ impl SourceIndex for FakeSources {
         rows.truncate(limit as usize);
         Ok(rows)
     }
+
+    fn upsert_chat(&mut self, points: &[ChatPoint]) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        for point in points {
+            ensure!(!point.payload.messages.is_empty(), "a chat chunk carries no messages");
+            state.chat.insert(point.id.clone(), point.clone());
+        }
+        Ok(())
+    }
+
+    fn chat_nearest(&mut self, vector: &[f32], filter: &ChatFilter, limit: u32, _within: Duration) -> Result<Vec<ChatRow>> {
+        let state = self.state.lock().unwrap();
+        let mut rows: Vec<ChatRow> = state
+            .chat
+            .values()
+            .filter(|point| chat_kept(filter, &point.payload))
+            .map(|point| ChatRow { score: cosine(vector, &point.vector), payload: point.payload.clone() })
+            .collect();
+        rows.sort_by(|a, b| b.score.total_cmp(&a.score));
+        rows.truncate(limit as usize);
+        Ok(rows)
+    }
+
+    fn chat_scroll(&mut self, filter: &ChatFilter, limit: u32, _within: Duration) -> Result<Vec<ChatPayload>> {
+        let state = self.state.lock().unwrap();
+        let mut kept: Vec<&ChatPayload> = state.chat.values().map(|point| &point.payload).filter(|payload| chat_kept(filter, payload)).collect();
+        kept.sort_by_key(|payload| payload.messages.iter().map(|message| message.ts_ms).min());
+        Ok(kept.into_iter().take(limit as usize).cloned().collect())
+    }
+}
+
+/// A chat chunk under a filter, by the span its messages make.
+fn chat_kept(filter: &ChatFilter, payload: &ChatPayload) -> bool {
+    let times = || payload.messages.iter().map(|message| message.ts_ms);
+    match (times().min(), times().max()) {
+        (Some(start), Some(end)) => filter.keeps(&payload.room_id, payload.room_alias.as_deref(), start, end),
+        _ => false,
+    }
 }
 
 impl SourceIndex for FakeIndex {
@@ -389,5 +430,14 @@ impl SourceIndex for FakeIndex {
     }
     fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, front: bool, limit: u32, within: Duration) -> Result<Vec<SourceRow>> {
         self.sources.search_sources(vector, repo, front, limit, within)
+    }
+    fn upsert_chat(&mut self, points: &[ChatPoint]) -> Result<()> {
+        self.sources.upsert_chat(points)
+    }
+    fn chat_nearest(&mut self, vector: &[f32], filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatRow>> {
+        self.sources.chat_nearest(vector, filter, limit, within)
+    }
+    fn chat_scroll(&mut self, filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatPayload>> {
+        self.sources.chat_scroll(filter, limit, within)
     }
 }

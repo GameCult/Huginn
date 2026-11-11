@@ -1,5 +1,7 @@
-//! The source index: the public GameCult forge repos' code and docs as chunks
-//! in one Qdrant collection, `huginn_sources`, for semantic search.
+//! The source index: the public GameCult forge repos' code and docs, and the
+//! Minds' chat rooms, as chunks in one Qdrant collection, `huginn_sources`,
+//! for semantic search. Each point's `corpus` payload (`forge` or `chat`) keeps
+//! the two apart; a forge search filters `forge` and a chat search `chat`.
 //!
 //! Two truths, one writer. The forge is the truth of which repos exist and what
 //! they hold; the collection is derived from it and can be deleted whenever.
@@ -30,7 +32,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use huginn_mind::{SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery};
+use huginn_mind::{ChatHit, ChatHits, ChatMessage, ChatQuery, SOURCE_TOP_K_MAX, SourceHit, SourceHits, SourceModel, SourceQuery};
 
 use crate::index::{BATCH, BULK_EMBED_TIMEOUT, Budget, Embedder, INDEX_CALL_TIMEOUT, MANAGED_BY, ModelIdentity, point_id};
 use chunk::{CHUNKER_VERSION, embedded_text};
@@ -43,8 +45,19 @@ pub const COLLECTION: &str = "huginn_sources";
 /// agent reads first to learn what the repo is. The only owner of the list.
 pub const FRONT_PAGE_FILES: [&str; 6] = ["README.md", "README", "readme.md", "README.markdown", "CLAUDE.md", "AGENTS.md"];
 
-/// What the collection says its corpus is.
-pub const CORPUS: &str = "forge:GameCult";
+/// What the collection says its corpus is: the set of corpora it holds, each
+/// point's `corpus` payload naming which (`forge` or `chat`). A collection
+/// labelled with any other set is rebuilt.
+pub const CORPUS: &str = "forge:GameCult+chat:rooms";
+
+/// The `corpus` payload of a forge point, and of a chat point.
+pub const CORPUS_FORGE: &str = "forge";
+pub const CORPUS_CHAT: &str = "chat";
+
+/// The instruction Qwen3 embedding models take in front of a question about
+/// past conversation.
+pub const CHAT_QUERY_INSTRUCTION: &str =
+    "Given a question about past conversation in chat rooms, retrieve the chat passages that answer it";
 
 /// The instruction Qwen3 embedding models take in front of a query about code.
 pub const SOURCE_QUERY_INSTRUCTION: &str =
@@ -111,6 +124,58 @@ pub struct SourcePoint {
     pub payload: SourcePayload,
 }
 
+/// What travels beside a chat chunk's vector: consecutive messages of one
+/// room, never spanning rooms. The single owner of the chat point's shape; the
+/// ingest job is its only writer (through `upsert_chat`) and nothing else of the
+/// payload is read. `messages` are the display truth and hold, in order, at
+/// least one message. The chunk's span, its first and last event ids and its
+/// `event_ids` are derived from them by the codec, so they cannot disagree.
+/// `text` is what was embedded: the room's name, then `time sender: body` per
+/// message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatPayload {
+    pub room_id: String,
+    /// Absent when the room has no canonical alias.
+    pub room_alias: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatPoint {
+    pub id: String,
+    pub vector: Vec<f32>,
+    pub payload: ChatPayload,
+}
+
+/// One chat chunk a vector search returned and how near it scored.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatRow {
+    pub score: f32,
+    pub payload: ChatPayload,
+}
+
+/// Which chat chunks a read keeps; the selectors compose as AND. `rooms` are
+/// any-of room ids (`!`) or aliases (`#`); the span keeps chunks whose own
+/// span overlaps [`after_ms`, `before_ms`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChatFilter {
+    pub rooms: Vec<String>,
+    pub after_ms: Option<u64>,
+    pub before_ms: Option<u64>,
+}
+
+impl ChatFilter {
+    /// Whether a chunk of `room_id`/`room_alias` spanning [`start`, `end`]
+    /// passes. The fake index and the tests read the filter through this; the
+    /// Qdrant index states the same thing as conditions.
+    pub fn keeps(&self, room_id: &str, room_alias: Option<&str>, start: u64, end: u64) -> bool {
+        (self.rooms.is_empty() || self.rooms.iter().any(|room| room == room_id || Some(room.as_str()) == room_alias))
+            && self.after_ms.is_none_or(|after| end >= after)
+            && self.before_ms.is_none_or(|before| start <= before)
+    }
+}
+
 /// One chunk a vector search returned and how near it scored.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceRow {
@@ -124,7 +189,9 @@ pub struct SourceRow {
 pub trait SourceIndex {
     fn describe_sources(&mut self, within: Duration) -> Result<DescribedSources>;
     /// Drops the collection if it exists and creates it empty with this
-    /// metadata, no cursors, and keyword indexes on `repo` and `path`.
+    /// metadata, no cursors, keyword indexes on `repo`, `path`, `corpus`,
+    /// `room_id`, `room_alias` and `event_ids`, and integer indexes on
+    /// `ts_start_ms` and `ts_end_ms`.
     fn recreate_sources(&mut self, meta: &SourcesMeta) -> Result<()>;
     /// Replaces the cursors object whole.
     fn set_cursors(&mut self, cursors: &BTreeMap<String, String>) -> Result<()>;
@@ -137,6 +204,15 @@ pub trait SourceIndex {
     /// The `limit` nearest chunks, best first, in `repo` alone when given, and
     /// among the `FRONT_PAGE_FILES` alone when `front`.
     fn search_sources(&mut self, vector: &[f32], repo: Option<&str>, front: bool, limit: u32, within: Duration) -> Result<Vec<SourceRow>>;
+    /// Writes chat chunks, acknowledged before it returns. The ingest job's
+    /// alone: the daemon never calls it. A chunk with no messages is refused.
+    fn upsert_chat(&mut self, points: &[ChatPoint]) -> Result<()>;
+    /// The `limit` chat chunks nearest `vector`, best first, among those
+    /// `filter` keeps. Reads only `corpus=chat` points; the daemon's.
+    fn chat_nearest(&mut self, vector: &[f32], filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatRow>>;
+    /// Up to `limit` chat chunks `filter` keeps, oldest first by span start.
+    /// Reads only `corpus=chat` points; the daemon's.
+    fn chat_scroll(&mut self, filter: &ChatFilter, limit: u32, within: Duration) -> Result<Vec<ChatPayload>>;
 }
 
 /// A repo the forge lists as indexable.
@@ -476,6 +552,10 @@ pub fn fuse<T>(lists: Vec<Vec<T>>, key: impl Fn(&T) -> String, k: u32, top_k: us
 /// of one, trimmed, and each distinct text once, in the order asked.
 fn query_texts(query: &SourceQuery) -> Vec<&str> {
     let asked: Vec<&str> = if query.texts.is_empty() { vec![query.text.0.as_str()] } else { query.texts.iter().map(|text| text.0.as_str()).collect() };
+    distinct_texts(asked)
+}
+
+fn distinct_texts(asked: Vec<&str>) -> Vec<&str> {
     let mut distinct: Vec<&str> = Vec::with_capacity(asked.len());
     for text in asked {
         if !distinct.iter().any(|seen| seen.trim() == text.trim()) {
@@ -485,16 +565,14 @@ fn query_texts(query: &SourceQuery) -> Vec<&str> {
     distinct
 }
 
-/// A source search, which a daemon answers from the collection as it finds it:
-/// it embeds the query with its own embedder, and refuses if the collection
-/// was built under another model, because vectors of two models do not compare.
-pub fn search<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, query: &SourceQuery, within: Duration) -> Result<SourceHits> {
-    let budget = Budget::new(within);
-    let built = match index.describe_sources(budget.left()?).context("describing the source collection")? {
-        DescribedSources::Absent => bail!("source index not built"),
-        DescribedSources::Unlabelled => bail!("source index not built: {COLLECTION} carries no Huginn metadata"),
-        DescribedSources::Labelled { meta, .. } => meta,
-    };
+/// The label of the collection a daemon is about to read, if it was built
+/// under the model this daemon embeds with. Absent, unlabelled and other-model
+/// collections are loud refusals: vectors of two models do not compare, and an
+/// empty page is not an answer. A collection built for another corpus set (an
+/// old forge-only one) is refused the same way until the rebuild lands, since
+/// it would answer a chat search with an empty page.
+fn readable_under_this_model<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, budget: &Budget) -> Result<(SourcesMeta, ModelIdentity)> {
+    let built = built_label(index, budget)?;
     let identity = embedder.model_identity(budget.left()?).context("reading the embedding model's identity")?;
     ensure!(
         built.model == identity.name && built.model_digest == identity.digest && built.dimensions == identity.dimensions,
@@ -506,6 +584,30 @@ pub fn search<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, quer
         identity.digest,
         identity.dimensions
     );
+    Ok((built, identity))
+}
+
+fn built_label<S: SourceIndex>(index: &mut S, budget: &Budget) -> Result<SourcesMeta> {
+    match index.describe_sources(budget.left()?).context("describing the source collection")? {
+        DescribedSources::Absent => bail!("source index not built"),
+        DescribedSources::Unlabelled => bail!("source index not built: {COLLECTION} carries no Huginn metadata"),
+        DescribedSources::Labelled { meta, .. } => {
+            ensure!(
+                meta.corpus == CORPUS,
+                "the source index is stale: it was built for corpus {} and this daemon reads {CORPUS}; the rebuild is pending",
+                meta.corpus
+            );
+            Ok(meta)
+        }
+    }
+}
+
+/// A source search, which a daemon answers from the collection as it finds it:
+/// it embeds the query with its own embedder, and refuses if the collection
+/// was built under another model, because vectors of two models do not compare.
+pub fn search<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, query: &SourceQuery, within: Duration) -> Result<SourceHits> {
+    let budget = Budget::new(within);
+    let (built, identity) = readable_under_this_model(embedder, index, &budget)?;
     let topics = query_texts(query);
     let prompts: Vec<String> = topics.iter().map(|topic| format!("Instruct: {SOURCE_QUERY_INSTRUCTION}\nQuery: {topic}")).collect();
     let vectors = embedder.embed(&prompts, budget.left()?).context("embedding the query")?;
@@ -537,5 +639,70 @@ pub fn search<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, quer
                 text: row.payload.text,
             })
             .collect(),
+    })
+}
+
+/// A chat search. With texts, the chunks nearest them among those the room and
+/// span selectors keep, several texts fused by `fuse`; with none, a listing of
+/// what the selectors keep, oldest first, `top_k` of it and `truncated` saying
+/// more exist (no embedding, so the model's identity is not consulted, though
+/// an absent collection is still refused). A hit outside the span is not
+/// returned and a boundary hit loses its messages outside [after, before], its
+/// span and first and last ids recomputed from what is left. Never writes.
+pub fn search_chat<E: Embedder, S: SourceIndex>(embedder: &mut E, index: &mut S, query: &ChatQuery, within: Duration) -> Result<ChatHits> {
+    let budget = Budget::new(within);
+    let filter = ChatFilter { rooms: query.rooms.iter().map(|room| room.0.clone()).collect(), after_ms: query.after_ms, before_ms: query.before_ms };
+    let top_k = query.top_k as usize;
+    let topics = distinct_texts(query.texts.iter().map(|text| text.0.as_str()).collect());
+    let (built, rows, truncated) = if topics.is_empty() {
+        let built = built_label(index, &budget)?;
+        let mut held = index.chat_scroll(&filter, query.top_k + 1, budget.left()?)?;
+        let truncated = held.len() > top_k;
+        held.truncate(top_k);
+        (built, held.into_iter().map(|payload| (None, payload)).collect::<Vec<_>>(), truncated)
+    } else {
+        let (built, identity) = readable_under_this_model(embedder, index, &budget)?;
+        let prompts: Vec<String> = topics.iter().map(|topic| format!("Instruct: {CHAT_QUERY_INSTRUCTION}\nQuery: {topic}")).collect();
+        let vectors = embedder.embed(&prompts, budget.left()?).context("embedding the query")?;
+        ensure!(vectors.len() == prompts.len(), "the embedder returned {} vectors for {} query texts", vectors.len(), prompts.len());
+        let depth = if vectors.len() == 1 { query.top_k } else { FUSE_DEPTH };
+        let mut lists = Vec::with_capacity(vectors.len());
+        for vector in &vectors {
+            ensure!(vector.len() == identity.dimensions as usize, "the embedder returned a query vector of {} where the collection holds {}", vector.len(), identity.dimensions);
+            lists.push(index.chat_nearest(vector, &filter, depth, budget.left()?)?);
+        }
+        let rows: Vec<ChatRow> = if lists.len() == 1 {
+            lists.remove(0)
+        } else {
+            let key = |row: &ChatRow| format!("{}\0{}", row.payload.room_id, row.payload.messages.first().map_or("", |message| message.event_id.as_str()));
+            fuse(lists, key, FUSE_K, top_k).into_iter().map(|(score, row)| ChatRow { score, ..row }).collect()
+        };
+        (built, rows.into_iter().map(|row| (Some(row.score), row.payload)).collect(), false)
+    };
+    Ok(ChatHits {
+        indexed_under: SourceModel { name: built.model, digest: built.model_digest },
+        truncated,
+        hits: rows.into_iter().filter_map(|(score, payload)| chat_hit(score, payload, &filter)).collect(),
+    })
+}
+
+/// A held chunk as a hit: only the messages inside the asked span, the span and
+/// ids those messages make, and nothing at all when none is inside.
+fn chat_hit(score: Option<f32>, payload: ChatPayload, filter: &ChatFilter) -> Option<ChatHit> {
+    let messages: Vec<ChatMessage> = payload
+        .messages
+        .into_iter()
+        .filter(|message| filter.after_ms.is_none_or(|after| message.ts_ms >= after) && filter.before_ms.is_none_or(|before| message.ts_ms <= before))
+        .collect();
+    let (first, last) = (messages.first()?, messages.last()?);
+    Some(ChatHit {
+        room_id: payload.room_id,
+        room_alias: payload.room_alias,
+        first_event_id: first.event_id.clone(),
+        last_event_id: last.event_id.clone(),
+        ts_start_ms: messages.iter().map(|message| message.ts_ms).min()?,
+        ts_end_ms: messages.iter().map(|message| message.ts_ms).max()?,
+        score,
+        messages,
     })
 }

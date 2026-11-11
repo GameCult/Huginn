@@ -105,9 +105,9 @@ use huginn_mind::wire::IndexStatus;
 use huginn_mind::{INDEX_TEXT_VERSION, IndexEntry, Mind, MindStore};
 use sha2::{Digest, Sha256};
 
-use crate::daemon::{Hits, IndexSink, SearchTicket};
+use crate::daemon::{Found, Hits, IndexSink, SearchTicket};
 use crate::sources::{self, SourceIndex};
-use huginn_mind::{SourceHits, SourceQuery};
+use huginn_mind::{ChatQuery, SourceQuery};
 use ollama::QUERY_INSTRUCTION;
 
 /// The `managed_by` a collection carries when this organ made it.
@@ -685,11 +685,17 @@ struct Queued {
     due: Instant,
 }
 
-/// A source search waiting for the worker. It is not the mind's: nothing about
-/// the mind's reconciliation gates it.
+/// What a source-collection search asks: forge chunks or chat chunks.
+enum SourceAsk {
+    Sources(SourceQuery),
+    Chat(ChatQuery),
+}
+
+/// A source or chat search waiting for the worker. It is not the mind's:
+/// nothing about the mind's reconciliation gates it.
 struct QueuedSource {
     ticket: SearchTicket,
-    query: SourceQuery,
+    ask: SourceAsk,
     due: Instant,
 }
 
@@ -706,7 +712,7 @@ struct Shared {
     /// Searches the worker finished and the serve loop has not collected.
     found: Vec<(SearchTicket, Result<Hits, String>)>,
     source_searches: VecDeque<QueuedSource>,
-    sources_found: Vec<(SearchTicket, Result<SourceHits, String>)>,
+    sources_found: Vec<(SearchTicket, Found)>,
     next_ticket: u64,
 }
 
@@ -821,10 +827,14 @@ fn serve_source_search<E: Embedder, V: VectorIndex + SourceIndex>(projector: &mu
     if guard.closed {
         return;
     }
-    let Some(QueuedSource { ticket, query, due }) = guard.source_searches.pop_front() else { return };
+    let Some(QueuedSource { ticket, ask, due }) = guard.source_searches.pop_front() else { return };
     drop(guard);
-    let found = sources::search(&mut projector.embedder, &mut projector.index, &query, due.saturating_duration_since(Instant::now()))
-        .map_err(|error| format!("{error:#}"));
+    let within = due.saturating_duration_since(Instant::now());
+    let found = match ask {
+        SourceAsk::Sources(query) => sources::search(&mut projector.embedder, &mut projector.index, &query, within).map(Found::Sources),
+        SourceAsk::Chat(query) => sources::search_chat(&mut projector.embedder, &mut projector.index, &query, within).map(Found::Chat),
+    }
+    .unwrap_or_else(|error| Found::Failed(format!("{error:#}")));
     lock(shared).sources_found.push((ticket, found));
 }
 
@@ -966,6 +976,24 @@ pub struct WorkerSink {
 }
 
 impl WorkerSink {
+    /// Queues a source or chat search behind the same bound as every other
+    /// search; the mind's index state does not refuse it.
+    fn queue_source_ask(&mut self, ask: SourceAsk) -> Result<SearchTicket, String> {
+        let mut guard = lock(&self.shared);
+        if guard.searches.len() + guard.source_searches.len() >= SEARCHES_QUEUED_MAX {
+            return Err(format!(
+                "the index has {} searches waiting and takes no more until it has answered some",
+                guard.searches.len() + guard.source_searches.len()
+            ));
+        }
+        let ticket = SearchTicket(guard.next_ticket);
+        guard.next_ticket += 1;
+        guard.source_searches.push_back(QueuedSource { ticket, ask, due: Instant::now() + self.deadline });
+        drop(guard);
+        self.shared.1.notify_all();
+        Ok(ticket)
+    }
+
     /// Starts the worker. `mind` is the mind's genesis receipt id, `None` for
     /// a mind not yet written. `startup` is every indexable document the mind
     /// holds now; the worker's first act is to reconcile the collection
@@ -1086,22 +1114,14 @@ impl<S: MindStore> IndexSink<S> for WorkerSink {
     }
 
     fn search_sources(&mut self, query: &SourceQuery) -> Result<SearchTicket, String> {
-        let mut guard = lock(&self.shared);
-        if guard.searches.len() + guard.source_searches.len() >= SEARCHES_QUEUED_MAX {
-            return Err(format!(
-                "the index has {} searches waiting and takes no more until it has answered some",
-                guard.searches.len() + guard.source_searches.len()
-            ));
-        }
-        let ticket = SearchTicket(guard.next_ticket);
-        guard.next_ticket += 1;
-        guard.source_searches.push_back(QueuedSource { ticket, query: query.clone(), due: Instant::now() + self.deadline });
-        drop(guard);
-        self.shared.1.notify_all();
-        Ok(ticket)
+        self.queue_source_ask(SourceAsk::Sources(query.clone()))
     }
 
-    fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+    fn search_chat(&mut self, query: &ChatQuery) -> Result<SearchTicket, String> {
+        self.queue_source_ask(SourceAsk::Chat(query.clone()))
+    }
+
+    fn sources_searched(&mut self) -> Vec<(SearchTicket, Found)> {
         std::mem::take(&mut lock(&self.shared).sources_found)
     }
 
