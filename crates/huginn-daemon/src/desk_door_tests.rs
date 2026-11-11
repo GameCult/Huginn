@@ -902,10 +902,12 @@ mod door_smoke {
         assert_eq!((page_of(list).0.forks.len(), entry_of(entry).0.card.fork_id.as_str().to_string()), (1, FORK.to_string()));
     }
 
-    /// Fifty wordy forks, one commit. A page of them is past the response bound: the door refuses it by name
-    /// (the client lowers `limit`), never cuts it, and the smaller page is whole.
+    /// Fifty wordy forks, one commit each. A limit-50 page of them would pass the response bound: the Mind
+    /// stops the page short at its budget and names the cursor, so the door sends it whole; the door's own
+    /// measure stays exact at the bound. A group of them admitted in one commit that is past the budget by
+    /// itself comes back as the Mind's refusal naming its first fork.
     #[test]
-    fn a_page_past_the_response_bound_is_refused_by_name_and_never_cut() {
+    fn a_page_is_short_of_the_response_bound_and_the_door_still_measures_it_exactly() {
         let mut rig = rig(my_uid());
         let (question, _) = question_and_ruling();
         let PipelineDocument::Question(held) = question else { unreachable!() };
@@ -917,15 +919,27 @@ mod door_smoke {
                 PipelineDocument::Question(wordy)
             })
             .collect();
-        let admitted = rig.daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents)), now()).answered();
+        let admitted = rig.daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, documents.clone())), now()).answered();
         assert!(matches!(admitted, HuginnMindResponse::Admit(huginn_mind::PipelineAdmissionOutcome::Committed { .. })), "{admitted:?}");
         let before = rig.state();
-        let (big, small) = rig.serving(|path| (reply_of(path, "m-1", &forks_all(&["x"])), reply_of(path, "m-2", &forks("x", &["x"], None, None, 10))));
-        let DeskResponse::Refused(MindRefusal::ResponseTooLarge { bytes, limit }) = big else { panic!("{big:?}") };
-        assert_eq!(limit, DESK_MAX_RESPONSE_BYTES as u64);
+        let grouped = rig.serving(|path| reply_of(path, "m-0", &forks_all(&["x"])));
+        let DeskResponse::Refused(MindRefusal::DeskForkTooLarge { bytes, limit, .. }) = grouped else { panic!("{grouped:?}") };
+        assert_eq!(limit, huginn_mind::desk_wire::DESK_PAGE_BUDGET as u64);
         assert!(bytes > limit);
+        assert_eq!(rig.state(), before);
+        // Then fifty more, each in its own commit, newer than the group.
+        for n in 52..=101 {
+            let PipelineDocument::Question(mut wordy) = documents[0].clone() else { unreachable!() };
+            wordy.label = format!("Q{n}").as_str().into();
+            let admitted = rig.daemon.handle(HuginnMindRequest::Admit(batch(INSTANCE, vec![PipelineDocument::Question(wordy)])), now()).answered();
+            assert!(matches!(admitted, HuginnMindResponse::Admit(huginn_mind::PipelineAdmissionOutcome::Committed { .. })), "{admitted:?}");
+        }
+        let before = rig.state();
+        let (big, small) = rig.serving(|path| (reply_of(path, "m-1", &forks_all(&["x"])), reply_of(path, "m-2", &forks("x", &["x"], None, None, 10))));
+        let (big, _) = page_of(big);
+        assert!(big.forks.len() > 10 && big.forks.len() < 50 && big.next_cursor.is_some(), "{} entries", big.forks.len());
         let (small, _) = page_of(small);
-        assert_eq!((small.forks.len(), small.open_count), (10, 51));
+        assert_eq!((small.forks.len(), small.open_count), (10, 101));
         assert!(small.next_cursor.is_some());
         assert_eq!(rig.state(), before);
         // The bound is exact on a read: a response of N bytes passes at N and is refused at N - 1.
