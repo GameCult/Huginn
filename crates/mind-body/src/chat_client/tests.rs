@@ -467,7 +467,7 @@ fn format_and_private_use_characters_are_stripped_from_the_excerpt() {
     for c in ['\u{200D}', '\u{200B}', '\u{200C}', '\u{200E}', '\u{200F}', '\u{061C}', '\u{00AD}', '\u{202E}', '\u{2066}', '\u{2060}', '\u{FEFF}', '\u{E000}', '\u{F8FF}', '\u{F0000}', '\u{10FFFD}', '\u{E0001}', '\u{E0049}', '\u{E007F}', '\u{E0002}'] {
         assert_eq!(excerpt_of(&format!("a{c}b")).as_deref(), Some("ab"), "{c:?}");
     }
-    for kept in ["caf\u{e9} \u{1F600} \u{4E2D}\u{6587}", "e\u{0301}", "a\u{180B}b"] {
+    for kept in ["caf\u{e9} \u{1F600} \u{4E2D}\u{6587}", "e\u{0301}"] {
         assert_eq!(excerpt_of(kept).as_deref(), Some(kept));
     }
     let mixed = format!("{}{}", "a".repeat(120), "\u{200B}".repeat(120));
@@ -510,4 +510,56 @@ fn the_bifrost_fixtures_still_decode_as_quotes() {
     assert_eq!(link_of(PENDING_V4_REPLY_BYTES), quote("@alice:gamecult.org", Some("can someone look at the build?")));
     assert_eq!(link_of(PENDING_V4_REDACTED_BYTES), quote("@alice:gamecult.org", None));
     assert_eq!(link_of(PENDING_V4_NONE_BYTES), ReplyLink::Absent);
+}
+
+/// The valid answer with the msgpack bytes `from` (which must occur once) replaced by `to`: the way to put a value into the document that
+/// `serde_json::Value` cannot hold.
+fn answer_with_bytes(from: &[u8], to: &[u8]) -> Vec<u8> {
+    let bytes = answer_with(serde_json::json!(["$q1", "@a:b", "t"]));
+    let at: Vec<usize> = bytes.windows(from.len()).enumerate().filter(|(_, w)| *w == from).map(|(i, _)| i).collect();
+    assert_eq!(at.len(), 1, "the bytes to replace occur once");
+    [&bytes[..at[0]], to, &bytes[at[0] + from.len()..]].concat()
+}
+
+/// A msgpack ext value (fixext, ext8, the timestamp ext) anywhere in `reply_to` is that delivery's defect, never the document's.
+#[test]
+fn a_msgpack_ext_value_inside_reply_to_drops_that_quote_and_not_the_document() {
+    const TRIPLE: &[u8] = &[0x93, 0xa3, b'$', b'q', b'1', 0xa4, b'@', b'a', b':', b'b', 0xa1, b't'];
+    const EVENT_ID: &[u8] = &[0xa3, b'$', b'q', b'1'];
+    const EXCERPT: &[u8] = &[0xa1, b't'];
+    let expected: ChatPending = decode(PENDING_V4_REPLY_BYTES).unwrap();
+    let cases: [(&str, Vec<u8>, ReplyViolation); 4] = [
+        ("fixext as reply_to", answer_with_bytes(TRIPLE, &[0xd4, 0x05, 0x01]), ReplyViolation::NotATriple),
+        ("ext8 as excerpt", answer_with_bytes(EXCERPT, &[0xc7, 0x02, 0x05, 0xaa, 0xbb]), ReplyViolation::ExcerptNotText),
+        ("fixext as event id", answer_with_bytes(EVENT_ID, &[0xd4, 0x01, 0x07]), ReplyViolation::BadEventId),
+        ("timestamp ext as excerpt", answer_with_bytes(EXCERPT, &[0xd6, 0xff, 0x00, 0x00, 0x00, 0x01]), ReplyViolation::ExcerptNotText),
+    ];
+    for (name, bytes, violation) in cases {
+        let pending: ChatPending = decode(&bytes).unwrap_or_else(|e| panic!("{name}: the document must decode: {e}"));
+        assert_eq!(pending.deliveries[0].reply_to, ReplyLink::Dropped(violation), "{name}");
+        assert_eq!(ChatDelivery { reply_to: expected.deliveries[0].reply_to.clone(), ..pending.deliveries[0].clone() }, expected.deliveries[0], "{name}: the delivery is otherwise unchanged");
+    }
+}
+
+/// Deep nesting inside reply_to is read without recursing past two levels of ours: within rmp-serde's depth limit (1024) the link drops
+/// and the document decodes; past it the decoder abandons the read, serde cannot resume it, and the document fails.
+#[test]
+fn deep_nesting_inside_reply_to_drops_the_quote_within_serdes_limit_and_fails_the_document_past_it() {
+    const TRIPLE: &[u8] = &[0x93, 0xa3, b'$', b'q', b'1', 0xa4, b'@', b'a', b':', b'b', 0xa1, b't'];
+    let nested = |depth: usize| [vec![0x91; depth], vec![0xc0]].concat();
+    let within = answer_with_bytes(TRIPLE, &nested(300));
+    assert_eq!(decode::<ChatPending>(&within).unwrap().deliveries[0].reply_to, ReplyLink::Dropped(ReplyViolation::NotATriple));
+    // rmp-serde's own recursion needs more than a test thread's 2 MiB in a debug build near its limit, so the past-the-limit read gets a big stack.
+    let past = answer_with_bytes(TRIPLE, &nested(10_000));
+    let failed = std::thread::Builder::new().stack_size(256 << 20).spawn(move || decode::<ChatPending>(&past).is_err()).unwrap().join().unwrap();
+    assert!(failed);
+}
+
+#[test]
+fn invisible_cells_that_render_as_nothing_are_stripped_from_the_excerpt() {
+    for c in ['\u{034F}', '\u{115F}', '\u{1160}', '\u{17B4}', '\u{17B5}', '\u{180B}', '\u{180C}', '\u{180D}', '\u{2800}', '\u{3164}'] {
+        assert_eq!(excerpt_of(&format!("a{c}b")).as_deref(), Some("ab"), "{c:?}");
+    }
+    assert_eq!(excerpt_of("\u{2800}\u{3164}"), None);
+    assert_eq!(excerpt_of("a\u{00A0}b").as_deref(), Some("a\u{00A0}b"), "NBSP stays");
 }

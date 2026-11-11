@@ -85,7 +85,7 @@ pub struct ChatDelivery {
 pub const REPLY_EXCERPT_CHARS: usize = 240;
 
 /// The quote of the event a message replies to: `[event_id, sender, excerpt]`. `excerpt` is untrusted text, none when the mouth sent
-/// none (redacted, edited, or not text). Built only by `ReplyLink`'s decode, which holds it to the mouth's contract.
+/// none (redacted, edited, or not text) or nothing but invisible characters. Built only by `ReplyLink`'s decode, which holds it to the mouth's contract.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ReplyTo {
     pub event_id: String,
@@ -141,12 +141,13 @@ fn event_id_shape(text: &str) -> bool {
 }
 
 /// The excerpt without the characters that show nothing: variation selectors, the tag block, and every format or private-use character.
-/// Removal only; nothing is trimmed, replaced or reordered.
+/// Removal only; nothing is trimmed, replaced or reordered. Besides the selectors and the Cf/Co categories it removes the Mn/Lo/Zs/So
+/// cells that render as nothing: U+034F, U+115F, U+1160, U+17B4, U+17B5, U+180B-180D, U+2800 and U+3164. Other whitespace, NBSP included, stays.
 fn without_invisible(text: &str) -> String {
     use unicode_general_category::{GeneralCategory, get_general_category};
     text.chars()
         .filter(|&c| {
-            !matches!(c, '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}' | '\u{E0000}'..='\u{E007F}')
+            !matches!(c, '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}' | '\u{E0000}'..='\u{E007F}' | '\u{034F}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180D}' | '\u{2800}' | '\u{3164}')
                 && !matches!(get_general_category(c), GeneralCategory::Format | GeneralCategory::PrivateUse)
         })
         .collect()
@@ -188,6 +189,8 @@ impl Serialize for ReplyLink {
 impl<'de> Deserialize<'de> for ReplyLink {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Whatever one element of the document holds, read whole so it can be judged after: an element that errors mid-read cannot be resumed.
+        // Nesting past rmp-serde's depth limit (1024) is the one input that still fails the document: the decoder abandons the read and
+        // serde cannot resume it.
         enum Element {
             Nil,
             Text(String),
@@ -195,7 +198,21 @@ impl<'de> Deserialize<'de> for ReplyLink {
             Other,
         }
 
-        struct ElementVisitor;
+        // `top` is the reply link itself, the only level whose list is read item by item; a list inside it is Other and its contents are
+        // skipped, so no input can make this read recurse past two levels of its own.
+        struct ElementVisitor {
+            top: bool,
+        }
+
+        struct Item;
+
+        impl<'de> serde::de::DeserializeSeed<'de> for Item {
+            type Value = Element;
+
+            fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Element, D::Error> {
+                deserializer.deserialize_any(ElementVisitor { top: false })
+            }
+        }
 
         impl<'de> serde::de::Visitor<'de> for ElementVisitor {
             type Value = Element;
@@ -221,8 +238,12 @@ impl<'de> Deserialize<'de> for ReplyLink {
             }
 
             fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Element, A::Error> {
+                if !self.top {
+                    while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                    return Ok(Element::Other);
+                }
                 let mut items = Vec::new();
-                while let Some(item) = seq.next_element::<Element>()? {
+                while let Some(item) = seq.next_element_seed(Item)? {
                     items.push(item);
                 }
                 Ok(Element::List(items))
@@ -252,11 +273,29 @@ impl<'de> Deserialize<'de> for ReplyLink {
             fn visit_bytes<E>(self, _: &[u8]) -> Result<Element, E> {
                 Ok(Element::Other)
             }
+
+            // A msgpack ext value reaches the visitor as a newtype struct or an enum (rmp-serde's timestamp and ext shapes), and an
+            // `Option` wrapper as `visit_some`: all are out of contract, so read them as Other and let the delivery's link drop.
+            fn visit_newtype_struct<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Element, D::Error> {
+                serde::de::IgnoredAny::deserialize(deserializer)?;
+                Ok(Element::Other)
+            }
+
+            fn visit_some<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Element, D::Error> {
+                serde::de::IgnoredAny::deserialize(deserializer)?;
+                Ok(Element::Other)
+            }
+
+            fn visit_enum<A: serde::de::EnumAccess<'de>>(self, data: A) -> Result<Element, A::Error> {
+                let (_, variant): (serde::de::IgnoredAny, _) = data.variant()?;
+                serde::de::VariantAccess::newtype_variant::<serde::de::IgnoredAny>(variant)?;
+                Ok(Element::Other)
+            }
         }
 
         impl<'de> Deserialize<'de> for Element {
             fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                deserializer.deserialize_any(ElementVisitor)
+                deserializer.deserialize_any(ElementVisitor { top: true })
             }
         }
 
