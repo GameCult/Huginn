@@ -463,6 +463,7 @@ fn delivery_of(seq: u64, room: &str, sender: &str, text: &str, event_id: &str) -
         image: None,
         basis: None,
         form: crate::chat_client::Form::Message,
+        reply_to: crate::chat_client::ReplyLink::Absent,
     }
 }
 

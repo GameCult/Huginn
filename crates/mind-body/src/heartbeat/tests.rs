@@ -164,6 +164,7 @@ fn delivery(seq: u64, sender: &str, text: &str, mentions: &[&str]) -> ChatDelive
         image: None,
         basis: None,
         form: crate::chat_client::Form::Message,
+        reply_to: crate::chat_client::ReplyLink::Absent,
     }
 }
 

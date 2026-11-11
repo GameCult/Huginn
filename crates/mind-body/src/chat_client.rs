@@ -21,6 +21,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub const PENDING_REQUEST_V1: &str = "gamecult.persona.chat_pending_request.v1";
 /// The pending request, the same tuple. Asking by this kind is asking for the answer with the addressing facts.
 pub const PENDING_REQUEST: &str = "gamecult.persona.chat_pending_request.v2";
+/// The pending request that asks for the reply link, the same tuple. Opt-in: only a client with the link on sends it.
+pub const PENDING_REQUEST_V4: &str = "gamecult.persona.chat_pending_request.v3";
+/// The answer a flag-on mouth gives it: a delivery with `reply_to` at tuple index 14. Never asked for by default.
+pub const PENDING_V4: &str = "gamecult.persona.chat_pending.v4";
 /// The answer to it: a delivery with its `basis` and `form` at tuple indices 12 and 13.
 pub const PENDING: &str = "gamecult.persona.chat_pending.v3";
 /// The answer a mouth gives a v1 request: no addressing facts, decoded as `basis: None, form: Message`.
@@ -71,6 +75,229 @@ pub struct ChatDelivery {
     /// What kind of event it is: tuple index 13. An answer of an older mouth ends before it and reads as a message.
     #[serde(default)]
     pub form: Form,
+    /// The earlier event this message replies to, as a `chat_pending.v4` mouth quotes it: tuple index 14. An answer of an older mouth
+    /// ends before it and reads as absent, and so does an explicit nil. Display-only evidence: no addressing rule reads it.
+    #[serde(default, skip_serializing_if = "ReplyLink::sends_nothing")]
+    pub reply_to: ReplyLink,
+}
+
+/// The longest excerpt the mouth quotes, in Unicode code points (its `limits.replyExcerpt`).
+pub const REPLY_EXCERPT_CHARS: usize = 240;
+
+/// The quote of the event a message replies to: `[event_id, sender, excerpt]`. `excerpt` is untrusted text, none when the mouth sent
+/// none (redacted, edited, or not text). Built only by `ReplyLink`'s decode, which holds it to the mouth's contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReplyTo {
+    pub event_id: String,
+    pub sender: String,
+    pub excerpt: Option<String>,
+}
+
+/// How a reply link out of the mouth's contract fails it, first by tuple order. A class and nothing the mouth sent, so no path can echo
+/// what was read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplyViolation {
+    /// Not an array, or an array of arity other than 3.
+    NotATriple,
+    /// An event id that is not a string, is empty, or is not the shape of one.
+    BadEventId,
+    /// A sender that is not a string, is empty, or is not the shape of a Matrix user id.
+    BadSenderId,
+    /// An excerpt that is neither a string nor nil.
+    ExcerptNotText,
+    /// An excerpt over `REPLY_EXCERPT_CHARS` code points as sent, before invisible characters are stripped.
+    ExcerptTooLong,
+}
+
+impl ReplyViolation {
+    /// The log token of the class.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NotATriple => "not_a_triple",
+            Self::BadEventId => "bad_event_id",
+            Self::BadSenderId => "bad_sender_id",
+            Self::ExcerptNotText => "excerpt_not_text",
+            Self::ExcerptTooLong => "excerpt_too_long",
+        }
+    }
+}
+
+/// Whether `text` has the shape of a Matrix user id: `@localpart:server`, at most 255 bytes. A shape check, no directory lookup. The
+/// localpart is any ASCII graphic byte (historical and appservice ids such as `@_discord_123:host` are legal); the server name is a
+/// hostname, IPv4 or `[IPv6]` with an optional port.
+fn matrix_user_id(text: &str) -> bool {
+    let Some((localpart, server)) = text.strip_prefix('@').and_then(|rest| rest.split_once(':')) else { return false };
+    text.len() <= 255
+        && !localpart.is_empty()
+        && localpart.bytes().all(|byte| byte.is_ascii_graphic())
+        && !server.is_empty()
+        && server.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".:_[]-".contains(&byte))
+}
+
+/// Whether `text` has the shape of an event id: `$` and at least one ASCII graphic byte, at most 255 bytes. Deliberately not a base64
+/// check: room versions 3 to 12 and the legacy `$opaque:server` ids all pass, because the mouth forwards whatever the homeserver named.
+fn event_id_shape(text: &str) -> bool {
+    text.len() <= 255 && text.strip_prefix('$').is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_graphic()))
+}
+
+/// The excerpt without the characters that show nothing: variation selectors, the tag block, and every format or private-use character.
+/// Removal only; nothing is trimmed, replaced or reordered.
+fn without_invisible(text: &str) -> String {
+    use unicode_general_category::{GeneralCategory, get_general_category};
+    text.chars()
+        .filter(|&c| {
+            !matches!(c, '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}' | '\u{E0000}'..='\u{E007F}')
+                && !matches!(get_general_category(c), GeneralCategory::Format | GeneralCategory::PrivateUse)
+        })
+        .collect()
+}
+
+/// A delivery's reply link, tuple index 14: absent, a quote within the mouth's contract, or dropped whole for leaving it. A defective link
+/// never fails the poll and is never repaired or clipped; `reply_warnings` names it, and only `quote` reaches a model.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ReplyLink {
+    #[default]
+    Absent,
+    Quote(ReplyTo),
+    Dropped(ReplyViolation),
+}
+
+impl ReplyLink {
+    /// The quote, only when the link was within the contract.
+    pub fn quote(&self) -> Option<&ReplyTo> {
+        match self {
+            Self::Quote(quote) => Some(quote),
+            _ => None,
+        }
+    }
+
+    fn sends_nothing(&self) -> bool {
+        !matches!(self, Self::Quote(_))
+    }
+}
+
+impl Serialize for ReplyLink {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Quote(quote) => quote.serialize(serializer),
+            _ => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ReplyLink {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Whatever one element of the document holds, read whole so it can be judged after: an element that errors mid-read cannot be resumed.
+        enum Element {
+            Nil,
+            Text(String),
+            List(Vec<Element>),
+            Other,
+        }
+
+        struct ElementVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ElementVisitor {
+            type Value = Element;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a reply link element")
+            }
+
+            fn visit_unit<E>(self) -> Result<Element, E> {
+                Ok(Element::Nil)
+            }
+
+            fn visit_none<E>(self) -> Result<Element, E> {
+                Ok(Element::Nil)
+            }
+
+            fn visit_str<E>(self, text: &str) -> Result<Element, E> {
+                Ok(Element::Text(text.to_string()))
+            }
+
+            fn visit_string<E>(self, text: String) -> Result<Element, E> {
+                Ok(Element::Text(text))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Element, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element::<Element>()? {
+                    items.push(item);
+                }
+                Ok(Element::List(items))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Element, A::Error> {
+                while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
+                Ok(Element::Other)
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Element, E> {
+                Ok(Element::Other)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Element, E> {
+                Ok(Element::Other)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Element, E> {
+                Ok(Element::Other)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Element, E> {
+                Ok(Element::Other)
+            }
+
+            fn visit_bytes<E>(self, _: &[u8]) -> Result<Element, E> {
+                Ok(Element::Other)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for Element {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                deserializer.deserialize_any(ElementVisitor)
+            }
+        }
+
+        Ok(match Element::deserialize(deserializer)? {
+            Element::Nil => Self::Absent,
+            Element::List(items) if items.len() == 3 => {
+                let mut items = items.into_iter();
+                let (event_id, sender, excerpt) = (items.next(), items.next(), items.next());
+                match (event_id, sender, excerpt) {
+                    (Some(Element::Text(event_id)), _, _) if !event_id_shape(&event_id) => Self::Dropped(ReplyViolation::BadEventId),
+                    (Some(Element::Text(_)), Some(Element::Text(sender)), _) if !matrix_user_id(&sender) => Self::Dropped(ReplyViolation::BadSenderId),
+                    (Some(Element::Text(event_id)), Some(Element::Text(sender)), Some(excerpt)) => match excerpt {
+                        Element::Nil => Self::Quote(ReplyTo { event_id, sender, excerpt: None }),
+                        Element::Text(text) if text.chars().take(REPLY_EXCERPT_CHARS + 1).count() > REPLY_EXCERPT_CHARS => Self::Dropped(ReplyViolation::ExcerptTooLong),
+                        Element::Text(text) => {
+                            let shown = without_invisible(&text);
+                            Self::Quote(ReplyTo { event_id, sender, excerpt: if shown.is_empty() { None } else { Some(shown) } })
+                        }
+                        _ => Self::Dropped(ReplyViolation::ExcerptNotText),
+                    },
+                    (Some(Element::Text(_)), _, _) => Self::Dropped(ReplyViolation::BadSenderId),
+                    _ => Self::Dropped(ReplyViolation::BadEventId),
+                }
+            }
+            _ => Self::Dropped(ReplyViolation::NotATriple),
+        })
+    }
+}
+
+/// The log line for each delivery whose reply link was dropped and whose event id is not yet in `warned`, which it grows: one warning per
+/// event however often the answer is polled. The event id is escaped (`{:?}`) so it cannot start another line, and the line holds nothing
+/// else the mouth sent.
+pub fn reply_warnings(pending: &ChatPending, warned: &mut std::collections::BTreeSet<String>) -> Vec<String> {
+    pending
+        .deliveries
+        .iter()
+        .filter_map(|delivery| match &delivery.reply_to {
+            ReplyLink::Dropped(violation) if warned.insert(delivery.event_id.clone()) => Some(format!("reply_to dropped event={:?} violation={}", delivery.event_id, violation.name())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Why the mouth found a delivery to be for the Persona, by what Matrix says (Bifrost `docs/bridge.md` "Addressing facts"). `Tag` and

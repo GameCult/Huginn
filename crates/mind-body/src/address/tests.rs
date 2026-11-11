@@ -13,6 +13,7 @@ fn said(text: &str, mentions: &[&str]) -> ChatDelivery {
         image: None,
         basis: None,
         form: Form::Message,
+        reply_to: crate::chat_client::ReplyLink::Absent,
         sender: "@op:chat".into(),
         sender_display: "Op".into(),
         at_unix_ms: 0,
