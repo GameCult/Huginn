@@ -315,7 +315,7 @@ fn account_id(text: &str) -> bool {
 
 /// Every account id the fixtures carry is a Bifrost account id, never a Matrix id, email or
 /// handle. The door does not refuse other shapes yet (`Short`, any 200 bytes); that refusal is owed
-/// by `cut-desk-feed-listing.r4`, and this pins the grammar it must enforce.
+/// by `cut-desk-feed-listing.r6`, and this pins the grammar it must enforce.
 #[test]
 fn every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid() {
     for request in [forks(Some(ListStatus::Open), None, 50), read()] {
