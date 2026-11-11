@@ -3,29 +3,37 @@
 //! for semantic search. Each point's `corpus` payload (`forge` or `chat`) keeps
 //! the two apart; a forge search filters `forge` and a chat search `chat`.
 //!
-//! Two truths, one writer. The forge is the truth of which repos exist and what
-//! they hold; the collection is derived from it and can be deleted whenever.
-//! `refresh` is the only writer of the collection, run by the `huginn-sources`
-//! oneshot job: first build, incremental refresh, rebuild after a model or
-//! chunker change, and retirement are all the one routine (delete by filter,
-//! ingest at a commit, rewrite the cursors). The daemon only reads: `search`
-//! is its whole part, and nothing in `serve` or the worker calls a write.
+//! Two truths, one job. The forge is the truth of which repos exist and what
+//! they hold, Synapse of what the Minds' rooms said; the collection is derived
+//! from them and can be deleted whenever (but for a steward's purge tombstones, see
+//! `chat_purge`). `refresh` is the forge's writer and the only creator of the
+//! collection, run by the `huginn-sources` oneshot job: first build, incremental
+//! refresh, rebuild after a model or chunker change, and retirement are all the one
+//! routine (delete by filter, ingest at a commit, rewrite the cursors). `chat::refresh_chat`
+//! joins it in the same job and the same cursors object, as the only writer of chat points;
+//! it requires the collection to exist and never recreates it. The daemon only reads: `search`
+//! and `search_chat` are its whole part, and nothing in `serve` or the worker calls a write.
 //!
-//! A cursor is the commit whose chunks the collection holds for a repo. It
-//! lives in the collection's own metadata, so it is lost with the collection
+//! A cursor is the commit (or, for a room, the event) whose chunks the collection
+//! holds. It lives in the collection's own metadata, so it is lost with the collection
 //! and the two cannot disagree about what is held. It is advanced only after
-//! the repo's deletes and upserts are acknowledged: it may lag and never leads.
-//! It is dropped before the repo's first delete, so a run that fails between
-//! the delete and the upserts leaves no cursor, and the repo is ingested whole.
-//! The cursors object is written whole by this job alone, once per repo.
+//! the source's deletes and upserts are acknowledged: it may lag and never leads.
+//! A repo's is dropped before its first delete, so a run that fails between
+//! the delete and the upserts leaves no cursor, and the repo is ingested whole; a room's
+//! chat chunks are written before anything they replace is deleted. The cursors
+//! object is written whole by this job alone. A key is a repo name, or a chat key
+//! (`chat::is_chat_key`), never both.
 
 pub mod chat;
 pub mod chat_chunk;
+pub mod chat_purge;
 pub mod chunk;
 pub mod forge;
 pub mod git;
 pub mod room_scope;
 
+#[cfg(test)]
+mod chat_tests;
 #[cfg(test)]
 mod tests;
 

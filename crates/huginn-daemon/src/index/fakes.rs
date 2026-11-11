@@ -264,6 +264,8 @@ pub(crate) struct SourcesState {
     pub(crate) deletes: Vec<(String, Option<Vec<String>>)>,
     /// A delete naming this repo refuses.
     pub(crate) fail_deletes_of: Option<String>,
+    /// Every cursor write refuses once this many have been written.
+    pub(crate) fail_cursor_writes_after: Option<usize>,
     /// Every chat upsert refuses while this is set.
     pub(crate) fail_chat_upserts: bool,
     /// Every chat delete refuses while this is set.
@@ -332,6 +334,9 @@ impl SourceIndex for FakeSources {
 
     fn set_cursors(&mut self, cursors: &BTreeMap<String, String>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+        if state.fail_cursor_writes_after.is_some_and(|after| state.cursor_writes.len() >= after) {
+            bail!("the vector store refused the cursor write");
+        }
         state.cursor_writes.push(cursors.clone());
         let Some(DescribedSources::Labelled { cursors: held, .. }) = &mut state.described else { bail!("no source collection") };
         *held = cursors.clone();
