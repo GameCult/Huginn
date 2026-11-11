@@ -688,6 +688,7 @@ fn unexpected(answer: &HuginnMindResponse) -> Trouble {
         HuginnMindResponse::Persona(_) => "a persona",
         HuginnMindResponse::PersonaPut(_) => "a persona put",
         HuginnMindResponse::Sources(_) => "source hits",
+        HuginnMindResponse::Chat(_) => "chat hits",
         HuginnMindResponse::Activity(_) => "repo activity",
         HuginnMindResponse::RootsTouched(_) => "roots touched",
         HuginnMindResponse::Refused(_) => "a refusal",

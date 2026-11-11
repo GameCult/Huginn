@@ -1233,7 +1233,8 @@ struct Desk {
     embeds_under: &'static str,
     held: Vec<huginn_daemon::sources::SourcePayload>,
     tickets: u64,
-    done: Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)>,
+    chat: Vec<huginn_daemon::sources::ChatPayload>,
+    done: Vec<(SearchTicket, huginn_daemon::daemon::Found)>,
 }
 
 /// An embedder that sends every text to one vector, under a digest.
@@ -1297,6 +1298,35 @@ impl huginn_daemon::sources::SourceIndex for Desk {
             .map(|payload| huginn_daemon::sources::SourceRow { score: 0.9, payload: payload.clone() })
             .collect())
     }
+
+    fn upsert_chat(&mut self, _points: &[huginn_daemon::sources::ChatPoint]) -> anyhow::Result<()> {
+        anyhow::bail!("a daemon never writes the source index")
+    }
+
+    fn chat_nearest(
+        &mut self,
+        _vector: &[f32],
+        filter: &huginn_daemon::sources::ChatFilter,
+        limit: u32,
+        _within: Duration,
+    ) -> anyhow::Result<Vec<huginn_daemon::sources::ChatRow>> {
+        Ok(self.chat_scroll(filter, limit, _within)?.into_iter().map(|payload| huginn_daemon::sources::ChatRow { score: 0.9, payload }).collect())
+    }
+
+    fn chat_scroll(&mut self, filter: &huginn_daemon::sources::ChatFilter, limit: u32, _within: Duration) -> anyhow::Result<Vec<huginn_daemon::sources::ChatPayload>> {
+        let mut kept: Vec<_> = self
+            .chat
+            .iter()
+            .filter(|payload| {
+                let times = payload.messages.iter().map(|message| message.ts_ms);
+                filter.keeps(&payload.room_id, payload.room_alias.as_deref(), times.clone().min().unwrap(), times.max().unwrap())
+            })
+            .cloned()
+            .collect();
+        kept.sort_by_key(|payload| payload.messages[0].ts_ms);
+        kept.truncate(limit as usize);
+        Ok(kept)
+    }
 }
 
 impl<S: MindStore> IndexSink<S> for Desk {
@@ -1313,11 +1343,21 @@ impl<S: MindStore> IndexSink<S> for Desk {
         self.tickets += 1;
         let ticket = SearchTicket(self.tickets);
         let mut embedder = Flat(self.embeds_under);
-        let found = huginn_daemon::sources::search(&mut embedder, self, query, Duration::from_secs(5)).map_err(|error| format!("{error:#}"));
+        let found = huginn_daemon::sources::search(&mut embedder, self, query, Duration::from_secs(5))
+            .map_or_else(|error| huginn_daemon::daemon::Found::Failed(format!("{error:#}")), huginn_daemon::daemon::Found::Sources);
         self.done.push((ticket, found));
         Ok(ticket)
     }
-    fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)> {
+    fn search_chat(&mut self, query: &huginn_mind::ChatQuery) -> Result<SearchTicket, String> {
+        self.tickets += 1;
+        let ticket = SearchTicket(self.tickets);
+        let mut embedder = Flat(self.embeds_under);
+        let found = huginn_daemon::sources::search_chat(&mut embedder, self, query, Duration::from_secs(5))
+            .map_or_else(|error| huginn_daemon::daemon::Found::Failed(format!("{error:#}")), huginn_daemon::daemon::Found::Chat);
+        self.done.push((ticket, found));
+        Ok(ticket)
+    }
+    fn sources_searched(&mut self) -> Vec<(SearchTicket, huginn_daemon::daemon::Found)> {
         std::mem::take(&mut self.done)
     }
     fn search_deadline(&self) -> Duration {
@@ -1351,6 +1391,7 @@ fn source_daemon(built_under: &'static str, embeds_under: &'static str) -> Serve
             chunk("Demo", "README.md", 1, 2, "# Demo"),
             chunk("Other", "x.rs", 1, 1, "fn other() {}"),
         ],
+        chat: Vec::new(),
         tickets: 0,
         done: Vec::new(),
     };

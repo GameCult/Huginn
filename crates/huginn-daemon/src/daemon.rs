@@ -8,7 +8,7 @@ use crate::sources::forge::HttpForge;
 use huginn_mind::desk_wire::{DeskRequest, DeskResponse};
 use huginn_mind::eureka_pipeline::{PipelineRef, Slug};
 use huginn_mind::wire::{ACTIVITY_REPOS_MAX, HuginnMindRequest, HuginnMindResponse, IndexStatus};
-use huginn_mind::{Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery, SourceHits, SourceQuery};
+use huginn_mind::{ChatHits, ChatQuery, Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery, SourceHits, SourceQuery};
 
 /// Where the index attaches. Called after a batch commits, with the refs the
 /// batch landed, derived writes included; the sink may read each through
@@ -34,8 +34,12 @@ pub trait IndexSink<S: MindStore> {
     /// Starts a source search. The source index is not the mind's: it needs no
     /// member ids, and nothing about the mind's own index state refuses it.
     fn search_sources(&mut self, query: &SourceQuery) -> Result<SearchTicket, String>;
-    /// Every source search that finished since the last call, by ticket.
-    fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)>;
+    /// Starts a chat search: the same queue and worker as a source search,
+    /// over the same collection.
+    fn search_chat(&mut self, query: &ChatQuery) -> Result<SearchTicket, String>;
+    /// Every source or chat search that finished since the last call, by
+    /// ticket: `Found::Sources`, `Found::Chat` or `Found::Failed`.
+    fn sources_searched(&mut self) -> Vec<(SearchTicket, Found)>;
     fn search_deadline(&self) -> std::time::Duration;
     /// Every search that finished since the last call, by ticket: its
     /// candidates and scores, or why it failed.
@@ -78,6 +82,7 @@ struct MindSearch {
 pub enum Found {
     Mind(Hits),
     Sources(SourceHits),
+    Chat(ChatHits),
     Failed(String),
 }
 
@@ -205,6 +210,15 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
                 Ok(roots) => HuginnMindResponse::RootsTouched(roots),
                 Err(refusal) => HuginnMindResponse::Refused(refusal),
             },
+            HuginnMindRequest::SearchChat { query, .. } => {
+                if let Err(refusal) = query.check() {
+                    return Handled::Answered(HuginnMindResponse::Refused(refusal));
+                }
+                return match self.index.search_chat(&query) {
+                    Ok(ticket) => Handled::Searching(Search { ticket, mind: None }),
+                    Err(detail) => Handled::Answered(HuginnMindResponse::Refused(MindRefusal::Unavailable { detail })),
+                };
+            }
             HuginnMindRequest::StewardedActivity { instance, repos, after } => {
                 let refused = |message: &str| MindRefusal::SelectionInvalid { field: "repos".into(), value: None, message: message.into() };
                 if repos.len() > ACTIVITY_REPOS_MAX {
@@ -282,8 +296,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
     /// Searches the index has finished since this was last called.
     pub fn searched(&mut self) -> Vec<(SearchTicket, Found)> {
         let mind = self.index.searched().into_iter().map(|(ticket, found)| (ticket, found.map_or_else(Found::Failed, Found::Mind)));
-        let sources = self.index.sources_searched().into_iter().map(|(ticket, found)| (ticket, found.map_or_else(Found::Failed, Found::Sources)));
-        mind.chain(sources).collect()
+        mind.chain(self.index.sources_searched()).collect()
     }
 
     /// The client has stopped waiting for `ticket`.
@@ -300,6 +313,7 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         let (selection, semantic, members, hits) = match (search.mind, found) {
             (_, Found::Failed(detail)) => return unavailable(detail),
             (None, Found::Sources(hits)) => return HuginnMindResponse::Sources(hits),
+            (None, Found::Chat(hits)) => return HuginnMindResponse::Chat(hits),
             (Some(asked), Found::Mind(hits)) => (asked.selection, asked.semantic, asked.members, hits),
             _ => return unavailable("the index answered another kind of search than the one asked".into()),
         };
@@ -326,6 +340,7 @@ pub(crate) mod tests {
         StructuralDelta, Title, VerificationTest,
     };
     use huginn_mind::wire::MindStatus;
+    use huginn_mind::ChatQuery;
     use huginn_mind::{MindRefusal, OwnedRedbMessagePackBackingStore};
     use std::path::Path;
     use cultnet_rs::Selection;
@@ -580,11 +595,15 @@ pub(crate) mod tests {
             Err("this index cannot search".into())
         }
 
+        fn search_chat(&mut self, _query: &ChatQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
         fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
 
-        fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+        fn sources_searched(&mut self) -> Vec<(SearchTicket, Found)> {
             Vec::new()
         }
 
@@ -619,13 +638,17 @@ pub(crate) mod tests {
             Err("this index cannot search the mind".into())
         }
 
+        fn search_chat(&mut self, _query: &ChatQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
         fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
             *self.asked.lock().unwrap() += 1;
             Ok(SearchTicket(7))
         }
 
-        fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
-            vec![(SearchTicket(7), Ok(self.hits.clone()))]
+        fn sources_searched(&mut self) -> Vec<(SearchTicket, Found)> {
+            vec![(SearchTicket(7), Found::Sources(self.hits.clone()))]
         }
 
         fn search_deadline(&self) -> std::time::Duration {
@@ -685,6 +708,31 @@ pub(crate) mod tests {
         assert_eq!(*asked.lock().unwrap(), 3, "a refused query never reached the index");
     }
 
+    /// A chat search is checked at the door before the index is asked, is
+    /// refused for another mind, turns an index that cannot be asked into
+    /// `Unavailable`, and its finished hits are the answer as they are.
+    #[test]
+    fn a_chat_search_is_checked_at_the_door_and_answers_its_hits() {
+        use huginn_mind::eureka_pipeline::{Line, Short};
+        use huginn_mind::{ChatHits, SourceModel};
+        let root = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::new(Mind::open(root.path(), &slug(INSTANCE)).unwrap(), NoIndex);
+        let request = |instance: &str, rooms: &[&str], top_k: u32| HuginnMindRequest::SearchChat {
+            instance: slug(instance),
+            query: ChatQuery { texts: vec![Line("find".into())], rooms: rooms.iter().map(|room| Short((*room).into())).collect(), after_ms: None, before_ms: None, top_k },
+        };
+        for (refused, field) in [(request(INSTANCE, &[], 0), "top_k"), (request(INSTANCE, &["swarm"], 5), "rooms")] {
+            let answer = daemon.handle(refused, now()).answered();
+            assert!(matches!(answer, HuginnMindResponse::Refused(MindRefusal::SelectionInvalid { field: ref named, .. }) if named == field), "{answer:?}");
+        }
+        assert!(matches!(daemon.handle(request(OTHER, &[], 5), now()).answered(), HuginnMindResponse::Refused(_)));
+        let answer = daemon.handle(request(INSTANCE, &["#swarm:x"], 5), now()).answered();
+        assert!(matches!(answer, HuginnMindResponse::Refused(MindRefusal::Unavailable { .. })), "{answer:?}");
+        let hits = ChatHits { indexed_under: SourceModel { name: "m".into(), digest: "d".into() }, truncated: false, hits: vec![] };
+        let search = Search { ticket: SearchTicket(1), mind: None };
+        assert_eq!(daemon.finish(search, Found::Chat(hits.clone())), HuginnMindResponse::Chat(hits));
+    }
+
     /// A daemon over the instance's mind under `state_root`, with no index.
     pub(crate) fn open_unindexed(
         state_root: &Path,
@@ -716,11 +764,15 @@ pub(crate) mod tests {
             Err("this index cannot search".into())
         }
 
+        fn search_chat(&mut self, _query: &ChatQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
         fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
 
-        fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+        fn sources_searched(&mut self) -> Vec<(SearchTicket, Found)> {
             Vec::new()
         }
 
@@ -750,11 +802,15 @@ pub(crate) mod tests {
             Err("this index cannot search".into())
         }
 
+        fn search_chat(&mut self, _query: &ChatQuery) -> Result<SearchTicket, String> {
+            Err("this index cannot search".into())
+        }
+
         fn search_sources(&mut self, _query: &SourceQuery) -> Result<SearchTicket, String> {
             Err("this index cannot search".into())
         }
 
-        fn sources_searched(&mut self) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+        fn sources_searched(&mut self) -> Vec<(SearchTicket, Found)> {
             Vec::new()
         }
 

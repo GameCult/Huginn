@@ -1999,10 +1999,19 @@ fn ask_sources(sink: &mut WorkerSink, text: &str) -> Result<SearchTicket, String
     <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search_sources(sink, &query)
 }
 
-fn sources_answers(sink: &mut WorkerSink, count: usize) -> Vec<(SearchTicket, Result<SourceHits, String>)> {
+fn sources_answers(sink: &mut WorkerSink, count: usize) -> Vec<(SearchTicket, Result<huginn_mind::SourceHits, String>)> {
     let mut all = Vec::new();
     eventually("the source searches being answered", || {
-        all.extend(<WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::sources_searched(sink));
+        all.extend(<WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::sources_searched(sink).into_iter().map(|(ticket, found)| {
+            (
+                ticket,
+                match found {
+                    crate::daemon::Found::Sources(hits) => Ok(hits),
+                    crate::daemon::Found::Failed(why) => Err(why),
+                    other => panic!("a source search was answered with another kind: {}", matches!(other, crate::daemon::Found::Chat(_))),
+                },
+            )
+        }));
         all.len() >= count
     });
     all
@@ -2079,6 +2088,60 @@ fn a_worker_stuck_on_the_minds_collection_still_answers_a_source_search() {
     assert_eq!(answered.hits.len(), 1);
     assert_eq!((answered.hits[0].repo.as_str(), answered.hits[0].path.as_str()), ("Huginn", "a.rs"));
     assert_eq!(answered.indexed_under.digest, "d1");
+}
+
+/// A chat search rides the same queue and worker as a source search, answers
+/// from the same collection while the mind's own collection is stuck, and comes
+/// back as chat hits.
+#[test]
+fn a_worker_answers_a_chat_search_from_the_shared_collection() {
+    use crate::sources::{ChatPayload, ChatPoint, DescribedSources, SourcesMeta};
+    use huginn_mind::ChatMessage;
+    let (embedder, index) = pair();
+    index.plant(
+        &collection_name(&slug(INSTANCE)),
+        Described::Labelled(CollectionMeta {
+            managed_by: MANAGED_BY.into(),
+            instance: INSTANCE.into(),
+            mind: "another-mind".into(),
+            model: "model".into(),
+            model_digest: "d1".into(),
+            dimensions: 4,
+            index_text_version: INDEX_TEXT_VERSION,
+        }),
+    );
+    let meta = SourcesMeta { managed_by: MANAGED_BY.into(), corpus: crate::sources::CORPUS.into(), model: "model".into(), model_digest: "d1".into(), dimensions: 4, chunker_version: 1 };
+    index.sources.plant(DescribedSources::Labelled { meta, cursors: Default::default() });
+    index
+        .sources
+        .state
+        .lock()
+        .unwrap()
+        .chat
+        .insert(
+            "c1".into(),
+            ChatPoint {
+                id: "c1".into(),
+                vector: vec![1.0; 4],
+                payload: ChatPayload {
+                    room_id: "!r:x".into(),
+                    room_alias: None,
+                    messages: vec![ChatMessage { event_id: "$e".into(), sender: "@a:x".into(), ts_ms: 5, body: "hi".into() }],
+                    text: "t".into(),
+                },
+            },
+        );
+    let mut sink = WorkerSink::spawn(embedder, index.clone(), &slug(INSTANCE), Some(MIND.into()), entries_of(1), quick());
+    sink.wait_status(|status| matches!(status, IndexStatus::Refused { .. }));
+    let query = huginn_mind::ChatQuery { texts: vec![], rooms: vec![], after_ms: None, before_ms: None, top_k: 5 };
+    let ticket = <WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::search_chat(&mut sink, &query).unwrap();
+    let mut found = Vec::new();
+    eventually("the chat search being answered", || {
+        found.extend(<WorkerSink as IndexSink<OwnedRedbMessagePackBackingStore>>::sources_searched(&mut sink));
+        !found.is_empty()
+    });
+    let (answered, Found::Chat(hits)) = found.remove(0) else { panic!("a chat ask is answered with chat hits") };
+    assert_eq!((answered, hits.hits.len(), hits.hits[0].first_event_id.as_str(), hits.truncated), (ticket, 1, "$e", false));
 }
 
 /// Source searches take their own tickets, share the queue's bound with the
