@@ -673,7 +673,16 @@ pub(crate) mod tests {
             let answer = daemon.handle(refused, now()).answered();
             assert!(matches!(answer, HuginnMindResponse::Refused(_)), "{answer:?}");
         }
-        assert_eq!(*asked.lock().unwrap(), 2, "a refused query never reached the index");
+        let texts = |texts: &[&str]| HuginnMindRequest::SearchSources {
+            instance: slug(INSTANCE),
+            query: SourceQuery { text: huginn_mind::eureka_pipeline::Line::default(), texts: texts.iter().map(|text| huginn_mind::eureka_pipeline::Line((*text).into())).collect(), top_k: 5, repo: None, front: false },
+        };
+        for refused in [texts(&[]), texts(&["a"; 9]), texts(&["a", " "])] {
+            let answer = daemon.handle(refused, now()).answered();
+            assert!(matches!(answer, HuginnMindResponse::Refused(MindRefusal::SelectionInvalid { ref field, .. }) if field == "texts"), "{answer:?}");
+        }
+        assert!(matches!(daemon.handle(texts(&["a", "b"]), now()), Handled::Searching(_)), "two texts are one queued search");
+        assert_eq!(*asked.lock().unwrap(), 3, "a refused query never reached the index");
     }
 
     /// A daemon over the instance's mind under `state_root`, with no index.
