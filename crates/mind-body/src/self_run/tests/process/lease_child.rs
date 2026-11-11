@@ -91,7 +91,7 @@ echo left > "$CLAUDE_CONFIG_DIR/leftover"
 
 fn run_once(program: &Path, scratch: &Path, seed: Option<&Path>) -> Vec<String> {
     let config = FreshConfig::create(scratch, seed, None).unwrap();
-    let mut child = spawn_program(program, &[], &token_holding("tok-canary-7f3a"), &unit_environment(), config).unwrap();
+    let mut child = spawn_program(program, &[], &token_holding("tok-canary-7f3a"), (&unit_environment(), None), config).unwrap();
     child.close_input();
     let (lines, code) = drain(&mut *child);
     assert_eq!(code, Some(0), "{lines:?}");
@@ -167,7 +167,7 @@ fn the_child_scrubs_its_subprocesses_unless_the_unit_says_off() {
         let mut unit = unit_environment();
         unit.extend(value.map(|value| (SCRUB_VARIABLE.into(), value.into())));
         let config = FreshConfig::create(dir.path(), None, None).unwrap();
-        let mut child = spawn_program(&program, &[], &token_holding("tok-canary-7f3a"), &unit, config).unwrap();
+        let mut child = spawn_program(&program, &[], &token_holding("tok-canary-7f3a"), (&unit, None), config).unwrap();
         child.close_input();
         let (lines, _) = drain(&mut *child);
         field(&lines, "scrub")
@@ -176,4 +176,23 @@ fn the_child_scrubs_its_subprocesses_unless_the_unit_says_off() {
     assert_eq!(scrub_with(Some("on")), "1", "any other value keeps it on");
     assert_eq!(scrub_with(Some("OFF")), "1", "only the exact word turns it off");
     assert_eq!(scrub_with(Some("off")), "0", "a unit for a user that holds root turns it off");
+}
+
+#[test]
+fn the_child_holds_huginn_session_only_as_the_spawn_set_it_never_as_the_unit_had_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = script(&dir, "echo \"session=${HUGINN_SESSION-unset}\"");
+    let session_of = |unit_value: Option<&str>, given: Option<&str>| {
+        let mut unit = unit_environment();
+        unit.extend(unit_value.map(|value| ("HUGINN_SESSION".into(), value.into())));
+        let config = FreshConfig::create(dir.path(), None, None).unwrap();
+        let mut child = spawn_program(&program, &[], &token_holding("tok-canary-7f3a"), (&unit, given), config).unwrap();
+        child.close_input();
+        let (lines, _) = drain(&mut *child);
+        field(&lines, "session")
+    };
+    assert_eq!(session_of(None, Some("mind-20261111T072944197Z")), "mind-20261111T072944197Z");
+    assert_eq!(session_of(None, None), "unset", "a child with no run label is given none");
+    assert_eq!(session_of(Some("stale-unit-value"), None), "unset", "the unit's own value is not on the allow-list");
+    assert_eq!(session_of(Some("stale-unit-value"), Some("mind-new")), "mind-new", "the run's label is the only value");
 }

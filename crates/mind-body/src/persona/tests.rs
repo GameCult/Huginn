@@ -247,7 +247,7 @@ struct FakeSession {
 }
 
 impl Spawner for FakeSession {
-    fn spawn(&self, args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
+    fn spawn(&self, args: &[String], _token: &TokenFd, _session: Option<&str>) -> Result<Box<dyn Child>> {
         if self.refuse.get() {
             return Err(anyhow!("refused"));
         }
@@ -2711,7 +2711,7 @@ impl Child for Timed {
 struct ScriptedSpawner<T>(RefCell<VecDeque<T>>);
 
 impl<T: Child + 'static> crate::self_run::Spawner for ScriptedSpawner<T> {
-    fn spawn(&self, _args: &[String], _token: &TokenFd) -> Result<Box<dyn Child>> {
+    fn spawn(&self, _args: &[String], _token: &TokenFd, _session: Option<&str>) -> Result<Box<dyn Child>> {
         self.0.borrow_mut().pop_front().map(|child| Box::new(child) as Box<dyn Child>).ok_or_else(|| anyhow!("no more processes"))
     }
 }

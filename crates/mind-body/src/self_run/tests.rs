@@ -138,6 +138,7 @@ struct Ran {
     /// Every event, the lease's included.
     all: Vec<Event>,
     spawns: Vec<Vec<String>>,
+    sessions: Vec<Option<String>>,
     admits: usize,
     asked: Vec<LeaseRequest>,
 }
@@ -215,7 +216,8 @@ fn carry_kept(seen: &Seen, steps: Vec<Step>, (code, dies_on, refuses, hangs): (O
     // The child's own events; the lease's are in `all`, in order with them.
     let events = all.iter().filter(|event| !matches!(event, Event::Lent | Event::Spawned | Event::Abandoned | Event::Kept(_))).cloned().collect();
     let spawns = fake.spawns.borrow().clone();
-    Ran { outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
+    let sessions = fake.sessions.borrow().clone();
+    Ran { outcome, out: String::from_utf8(out).unwrap(), events, all, spawns, sessions, admits: seen.admits.get(), asked: lender.asked.borrow().clone() }
 }
 
 fn at_start() -> chrono::DateTime<chrono::Utc> {
@@ -361,6 +363,26 @@ fn the_child_is_started_for_her_run_with_the_fixed_list_whatever_the_run_record_
         assert_eq!(ran.spawns.len(), 1, "{budget}");
         assert_eq!(ran.spawns[0], claude_args(Uuid::parse_str(SESSION_OF_RUN_B).unwrap(), None), "{budget}");
     }
+}
+
+#[test]
+fn the_child_is_given_its_runs_label_as_huginn_session_fresh_resumed_and_in_the_next_run_only() {
+    // Fresh: the bare label, the spelling the run's opening receipt carries, not the id and not the derived UUID.
+    let a = with_run();
+    let fresh = carry_with(&Seen::of(&a), vec![Out(result_line())], Some(0), false);
+    assert_eq!(fresh.sessions, [Some("selfrun-a".to_string())]);
+    // Resumed: the same child, the new run's label.
+    let resumed = carry_kept(&Seen::of(&with_run()), vec![Out(result_line())], (Some(0), None, &[], false), Some(resume::kept_for(1800, true)));
+    assert_eq!(resumed.sessions, [Some("selfrun-a".to_string())]);
+    // The rotation's new run sets its own; nothing of the previous run is carried.
+    let b = TestMind::seeded();
+    b.committed(vec![self_run("selfrun-b", "5")]);
+    let next = carry_kept(&Seen::of(&b), vec![Out(result_line())], (Some(0), None, &[], false), Some(resume::kept_for(1800, true)));
+    assert_eq!(next.sessions, [Some("selfrun-b".to_string())]);
+    for ran in [&fresh, &resumed, &next] {
+        assert!(ran.sessions.iter().flatten().all(|label| !label.contains(':') && label.parse::<Uuid>().is_err()), "{:?}", ran.sessions);
+    }
+    assert!(!next.sessions.contains(&Some("selfrun-a".to_string())));
 }
 
 #[test]
@@ -962,7 +984,7 @@ mod process {
     fn start_with(program: &Path, args: &[String], token: &TokenFd) -> Box<dyn Child> {
         for _ in 0..50 {
             let config = FreshConfig::create(program.parent().unwrap(), None, None).unwrap();
-            match spawn_program(program, args, token, &unit_environment(), config) {
+            match spawn_program(program, args, token, (&unit_environment(), None), config) {
                 Ok(child) => return child,
                 Err(error) if format!("{error:#}").contains("busy") => std::thread::sleep(StdDuration::from_millis(100)),
                 Err(error) => panic!("{error:#}"),
@@ -1034,7 +1056,7 @@ mod process {
         let canary = "canary-argument-6b0d";
         let scratch = tempfile::tempdir().unwrap();
         let config = FreshConfig::create(scratch.path(), None, None).unwrap();
-        let error = spawn_program(Path::new("/nonexistent/claude"), &[canary.to_string()], &token_holding("tok-canary"), &[], config).err().unwrap();
+        let error = spawn_program(Path::new("/nonexistent/claude"), &[canary.to_string()], &token_holding("tok-canary"), (&[], None), config).err().unwrap();
         assert!(!format!("{error:#}").contains(canary) && !format!("{error:#}").contains("nonexistent"), "{error:#}");
     }
 
@@ -1061,7 +1083,7 @@ mod process {
 
     struct Spawn(PathBuf);
     impl Spawner for Spawn {
-        fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
+        fn spawn(&self, args: &[String], token: &TokenFd, _session: Option<&str>) -> Result<Box<dyn Child>> {
             Ok(Box::new(Prompt(start_with(&self.0, args, token))))
         }
     }
@@ -1087,7 +1109,7 @@ mod process {
 
     struct Patient(PathBuf);
     impl Spawner for Patient {
-        fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
+        fn spawn(&self, args: &[String], token: &TokenFd, _session: Option<&str>) -> Result<Box<dyn Child>> {
             Ok(Box::new(Bounded(start_with(&self.0, args, token), std::time::Instant::now())))
         }
     }
@@ -1942,7 +1964,7 @@ mod sandbox {
         unit.push(("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()).into()));
         unit.push((SCRATCH_VARIABLE.into(), scratch.clone().into_os_string()));
         let spawner = ClaudeSpawner::in_sandbox(unit, "MIND_PERSONA_CONFIG_SEED", Some(sandbox.clone())).unwrap();
-        let mut child = spawner.spawn(&["--flag".to_string(), "value".to_string()], &token_holding("tok-canary")).unwrap();
+        let mut child = spawner.spawn(&["--flag".to_string(), "value".to_string()], &token_holding("tok-canary"), None).unwrap();
         while !matches!(child.next(StdDuration::from_secs(20)), Read::Exited(_) | Read::Timeout) {}
         let recorded: Vec<String> = std::fs::read_to_string(&argv).unwrap().lines().map(String::from).collect();
         let mut expected = sandbox_args(&sandbox, &scratch);

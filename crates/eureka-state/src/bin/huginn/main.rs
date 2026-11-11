@@ -4,9 +4,9 @@
 //! strict decode of agent-written JSON into the leaf's types (`door`), the
 //! recipe selections (`recipes`), the text rendering (`render`), the exit code
 //! and the read-back after an admission. It owns no state, writes no file and
-//! reads no configuration but two environment variables: `EUREKA_INSTANCE`
+//! reads no configuration but these environment variables: `EUREKA_INSTANCE`
 //! names the mind and `HUGINN_ENDPOINT` (`rudp://host:port`) the daemon that
-//! holds it. Each call is a new process; there is no retry inside it, the
+//! holds it. The admitting verbs take `--session`, else `HUGINN_SESSION`. Each call is a new process; there is no retry inside it, the
 //! caller's rule retries `Unavailable` once.
 //!
 //! Answers go to stdout and the exit code says what the answer was: 0 answered,
@@ -125,9 +125,9 @@ enum Command {
         /// The admitting agent's name.
         #[arg(long)]
         agent: String,
-        /// The admitting session.
+        /// The admitting session; else the environment's HUGINN_SESSION, which a Self run sets to its run.
         #[arg(long)]
-        session: String,
+        session: Option<String>,
         /// The token of the hold this exact batch got: admit it.
         #[arg(long)]
         seen: Option<String>,
@@ -152,9 +152,9 @@ enum Command {
         /// The importing agent's name.
         #[arg(long)]
         agent: String,
-        /// The importing session.
+        /// The importing session; else the environment's HUGINN_SESSION.
         #[arg(long)]
-        session: String,
+        session: Option<String>,
     },
     /// Recall into a dispatched brief.
     Recall {
@@ -198,9 +198,9 @@ enum PersonaCommand {
         /// The writing agent's name.
         #[arg(long)]
         agent: String,
-        /// The writing session.
+        /// The writing session; else the environment's HUGINN_SESSION.
         #[arg(long)]
-        session: String,
+        session: Option<String>,
         /// The stored updatedAt this put replaces; omit for the first put.
         #[arg(long)]
         expected_updated_at: Option<String>,
@@ -290,6 +290,7 @@ fn run(settings: &Settings, command: Command) -> Result<u8, Trouble> {
         }
         Command::Admit { faculty, agent, session, seen, file } => admit(settings, faculty, agent, session, seen, &file),
         Command::Import { campaign, from, from_endpoint, faculty, agent, session } => {
+            let session = settings.session(session)?;
             import::run(settings, import::Flags { campaign, from, from_endpoint, faculty, agent, session })
         }
         Command::Persona { command: PersonaCommand::Get } => persona_get(settings),
@@ -489,10 +490,11 @@ fn admit(
     settings: &Settings,
     faculty: Faculty,
     agent: String,
-    session: String,
+    session: Option<String>,
     seen: Option<String>,
     file: &str,
 ) -> Result<u8, Trouble> {
+    let session = settings.session(session)?;
     let documents = door::documents(&door::file_or_stdin(file)?)?;
     if documents.is_empty() || documents.len() > BATCH_MAX {
         return Err(Trouble::invalid(format!("a batch is 1 to {BATCH_MAX} documents, this one has {}", documents.len())));
@@ -649,10 +651,11 @@ fn persona_put(
     settings: &Settings,
     faculty: Faculty,
     agent: String,
-    session: String,
+    session: Option<String>,
     expected_updated_at: Option<String>,
     file: &str,
 ) -> Result<u8, Trouble> {
+    let session = settings.session(session)?;
     let text = door::file_or_stdin(file)?;
     let state: Value = serde_json::from_str(&text)
         .map_err(|error| Trouble::invalid(format!("the persona document is not JSON: {error}")))?;

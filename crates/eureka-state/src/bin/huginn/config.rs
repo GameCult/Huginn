@@ -15,6 +15,10 @@ use crate::trouble::Trouble;
 pub const TOOL: &str = "huginn";
 /// How long one call may take, connection to last byte.
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// The environment variable a Self run sets to its run label: the session an admitting verb attributes to when `--session` is not given.
+pub const SESSION_VARIABLE: &str = "HUGINN_SESSION";
+/// `Short`'s bound in bytes (the leaf keeps it private); the daemon enforces it again.
+const SESSION_MAX: usize = 200;
 /// What `ask_until` leaves of its deadline for the caller to print and exit.
 const RESERVE: Duration = Duration::from_millis(100);
 
@@ -37,6 +41,22 @@ impl Settings {
 
     pub fn client(&self) -> Result<&HuginnClient, Trouble> {
         self.client.as_ref().map_err(|detail| Trouble::Misconfigured(detail.clone()))
+    }
+
+    /// The session an admission is attributed to: the flag as given; else `HUGINN_SESSION` when it
+    /// is set and not empty; else a refusal. Never guessed and never any other variable.
+    pub fn session(&self, flag: Option<String>) -> Result<String, Trouble> {
+        if let Some(flag) = flag {
+            return Ok(flag);
+        }
+        match variable(SESSION_VARIABLE) {
+            Err(detail) => Err(Trouble::invalid(detail)),
+            Ok(Some(value)) if value.len() > SESSION_MAX => {
+                Err(Trouble::invalid(format!("{SESSION_VARIABLE} is longer than {SESSION_MAX} bytes")))
+            }
+            Ok(Some(value)) if !value.is_empty() => Ok(value),
+            Ok(_) => Err(Trouble::invalid(format!("--session is required (or {SESSION_VARIABLE} set to the session's label)"))),
+        }
     }
 
     /// A client for another mind, read from: `instance` at `endpoint` (`rudp://<ip>:<port>`), both

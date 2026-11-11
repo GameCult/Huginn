@@ -15,7 +15,7 @@ fn previous() -> Uuid {
     Uuid::parse_str(PREVIOUS).unwrap()
 }
 
-fn kept_for(warm_for_s: i64, same_seed: bool) -> Kept {
+pub(super) fn kept_for(warm_for_s: i64, same_seed: bool) -> Kept {
     Kept { session: previous(), transcript: PathBuf::from(format!("/state/session/{PREVIOUS}.jsonl")), warm_until: at_start() + ChronoDuration::seconds(warm_for_s), written_at: at_start(), same_seed }
 }
 
@@ -321,8 +321,8 @@ impl Spawner for FilesThenDies {
         self.files.keep(keep)
     }
 
-    fn spawn(&self, args: &[String], token: &TokenFd) -> Result<Box<dyn Child>> {
-        self.dies.spawn(args, token)
+    fn spawn(&self, args: &[String], token: &TokenFd, session: Option<&str>) -> Result<Box<dyn Child>> {
+        self.dies.spawn(args, token, session)
     }
 }
 
