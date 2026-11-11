@@ -211,6 +211,7 @@ mind_body::persona: impl Config: fn from_args_and_env (args : & [String] , looku
 mind_body::persona: impl Conversation
 mind_body::persona: impl FileTrace
 mind_body::persona: impl FileTrace: fn new (path : impl Into < PathBuf >) -> Self
+mind_body::persona: impl Heard
 mind_body::persona: impl HuginnPersona
 mind_body::persona: impl HuginnPersona: fn new (client : HuginnClient) -> Self
 mind_body::persona: impl PersonaState for HuginnPersona
