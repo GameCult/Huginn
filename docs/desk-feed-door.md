@@ -213,6 +213,8 @@ does not parse as RFC3339 is served as nil. One known limit: after a campaign ha
 to C), C sees B's admission time, because an import quotes its source's receipt and B's receipt is B's
 own (follow-up `desk-raised-at-import-chain`).
 
+The published schemas (`schemas/cultnet/huginn.desk_response.v1.schema.json`) type `answerer` and `raised_at` as plain `string`, the existing convention for nullable keys here; a consumer validating against CultLib's own schema must treat nil as allowed for both.
+
 The card's key order and bytes are pinned by the vendored CultLib vectors (above): `card-operator-fork`
 (`raised_at` a string), `card-raised-at-nil` and `card-withheld-deciders`, and Huginn's own entry-bearing
 fixtures carry it (`list-open.response` a string, `read.response` nil).
