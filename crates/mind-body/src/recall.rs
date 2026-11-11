@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
-use eureka_pipeline::{MemoryOrigin, MemorySort, PipelineDocument, PipelineKind};
+use eureka_pipeline::{MemoryOrigin, MemorySort, PipelineDocument, PipelineKind, RulingAuthority};
 use huginn_mind::{PipelineDocumentView, PipelinePageItems};
 
 use crate::persona::quoted;
@@ -248,7 +248,19 @@ fn line_of(view: &PipelineDocumentView, names: &BTreeMap<&str, &str>) -> Option<
     match &view.document {
         PipelineDocument::Memory(_) => memory_line(view, names, false),
         PipelineDocument::FollowUp(follow_up) => Some(format!("- You set yourself to: {}\n", quoted(follow_up.item.0.lines().next().unwrap_or("")))),
-        PipelineDocument::Ruling(ruling) => Some(format!("- Ruled: {}\n", quoted(&ruling.title.0))),
+        PipelineDocument::Ruling(ruling) => {
+            let title = quoted(&ruling.title.0);
+            Some(match &ruling.authority {
+                RulingAuthority::Steward { steward, repo, .. } => {
+                    // A display name is a member's text: keep it to one line.
+                    let who: String = names.get(steward.0.as_str()).copied().unwrap_or(steward.0.as_str()).chars().filter(|c| !c.is_control()).collect();
+                    format!("- {who} ruled, as steward of {}: {title}\n", repo.0)
+                }
+                RulingAuthority::Mind => format!("- You ruled: {title}\n"),
+                RulingAuthority::Operator => format!("- The operator ruled: {title}\n"),
+                RulingAuthority::Standing | RulingAuthority::Defaulted => format!("- Ruled: {title}\n"),
+            })
+        }
         _ => None,
     }
 }

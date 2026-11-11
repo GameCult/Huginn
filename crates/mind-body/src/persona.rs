@@ -74,7 +74,7 @@ use chrono::{DateTime, Utc};
 use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
 use cultnet_rs::{Incoming, Selection};
 use eureka_pipeline::{
-    Date, Label, Line, MemoryOrigin, MemorySort, OrgRepo, PipelineDocument, PipelineFollowUp, PipelineKind, PipelineMemory, PipelinePulse, PipelineRef, PipelineResolution, ResolutionOutcome, RunOperator, RunTurn, SALIENCE_MAX_PERMILLE, Short, Slug,
+    Date, Label, Line, MemoryOrigin, MemorySort, OrgRepo, PipelineDocument, PipelineFollowUp, PipelineKind, PipelineMemory, PipelinePulse, PipelineRef, PipelineResolution, PipelineRuling, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, SALIENCE_MAX_PERMILLE, Short, Slug,
     TEMPO_VOTE_MAX_S, TEMPO_VOTE_MIN_S, URGENCY_MAX_PERMILLE, pipeline_key,
 };
 use eureka_state::HuginnClient;
@@ -89,7 +89,7 @@ use crate::chat_image::{self, Image, MAX_PER_LINE};
 use crate::chat_client::{TailLine, Basis, Chat, ChatDelivery, MouthRefused, ChatOpenDirectRequest, ChatRead, DirectOutcome, ChatSendRequest, ContextLine, Refusal, SendBasis};
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
-use crate::heartbeat::{HeartbeatView, PollTrace, project_names_of};
+use crate::heartbeat::{HeartbeatView, PollTrace, stewardships_of};
 use crate::lease_client::{Lease, LeaseRequest, Lender, Lent};
 use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, holders, open_and_launch};
 use crate::queue::{MindPort, any_of, citing, headers, in_force, live_claims, of_kind};
@@ -162,10 +162,22 @@ const SETTLE_ITEM_FAULT: &str = "settle.item: not an open item this conversation
 const OPEN_DIRECT_FAULT: &str = "open_direct: only a public conversation may open one, with a person this session showed (not a Mind, not you), and a text of 1 to 4000 bytes";
 /// The mouth's bound on an invitation's text, in bytes.
 const OPEN_DIRECT_TEXT_MAX_BYTES: usize = 4000;
+const RULE_BY_OWN_FAULT: &str = "rule.by: your own decision is not a rule";
+const RULE_BY_OPERATOR_FAULT: &str = "rule.by: rule records a Mind's decision in her stewardship";
+const RULE_BY_UNKNOWN_FAULT: &str = "rule.by: not a Mind of the swarm";
+const RULE_WORDS_FAULT: &str = "rule.words: copy them exactly from one of her lines in this session";
+const RULE_REPO_FAULT: &str = "rule.repo: not a repo the Mind named stewards";
+const RULE_REPO_UNREAD_FAULT: &str = "rule.repo: no stewardship of the Mind named has been read yet";
+const RULE_BOUNDS_FAULT: &str = "rule: more entries than one reply may carry, or a field blank or over its length bound";
+const RULE_CAMPAIGN_FAULT: &str = "rule.campaign: not a campaign in force";
 const FOR_ITEM_FAULT: &str = "start_self_run.for_item: not an open item shown, or new:<i> for an Asked or Committed entry of this reply";
 /// The most memories, and the most settles, one reply carries.
 const REMEMBER_MAX: usize = 8;
 const SETTLE_MAX: usize = 8;
+/// The most rulings of other Minds one reply records.
+const RULE_MAX: usize = 4;
+const RULE_TITLE_MAX_BYTES: usize = 200;
+const RULE_TEXT_MAX_BYTES: usize = 4000;
 /// A memory's text in bytes, the people it is about, and a settle's reason in characters.
 pub(crate) const REMEMBER_TEXT_MAX_BYTES: usize = 1000;
 pub(crate) const ABOUT_MAX: usize = 8;
@@ -311,6 +323,8 @@ pub struct PersonaReply {
     pub start_self_run: Option<StartSelfRun>,
     /// Required, empty when she keeps nothing: what she must still know when this conversation is gone.
     pub remember: Vec<Remember>,
+    /// Required, empty when she records none: a decision another Mind made inside her own stewardship, as she heard it.
+    pub rule: Vec<Rule>,
     /// Required, empty when she settles nothing: the open commitments and asks shown this turn that she closes.
     pub settle: Vec<Settle>,
     /// The beat she votes for, in seconds. Omitted, she says nothing about her
@@ -360,6 +374,19 @@ pub struct Remember {
     /// The Matrix ids it concerns, Minds included.
     pub about: Vec<String>,
     pub salience_permille: u16,
+}
+
+/// A decision a peer Mind made inside her own stewardship, as she said it in a line this session showed. The organ, not she, derives the
+/// authority, the stewardship check and the event: it checks `by` against the line's sender and `repo` against the heartbeat's table.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rule {
+    pub by: String,
+    pub words: String,
+    pub repo: String,
+    pub campaign: String,
+    pub title: String,
+    pub ruling: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,7 +443,8 @@ fn open_direct_description() -> String {
 /// (none in force: `start_self_run` can only be null). The people she may name and the open items
 /// she may settle change with every batch, so the schema holds them as strings and `decode_reply`
 /// holds them to the batch. Text, because the CLI takes it as an argument.
-const REMEMBER_DESCRIPTION: &str = "What you must still know when this conversation is gone, in your own words; the chat will not be there to read again. One entry for each of: asks of you (sort Asked); decisions, the operator's and those you agreed with other Minds (Decided); your own commitments (Committed): a shared plan you are in is one Committed entry, your part in your own words and who holds each other part, with about naming those Minds; it stays in front of you every session until you settle it. Decided is for decisions that are not your own part of the work; what you learned (Learned) and did (Did); ideas, your own brainstorming and other Minds' ideas (Idea, about whose); rapport, how you and another Mind or person work and bounce off each other (Rapport, about that one). For Asked, about names who asked. Agreements between Minds and their parts are kept here until the shared Atlas mind takes them. Do not invent a bond from one exchange, do not keep an echo of what others said as your own, and do not keep every joke. Leave empty when nothing here is worth keeping. About holds Matrix ids this session has shown you.";
+const REMEMBER_DESCRIPTION: &str = "What you must still know when this conversation is gone, in your own words; the chat will not be there to read again. One entry for each of: asks of you (sort Asked); decisions that are not a Mind's inside her own stewardship: the operator's, and those you agreed with other Minds (Decided); a Mind's decision inside her own stewardship goes in rule; your own commitments (Committed): a shared plan you are in is one Committed entry, your part in your own words and who holds each other part, with about naming those Minds; it stays in front of you every session until you settle it. Decided is for decisions that are not your own part of the work; what you learned (Learned) and did (Did); ideas, your own brainstorming and other Minds' ideas (Idea, about whose); rapport, how you and another Mind or person work and bounce off each other (Rapport, about that one). For Asked, about names who asked. Agreements between Minds and their parts are kept here until the shared Atlas mind takes them. Do not invent a bond from one exchange, do not keep an echo of what others said as your own, and do not keep every joke. Leave empty when nothing here is worth keeping. About holds Matrix ids this session has shown you.";
+const RULE_DESCRIPTION: &str = "A decision another Mind made inside her own stewardship, as you heard it: by her Matrix id, words copied exactly from one of her lines in this session, repo the repo she stewards that she decided for, title and ruling what she decided in your words, campaign one in force. The organ checks her line and her stewardship. A Mind's word inside your stewardship is a respected contributor's: weigh it and decide; that decision is yours, not a rule.";
 const INTENT_DESCRIPTION: &str = "Write this first. What you are going after right now in what you steward, and what this reply does about it. Name the thing: a repo, a run, a commitment, a person, an idea. Waiting is an answer only when you name whose decision you wait on, why it is theirs and not yours, and what this turn does toward it. If you have already asked and nothing more can be done, say so and name the next thing.";
 const INTENT_MAX_CHARS: usize = 600;
 const SETTLE_DESCRIPTION: &str = "Close an open item shown under 'You committed to' or 'Asked of you, not yet taken on' in this session: done when you have done it, declined when you will not (a commitment you let go: tell whoever holds the other parts), wrong when it was a mistake. Item is the id shown there. Leave empty when you close none.";
@@ -465,6 +493,24 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String], may_open: bool) -> S
             }
         }
     });
+    let rule = json!({
+        "description": RULE_DESCRIPTION,
+        "type": "array",
+        "maxItems": if campaigns.is_empty() { 0 } else { RULE_MAX },
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["by", "words", "repo", "campaign", "title", "ruling"],
+            "properties": {
+                "by": { "type": "string" },
+                "words": { "type": "string", "minLength": 1, "maxLength": RULE_TEXT_MAX_BYTES },
+                "repo": { "type": "string", "pattern": REPO_PATTERN },
+                "campaign": { "type": "string", "enum": campaigns },
+                "title": { "type": "string", "minLength": 1, "maxLength": RULE_TITLE_MAX_BYTES },
+                "ruling": { "type": "string", "minLength": 1, "maxLength": RULE_TEXT_MAX_BYTES }
+            }
+        }
+    });
     let start = if campaigns.is_empty() {
         json!({ "type": "null" })
     } else {
@@ -505,7 +551,7 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String], may_open: bool) -> S
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["intent", "say", "open_direct", "start_self_run", "remember", "settle", "urgency_permille"],
+        "required": ["intent", "say", "open_direct", "start_self_run", "remember", "rule", "settle", "urgency_permille"],
         "properties": {
             "intent": { "description": INTENT_DESCRIPTION, "type": "string", "minLength": 1, "maxLength": INTENT_MAX_CHARS },
             "say": {
@@ -523,6 +569,7 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String], may_open: bool) -> S
             "open_direct": open,
             "start_self_run": start,
             "remember": remember,
+            "rule": rule,
             "settle": settle,
             "tempo_vote_beat_s": { "description": "Omit this key to leave your standing vote unchanged. A number votes that many seconds per beat. null only withdraws your vote, so you abstain again and are not counted.", "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": TEMPO_VOTE_MIN_S, "maximum": TEMPO_VOTE_MAX_S }] },
             "urgency_permille": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0, "maximum": URGENCY_MAX_PERMILLE }] }
@@ -890,7 +937,8 @@ pub fn carry(organs: &Organs, control: &impl ControlSource, swarm: &impl Control
         // Her names as the heartbeat's table has them, and her projects' names as her mind holds them now: the table is saved after the
         // heartbeat launches her, so it may not yet hold a project a message names.
         let table = addressing.iter().find(|mind| mind.matrix_id() == config.own_sender).cloned().unwrap_or_else(|| own_addressee(config));
-        let fresh = own_addressee(config).with_projects(project_names_of(organs.mind).unwrap_or_default());
+        let (fresh_names, fresh_repos) = stewardships_of(organs.mind).unwrap_or_default();
+        let fresh = own_addressee(config).with_stewardships(fresh_names, fresh_repos);
         if let Some(through) = quiet_through(&[&table, &fresh], &pending, 0) {
             if organs.chat.ack(through).is_err() {
                 progress.failure = Some(Failure::Ack);
@@ -1155,6 +1203,26 @@ fn next_session(config: &Config, addressing: &[Addressee], pending: Vec<ChatDeli
 struct Shown {
     people: Vec<String>,
     open: Vec<String>,
+    /// Every message line a rendered line showed (a delivery carries its event id) and every earlier line (none): what a peer's rule may quote.
+    said: Vec<Said>,
+}
+
+/// One line a session showed her: who said it, the words, and the Matrix event of its delivery when it was one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Said {
+    sender: String,
+    text: String,
+    event: Option<String>,
+}
+
+/// The lines `message_lines` prints for a batch, in print order.
+fn said_of(deliveries: &[ChatDelivery], earlier: &[Vec<&ContextLine>]) -> Vec<Said> {
+    let mut said = Vec::new();
+    for (delivery, lines) in deliveries.iter().zip(earlier) {
+        said.extend(lines.iter().map(|line| Said { sender: line.sender.clone(), text: line.text.clone(), event: None }));
+        said.push(Said { sender: delivery.sender.clone(), text: delivery.text.clone(), event: (!delivery.event_id.is_empty()).then(|| delivery.event_id.clone()) });
+    }
+    said
 }
 
 impl Shown {
@@ -1169,6 +1237,7 @@ impl Shown {
                 self.open.push(item);
             }
         }
+        self.said.extend(other.said);
     }
 }
 
@@ -1399,7 +1468,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         let names = sender_names(deliveries);
         let goals = render_responsibilities(organs.mind, &instance, &names)?;
         self.repos = goals.repos.clone();
-        self.addressee = own_addressee(self.config).with_projects(goals.names.clone());
+        self.addressee = own_addressee(self.config).with_stewardships(goals.names.clone(), goals.repos.clone());
         self.addressing = addressing_of(self.config, organs.heartbeat, &self.addressee);
         let (wear_at, wear_facts) = self.first_repo_read(&goals.open_roots);
         let wear = render_wear(wear_at, &wear_facts);
@@ -1420,7 +1489,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         let tail = render_tail(self.config, &self.addressing, std::mem::take(&mut self.tail), &tail_rooms(self.config, &self.conversation), &told, &self.waiting_ids);
         told.extend(tail.keys);
         let input = render_input(self.config, started_self_today, &tail.text, &format!("{heard}{}{attached}", message_lines(self.config, &self.addressee, &self.addressing, deliveries, &earlier)), note, &history, &goals.text, &wear, &recall::render(&recalled), &format!("{}\n\n{tempo}", self.plan), &people);
-        Ok(Rendered { input, shown: Shown { people, open: goals.open }, told, replies, images })
+        Ok(Rendered { input, shown: Shown { people, open: goals.open, said: said_of(deliveries, &earlier) }, told, replies, images })
     }
 
     /// A later line: the messages, a refused batch's note before them, the organ's lines (her Self's replies, the notices of her repos), and
@@ -1432,7 +1501,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         let lines = format!("{notices}{}{attached}", message_lines(self.config, &self.addressee, &self.addressing, deliveries, &earlier));
         let input = note.map_or_else(|| lines.clone(), |note| format!("{note}\n\n{lines}"));
         let input = format!("{input}\n{WORK_TAIL}\n");
-        Rendered { input, shown: Shown { people: people_she_may_name(self.config, &self.addressing, deliveries, &earlier, &[]), open: Vec::new() }, told: lines_told(deliveries, &earlier), replies: Vec::new(), images }
+        Rendered { input, shown: Shown { people: people_she_may_name(self.config, &self.addressing, deliveries, &earlier, &[]), open: Vec::new(), said: said_of(deliveries, &earlier) }, told: lines_told(deliveries, &earlier), replies: Vec::new(), images }
     }
 
     /// Notes what a rendered line carries, as it goes to the child.
@@ -1750,7 +1819,7 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
                 self.answered_replies.extend(heard.into_iter().map(|reply| (reply, by.clone())));
                 self.settle_replies();
                 // What she admitted this turn is hers to settle or take on for the rest of the session, though no line showed its id.
-                self.seen.add(Shown { people: Vec::new(), open: opened });
+                self.seen.add(Shown { people: Vec::new(), open: opened, said: Vec::new() });
                 // The one ack rule: through the highest answered seq, never past a delivery still told
                 // and unanswered (a retold batch, or a line written and not yet echoed), and nothing once the session has
                 // failed (a batch's third refusal leaves no retell to hold the ack back). Deliveries are
@@ -1900,7 +1969,7 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
         organs.trace.record(&record(vec![raw], format!("failed: {why}")))?;
         Ok(Step::Refused(why))
     };
-    let mut reply = match decode_reply(text, &inbox.rooms, &inbox.seen.people, &inbox.seen.open, &inbox.conversation, config, &inbox.addressing) {
+    let mut reply = match decode_reply(text, &inbox.rooms, &inbox.seen, &inbox.conversation, config, &inbox.addressing) {
         Ok(reply) => reply,
         Err(why) => return refuse(why),
     };
@@ -1978,6 +2047,16 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
     // The one origin of this turn: its memories and its brief record the same conversation.
     let origin = origin_of(config, batch, &inbox.origin);
     let memories = build_memories(&instance, run, turn, &reply, &origin);
+    if !reply.rule.is_empty() {
+        let in_force = campaigns_in_force(organs.mind)?;
+        if reply.rule.iter().any(|rule| !in_force.iter().any(|(slug, _)| *slug == rule.campaign)) {
+            return refuse(Failure::OutOfBounds(RULE_CAMPAIGN_FAULT));
+        }
+    }
+    let rulings = build_rulings(run, turn, &reply, &inbox.seen, date(now));
+    for rule in &reply.rule {
+        outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("rule {} {}: {}", rule.by, rule.repo, rule.title) });
+    }
     for remembered in &reply.remember {
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("remember {:?}: {}", remembered.sort, remembered.text) });
     }
@@ -1987,7 +2066,7 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
     if votes(&reply) {
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("pulse tempo_vote_beat_s={:?} urgency_permille={:?}", reply.tempo_vote_beat_s, reply.urgency_permille) });
     }
-    if !admit_turn_documents(organs, run, turn, &reply, memories.clone())? {
+    if !admit_turn_documents(organs, run, turn, &reply, memories.clone(), rulings)? {
         organs.trace.record(&record(outputs, "failed: memory".into()))?;
         return Ok(Step::Failed(Failure::Memory, reply.intent));
     }
@@ -2138,6 +2217,39 @@ fn memory_fault(reply: &PersonaReply, people: &[String], open: &[String]) -> Opt
     (!taken).then_some(FOR_ITEM_FAULT)
 }
 
+/// The field a rule breaks, if any: it records a peer Mind's decision, so `by` is a Mind of the table (neither herself nor the
+/// operator), `words` are the Mind's own, copied from one of her lines this session showed, and `repo` is one the table says she stewards.
+/// What the words mean, and whether they fall inside that repo, is her reading; the organ checks the line and the stewardship.
+fn rule_fault(reply: &PersonaReply, shown: &Shown, addressing: &[Addressee], config: &Config) -> Option<&'static str> {
+    if reply.rule.len() > RULE_MAX {
+        return Some(RULE_BOUNDS_FAULT);
+    }
+    for rule in &reply.rule {
+        let text_ok = |text: &str, max: usize| (1..=max).contains(&text.len()) && !text.trim().is_empty();
+        let title_ok = text_ok(&rule.title, RULE_TITLE_MAX_BYTES) && rule.title.chars().any(char::is_alphanumeric) && !rule.title.chars().any(char::is_control);
+        if rule.by.len() > SHORT_MAX_BYTES || !title_ok || !text_ok(&rule.ruling, RULE_TEXT_MAX_BYTES) || !text_ok(&rule.words, RULE_TEXT_MAX_BYTES) || !repo_in_bounds(&rule.repo) || !campaign_in_bounds(&rule.campaign) {
+            return Some(RULE_BOUNDS_FAULT);
+        }
+        match sender_role(config, addressing, &rule.by) {
+            Sender::Persona => return Some(RULE_BY_OWN_FAULT),
+            Sender::Operator => return Some(RULE_BY_OPERATOR_FAULT),
+            Sender::Member => return Some(RULE_BY_UNKNOWN_FAULT),
+            Sender::Mind => {}
+        }
+        if !shown.said.iter().any(|said| said.sender == rule.by && said.text.contains(&rule.words)) {
+            return Some(RULE_WORDS_FAULT);
+        }
+        let stewarded = addressing.iter().find(|row| row.matrix_id() == rule.by).map(Addressee::repos).unwrap_or_default();
+        if stewarded.is_empty() {
+            return Some(RULE_REPO_UNREAD_FAULT);
+        }
+        if !stewarded.contains(&OrgRepo(rule.repo.clone())) {
+            return Some(RULE_REPO_FAULT);
+        }
+    }
+    None
+}
+
 /// Whether an open is hers to ask: from a public conversation, of a person this session showed who is neither a Mind nor herself, with
 /// an invitation the mouth takes (not blank, within its byte bound).
 fn open_in_bounds(ask: &OpenDirect, conversation: &Conversation, config: &Config, addressing: &[Addressee], people: &[String]) -> bool {
@@ -2151,7 +2263,7 @@ fn open_in_bounds(ask: &OpenDirect, conversation: &Conversation, config: &Config
 
 /// The reply as the one type it must be, with every room one of `rooms`, every person one of
 /// `people` and every settled or taken-on item one of the `open` items shown this turn.
-fn decode_reply(text: &str, rooms: &[String], people: &[String], open: &[String], conversation: &Conversation, config: &Config, addressing: &[Addressee]) -> Result<PersonaReply, Failure> {
+fn decode_reply(text: &str, rooms: &[String], seen: &Shown, conversation: &Conversation, config: &Config, addressing: &[Addressee]) -> Result<PersonaReply, Failure> {
     let reply: PersonaReply = serde_json::from_str(text).map_err(|_| Failure::Undecodable)?;
     if reply.intent.trim().is_empty() || reply.intent.chars().count() > INTENT_MAX_CHARS {
         return Err(Failure::OutOfBounds(INTENT_FAULT));
@@ -2162,10 +2274,13 @@ fn decode_reply(text: &str, rooms: &[String], people: &[String], open: &[String]
     if !vote_in_bounds(&reply) {
         return Err(Failure::OutOfBounds(VOTE_FAULT));
     }
-    if let Some(field) = memory_fault(&reply, people, open) {
+    if let Some(field) = memory_fault(&reply, &seen.people, &seen.open) {
         return Err(Failure::OutOfBounds(field));
     }
-    if reply.open_direct.as_ref().is_some_and(|ask| !open_in_bounds(ask, conversation, config, addressing, people)) {
+    if let Some(field) = rule_fault(&reply, seen, addressing, config) {
+        return Err(Failure::OutOfBounds(field));
+    }
+    if reply.open_direct.as_ref().is_some_and(|ask| !open_in_bounds(ask, conversation, config, addressing, &seen.people)) {
         return Err(Failure::OutOfBounds(OPEN_DIRECT_FAULT));
     }
     if reply.say.iter().any(|say| !rooms.contains(&say.room) || say.text.trim().is_empty()) {
@@ -2368,6 +2483,32 @@ fn build_memories(instance: &Slug, run: &PipelineRef, turn: u32, reply: &Persona
         .collect()
 }
 
+/// Her `rule` entries as rulings under authority Steward, labelled by run, turn and index. The decider is the entry's checked `by`, the
+/// stewardship its checked `repo`, the words hers, and the event the Matrix id of the newest delivery of hers that held them (none when
+/// only an earlier line did): the organ derives all four, the model typed only what `rule_fault` has checked.
+fn build_rulings(run: &PipelineRef, turn: u32, reply: &PersonaReply, shown: &Shown, ruled_on: Date) -> Vec<PipelineDocument> {
+    reply
+        .rule
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| {
+            let event = shown.said.iter().rev().find(|said| said.sender == rule.by && said.text.contains(&rule.words) && said.event.is_some()).and_then(|said| said.event.clone());
+            PipelineDocument::Ruling(PipelineRuling {
+                campaign: Slug(rule.campaign.clone()),
+                label: Label(format!("{}-t{turn}-r{index}", label_of(run))),
+                title: rule.title.as_str().into(),
+                answers: None,
+                choice: None,
+                ruling: rule.ruling.as_str().into(),
+                operator_quote: None,
+                ruled_on: ruled_on.clone(),
+                precedents: vec![],
+                authority: RulingAuthority::Steward { steward: Short(rule.by.clone()), repo: OrgRepo(rule.repo.clone()), words: rule.words.as_str().into(), event: event.map(Short) },
+            })
+        })
+        .collect()
+}
+
 /// The open item a Self run takes on: a shown item's memory, or the memory this reply wrote at `new:<i>`.
 fn item_taken(start: &StartSelfRun, memories: &[PipelineDocument]) -> Result<Option<PipelineRef>> {
     let Some(item) = start.for_item.as_deref() else { return Ok(None) };
@@ -2381,11 +2522,12 @@ fn item_taken(start: &StartSelfRun, memories: &[PipelineDocument]) -> Result<Opt
     Ok(Some(PipelineRef { kind: PipelineKind::Memory, id: id.as_str().into() }))
 }
 
-/// One admission per turn: her memories, the resolutions that settle open items, and her vote and
+/// One admission per turn: her memories, the rulings she records, the resolutions that settle open items, and her vote and
 /// declared urgency as one Pulse (its label is her run label and the turn, which sorts in time
 /// order like a run label). True when there was nothing to admit or her mind took it.
-fn admit_turn_documents(organs: &Organs, run: &PipelineRef, turn: u32, reply: &PersonaReply, memories: Vec<PipelineDocument>) -> Result<bool> {
+fn admit_turn_documents(organs: &Organs, run: &PipelineRef, turn: u32, reply: &PersonaReply, memories: Vec<PipelineDocument>, rulings: Vec<PipelineDocument>) -> Result<bool> {
     let mut documents = memories;
+    documents.extend(rulings);
     for settle in &reply.settle {
         let subject = PipelineRef { kind: PipelineKind::Memory, id: settle.item.as_str().into() };
         let reason = Line(settle.why.clone());

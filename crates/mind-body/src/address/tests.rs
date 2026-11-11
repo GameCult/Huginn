@@ -27,7 +27,7 @@ fn names(texts: &[&str]) -> Vec<Short> {
 }
 
 fn steward(repo: &str, listed: &[&str]) -> Addressee {
-    Addressee::new("@nibu:chat", ["Nibu"]).with_projects(project_names(&OrgRepo(repo.into()), &names(listed)))
+    Addressee::new("@nibu:chat", ["Nibu"]).with_stewardships(project_names(&OrgRepo(repo.into()), &names(listed)), [OrgRepo(repo.into())])
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn project_names_derives_the_repo_name_and_its_split_form_and_listed_names_repla
 
 #[test]
 fn a_listed_name_matches_exactly_as_written_a_derived_one_word_name_as_spelled_and_a_split_phrase_in_any_case() {
-    let libby = Addressee::new("@libby:chat", ["Libby"]).with_projects(project_names(&OrgRepo("GameCult/Thing".into()), &names(&["Thing"])));
+    let libby = Addressee::new("@libby:chat", ["Libby"]).with_stewardships(project_names(&OrgRepo("GameCult/Thing".into()), &names(&["Thing"])), [OrgRepo("GameCult/Thing".into())]);
     assert!(addresses(&libby, &said("Thing is down", &[])));
     assert!(!addresses(&libby, &said("one thing at a time", &[])));
     assert!(!addresses(&libby, &said("THING", &[])));
@@ -87,11 +87,11 @@ fn a_listed_name_matches_exactly_as_written_a_derived_one_word_name_as_spelled_a
 #[test]
 fn one_name_addresses_every_mind_that_lists_it_each_on_her_own_record() {
     let lore = steward("GameCult/AetheriaLore", &[]);
-    let aetheria = Addressee::new("@aqua:chat", ["Aqua"]).with_projects(project_names(&OrgRepo("GameCult/Aetheria".into()), &[]));
+    let aetheria = Addressee::new("@aqua:chat", ["Aqua"]).with_stewardships(project_names(&OrgRepo("GameCult/Aetheria".into()), &[]), [OrgRepo("GameCult/Aetheria".into())]);
     let both = said("Aetheria lore needs a pass", &[]);
     assert!(addresses(&aetheria, &both), "a name inside another Mind's longer name addresses her too");
     assert!(addresses(&lore, &both));
-    let two_stewards = [steward("GameCult/Thing", &["Thing"]), Addressee::new("@libby:chat", ["Libby"]).with_projects(project_names(&OrgRepo("GameCult/Thing".into()), &[]))];
+    let two_stewards = [steward("GameCult/Thing", &["Thing"]), Addressee::new("@libby:chat", ["Libby"]).with_stewardships(project_names(&OrgRepo("GameCult/Thing".into()), &[]), [OrgRepo("GameCult/Thing".into())])];
     assert!(two_stewards.iter().all(|who| addresses(who, &said("Thing is broken", &[]))), "a project with two stewards addresses each");
     assert!(!addresses(&two_stewards[0], &said("a thing", &[])), "listed Thing is exact");
     assert!(!addresses(&two_stewards[1], &said("a thing", &[])), "derived Thing is exact as the repo spells it");
