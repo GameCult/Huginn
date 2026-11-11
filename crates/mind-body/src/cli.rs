@@ -151,7 +151,7 @@ fn swarm(
             let written = SwarmWriter::open(&path).and_then(|mut writer| writer.set_brake(false, now, set_by));
             let stopped = stop_units(StopScope::Swarm);
             if written.is_ok() && stopped.is_ok() {
-                writeln!(out, "units: stopped every mind-self@, mind-persona@ and mind-stream@ unit")?;
+                writeln!(out, "units: stopped every {}", stop_args(StopScope::Swarm)?[2..].join(" "))?;
             }
             held((written, stopped))
         }

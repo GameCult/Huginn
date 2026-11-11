@@ -275,7 +275,7 @@ fn brake_hold_stops_once_with_the_instance_and_the_store_already_held() {
     result.unwrap();
     assert_eq!(calls, [Some("eureka".to_string())]);
     assert!(seen_at_stop.contains("BrakeHeld"), "the write comes before the stop: {seen_at_stop}");
-    assert!(out.contains("units: stopped mind-self@eureka.service mind-persona@eureka.service mind-stream@eureka.service"), "{out}");
+    assert!(out.lines().any(|line| line == "units: stopped mind-self@eureka.service mind-persona@eureka.service mind-stream@eureka.service"), "{out}");
 }
 
 #[test]
@@ -475,7 +475,7 @@ fn swarm_brake_hold_stops_once_with_the_swarm_scope_and_the_swarm_store_already_
     result.unwrap();
     assert_eq!(calls, [None], "one stop, for the swarm");
     assert!(seen_at_stop.contains("BrakeHeld"), "the write comes before the stop: {seen_at_stop}");
-    assert!(out.contains("units: stopped every mind-self@, mind-persona@ and mind-stream@ unit"), "{out}");
+    assert!(out.lines().any(|line| line == "units: stopped every mind-self@*.service mind-persona@*.service mind-stream@*.service"), "the line names exactly what stop_args stopped: {out}");
 }
 
 #[test]

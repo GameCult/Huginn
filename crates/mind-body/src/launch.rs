@@ -153,7 +153,7 @@ pub enum StopScope<'a> {
 /// `eureka-two`). The swarm's: each template's glob over the loaded units,
 /// which is exactly every running Mind and exits 0 when none is loaded. No
 /// `--no-block`: `systemctl stop` returns when the units are down. The
-/// instance is validated by `unit()`.
+/// instance is validated by `named()`.
 pub(crate) fn stop_args(scope: StopScope<'_>) -> Result<Vec<String>> {
     let mut args = vec!["stop".to_string(), "--".to_string()];
     args.extend(held_templates().into_iter().map(|template| match scope {

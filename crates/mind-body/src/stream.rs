@@ -100,6 +100,8 @@ impl Sampling {
 /// The Projector: state to narrative. Its one owner is `KitProjector`, her own caller on the connector. A fault is an error:
 /// the tick ends, the process does not.
 pub trait Projector {
+    /// The model id every projection of this Projector names; the thought records it, so it is the model that ran.
+    fn model(&self) -> &str;
     /// One turn: `prompt` is the turn's one user text and `request_id` is its identity on the connector.
     fn project(&self, request_id: &str, prompt: &str) -> Result<String>;
 }
@@ -200,6 +202,13 @@ fn request_id(instance: &Slug, label: &str, mode: Mode, now: DateTime<Utc>) -> S
     }
 }
 
+/// The connector key: the credential file in systemd's credentials directory, read once and trimmed. Its error names the
+/// credential and never a byte of the file.
+pub fn connector_key(credentials: &std::path::Path) -> Result<String> {
+    let key = std::fs::read_to_string(credentials.join("connector-key")).map_err(|_| anyhow!("the connector-key credential could not be read"))?;
+    Ok(key.trim().to_owned())
+}
+
 /// The Projector as one tool-less connector turn by `caller` (her instance) on `model`. Loopback only, as the kit is.
 /// Each projection is its own conversation: nothing is carried from one tick to the next.
 pub struct KitProjector {
@@ -220,6 +229,10 @@ impl KitProjector {
 }
 
 impl Projector for KitProjector {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
     fn project(&self, request_id: &str, prompt: &str) -> Result<String> {
         let mut request = ProviderRequest::new(request_id, request_id, &self.model, PROJECTOR_INSTRUCTIONS, PROJECTOR_MAX_OUTPUT_TOKENS);
         request.input = vec![InputItem::UserText { text: prompt.to_owned() }];
@@ -594,7 +607,6 @@ pub struct Organs<'a> {
     pub persona: &'a dyn PersonaSource,
     pub projector: &'a dyn Projector,
     pub continuer: &'a dyn Continuer,
-    pub projector_model: &'a str,
     pub base_model: &'a str,
 }
 
@@ -685,7 +697,7 @@ pub fn tick(organs: &Organs, brake: &dyn Fn() -> Effective, mode: Mode, now: Dat
         identity: Line::from(seed.identity.as_str()),
         context: Para::from(seed.context.as_str()),
         stimulus: Para::from(seed.stimulus.as_str()),
-        projector_model: Short(organs.projector_model.to_owned()),
+        projector_model: Short(organs.projector.model().to_owned()),
         projection: Para::from(projection.as_str()),
         base_model: Short(organs.base_model.to_owned()),
         temperature_permille: Sampling::STREAM.temperature_permille,

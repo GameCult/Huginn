@@ -73,6 +73,10 @@ impl Fake {
 }
 
 impl Projector for Fake {
+    fn model(&self) -> &str {
+        "projector:test"
+    }
+
     fn project(&self, request_id: &str, prompt: &str) -> Result<String> {
         self.projected.borrow_mut().push((request_id.into(), prompt.into()));
         if self.fault { Err(anyhow!("the connector is down")) } else { Ok(self.projection.clone()) }
@@ -202,7 +206,7 @@ fn mind_with_thought(thought_at: i64) -> TestMind {
 }
 
 fn organs<'a>(mind: &'a dyn MindPort, persona: &'a Persona, model: &'a Fake) -> Organs<'a> {
-    Organs { mind, persona, projector: model, continuer: model, projector_model: "projector:test", base_model: "base:test" }
+    Organs { mind, persona, projector: model, continuer: model, base_model: "base:test" }
 }
 
 fn thoughts(mind: &TestMind) -> Vec<String> {
@@ -553,12 +557,52 @@ fn a_kit_refusal_is_a_tick_fault() {
     let continuer = Fake::saying("unused", &["unused"]);
     let persona = persona();
     let wrap = Wrap::over(&mind, &[]);
-    let organs = Organs { mind: &wrap, persona: &persona, projector: &projector, continuer: &continuer, projector_model: KIT_MODEL, base_model: "base:test" };
+    let organs = Organs { mind: &wrap, persona: &persona, projector: &projector, continuer: &continuer, base_model: "base:test" };
     let fault = format!("{:#}", tick(&organs, &|| released(), Mode::Live, t(1000 + STREAM_IDLE_GAP_S)).unwrap_err());
     assert!(fault.contains("ModelNotAllowed"), "{fault}");
     assert!(backend.seen.lock().unwrap().is_empty(), "the provider was never reached");
     assert_eq!(continuer.calls(), 0, "the continuer is not called");
     assert!(wrap.admitted.borrow().is_empty());
+}
+
+#[test]
+fn a_thought_names_the_model_the_kit_ran() {
+    let backend = Scripted::ending(StopReason::EndTurn, &["I turn it over."]);
+    let (projector, _root) = kit(Arc::clone(&backend), KIT_MODEL);
+    let mind = mind_with_thought(1000);
+    let continuer = Fake::saying("unused", &["A drift"]);
+    let persona = persona();
+    let wrap = Wrap::over(&mind, &[0.1]);
+    let organs = Organs { mind: &wrap, persona: &persona, projector: &projector, continuer: &continuer, base_model: "base:test" };
+    let Outcome::Thought { thought, .. } = tick(&organs, &|| released(), Mode::Live, t(1000 + STREAM_IDLE_GAP_S)).unwrap() else { panic!("a thought") };
+    let ran = backend.seen.lock().unwrap()[0].1.model.clone();
+    assert_eq!(ran, KIT_MODEL);
+    assert_eq!(thought.projector_model.0, ran, "the recorded model is the one the kit was asked for");
+}
+
+#[test]
+fn the_instructions_restate_no_membrane_text() {
+    let membrane = build_projector_prompt(&ProjectorPrompt { identity: "", typed_context: "", visible_stimulus: "", domain_guidance: STREAM_GUIDANCE, word_budget: PROJECTOR_WORDS }).to_lowercase();
+    let words: Vec<&str> = PROJECTOR_INSTRUCTIONS.split_whitespace().collect();
+    assert!(!PROJECTOR_INSTRUCTIONS.contains('\n') && words.len() <= 20, "one short line");
+    for run in words.windows(4) {
+        let run = run.join(" ").to_lowercase();
+        assert!(!membrane.contains(&run), "Ghostlight's membrane text reached the instructions: {run}");
+    }
+}
+
+#[test]
+fn the_connector_key_is_read_trimmed_and_its_absence_leaks_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("connector-key"), "canary-key-7f3a91\n").unwrap();
+    assert_eq!(connector_key(dir.path()).unwrap(), "canary-key-7f3a91");
+    let empty = tempfile::tempdir().unwrap();
+    let fault = format!("{:#}", connector_key(empty.path()).unwrap_err());
+    assert!(fault.contains("connector-key") && !fault.contains(empty.path().to_str().unwrap()), "{fault}");
+    let bad = tempfile::tempdir().unwrap();
+    std::fs::write(bad.path().join("connector-key"), b"canary-key-7f3a91\xff\xfe").unwrap();
+    let fault = format!("{:#}", connector_key(bad.path()).unwrap_err());
+    assert!(!fault.contains("canary"), "no byte of the key reaches an error: {fault}");
 }
 
 #[test]
@@ -837,7 +881,7 @@ fn old_repo_activity_does_not_make_a_tick_due() {
     let model = Fake::saying("I turn it over.", &["A new drift"]);
     let persona = CountedPersona(persona(), std::cell::Cell::new(0));
     let wrap = Wrap::over(&mind, &[0.1]).with_forge(vec![push(1, 500)]);
-    let organs = Organs { mind: &wrap, persona: &persona, projector: &model, continuer: &model, projector_model: "projector:test", base_model: "base:test" };
+    let organs = Organs { mind: &wrap, persona: &persona, projector: &model, continuer: &model, base_model: "base:test" };
     assert_eq!(tick(&organs, &|| released(), Mode::Live, t(1901)).unwrap(), Outcome::NotDue);
     assert_eq!((model.calls(), persona.1.get(), thoughts(&mind).len()), (0, 0, 1), "no model call, no seed, no thought");
 }
