@@ -80,6 +80,8 @@ struct FakeChat {
     opens: RefCell<Vec<ChatOpenDirectRequest>>,
     /// How the fake mouth answers an open; none is a transport error.
     open_outcome: Cell<Option<DirectOutcome>>,
+    /// The mouth refuses the open kind outright (an older mouth): the open errors with the typed refusal.
+    open_unserved: Cell<bool>,
 }
 
 impl FakeChat {
@@ -150,6 +152,9 @@ impl Chat for FakeChat {
     fn open_direct(&self, request: &ChatOpenDirectRequest) -> Result<ChatOpenDirectReceipt> {
         self.log.borrow_mut().push("open".into());
         self.opens.borrow_mut().push(request.clone());
+        if self.open_unserved.get() {
+            return Err(crate::chat_client::MouthRefused(Refusal::UnknownKind).into());
+        }
         let Some(outcome) = self.open_outcome.get() else { return Err(anyhow!("CANARY-open-down {}", request.user_id)) };
         let landed = matches!(outcome, DirectOutcome::Opened | DirectOutcome::Existing);
         Ok(ChatOpenDirectReceipt { request_id: request.request_id.clone(), outcome, room_id: landed.then(|| "!dm:chat".to_string()), event_id: landed.then(|| "$open".to_string()) })
@@ -448,6 +453,7 @@ impl Rig {
                 keep_on_ack: Cell::new(false),
                 opens: RefCell::default(),
                 open_outcome: Cell::new(Some(DirectOutcome::Opened)),
+                open_unserved: Cell::new(false),
             },
             model: FakeSession {
                 log: log.clone(),
@@ -7799,7 +7805,7 @@ fn a_held_brake_stops_the_open() {
 fn a_refused_or_unanswered_open_is_told_and_the_turn_stands() {
     let cases: [(Option<DirectOutcome>, &str); 4] = [
         (Some(DirectOutcome::Declined), "until they write to you first"),
-        (Some(DirectOutcome::InvitePending), "has not answered"),
+        (Some(DirectOutcome::InvitePending), "has not answered your earlier invitation; it stays open. Do not send another."),
         (None, "did not answer"),
         (Some(DirectOutcome::DailyLimit), "today"),
     ];
@@ -7820,6 +7826,29 @@ fn a_refused_or_unanswered_open_is_told_and_the_turn_stands() {
         assert!(!format!("{trace:?}").contains("CANARY"));
         assert_eq!(trace[0].outcome, "answered");
     }
+}
+
+#[test]
+fn an_open_the_mouth_does_not_serve_is_told_as_not_sent() {
+    let kept = json!({ "intent": "Ask them over", "say": [{ "room": "swarm", "text": "yes" }], "open_direct": { "with": "@ann:chat", "text": "Hello Ann" }, "start_self_run": null, "remember": [], "settle": [], "urgency_permille": null }).to_string();
+    let rig = public_rig_with_a_next_line(&[kept, says(&[])]);
+    rig.chat.open_unserved.set(true);
+    let Outcome::Served { failure, .. } = rig.go() else { panic!("served") };
+    assert_eq!(failure, None);
+    let line = input_of(&rig, 1);
+    assert!(line.contains("was not sent") && !line.contains("may or may not"), "{line}");
+    let trace = rig.trace.0.borrow();
+    assert!(trace[0].outputs.iter().any(|item| item.text == "open_direct @ann:chat: UnknownKind"), "{trace:?}");
+}
+
+#[test]
+fn the_daily_creation_policy_has_one_text_in_the_schema_and_the_notice() {
+    let schema = reply_schema(&["swarm".to_string()], &[], true);
+    let told = open_told("@ann:chat", Some(DirectOutcome::DailyLimit));
+    assert!(told.contains(OPEN_DAILY_POLICY), "{told}");
+    let schema: Value = serde_json::from_str(&schema).unwrap();
+    let described = schema.pointer("/properties/open_direct/anyOf/1/description").and_then(Value::as_str).unwrap_or_default();
+    assert!(described.contains(OPEN_DAILY_POLICY), "{described}");
 }
 
 #[test]
