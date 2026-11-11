@@ -21,6 +21,11 @@ use huginn_mind::envelope::{OperationFailure, encode_desk_failure, encode_desk_r
 use huginn_mind::eureka_pipeline::{DeskAuthority, Short, Slug};
 
 const RUNTIME: &str = "huginn-eureka";
+/// Account ids as Bifrost sends them: `UserAccount.Id` rendered lowercase D-format
+/// (`DeskEndpoints.cs` `accountId.Value.ToString("D")`; `StartupConfigurationValidator` refuses any
+/// other decider). Synthetic values.
+const READER: &str = "5f0c2b1e-8a4d-4c3b-9e7f-1a2b3c4d5e6f";
+const OTHER_DECIDER: &str = "0b9d7e3a-6c21-4f58-a0d4-9e8f7a6b5c4d";
 /// A question Eureka's mind holds (asked 2026-11-11). The answers, notes and hash in `record()` are
 /// synthetic: the hash is CultLib's sample digest, not this question's.
 const FORK: &str = "eureka-substrate:question:desk-listing-authority";
@@ -32,8 +37,8 @@ fn s(text: &str) -> Short {
 fn forks(status: Option<ListStatus>, cursor: Option<u64>, limit: u8) -> DeskRequest {
     DeskRequest::Forks {
         mind: Slug("eureka".into()),
-        subject: s("7"),
-        deciders: vec![s("7"), s("12")],
+        subject: s(READER),
+        deciders: vec![s(READER), s(OTHER_DECIDER)],
         status,
         cursor: cursor.and_then(ForkCursor::new),
         limit: ForkLimit::new(limit).unwrap(),
@@ -41,7 +46,7 @@ fn forks(status: Option<ListStatus>, cursor: Option<u64>, limit: u8) -> DeskRequ
 }
 
 fn read() -> DeskRequest {
-    DeskRequest::Fork { mind: Slug("eureka".into()), subject: s("7"), deciders: vec![s("7"), s("12")], fork_id: FORK.into() }
+    DeskRequest::Fork { mind: Slug("eureka".into()), subject: s(READER), deciders: vec![s(READER), s(OTHER_DECIDER)], fork_id: FORK.into() }
 }
 
 fn list(open_count: u64, recorded_count: u64) -> DeskResponse {
@@ -93,8 +98,8 @@ fn record() -> ForkRecord {
         options_hash: "7d95fc87d532420611fe415c1def27a3447617bb68235f46e3af130aea361c48".into(),
         counted_answer_id: Some("n1".into()),
         answers: vec![
-            answer("n1", "Counted", None, "7", "The asker lists her own forks.", "2026-11-11T17:00:00Z"),
-            answer("n2", "Revision", Some("n1"), "12", "Agreed.", "2026-11-11T17:05:00Z"),
+            answer("n1", "Counted", None, READER, "The asker lists her own forks.", "2026-11-11T17:00:00Z"),
+            answer("n2", "Revision", Some("n1"), OTHER_DECIDER, "Agreed.", "2026-11-11T17:05:00Z"),
         ],
     }
 }
@@ -188,5 +193,34 @@ fn desk_feed_fixtures_are_what_the_encoders_write() {
             let held = std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
             assert!(held == bytes, "{name} differs from what the encoders write now");
         }
+    }
+}
+
+/// The one grammar for `subject`, every `deciders` entry and every `answerer`: a lowercase
+/// D-format UUID (8-4-4-4-12 lowercase hex), the grammar Huginn already names for `RequestId`
+/// (`eureka-pipeline` `uuid_text`). A Matrix id, an email or a handle never fits it.
+fn account_id(text: &str) -> bool {
+    text.len() == 36
+        && text.bytes().enumerate().all(|(at, byte)| match at {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
+        })
+}
+
+/// Every account id the fixtures carry is a Bifrost account id, never a Matrix id, email or
+/// handle. The door does not refuse other shapes yet (`Short`, any 200 bytes); that refusal is owed
+/// by `cut-desk-feed-listing.r4`, and this pins the grammar it must enforce.
+#[test]
+fn every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid() {
+    for request in [forks(Some(ListStatus::Open), None, 50), read()] {
+        let subject = match &request {
+            DeskRequest::Forks { subject, .. } | DeskRequest::Fork { subject, .. } | DeskRequest::Answer { subject, .. } => subject,
+        };
+        assert!(account_id(&subject.0), "subject");
+        assert!(request.deciders().iter().all(|decider| account_id(&decider.0)), "deciders");
+    }
+    assert!(record().answers.iter().all(|answer| account_id(&answer.answerer)), "answerer");
+    for shape in ["@heimdall:gamecult.org", "meta@gamecult.org", "heimdall", "7", "5F0C2B1E-8A4D-4C3B-9E7F-1A2B3C4D5E6F", "{5f0c2b1e-8a4d-4c3b-9e7f-1a2b3c4d5e6f}", ""] {
+        assert!(!account_id(shape), "{shape} is not an account id");
     }
 }

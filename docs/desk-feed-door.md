@@ -94,6 +94,22 @@ Request (`huginn.desk_request.v1`):
 Huginn keeps no copy. `subject` is the verified Bifrost account id of the reader. The reads carry
 no `authority`, and a payload that names it is refused whole.
 
+**Account ids.** `subject`, every `deciders` entry and every stored `answerer` are Bifrost account ids:
+`UserAccount.Id` in lowercase D-format, 8-4-4-4-12 lowercase hex (Bifrost renders it in
+`DeskEndpoints.cs` with `accountId.Value.ToString("D")`, and `StartupConfigurationValidator.cs`
+refuses any decider not in that form). That is the same grammar Huginn names for `RequestId`
+(`uuid_text`). These ids are opaque random UUIDs. A Matrix id, an email, a display name or any other
+handle is never one of them. Bifrost enforces the grammar; Huginn's door does not yet: it reads these
+fields as `Short` (any text up to 200 bytes) and would accept `@x:server` or an email. A subject
+is stored as `answerer` on an answer, so a wrong value would enter the mind. Refusing every other
+shape at decode is owed by `cut-desk-feed-listing.r4`. The test
+`every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid` pins the grammar. The fixtures use
+synthetic UUIDs.
+
+`card.deciders` echoes the call's decider list on every card to every reader. Bifrost masks
+`answerer` for a reader who is not a decider (X3), but it must also mask `card.deciders`, or the
+same account ids reach that reader through the card.
+
 Response (`huginn.desk_response.v1`):
 
 | variant | meaning | Bifrost answers |
