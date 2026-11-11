@@ -3034,7 +3034,7 @@
       "maxLength": 64
     },
     "SourceQuery": {
-      "description": "A source search: the text to find chunks near, how many, optionally the\none forge repo (by name) to look in, and whether to look only in repos'\nfront-page files (`FRONT_PAGE_FILES` at the repo root). An old client's\nrequest has no `front` and means false.",
+      "description": "A source search: the texts to find chunks near (one to `SOURCE_TEXTS_MAX`,\neach a topic; several answer with their ranked lists fused), how many,\noptionally the one forge repo (by name) to look in, and whether to look\nonly in repos' front-page files (`FRONT_PAGE_FILES` at the repo root). An\nold client's request has no `front` and means false.",
       "type": "object",
       "properties": {
         "front": {
@@ -3052,7 +3052,17 @@
           ]
         },
         "text": {
-          "$ref": "#/$defs/Line"
+          "description": "Transitional: an old client's single text, read as `texts` of one. Exactly\none of `text` and `texts` is given. To be deleted once no client sends it.",
+          "$ref": "#/$defs/Line",
+          "default": ""
+        },
+        "texts": {
+          "description": "The topics to search by, one to `SOURCE_TEXTS_MAX`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Line"
+          }
         },
         "top_k": {
           "type": "integer",
@@ -3061,7 +3071,6 @@
         }
       },
       "required": [
-        "text",
         "top_k"
       ]
     },

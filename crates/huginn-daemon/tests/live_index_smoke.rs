@@ -179,6 +179,7 @@ fn a_small_repo_is_refreshed_into_a_scratch_source_collection_and_found() {
         .and_then(|_| {
             let query = huginn_mind::SourceQuery {
                 text: huginn_mind::eureka_pipeline::Line("what does this repository do".into()),
+                texts: vec![],
                 top_k: 3,
                 repo: None,
                 front: false,

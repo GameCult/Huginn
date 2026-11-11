@@ -6005,6 +6005,7 @@
           "type": "string"
         },
         "score": {
+          "description": "Cosine similarity for a search of one text; the reciprocal-rank sum\n(k = 60) over the texts' lists for a search of several.",
           "type": "number",
           "format": "float"
         },

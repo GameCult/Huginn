@@ -655,7 +655,7 @@ pub(crate) mod tests {
         let mut daemon = Daemon::new(mind, SourcesIndex { asked: Arc::clone(&asked), hits: hits.clone() });
         let request = |instance: &str, top_k: u32| HuginnMindRequest::SearchSources {
             instance: slug(instance),
-            query: SourceQuery { text: huginn_mind::eureka_pipeline::Line("find".into()), top_k, repo: None, front: false },
+            query: SourceQuery { text: huginn_mind::eureka_pipeline::Line("find".into()), texts: vec![], top_k, repo: None, front: false },
         };
 
         let Handled::Searching(search) = daemon.handle(request(INSTANCE, 5), now()) else { panic!("a well-formed source search is a search") };
@@ -673,7 +673,16 @@ pub(crate) mod tests {
             let answer = daemon.handle(refused, now()).answered();
             assert!(matches!(answer, HuginnMindResponse::Refused(_)), "{answer:?}");
         }
-        assert_eq!(*asked.lock().unwrap(), 2, "a refused query never reached the index");
+        let texts = |texts: &[&str]| HuginnMindRequest::SearchSources {
+            instance: slug(INSTANCE),
+            query: SourceQuery { text: huginn_mind::eureka_pipeline::Line::default(), texts: texts.iter().map(|text| huginn_mind::eureka_pipeline::Line((*text).into())).collect(), top_k: 5, repo: None, front: false },
+        };
+        for refused in [texts(&[]), texts(&["a"; 9]), texts(&["a", " "])] {
+            let answer = daemon.handle(refused, now()).answered();
+            assert!(matches!(answer, HuginnMindResponse::Refused(MindRefusal::SelectionInvalid { ref field, .. }) if field == "texts"), "{answer:?}");
+        }
+        assert!(matches!(daemon.handle(texts(&["a", "b"]), now()), Handled::Searching(_)), "two texts are one queued search");
+        assert_eq!(*asked.lock().unwrap(), 3, "a refused query never reached the index");
     }
 
     /// A daemon over the instance's mind under `state_root`, with no index.

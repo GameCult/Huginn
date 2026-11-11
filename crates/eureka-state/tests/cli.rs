@@ -1383,6 +1383,31 @@ fn sources_front_prints_only_the_front_page_with_its_lines() {
     assert_eq!(found.out.trim_end(), "Demo:README.md:1-2 @abcdef1 0.900\n# Demo", "{}", found.out);
 }
 
+/// `huginn sources <TEXT>...` sends every text in `texts` and none in `text`, the
+/// daemon fuses them into one answer, and a ninth or no text never leaves the CLI.
+#[test]
+fn sources_sends_each_text_as_a_topic_and_prints_the_fused_answer() {
+    let (server, seen) = replying(
+        "search_sources",
+        HuginnMindResponse::Sources(huginn_mind::SourceHits { indexed_under: huginn_mind::SourceModel { name: "m".into(), digest: "d".into() }, hits: vec![] }),
+    );
+    let ran = at(server.addr, &["sources", "qdrant filter", "reciprocal rank", "--top-k", "5"], None);
+    assert_eq!(ran.code, 0, "{}", ran.err);
+    let HuginnMindRequest::SearchSources { query, .. } = seen.lock().unwrap().remove(0) else { panic!("a source search") };
+    let texts: Vec<&str> = query.texts.iter().map(|text| text.0.as_str()).collect();
+    assert_eq!((texts, query.text.0.as_str(), query.top_k), (vec!["qdrant filter", "reciprocal rank"], "", 5));
+
+    let daemon = source_daemon("d1", "d1");
+    let found = at(daemon.addr, &["sources", "cursor", "readme", "--repo", "Demo"], None);
+    assert_eq!(found.code, 0, "{}", found.err);
+    assert!(found.out.contains("Demo:src/lib.rs:3-9") && found.out.contains("Demo:README.md:1-2"), "{}", found.out);
+
+    let nine = ["sources", "a", "b", "c", "d", "e", "f", "g", "h", "i"];
+    assert_ne!(at(server.addr, &nine, None).code, 0);
+    assert_ne!(at(server.addr, &["sources"], None).code, 0);
+    assert!(seen.lock().unwrap().is_empty(), "a refused command asked nothing");
+}
+
 /// A daemon whose embedder is not the model the index was built under refuses
 /// the search naming both, and the CLI exits 1 with that word.
 #[test]
