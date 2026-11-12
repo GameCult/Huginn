@@ -153,6 +153,9 @@ fn the_follow_up_basis_is_one_wire_string_that_round_trips_and_an_unknown_one_st
     let pending = decode::<ChatPending>(&rmp_serde::to_vec(&value).unwrap()).unwrap();
     assert_eq!(pending.deliveries[0].basis, Some(Basis::FollowUp));
     assert_eq!(Basis::FollowUp.name(), FOLLOW_UP_BASIS);
+    assert_eq!(Basis::FollowUp.name(), "follow", "the mouth's literal word (Bifrost PR #74), not the constant");
+    value[1][0][12] = "follow".into();
+    assert_eq!(decode::<ChatPending>(&rmp_serde::to_vec(&value).unwrap()).unwrap().deliveries[0].basis, Some(Basis::FollowUp));
     assert_eq!(rmp_serde::from_slice::<String>(&rmp_serde::to_vec(&Basis::FollowUp).unwrap()).unwrap(), FOLLOW_UP_BASIS);
     value[1][0][12] = "follow-up".into();
     assert!(decode::<ChatPending>(&rmp_serde::to_vec(&value).unwrap()).is_err());
