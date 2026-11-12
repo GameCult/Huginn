@@ -39,6 +39,9 @@ pub const SEND_RECEIPT: &str = "gamecult.persona.chat_send_receipt.v2";
 /// Her request that the mouth open a DM with a person, and its answer.
 pub const OPEN_DIRECT_REQUEST: &str = "gamecult.persona.chat_open_direct_request.v1";
 pub const OPEN_DIRECT_RECEIPT: &str = "gamecult.persona.chat_open_direct_receipt.v1";
+/// Her request that the mouth fetch one event's image, verify it and post the receipt as her, and its answer.
+pub const FETCH_REQUEST: &str = "gamecult.persona.chat_fetch_request.v1";
+pub const FETCH_RECEIPT: &str = "gamecult.persona.chat_fetch_receipt.v1";
 pub const REFUSAL: &str = "gamecult.persona.chat_refusal.v1";
 
 /// One earlier line of a room, delivered with a message for its context.
@@ -688,6 +691,159 @@ impl TryFrom<RawOpenReceipt> for ChatOpenDirectReceipt {
     }
 }
 
+/// A request that the mouth fetch the image of `event_id` in `room` (an alias or room id) for `persona`: the reference is room and
+/// event only. `request_id` makes a repeat the same fetch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatFetchRequest {
+    pub request_id: String,
+    pub persona: String,
+    pub room: String,
+    pub event_id: String,
+}
+
+/// How the mouth answered a fetch, as its fourteen typed names. Whether the file may be fetched is the mouth's, derived from Matrix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FetchOutcome {
+    /// Fetched, verified against the event's hash, stored. The receipt, if any, says whether it was posted.
+    Stored,
+    /// Fetched and stored but the event carried no hash: not verified, no receipt, never marked read.
+    StoredUnverified,
+    NotAMember,
+    BridgedRoom,
+    TooLarge,
+    TypeRefused,
+    NoAttachment,
+    HashMismatch,
+    RateLimited,
+    Brake,
+    PersonaMismatch,
+    UnknownPersona,
+    FetchFailed,
+    StoreFailed,
+}
+
+impl FetchOutcome {
+    const ALL: [Self; 14] = [
+        Self::Stored,
+        Self::StoredUnverified,
+        Self::NotAMember,
+        Self::BridgedRoom,
+        Self::TooLarge,
+        Self::TypeRefused,
+        Self::NoAttachment,
+        Self::HashMismatch,
+        Self::RateLimited,
+        Self::Brake,
+        Self::PersonaMismatch,
+        Self::UnknownPersona,
+        Self::FetchFailed,
+        Self::StoreFailed,
+    ];
+
+    /// The mouth's spelling: a MessagePack string.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stored => "Stored",
+            Self::StoredUnverified => "StoredUnverified",
+            Self::NotAMember => "NotAMember",
+            Self::BridgedRoom => "BridgedRoom",
+            Self::TooLarge => "TooLarge",
+            Self::TypeRefused => "TypeRefused",
+            Self::NoAttachment => "NoAttachment",
+            Self::HashMismatch => "HashMismatch",
+            Self::RateLimited => "RateLimited",
+            Self::Brake => "Brake",
+            Self::PersonaMismatch => "PersonaMismatch",
+            Self::UnknownPersona => "UnknownPersona",
+            Self::FetchFailed => "FetchFailed",
+            Self::StoreFailed => "StoreFailed",
+        }
+    }
+
+    /// Whether the mouth stored a file for this outcome: the two that carry a room id and an image.
+    pub fn stored(self) -> bool {
+        matches!(self, Self::Stored | Self::StoredUnverified)
+    }
+}
+
+impl Serialize for FetchOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for FetchOutcome {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::ALL.into_iter().find(|outcome| outcome.name() == name).ok_or_else(|| serde::de::Error::custom("the mouth named a fetch outcome this side does not know"))
+    }
+}
+
+/// The receipt the mouth posted as the Persona for a `Stored` fetch, or found already posted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptMode {
+    Posted,
+    Existing,
+}
+
+impl ReceiptMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Posted => "Posted",
+            Self::Existing => "Existing",
+        }
+    }
+}
+
+impl Serialize for ReceiptMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReceiptMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        [Self::Posted, Self::Existing].into_iter().find(|mode| mode.name() == name).ok_or_else(|| serde::de::Error::custom("the mouth named a receipt mode this side does not know"))
+    }
+}
+
+/// The mouth's answer to a fetch: `[request_id, outcome, room_id, image, receipt]`. `room_id` and `image` are present exactly for
+/// `Stored` and `StoredUnverified`; `receipt` only with `Stored` (`Stored` with none is valid: nothing was posted, so it is not
+/// marked read). A receipt that says otherwise does not decode.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawFetchReceipt")]
+pub struct ChatFetchReceipt {
+    pub request_id: String,
+    pub outcome: FetchOutcome,
+    pub room_id: Option<String>,
+    pub image: Option<ChatImage>,
+    pub receipt: Option<ReceiptMode>,
+}
+
+#[derive(Deserialize)]
+struct RawFetchReceipt {
+    request_id: String,
+    outcome: FetchOutcome,
+    room_id: Option<String>,
+    image: Option<ChatImage>,
+    receipt: Option<ReceiptMode>,
+}
+
+impl TryFrom<RawFetchReceipt> for ChatFetchReceipt {
+    type Error = &'static str;
+
+    fn try_from(raw: RawFetchReceipt) -> Result<Self, Self::Error> {
+        if raw.outcome.stored() != (raw.room_id.is_some() && raw.image.is_some()) || (!raw.outcome.stored() && (raw.room_id.is_some() || raw.image.is_some())) {
+            return Err("the fetch receipt's room and image do not match its outcome");
+        }
+        if raw.receipt.is_some() && raw.outcome != FetchOutcome::Stored {
+            return Err("the fetch receipt posts a receipt for an outcome that is not Stored");
+        }
+        Ok(Self { request_id: raw.request_id, outcome: raw.outcome, room_id: raw.room_id, image: raw.image, receipt: raw.receipt })
+    }
+}
+
 /// A document as the mouth reads it: a positional tuple.
 pub fn encode<T: Serialize>(document: &T) -> Result<Vec<u8>> {
     rmp_serde::to_vec(document).context("the chat document does not encode")
@@ -706,6 +862,9 @@ pub trait Chat {
     fn send(&self, request: &ChatSendRequest) -> Result<ChatSendReceipt>;
     /// Ask the mouth to open a DM. A refusal is a receipt; only a transport fault or a mouth that does not serve the kind is an error.
     fn open_direct(&self, request: &ChatOpenDirectRequest) -> Result<ChatOpenDirectReceipt>;
+    /// Ask the mouth to fetch, verify and receipt one event's image. A refusal is a receipt; only a transport fault or a mouth
+    /// that does not serve the kind is an error.
+    fn fetch(&self, request: &ChatFetchRequest) -> Result<ChatFetchReceipt>;
     /// Every delivery up to and including `through_seq` is answered; the mouth
     /// advances its sync position only now, so a start that dies first has its
     /// deliveries again.

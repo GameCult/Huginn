@@ -101,6 +101,10 @@ impl Chat for FakeChat {
         panic!("the heartbeat opens nothing")
     }
 
+    fn fetch(&self, _: &crate::chat_client::ChatFetchRequest) -> Result<crate::chat_client::ChatFetchReceipt> {
+        panic!("the heartbeat fetches nothing")
+    }
+
     fn ack(&self, _: u64) -> Result<()> {
         panic!("the heartbeat never acks a delivery")
     }

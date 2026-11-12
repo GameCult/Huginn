@@ -17,10 +17,14 @@ mind_body::address: struct Name # [derive (Clone , Debug , PartialEq , Eq , serd
 mind_body::chat_client: # [derive (Clone , Copy , Debug , Default , PartialEq , Eq)] pub enum Form { # [default] Message , Notice , Edit , }
 mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Basis { Direct , Tag , Reply , Room , }
 mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum DirectOutcome { Opened , Existing , Brake , PersonaMismatch , UnknownPersona , EmptyText , ForeignUser , NotAPerson , NoSuchUser , InvitePending , Declined , DailyLimit , SendFailed , }
+mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum FetchOutcome { Stored , StoredUnverified , NotAMember , BridgedRoom , TooLarge , TypeRefused , NoAttachment , HashMismatch , RateLimited , Brake , PersonaMismatch , UnknownPersona , FetchFailed , StoreFailed , }
+mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum ReceiptMode { Posted , Existing , }
 mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Refusal { Brake , PersonaMismatch , UnknownRoom , EmptyText , SendFailed , UnknownPersona , RoomMoved , UnknownKind , }
 mind_body::chat_client: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum ReplyViolation { NotATriple , BadEventId , BadSenderId , ExcerptNotText , ExcerptTooLong , }
 mind_body::chat_client: # [derive (Clone , Debug , Default , PartialEq , Eq)] pub enum ReplyLink { # [default] Absent , Quote (ReplyTo) , Dropped (ReplyViolation) , }
 mind_body::chat_client: const ACK : & str
+mind_body::chat_client: const FETCH_RECEIPT : & str
+mind_body::chat_client: const FETCH_REQUEST : & str
 mind_body::chat_client: const OPEN_DIRECT_RECEIPT : & str
 mind_body::chat_client: const OPEN_DIRECT_REQUEST : & str
 mind_body::chat_client: const PENDING : & str
@@ -42,8 +46,13 @@ mind_body::chat_client: impl Basis
 mind_body::chat_client: impl Basis: fn name (self) -> & 'static str
 mind_body::chat_client: impl DirectOutcome
 mind_body::chat_client: impl DirectOutcome: fn name (self) -> & 'static str
+mind_body::chat_client: impl FetchOutcome
+mind_body::chat_client: impl FetchOutcome: fn name (self) -> & 'static str
+mind_body::chat_client: impl FetchOutcome: fn stored (self) -> bool
 mind_body::chat_client: impl Form
 mind_body::chat_client: impl Form: fn name (self) -> & 'static str
+mind_body::chat_client: impl ReceiptMode
+mind_body::chat_client: impl ReceiptMode: fn name (self) -> & 'static str
 mind_body::chat_client: impl Refusal
 mind_body::chat_client: impl Refusal: fn name (self) -> & 'static str
 mind_body::chat_client: impl ReplyLink
@@ -52,20 +61,27 @@ mind_body::chat_client: impl ReplyViolation
 mind_body::chat_client: impl ReplyViolation: fn name (self) -> & 'static str
 mind_body::chat_client: impl Serialize for Basis
 mind_body::chat_client: impl Serialize for DirectOutcome
+mind_body::chat_client: impl Serialize for FetchOutcome
 mind_body::chat_client: impl Serialize for Form
+mind_body::chat_client: impl Serialize for ReceiptMode
 mind_body::chat_client: impl Serialize for Refusal
 mind_body::chat_client: impl Serialize for ReplyLink
+mind_body::chat_client: impl TryFrom < RawFetchReceipt > for ChatFetchReceipt
 mind_body::chat_client: impl TryFrom < RawOpenReceipt > for ChatOpenDirectReceipt
 mind_body::chat_client: impl std :: error :: Error for MouthRefused
 mind_body::chat_client: impl std :: fmt :: Display for MouthRefused
 mind_body::chat_client: impl< 'de > Deserialize < 'de > for Basis
 mind_body::chat_client: impl< 'de > Deserialize < 'de > for DirectOutcome
+mind_body::chat_client: impl< 'de > Deserialize < 'de > for FetchOutcome
 mind_body::chat_client: impl< 'de > Deserialize < 'de > for Form
+mind_body::chat_client: impl< 'de > Deserialize < 'de > for ReceiptMode
 mind_body::chat_client: impl< 'de > Deserialize < 'de > for Refusal
 mind_body::chat_client: impl< 'de > Deserialize < 'de > for ReplyLink
-mind_body::chat_client: pub trait Chat { fn pending (& self , after_seq : u64) -> Result < ChatPending > ; fn send (& self , request : & ChatSendRequest) -> Result < ChatSendReceipt > ; fn open_direct (& self , request : & ChatOpenDirectRequest) -> Result < ChatOpenDirectReceipt > ; fn ack (& self , through_seq : u64) -> Result < () > ; fn read (& self , read : & ChatRead) -> Result < () > ; }
+mind_body::chat_client: pub trait Chat { fn pending (& self , after_seq : u64) -> Result < ChatPending > ; fn send (& self , request : & ChatSendRequest) -> Result < ChatSendReceipt > ; fn open_direct (& self , request : & ChatOpenDirectRequest) -> Result < ChatOpenDirectReceipt > ; fn fetch (& self , request : & ChatFetchRequest) -> Result < ChatFetchReceipt > ; fn ack (& self , through_seq : u64) -> Result < () > ; fn read (& self , read : & ChatRead) -> Result < () > ; }
 mind_body::chat_client: struct ChatAck # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[persona: String, through_seq: u64]
 mind_body::chat_client: struct ChatDelivery # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[seq: u64, room_alias: String, room_id: String, event_id: String, sender: String, sender_display: String, text: String, at_unix_ms: u64, context: Vec < ContextLine >, mentions: Vec < String >, is_direct: bool, image: Option < ChatImage >, basis: Option < Basis >, form: Form, reply_to: ReplyLink]
+mind_body::chat_client: struct ChatFetchReceipt # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, outcome: FetchOutcome, room_id: Option < String >, image: Option < ChatImage >, receipt: Option < ReceiptMode >]
+mind_body::chat_client: struct ChatFetchRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, persona: String, room: String, event_id: String]
 mind_body::chat_client: struct ChatImage # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[path: String, mime: String, size: u64, sha256: String]
 mind_body::chat_client: struct ChatOpenDirectReceipt # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, outcome: DirectOutcome, room_id: Option < String >, event_id: Option < String >]
 mind_body::chat_client: struct ChatOpenDirectRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[request_id: String, persona: String, user_id: String, text: String]

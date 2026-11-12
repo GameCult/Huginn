@@ -193,6 +193,10 @@ impl Chat for FakeChat {
         Ok(ChatOpenDirectReceipt { request_id: request.request_id.clone(), outcome, room_id: landed.then(|| "!dm:chat".to_string()), event_id: landed.then(|| "$open".to_string()) })
     }
 
+    fn fetch(&self, _: &crate::chat_client::ChatFetchRequest) -> Result<crate::chat_client::ChatFetchReceipt> {
+        panic!("no test asks the fake mouth to fetch yet")
+    }
+
     fn read(&self, read: &ChatRead) -> Result<()> {
         if self.fail_read.get() {
             return Err(anyhow!("the mouth is down"));

@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cultnet_rs::{CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetRudpSocketTransportConnection, CultNetRudpSocketTransportOptions};
-use mind_body::chat_client::{self, ReplyLink, ReplyViolation, Basis, Form, ChatRefusal, MouthRefused, Refusal, REFUSAL, ACK, Chat, ChatAck, ChatOpenDirectReceipt, ChatOpenDirectRequest, DirectOutcome, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_REQUEST_V4, PENDING_V1, PENDING_V2, PENDING_V4, READ, SEND_RECEIPT, SEND_REQUEST};
+use mind_body::chat_client::{self, ReplyLink, ReplyViolation, Basis, Form, ChatRefusal, MouthRefused, Refusal, REFUSAL, ACK, Chat, ChatAck, ChatFetchReceipt, ChatFetchRequest, ChatOpenDirectReceipt, ChatOpenDirectRequest, DirectOutcome, FetchOutcome, FETCH_RECEIPT, FETCH_REQUEST, ReceiptMode, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, ChatPending, ChatPendingRequest, ChatRead, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_REQUEST_V4, PENDING_V1, PENDING_V2, PENDING_V4, READ, SEND_RECEIPT, SEND_REQUEST};
 use mind_body::chat_rudp::{RudpChat, connection_id};
 
 const ACK_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_ack.v1.msgpack");
@@ -34,6 +34,10 @@ const OPEN_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamec
 const UNKNOWN_KIND_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamecult.persona.chat_refusal.v1.unknown-kind.msgpack");
 const REFUSAL_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v1/gamecult.persona.chat_refusal.v1.msgpack");
 const OPENED_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v4/gamecult.persona.chat_open_direct_receipt.v1.opened.msgpack");
+
+// Bifrost 3a6b45d's own golden bytes for the fetch, copied unchanged as `persona-chat-v9/` (`tests/fixtures/persona-chat-v7/` there).
+const FETCH_REQUEST_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v9/gamecult.persona.chat_fetch_request.v1.msgpack");
+const FETCH_POSTED_BYTES: &[u8] = include_bytes!("fixtures/persona-chat-v9/gamecult.persona.chat_fetch_receipt.v1.stored-posted.msgpack");
 
 const KEY: &str = "connection-key-for-test";
 const TAG: &str = "cultnet.transport.rudp.v0";
@@ -128,6 +132,7 @@ fn serve(key: &str, bind: &str, pending_kind: &'static str, pending_bytes: &'sta
                 PENDING_REQUEST_V1 if pending_kind != PENDING && for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => Some(answer(pending_kind, "eureka", pending_bytes)),
                 SEND_REQUEST if for_eureka(&chat_client::decode::<ChatSendRequest>(&document.payload).unwrap().persona) => Some(answer(SEND_RECEIPT, &document.record_key, SEND_RECEIPT_BYTES)),
                 OPEN_DIRECT_REQUEST if for_eureka(&chat_client::decode::<ChatOpenDirectRequest>(&document.payload).unwrap().persona) => Some(answer(open.0, open.1.unwrap_or(&document.record_key), open.2)),
+                FETCH_REQUEST if for_eureka(&chat_client::decode::<ChatFetchRequest>(&document.payload).unwrap().persona) => Some(answer(FETCH_RECEIPT, &document.record_key, FETCH_POSTED_BYTES)),
                 _ => None,
             };
             if let Some(reply) = reply {
@@ -330,6 +335,21 @@ fn an_open_crosses_a_real_rudp_session_in_the_mouths_bytes_and_a_receipt_for_ano
     assert!(chat.open_direct(&another).is_err(), "the answer names req-1, not req-other");
     let seen = mouth.seen.lock().unwrap().clone();
     assert_eq!(seen[0], (OPEN_DIRECT_REQUEST.to_string(), OPEN_REQUEST_BYTES.to_vec()));
+}
+
+#[test]
+fn a_fetch_crosses_a_real_rudp_session_in_the_mouths_bytes_and_a_receipt_for_another_fetch_is_refused() {
+    let mouth = mouth(KEY);
+    let chat = client(&mouth, KEY, "eureka", Duration::from_secs(5));
+    let request = chat_client::decode::<ChatFetchRequest>(FETCH_REQUEST_BYTES).unwrap();
+    let receipt = chat.fetch(&request).unwrap();
+    assert_eq!(receipt, chat_client::decode::<ChatFetchReceipt>(FETCH_POSTED_BYTES).unwrap());
+    assert_eq!((receipt.outcome, receipt.receipt), (FetchOutcome::Stored, Some(ReceiptMode::Posted)));
+
+    let another = ChatFetchRequest { request_id: "req-other".into(), ..request };
+    assert!(chat.fetch(&another).is_err(), "the answer names req-f1, not req-other");
+    let seen = mouth.seen.lock().unwrap().clone();
+    assert_eq!(seen[0], (FETCH_REQUEST.to_string(), FETCH_REQUEST_BYTES.to_vec()));
 }
 
 /// A mouth that answers every open with `reply`.
