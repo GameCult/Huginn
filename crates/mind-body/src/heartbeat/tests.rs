@@ -1577,6 +1577,8 @@ fn matrixs_addressing_facts_wake_her_off_the_beat_only_on_a_message_from_the_ros
         (Some(Basis::Direct), Form::Message, true),
         (Some(Basis::Tag), Form::Message, true),
         (Some(Basis::Reply), Form::Message, true),
+        (Some(Basis::FollowUp), Form::Message, true),
+        (Some(Basis::FollowUp), Form::Notice, false),
         (Some(Basis::Room), Form::Message, false),
         (None, Form::Message, false),
         (Some(Basis::Direct), Form::Notice, false),

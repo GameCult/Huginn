@@ -1117,6 +1117,15 @@ fn a_minds_earlier_line_and_tail_line_read_role_mind() {
 }
 
 #[test]
+fn a_follow_up_tail_line_prints_its_basis() {
+    let c = config();
+    let table = addressing_of(&c, None, &own_addressee(&c));
+    let mut line = tl("swarm", 1, LIBBY, "x");
+    line.basis = Some(crate::chat_client::Basis::FollowUp);
+    assert!(tail_line(&c, &table, &line).contains(&format!("basis={}", crate::chat_client::FOLLOW_UP_BASIS)));
+}
+
+#[test]
 fn the_tail_size_budget_measures_a_mind_line_as_the_line_it_prints() {
     let c = config();
     let table = addressing_of(&c, None, &own_addressee(&c));

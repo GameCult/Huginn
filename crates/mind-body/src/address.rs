@@ -65,7 +65,7 @@ pub(crate) fn addresses(who: &Addressee, delivery: &ChatDelivery) -> bool {
 /// Whether a delivery the mouth gave `own` is for her: her DM (`is_direct`, which every mouth sends, so an old mouth's DM is hers too),
 /// Matrix's word that it is a tag of hers or a reply to her, or what it says (`addresses`). The basis `Room` (`@room`) is for no one, and no basis is unproven, not "not for her": the names still decide.
 pub(crate) fn is_for(own: &Addressee, delivery: &ChatDelivery) -> bool {
-    (delivery.form == Form::Message && (delivery.is_direct || matches!(delivery.basis, Some(Basis::Direct | Basis::Tag | Basis::Reply)))) || addresses(own, delivery)
+    (delivery.form == Form::Message && (delivery.is_direct || matches!(delivery.basis, Some(Basis::Direct | Basis::Tag | Basis::Reply | Basis::FollowUp)))) || addresses(own, delivery)
 }
 
 /// The chat names of one stewarded repo. Listed names are exactly those, each matched exactly as the steward wrote it (capitalization
