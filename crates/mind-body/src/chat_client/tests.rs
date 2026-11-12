@@ -145,6 +145,19 @@ fn a_basis_or_form_this_side_does_not_know_does_not_decode() {
     assert!(decode::<ChatPending>(&rmp_serde::to_vec(&value).unwrap()).is_err());
 }
 
+#[test]
+fn the_follow_up_basis_is_one_wire_string_that_round_trips_and_an_unknown_one_still_fails() {
+    use crate::chat_client::{Basis, FOLLOW_UP_BASIS};
+    let mut value: serde_json::Value = rmp_serde::from_slice(PENDING_TAG_BYTES).unwrap();
+    value[1][0][12] = FOLLOW_UP_BASIS.into();
+    let pending = decode::<ChatPending>(&rmp_serde::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(pending.deliveries[0].basis, Some(Basis::FollowUp));
+    assert_eq!(Basis::FollowUp.name(), FOLLOW_UP_BASIS);
+    assert_eq!(rmp_serde::from_slice::<String>(&rmp_serde::to_vec(&Basis::FollowUp).unwrap()).unwrap(), FOLLOW_UP_BASIS);
+    value[1][0][12] = "follow-up".into();
+    assert!(decode::<ChatPending>(&rmp_serde::to_vec(&value).unwrap()).is_err());
+}
+
 /// Reads the tuple's shape from the raw bytes, independent of the serde types under test.
 mod shape {
     #[derive(Debug, PartialEq, Eq)]

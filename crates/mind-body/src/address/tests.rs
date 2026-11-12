@@ -117,7 +117,7 @@ fn the_localpart_is_the_name_between_the_at_and_the_colon() {
 fn only_a_message_can_address_and_the_mouths_basis_stands_for_the_polling_mind_alone() {
     let nibu = steward("GameCult/Thing", &[]);
     let with = |basis, form, text: &str, mentions: &[&str]| ChatDelivery { basis, form, ..said(text, mentions) };
-    for basis in [Basis::Direct, Basis::Tag, Basis::Reply] {
+    for basis in [Basis::Direct, Basis::Tag, Basis::Reply, Basis::FollowUp] {
         assert!(is_for(&nibu, &with(Some(basis), Form::Message, "nothing named", &[])), "{basis:?}");
         assert!(!addresses(&nibu, &with(Some(basis), Form::Message, "nothing named", &[])), "a basis is a fact about the Persona that polled, not about every Mind: {basis:?}");
         assert!(!is_for(&nibu, &with(Some(basis), Form::Notice, "nothing named", &[])), "a notice is for no one: {basis:?}");

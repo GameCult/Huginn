@@ -350,11 +350,17 @@ pub enum Basis {
     Direct,
     Tag,
     Reply,
+    /// A reply in a conversation she opened within the mouth's window. The window and its cap are the mouth's; Huginn keeps no state for it.
+    FollowUp,
     Room,
 }
 
+/// The wire spelling of `Basis::FollowUp`, defined once: decode, encode and the rendered `basis=` all read it. The mouth's word
+/// (Bifrost PR #74, `CHAT_FOLLOW=1`); the parser accepts it before the mouth's flag turns on.
+pub const FOLLOW_UP_BASIS: &str = "follow";
+
 impl Basis {
-    const ALL: [Self; 4] = [Self::Direct, Self::Tag, Self::Reply, Self::Room];
+    const ALL: [Self; 5] = [Self::Direct, Self::Tag, Self::Reply, Self::FollowUp, Self::Room];
 
     /// The mouth's spelling: a MessagePack string.
     pub fn name(self) -> &'static str {
@@ -362,6 +368,7 @@ impl Basis {
             Self::Direct => "direct",
             Self::Tag => "tag",
             Self::Reply => "reply",
+            Self::FollowUp => FOLLOW_UP_BASIS,
             Self::Room => "room",
         }
     }
