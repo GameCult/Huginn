@@ -3238,6 +3238,17 @@ fn the_work_question_names_the_search_over_her_plans_and_frames_what_she_finds_a
 }
 
 #[test]
+fn turn_that_asks_next_work_carries_the_imagination_line() {
+    let c = config();
+    let batch = [delivery(1, "swarm", "@aqua:chat", "hello")];
+    let lines = message_lines(&c, &own_addressee(&c), &[], &batch, &earlier_shown(&batch, &BTreeSet::new(), &c.own_sender, u64::MAX));
+    for (started_self_today, messages) in [(true, lines.as_str()), (true, ""), (false, "")] {
+        let input = render_input(&c, started_self_today, "", messages, None, &[], "", "", "", "usage", &[]);
+        assert!(input.contains("Explore your Body and consult your Imagination for how it could be improved."), "{input}");
+    }
+}
+
+#[test]
 fn only_a_line_with_messages_asks_for_them_to_be_answered() {
     let with = input_for(&[], "Aqua");
     assert!(with.contains(ANSWER_MESSAGES) && with.find(ANSWER_MESSAGES) < with.find(WORK_QUESTION) && with.trim_end().ends_with(WORK_QUESTION), "{with}");
