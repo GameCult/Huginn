@@ -185,6 +185,74 @@ fn open_direct_fixtures_round_trip() {
     golden(UNKNOWN_KIND_BYTES, &ChatRefusal { persona: "eureka".into(), refusal: Refusal::UnknownKind });
 }
 
+const FETCH_REQUEST_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v9/gamecult.persona.chat_fetch_request.v1.msgpack");
+const FETCH_POSTED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v9/gamecult.persona.chat_fetch_receipt.v1.stored-posted.msgpack");
+const FETCH_EXISTING_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v9/gamecult.persona.chat_fetch_receipt.v1.stored-existing.msgpack");
+const FETCH_NIL_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v9/gamecult.persona.chat_fetch_receipt.v1.stored-nil.msgpack");
+const FETCH_UNVERIFIED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v9/gamecult.persona.chat_fetch_receipt.v1.stored-unverified.msgpack");
+const FETCH_REFUSED_BYTES: &[u8] = include_bytes!("../../tests/fixtures/persona-chat-v9/gamecult.persona.chat_fetch_receipt.v1.refused.msgpack");
+
+fn fetch_image() -> ChatImage {
+    let hash = "ab".repeat(32);
+    ChatImage { path: format!("{}/{hash}.png", "cd".repeat(32)), mime: "image/png".into(), size: 2048, sha256: hash }
+}
+
+fn fetch_receipt(outcome: FetchOutcome, stored: bool, receipt: Option<ReceiptMode>) -> ChatFetchReceipt {
+    ChatFetchReceipt { request_id: "req-f1".into(), outcome, room_id: stored.then(|| "!abc:gamecult.org".to_string()), image: stored.then(fetch_image), receipt }
+}
+
+#[test]
+fn mouth_fixtures_roundtrip() {
+    golden(FETCH_REQUEST_BYTES, &ChatFetchRequest { request_id: "req-f1".into(), persona: "eureka".into(), room: "#swarm:gamecult.org".into(), event_id: "$file1".into() });
+    golden(FETCH_POSTED_BYTES, &fetch_receipt(FetchOutcome::Stored, true, Some(ReceiptMode::Posted)));
+    golden(FETCH_EXISTING_BYTES, &fetch_receipt(FetchOutcome::Stored, true, Some(ReceiptMode::Existing)));
+    golden(FETCH_NIL_BYTES, &fetch_receipt(FetchOutcome::Stored, true, None));
+    golden(FETCH_UNVERIFIED_BYTES, &fetch_receipt(FetchOutcome::StoredUnverified, true, None));
+    golden(FETCH_REFUSED_BYTES, &ChatFetchReceipt { request_id: "req-f1".into(), outcome: FetchOutcome::BridgedRoom, room_id: None, image: None, receipt: None });
+    // The receipt is a 5-slot tuple whose image is its own 4-slot tuple.
+    assert_eq!(FETCH_POSTED_BYTES[0], 0x95);
+}
+
+#[test]
+fn the_receipt_checker_follows_the_one_table() {
+    use FetchOutcome::*;
+    let decodes = |receipt: &ChatFetchReceipt| {
+        let wire = (&receipt.request_id, receipt.outcome, &receipt.room_id, &receipt.image, receipt.receipt);
+        decode::<ChatFetchReceipt>(&encode(&wire).unwrap()).is_ok()
+    };
+    for mode in [None, Some(ReceiptMode::Posted), Some(ReceiptMode::Existing)] {
+        assert!(decodes(&fetch_receipt(Stored, true, mode)), "Stored with {mode:?}");
+    }
+    assert!(decodes(&fetch_receipt(StoredUnverified, true, None)));
+    assert!(!decodes(&fetch_receipt(StoredUnverified, true, Some(ReceiptMode::Posted))), "an unverified fetch posts no receipt");
+    assert!(!decodes(&fetch_receipt(StoredUnverified, true, Some(ReceiptMode::Existing))));
+    for outcome in FetchOutcome::ALL {
+        let stored = outcome.stored();
+        assert!(!decodes(&fetch_receipt(outcome, !stored, None)), "{outcome:?} with the other half's ids");
+        assert!(decodes(&fetch_receipt(outcome, stored, None)), "{outcome:?}");
+        if outcome != Stored {
+            assert!(!decodes(&fetch_receipt(outcome, stored, Some(ReceiptMode::Posted))), "{outcome:?} with a receipt");
+        }
+        let mut half = fetch_receipt(outcome, stored, None);
+        half.room_id = (!stored).then(|| "!r:x".to_string());
+        assert!(!decodes(&half), "{outcome:?} with only a room id");
+    }
+}
+
+#[test]
+fn every_fetch_outcome_is_spelled_as_the_mouth_spells_it_and_no_other_decodes() {
+    let words = ["Stored", "StoredUnverified", "NotAMember", "BridgedRoom", "TooLarge", "TypeRefused", "NoAttachment", "HashMismatch", "RateLimited", "Brake", "PersonaMismatch", "UnknownPersona", "FetchFailed", "StoreFailed"];
+    assert_eq!(FetchOutcome::ALL.map(FetchOutcome::name), words);
+    for word in words {
+        assert_eq!(decode::<FetchOutcome>(&encode(&word).unwrap()).unwrap().name(), word);
+    }
+    // The organ-local words are never on the wire.
+    for local in ["NoStore", "Unserved", "Unanswered", "stored", ""] {
+        assert!(decode::<FetchOutcome>(&encode(&local).unwrap()).is_err(), "{local}");
+    }
+    assert!(decode::<ReceiptMode>(&encode(&"Skipped").unwrap()).is_err());
+}
+
 #[test]
 fn every_outcome_is_spelled_as_the_mouth_spells_it() {
     let all = [

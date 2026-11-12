@@ -84,6 +84,10 @@ struct FakeChat {
     open_outcome: Cell<Option<DirectOutcome>>,
     /// The mouth refuses the open kind outright (an older mouth): the open errors with the typed refusal.
     open_unserved: Cell<bool>,
+    /// The fetches asked of the mouth, in order.
+    fetches: RefCell<Vec<crate::chat_client::ChatFetchRequest>>,
+    /// How the fake mouth answers a fetch.
+    fetch_answer: RefCell<FetchAnswer>,
     /// Every line the fake homeserver holds, oldest first; none is a mouth with no tail. The reply carries them as the real mouth does:
     /// rooms she may speak in only, 20 a room and 60 in all, newest kept, oldest first (Bifrost `docs/bridge.md` "Room tail").
     homeserver: RefCell<Option<Vec<TailLine>>>,
@@ -93,6 +97,16 @@ struct FakeChat {
     gaps: RefCell<Vec<String>>,
     /// The mouth cannot be asked for its pending.
     fail_pending: Cell<bool>,
+}
+
+/// What a fake mouth does with a fetch.
+#[derive(Clone)]
+enum FetchAnswer {
+    Receipt(crate::chat_client::ChatFetchReceipt),
+    /// The kind is refused as unlisted.
+    Unserved,
+    /// No answer: the transport errors.
+    Down,
 }
 
 impl FakeChat {
@@ -191,6 +205,16 @@ impl Chat for FakeChat {
         let Some(outcome) = self.open_outcome.get() else { return Err(anyhow!("CANARY-open-down {}", request.user_id)) };
         let landed = matches!(outcome, DirectOutcome::Opened | DirectOutcome::Existing);
         Ok(ChatOpenDirectReceipt { request_id: request.request_id.clone(), outcome, room_id: landed.then(|| "!dm:chat".to_string()), event_id: landed.then(|| "$open".to_string()) })
+    }
+
+    fn fetch(&self, request: &crate::chat_client::ChatFetchRequest) -> Result<crate::chat_client::ChatFetchReceipt> {
+        self.log.borrow_mut().push("fetch".into());
+        self.fetches.borrow_mut().push(request.clone());
+        match self.fetch_answer.borrow().clone() {
+            FetchAnswer::Receipt(receipt) => Ok(crate::chat_client::ChatFetchReceipt { request_id: request.request_id.clone(), ..receipt }),
+            FetchAnswer::Unserved => Err(crate::chat_client::MouthRefused(Refusal::UnknownKind).into()),
+            FetchAnswer::Down => Err(anyhow!("CANARY-fetch-down {}", request.event_id)),
+        }
     }
 
     fn read(&self, read: &ChatRead) -> Result<()> {
@@ -425,6 +449,7 @@ fn config() -> Config {
         model: "claude-test-model".into(),
         doctrine: vec![],
         image_store: None,
+        fetch: false,
     }
 }
 
@@ -502,6 +527,8 @@ impl Rig {
                 opens: RefCell::default(),
                 open_outcome: Cell::new(Some(DirectOutcome::Opened)),
                 open_unserved: Cell::new(false),
+                fetches: RefCell::default(),
+                fetch_answer: RefCell::new(FetchAnswer::Down),
                 homeserver: RefCell::new(None),
                 dms: RefCell::default(),
                 gaps: RefCell::new(Vec::new()),
@@ -941,7 +968,7 @@ fn the_decoder_holds_the_bounds_the_schema_states() {
         assert!(!ok(brief, repo, campaign), "{repo:?} {campaign:?} brief of {}", brief.chars().count());
     }
     // The decoder's bounds are the schema's, read from one place.
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&c.rooms, &[CAMPAIGN.to_string()], true)).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&c.rooms, &[CAMPAIGN.to_string()], true, false)).unwrap();
     let ask = &schema["properties"]["start_self_run"]["anyOf"][1]["properties"];
     assert_eq!(ask["repo"]["pattern"], REPO_PATTERN);
     assert_eq!(ask["campaign"]["enum"], json!([CAMPAIGN]));
@@ -1638,7 +1665,7 @@ fn a_vote_or_urgency_outside_its_bounds_fails_the_turn_without_a_pulse_or_an_ack
 
 #[test]
 fn the_reply_schema_bounds_the_vote_and_the_urgency_to_the_pulse_kind() {
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[], true)).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[], true, false)).unwrap();
     assert_eq!(schema["required"], json!(["intent", "say", "open_direct", "start_self_run", "remember", "rule", "settle", "urgency_permille"]));
     assert_eq!(schema["properties"]["tempo_vote_beat_s"]["anyOf"][1], json!({ "type": "integer", "minimum": 60, "maximum": 86_400 }));
     let described = schema["properties"]["tempo_vote_beat_s"]["description"].as_str().expect("the vote key is described to the model");
@@ -1863,7 +1890,7 @@ fn the_persona_flags_come_from_the_environment_when_the_command_line_lacks_them(
     let (config, rest) = Config::from_args_and_env(&args("--instance eureka"), env, "usage").unwrap();
     assert_eq!(
         config,
-        Config { rooms: vec!["swarm".into(), "usage".into()], operators: vec!["@op:chat".into(), "@op2:chat".into()], minds: vec!["@libby:chat".into(), "@aqua:chat".into()], own_sender: "@eureka:chat".into(), model: "claude-test-model".into(), doctrine: vec![], image_store: None }
+        Config { rooms: vec!["swarm".into(), "usage".into()], operators: vec!["@op:chat".into(), "@op2:chat".into()], minds: vec!["@libby:chat".into(), "@aqua:chat".into()], own_sender: "@eureka:chat".into(), model: "claude-test-model".into(), doctrine: vec![], image_store: None, fetch: false }
     );
     assert_eq!(rest, ["--instance", "eureka"]);
     // A flag wins over its variable, one at a time.
@@ -2156,7 +2183,7 @@ fn where_and_from_whom_she_learned_a_memory_comes_from_the_batch_and_no_model_fi
     let (_, memory) = memories(&wake).remove(0);
     assert_eq!((memory.origin, memory.sources.len()), (MemoryOrigin::Wake, 0));
     // The schema has no such fields and the decoder refuses them.
-    let schema = reply_schema(&["swarm".to_string()], &[CAMPAIGN.to_string()], true);
+    let schema = reply_schema(&["swarm".to_string()], &[CAMPAIGN.to_string()], true, false);
     for field in ["origin", "heard_from", "sources"] {
         assert!(!schema.contains(field), "{field}");
     }
@@ -2187,7 +2214,7 @@ fn what_she_keeps_names_only_people_she_may_name_and_stays_in_bounds() {
     assert!(!ok(json!([{ "sort": "Idea", "text": "x", "about": [], "salience_permille": 1001 }])));
     let without = reply(&[], json!([]), json!([]), json!(null)).replace("\"remember\":[],", "");
     assert_eq!(decode_reply(&without, &rooms, &Shown { people: people.to_vec(), ..Shown::default() }, &Conversation::Public, &config(), &[]), Err(Failure::Undecodable), "remember is required");
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()], true)).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()], true, false)).unwrap();
     let items = &schema["properties"]["remember"]["items"]["properties"];
     assert_eq!(items["about"]["items"], json!({ "type": "string" }), "the people she may name change with every batch: the decoder holds them, the line lists them");
     assert_eq!(items["sort"]["enum"], json!(["Asked", "Decided", "Committed", "Learned", "Did", "Idea", "Rapport"]));
@@ -2267,7 +2294,7 @@ fn the_open_items_shown_are_what_the_decoder_lets_her_settle_or_take_on() {
     assert_eq!(decode_reply(&taking("yggdrasil:memory:b"), &rooms, &Shown { open: shown.to_vec(), ..Shown::default() }, &Conversation::Public, &config(), &[]), Err(Failure::OutOfBounds(FOR_ITEM_FAULT)));
     assert_eq!(decode_reply(&taking("new:0"), &rooms, &Shown { open: shown.to_vec(), ..Shown::default() }, &Conversation::Public, &config(), &[]), Err(Failure::OutOfBounds(FOR_ITEM_FAULT)), "new:<i> names a memory this reply writes");
     // The schema leaves the ids to the decoder and the line, and still offers the one-reply form.
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()], true)).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &[CAMPAIGN.to_string()], true, false)).unwrap();
     assert_eq!(schema["properties"]["settle"]["items"]["properties"]["item"], json!({ "type": "string" }));
     assert_eq!(schema["properties"]["start_self_run"]["anyOf"][1]["properties"]["for_item"]["anyOf"], json!([{ "type": "null" }, { "type": "string" }]));
 }
@@ -3437,7 +3464,7 @@ fn a_first_line_with_messages_ends_on_the_work_question_after_them() {
 
 #[test]
 fn a_reply_states_its_intent_first() {
-    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[], true)).unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&reply_schema(&["operator".to_string()], &[], true, false)).unwrap();
     assert_eq!(schema["required"][0], json!("intent"));
     assert!(schema["properties"]["intent"]["description"].as_str().unwrap().contains("whose decision you wait on") && INTENT_DESCRIPTION.ends_with("If you have already asked and nothing more can be done, say so and name the next thing."));
     let rooms = ["operator".to_string()];
@@ -7910,14 +7937,14 @@ fn open_fault(reply: &str, people: &[String], conversation: &Conversation, confi
 #[test]
 fn open_direct_is_null_outside_a_public_session() {
     let (rooms, campaigns) = (vec!["swarm".to_string()], vec![CAMPAIGN.to_string()]);
-    let public: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &campaigns, true)).unwrap();
+    let public: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &campaigns, true, false)).unwrap();
     let ask = &public["properties"]["open_direct"]["anyOf"];
     assert_eq!(ask[0], json!({ "type": "null" }));
     assert_eq!(ask[1]["required"], json!(["with", "text"]));
     assert_eq!(ask[1]["properties"]["with"], json!({ "type": "string" }), "the people grow during the session: not an enum");
     assert_eq!(ask[1]["properties"]["text"]["minLength"], json!(1));
     assert!(ask[1]["description"].as_str().unwrap().contains("until they write to you first"), "{}", ask[1]["description"]);
-    let direct: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &campaigns, false)).unwrap();
+    let direct: serde_json::Value = serde_json::from_str(&reply_schema(&rooms, &campaigns, false, false)).unwrap();
     assert_eq!(direct["properties"]["open_direct"], json!({ "type": "null" }));
     assert!(direct["required"].as_array().unwrap().contains(&json!("open_direct")), "required in both");
 
@@ -8109,7 +8136,7 @@ fn an_open_the_mouth_does_not_serve_is_told_as_not_sent() {
 
 #[test]
 fn the_daily_creation_policy_has_one_text_in_the_schema_and_the_notice() {
-    let schema = reply_schema(&["swarm".to_string()], &[], true);
+    let schema = reply_schema(&["swarm".to_string()], &[], true, false);
     let told = open_told("@ann:chat", Some(DirectOutcome::DailyLimit));
     assert!(told.contains(OPEN_DAILY_POLICY), "{told}");
     let schema: Value = serde_json::from_str(&schema).unwrap();
@@ -8884,4 +8911,346 @@ fn an_event_told_and_unanswered_that_the_mouth_renumbers_is_not_told_again() {
     rig.go();
     let told: String = rig.model.requests.borrow().iter().map(|told| told.input.clone()).collect::<Vec<_>>().join("\n");
     assert_eq!(told.matches("text=\"first\"").count(), 1, "{told}");
+}
+
+// ---- the attachment save: a reply field, behind the fetch flag, and the verified file in her sandbox ----
+
+fn saving(room: &str, event: &str) -> String {
+    json!({ "intent": "Keep the picture", "say": [], "open_direct": null, "start_self_run": null, "remember": [], "rule": [], "settle": [], "urgency_permille": null, "save_attachment": { "room": room, "event": event } }).to_string()
+}
+
+fn with_key(key: serde_json::Value) -> String {
+    let mut reply: serde_json::Value = serde_json::from_str(&says(&[])).unwrap();
+    reply["save_attachment"] = key;
+    reply.to_string()
+}
+
+fn on() -> Config {
+    Config { fetch: true, ..config() }
+}
+
+fn save_fault(reply: &str, config: &Config) -> Option<Failure> {
+    decode_reply(reply, &config.rooms, &Shown::default(), &Conversation::Public, config, &addressing_of(config, None, &own_addressee(config))).err()
+}
+
+/// A rig whose store holds `PNG_BYTES` for `!swarm:chat` and whose mouth answers a fetch with `outcome`, the room id and that image.
+fn fetching(outcome: crate::chat_client::FetchOutcome, receipt: Option<crate::chat_client::ReceiptMode>, replies: &[String]) -> (Rig, tempfile::TempDir, ChatImage) {
+    let rig = public_rig(replies);
+    let store = tempfile::tempdir().unwrap();
+    let image = stored_image(store.path(), "!swarm:chat", PNG_BYTES);
+    let stored = outcome.stored();
+    *rig.chat.fetch_answer.borrow_mut() = FetchAnswer::Receipt(crate::chat_client::ChatFetchReceipt { request_id: String::new(), outcome, room_id: stored.then(|| "!swarm:chat".to_string()), image: stored.then(|| image.clone()), receipt });
+    (rig, store, image)
+}
+
+fn kept(rig: &Rig) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(rig.sandbox().join("attachments")).map(|dir| dir.map(|e| e.unwrap().file_name().into_string().unwrap()).collect()).unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[test]
+fn with_the_flag_off_the_schema_has_no_save_attachment_and_with_it_on_the_property_is_optional() {
+    let (rooms, campaigns) = (vec!["swarm".to_string()], vec![CAMPAIGN.to_string()]);
+    let off: Value = serde_json::from_str(&reply_schema(&rooms, &campaigns, true, false)).unwrap();
+    assert!(off["properties"].get("save_attachment").is_none());
+    assert!(!off["required"].as_array().unwrap().iter().any(|name| name == "save_attachment"));
+    assert!(!off.to_string().contains("save_attachment"));
+    let on: Value = serde_json::from_str(&reply_schema(&rooms, &campaigns, true, true)).unwrap();
+    assert!(on["properties"].get("save_attachment").is_some());
+    assert!(!on["required"].as_array().unwrap().iter().any(|name| name == "save_attachment"), "like tempo_vote_beat_s: omission is no ask");
+    assert_eq!(on["properties"]["save_attachment"]["anyOf"][1]["properties"]["room"]["enum"], json!(["swarm"]), "only rooms she may say in");
+}
+
+#[test]
+fn a_flag_off_reply_naming_save_attachment_is_out_of_bounds_and_an_omitting_one_decodes_as_before() {
+    let fault = Some(Failure::OutOfBounds(SAVE_FAULT));
+    assert_eq!(save_fault(&saving("swarm", "$e1"), &config()), fault);
+    assert_eq!(save_fault(&with_key(json!(null)), &config()), fault, "null names the key too");
+    assert_eq!(save_fault(&says(&[]), &config()), None, "omitted decodes exactly as before");
+    // And nothing leaves the organ for it.
+    let rig = public_rig(&[saving("swarm", "$e1"), saving("swarm", "$e1"), saving("swarm", "$e1")]);
+    *rig.chat.fetch_answer.borrow_mut() = FetchAnswer::Unserved;
+    let _ = rig.go();
+    assert!(rig.chat.fetches.borrow().is_empty());
+}
+
+#[test]
+fn with_the_flag_on_an_omitted_or_null_field_is_no_ask_and_an_object_is_bounds_checked() {
+    assert_eq!(save_fault(&says(&[]), &on()), None);
+    assert_eq!(save_fault(&with_key(json!(null)), &on()), None);
+    assert_eq!(save_fault(&saving("swarm", "$e1"), &on()), None);
+    let fault = Some(Failure::OutOfBounds(SAVE_FAULT));
+    assert_eq!(save_fault(&saving("not-a-room", "$e1"), &on()), fault, "a room outside the reply rooms");
+    assert_eq!(save_fault(&saving("!swarm:chat", "$e1"), &on()), fault, "a room id is not an alias she was shown");
+    for event in ["", "$", "e1", "$e 1", "$\u{e9}", &format!("${}", "x".repeat(255))] {
+        assert_eq!(save_fault(&saving("swarm", event), &on()), fault, "{event:?}");
+    }
+    assert_eq!(save_fault(&saving("swarm", &format!("${}", "x".repeat(254))), &on()), None);
+    assert_eq!(save_fault(&with_key(json!({ "room": "swarm", "event": "$e1", "path": "/etc" })), &on()), Some(Failure::Undecodable), "the reference is room and event only");
+    assert_eq!(save_fault(&with_key(json!([{ "room": "swarm", "event": "$e1" }, { "room": "swarm", "event": "$e2" }])), &on()), Some(Failure::Undecodable), "one per reply: the field is an object");
+}
+
+#[test]
+fn the_flag_is_exactly_one() {
+    let args = ["--rooms", "swarm", "--operator", "@op:chat", "--minds", "@eureka:chat", "--self-sender", "@eureka:chat"].map(String::from).to_vec();
+    for (value, expected) in [(Some("1"), true), (Some("0"), false), (Some("true"), false), (Some(""), false), (Some(" 1"), false), (Some("11"), false), (None, false)] {
+        let lookup = move |name: &str| match name {
+            ENV_MODEL => Some("m".to_string()),
+            "BIFROST_CHAT_FETCH" => value.map(String::from),
+            _ => None,
+        };
+        assert_eq!(Config::from_args_and_env(&args, lookup, "usage").unwrap().0.fetch, expected, "{value:?}");
+    }
+}
+
+#[test]
+fn the_fetch_is_never_asked_on_the_poll_path() {
+    let (rig, store, _) = fetching(crate::chat_client::FetchOutcome::Stored, None, &[says(&[("swarm", "hello")])]);
+    assert_eq!(failure_of(rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() })), None);
+    assert!(rig.chat.fetches.borrow().is_empty());
+    assert!(!rig.log.borrow().iter().any(|step| step == "fetch"));
+}
+
+#[test]
+fn a_saved_image_from_an_alias_lands_by_hash_with_the_batch_request_id_and_one_line() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    let (rig, store, image) = fetching(F::Stored, Some(R::Posted), &[saving("swarm", "$pic"), says(&[])]);
+    let rig = {
+        let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+        *rig.model.during.borrow_mut() = Some(Box::new(move || {
+            if !pushed.replace(true) {
+                deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+            }
+        }));
+        rig
+    };
+    assert_eq!(failure_of(rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() })), None);
+    let asked = rig.chat.fetches.borrow().clone();
+    assert_eq!(asked, [crate::chat_client::ChatFetchRequest { request_id: "s1-1-a".into(), persona: INSTANCE.into(), room: "swarm".into(), event_id: "$pic".into() }]);
+    let name = format!("{}.png", image.sha256);
+    assert_eq!(kept(&rig), [name.clone()]);
+    assert_eq!(std::fs::read(rig.sandbox().join("attachments").join(&name)).unwrap(), PNG_BYTES);
+    let line = input_of(&rig, 1);
+    assert!(line.contains(&format!("saved at attachments/{name}")) && line.contains("The room shows you received it"), "{line}");
+    assert!(!line.contains("$pic") && !line.contains("!swarm:chat") && !line.contains("CANARY"), "no event id, room id or mouth text: {line}");
+    let trace = rig.trace.0.borrow();
+    assert!(trace[0].outputs.iter().any(|item| item.text == "save_attachment swarm $pic: Stored"), "{trace:?}");
+}
+
+#[test]
+fn the_three_saved_lines_are_their_own_and_a_stored_with_no_receipt_is_not_a_failure() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    let mut told = Vec::new();
+    for (outcome, receipt, word, says_not_read) in [(F::Stored, Some(R::Posted), "Stored", false), (F::Stored, Some(R::Existing), "Stored", false), (F::Stored, None, "StoredNoReceipt", true), (F::StoredUnverified, None, "StoredUnverified", true)] {
+        let (rig, store, image) = fetching(outcome, receipt, &[saving("swarm", "$pic"), says(&[])]);
+        let rig = {
+            let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+            *rig.model.during.borrow_mut() = Some(Box::new(move || {
+                if !pushed.replace(true) {
+                    deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+                }
+            }));
+            rig
+        };
+        let Outcome::Served { failure, .. } = rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() }) else { panic!("served") };
+        assert_eq!(failure, None, "{outcome:?} {receipt:?}");
+        assert_eq!(kept(&rig), [format!("{}.png", image.sha256)], "the file is saved under the computed hash for every saved outcome");
+        let line = input_of(&rig, 1);
+        assert_eq!(line.contains("not marked read"), says_not_read, "{outcome:?} {receipt:?}: {line}");
+        assert_eq!(line.contains("not verified"), outcome == F::StoredUnverified, "{line}");
+        assert!(rig.trace.0.borrow()[0].outputs.iter().any(|item| item.text == format!("save_attachment swarm $pic: {word}")));
+        let tail = line.rsplit("notice role=organ").next().unwrap().to_string();
+        told.push(tail.replace(&image.sha256, "H"));
+    }
+    assert_eq!(told[0], told[1], "Posted and Existing share one line");
+    assert!(told[0] != told[2] && told[0] != told[3] && told[2] != told[3], "{told:?}");
+}
+
+#[test]
+fn a_refusal_outcome_writes_no_file_and_is_told_in_its_own_line() {
+    use crate::chat_client::FetchOutcome as F;
+    let mut lines = BTreeSet::new();
+    for outcome in [F::NotAMember, F::BridgedRoom, F::TooLarge, F::TypeRefused, F::NoAttachment, F::HashMismatch, F::RateLimited, F::Brake, F::PersonaMismatch, F::UnknownPersona, F::FetchFailed, F::StoreFailed] {
+        let (rig, store, _) = fetching(outcome, None, &[saving("swarm", "$pic"), says(&[])]);
+        let rig = {
+            let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+            *rig.model.during.borrow_mut() = Some(Box::new(move || {
+                if !pushed.replace(true) {
+                    deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+                }
+            }));
+            rig
+        };
+        assert_eq!(failure_of(rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() })), None, "{outcome:?}: told, never a failed step");
+        assert!(kept(&rig).is_empty(), "{outcome:?} saved a file");
+        let line = input_of(&rig, 1);
+        let told = line.rsplit("notice role=organ").next().unwrap().to_string();
+        assert!(told.contains("was not saved") && !told.contains("CANARY") && !told.contains("$pic"), "{outcome:?}: {told}");
+        assert!(lines.insert(told), "{outcome:?} shares a line with another");
+        assert!(rig.trace.0.borrow()[0].outputs.iter().any(|item| item.text == format!("save_attachment swarm $pic: {}", outcome.name())));
+    }
+    assert_eq!(lines.len(), 12);
+}
+
+#[test]
+fn an_old_mouth_a_silent_mouth_and_no_store_are_told_and_not_retried() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    for (answer, told, word, sent) in [(FetchAnswer::Unserved, "does not serve attachments", "Unserved", 1), (FetchAnswer::Down, "did not answer", "Unanswered", 1)] {
+        let (rig, store, _) = fetching(F::Stored, Some(R::Posted), &[saving("swarm", "$pic"), says(&[])]);
+        *rig.chat.fetch_answer.borrow_mut() = answer;
+        let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+        *rig.model.during.borrow_mut() = Some(Box::new(move || {
+            if !pushed.replace(true) {
+                deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+            }
+        }));
+        assert_eq!(failure_of(rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() })), None);
+        assert_eq!(rig.chat.fetches.borrow().len(), sent, "no retry in the turn");
+        let line = input_of(&rig, 1);
+        assert!(line.contains(told) && !line.contains("CANARY"), "{line}");
+        assert!(rig.trace.0.borrow()[0].outputs.iter().any(|item| item.text == format!("save_attachment swarm $pic: {word}")));
+        assert!(kept(&rig).is_empty());
+    }
+    // No image store: decided before anything is sent.
+    let (rig, _, _) = fetching(F::Stored, Some(R::Posted), &[saving("swarm", "$pic"), says(&[])]);
+    let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        if !pushed.replace(true) {
+            deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+        }
+    }));
+    assert_eq!(failure_of(rig.go_with(&on())), None);
+    assert!(rig.chat.fetches.borrow().is_empty(), "nothing leaves the organ without a store");
+    assert!(input_of(&rig, 1).contains("this Persona has no image store"));
+    assert!(rig.trace.0.borrow()[0].outputs.iter().any(|item| item.text == "save_attachment swarm $pic: NoStore"));
+}
+
+#[test]
+fn a_receipt_path_under_another_rooms_hash_or_a_missing_file_is_told_by_the_verifiers_reason_and_saves_nothing() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    let (rig, store, _) = fetching(F::Stored, Some(R::Posted), &[saving("swarm", "$pic"), says(&[])]);
+    let other = stored_image(store.path(), "!other:chat", PNG_BYTES);
+    let FetchAnswer::Receipt(receipt) = rig.chat.fetch_answer.borrow().clone() else { unreachable!() };
+    *rig.chat.fetch_answer.borrow_mut() = FetchAnswer::Receipt(crate::chat_client::ChatFetchReceipt { image: Some(other), ..receipt });
+    let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        if !pushed.replace(true) {
+            deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+        }
+    }));
+    assert_eq!(failure_of(rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() })), None);
+    assert!(kept(&rig).is_empty());
+    assert!(input_of(&rig, 1).contains("the image reference leaves this room's store"));
+}
+
+#[test]
+fn the_gate_holds_a_fetch_as_it_holds_a_say() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    let (rig, store, _) = fetching(F::Stored, Some(R::Posted), &[saving("swarm", "$pic")]);
+    let control = rig.store();
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        ControlWriter::open(&control).unwrap().set_brake(false, at(0), "op").unwrap();
+    }));
+    let Outcome::Served { failure, .. } = rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() }) else { panic!("served") };
+    assert_eq!(failure, Some(Failure::Held(HeldReason::BrakeHeld)));
+    assert!(rig.chat.fetches.borrow().is_empty());
+    assert!(kept(&rig).is_empty());
+}
+
+#[test]
+fn both_notices_survive_a_reply_with_open_direct_and_save_attachment() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    let mut both: serde_json::Value = serde_json::from_str(&opening(&[], "@ann:chat", "Hello Ann")).unwrap();
+    both["save_attachment"] = json!({ "room": "swarm", "event": "$pic" });
+    let (rig, store, _) = fetching(F::Stored, Some(R::Posted), &[both.to_string(), says(&[])]);
+    let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+    *rig.model.during.borrow_mut() = Some(Box::new(move || {
+        if !pushed.replace(true) {
+            deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+        }
+    }));
+    assert_eq!(failure_of(rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() })), None);
+    let log = rig.log.borrow().clone();
+    let (open, fetch) = (log.iter().position(|step| step == "open"), log.iter().position(|step| step == "fetch"));
+    assert!(open.is_some() && fetch.is_some() && open < fetch, "one request each, the open first: {log:?}");
+    assert_eq!(log.iter().filter(|step| *step == "open" || *step == "fetch").count(), 2);
+    let line = input_of(&rig, 1);
+    let (open, save) = (line.find("Your invitation to @ann:chat").expect("the open's line"), line.find("is saved at attachments/").expect("the save's line"));
+    assert!(open < save, "the open's line first: {line}");
+    assert_eq!(line.matches("notice role=organ").count(), 2);
+    let trace = rig.trace.0.borrow();
+    let words: Vec<_> = trace[0].outputs.iter().filter(|item| item.text.starts_with("open_direct") || item.text.starts_with("save_attachment")).map(|item| item.text.clone()).collect();
+    assert_eq!(words, ["open_direct @ann:chat: Opened", "save_attachment swarm $pic: Stored"]);
+    assert_eq!(rig.chat.fetches.borrow()[0].request_id, "s1-1-a");
+    assert_eq!(rig.chat.opens.borrow()[0].request_id, "s1-1-d");
+}
+
+#[test]
+fn a_revised_reply_with_an_open_and_a_save_sends_them_under_different_request_ids() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    let store = tempfile::tempdir().unwrap();
+    let both = |extra: &str| {
+        let mut reply: serde_json::Value = serde_json::from_str(&opening(&[("swarm", extra)], "@ann:chat", "Come and see")).unwrap();
+        reply["save_attachment"] = json!({ "room": "swarm", "event": "$pic" });
+        reply.to_string()
+    };
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let image = stored_image(store.path(), "!swarm:chat", PNG_BYTES);
+    *rig.chat.fetch_answer.borrow_mut() = FetchAnswer::Receipt(crate::chat_client::ChatFetchReceipt { request_id: String::new(), outcome: F::Stored, room_id: Some("!swarm:chat".into()), image: Some(image), receipt: Some(R::Posted) });
+    let config = Config { image_store: Some(store.path().to_path_buf()), ..on() };
+    let (ask, answer) = (delivery(1, "swarm", "@ann:chat", "who owns the stairs?"), delivery(2, "swarm", "@libby:chat", "the stairs are mine"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config, vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &answer);
+        inbox.result(&reply_result(&both("I own the stairs")), true, false).unwrap();
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell(false).unwrap();
+        inbox.echoed();
+        inbox.result(&reply_result(&both("then the cellar is mine")), true, false).unwrap();
+        let (opens, fetches) = (rig.chat.opens.borrow().clone(), rig.chat.fetches.borrow().clone());
+        assert_eq!((opens.len(), fetches.len()), (1, 1));
+        assert_ne!(opens[0].request_id, fetches[0].request_id, "two documents never share an id");
+        assert!(opens[0].request_id.contains("-r1-") && opens[0].request_id.ends_with("-d"), "{}", opens[0].request_id);
+        assert!(fetches[0].request_id.contains("-r1-") && fetches[0].request_id.ends_with("-a"), "{}", fetches[0].request_id);
+    });
+}
+
+#[test]
+fn every_failed_save_is_told_to_her_in_her_own_next_turn_and_leaves_no_file() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    type Prepare = Box<dyn Fn(&std::path::Path, &str)>;
+    let cases: [(&str, Prepare, &str); 5] = [
+        ("RepoTree", Box::new(|sandbox, _| std::fs::create_dir_all(sandbox.join(".git")).unwrap()), "git work tree"),
+        ("OutsideSandbox", Box::new(|sandbox, _| std::os::unix::fs::symlink("/", sandbox.join("attachments")).unwrap()), "link or not a folder"),
+        ("Exists", Box::new(|sandbox, sha| {
+            std::fs::create_dir_all(sandbox.join("attachments")).unwrap();
+            std::fs::write(sandbox.join("attachments").join(format!("{sha}.png")), b"hers").unwrap();
+        }), "a different file already holds that name"),
+        ("WriteFailed", Box::new(|sandbox, sha| std::fs::create_dir_all(sandbox.join("attachments").join(format!(".{sha}.png.part"))).unwrap()), "could not be written into your sandbox"),
+        ("Load", Box::new(|_, _| {}), "the stored image cannot be read"),
+    ];
+    for (word, prepare, told) in cases {
+        let (rig, store, image) = fetching(F::Stored, Some(R::Posted), &[saving("swarm", "$pic"), says(&[])]);
+        let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+        *rig.model.during.borrow_mut() = Some(Box::new(move || {
+            if !pushed.replace(true) {
+                deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+            }
+        }));
+        std::fs::create_dir_all(rig.sandbox()).unwrap();
+        prepare(&rig.sandbox(), &image.sha256);
+        if word == "Load" {
+            std::fs::remove_file(store.path().join(&image.path)).unwrap();
+        }
+        assert_eq!(failure_of(rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() })), None, "{word}: told, never a failed step");
+        let line = input_of(&rig, 1);
+        assert!(line.contains("Your attachment was not saved") && line.contains(told), "{word}: {line}");
+        assert!(!line.contains("The room shows you received it"), "{word}: {line}");
+        assert!(rig.trace.0.borrow()[0].outputs.iter().any(|item| item.text.starts_with("save_attachment swarm $pic: ") && item.text.contains(word)), "{word}");
+        assert!(!rig.sandbox().join("attachments").join(format!("{}.png", image.sha256)).exists() || word == "Exists", "{word}");
+    }
 }

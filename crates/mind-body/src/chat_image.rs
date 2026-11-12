@@ -65,7 +65,13 @@ impl Skip {
 
 /// Loads `image`, which was delivered for `room_id`, from `store`.
 pub(crate) fn load(store: Option<&Path>, room_id: &str, image: &ChatImage) -> Result<Image, Skip> {
-    let store = store.ok_or(Skip::NoStore)?;
+    let (bytes, media_type) = load_bytes(store.ok_or(Skip::NoStore)?, room_id, image)?;
+    Ok(Image { media_type, base64: STANDARD.encode(&bytes) })
+}
+
+/// The verified bytes of `image` and the media type they sniff as: everything `load` checks, before it encodes. The one verifier;
+/// the attachment saver calls it too, and holds no check of its own.
+pub(crate) fn load_bytes(store: &Path, room_id: &str, image: &ChatImage) -> Result<(Vec<u8>, &'static str), Skip> {
     if image.size > MAX_BYTES {
         return Err(Skip::TooLarge);
     }
@@ -108,7 +114,7 @@ pub(crate) fn load(store: Option<&Path>, room_id: &str, image: &ChatImage) -> Re
     if image.mime != media_type {
         return Err(Skip::MimeMismatch);
     }
-    Ok(Image { media_type, base64: STANDARD.encode(&bytes) })
+    Ok((bytes, media_type))
 }
 
 /// At most `MAX_BYTES + 1` bytes of `path`: a file that grew since the length check reads as another size than the

@@ -30,7 +30,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::chat_client::{
-    ACK, Chat, ChatAck, ChatDelivery, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, MouthRefused, Refusal, reply_warnings, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_REQUEST_V4, PENDING_V2, PENDING_V4, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
+    ACK, Chat, ChatAck, ChatDelivery, ChatFetchReceipt, ChatFetchRequest, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, MouthRefused, Refusal, reply_warnings, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_REQUEST_V4, PENDING_V2, PENDING_V4, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, FETCH_RECEIPT, FETCH_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
     SEND_REQUEST, decode, encode,
 };
 
@@ -225,6 +225,25 @@ impl Chat for RudpChat {
         let receipt: ChatOpenDirectReceipt = decode(&payload)?;
         if receipt.request_id != request.request_id {
             bail!("the mouth answered another open");
+        }
+        Ok(receipt)
+    }
+
+    fn fetch(&self, request: &ChatFetchRequest) -> Result<ChatFetchReceipt> {
+        // As an open: a mouth that does not serve the kind answers a refusal keyed by the persona, and the fetch is known not sent.
+        let p = self.persona.as_str();
+        let answers = [(FETCH_RECEIPT, request.request_id.as_str()), (REFUSAL, p)];
+        let (kind, payload) = self.exchange(FETCH_REQUEST, &request.request_id, request, Some(&answers))?.ok_or_else(|| anyhow!("no answer payload"))?;
+        if kind == REFUSAL {
+            let refusal: ChatRefusal = decode(&payload)?;
+            if refusal.persona != self.persona || refusal.refusal != Refusal::UnknownKind {
+                bail!("the mouth refused the fetch: {}", refusal.refusal.name());
+            }
+            return Err(MouthRefused(refusal.refusal).into());
+        }
+        let receipt: ChatFetchReceipt = decode(&payload)?;
+        if receipt.request_id != request.request_id {
+            bail!("the mouth answered another fetch");
         }
         Ok(receipt)
     }
