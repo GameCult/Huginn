@@ -139,7 +139,7 @@ fn matrix_user_id(text: &str) -> bool {
 
 /// Whether `text` has the shape of an event id: `$` and at least one ASCII graphic byte, at most 255 bytes. Deliberately not a base64
 /// check: room versions 3 to 12 and the legacy `$opaque:server` ids all pass, because the mouth forwards whatever the homeserver named.
-fn event_id_shape(text: &str) -> bool {
+pub(crate) fn event_id_shape(text: &str) -> bool {
     text.len() <= 255 && text.strip_prefix('$').is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_graphic()))
 }
 

@@ -19,7 +19,7 @@
 //! is never in this process's environment, only the descriptor a lease grants); `RUNTIME_DIRECTORY` (the
 //! unit's `RuntimeDirectory=`) holds each process's configuration and instructions; `BIFROST_CHAT_ENDPOINT`
 //! (`rudp://<ip>:<port>`, the mouth) and `BIFROST_CHAT_KEY_FILE`; `BIFROST_CHAT_PENDING_V4` set to exactly `1` asks the mouth for the
-//! reply link (`chat_pending.v4`), anything else or unset does not. Without
+//! reply link (`chat_pending.v4`), anything else or unset does not. `BIFROST_CHAT_FETCH` set to exactly `1` lets her ask the mouth to keep one event's image (`save_attachment`); the operator sets it only once the mouth runs `CHAT_FETCH=1`. Without
 //! `--endpoint` the daemon is `HUGINN_ENDPOINT`; the trace is `persona-trace.cc`
 //! under `STATE_DIRECTORY`, and her sandbox is `STATE_DIRECTORY/sandbox`. The key file is read here and its
 //! text goes to the transport, which holds it; nothing is printed.

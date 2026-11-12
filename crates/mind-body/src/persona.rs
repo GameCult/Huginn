@@ -85,8 +85,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::address::{Addressee, Name, addresses, is_for, localpart, project_names};
+use crate::attachment::{self, SaveFault};
 use crate::chat_image::{self, Image, MAX_PER_LINE};
-use crate::chat_client::{TailLine, Basis, Chat, ChatDelivery, MouthRefused, ChatOpenDirectRequest, ChatRead, DirectOutcome, ChatSendRequest, ContextLine, Refusal, ReplyTo, SendBasis};
+use crate::chat_client::{TailLine, Basis, Chat, ChatDelivery, MouthRefused, ChatFetchRequest, event_id_shape, ChatOpenDirectRequest, ChatRead, DirectOutcome, FetchOutcome, ReceiptMode, ChatSendRequest, ContextLine, Refusal, ReplyTo, SendBasis};
 use crate::connector::render_plan;
 use crate::control::{ControlSource, Effective, HeldReason, derive};
 use crate::heartbeat::{HeartbeatView, PollTrace, stewardships_of};
@@ -141,6 +142,8 @@ pub const ENV_CONFIG_SEED: &str = "MIND_PERSONA_CONFIG_SEED";
 pub const ENV_DOCTRINE: &str = "MIND_PERSONA_DOCTRINE";
 /// The absolute path of her image store (`Config::image_store`).
 pub const ENV_IMAGE_STORE: &str = "MIND_PERSONA_IMAGE_STORE";
+/// The mouth's attachment fetch is served: exactly `1` turns it on (`Config::fetch`), as `BIFROST_CHAT_PENDING_V4` does for the reply link.
+const ENV_FETCH: &str = "BIFROST_CHAT_FETCH";
 /// The most doctrine text, in bytes, one process's instructions may carry.
 pub const DOCTRINE_MAX_BYTES: usize = 96 * 1024;
 /// How many of her latest runs a turn's input lists.
@@ -159,6 +162,7 @@ const START_FAULT: &str = "start_self_run: its brief, repo or campaign is out of
 const VOTE_FAULT: &str = "tempo_vote_beat_s or urgency_permille: outside its range";
 const ABOUT_FAULT: &str = "remember.about: every entry must be an id copied exactly from a line of this session";
 const SETTLE_ITEM_FAULT: &str = "settle.item: not an open item this conversation showed";
+const SAVE_FAULT: &str = "save_attachment: not offered here, or its room is not one you may say in, or its event is not an event id";
 const OPEN_DIRECT_FAULT: &str = "open_direct: only a public conversation may open one, with a person this session showed (not a Mind, not you), and a text of 1 to 4000 bytes";
 /// The mouth's bound on an invitation's text, in bytes.
 const OPEN_DIRECT_TEXT_MAX_BYTES: usize = 4000;
@@ -215,6 +219,9 @@ pub struct Config {
     pub doctrine: Vec<PathBuf>,
     /// Her image store: where the mouth keeps the images it fetched for her, one directory per room. None shows no image.
     pub image_store: Option<PathBuf>,
+    /// Whether she may ask the mouth to fetch one event's image: the operator's declaration that the mouth runs `CHAT_FETCH=1`
+    /// (`BIFROST_CHAT_FETCH`, exactly `1`). Off, the reply schema has no `save_attachment` and no request leaves the organ.
+    pub fetch: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,7 +274,7 @@ impl Config {
             if items.iter().any(String::is_empty) { Err(anyhow!("{usage}")) } else { Ok(items) }
         };
         let rooms = list(rooms)?;
-        let config = Self { rooms, operators: list(operators)?, minds: list(minds)?, own_sender: own.ok_or_else(|| anyhow!("{usage}"))?, model: String::new(), doctrine: Vec::new(), image_store: None };
+        let config = Self { rooms, operators: list(operators)?, minds: list(minds)?, own_sender: own.ok_or_else(|| anyhow!("{usage}"))?, model: String::new(), doctrine: Vec::new(), image_store: None, fetch: false };
         Ok((config, rest))
     }
 
@@ -294,6 +301,7 @@ impl Config {
                 bail!("{ENV_DOCTRINE} names a path that is not absolute");
             }
         }
+        config.fetch = lookup(ENV_FETCH).as_deref() == Some("1");
         if let Some(path) = lookup(ENV_IMAGE_STORE).filter(|value| !value.is_empty()) {
             if !Path::new(&path).is_absolute() {
                 bail!("{ENV_IMAGE_STORE} is not an absolute path");
@@ -336,6 +344,10 @@ pub struct PersonaReply {
     /// The urgency she declares for herself until her next turn, in thousandths; null declares none.
     #[serde(deserialize_with = "Option::deserialize")]
     pub urgency_permille: Option<u16>,
+    /// One event's image she asks the mouth for, to keep in her sandbox. Present only where the fetch flag is on: omitted or null is no ask;
+    /// a reply that names the key with the flag off decodes and is refused as a bound, with nothing sent.
+    #[serde(default, deserialize_with = "present")]
+    pub save_attachment: Option<Option<SaveAttachment>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +364,15 @@ pub struct Say {
 pub struct OpenDirect {
     pub with: String,
     pub text: String,
+}
+
+/// Her ask that the mouth fetch the image of `event` in `room` (an alias she may say in) for her sandbox. Room and event only: nothing
+/// else about the file leaves the organ.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveAttachment {
+    pub room: String,
+    pub event: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,7 +494,9 @@ pub(crate) fn remember_item_schema() -> Value {
     })
 }
 
-pub fn reply_schema(rooms: &[String], campaigns: &[String], may_open: bool) -> String {
+const SAVE_ATTACHMENT_DESCRIPTION: &str = "Keep one image from a room's event in your sandbox, or null (or omit the key). `room` is the room name as the attachment line shows it and `event` is the event id shown there. The mouth checks you are a member, fetches the file, verifies it and tells the room you received it; the file lands in your sandbox as attachments/<sha256>.<ext>, and the outcome is told to you next turn. One per reply.";
+
+pub fn reply_schema(rooms: &[String], campaigns: &[String], may_open: bool, fetch: bool) -> String {
     let remember = json!({
         "description": REMEMBER_DESCRIPTION,
         "type": "array",
@@ -550,7 +573,7 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String], may_open: bool) -> S
     } else {
         json!({ "type": "null" })
     };
-    json!({
+    let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["intent", "say", "open_direct", "start_self_run", "remember", "rule", "settle", "urgency_permille"],
@@ -576,8 +599,23 @@ pub fn reply_schema(rooms: &[String], campaigns: &[String], may_open: bool) -> S
             "tempo_vote_beat_s": { "description": "Omit this key to leave your standing vote unchanged. A number votes that many seconds per beat. null only withdraws your vote, so you abstain again and are not counted.", "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": TEMPO_VOTE_MIN_S, "maximum": TEMPO_VOTE_MAX_S }] },
             "urgency_permille": { "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0, "maximum": URGENCY_MAX_PERMILLE }] }
         }
-    })
-    .to_string()
+    });
+    if fetch {
+        // Not required, like tempo_vote_beat_s: omission and null are no ask.
+        schema["properties"]["save_attachment"] = json!({
+            "description": SAVE_ATTACHMENT_DESCRIPTION,
+            "anyOf": [
+                { "type": "null" },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["room", "event"],
+                    "properties": { "room": { "type": "string", "enum": rooms }, "event": { "type": "string", "minLength": 2, "maxLength": 255 } }
+                }
+            ]
+        });
+    }
+    schema.to_string()
 }
 
 /// What the plan's usage windows say, as the lease grant carries them: the kit's own type, not a copy.
@@ -745,7 +783,8 @@ pub struct Organs<'a> {
     pub spawner: &'a dyn Spawner,
     /// The unit's `RuntimeMaxSec` in seconds: the one length of a start.
     pub run_cap_s: u64,
-    /// Her sandbox: the one directory her tools write, made owner-only if absent. Never read by an organ.
+    /// Her sandbox: the one directory her tools write, made owner-only if absent. Never read by an organ, except the one named regular file the
+    /// attachment saver compares after EEXIST (bounded, nonblocking, no listing).
     pub sandbox: &'a Path,
     /// The unit's runtime directory: each process's instructions file is written here.
     pub scratch: &'a Path,
@@ -833,8 +872,8 @@ impl fmt::Display for Outcome {
 
 /// How one result ended.
 enum Step {
-    /// Answered; the Self run its reply started or found live and the follow-up it admitted for it, if any, the intent it stated, the ids of the open items (Asked, Committed) it wrote, and the notice line of the DM it asked the mouth to open, if any.
-    Answered(Option<(PipelineRef, PipelineRef)>, String, Vec<String>, Option<String>),
+    /// Answered; the Self run its reply started or found live and the follow-up it admitted for it, if any, the intent it stated, the ids of the open items (Asked, Committed) it wrote, and the notice lines of what she asked the mouth: zero to two, the DM open first and the attachment save second.
+    Answered(Option<(PipelineRef, PipelineRef)>, String, Vec<String>, Vec<String>),
     /// The reply could not be decoded: it is told back to her, and sends and acks nothing.
     Refused(Failure),
     /// The mouth refused a send because the room moved past what her input held: the room, the rooms sent before it in the
@@ -1012,7 +1051,7 @@ fn one_process(
     let session_id = Uuid::new_v5(&SESSION_NAMESPACE, format!("{}:p{process}", run.id.0).as_bytes());
     let rooms = reply_rooms(config, &session.conversation);
     let may_open = session.conversation == Conversation::Public;
-    let schema_of = |campaigns: &[(String, String)]| reply_schema(&rooms, &campaigns.iter().map(|(slug, _)| slug.clone()).collect::<Vec<_>>(), may_open);
+    let schema_of = |campaigns: &[(String, String)]| reply_schema(&rooms, &campaigns.iter().map(|(slug, _)| slug.clone()).collect::<Vec<_>>(), may_open, config.fetch);
     let Started { child, lease, started_ms } = match start_session(organs, config, session_id, remaining_s, schema_of)? {
         Ok(started) => started,
         Err(why) => {
@@ -1843,8 +1882,8 @@ impl<C: ControlSource, S: ControlSource> SessionInbox for PersonaInbox<'_, C, S>
             }
         };
         match step {
-            Step::Answered(started, intent, opened, notice) => {
-                self.notices.extend(notice);
+            Step::Answered(started, intent, opened, notices) => {
+                self.notices.extend(notices);
                 // The result answers the replies its lines carried: they are heard now, and only now.
                 let by = started.as_ref().map(|(_, follow_up)| follow_up.clone());
                 self.answered_replies.extend(heard.into_iter().map(|reply| (reply, by.clone())));
@@ -2079,7 +2118,7 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
         }
         outputs.push(TraceItem { provenance: "her own".into(), room: say.room.clone(), text });
     }
-    let mut notice = None;
+    let mut notices = Vec::new();
     if let Some(ask) = &reply.open_direct {
         // The gate binds the open as it binds a say.
         if let Effective::Held { reason } = read(control, swarm, &instance) {
@@ -2095,7 +2134,19 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
         let outcome = answer.ok().map(|receipt| receipt.outcome);
         outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("open_direct {}: {}", ask.with, unserved.or(outcome.map(DirectOutcome::name)).unwrap_or("unanswered")) });
         let told = if unserved.is_some() { format!("Your invitation to {} was not sent: the mouth does not serve invitations yet.", ask.with) } else { open_told(&ask.with, outcome) };
-        notice = Some(organ_notice(unix_ms(organs.clock.now()), &told));
+        notices.push(organ_notice(unix_ms(organs.clock.now()), &told));
+    }
+    if let Some(Some(ask)) = &reply.save_attachment {
+        // The gate binds the fetch as it binds a say and an open; each step has its own request id.
+        if let Effective::Held { reason } = read(control, swarm, &instance) {
+            organs.trace.record(&record(outputs, format!("failed: {}", Failure::Held(reason))))?;
+            return Ok(Step::Failed(Failure::Held(reason), reply.intent));
+        }
+        let request_id = if finality.revised { format!("{batch_id}-r{turn}-a") } else { format!("{batch_id}-a") };
+        // A refusal, a fault and a silent mouth are told, never a failed step. Nothing is retried in the turn.
+        let saved = save_attachment(organs, config, &instance.0, request_id, ask);
+        outputs.push(TraceItem { provenance: "her own".into(), room: String::new(), text: format!("save_attachment {} {}: {}", ask.room, ask.event, saved.word()) });
+        notices.push(organ_notice(unix_ms(organs.clock.now()), &saved.told()));
     }
     // The one origin of this turn: its memories and its brief record the same conversation.
     let origin = origin_of(config, batch, &inbox.origin);
@@ -2131,7 +2182,7 @@ fn act<C: ControlSource, S: ControlSource>(inbox: &PersonaInbox<'_, C, S>, batch
     }
     organs.trace.record(&record(outputs, "answered".into()))?;
     let opened = reply.remember.iter().zip(&memories).filter(|(remember, _)| matches!(remember.sort, MemorySort::Asked | MemorySort::Committed)).filter_map(|(_, memory)| pipeline_key(memory).ok()).collect();
-    Ok(Step::Answered(started, reply.intent, opened, notice))
+    Ok(Step::Answered(started, reply.intent, opened, notices))
 }
 
 /// The seq an ack may pass because nothing in it is for her: the leading run of `pending` (oldest first) that is not addressed to any of
@@ -2366,6 +2417,17 @@ fn open_in_bounds(ask: &OpenDirect, conversation: &Conversation, config: &Config
         && ask.text.len() <= OPEN_DIRECT_TEXT_MAX_BYTES
 }
 
+/// Whether the save is hers to ask. With the flag off the key must be absent, null included; on, an ask names a room she may say in and
+/// an event id's shape.
+fn save_in_bounds(reply: &PersonaReply, rooms: &[String], config: &Config) -> bool {
+    match &reply.save_attachment {
+        None => true,
+        Some(_) if !config.fetch => false,
+        Some(None) => true,
+        Some(Some(ask)) => rooms.contains(&ask.room) && event_id_shape(&ask.event),
+    }
+}
+
 /// The reply as the one type it must be, with every room one of `rooms`, every person one of
 /// `people` and every settled or taken-on item one of the `open` items shown this turn.
 fn decode_reply(text: &str, rooms: &[String], seen: &Shown, conversation: &Conversation, config: &Config, addressing: &[Addressee]) -> Result<PersonaReply, Failure> {
@@ -2390,6 +2452,9 @@ fn decode_reply(text: &str, rooms: &[String], seen: &Shown, conversation: &Conve
     }
     if reply.say.iter().any(|say| !rooms.contains(&say.room) || say.text.trim().is_empty()) {
         return Err(Failure::RoomNotAllowed);
+    }
+    if !save_in_bounds(&reply, rooms, config) {
+        return Err(Failure::OutOfBounds(SAVE_FAULT));
     }
     Ok(reply)
 }
@@ -3235,6 +3300,95 @@ fn open_told(with: &str, outcome: Option<DirectOutcome>) -> String {
         Some(D::DailyLimit) => format!("{OPEN_DAILY_POLICY} You opened one with {with} today. Try again tomorrow if it still matters, or wait for them to write."),
         Some(refused @ (D::PersonaMismatch | D::UnknownPersona | D::EmptyText | D::SendFailed)) => format!("Your invitation to {with} was not sent: the mouth refused it ({}).", refused.name()),
         None => format!("The mouth did not answer your invitation to {with}, so it may or may not have gone out. Do not repeat it unless they stay silent."),
+    }
+}
+
+/// What became of her save: a closed set, so nothing the mouth wrote reaches her. The three saved lines are their own arms.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Saved {
+    /// Saved and verified; `receipt` Posted or Existing means the room shows it received, none means no receipt was posted.
+    Stored { path: String, receipt: Option<ReceiptMode> },
+    /// Saved, the event carried no hash: not verified, no receipt, never marked read.
+    Unverified { path: String },
+    /// One of the mouth's twelve refusal words.
+    Refused(FetchOutcome),
+    /// The mouth refused the kind (UnknownKind): nothing was sent.
+    Unserved,
+    /// The mouth did not answer: it may or may not have fetched.
+    Unanswered,
+    /// No image store: decided before any request.
+    NoStore,
+    Fault(SaveFault),
+}
+
+impl Saved {
+    /// The outcome as the trace spells it.
+    fn word(&self) -> String {
+        match self {
+            Self::Stored { receipt: Some(_), .. } => "Stored".into(),
+            Self::Stored { receipt: None, .. } => "StoredNoReceipt".into(),
+            Self::Unverified { .. } => FetchOutcome::StoredUnverified.name().into(),
+            Self::Refused(outcome) => outcome.name().into(),
+            Self::Unserved => "Unserved".into(),
+            Self::Unanswered => "Unanswered".into(),
+            Self::NoStore => "NoStore".into(),
+            Self::Fault(SaveFault::Load(skip)) => format!("Load {skip:?}"),
+            Self::Fault(fault) => format!("{fault:?}"),
+        }
+    }
+
+    /// The one fixed line she is told. Only the saved lines carry the relative path.
+    fn told(&self) -> String {
+        use FetchOutcome as F;
+        match self {
+            Self::Stored { path, receipt: Some(_) } => format!("Your attachment is saved at {path} in your sandbox and checked against its hash. The room shows you received it."),
+            Self::Stored { path, receipt: None } => format!("Your attachment is saved at {path} in your sandbox and checked against its hash, but no receipt was posted, so it is not marked read."),
+            Self::Unverified { path } => format!("Your attachment is saved at {path} in your sandbox but not verified: the event carried no hash. No receipt was posted and it is not marked read."),
+            Self::Refused(outcome) => match outcome {
+                F::NotAMember => "Your attachment was not saved: you are not a member of that room.",
+                F::BridgedRoom => "Your attachment was not saved: that room is bridged from another network, and the mouth does not fetch from it.",
+                F::TooLarge => "Your attachment was not saved: the image is too large for the mouth to keep.",
+                F::TypeRefused => "Your attachment was not saved: the mouth keeps png, jpeg, gif and webp from unencrypted rooms only, and that file is not one it can keep.",
+                F::NoAttachment => "Your attachment was not saved: that event has no image attached.",
+                F::HashMismatch => "Your attachment was not saved: the file does not match the hash its event declared.",
+                F::RateLimited => "Your attachment was not saved: the mouth's hourly limit on saves for you is reached. Do not ask again this turn.",
+                F::Brake => "Your attachment was not saved: the brake is held.",
+                F::PersonaMismatch => "Your attachment was not saved: the mouth took the request for another Persona.",
+                F::UnknownPersona => "Your attachment was not saved: the mouth does not know you.",
+                F::FetchFailed => "Your attachment was not saved: the mouth could not fetch the file from the homeserver.",
+                F::StoreFailed => "Your attachment was not saved: the mouth could not store the file.",
+                F::Stored | F::StoredUnverified => unreachable!("a stored outcome is a saved line, not a refusal"),
+            }
+            .into(),
+            Self::Unserved => "Your attachment was not saved: the mouth does not serve attachments yet.".into(),
+            Self::Unanswered => "The mouth did not answer your request to keep an attachment, so it may or may not have gone through. Do not repeat it unless the file is missing.".into(),
+            Self::NoStore => format!("Your attachment was not saved: {}.", chat_image::Skip::NoStore.reason()),
+            Self::Fault(SaveFault::RepoTree) => "Your attachment was not saved: your sandbox, or its attachments folder, is a git work tree.".into(),
+            Self::Fault(SaveFault::OutsideSandbox) => "Your attachment was not saved: attachments in your sandbox is a link or not a folder.".into(),
+            Self::Fault(SaveFault::Exists) => "Your attachment was not saved: a different file already holds that name in attachments, and nothing was replaced.".into(),
+            Self::Fault(SaveFault::WriteFailed) => "Your attachment was not saved: the file could not be written into your sandbox.".into(),
+            Self::Fault(SaveFault::Load(skip)) => format!("Your attachment was not saved: {}.", skip.reason()),
+        }
+    }
+}
+
+/// Asks the mouth for `ask`'s image and keeps what it verified. The store is checked before anything is sent; the organ posts no receipt
+/// (the mouth does, as her, in the same request); a saved file's room id is the receipt's, which the mouth resolved from the alias.
+fn save_attachment(organs: &Organs<'_>, config: &Config, persona: &str, request_id: String, ask: &SaveAttachment) -> Saved {
+    let Some(store) = config.image_store.as_deref() else { return Saved::NoStore };
+    let request = ChatFetchRequest { request_id, persona: persona.into(), room: ask.room.clone(), event_id: ask.event.clone() };
+    let receipt = match organs.chat.fetch(&request) {
+        Ok(receipt) => receipt,
+        Err(error) if error.downcast_ref::<MouthRefused>().is_some() => return Saved::Unserved,
+        Err(_) => return Saved::Unanswered,
+    };
+    let (Some(room_id), Some(image)) = (&receipt.room_id, &receipt.image) else { return Saved::Refused(receipt.outcome) };
+    match attachment::save(store, organs.sandbox, room_id, image) {
+        Ok(path) => {
+            let path = path.to_string_lossy().into_owned();
+            if receipt.outcome == FetchOutcome::StoredUnverified { Saved::Unverified { path } } else { Saved::Stored { path, receipt: receipt.receipt } }
+        }
+        Err(fault) => Saved::Fault(fault),
     }
 }
 

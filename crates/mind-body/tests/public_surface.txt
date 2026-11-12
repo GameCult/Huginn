@@ -236,7 +236,7 @@ mind_body::persona: const ENV_SELF_SENDER : & str
 mind_body::persona: const PERSONA_POLL_S : i64
 mind_body::persona: const SANDBOX_DIR : & str
 mind_body::persona: fn carry (organs : & Organs , control : & impl ControlSource , swarm : & impl ControlSource , config : & Config) -> Result < Outcome >
-mind_body::persona: fn reply_schema (rooms : & [String] , campaigns : & [String] , may_open : bool) -> String
+mind_body::persona: fn reply_schema (rooms : & [String] , campaigns : & [String] , may_open : bool , fetch : bool) -> String
 mind_body::persona: impl Config
 mind_body::persona: impl Config: fn from_args (args : & [String] , usage : & str) -> Result < (Self , Vec < String >) >
 mind_body::persona: impl Config: fn from_args_and_env (args : & [String] , lookup : impl Fn (& str) -> Option < String > , usage : & str) -> Result < (Self , Vec < String >) >
@@ -246,6 +246,7 @@ mind_body::persona: impl FileTrace: fn new (path : impl Into < PathBuf >) -> Sel
 mind_body::persona: impl HuginnPersona
 mind_body::persona: impl HuginnPersona: fn new (client : HuginnClient) -> Self
 mind_body::persona: impl PersonaState for HuginnPersona
+mind_body::persona: impl Saved
 mind_body::persona: impl Sender
 mind_body::persona: impl Shown
 mind_body::persona: impl Trace for FileTrace
@@ -259,14 +260,15 @@ mind_body::persona: impl< C : ControlSource , S : ControlSource > SessionInbox f
 mind_body::persona: pub trait PersonaState { fn instructions (& self) -> Result < String > ; }
 mind_body::persona: pub trait Trace { fn record (& self , trace : & TurnTrace) -> Result < () > ; }
 mind_body::persona: pub use model_connector :: PlanQuota ;
-mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[rooms: Vec < String >, operators: Vec < String >, minds: Vec < String >, own_sender: String, model: String, doctrine: Vec < PathBuf >, image_store: Option < PathBuf >]
+mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[rooms: Vec < String >, operators: Vec < String >, minds: Vec < String >, own_sender: String, model: String, doctrine: Vec < PathBuf >, image_store: Option < PathBuf >, fetch: bool]
 mind_body::persona: struct FileTrace  pub-fields[]
 mind_body::persona: struct HuginnPersona  pub-fields[]
 mind_body::persona: struct OpenDirect # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[with: String, text: String]
 mind_body::persona: struct Organs< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str, chat: & 'a dyn Chat, persona: & 'a dyn PersonaState, trace: & 'a dyn Trace, heartbeat: Option < & 'a dyn HeartbeatView >, lender: & 'a dyn Lender, spawner: & 'a dyn Spawner, run_cap_s: u64, sandbox: & 'a Path, scratch: & 'a Path]
-mind_body::persona: struct PersonaReply # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[intent: String, say: Vec < Say >, open_direct: Option < OpenDirect >, start_self_run: Option < StartSelfRun >, remember: Vec < Remember >, rule: Vec < Rule >, settle: Vec < Settle >, tempo_vote_beat_s: Option < Option < u32 > >, urgency_permille: Option < u16 >]
+mind_body::persona: struct PersonaReply # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[intent: String, say: Vec < Say >, open_direct: Option < OpenDirect >, start_self_run: Option < StartSelfRun >, remember: Vec < Remember >, rule: Vec < Rule >, settle: Vec < Settle >, tempo_vote_beat_s: Option < Option < u32 > >, urgency_permille: Option < u16 >, save_attachment: Option < Option < SaveAttachment > >]
 mind_body::persona: struct Remember # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[sort: MemorySort, text: String, about: Vec < String >, salience_permille: u16]
 mind_body::persona: struct Rule # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[by: String, words: String, repo: String, campaign: String, title: String, ruling: String]
+mind_body::persona: struct SaveAttachment # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[room: String, event: String]
 mind_body::persona: struct Say # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[room: String, text: String]
 mind_body::persona: struct Settle # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[item: String, outcome: SettleOutcome, why: String]
 mind_body::persona: struct StartSelfRun # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[brief: String, repo: String, campaign: String, for_item: Option < String >]

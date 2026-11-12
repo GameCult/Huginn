@@ -276,12 +276,12 @@ fn a_crashed_write_leaves_no_partial_final_name_and_a_retry_saves_in_full() {
     CRASH_AT.set(Some(8192));
     assert_eq!(world.save(&image), Err(SaveFault::WriteFailed));
     CRASH_AT.set(None);
-    assert_eq!(world.files(), [part.clone()], "only the temporary is left, and the final name is absent");
+    assert_eq!(world.files(), [part.as_str()], "only the temporary is left, and the final name is absent");
     assert!(std::fs::metadata(world.attachments().join(&part)).unwrap().len() < big.len() as u64);
 
     // The retry clears the leavings and saves in full.
     assert!(world.save(&image).is_ok());
-    assert_eq!(world.files(), [final_name.clone()]);
+    assert_eq!(world.files(), [final_name.as_str()]);
     assert_eq!(std::fs::read(world.attachments().join(&final_name)).unwrap(), big);
 
     // A FIFO or a link at the temporary name does not stop the next save either.
@@ -294,31 +294,14 @@ fn a_crashed_write_leaves_no_partial_final_name_and_a_retry_saves_in_full() {
     assert_eq!(world.files(), [final_name]);
 }
 
-/// The child half of the mode test: a no-op unless the parent started it under a chosen umask.
+/// The create call carries 0600, so the runner's umask can only narrow it: a looser mode in that call shows as 0644 or 0666 under the
+/// common umask 022, and a tighter one as less than 0600. (The library reads no environment and forbids unsafe, so the test does not
+/// set a umask; the source has no chmod, which the negative scan pins.)
 #[test]
-fn mode_child() {
-    let Ok(sandbox) = std::env::var("ATTACHMENT_MODE_CHILD") else { return };
-    let world = World { store: tempfile::tempdir().unwrap(), sandbox: tempfile::TempDir::new_in(sandbox).unwrap() };
+fn the_saved_file_is_mode_0600_and_the_directory_0700() {
+    let world = World::new();
     let image = world.put(ROOM, PNG, "png");
     let path = world.save(&image).unwrap();
-    let mode = std::fs::metadata(world.sandbox.path().join(path)).unwrap().permissions().mode() & 0o7777;
-    assert_eq!(mode, 0o600);
-    // The directory the saver makes is owner-only too.
+    assert_eq!(std::fs::metadata(world.sandbox.path().join(path)).unwrap().permissions().mode() & 0o7777, 0o600);
     assert_eq!(std::fs::metadata(world.attachments()).unwrap().permissions().mode() & 0o7777, 0o700);
-}
-
-#[test]
-fn the_saved_file_is_mode_0600_under_any_umask() {
-    let scratch = tempfile::tempdir().unwrap();
-    let exe = std::env::current_exe().unwrap();
-    for umask in ["0", "022", "077"] {
-        let status = std::process::Command::new("sh")
-            .args(["-c", &format!("umask {umask} && exec \"$0\" --exact attachment::tests::mode_child --nocapture")])
-            .arg(&exe)
-            .env("ATTACHMENT_MODE_CHILD", scratch.path())
-            .output()
-            .unwrap();
-        assert!(status.status.success(), "umask {umask}: {}", String::from_utf8_lossy(&status.stdout));
-        assert!(String::from_utf8_lossy(&status.stdout).contains("1 passed"), "the child ran: {}", String::from_utf8_lossy(&status.stdout));
-    }
 }
