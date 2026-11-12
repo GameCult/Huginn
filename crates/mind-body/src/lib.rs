@@ -35,6 +35,7 @@
 #![forbid(unsafe_code)]
 
 mod address;
+mod attachment;
 pub mod chat_client;
 mod chat_image;
 pub mod chat_rudp;
