@@ -8,6 +8,8 @@
 //! operator's, not hers); every open below it is relative to a held descriptor and refuses a symlink, so a shell that swaps
 //! `attachments/` for a link between two calls finds the next call refusing it. The bytes go to a temporary name in that directory
 //! and are linked to the final name, which fails where a rename would replace her file; a crash leaves only the temporary.
+//!
+//! The file_received receipt means only that the mouth fetched and stored the file for her. It does not prove the file reached her sandbox. The receipt stays inside the mouth's fetch, so a failed save (Exists, WriteFailed, RepoTree, a Load skip) leaves the receipt standing; she is told the save failed in her own turn.
 
 use std::path::{Path, PathBuf};
 
@@ -82,6 +84,8 @@ fn write(sandbox: &Path, name: &str, bytes: &[u8]) -> Result<(), SaveFault> {
         Ok(()) | Err(Errno::NOENT) => {}
         Err(_) => return Err(SaveFault::WriteFailed),
     }
+    #[cfg(test)]
+    tests::between_unlink_and_create();
     let file = fs::openat(&dir, temp.as_str(), OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::RUSR | Mode::WUSR)
         .map_err(|_| SaveFault::WriteFailed)?;
     let landed = (|| {

@@ -9185,3 +9185,72 @@ fn both_notices_survive_a_reply_with_open_direct_and_save_attachment() {
     assert_eq!(rig.chat.fetches.borrow()[0].request_id, "s1-1-a");
     assert_eq!(rig.chat.opens.borrow()[0].request_id, "s1-1-d");
 }
+
+#[test]
+fn a_revised_reply_with_an_open_and_a_save_sends_them_under_different_request_ids() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    let store = tempfile::tempdir().unwrap();
+    let both = |extra: &str| {
+        let mut reply: serde_json::Value = serde_json::from_str(&opening(&[("swarm", extra)], "@ann:chat", "Come and see")).unwrap();
+        reply["save_attachment"] = json!({ "room": "swarm", "event": "$pic" });
+        reply.to_string()
+    };
+    let rig = Rig::new(vec![], &[]);
+    rig.clock.step.set(0);
+    let image = stored_image(store.path(), "!swarm:chat", PNG_BYTES);
+    *rig.chat.fetch_answer.borrow_mut() = FetchAnswer::Receipt(crate::chat_client::ChatFetchReceipt { request_id: String::new(), outcome: F::Stored, room_id: Some("!swarm:chat".into()), image: Some(image), receipt: Some(R::Posted) });
+    let config = Config { image_store: Some(store.path().to_path_buf()), ..on() };
+    let (ask, answer) = (delivery(1, "swarm", "@ann:chat", "who owns the stairs?"), delivery(2, "swarm", "@libby:chat", "the stairs are mine"));
+    arrives(&rig, &ask);
+    with_inbox(&rig, &config, vec![ask.clone()], |inbox| {
+        inbox.start_line().unwrap();
+        inbox.echoed();
+        arrives(&rig, &answer);
+        inbox.result(&reply_result(&both("I own the stairs")), true, false).unwrap();
+        assert!(inbox.poll().unwrap().pending);
+        inbox.tell(false).unwrap();
+        inbox.echoed();
+        inbox.result(&reply_result(&both("then the cellar is mine")), true, false).unwrap();
+        let (opens, fetches) = (rig.chat.opens.borrow().clone(), rig.chat.fetches.borrow().clone());
+        assert_eq!((opens.len(), fetches.len()), (1, 1));
+        assert_ne!(opens[0].request_id, fetches[0].request_id, "two documents never share an id");
+        assert!(opens[0].request_id.contains("-r1-") && opens[0].request_id.ends_with("-d"), "{}", opens[0].request_id);
+        assert!(fetches[0].request_id.contains("-r1-") && fetches[0].request_id.ends_with("-a"), "{}", fetches[0].request_id);
+    });
+}
+
+#[test]
+fn every_failed_save_is_told_to_her_in_her_own_next_turn_and_leaves_no_file() {
+    use crate::chat_client::{FetchOutcome as F, ReceiptMode as R};
+    type Prepare = Box<dyn Fn(&std::path::Path, &str)>;
+    let cases: [(&str, Prepare, &str); 5] = [
+        ("RepoTree", Box::new(|sandbox, _| std::fs::create_dir_all(sandbox.join(".git")).unwrap()), "git work tree"),
+        ("OutsideSandbox", Box::new(|sandbox, _| std::os::unix::fs::symlink("/", sandbox.join("attachments")).unwrap()), "link or not a folder"),
+        ("Exists", Box::new(|sandbox, sha| {
+            std::fs::create_dir_all(sandbox.join("attachments")).unwrap();
+            std::fs::write(sandbox.join("attachments").join(format!("{sha}.png")), b"hers").unwrap();
+        }), "a different file already holds that name"),
+        ("WriteFailed", Box::new(|sandbox, sha| std::fs::create_dir_all(sandbox.join("attachments").join(format!(".{sha}.png.part"))).unwrap()), "could not be written into your sandbox"),
+        ("Load", Box::new(|_, _| {}), "the stored image cannot be read"),
+    ];
+    for (word, prepare, told) in cases {
+        let (rig, store, image) = fetching(F::Stored, Some(R::Posted), &[saving("swarm", "$pic"), says(&[])]);
+        let (deliveries, pushed) = (rig.chat.deliveries.clone(), Cell::new(false));
+        *rig.model.during.borrow_mut() = Some(Box::new(move || {
+            if !pushed.replace(true) {
+                deliveries.borrow_mut().push(delivery(2, "swarm", "@ann:chat", "any news?"));
+            }
+        }));
+        std::fs::create_dir_all(rig.sandbox()).unwrap();
+        prepare(&rig.sandbox(), &image.sha256);
+        if word == "Load" {
+            std::fs::remove_file(store.path().join(&image.path)).unwrap();
+        }
+        assert_eq!(failure_of(rig.go_with(&Config { image_store: Some(store.path().to_path_buf()), ..on() })), None, "{word}: told, never a failed step");
+        let line = input_of(&rig, 1);
+        assert!(line.contains("Your attachment was not saved") && line.contains(told), "{word}: {line}");
+        assert!(!line.contains("The room shows you received it"), "{word}: {line}");
+        assert!(rig.trace.0.borrow()[0].outputs.iter().any(|item| item.text.starts_with("save_attachment swarm $pic: ") && item.text.contains(word)), "{word}");
+        assert!(!rig.sandbox().join("attachments").join(format!("{}.png", image.sha256)).exists() || word == "Exists", "{word}");
+    }
+}

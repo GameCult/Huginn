@@ -26,6 +26,19 @@ pub(super) fn crash_after(written: usize) -> bool {
     fire
 }
 
+thread_local! {
+    static GAP: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The seam between the unlink of the temporary's name and its create: where her shell could plant something at that name.
+pub(super) fn between_unlink_and_create() {
+    GAP.with(|gap| {
+        if let Some(plant) = gap.borrow().as_ref() {
+            plant();
+        }
+    });
+}
+
 pub(super) fn crashed() -> bool {
     CRASHED.get()
 }
@@ -304,4 +317,45 @@ fn the_saved_file_is_mode_0600_and_the_directory_0700() {
     let path = world.save(&image).unwrap();
     assert_eq!(std::fs::metadata(world.sandbox.path().join(path)).unwrap().permissions().mode() & 0o7777, 0o600);
     assert_eq!(std::fs::metadata(world.attachments()).unwrap().permissions().mode() & 0o7777, 0o700);
+}
+
+#[test]
+fn a_file_or_link_planted_at_the_temporary_name_after_its_unlink_is_refused_and_never_written_through() {
+    let world = World::new();
+    let image = world.put(ROOM, PNG, "png");
+    let victim = world.sandbox.path().join("victim");
+    let part = world.attachments().join(format!(".{}.png.part", image.sha256));
+    for plant_a_link in [false, true] {
+        std::fs::write(&victim, b"keep me").unwrap();
+        let (victim_path, part_path) = (victim.clone(), part.clone());
+        let plant: Box<dyn Fn()> = Box::new(move || {
+            if plant_a_link {
+                symlink(&victim_path, &part_path).unwrap();
+            } else {
+                // A regular file of her own: an create without O_EXCL would open it and truncate.
+                std::fs::write(&part_path, b"hers").unwrap();
+            }
+        });
+        GAP.with(|gap| *gap.borrow_mut() = Some(plant));
+        let saved = world.save(&image);
+        GAP.with(|gap| *gap.borrow_mut() = None);
+        assert_eq!(saved, Err(SaveFault::WriteFailed), "link: {plant_a_link}");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep me", "nothing was written through the planted name (link: {plant_a_link})");
+        if !plant_a_link {
+            assert_eq!(std::fs::read(&part).unwrap(), b"hers", "her file is not truncated");
+        }
+        assert!(!world.attachments().join(format!("{}.png", image.sha256)).exists(), "no final name from a refused create");
+        let _ = std::fs::remove_file(&part);
+    }
+}
+
+#[test]
+fn a_link_to_a_same_length_regular_file_at_the_final_name_is_exists_not_saved() {
+    let world = World::new();
+    let image = world.put(ROOM, PNG, "png");
+    let outside = world.sandbox.path().join("outside.bin");
+    std::fs::write(&outside, PNG).unwrap();
+    std::fs::create_dir(world.attachments()).unwrap();
+    symlink(&outside, world.attachments().join(format!("{}.png", image.sha256))).unwrap();
+    assert_eq!(world.save(&image), Err(SaveFault::Exists), "a link is not a file in her sandbox, whatever it points at");
 }

@@ -132,7 +132,7 @@ fn serve(key: &str, bind: &str, pending_kind: &'static str, pending_bytes: &'sta
                 PENDING_REQUEST_V1 if pending_kind != PENDING && for_eureka(&chat_client::decode::<ChatPendingRequest>(&document.payload).unwrap().persona) => Some(answer(pending_kind, "eureka", pending_bytes)),
                 SEND_REQUEST if for_eureka(&chat_client::decode::<ChatSendRequest>(&document.payload).unwrap().persona) => Some(answer(SEND_RECEIPT, &document.record_key, SEND_RECEIPT_BYTES)),
                 OPEN_DIRECT_REQUEST if for_eureka(&chat_client::decode::<ChatOpenDirectRequest>(&document.payload).unwrap().persona) => Some(answer(open.0, open.1.unwrap_or(&document.record_key), open.2)),
-                FETCH_REQUEST if for_eureka(&chat_client::decode::<ChatFetchRequest>(&document.payload).unwrap().persona) => Some(answer(FETCH_RECEIPT, &document.record_key, FETCH_POSTED_BYTES)),
+                FETCH_REQUEST if for_eureka(&chat_client::decode::<ChatFetchRequest>(&document.payload).unwrap().persona) => Some(if open.0 == REFUSAL { answer(open.0, open.1.unwrap_or(&document.record_key), open.2) } else { answer(FETCH_RECEIPT, &document.record_key, FETCH_POSTED_BYTES) }),
                 _ => None,
             };
             if let Some(reply) = reply {
@@ -436,4 +436,30 @@ fn the_four_field_v3_crosses_real_rudp_with_its_gaps_and_the_three_field_one_wit
     assert_eq!((empty.tail.as_ref().map(Vec::len), empty.tail_gaps), (Some(2), Vec::<String>::new()), "an empty fourth element is every room read fully");
     let quiet = fetch(four_field(PENDING_TAIL_BYTES, &["#swarm:gamecult.org"]));
     assert!(!quiet.tail_gaps.contains(&"#operator:gamecult.org".to_string()), "a room the mouth did not name is not a gap, however few lines it has");
+}
+
+#[test]
+fn a_mouth_that_does_not_serve_the_fetch_kind_refuses_it_and_the_fetch_is_known_not_sent_at_once() {
+    let mouth = opening_with((REFUSAL, Some("eureka"), UNKNOWN_KIND_BYTES));
+    let chat = client(&mouth, KEY, "eureka", Duration::from_secs(20));
+    let request = chat_client::decode::<ChatFetchRequest>(FETCH_REQUEST_BYTES).unwrap();
+    let started = std::time::Instant::now();
+    let error = chat.fetch(&request).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(5), "the refusal ends the wait: {:?}", started.elapsed());
+    assert_eq!(error.downcast_ref::<MouthRefused>(), Some(&MouthRefused(Refusal::UnknownKind)), "{error}");
+}
+
+#[test]
+fn a_fetch_refusal_of_another_reason_or_naming_another_persona_is_not_heard_as_not_sent() {
+    let request = chat_client::decode::<ChatFetchRequest>(FETCH_REQUEST_BYTES).unwrap();
+    // The fixture refusal is persona "ghost", UnknownPersona: a refusal for this Persona for a reason other than the kind.
+    let mouth = opening_with((REFUSAL, Some("ghost"), REFUSAL_BYTES));
+    let error = client(&mouth, KEY, "ghost", Duration::from_secs(20)).fetch(&request).unwrap_err();
+    assert!(error.downcast_ref::<MouthRefused>().is_none(), "only UnknownKind is a known not-sent: {error}");
+    assert!(error.to_string().contains("UnknownPersona"), "{error}");
+    // UnknownKind keyed by this persona but naming another.
+    let other = chat_client::encode(&ChatRefusal { persona: "someone-else".into(), refusal: Refusal::UnknownKind }).unwrap();
+    let mouth = opening_with((REFUSAL, Some("eureka"), Box::leak(other.into_boxed_slice())));
+    let error = client(&mouth, KEY, "eureka", Duration::from_secs(20)).fetch(&request).unwrap_err();
+    assert!(error.downcast_ref::<MouthRefused>().is_none(), "the payload names another Persona: {error}");
 }
