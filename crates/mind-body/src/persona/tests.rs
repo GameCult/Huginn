@@ -4155,7 +4155,12 @@ fn with_chat_names(base: &str) -> String {
     let mut lines: Vec<String> = base.lines().map(|line| line.replace("- steward of GameCult/Huginn: ", "- steward of GameCult/Huginn (chat names, exactly as written: Huginn): ").replace("- steward of GameCult/cinny: ", "- steward of GameCult/cinny (chat names, exactly as written: cinny): ")).collect();
     let last = lines.iter().rposition(|line| line.starts_with("- steward of")).unwrap();
     lines.insert(last + 1, "These names address you in chat as a tag does. To change a project's names, admit its stewardship's next sequence with `names` and a resolution superseding the previous record; names you list replace the derived ones and match exactly as you write them, so list each casing you want.".into());
-    lines.join("\n") + "\n"
+    with_imagination_line(&(lines.join("\n") + "\n"))
+}
+
+/// The Imagination sentence the work question gained after the capture, ahead of the intent instruction.
+fn with_imagination_line(base: &str) -> String {
+    base.replace("Put what you are building in `intent` first.", "Explore your Body and consult your Imagination for how it could be improved. Put what you are building in `intent` first.")
 }
 
 /// The header's words at 62a4a7e, and what this cut made of them.
