@@ -271,3 +271,18 @@ fn a_writer_refuses_to_open_over_a_store_holding_a_record_it_does_not_read() {
     assert!(refusal.contains("does not read"), "{refusal}");
     assert_eq!(std::fs::read(&path).unwrap(), before, "the refused open leaves the store bytes alone");
 }
+
+#[test]
+fn a_swarm_writer_refuses_to_open_over_a_store_holding_a_record_it_does_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = swarm_path(dir.path());
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<OldDial>().unwrap();
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    cache.pull_all_backing_stores().unwrap();
+    cache.put("dial", &OldDial { heat: "1".into() }).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let refusal = SwarmWriter::open(&path).err().expect("a foreign record refuses the open").to_string();
+    assert!(refusal.contains("does not read"), "{refusal}");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "the refused open leaves the store bytes alone");
+}
