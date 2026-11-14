@@ -330,13 +330,13 @@ impl CacheBackingStore for LandsThenFails {
     fn pull_all(&self) -> Result<Vec<CultCacheEnvelope>> {
         self.inner.pull_all()
     }
-    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<String> {
         self.inner.push(entry)
     }
     fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
         self.inner.delete(entry)
     }
-    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<()> {
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<Vec<String>> {
         self.inner.push_all(entries, options)
     }
 }
@@ -547,13 +547,13 @@ impl CacheBackingStore for FailsTheLook {
         }
         self.inner.pull_all()
     }
-    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+    fn push(&mut self, entry: &CultCacheEnvelope) -> Result<String> {
         self.inner.push(entry)
     }
     fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
         self.inner.delete(entry)
     }
-    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<()> {
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<Vec<String>> {
         self.inner.push_all(entries, options)
     }
 }

@@ -62,6 +62,7 @@ fn a_brake_payload_that_does_not_decode_makes_the_store_undecodable() {
     let mut cache = CultCache::new();
     cache.register_entry_type::<WrongBrake>().unwrap();
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    cache.pull_all_backing_stores().unwrap();
     cache.put(BRAKE_KEY, &WrongBrake { released: "yes".into() }).unwrap();
     assert_eq!(effective(&path), held(HeldReason::Undecodable));
 }
