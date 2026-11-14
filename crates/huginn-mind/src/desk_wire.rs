@@ -550,11 +550,12 @@ impl<S: MindStore> Mind<S> {
         let image = self.image()?;
         let docs = Docs::at(image, image.head);
         // A fork this reader may not see is unshowable here too, by the read side's own `visible`: the answer path
-        // must not tell a hidden fork from a missing one, nor store a refusal for it.
-        // A request already stored replays whatever the list is now: the lookup is `answer_desk`'s,
-        // asked here only so the gate does not shadow it.
-        let unshowable = bound_answer(&docs, &subject, &sent.request_id).is_none()
-            && matches!(docs.find(PipelineKind::Question, &sent.fork.0), Some(PipelineDocument::Question(question)) if !showable(question, deciders) || !reads::visible(&docs, &sent.fork.0, deciders.contains(&subject)));
+        // must not tell a hidden fork from a missing one, nor store a refusal for it. A request already stored replays
+        // whatever the decider list is now (the lookup is `answer_desk`'s, asked here only so `showable` does not
+        // shadow it), but never to a reader who can no longer see the fork: the counted answer id and `as_of` it
+        // would carry are the fork's current state, so that replay is `fork_unknown` too (ruling clause 3).
+        let replay = bound_answer(&docs, &subject, &sent.request_id).is_some();
+        let unshowable = matches!(docs.find(PipelineKind::Question, &sent.fork.0), Some(PipelineDocument::Question(question)) if (!replay && !showable(question, deciders)) || !reads::visible(&docs, &sent.fork.0, deciders.contains(&subject)));
         if unshowable {
             return Ok(DeskResponse::NotStored(fork_unknown()));
         }
@@ -1310,6 +1311,54 @@ mod tests {
             assert_eq!((not_stored(other).code, committed), (ForkRefusalCode::ForkUnknown, false));
             assert_eq!(head(&mind), before);
         }
+    }
+
+    /// Ruling clause 3: a stored request replays whatever the decider list is now, but never to a reader who can no
+    /// longer see the fork. The replay would carry the fork's current counted answer id and head, so it is the same
+    /// bytes a missing fork answers with; the stored word itself comes back once the fork is listed again.
+    #[test]
+    fn a_stored_answer_does_not_replay_to_a_reader_who_can_no_longer_see_the_fork() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        // Dan is not a decider: his answer to the listed fork is a stored refusal and counts nothing.
+        let dan_request = wire(FORK, &hash);
+        let (first, wrote) = ask(&mut mind, "d", dan_request.clone());
+        let (refused, counted, _) = answered(first);
+        assert!((wrote, refused.outcome.as_str(), refused.code.is_some(), counted) == (true, "Refused", true, None), "{refused:?}");
+        // A decider answers, so the fork now has a counted answer a replay could name.
+        let x_request = wire(FORK, &hash);
+        let (counted_by_x, _) = ask(&mut mind, "x", x_request.clone());
+        assert!(answered(counted_by_x).1.is_some());
+        // Still listed: the replay is the stored word, with the fork's current state.
+        let before = head(&mind);
+        let (listed_replay, wrote) = ask(&mut mind, "d", dan_request.clone());
+        assert!(!wrote);
+        let (_, counted, as_of) = answered(listed_replay);
+        assert_eq!((counted.is_some(), as_of), (true, before));
+        // Unlisted: the replay is fork_unknown, byte for byte a fork that does not exist, and writes nothing.
+        let withdrawal = crate::fixtures::resolution_n(
+            eureka_pipeline::PipelineRef { kind: PipelineKind::DeskListing, id: s("eureka-state:desk_listing:Q1") },
+            1,
+            eureka_pipeline::ResolutionOutcome::Withdrawn { reason: "unlisted".into() },
+        );
+        let withdrawal_key = eureka_pipeline::pipeline_key(&withdrawal).unwrap();
+        committed(admit(&mut mind, vec![withdrawal]));
+        let before = head(&mind);
+        let (hidden, wrote) = ask(&mut mind, "d", dan_request.clone());
+        assert!(!wrote);
+        let (missing, _) = ask(&mut mind, "d", ForkAnswerRequest { fork_id: "eureka-state:question:Q99".into(), ..wire(FORK, &hash) });
+        assert_eq!(not_stored(hidden.clone()).code, ForkRefusalCode::ForkUnknown);
+        assert_eq!(encode(&hidden), encode(&missing));
+        // A decider is told the fork whether or not it is listed.
+        let (decider_replay, wrote) = ask(&mut mind, "x", x_request);
+        assert!(!wrote && answered(decider_replay).1.is_some());
+        assert_eq!(head(&mind), before);
+        // Relisted: the stored word replays again.
+        let subject = eureka_pipeline::PipelineRef { kind: PipelineKind::Resolution, id: s(&withdrawal_key) };
+        committed(admit(&mut mind, vec![crate::fixtures::resolution(subject, eureka_pipeline::ResolutionOutcome::Withdrawn { reason: "listed again".into() })]));
+        let (relisted, wrote) = ask(&mut mind, "d", dan_request);
+        assert!(!wrote);
+        assert_eq!(answered(relisted).0.outcome, "Refused");
     }
 
     #[test]
