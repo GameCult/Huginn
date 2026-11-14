@@ -109,9 +109,6 @@ impl Handled {
     }
 }
 
-/// What the log says of the hits the mind held no document for: how many, and
-/// the first few by name (a restored mind can leave hundreds), or nothing when
-/// the mind held them all.
 /// The door checks an account id; the Mind's desk calls take it as the text it is.
 fn short_id(id: AccountId) -> Short {
     Short(id.0)
@@ -121,6 +118,9 @@ fn short_ids(ids: &[AccountId]) -> Vec<Short> {
     ids.iter().map(|id| Short(id.0.clone())).collect()
 }
 
+/// What the log says of the hits the mind held no document for: how many, and
+/// the first few by name (a restored mind can leave hundreds), or nothing when
+/// the mind held them all.
 fn dropped_note(dropped: &[PipelineRef]) -> Option<String> {
     if dropped.is_empty() {
         return None;
