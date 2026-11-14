@@ -1071,6 +1071,20 @@ mod tests {
         assert!(matches!(read_by(&mind, DAN, 1), DeskResponse::NotStored(_)));
     }
 
+    /// Re-admitting the listing after unlisting is the same document: AlreadyAdmitted, and the fork stays hidden.
+    #[test]
+    fn admitting_the_listing_again_after_unlisting_does_not_relist() {
+        let mut mind = desk(1);
+        list_it(&mut mind, 1);
+        let withdrawal = unlist(&mut mind, 1, 1);
+        let before = head(&mind);
+        let again = admit(&mut mind, vec![listing_doc(1)]);
+        assert!(matches!(again, PipelineAdmissionOutcome::AlreadyAdmitted { .. }), "{again:?}");
+        assert_eq!((head(&mind), seen_by(&mind, DAN)), (before, Vec::<String>::new()));
+        relist(&mut mind, &withdrawal);
+        assert_eq!(seen_by(&mind, DAN), [fork(1)]);
+    }
+
     #[test]
     fn counts_and_cursor_cover_the_visible_set() {
         let mut mind = desk(5);
@@ -1149,32 +1163,51 @@ mod tests {
 
     #[test]
     fn a_decider_or_subject_outside_the_account_grammar_is_refused_at_decode() {
-        let good = encode_desk_request("m", &DeskRequest::Fork { mind: slug(INSTANCE), subject: acct("a"), deciders: vec![acct("a")], fork_id: fork(1) }, None).unwrap();
-        decode_desk_request(&good).unwrap();
-        let bad_ids = ["@x:server", "meta@gamecult.org", "someone", "7", &acct("a").0.to_uppercase(), &format!("{{{}}}", acct("a").0), ""];
-        for bad in bad_ids {
-            for (field, edit) in [("subject", 0), ("deciders", 1)] {
-                let mut value = serde_json::to_value(DeskRequest::Fork { mind: slug(INSTANCE), subject: acct("a"), deciders: vec![acct("a")], fork_id: fork(1) }).unwrap();
-                if edit == 0 {
-                    value["Fork"]["subject"] = bad.into();
-                } else {
-                    value["Fork"]["deciders"] = json!([bad]);
+        let ask = ForkAnswerRequest {
+            schema_version: RequestSchema::V0,
+            fork_id: fork(1),
+            options_hash: "h".into(),
+            answer: Some(ForkAnswer { choice: Some("A".into()), note: None }),
+            retracted: false,
+            retracts: None,
+            answered_at: "2026-09-16T11:00:00Z".into(),
+            request_id: request_id(),
+        };
+        let (mind_slug, who) = (slug(INSTANCE), acct("a"));
+        let requests = [
+            DeskRequest::Answer { mind: mind_slug.clone(), subject: who.clone(), authority: DeskAuthority::Member, deciders: vec![who.clone()], request: ask },
+            DeskRequest::Forks { mind: mind_slug.clone(), subject: who.clone(), deciders: vec![who.clone()], status: None, cursor: None, limit: ForkLimit::new(10).unwrap() },
+            DeskRequest::Fork { mind: mind_slug, subject: who.clone(), deciders: vec![who.clone()], fork_id: fork(1) },
+        ];
+        for request in &requests {
+            let operation = request.operation();
+            let variant = match operation {
+                "answer" => "Answer",
+                "forks" => "Forks",
+                _ => "Fork",
+            };
+            let good = encode_desk_request_value(operation, &serde_json::to_value(request).unwrap());
+            decode_desk_request(&good).unwrap_or_else(|failure| panic!("{operation}: {failure:?}"));
+            let bad_ids = ["@x:server", "meta@gamecult.org", "someone", "7", &who.0.to_uppercase(), &format!("{{{}}}", who.0), ""];
+            for bad in bad_ids {
+                for field in ["subject", "deciders"] {
+                    let mut value = serde_json::to_value(request).unwrap();
+                    value[variant][field] = if field == "subject" { bad.into() } else { json!([bad]) };
+                    let failure = decode_desk_request(&encode_desk_request_value(operation, &value)).unwrap_err();
+                    assert_eq!(failure.code, "payload-not-a-request", "{operation} {field}: {bad:?}");
+                    assert!(failure.message.contains(field), "{operation}: {}", failure.message);
+                    assert!(bad.is_empty() || !failure.message.contains(bad), "the refusal quotes {bad:?}: {}", failure.message);
                 }
-                let sent = encode_desk_request_value(&value);
-                let failure = decode_desk_request(&sent).unwrap_err();
-                assert_eq!(failure.code, "payload-not-a-request", "{field}: {bad:?}");
-                assert!(failure.message.contains(field), "{}", failure.message);
-                assert!(bad.is_empty() || !failure.message.contains(bad), "the refusal quotes {bad:?}: {}", failure.message);
             }
         }
     }
 
-    fn encode_desk_request_value(value: &Value) -> cultnet_rs::CultNetMessage {
+    fn encode_desk_request_value(operation: &str, value: &Value) -> cultnet_rs::CultNetMessage {
         use base64::Engine;
         cultnet_rs::CultNetMessage::OperationRequest {
             message_id: "m".into(),
             service_id: DESK_SERVICE_ID.into(),
-            operation: "fork".into(),
+            operation: operation.into(),
             payload_schema: DESK_REQUEST_SCHEMA.into(),
             payload_encoding: "messagepack-base64".into(),
             payload: base64::engine::general_purpose::STANDARD.encode(rmp_serde::to_vec_named(value).unwrap()),
