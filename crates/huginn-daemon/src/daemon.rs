@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
 use crate::sources::forge::HttpForge;
 use huginn_mind::desk_wire::{DeskRequest, DeskResponse};
-use huginn_mind::eureka_pipeline::{PipelineRef, Slug};
+use huginn_mind::eureka_pipeline::{AccountId, PipelineRef, Short, Slug};
 use huginn_mind::wire::{ACTIVITY_REPOS_MAX, HuginnMindRequest, HuginnMindResponse, IndexStatus};
 use huginn_mind::{ChatHits, ChatQuery, ChatWindow, ChatWindowQuery, Members, Mind, MindRefusal, MindStore, PipelineAdmissionOutcome, SemanticQuery, SourceHits, SourceQuery};
 
@@ -107,6 +107,15 @@ impl Handled {
             Self::Searching(search) => panic!("expected an answer, got the search {:?}", search.ticket),
         }
     }
+}
+
+/// The door checks an account id; the Mind's desk calls take it as the text it is.
+fn short_id(id: AccountId) -> Short {
+    Short(id.0)
+}
+
+fn short_ids(ids: &[AccountId]) -> Vec<Short> {
+    ids.iter().map(|id| Short(id.0.clone())).collect()
 }
 
 /// What the log says of the hits the mind held no document for: how many, and
@@ -271,10 +280,10 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
         }
         match request {
             DeskRequest::Answer { subject, authority, deciders, request, .. } => {
-                self.mind.desk_answer(&deciders, subject, authority, request, now)
+                self.mind.desk_answer(&short_ids(&deciders), short_id(subject), authority, request, now)
             }
-            DeskRequest::Forks { subject, deciders, status, cursor, limit, .. } => self.mind.desk_forks(&subject, &deciders, status, cursor, limit),
-            DeskRequest::Fork { subject, deciders, fork_id, .. } => self.mind.desk_fork(&subject, &deciders, &fork_id),
+            DeskRequest::Forks { subject, deciders, status, cursor, limit, .. } => self.mind.desk_forks(&short_id(subject), &short_ids(&deciders), status, cursor, limit),
+            DeskRequest::Fork { subject, deciders, fork_id, .. } => self.mind.desk_fork(&short_id(subject), &short_ids(&deciders), &fork_id),
         }
     }
 

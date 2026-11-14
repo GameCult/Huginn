@@ -20,6 +20,13 @@
 //! gets `deciders` empty, `answerer` nil and the counts instead. The reads carry no `authority` (a
 //! payload that names one is refused whole), and the door has no other way to ask who is reading.
 //!
+//! The listing gate: a reader who is not a decider sees a fork only while a `desk_listing` for it is
+//! in force, and a fork it may not see reads `fork_unknown`, the same bytes as a missing one, on
+//! every desk operation, a replay of a stored answer included. The door never writes a listing; it
+//! arrives by the RUDP Admit door only. Unlisting is a `Withdrawn` resolution on the listing, and
+//! admitting the listing again after that returns `AlreadyAdmitted` and the fork stays hidden:
+//! relisting is withdrawing the withdrawal, not a second admission.
+//!
 //! It owns no rule. Which Mind method answers is `Daemon::handle_desk`'s; when the door is
 //! served is `serve::run`'s, once per pass in the thread that owns the Mind. A peer that is
 //! slow costs the loop at most `DESK_ACCEPTS_PER_PASS` connections of `DESK_CONNECTION_DEADLINE`

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DeskRequest",
-  "description": "Every request the desk door answers. The fields are the wire names: the `mind` addressed\n(the persona and pipeline requests say `instance`; the sets are separate), the verified\n`subject` and `authority` Bifrost vouches for (door context, never body fields), and the\n`deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside\nthe set refuses the whole payload.\n\nThe reads, `Forks` and `Fork`, carry NO `authority` (CultLib `list_request` and\n`read_request` are closed and have none; one that names it is refused whole). Their `deciders`\nfeed the showability gate, and `subject` decides the view: a subject in `deciders` is a decider\nand is told the ids; any other is told counts in their place. `Forks` takes the contract's `list_request` fields flat\nbeside them (`status`, `cursor`, `limit`), each key written, `null` where absent. Bifrost\nstrips notes; see `DeskResponse` for the trust boundary. These docs and the doc of `Mind::desk_forks`/`Mind::desk_fork` are the\nreads spec.",
+  "description": "Every request the desk door answers. The fields are the wire names: the `mind` addressed\n(the persona and pipeline requests say `instance`; the sets are separate), the verified\n`subject` and `authority` Bifrost vouches for (door context, never body fields), and the\n`deciders` of this call (1 to 64, distinct; the Mind never stores them). Closed: a key outside\nthe set refuses the whole payload.\n\nThe reads, `Forks` and `Fork`, carry NO `authority` (CultLib `list_request` and\n`read_request` are closed and have none; one that names it is refused whole). Their `deciders`\nfeed the showability gate, and `subject` decides the view: a subject in `deciders` is a decider,\nsees every showable fork and is told the ids; any other reads only the forks the Mind lists\n(a `desk_listing` in force) and is told counts in the ids' place. `Forks` takes the contract's `list_request` fields flat\nbeside them (`status`, `cursor`, `limit`), each key written, `null` where absent. Bifrost\nstrips notes; see `DeskResponse` for the trust boundary. These docs and the doc of `Mind::desk_forks`/`Mind::desk_fork` are the\nreads spec.",
   "oneOf": [
     {
       "type": "object",
@@ -15,7 +15,7 @@
             "deciders": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/Short"
+                "$ref": "#/$defs/AccountId"
               },
               "maxItems": 64,
               "minItems": 1,
@@ -28,7 +28,7 @@
               "$ref": "#/$defs/ForkAnswerRequest"
             },
             "subject": {
-              "$ref": "#/$defs/Short"
+              "$ref": "#/$defs/AccountId"
             }
           },
           "additionalProperties": false,
@@ -59,7 +59,7 @@
             "deciders": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/Short"
+                "$ref": "#/$defs/AccountId"
               },
               "maxItems": 64,
               "minItems": 1,
@@ -80,7 +80,7 @@
               ]
             },
             "subject": {
-              "$ref": "#/$defs/Short"
+              "$ref": "#/$defs/AccountId"
             }
           },
           "additionalProperties": false,
@@ -108,7 +108,7 @@
             "deciders": {
               "type": "array",
               "items": {
-                "$ref": "#/$defs/Short"
+                "$ref": "#/$defs/AccountId"
               },
               "maxItems": 64,
               "minItems": 1,
@@ -121,7 +121,7 @@
               "$ref": "#/$defs/Slug"
             },
             "subject": {
-              "$ref": "#/$defs/Short"
+              "$ref": "#/$defs/AccountId"
             }
           },
           "additionalProperties": false,
@@ -140,6 +140,12 @@
     }
   ],
   "$defs": {
+    "AccountId": {
+      "description": "A Bifrost account id: a lowercase D-format UUID (`UserAccount.Id`). A Matrix id, an email or a\nhandle is never one.",
+      "type": "string",
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
     "DeskAuthority": {
       "type": "string",
       "enum": [
@@ -214,11 +220,6 @@
       "enum": [
         "gamecult.fork.answer_request.v0"
       ]
-    },
-    "Short": {
-      "description": "Text of at most 200 UTF-8 bytes.",
-      "type": "string",
-      "maxLength": 200
     },
     "Slug": {
       "description": "A campaign slug or key segment: label parts joined by `.`.",

@@ -105,8 +105,8 @@ pub fn index_text(document: &PipelineDocument) -> Option<String> {
             lines.push(&idea.idea.0);
             lines.push(&idea.tradeoffs.0);
         }
-        // A desk answer is a person's words, not indexed.
-        D::Instance(_) | D::Stewardship(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) | D::DeskAnswer(_) => {}
+        // A desk answer is a person's words and a listing's reason is no retrieval text: neither is indexed.
+        D::Instance(_) | D::Stewardship(_) | D::Run(_) | D::Pulse(_) | D::Reply(_) | D::DeskAnswer(_) | D::DeskListing(_) => {}
     }
     lines.retain(|line| !line.is_empty());
     if lines.is_empty() {

@@ -104,7 +104,8 @@
         "Idea",
         "Reply",
         "Thought",
-        "DeskAnswer"
+        "DeskAnswer",
+        "DeskListing"
       ],
       "type": "string"
     },

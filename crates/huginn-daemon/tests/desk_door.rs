@@ -191,12 +191,18 @@ impl Drop for Daemon {
     }
 }
 
+/// A test's name for someone as the Bifrost account id the door requires: a deterministic lowercase D-format UUID.
+fn acct(name: &str) -> huginn_mind::eureka_pipeline::AccountId {
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+    huginn_mind::eureka_pipeline::AccountId(format!("{:08x}-{:04x}-4000-8000-{:012x}", hash >> 32, (hash >> 16) & 0xffff, hash & 0xffff_ffff_ffff))
+}
+
 fn answer(who: &str, hash: &str, request_id: &str) -> DeskRequest {
     DeskRequest::Answer {
         mind: INSTANCE.into(),
-        subject: short(who),
+        subject: acct(who),
         authority: DeskAuthority::Operator,
-        deciders: vec![short(who)],
+        deciders: vec![acct(who)],
         request: ForkAnswerRequest {
             schema_version: RequestSchema::V0,
             fork_id: FORK.into(),
@@ -213,8 +219,8 @@ fn answer(who: &str, hash: &str, request_id: &str) -> DeskRequest {
 fn forks_request(who: &str, deciders: &[&str]) -> DeskRequest {
     DeskRequest::Forks {
         mind: INSTANCE.into(),
-        subject: short(who),
-        deciders: deciders.iter().map(|d| short(d)).collect(),
+        subject: acct(who),
+        deciders: deciders.iter().map(|d| acct(d)).collect(),
         status: None,
         cursor: None,
         limit: huginn_mind::desk_wire::ForkLimit::new(50).unwrap(),
@@ -284,14 +290,14 @@ fn the_binary_serves_both_doors_and_survives_restart() {
     };
     assert_eq!((list.open_count, list.recorded_count, list.forks.len(), list.stamp.clone()), (1, 0, 1, format!("s{listed_at}")));
     assert_eq!(list.forks[0].card.options_hash, hash);
-    let DeskResponse::Fork { entry, as_of } = ask(&desk, "m-r2", &DeskRequest::Fork { mind: INSTANCE.into(), subject: short("x"), deciders: vec![short("x")], fork_id: FORK.into() })
+    let DeskResponse::Fork { entry, as_of } = ask(&desk, "m-r2", &DeskRequest::Fork { mind: INSTANCE.into(), subject: acct("x"), deciders: vec![acct("x")], fork_id: FORK.into() })
     else {
         panic!("a read of the seeded fork")
     };
     assert_eq!((entry, as_of), (list.forks[0].clone(), listed_at));
     assert_eq!(daemon.documents(), seeded);
     // `authority` is no field of a read: the payload is refused whole and nothing is answered or stored.
-    for (operation, request) in [("forks", forks_request("x", &["x"])), ("fork", DeskRequest::Fork { mind: INSTANCE.into(), subject: short("x"), deciders: vec![short("x")], fork_id: FORK.into() })] {
+    for (operation, request) in [("forks", forks_request("x", &["x"])), ("fork", DeskRequest::Fork { mind: INSTANCE.into(), subject: acct("x"), deciders: vec![acct("x")], fork_id: FORK.into() })] {
         let mut value = serde_json::to_value(&request).unwrap();
         let variant = if operation == "forks" { "Forks" } else { "Fork" };
         value[variant]["authority"] = serde_json::json!("Operator");
@@ -319,16 +325,20 @@ fn the_binary_serves_both_doors_and_survives_restart() {
     assert_eq!((stale.code, counted_answer_id.as_deref()), (Some(ForkAnswerCode::StaleFork), Some("n1")));
     let stored = daemon.documents();
     assert_eq!(stored, seeded + 2);
-    // A subject the call's deciders do not name reads both answers, the first with its choice and the stale one with its code, and is told no account id.
+    // A subject the call's deciders do not name is a non-decider: the fork is unlisted, so it reads as a missing one.
+    let outsider = ask(&desk, "m-r3", &DeskRequest::Fork { mind: INSTANCE.into(), subject: acct("outsider"), deciders: vec![acct("y")], fork_id: FORK.into() });
+    assert!(matches!(outsider, DeskResponse::NotStored(ref refusal) if refusal.code == huginn_mind::desk_wire::ForkRefusalCode::ForkUnknown), "{outsider:?}");
+    // A decider reads both answers, the first with its choice and the stale one with its code, and is told who answered.
     let DeskResponse::Fork { entry, .. } =
-        ask(&desk, "m-r3", &DeskRequest::Fork { mind: INSTANCE.into(), subject: short("outsider"), deciders: vec![short("y")], fork_id: FORK.into() })
+        ask(&desk, "m-r4", &DeskRequest::Fork { mind: INSTANCE.into(), subject: acct("y"), deciders: vec![acct("y")], fork_id: FORK.into() })
     else {
         panic!("a read")
     };
     let seen: Vec<_> = entry.record.answers.iter().map(|answer| (answer.answer_id.as_str(), answer.answerer.as_deref(), answer.code)).collect();
-    assert_eq!(seen, [("n1", None, None), ("n2", None, Some(ForkAnswerCode::StaleFork))]);
+    let x = acct("x").0;
+    assert_eq!(seen, [("n1", Some(x.as_str()), None), ("n2", Some(x.as_str()), Some(ForkAnswerCode::StaleFork))]);
     assert_eq!((entry.record.counted_answer_id.as_deref(), entry.record.answerer_count), (Some("n1"), 1));
-    assert_eq!((entry.card.deciders.as_slice(), entry.card.decider_count), (&[][..], 1));
+    assert_eq!((entry.card.deciders.as_slice(), entry.card.decider_count), (&[acct("y").0][..], 1));
     assert_eq!(daemon.documents(), stored);
 
     // A stop takes the socket with it; the stored answers are the retry's memory.
@@ -580,7 +590,7 @@ fn forks_page(who: &str, cursor: Option<&str>) -> DeskRequest {
 }
 
 fn fork_read(who: &str, fork_id: &str) -> DeskRequest {
-    DeskRequest::Fork { mind: INSTANCE.into(), subject: short(who), deciders: vec![short(who)], fork_id: fork_id.into() }
+    DeskRequest::Fork { mind: INSTANCE.into(), subject: acct(who), deciders: vec![acct(who)], fork_id: fork_id.into() }
 }
 
 /// The wire spelling of a not-stored refusal's code, and its text.

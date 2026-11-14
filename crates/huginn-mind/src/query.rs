@@ -166,6 +166,8 @@ pub enum PipelineFacts {
     /// the one that counts for its fork at the read's snapshot, derived by `counted_answer` and never
     /// stored: a retracted `Counted` answer reads `counts: false`, the promoted next answer `true`.
     DeskAnswer { fork: Short, sequence: u32, outcome: Short, counts: bool, authority: DeskAuthority },
+    /// The question this listing lets members read.
+    DeskListing { listed: Short },
 }
 
 impl PipelineFacts {
@@ -306,6 +308,7 @@ impl PipelineFacts {
                 counts: counted_of(&value.fork.0).as_deref() == Some(id.id.0.as_str()),
                 authority: value.authority,
             },
+            D::DeskListing(value) => Self::DeskListing { listed: value.listed.clone() },
         }
     }
 }
@@ -1849,7 +1852,7 @@ mod tests {
 
         // Two desk answers on the open fork Q2: the second is a Revision of the first.
         let D::Question(shown) = question("Q2", &["A", "B"], "A") else { unreachable!() };
-        let stamp = crate::desk::DeskStamp { answerer: s("x"), authority: eureka_pipeline::DeskAuthority::Member, deciders: vec![s("x")] };
+        let stamp = crate::desk::DeskStamp { answerer: crate::fixtures::account("x"), authority: eureka_pipeline::DeskAuthority::Member, deciders: vec![crate::fixtures::account("x")] };
         let pick = |n: u32| crate::desk::DeskAnswerRequest {
             fork: s(&q2),
             options_hash: crate::desk::options_hash(&shown),
@@ -1861,6 +1864,10 @@ mod tests {
         for n in 1..=2 {
             assert!(matches!(mind.answer_desk(stamp.clone(), pick(n), now()), crate::desk::DeskAnswerOutcome::Stored { .. }));
         }
+
+        // The Mind lists Q2: one `listed` edge.
+        committed(admit(&mut mind, vec![D::DeskListing(eureka_pipeline::PipelineDeskListing { campaign: slug(CAMPAIGN), listed: s(&q2), reason: "Members may read why.".into() })]));
+        let listing = id("desk_listing", "Q2");
 
         let (n1, f1_closed, f2_closed) = (
             id("resolution", "question.Q1.n1"),
@@ -1910,8 +1917,9 @@ mod tests {
             (CitationRole::Fork, &answer_1, &q2),
             (CitationRole::Fork, &answer_2, &q2),
             (CitationRole::Answer, &answer_2, &answer_1),
+            (CitationRole::Listed, &listing, &q2),
         ];
-        assert_eq!(CitationRole::ALL.len(), 26);
+        assert_eq!(CitationRole::ALL.len(), 27);
         for role in CitationRole::ALL {
             let selection =
                 Selection { cited: Some(Incoming { role: role.name().into(), exists: true }), ..Selection::default() };

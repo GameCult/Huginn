@@ -19,6 +19,7 @@
 
 use chrono::{DateTime, Duration, SecondsFormat, SubsecRound, Utc};
 use eureka_pipeline::{
+    AccountId,
     DeskAuthority, DeskOutcome, DeskRefusal, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, PipelineRefusal,
     PipelineResolution, RequestId, ResolutionOutcome, Sha256Hex, Short, Slug, Words,
 };
@@ -145,7 +146,7 @@ fn counts_under(answer: &PipelineDeskAnswer, current: &Sha256Hex) -> bool {
 /// `answer_desk` runs before it reads the fork and the door runs before its showability gate.
 pub(crate) fn bound_answer<'a>(docs: &'a Docs<'_>, answerer: &Short, request_id: &RequestId) -> Option<(&'a str, &'a PipelineDeskAnswer)> {
     docs.of_kind(PipelineKind::DeskAnswer).find_map(|(key, document)| match document {
-        PipelineDocument::DeskAnswer(held) if held.answerer == *answerer && held.request_id == *request_id => Some((key, held)),
+        PipelineDocument::DeskAnswer(held) if held.answerer.0 == answerer.0 && held.request_id == *request_id => Some((key, held)),
         _ => None,
     })
 }
@@ -314,7 +315,7 @@ impl<S: MindStore> Mind<S> {
             claim_in_future,
             request_id: request.request_id.clone(),
             body_sha256: body_sha256.clone(),
-            answerer: stamp.answerer.clone(),
+            answerer: AccountId(stamp.answerer.0.clone()),
             authority: stamp.authority,
             outcome,
         };
@@ -425,7 +426,7 @@ mod tests {
     const LIST: [&str; 6] = ["x", "y", "z", "a", "op", "dec"];
 
     fn stamp_as(who: &str, authority: DeskAuthority, list: &[&str]) -> DeskStamp {
-        DeskStamp { answerer: s(who), authority, deciders: list.iter().map(|id| s(id)).collect() }
+        DeskStamp { answerer: account(who), authority, deciders: list.iter().map(|id| account(id)).collect() }
     }
 
     fn decider(who: &str) -> DeskStamp {
@@ -531,7 +532,7 @@ mod tests {
         let mut mind = desk();
         stored(ask(&mut mind, &decider("z"), pick(FORK, "Q1", "A", "2026-11-10T12:00:00Z")));
         stored(ask(&mut mind, &decider("a"), pick(FORK, "Q1", "A", "2026-11-10T12:00:00Z")));
-        assert_eq!(held(&mind, &counted(&mind, FORK).unwrap()).answerer, s("z"));
+        assert_eq!(held(&mind, &counted(&mind, FORK).unwrap()).answerer, acct("z"));
     }
 
     #[test]
@@ -780,7 +781,7 @@ mod tests {
         let record = held(&mind, &answer);
         assert_eq!(record.outcome, outcome);
         assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::NotADecider, retracts: None });
-        assert_eq!((record.answerer, record.authority, record.answered_at), (s("guest"), DeskAuthority::Steward, s(at)));
+        assert_eq!((record.answerer, record.authority, record.answered_at), (acct("guest"), DeskAuthority::Steward, s(at)));
     }
 
     #[test]
@@ -790,7 +791,7 @@ mod tests {
         for (who, authority) in [("op", DeskAuthority::Operator), ("dec", DeskAuthority::Steward), ("x", DeskAuthority::Member)] {
             let (answer, _) = stored(ask(&mut mind, &stamp_as(who, authority, &LIST), pick(FORK, "Q1", "A", at)));
             let record = held(&mind, &answer);
-            assert_eq!((record.answerer, record.authority), (s(who), authority));
+            assert_eq!((record.answerer, record.authority), (acct(who), authority));
         }
     }
 
@@ -1039,7 +1040,7 @@ mod tests {
             let DeskAnswerOutcome::Stored { receipt_id, .. } = outcome else { panic!("{outcome:?}") };
             let receipt = mind.receipts().unwrap().into_iter().find(|receipt| receipt.receipt_id == receipt_id).unwrap();
             assert_eq!(receipt.provenance.faculty, faculty, "{authority:?}");
-            assert_eq!(receipt.provenance.agent, s("x"));
+            assert_eq!(receipt.provenance.agent, account("x"));
         }
     }
 
@@ -1206,10 +1207,10 @@ mod tests {
         let image = first.image().unwrap();
         let found = Docs::at(image, image.head).find(K::DeskAnswer, &key("Q1", 1)).cloned();
         let Some(PipelineDocument::DeskAnswer(mut held)) = found else { panic!("stored") };
-        held.answerer = s(&long);
+        held.answerer = eureka_pipeline::AccountId(long.clone());
         store.plant(PipelineDocument::DeskAnswer(held).prepare(&cache).unwrap());
         let mut mind = opened(store, INSTANCE);
-        let stamp = stamp_as(&long, DeskAuthority::Member, &LIST);
+        let stamp = DeskStamp { answerer: s(&long), ..stamp_as("x", DeskAuthority::Member, &LIST) };
         let before = head(&mind);
         assert_eq!(replayed(ask(&mut mind, &stamp, request)), (key("Q1", 1), DeskOutcome::Counted));
         assert_eq!(head(&mind), before);
@@ -1262,8 +1263,8 @@ mod tests {
         assert_eq!(stored(ask(&mut mind, &decider("x"), sent.clone())), (key("Q1", 1), DeskOutcome::Counted));
         let (y_answer, y_outcome) = stored(ask(&mut mind, &decider("y"), sent.clone()));
         assert_eq!((y_answer.as_str(), &y_outcome), (key("Q1", 2).as_str(), &DeskOutcome::Revision { of: s(&key("Q1", 1)) }));
-        assert_eq!(held(&mind, &y_answer).answerer, s("y"));
-        assert_eq!(held(&mind, &key("Q1", 1)).answerer, s("x"));
+        assert_eq!(held(&mind, &y_answer).answerer, acct("y"));
+        assert_eq!(held(&mind, &key("Q1", 1)).answerer, acct("x"));
         // x's later retry still returns n1; y's returns n2.
         assert_eq!(replayed(ask(&mut mind, &decider("x"), sent.clone())).0, key("Q1", 1));
         assert_eq!(replayed(ask(&mut mind, &decider("y"), sent)).0, key("Q1", 2));

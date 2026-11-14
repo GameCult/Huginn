@@ -267,6 +267,12 @@
     }
   ],
   "$defs": {
+    "AccountId": {
+      "description": "A Bifrost account id: a lowercase D-format UUID (`UserAccount.Id`). A Matrix id, an email or a\nhandle is never one.",
+      "type": "string",
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
     "AuthorityMap": {
       "type": "object",
       "properties": {
@@ -1320,7 +1326,7 @@
           "$ref": "#/$defs/Short"
         },
         "answerer": {
-          "$ref": "#/$defs/Short"
+          "$ref": "#/$defs/AccountId"
         },
         "authority": {
           "$ref": "#/$defs/DeskAuthority"
@@ -1388,6 +1394,26 @@
         "answerer",
         "authority",
         "outcome"
+      ]
+    },
+    "PipelineDeskListing": {
+      "description": "A fork the Mind lists: members who are not on a call's decider list may read the question\nwhile this document is in force (unlist = a `Withdrawn` resolution on it; relist = withdraw\nthat). One per question, keyed by the question's label; the receipt says who listed it and\nwhen, `reason` why members may read it. Admitted on the Mind's own door only, never the desk's.",
+      "type": "object",
+      "properties": {
+        "campaign": {
+          "$ref": "#/$defs/Slug"
+        },
+        "listed": {
+          "$ref": "#/$defs/Short"
+        },
+        "reason": {
+          "$ref": "#/$defs/Line"
+        }
+      },
+      "required": [
+        "campaign",
+        "listed",
+        "reason"
       ]
     },
     "PipelineDocument": {
@@ -1728,6 +1754,22 @@
             "kind",
             "value"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "desk_listing"
+            },
+            "value": {
+              "$ref": "#/$defs/PipelineDeskListing"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
         }
       ]
     },
@@ -1995,7 +2037,8 @@
         "Idea",
         "Reply",
         "Thought",
-        "DeskAnswer"
+        "DeskAnswer",
+        "DeskListing"
       ]
     },
     "PipelineMemory": {

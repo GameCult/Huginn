@@ -408,9 +408,9 @@ mod tests {
     fn desk_answer() -> DeskRequest {
         DeskRequest::Answer {
             mind: slug(INSTANCE),
-            subject: crate::fixtures::s("user-7"),
+            subject: crate::fixtures::acct("user-7"),
             authority: DeskAuthority::Member,
-            deciders: vec![crate::fixtures::s("user-7")],
+            deciders: vec![crate::fixtures::acct("user-7")],
             request: ForkAnswerRequest {
                 schema_version: crate::desk_wire::RequestSchema::V0,
                 fork_id: "eureka-state:question:Q1".into(),
@@ -425,7 +425,7 @@ mod tests {
     }
 
     fn desk_requests() -> [(DeskRequest, &'static str); 3] {
-        let (mind, subject, deciders) = (slug(INSTANCE), crate::fixtures::s("user-7"), vec![crate::fixtures::s("user-7")]);
+        let (mind, subject, deciders) = (slug(INSTANCE), crate::fixtures::acct("user-7"), vec![crate::fixtures::acct("user-7")]);
         [
             (desk_answer(), "Answer"),
             (DeskRequest::Forks { mind: mind.clone(), subject: subject.clone(), deciders: deciders.clone(), status: Some(crate::desk_wire::ListStatus::Open), cursor: crate::desk_wire::ForkCursor::new(7), limit: crate::desk_wire::ForkLimit::new(50).unwrap() }, "Forks"),
@@ -579,13 +579,13 @@ mod tests {
     fn a_maximal_desk_message_fits_the_frame() {
         let long = |n: usize| "x".repeat(n);
         let wire = |message: &CultNetMessage| encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0).unwrap().len();
-        let deciders: Vec<_> = (0..64).map(|at| crate::fixtures::s(&format!("{at:0>200}"))).collect();
+        let deciders: Vec<_> = (0..64).map(|at| crate::fixtures::acct(&format!("decider {at}"))).collect();
         let mut sized = vec![];
         for (request, _) in desk_requests() {
             let widest = match request {
                 DeskRequest::Answer { mind, request, authority, .. } => DeskRequest::Answer {
                     mind,
-                    subject: crate::fixtures::s(&long(200)),
+                    subject: crate::fixtures::acct("the widest subject"),
                     authority,
                     deciders: deciders.clone(),
                     request: ForkAnswerRequest {
@@ -596,10 +596,10 @@ mod tests {
                     },
                 },
                 DeskRequest::Forks { mind, status, cursor, limit, .. } => {
-                    DeskRequest::Forks { mind, subject: crate::fixtures::s(&long(200)), deciders: deciders.clone(), status, cursor, limit }
+                    DeskRequest::Forks { mind, subject: crate::fixtures::acct("the widest subject"), deciders: deciders.clone(), status, cursor, limit }
                 }
                 DeskRequest::Fork { mind, .. } => {
-                    DeskRequest::Fork { mind, subject: crate::fixtures::s(&long(200)), deciders: deciders.clone(), fork_id: long(200) }
+                    DeskRequest::Fork { mind, subject: crate::fixtures::acct("the widest subject"), deciders: deciders.clone(), fork_id: long(200) }
                 }
             };
             let message = encode_desk_request("m-10", &widest, Some(long(200))).unwrap();
@@ -607,7 +607,8 @@ mod tests {
             sized.push(wire(&message));
         }
         assert!(sized.iter().all(|size| *size <= DESK_MAX_REQUEST_BYTES), "{sized:?} against {DESK_MAX_REQUEST_BYTES}");
-        assert!(sized[0] > DESK_MAX_REQUEST_BYTES / 4, "the test builds a request that is actually large: {sized:?}");
+        // 64 account ids of 36 bytes and a 4,000-byte note: the widest answer a request can carry.
+        assert!(sized[0] > 4000 + 64 * 36, "the test builds a request that is actually large: {sized:?}");
 
         let answer = ForkDeskAnswer {
             schema_version: crate::desk_wire::AnswerSchema::V0,

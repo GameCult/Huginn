@@ -1,0 +1,40 @@
+{
+  "$defs": {
+    "Line": {
+      "description": "Text of at most 1,000 UTF-8 bytes.",
+      "maxLength": 1000,
+      "type": "string"
+    },
+    "Short": {
+      "description": "Text of at most 200 UTF-8 bytes.",
+      "maxLength": 200,
+      "type": "string"
+    },
+    "Slug": {
+      "description": "A campaign slug or key segment: label parts joined by `.`.",
+      "maxLength": 64,
+      "type": "string"
+    }
+  },
+  "$id": "https://gamecult.dev/epiphany/cultnet/epiphany.pipeline.desk_listing.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A fork the Mind lists: members who are not on a call's decider list may read the question\nwhile this document is in force (unlist = a `Withdrawn` resolution on it; relist = withdraw\nthat). One per question, keyed by the question's label; the receipt says who listed it and\nwhen, `reason` why members may read it. Admitted on the Mind's own door only, never the desk's.",
+  "properties": {
+    "campaign": {
+      "$ref": "#/$defs/Slug"
+    },
+    "listed": {
+      "$ref": "#/$defs/Short"
+    },
+    "reason": {
+      "$ref": "#/$defs/Line"
+    }
+  },
+  "required": [
+    "campaign",
+    "listed",
+    "reason"
+  ],
+  "title": "PipelineDeskListing",
+  "type": "object"
+}

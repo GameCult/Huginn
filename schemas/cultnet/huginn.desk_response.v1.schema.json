@@ -1682,7 +1682,8 @@
         "Idea",
         "Reply",
         "Thought",
-        "DeskAnswer"
+        "DeskAnswer",
+        "DeskListing"
       ]
     },
     "PipelineRefusal": {

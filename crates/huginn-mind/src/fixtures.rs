@@ -56,6 +56,21 @@ pub(crate) fn s(value: &str) -> Short {
     value.into()
 }
 
+/// A deterministic Bifrost account id for a test's name for someone: a lowercase D-format UUID.
+pub(crate) fn account(name: &str) -> Short {
+    // An id already in account form stands for itself.
+    if name.len() == 36 && name.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b'-')) {
+        return Short(name.into());
+    }
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+    Short(format!("{:08x}-{:04x}-4000-8000-{:012x}", hash >> 32, (hash >> 16) & 0xffff, hash & 0xffff_ffff_ffff))
+}
+
+/// The same, as the stored type.
+pub(crate) fn acct(name: &str) -> eureka_pipeline::AccountId {
+    eureka_pipeline::AccountId(account(name).0)
+}
+
 pub(crate) fn l(value: &str) -> Label {
     value.into()
 }

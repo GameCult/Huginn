@@ -21,8 +21,8 @@ use huginn_mind::desk_wire::{
     fork_too_large_read, AnswerSchema, CardSchema, CardStatus, DeskRequest, DeskResponse, EntrySchema, ForkCard, ForkCursor, ForkDeskAnswer, ForkEntry, ForkLimit,
     ForkList, ForkOption, ForkRecord, ForkRefusal, ForkRefusalCode, ForkRef, ListSchema, ListStatus, RecordSchema,
 };
-use huginn_mind::envelope::{OperationFailure, encode_desk_failure, encode_desk_request, encode_desk_response};
-use huginn_mind::eureka_pipeline::{DeskAuthority, Short, Slug};
+use huginn_mind::envelope::{OperationFailure, decode_desk_request, encode_desk_failure, encode_desk_request, encode_desk_response};
+use huginn_mind::eureka_pipeline::{AccountId, DeskAuthority, Short, Slug};
 
 const RUNTIME: &str = "huginn-eureka";
 /// Account ids as Bifrost sends them: `UserAccount.Id` rendered lowercase D-format
@@ -42,11 +42,15 @@ fn s(text: &str) -> Short {
     Short(text.into())
 }
 
+fn a(text: &str) -> AccountId {
+    AccountId(text.into())
+}
+
 fn forks(status: Option<ListStatus>, cursor: Option<u64>, limit: u8) -> DeskRequest {
     DeskRequest::Forks {
         mind: Slug("eureka".into()),
-        subject: s(READER),
-        deciders: vec![s(READER), s(OTHER_DECIDER)],
+        subject: a(READER),
+        deciders: vec![a(READER), a(OTHER_DECIDER)],
         status,
         cursor: cursor.and_then(ForkCursor::new),
         limit: ForkLimit::new(limit).unwrap(),
@@ -54,15 +58,15 @@ fn forks(status: Option<ListStatus>, cursor: Option<u64>, limit: u8) -> DeskRequ
 }
 
 fn read() -> DeskRequest {
-    DeskRequest::Fork { mind: Slug("eureka".into()), subject: s(READER), deciders: vec![s(READER), s(OTHER_DECIDER)], fork_id: FORK.into() }
+    DeskRequest::Fork { mind: Slug("eureka".into()), subject: a(READER), deciders: vec![a(READER), a(OTHER_DECIDER)], fork_id: FORK.into() }
 }
 
 /// The same reads from a subject the call's deciders do not name: a non-decider.
 fn forks_as_non_decider() -> DeskRequest {
     DeskRequest::Forks {
         mind: Slug("eureka".into()),
-        subject: s(NON_DECIDER),
-        deciders: vec![s(READER), s(OTHER_DECIDER)],
+        subject: a(NON_DECIDER),
+        deciders: vec![a(READER), a(OTHER_DECIDER)],
         status: Some(ListStatus::Open),
         cursor: None,
         limit: ForkLimit::new(50).unwrap(),
@@ -70,7 +74,7 @@ fn forks_as_non_decider() -> DeskRequest {
 }
 
 fn read_as_non_decider() -> DeskRequest {
-    DeskRequest::Fork { mind: Slug("eureka".into()), subject: s(NON_DECIDER), deciders: vec![s(READER), s(OTHER_DECIDER)], fork_id: FORK.into() }
+    DeskRequest::Fork { mind: Slug("eureka".into()), subject: a(NON_DECIDER), deciders: vec![a(READER), a(OTHER_DECIDER)], fork_id: FORK.into() }
 }
 
 fn list(open_count: u64, recorded_count: u64) -> DeskResponse {
@@ -196,6 +200,24 @@ fn hex(bytes: &[u8]) -> String {
     text
 }
 
+/// A request message whose payload is `request` with one field changed to something the typed request
+/// cannot hold: what a client that skips the account grammar would send.
+fn malformed(id: &str, request: &DeskRequest, edit: impl Fn(&mut serde_json::Value)) -> CultNetMessage {
+    use base64::Engine;
+    let mut value = serde_json::to_value(request).unwrap();
+    edit(&mut value);
+    CultNetMessage::OperationRequest {
+        message_id: id.into(),
+        service_id: huginn_mind::desk_wire::DESK_SERVICE_ID.into(),
+        operation: "fork".into(),
+        payload_schema: huginn_mind::desk_wire::DESK_REQUEST_SCHEMA.into(),
+        payload_encoding: "messagepack-base64".into(),
+        payload: base64::engine::general_purpose::STANDARD.encode(rmp_serde::to_vec_named(&value).unwrap()),
+        source_runtime_id: None,
+        target_runtime_id: None,
+    }
+}
+
 /// Every fixture: its file stem and its bytes. A message gives `.frame.bin`, `.frame.hex` and,
 /// for an operation message, `.payload.msgpack` and `.payload.hex`; a bare payload gives the last two.
 fn fixtures() -> Vec<(String, Vec<u8>)> {
@@ -221,6 +243,15 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
     // raised_at nil: the question's first admission is unknown.
     message("read.response", encode_desk_response("m-4", "fork", &DeskResponse::Fork { entry: entry(true, None), as_of: 10190 }, RUNTIME).unwrap());
     message("read-non-decider.response", encode_desk_response("m-6", "fork", &DeskResponse::Fork { entry: entry(false, None), as_of: 10190 }, RUNTIME).unwrap());
+    // A decider or subject that is no account id is refused at decode, naming the field.
+    for (name, id, request) in [
+        ("read-mxid-decider", "m-7", malformed("m-7", &read(), |value| value["Fork"]["deciders"][0] = "@heimdall:gamecult.org".into())),
+        ("read-email-subject", "m-8", malformed("m-8", &read(), |value| value["Fork"]["subject"] = "meta@gamecult.org".into())),
+    ] {
+        message(&format!("{name}.request"), request.clone());
+        let failure = decode_desk_request(&request).expect_err("the door refuses it");
+        message(&format!("{name}.failure.response"), encode_desk_failure(id, "fork", &failure, RUNTIME));
+    }
     message("list-empty.response", encode_desk_response("m-1", "forks", &list(0, 0), RUNTIME).unwrap());
     message("list-counts.response", encode_desk_response("m-3", "forks", &list(3, 5), RUNTIME).unwrap());
     message(
@@ -290,8 +321,7 @@ fn account_id(text: &str) -> bool {
 }
 
 /// Every account id the fixtures carry is a Bifrost account id, never a Matrix id, email or
-/// handle. The door does not refuse other shapes yet (`Short`, any 200 bytes); that refusal is owed
-/// by `cut-desk-feed-listing.r6`, and this pins the grammar it must enforce.
+/// handle, and the door refuses any other shape at decode, naming the field and never the value.
 #[test]
 fn every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid() {
     for request in [forks(Some(ListStatus::Open), None, 50), read()] {
@@ -302,6 +332,14 @@ fn every_account_id_in_the_fixtures_is_a_lowercase_d_format_uuid() {
         assert!(request.deciders().iter().all(|decider| account_id(&decider.0)), "deciders");
     }
     assert!(record(true).answers.iter().all(|answer| account_id(answer.answerer.as_deref().unwrap())), "answerer");
+    for (request, field, value) in [
+        (malformed("m-7", &read(), |value| value["Fork"]["deciders"][0] = "@heimdall:gamecult.org".into()), "deciders", "@heimdall:gamecult.org"),
+        (malformed("m-8", &read(), |value| value["Fork"]["subject"] = "meta@gamecult.org".into()), "subject", "meta@gamecult.org"),
+    ] {
+        let failure = decode_desk_request(&request).expect_err("a request outside the grammar is refused");
+        assert_eq!(failure.code, "payload-not-a-request");
+        assert!(failure.message.contains(field) && !failure.message.contains(value), "{}", failure.message);
+    }
     for shape in [
         "@heimdall:gamecult.org",
         "meta@gamecult.org",

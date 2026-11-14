@@ -316,6 +316,10 @@ bounded_text! {
     Words = 4000, words_text;
     /// A client's retry token: a lowercase D-format UUID.
     RequestId = 36, uuid_text;
+    /// A Bifrost account id: a lowercase D-format UUID (`UserAccount.Id`). A Matrix id, an email or a
+    /// handle is never one.
+    #[schemars(extend("pattern" = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))]
+    AccountId = 36, uuid_text;
     /// A key label: `[A-Za-z0-9_-]{1,64}`.
     Label = 64, label_text;
     /// A campaign slug or key segment: label parts joined by `.`.
@@ -885,8 +889,13 @@ value_types! {
     pub struct PipelineDeskAnswer {
         campaign: Slug, fork: Short, sequence: u32, options_hash: Sha256Hex, choice: Option<Short>, note: Option<Words>,
         answered_at: Short, received_at: Short, claim_in_future: bool, request_id: RequestId, body_sha256: Sha256Hex,
-        answerer: Short, authority: DeskAuthority, outcome: DeskOutcome,
+        answerer: AccountId, authority: DeskAuthority, outcome: DeskOutcome,
     }
+    /// A fork the Mind lists: members who are not on a call's decider list may read the question
+    /// while this document is in force (unlist = a `Withdrawn` resolution on it; relist = withdraw
+    /// that). One per question, keyed by the question's label; the receipt says who listed it and
+    /// when, `reason` why members may read it. Admitted on the Mind's own door only, never the desk's.
+    pub struct PipelineDeskListing { campaign: Slug, listed: Short, reason: Line }
     pub struct PipelineVerdict { campaign: Slug, cut_report: Short, pass: u32, range: CommitRange, claims: Vec<VerdictClaim>[64] }
     pub struct PipelineFinding {
         campaign: Slug, verdict: Short, label: Label, range: CommitRange, confidence: FindingConfidence,
@@ -1425,6 +1434,16 @@ pipeline_kinds! {
         "epiphany.pipeline.thought.v2", "EpiphanyPipelineThoughtDocument";
     DeskAnswer(PipelineDeskAnswer) => EpiphanyPipelineDeskAnswerDocument, "desk_answer",
         "epiphany.pipeline.desk_answer.v2", "EpiphanyPipelineDeskAnswerDocument";
+    DeskListing(PipelineDeskListing) => EpiphanyPipelineDeskListingDocument, "desk_listing",
+        "epiphany.pipeline.desk_listing.v2", "EpiphanyPipelineDeskListingDocument";
+}
+
+impl AccountId {
+    /// Whether this is a lowercase D-format UUID. For the callers outside the crate, which have no way
+    /// to reach `Bounded`; on the pattern of `Slug::validate_slug`.
+    pub fn validate_account(&self) -> Result<(), PipelineRefusal> {
+        self.validate("account")
+    }
 }
 
 /// Parses a full document id: the grammar read backwards. A key and an id are
@@ -1516,7 +1535,7 @@ const SUBJECT_LOCAL_MAX: usize = 64;
 
 /// The longest kind name a resolution can name as its subject (`stewardship`),
 /// checked against `PipelineKind::ALL` by a test.
-const LONGEST_KIND_NAME: usize = "stewardship".len();
+const LONGEST_KIND_NAME: usize = "desk_listing".len();
 
 /// A `.n<sequence>` part at `u32::MAX`.
 const SEQUENCE_PART_MAX: usize = ".n".len() + "4294967295".len();
@@ -1650,6 +1669,10 @@ pub fn pipeline_key(document: &PipelineDocument) -> Result<String, PipelineRefus
             let label = parent_local("desk_answer.fork", &value.fork.0, &value.campaign.0, PipelineKind::Question)?;
             let sequence = format!("n{}", value.sequence);
             (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[label, &sequence])?)
+        }
+        D::DeskListing(value) => {
+            let label = parent_local("desk_listing.listed", &value.listed.0, &value.campaign.0, PipelineKind::Question)?;
+            (campaign_field.as_str(), value.campaign.0.as_str(), local(&key_field, document_kind, &[label])?)
         }
         D::Verdict(value) => {
             let report = parent_local("verdict.cut_report", &value.cut_report.0, &value.campaign.0, PipelineKind::CutReport)?;
@@ -1927,9 +1950,12 @@ mod tests {
                 campaign: slug(CAMPAIGN), fork: id("question", "Q1"), sequence: 1, options_hash: Sha256Hex("c".repeat(64)),
                 choice: Some(s("a")), note: Some("Share it, with the mark.".into()), answered_at: s("2026-11-10T15:00:00Z"),
                 received_at: s("2026-11-10T15:00:03Z"), claim_in_future: false, request_id: RequestId("6f1c0a52-3b7e-4d1a-9c58-0e2d7a4b9f13".into()), body_sha256: Sha256Hex("d".repeat(64)),
-                answerer: s("user-7"), authority: DeskAuthority::Member,
+                answerer: AccountId("5f0c2b1e-8a4d-4c3b-9e7f-1a2b3c4d5e6f".into()), authority: DeskAuthority::Member,
                 outcome: DeskOutcome::Revision { of: id("desk_answer", "Q1.n1") },
             }), format!("{CAMPAIGN}:desk_answer:Q1.n1")),
+            (D::DeskListing(PipelineDeskListing {
+                campaign: slug(CAMPAIGN), listed: id("question", "Q1"), reason: "Members may read why the Mind lists its own forks.".into(),
+            }), format!("{CAMPAIGN}:desk_listing:Q1")),
         ]
     }
 
@@ -3587,7 +3613,7 @@ mod tests {
             );
         }
         assert_eq!(widest, RESOLUTION_LOCAL_MAX, "the bound is exactly the widest depth-two chain");
-        assert_eq!(RESOLUTION_LOCAL_MAX, 111);
+        assert_eq!(RESOLUTION_LOCAL_MAX, 112);
     }
 
     #[test]
@@ -4109,7 +4135,7 @@ mod tests {
         };
         let document_schema = serde_json::to_value(schemars::schema_for!(PipelineDocument))?;
         let variants = document_schema["oneOf"].as_array().expect("the document schema is a oneOf");
-        assert_eq!(PipelineKind::ALL.len(), 21, "twenty-one kinds");
+        assert_eq!(PipelineKind::ALL.len(), 22, "twenty-two kinds");
         assert_eq!(
             variants.iter().map(tag).collect::<Vec<_>>(),
             PipelineKind::ALL.iter().map(|kind| kind.name().to_owned()).collect::<Vec<_>>(),
@@ -4639,7 +4665,7 @@ mod tests {
     }
 
     fn desk_answer_sample() -> PipelineDeskAnswer {
-        let PipelineDocument::DeskAnswer(answer) = samples().pop().unwrap().0 else { unreachable!() };
+        let PipelineDocument::DeskAnswer(answer) = samples().remove(20).0 else { unreachable!() };
         answer
     }
 

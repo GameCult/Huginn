@@ -1,5 +1,11 @@
 {
   "$defs": {
+    "AccountId": {
+      "description": "A Bifrost account id: a lowercase D-format UUID (`UserAccount.Id`). A Matrix id, an email or a\nhandle is never one.",
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
     "DeskAuthority": {
       "enum": [
         "Operator",
@@ -136,7 +142,7 @@
       "$ref": "#/$defs/Short"
     },
     "answerer": {
-      "$ref": "#/$defs/Short"
+      "$ref": "#/$defs/AccountId"
     },
     "authority": {
       "$ref": "#/$defs/DeskAuthority"

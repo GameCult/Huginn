@@ -20,7 +20,7 @@ pub use reads::{CardSchema, CardStatus, EntrySchema, ForkCard, ForkCursor, ForkE
 
 use chrono::{DateTime, Utc};
 use eureka_pipeline::{
-    DeskAuthority, DeskOutcome, DeskRefusal, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, RequestId, Sha256Hex, Short, Slug, Words,
+    AccountId, DeskAuthority, DeskOutcome, DeskRefusal, PipelineDeskAnswer, PipelineDocument, PipelineKind, PipelineQuestion, RequestId, Sha256Hex, Short, Slug, Words,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -232,18 +232,33 @@ pub const DESK_PAGE_BUDGET: usize = DESK_MAX_RESPONSE_BYTES - DESK_ENVELOPE_MARG
 /// Most deciders one call carries (CultLib `card.deciders` `maxItems`).
 pub const DESK_DECIDERS_MAX: usize = 64;
 
-/// A decider list, read whole or not at all: one to `DESK_DECIDERS_MAX` subjects, none twice. A
-/// bad list is the decoder's refusal, which names the field and never quotes a subject.
-fn deciders<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Short>, D::Error> {
+/// An account id read from the wire: a lowercase D-format UUID, or the decoder's refusal, which names the
+/// field and never quotes the value.
+fn account_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<AccountId, D::Error> {
+    let id = AccountId(String::deserialize(deserializer)?);
+    id.validate_account().map_err(|_| serde::de::Error::custom("not an account id: a lowercase D-format UUID"))?;
+    Ok(id)
+}
+
+/// A decider list, read whole or not at all: one to `DESK_DECIDERS_MAX` account ids, none twice. A
+/// bad list is the decoder's refusal, which names the field and never quotes an id.
+fn deciders<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<AccountId>, D::Error> {
     struct List;
+    /// One list entry, through the same grammar as `subject`.
+    struct Account(AccountId);
+    impl<'de> Deserialize<'de> for Account {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            account_id(deserializer).map(Self)
+        }
+    }
     impl<'de> serde::de::Visitor<'de> for List {
-        type Value = Vec<Short>;
+        type Value = Vec<AccountId>;
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("a list of distinct deciders")
         }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<Short>, A::Error> {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<AccountId>, A::Error> {
             let mut list = Vec::new();
-            while let Some(subject) = seq.next_element::<Short>()? {
+            while let Some(Account(subject)) = seq.next_element::<Account>()? {
                 if list.len() == DESK_DECIDERS_MAX {
                     return Err(serde::de::Error::custom("too many deciders"));
                 }
@@ -264,7 +279,7 @@ fn deciders<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Sho
 fn deciders_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "array",
-        "items": generator.subschema_for::<Short>(),
+        "items": generator.subschema_for::<AccountId>(),
         "minItems": 1,
         "maxItems": DESK_DECIDERS_MAX,
         "uniqueItems": true
@@ -279,8 +294,9 @@ fn deciders_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schem
 ///
 /// The reads, `Forks` and `Fork`, carry NO `authority` (CultLib `list_request` and
 /// `read_request` are closed and have none; one that names it is refused whole). Their `deciders`
-/// feed the showability gate, and `subject` decides the view: a subject in `deciders` is a decider
-/// and is told the ids; any other is told counts in their place. `Forks` takes the contract's `list_request` fields flat
+/// feed the showability gate, and `subject` decides the view: a subject in `deciders` is a decider,
+/// sees every showable fork and is told the ids; any other reads only the forks the Mind lists
+/// (a `desk_listing` in force) and is told counts in the ids' place. `Forks` takes the contract's `list_request` fields flat
 /// beside them (`status`, `cursor`, `limit`), each key written, `null` where absent. Bifrost
 /// strips notes; see `DeskResponse` for the trust boundary. These docs and the doc of `Mind::desk_forks`/`Mind::desk_fork` are the
 /// reads spec.
@@ -289,19 +305,21 @@ fn deciders_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schem
 pub enum DeskRequest {
     Answer {
         mind: Slug,
-        subject: Short,
+        #[serde(deserialize_with = "account_id")]
+        subject: AccountId,
         authority: DeskAuthority,
         #[serde(deserialize_with = "deciders")]
         #[schemars(schema_with = "deciders_schema")]
-        deciders: Vec<Short>,
+        deciders: Vec<AccountId>,
         request: ForkAnswerRequest,
     },
     Forks {
         mind: Slug,
-        subject: Short,
+        #[serde(deserialize_with = "account_id")]
+        subject: AccountId,
         #[serde(deserialize_with = "deciders")]
         #[schemars(schema_with = "deciders_schema")]
-        deciders: Vec<Short>,
+        deciders: Vec<AccountId>,
         #[serde(deserialize_with = "required")]
         #[schemars(required)]
         status: Option<ListStatus>,
@@ -312,10 +330,11 @@ pub enum DeskRequest {
     },
     Fork {
         mind: Slug,
-        subject: Short,
+        #[serde(deserialize_with = "account_id")]
+        subject: AccountId,
         #[serde(deserialize_with = "deciders")]
         #[schemars(schema_with = "deciders_schema")]
-        deciders: Vec<Short>,
+        deciders: Vec<AccountId>,
         fork_id: String,
     },
 }
@@ -337,7 +356,7 @@ impl DeskRequest {
         }
     }
 
-    pub fn deciders(&self) -> &[Short] {
+    pub fn deciders(&self) -> &[AccountId] {
         match self {
             Self::Answer { deciders, .. } | Self::Forks { deciders, .. } | Self::Fork { deciders, .. } => deciders,
         }
@@ -530,10 +549,13 @@ impl<S: MindStore> Mind<S> {
         };
         let image = self.image()?;
         let docs = Docs::at(image, image.head);
-        // A request already stored replays whatever the list is now: the lookup is `answer_desk`'s,
-        // asked here only so the gate does not shadow it.
-        let unshowable = bound_answer(&docs, &subject, &sent.request_id).is_none()
-            && matches!(docs.find(PipelineKind::Question, &sent.fork.0), Some(PipelineDocument::Question(question)) if !showable(question, deciders));
+        // A fork this reader may not see is unshowable here too, by the read side's own `visible`: the answer path
+        // must not tell a hidden fork from a missing one, nor store a refusal for it. A request already stored replays
+        // whatever the decider list is now (the lookup is `answer_desk`'s, asked here only so `showable` does not
+        // shadow it), but never to a reader who can no longer see the fork: the counted answer id and `as_of` it
+        // would carry are the fork's current state, so that replay is `fork_unknown` too (ruling clause 3).
+        let replay = bound_answer(&docs, &subject, &sent.request_id).is_some();
+        let unshowable = matches!(docs.find(PipelineKind::Question, &sent.fork.0), Some(PipelineDocument::Question(question)) if (!replay && !showable(question, deciders)) || !reads::visible(&docs, &sent.fork.0, deciders.contains(&subject)));
         if unshowable {
             return Ok(DeskResponse::NotStored(fork_unknown()));
         }
@@ -597,6 +619,11 @@ mod tests {
     fn desk() -> Mind<MemoryStore> {
         let mut mind = seeded();
         committed(admit(&mut mind, vec![question_n(1), question_n(2)]));
+        // Listed, so a reader who is not a decider reaches them (an unlisted fork is the reads' own tests').
+        for fork in [FORK, FORK2] {
+            let listing = D::DeskListing(eureka_pipeline::PipelineDeskListing { campaign: slug("eureka-state"), listed: s(fork), reason: "Listed.".into() });
+            committed(admit(&mut mind, vec![listing]));
+        }
         mind
     }
 
@@ -632,14 +659,14 @@ mod tests {
     }
 
     fn deciders(list: &[&str]) -> Vec<Short> {
-        list.iter().map(|who| s(who)).collect()
+        list.iter().map(|who| account(who)).collect()
     }
 
     /// The response and whether the call committed anything: a replay, a refused body and a gate
     /// refusal store nothing, so the head does not move.
     fn ask_as(mind: &mut Mind<MemoryStore>, who: &str, list: &[&str], request: ForkAnswerRequest) -> (DeskResponse, bool) {
         let before = head(mind);
-        let response = mind.desk_answer(&deciders(list), s(who), DeskAuthority::Member, request, now());
+        let response = mind.desk_answer(&deciders(list), account(who), DeskAuthority::Member, request, now());
         (response, head(mind) != before)
     }
 
@@ -779,7 +806,7 @@ mod tests {
             request_id: RequestId(text("request_id").unwrap()),
             body_sha256: Sha256Hex("0".repeat(64)),
             // A withheld vector names no answerer: store a placeholder, the vector is the non-decider's view of it.
-            answerer: Short(text("answerer").unwrap_or_else(|| "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f".into())),
+            answerer: AccountId(text("answerer").unwrap_or_else(|| "e0d1c2b3-a495-4687-8879-6a5b4c3d2e1f".into())),
             authority,
             outcome,
         };
@@ -1286,6 +1313,54 @@ mod tests {
         }
     }
 
+    /// Ruling clause 3: a stored request replays whatever the decider list is now, but never to a reader who can no
+    /// longer see the fork. The replay would carry the fork's current counted answer id and head, so it is the same
+    /// bytes a missing fork answers with; the stored word itself comes back once the fork is listed again.
+    #[test]
+    fn a_stored_answer_does_not_replay_to_a_reader_who_can_no_longer_see_the_fork() {
+        let mut mind = desk();
+        let hash = hash_of(&mind, FORK);
+        // Dan is not a decider: his answer to the listed fork is a stored refusal and counts nothing.
+        let dan_request = wire(FORK, &hash);
+        let (first, wrote) = ask(&mut mind, "d", dan_request.clone());
+        let (refused, counted, _) = answered(first);
+        assert!((wrote, refused.outcome.as_str(), refused.code.is_some(), counted) == (true, "Refused", true, None), "{refused:?}");
+        // A decider answers, so the fork now has a counted answer a replay could name.
+        let x_request = wire(FORK, &hash);
+        let (counted_by_x, _) = ask(&mut mind, "x", x_request.clone());
+        assert!(answered(counted_by_x).1.is_some());
+        // Still listed: the replay is the stored word, with the fork's current state.
+        let before = head(&mind);
+        let (listed_replay, wrote) = ask(&mut mind, "d", dan_request.clone());
+        assert!(!wrote);
+        let (_, counted, as_of) = answered(listed_replay);
+        assert_eq!((counted.is_some(), as_of), (true, before));
+        // Unlisted: the replay is fork_unknown, byte for byte a fork that does not exist, and writes nothing.
+        let withdrawal = crate::fixtures::resolution_n(
+            eureka_pipeline::PipelineRef { kind: PipelineKind::DeskListing, id: s("eureka-state:desk_listing:Q1") },
+            1,
+            eureka_pipeline::ResolutionOutcome::Withdrawn { reason: "unlisted".into() },
+        );
+        let withdrawal_key = eureka_pipeline::pipeline_key(&withdrawal).unwrap();
+        committed(admit(&mut mind, vec![withdrawal]));
+        let before = head(&mind);
+        let (hidden, wrote) = ask(&mut mind, "d", dan_request.clone());
+        assert!(!wrote);
+        let (missing, _) = ask(&mut mind, "d", ForkAnswerRequest { fork_id: "eureka-state:question:Q99".into(), ..wire(FORK, &hash) });
+        assert_eq!(not_stored(hidden.clone()).code, ForkRefusalCode::ForkUnknown);
+        assert_eq!(encode(&hidden), encode(&missing));
+        // A decider is told the fork whether or not it is listed.
+        let (decider_replay, wrote) = ask(&mut mind, "x", x_request);
+        assert!(!wrote && answered(decider_replay).1.is_some());
+        assert_eq!(head(&mind), before);
+        // Relisted: the stored word replays again.
+        let subject = eureka_pipeline::PipelineRef { kind: PipelineKind::Resolution, id: s(&withdrawal_key) };
+        committed(admit(&mut mind, vec![crate::fixtures::resolution(subject, eureka_pipeline::ResolutionOutcome::Withdrawn { reason: "listed again".into() })]));
+        let (relisted, wrote) = ask(&mut mind, "d", dan_request);
+        assert!(!wrote);
+        assert_eq!(answered(relisted).0.outcome, "Refused");
+    }
+
     #[test]
     fn showable_needs_two_options_text_depends_and_a_decider() {
         let D::Question(plain) = question("Q9", &["A", "B"], "A") else { unreachable!() };
@@ -1355,9 +1430,9 @@ mod tests {
         let (other, committed) = ask(&mut mind, "y", request.clone());
         let (other, _, _) = answered(other);
         assert!(committed);
-        assert_eq!((other.answer_id.as_str(), other.answerer.as_deref().unwrap(), other.outcome.as_str(), other.request_id.as_str()), ("n2", "y", "Revision", request.request_id.as_str()));
+        assert_eq!((other.answer_id.as_str(), other.answerer.as_deref().unwrap(), other.outcome.as_str(), other.request_id.as_str()), ("n2", account("y").0.as_str(), "Revision", request.request_id.as_str()));
         let (original, _, _) = answered(ask(&mut mind, "x", request.clone()).0);
-        assert_eq!((original.answer_id.as_str(), original.answerer.as_deref().unwrap()), ("n1", "x"));
+        assert_eq!((original.answer_id.as_str(), original.answerer.as_deref().unwrap()), ("n1", account("x").0.as_str()));
         // V17 and V18: an id that is no lowercase D-format UUID is body_invalid naming request_id, and binds nothing.
         let before = head(&mind);
         for bad in ["retry-1", "0000000A-0000-4000-8000-00000000000B", "{00000000-0000-4000-8000-000000000001}", "00000000-0000-4000-8000-0000000000010", "", " 00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000001 ", "00000000-0000-4000-8000-000000000001\n", "00000000-0000-4000-8000-000000000001x"] {
@@ -1472,6 +1547,7 @@ mod tests {
             assert_eq!(shown_hash(&question).0, her_hash, "{name}: the card's hash");
             let mut mind = seeded();
             committed(admit(&mut mind, vec![D::Question(question)]));
+            committed(admit(&mut mind, vec![D::DeskListing(eureka_pipeline::PipelineDeskListing { campaign: slug("eureka-state"), listed: s(FORK), reason: "Listed.".into() })]));
             let list: Vec<&str> = card["deciders"].as_array().unwrap().iter().map(|who| who.as_str().unwrap()).collect();
             if card["status"] == "closed" {
                 close(&mut mind, FORK, "RQ1", "no");
@@ -1568,27 +1644,27 @@ mod tests {
         let mut mind = desk();
         let hash = hash_of(&mind, FORK);
         // The operator's own account, off the list, is no decider; a member on the list is.
-        let off = mind.desk_answer(&deciders(&["x"]), s("op"), DeskAuthority::Operator, wire(FORK, &hash), now());
+        let off = mind.desk_answer(&deciders(&["x"]), account("op"), DeskAuthority::Operator, wire(FORK, &hash), now());
         assert_eq!(answered(off).0.code, Some(ForkAnswerCode::NotADecider));
-        let on = mind.desk_answer(&deciders(&["m"]), s("m"), DeskAuthority::Member, wire(FORK, &hash), now());
+        let on = mind.desk_answer(&deciders(&["m"]), account("m"), DeskAuthority::Member, wire(FORK, &hash), now());
         let (answer, _, _) = answered(on);
-        assert_eq!((answer.outcome.as_str(), answer.authority, answer.answerer.as_deref().unwrap()), ("Counted", DeskAuthority::Member, "m"));
+        assert_eq!((answer.outcome.as_str(), answer.authority, answer.answerer.as_deref().unwrap()), ("Counted", DeskAuthority::Member, account("m").0.as_str()));
     }
 
     // ---- the desk request on the wire: deciders ride each call, at most 64, never stored ----
 
     use crate::envelope::{OperationFailure, decode_desk_request, encode_desk_request};
 
-    fn list_of(n: usize) -> Vec<Short> {
-        (0..n).map(|at| s(&format!("d{at}"))).collect()
+    fn list_of(n: usize) -> Vec<AccountId> {
+        (0..n).map(|at| acct(&format!("d{at}"))).collect()
     }
 
     /// Each request kind of the desk, carrying `list`.
-    fn desk_requests(mind: &str, list: &[Short], hash: &str) -> [DeskRequest; 3] {
+    fn desk_requests(mind: &str, list: &[AccountId], hash: &str) -> [DeskRequest; 3] {
         [
-            DeskRequest::Answer { mind: slug(mind), subject: s("d0"), authority: DeskAuthority::Member, deciders: list.to_vec(), request: wire(FORK, hash) },
-            DeskRequest::Forks { mind: slug(mind), subject: s("d0"), deciders: list.to_vec(), status: None, cursor: None, limit: ForkLimit::new(10).unwrap() },
-            DeskRequest::Fork { mind: slug(mind), subject: s("d0"), deciders: list.to_vec(), fork_id: FORK.into() },
+            DeskRequest::Answer { mind: slug(mind), subject: acct("d0"), authority: DeskAuthority::Member, deciders: list.to_vec(), request: wire(FORK, hash) },
+            DeskRequest::Forks { mind: slug(mind), subject: acct("d0"), deciders: list.to_vec(), status: None, cursor: None, limit: ForkLimit::new(10).unwrap() },
+            DeskRequest::Fork { mind: slug(mind), subject: acct("d0"), deciders: list.to_vec(), fork_id: FORK.into() },
         ]
     }
 
@@ -1611,7 +1687,7 @@ mod tests {
         // 64 deciders through to the Mind: the subject is listed and counts.
         let DeskRequest::Answer { subject, authority, deciders, request, .. } = through_the_door(&desk_requests(INSTANCE, &list_of(64), &hash)[0]).unwrap() else { panic!("not an answer") };
         let before = head(&mind);
-        let response = mind.desk_answer(&deciders, subject, authority, request, now());
+        let response = mind.desk_answer(&deciders.iter().map(|id| s(&id.0)).collect::<Vec<_>>(), s(&subject.0), authority, request, now());
         assert!(head(&mind) > before);
         assert_eq!(answered(response).0.outcome, "Counted");
 
@@ -1631,7 +1707,7 @@ mod tests {
         let hash = hash_of(&mind, FORK);
         let before = (head(&mind), stored_count(&mind, FORK));
         let mut twice = list_of(3);
-        twice.push(s("d1"));
+        twice.push(acct("d1"));
         for (what, list) in [("empty", vec![]), ("duplicate", twice)] {
             for sent in desk_requests(INSTANCE, &list, &hash) {
                 let failure = through_the_door(&sent).unwrap_err();
@@ -1667,6 +1743,6 @@ mod tests {
         // The same request to the mind it names is answered.
         let DeskRequest::Answer { mind: named, subject, authority, deciders, request } = through_the_door(&desk_requests(INSTANCE, &list_of(4), &hash)[0]).unwrap() else { panic!("not an answer") };
         mind.require_instance(&named).unwrap();
-        assert_eq!(answered(mind.desk_answer(&deciders, subject, authority, request, now())).0.outcome, "Counted");
+        assert_eq!(answered(mind.desk_answer(&deciders.iter().map(|id| s(&id.0)).collect::<Vec<_>>(), s(&subject.0), authority, request, now())).0.outcome, "Counted");
     }
 }
