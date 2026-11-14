@@ -116,9 +116,9 @@ pub(crate) mod test_stores {
             Ok(self.rows())
         }
 
-        fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+        fn push(&mut self, entry: &CultCacheEnvelope) -> Result<String> {
             self.plant(entry.clone());
-            Ok(())
+            Ok(entry.stored_at.clone())
         }
 
         fn delete(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
@@ -126,9 +126,9 @@ pub(crate) mod test_stores {
             Ok(())
         }
 
-        fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<()> {
+        fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<Vec<String>> {
             *self.rows.lock().unwrap() = entries.iter().map(|entry| (identity(entry), entry.clone())).collect();
-            Ok(())
+            Ok(entries.iter().map(|entry| entry.stored_at.clone()).collect())
         }
     }
 
@@ -199,7 +199,7 @@ pub(crate) mod test_stores {
             self.inner.pull_all()
         }
 
-        fn push(&mut self, entry: &CultCacheEnvelope) -> Result<()> {
+        fn push(&mut self, entry: &CultCacheEnvelope) -> Result<String> {
             self.inner.push(entry)
         }
 
@@ -207,7 +207,7 @@ pub(crate) mod test_stores {
             self.inner.delete(entry)
         }
 
-        fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<()> {
+        fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<Vec<String>> {
             self.inner.push_all(entries, options)
         }
     }

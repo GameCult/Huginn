@@ -187,7 +187,12 @@ mod unsafe_installs {
         std::fs::create_dir(&instance).unwrap();
         for (name, mode) in [("control.cc.lock", lock_mode), ("control.cc", store_mode)] {
             if let Some(mode) = mode {
-                std::fs::write(instance.join(name), b"").unwrap();
+                if name == "control.cc" {
+                    // A store is a store the runtime reads: CultCache refuses a zero-byte file, as it refuses any file it cannot read.
+                    ControlWriter::open(instance.join(name)).unwrap().set_brake(false, at(0), "fixture").unwrap();
+                } else {
+                    std::fs::write(instance.join(name), b"").unwrap();
+                }
                 chmod(&instance.join(name), mode);
             }
         }

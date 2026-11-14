@@ -374,7 +374,7 @@ mod tests {
             self.inner.pull_all()
         }
 
-        fn push(&mut self, entry: &CultCacheEnvelope) -> anyhow::Result<()> {
+        fn push(&mut self, entry: &CultCacheEnvelope) -> anyhow::Result<String> {
             self.inner.push(entry)
         }
 
@@ -382,7 +382,7 @@ mod tests {
             self.inner.delete(entry)
         }
 
-        fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> anyhow::Result<()> {
+        fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> anyhow::Result<Vec<String>> {
             self.inner.push_all(entries, options)
         }
     }

@@ -36,7 +36,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use cultcache_rs::{CultCache, CultCacheEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore};
 use eureka_pipeline::Slug;
@@ -414,6 +414,10 @@ impl ControlWriter {
         let mut cache = registered_cache()?;
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
         cache.pull_all_backing_stores()?;
+        // A pull carries a record no registered type claims instead of refusing it; the writer still must not write beside one.
+        if !cache.foreign_records().is_empty() {
+            bail!("{} holds a record this control store does not read: archive it, nothing migrates it", path.display());
+        }
         Ok(Self { cache, path })
     }
 
@@ -502,6 +506,10 @@ impl SwarmWriter {
         let mut cache = swarm_cache()?;
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
         cache.pull_all_backing_stores()?;
+        // A pull carries a record no registered type claims instead of refusing it; the writer still must not write beside one.
+        if !cache.foreign_records().is_empty() {
+            bail!("{} holds a record this swarm store does not read: archive it, nothing migrates it", path.display());
+        }
         Ok(Self { cache, path })
     }
 

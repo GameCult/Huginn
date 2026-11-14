@@ -309,6 +309,10 @@ impl FileStore {
         let mut cache = Self::registered()?;
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&self.path))?;
         cache.pull_all_backing_stores().with_context(|| self.refusal())?;
+        // A pull now carries a record no registered type claims instead of refusing it; the writer still must not write beside one.
+        if !cache.foreign_records().is_empty() {
+            return Err(anyhow!(self.refusal()));
+        }
         Ok(cache)
     }
 
