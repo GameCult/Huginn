@@ -569,7 +569,7 @@ impl<S: MindStore> Mind<S> {
         let Some(PipelineDocument::DeskAnswer(stored)) = docs.find(PipelineKind::DeskAnswer, &key) else { return Err(unreadable_key()) };
         let fork = stored.fork.0.as_str();
         let counted_answer_id = counted_answer(&docs, fork).map(|counted| answer_seq(fork, &counted).map(n_text).ok_or_else(unreadable_key)).transpose()?;
-        Ok((DeskResponse::Answered { answer: project(&key, stored)?, counted_answer_id, as_of: image.head }))
+        Ok(DeskResponse::Answered { answer: project(&key, stored)?, counted_answer_id, as_of: image.head })
     }
 }
 
