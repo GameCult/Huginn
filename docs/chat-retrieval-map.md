@@ -125,9 +125,11 @@ data we lack).
 Built: cut 1 (`texts` on `SourceQuery`), chat search and window, the chat ingest
 core (`sources/chat.rs`, `room_scope.rs`, `chat_purge.rs`) and the ingest job.
 The job is `huginn-sources`: with `--matrix-url`, `--matrix-token-file`, three
-`--chat-exclude-room` ids (the estate rooms) and `--lock-file` it runs the forge
+`--chat-exclude-room` ids (the estate rooms) it runs the forge
 refresh and then `refresh_chat` through `sources/matrix.rs` (GET only, bearer
-from a systemd credential file); without them it retires every chat point. The
+from a systemd credential file); without them it retires every chat point. Every run, chat or not, requires
+`--lock-file` and holds it for the run (exit 3 if held), as `chat-purge` does,
+so a chat-off run cannot overwrite a concurrent purge tombstone. The
 rooms indexed are the reader's memberships; no flag lists rooms. `huginn-sources
 chat-purge` writes a steward's purge tombstone under the same lock. What the
 operator still has to do (reader account, credential, roster, unit lines) is the
