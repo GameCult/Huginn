@@ -150,7 +150,7 @@ mod tests {
     fn view(document: PipelineDocument, ordinal: u64) -> PipelineDocumentView {
         let key = pipeline_key(&document).unwrap();
         let id = PipelineRef { kind: document.kind(), id: s(&key) };
-        let faculty = if ordinal % 2 == 0 { Faculty::Hands } else { Faculty::Soul };
+        let faculty = if ordinal.is_multiple_of(2) { Faculty::Hands } else { Faculty::Soul };
         let admission = AdmissionFacts {
             receipt_id: format!("receipt-{ordinal}"),
             admitted_at: format!("2026-11-08T16:{ordinal:02}:00Z"),
@@ -226,7 +226,7 @@ mod tests {
         let to_source = [held.clone(), vec![moved(RECEIVER, 4)]].concat();
         assert_eq!(plan(&slug(CAMPAIGN), &slug(RECEIVER), &slug(RECEIVER), to_source), Err(ImportFault::SourceIsReceiver));
         let other_root = view(
-            resolution(r(K::Campaign, &format!("elsewhere:campaign:self")), ResolutionOutcome::Moved { to: slug(RECEIVER) }),
+            resolution(r(K::Campaign, "elsewhere:campaign:self"), ResolutionOutcome::Moved { to: slug(RECEIVER) }),
             4,
         );
         assert_eq!(plan_of([held, vec![other_root]].concat()), Err(ImportFault::NotMoved), "another root's move does not move this one");

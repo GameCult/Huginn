@@ -1468,7 +1468,7 @@ mod tests {
             let before = head(&mind);
             let id = request.request_id.clone();
             let (answer, outcome) = stored(ask(&mut mind, &decider("y"), request.clone()));
-            assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::BadRetraction, retracts: sent.2.map(|target| s(target)) }, "{what}");
+            assert_eq!(outcome, DeskOutcome::Refused { code: DeskRefusal::BadRetraction, retracts: sent.2.map(s) }, "{what}");
             assert_eq!(head(&mind), before + 1, "{what} is stored");
             // The record keeps what was sent: the choice, the note and the target it named.
             let record = held(&mind, &answer);
