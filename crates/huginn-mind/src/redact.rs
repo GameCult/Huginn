@@ -159,7 +159,7 @@ fn zero_width(c: char) -> bool {
 pub fn scrub(text: &str) -> Scrubbed {
     let mut hits = Vec::new();
     let mut stripped: String = text.chars().filter(|c| !zero_width(*c)).collect();
-    let passes: [(ScrubKind, fn(&str, usize) -> Option<usize>); 6] = [
+    let passes: [(ScrubKind, Finder); 6] = [
         (ScrubKind::PemBlock, pem_block),
         (ScrubKind::AuthorizationHeader, authorization_line),
         (ScrubKind::AccessToken, access_token),
@@ -176,7 +176,10 @@ pub fn scrub(text: &str) -> Scrubbed {
     if hits.is_empty() { Scrubbed { text: text.to_owned(), hits } } else { Scrubbed { text: urls, hits } }
 }
 
-fn replace_matches(text: &str, kind: ScrubKind, find: fn(&str, usize) -> Option<usize>, hits: &mut Vec<ScrubKind>) -> String {
+/// A scrub pass: finds the end of one secret starting at a byte offset, if one starts there.
+type Finder = fn(&str, usize) -> Option<usize>;
+
+fn replace_matches(text: &str, kind: ScrubKind, find: Finder, hits: &mut Vec<ScrubKind>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
     while at < text.len() {
