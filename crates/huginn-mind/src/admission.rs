@@ -671,7 +671,7 @@ fn check(docs: &Docs<'_>, staged: &Staged, mind: &Slug, import: Option<&ImportSo
                 return Err(MindRefusal::RepoNotInCampaign { repo: spec.repo.0.clone() });
             }
             for ruling in &spec.rulings {
-                if !(historic && root_and_local(&ruling.0).0 != root) && !docs.in_force(K::Ruling, &ruling.0) {
+                if !(docs.in_force(K::Ruling, &ruling.0) || historic && root_and_local(&ruling.0).0 != root) {
                     return Err(MindRefusal::CitesResolvedDocument { kind: K::Ruling, id: ruling.0.clone() });
                 }
             }
