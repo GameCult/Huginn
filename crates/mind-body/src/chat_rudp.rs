@@ -30,7 +30,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::chat_client::{
-    ACK, Chat, ChatAck, ChatDelivery, ChatFetchReceipt, ChatFetchRequest, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, MouthRefused, Refusal, reply_warnings, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_REQUEST_V4, PENDING_V2, PENDING_V4, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, FETCH_RECEIPT, FETCH_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
+    ACK, Chat, ChatAck, ChatFetchReceipt, ChatFetchRequest, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatPendingRequest, ChatRead, ChatRefusal, MouthRefused, Refusal, reply_warnings, ChatSendReceipt, ChatSendRequest, PENDING, PENDING_REQUEST, PENDING_REQUEST_V1, PENDING_REQUEST_V4, PENDING_V2, PENDING_V4, OPEN_DIRECT_RECEIPT, OPEN_DIRECT_REQUEST, FETCH_RECEIPT, FETCH_REQUEST, PENDING_V1, READ, REFUSAL, SEND_RECEIPT,
     SEND_REQUEST, decode, encode,
 };
 

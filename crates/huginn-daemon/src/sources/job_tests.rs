@@ -117,7 +117,7 @@ fn a_full_run_over_a_fake_synapse() {
     let request = Purge::check("!swarm:s", "2026-11-10T00:00:00Z", "2026-11-11T00:00:00Z", "follow_up:x", now()).unwrap();
     assert_eq!(purge(&mut rig.index, &request).unwrap(), "chat-purge requested: !swarm:s 2026-11-10T00:00:00Z..2026-11-11T00:00:00Z request=\"follow_up:x\" windows=1");
     let before = rig.index.cursors();
-    assert_eq!(purge(&mut rig.index, &request).unwrap().ends_with("windows=1"), true);
+    assert!(purge(&mut rig.index, &request).unwrap().ends_with("windows=1"));
     assert_eq!(rig.index.cursors(), before, "a repeated request writes nothing");
     let secret = format!("key ghp_{}", "k2L9".repeat(9));
     {
@@ -231,7 +231,7 @@ fn a_request_cannot_forge_a_journal_line() {
 #[test]
 fn a_failed_room_report_goes_to_the_complaint_stream_and_fails_the_run() {
     let mut rig = Rig::new();
-    struct FactsDown(Rooms);
+    struct FactsDown;
     impl RoomHistory for FactsDown {
         fn joined_rooms(&mut self) -> Result<Vec<String>> {
             Ok(vec!["!swarm:s".to_owned()])
@@ -243,7 +243,7 @@ fn a_failed_room_report_goes_to_the_complaint_stream_and_fails_the_run() {
             bail!("unreachable")
         }
     }
-    let out = rig.go(Some(&mut FactsDown(rooms(vec![]))));
+    let out = rig.go(Some(&mut FactsDown));
     assert_eq!(out.status, 1);
     assert!(out.complained.iter().any(|line| line.contains("!swarm:s") && line.contains("facts are down")), "{:?}", out.complained);
     assert!(!out.said.iter().any(|line| line.contains("facts are down")), "{:?}", out.said);
