@@ -536,6 +536,7 @@ fn chat_search(
     json: bool,
 ) -> Result<u8, Trouble> {
     let now = chrono::Utc::now();
+    let one_room = rooms.len() == 1;
     let query = ChatQuery {
         texts: texts.into_iter().map(Line).collect(),
         rooms: rooms.into_iter().map(Short).collect(),
@@ -548,7 +549,7 @@ fn chat_search(
             if json {
                 say(serde_json::to_string_pretty(&found).map_err(|error| Trouble::Internal(error.to_string()))?);
             } else {
-                say(render::chat_hits(&found));
+                say(render::chat_hits(&found, one_room));
             }
             Ok(0)
         }

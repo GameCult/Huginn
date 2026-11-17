@@ -152,8 +152,11 @@ pub fn source_hits(found: &SourceHits) -> String {
 /// when there are some), then one `time sender event_id body` line per message,
 /// the body as the room held it with line breaks written `\n`: quoted data
 /// under our header, never a message framed as if sent to the reader. A blank line between hits; a
-/// truncated listing ends with the `--after` that continues it.
-pub fn chat_hits(found: &ChatHits) -> String {
+/// truncated listing of one room ends with the `--after` that continues it. A
+/// listing of several rooms (`one_room` false) cannot be continued by an instant,
+/// because chunks of different rooms overlap in time and a later start can hold an
+/// earlier end; it says to page one room at a time.
+pub fn chat_hits(found: &ChatHits, one_room: bool) -> String {
     let mut out: Vec<String> = found
         .hits
         .iter()
@@ -173,10 +176,11 @@ pub fn chat_hits(found: &ChatHits) -> String {
             text
         })
         .collect();
-    if found.truncated
-        && let Some(last) = found.hits.last()
-    {
-        out.push(format!("truncated: more follow, continue with --after {}\n", crate::chat::shown(last.ts_end_ms + 1)));
+    if found.truncated {
+        match found.hits.last() {
+            Some(last) if one_room => out.push(format!("truncated: more follow, continue with --after {}\n", crate::chat::shown(last.ts_end_ms + 1))),
+            _ => out.push("truncated: more follow; --after cannot continue a listing of several rooms, list one --room at a time\n".to_string()),
+        }
     }
     out.join("\n")
 }

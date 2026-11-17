@@ -2998,6 +2998,26 @@ fn chat_search_prints_cited_messages_and_sends_its_selectors() {
     let rooms: Vec<&str> = query.rooms.iter().map(|room| room.0.as_str()).collect();
     assert_eq!((texts, rooms, query.after_ms, query.before_ms, query.top_k), (vec!["a", "b"], vec!["!x:y", "#z:y"], Some(1_700_000_000_000), Some(1_700_000_060_000), 3));
 
+    // A truncated listing is continued by `--after` only inside one room; across rooms the spans overlap and an instant loses chunks.
+    let hit = |end| huginn_mind::ChatHit {
+        room_id: "!r:y".into(),
+        room_alias: None,
+        first_event_id: "$a".into(),
+        last_event_id: "$b".into(),
+        ts_start_ms: 1_700_000_000_000,
+        ts_end_ms: end,
+        score: None,
+        messages: vec![],
+    };
+    let cut_short = HuginnMindResponse::Chat(huginn_mind::ChatHits { indexed_under: huginn_mind::SourceModel { name: "m".into(), digest: "d".into() }, truncated: true, hits: vec![hit(1_700_000_060_000)] });
+    let (listing, _) = replying("search_chat", cut_short);
+    let one = at(listing.addr, &["chat", "search", "--room", "!r:y"], None);
+    assert!(one.out.contains("continue with --after 2023-11-14T22:14:20.001Z"), "{}", one.out);
+    for rooms in [&["chat", "search"][..], &["chat", "search", "--room", "!r:y", "--room", "!s:y"]] {
+        let many = at(listing.addr, rooms, None);
+        assert!(many.out.contains("--after cannot continue a listing of several rooms") && !many.out.contains("continue with --after"), "{rooms:?}: {}", many.out);
+    }
+
     assert_ne!(at(spy.addr, &["chat", "search", "--after", "yesterday"], None).code, 0);
     assert!(seen.lock().unwrap().is_empty(), "a bad instant never left the CLI");
     for bad in [&["chat", "search", "--room", "swarm"][..], &["chat", "search", "--top-k", "0"]] {
