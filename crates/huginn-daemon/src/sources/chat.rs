@@ -134,6 +134,39 @@ impl std::fmt::Display for ChatReport {
     }
 }
 
+/// One line of a chat run's journal, typed so the job routes by what happened and not by how the line reads.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Entry {
+    /// A room's report; a failed one is an alarm.
+    Report(ChatReport),
+    Refused(RefusedRoom),
+    Scrubbed(ScrubHit),
+    /// A failure outside any one room's report: retiring rooms.
+    Trouble(String),
+}
+
+impl Entry {
+    /// The operator must see this on stderr: a failure, a refusal, a scrub hit.
+    pub fn is_alarm(&self) -> bool {
+        match self {
+            Self::Report(report) => report.failure.is_some(),
+            Self::Refused(_) | Self::Scrubbed(_) | Self::Trouble(_) => true,
+        }
+    }
+}
+
+impl std::fmt::Display for Entry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Report(report) => report.fmt(formatter),
+            Self::Refused(RefusedRoom { room_id, reason, event_id: None }) => write!(formatter, "refused: {room_id} {reason}"),
+            Self::Refused(RefusedRoom { room_id, reason, event_id: Some(event) }) => write!(formatter, "refused: {room_id} {reason} [{event}]"),
+            Self::Scrubbed(hit) => write!(formatter, "scrubbed: {} {} {}", hit.room_id, hit.event_id, hit.kind),
+            Self::Trouble(why) => write!(formatter, "huginn-sources: {why}"),
+        }
+    }
+}
+
 /// A joined room the scope refused, whole, and why; `event_id` when an event did it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefusedRoom {
@@ -562,7 +595,7 @@ pub fn refresh_chat<E: Embedder, S: SourceIndex, H: RoomHistory>(
     index: &mut S,
     history: &mut H,
     estate: &Estate,
-    journal: &mut dyn FnMut(String),
+    journal: &mut dyn FnMut(Entry),
 ) -> Result<ChatRefreshed> {
     let DescribedSources::Labelled { meta, .. } = index.describe_sources(INDEX_CALL_TIMEOUT).context("describing the source collection")? else {
         bail!("the source collection is absent or not Huginn's; the forge refresh creates it and chat never does");
@@ -589,13 +622,14 @@ pub fn refresh_chat<E: Embedder, S: SourceIndex, H: RoomHistory>(
             Ok(Err(reason)) => {
                 // Not kept, so the retirement below purges whatever it held.
                 keep.remove(room_id);
-                journal(format!("refused: {room_id} {reason}"));
-                out.refused.push(RefusedRoom { room_id: room_id.clone(), reason, event_id: None });
+                let refused = RefusedRoom { room_id: room_id.clone(), reason, event_id: None };
+                journal(Entry::Refused(refused.clone()));
+                out.refused.push(refused);
             }
             // An error is not a reclassification: the room keeps its points and cursor, and the report says why.
             Err(error) => {
                 let report = ChatReport::failed(room_id, None, &error.context("reading the room's facts"));
-                journal(report.to_string());
+                journal(Entry::Report(report.clone()));
                 out.failed.push(room_id.clone());
                 out.rooms.push(report);
             }
@@ -604,35 +638,35 @@ pub fn refresh_chat<E: Embedder, S: SourceIndex, H: RoomHistory>(
     match retire_chat(index, &keep) {
         Ok(done) => {
             for (room, why) in done.failed {
-                journal(format!("huginn-sources: retiring {room} failed, the others go on: {why}"));
+                journal(Entry::Trouble(format!("retiring {room} failed, the others go on: {why}")));
                 out.failed.push(room);
             }
         }
         Err(error) => {
-            journal(format!("huginn-sources: retiring rooms failed: {error:#}"));
+            journal(Entry::Trouble(format!("retiring rooms failed: {error:#}")));
             out.failed.push("retire".to_owned());
         }
     }
     for facts in admitted {
         match ingest_room(embedder, index, history, identity.dimensions, &facts, &mut out) {
             Ok(Outcome::Done(report)) => {
-                journal(report.to_string());
+                journal(Entry::Report(report.clone()));
                 out.rooms.push(report);
             }
             Ok(Outcome::Refused(refused)) => {
-                journal(format!("refused: {} {} [{}]", refused.room_id, refused.reason, refused.event_id.as_deref().unwrap_or("")));
+                journal(Entry::Refused(refused.clone()));
                 out.refused.push(refused);
             }
             Err(error) => {
                 let report = ChatReport::failed(&facts.room_id, facts.alias.clone(), &error);
-                journal(report.to_string());
+                journal(Entry::Report(report.clone()));
                 out.failed.push(facts.room_id.clone());
                 out.rooms.push(report);
             }
         }
     }
     for hit in &out.scrubbed {
-        journal(format!("scrubbed: {} {} {}", hit.room_id, hit.event_id, hit.kind));
+        journal(Entry::Scrubbed(hit.clone()));
     }
     Ok(out)
 }

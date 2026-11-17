@@ -120,10 +120,18 @@ k=60 are calibration, not design; RRF over a handful of lists is the
 established baseline and I did not survey learned fusion (it needs training
 data we lack).
 
-## Status (head-maintainer pass, 2026-11-05, Huginn `25199c9`)
+## Status (2026-11-17)
 
-Checked against main on merge. Nothing in this map is built: no `texts` on
-`SourceQuery`, no chat code under `sources/`. The anchors above were corrected.
+Built: cut 1 (`texts` on `SourceQuery`), chat search and window, the chat ingest
+core (`sources/chat.rs`, `room_scope.rs`, `chat_purge.rs`) and the ingest job.
+The job is `huginn-sources`: with `--matrix-url`, `--matrix-token-file`, three
+`--chat-exclude-room` ids (the estate rooms) and `--lock-file` it runs the forge
+refresh and then `refresh_chat` through `sources/matrix.rs` (GET only, bearer
+from a systemd credential file); without them it retires every chat point. The
+rooms indexed are the reader's memberships; no flag lists rooms. `huginn-sources
+chat-purge` writes a steward's purge tombstone under the same lock. What the
+operator still has to do (reader account, credential, roster, unit lines) is the
+handoff list of cut `gamecult-chat:cut_spec:cut-chat-ingest-job`.
 What changed since the map was written:
 
 - Questions 1 and 2 are answered with the recommendations

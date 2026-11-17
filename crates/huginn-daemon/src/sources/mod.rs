@@ -30,10 +30,19 @@ pub mod chat_purge;
 pub mod chunk;
 pub mod forge;
 pub mod git;
+pub mod job;
+pub mod matrix;
 pub mod room_scope;
 
 #[cfg(test)]
+mod test_http;
+
+#[cfg(test)]
 mod chat_tests;
+#[cfg(test)]
+mod job_tests;
+#[cfg(test)]
+mod matrix_tests;
 #[cfg(test)]
 mod tests;
 
