@@ -4,9 +4,9 @@
 //! nonzero if either failed or the collection could not be used. The
 //! `chat-purge` subcommand writes a steward's purge tombstone and nothing else.
 //!
-//! Exit status: 0 clean, 1 a run failed, 2 bad arguments, 3 another run holds
-//! the lock. The Matrix token is read from a file (a systemd credential),
-//! never from the environment or argv.
+//! Exit status: 0 clean, 1 a run failed, 2 bad arguments, 3 another run (or a
+//! purge) holds the lock, which every run and every purge takes. The Matrix
+//! token is read from a file (a systemd credential), never from the environment or argv.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions, TryLockError};
@@ -43,7 +43,8 @@ struct Options {
     embedding_model: String,
     forge_url: String,
     chat: Option<ChatOptions>,
-    lock_file: Option<PathBuf>,
+    /// Every run takes it: the cursors object is replaced whole, with or without chat.
+    lock_file: PathBuf,
 }
 
 enum Command {
@@ -150,8 +151,7 @@ fn parse(mut args: impl Iterator<Item = String>, now: DateTime<Utc>) -> Result<C
     ensure!(!embedding_model.is_empty(), "--embedding-model must name a model");
     ensure!(!ollama_urls.is_empty(), "at least one --ollama-url is required; repeat it for each GPU host");
     let chat = chat_options(&singles, excluded)?;
-    let lock_file = singles.get("lock-file").map(|path| absolute("lock-file", path)).transpose()?;
-    ensure!(chat.is_none() || lock_file.is_some(), "--lock-file is required whenever the chat flags are given");
+    let lock_file = absolute("lock-file", &take(&mut singles, "lock-file")?)?;
     Ok(Command::Run(Options {
         state_root,
         qdrant_url: http("qdrant-url", take(&mut singles, "qdrant-url")?)?,
@@ -175,10 +175,6 @@ fn take_lock(path: &Path) -> Result<File, Stop> {
     }
 }
 
-fn lock_if(path: &Option<PathBuf>) -> Result<Option<File>, Stop> {
-    path.as_deref().map(take_lock).transpose()
-}
-
 fn execute(command: Command) -> Result<u8, Stop> {
     match command {
         Command::Purge { qdrant_url, lock_file, purge } => {
@@ -196,7 +192,7 @@ fn execute(command: Command) -> Result<u8, Stop> {
             })
         }
         Command::Run(options) => {
-            let _lock = lock_if(&options.lock_file)?;
+            let _lock = take_lock(&options.lock_file)?;
             let mut embedder = pool(&options.ollama_urls, &options.reserve_urls, &options.embedding_model);
             let mut index = QdrantIndex::new(&options.qdrant_url);
             let mut forge = HttpForge::new(&options.forge_url);
@@ -257,13 +253,15 @@ mod tests {
     fn chat_flags_come_all_or_none() {
         let (_dir, token) = with_token("  sekret-token\n");
         let lock = "--lock-file /l";
+        let base = format!("{BASE} {lock}");
         let full = format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} {IDS} {lock}");
         let Ok(Command::Run(options)) = parse(args(&full), now()) else { panic!("full chat flags must parse") };
         assert_eq!(options.chat.as_ref().unwrap().token, "sekret-token", "trimmed");
-        assert!(matches!(parse(args(BASE), now()), Ok(Command::Run(Options { chat: None, lock_file: None, .. }))));
-        assert!(error(&format!("{BASE} --matrix-url http://localhost {lock}")).contains("--matrix-token-file is missing"));
-        assert!(error(&format!("{BASE} --matrix-token-file {token} {IDS} {lock}")).contains("--matrix-url is missing"));
-        assert!(error(&format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} {lock}")).contains("--chat-exclude-room is missing"));
+        assert!(matches!(parse(args(&base), now()), Ok(Command::Run(Options { chat: None, .. }))));
+        assert!(error(BASE).contains("--lock-file is required"), "a chat-off run needs the lock too");
+        assert!(error(&format!("{base} --matrix-url http://localhost")).contains("--matrix-token-file is missing"));
+        assert!(error(&format!("{base} --matrix-token-file {token} {IDS}")).contains("--matrix-url is missing"));
+        assert!(error(&format!("{base} --matrix-url http://localhost --matrix-token-file {token}")).contains("--chat-exclude-room is missing"));
         assert!(error(&format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} {IDS}")).contains("--lock-file is required"));
     }
 
@@ -336,7 +334,31 @@ mod tests {
         let (_t, token) = with_token("sekret-token");
         let run = parse(args(&format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} {IDS} --lock-file {lock}")), now()).unwrap();
         assert!(matches!(execute(run), Err(Stop::Locked)));
+        let off = parse(args(&format!("{BASE} --lock-file {lock}")), now()).unwrap();
+        assert!(matches!(execute(off), Err(Stop::Locked)), "a chat-off run must not write cursors under a held lock");
         drop(held);
+    }
+
+    #[test]
+    fn the_lock_is_held_for_the_whole_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        // A qdrant that accepts the run's first request and says nothing: the run is mid-flight while we probe the lock.
+        let qdrant = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", qdrant.local_addr().unwrap());
+        let run = parse(args(&format!("--state-root /s --qdrant-url {url} --ollama-url http://127.0.0.1:1 --embedding-model m --lock-file {}", lock.display())), now()).unwrap();
+        let worker = std::thread::spawn(move || execute(run));
+        let (connection, _) = qdrant.accept().unwrap();
+        assert!(matches!(take_lock(&lock), Err(Stop::Locked)), "the run must hold the lock while it works");
+        drop(connection);
+        // Refuse any retry the same way until the run gives up.
+        qdrant.set_nonblocking(true).unwrap();
+        while !worker.is_finished() {
+            drop(qdrant.accept());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(worker.join().unwrap().is_ok());
+        assert!(take_lock(&lock).is_ok(), "the lock is released when the run ends");
     }
 
     #[test]
