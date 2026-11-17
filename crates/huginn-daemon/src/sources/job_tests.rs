@@ -218,3 +218,36 @@ fn exit_status_is_clean_only_when_forge_and_chat_both_are() {
     assert!(complained.iter().any(|line| line.contains("the forge is down")), "{complained:?}");
     assert!(said.iter().any(|line| line.contains("(!swarm:s)")), "chat ran after the forge failed: {said:?}");
 }
+
+#[test]
+fn a_failed_room_report_goes_to_the_complaint_stream_and_fails_the_run() {
+    let mut rig = Rig::new();
+    struct FactsDown(Rooms);
+    impl RoomHistory for FactsDown {
+        fn joined_rooms(&mut self) -> Result<Vec<String>> {
+            Ok(vec!["!swarm:s".to_owned()])
+        }
+        fn facts(&mut self, _room_id: &str) -> Result<super::room_scope::RoomFacts> {
+            bail!("facts are down")
+        }
+        fn events_after(&mut self, _room_id: &str, _after: Option<&str>, _limit: u32) -> Result<Option<super::chat::EventPage>> {
+            bail!("unreachable")
+        }
+    }
+    let out = rig.go(Some(&mut FactsDown(rooms(vec![]))));
+    assert_eq!(out.status, 1);
+    assert!(out.complained.iter().any(|line| line.contains("!swarm:s") && line.contains("facts are down")), "{:?}", out.complained);
+    assert!(!out.said.iter().any(|line| line.contains("facts are down")), "{:?}", out.said);
+}
+
+#[test]
+fn chat_purge_makes_no_matrix_request() {
+    let world = world();
+    let (base, asked) = synapse(&world);
+    let mut rig = Rig::new();
+    rig.go(Some(&mut HttpMatrix::new(&base, TOKEN)));
+    let made = asked.seen().len();
+    let request = Purge::check("!swarm:s", "2026-11-10T00:00:00Z", "2026-11-11T00:00:00Z", "r", now()).unwrap();
+    purge(&mut rig.index, &request).unwrap();
+    assert_eq!(asked.seen().len(), made);
+}

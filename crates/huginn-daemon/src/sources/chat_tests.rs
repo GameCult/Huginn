@@ -141,7 +141,7 @@ impl Rig {
 
     fn run(&mut self, history: &mut FakeHistory) -> (Result<ChatRefreshed>, Vec<String>) {
         let mut journal = Vec::new();
-        let out = refresh_chat(&mut self.embedder, &mut self.index, history, &self.estate, &mut |line| journal.push(line));
+        let out = refresh_chat(&mut self.embedder, &mut self.index, history, &self.estate, &mut |line| journal.push(line.to_string()));
         (out, journal)
     }
 

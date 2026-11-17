@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 
-use super::chat::{RoomHistory, refresh_chat, retire_chat};
+use super::chat::{Entry, RoomHistory, refresh_chat, retire_chat};
 use super::chat_purge::{PurgeWindow, parse_windows, purge_key, request_purge};
 use super::room_scope::Estate;
 use super::{DescribedSources, Forge, SourceIndex, refresh};
@@ -21,11 +21,6 @@ use crate::index::{Embedder, INDEX_CALL_TIMEOUT};
 pub struct Chat<'a, H> {
     pub history: &'a mut H,
     pub estate: &'a Estate,
-}
-
-/// A chat journal line the operator must see on stderr rather than read as a room report.
-fn is_alarm(line: &str) -> bool {
-    line.starts_with("refused:") || line.starts_with("scrubbed:") || line.starts_with("huginn-sources:")
 }
 
 /// One run: the forge refresh, then chat (`Some`) or the retirement of every chat point (`None`).
@@ -60,7 +55,7 @@ pub fn run<E: Embedder, S: SourceIndex, F: Forge, H: RoomHistory>(
     }
     match chat {
         Some(Chat { history, estate }) => {
-            let mut line = |line: String| if is_alarm(&line) { complain(line) } else { say(line) };
+            let mut line = |entry: Entry| if entry.is_alarm() { complain(entry.to_string()) } else { say(entry.to_string()) };
             match refresh_chat(embedder, index, history, estate, &mut line) {
                 Ok(refreshed) => clean &= refreshed.is_clean(),
                 Err(error) => {
@@ -121,7 +116,7 @@ impl Purge {
     }
 }
 
-/// Writes the tombstone and returns the line the admin sees. Touches no point and makes no Matrix call;
+/// Writes the tombstone and returns the line the admin sees; the free-text request is quoted and escaped so it cannot forge a journal line. Touches no point and makes no Matrix call;
 /// the caller holds the job's lock. The next run applies it.
 pub fn purge<S: SourceIndex>(index: &mut S, purge: &Purge) -> Result<String> {
     request_purge(index, &purge.room_id, purge.window)?;
