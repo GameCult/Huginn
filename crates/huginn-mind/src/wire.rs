@@ -286,8 +286,9 @@ pub const CHAT_ROOMS_MAX: usize = 16;
 /// [after, before]. `texts` (none to `SOURCE_TEXTS_MAX`) is the meaning match,
 /// several fused as in a source search; with none the search is a listing:
 /// chunks oldest first, at most `top_k`, `ChatHits.truncated` saying more
-/// exist, and the caller narrows with `after_ms` = the last hit's
-/// `ts_end_ms + 1`.
+/// exist. Within one room the caller narrows with `after_ms` = the last hit's
+/// `ts_end_ms + 1`; across rooms spans overlap and that loses chunks, so list
+/// one room at a time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ChatQuery {
     pub texts: Vec<Line>,
