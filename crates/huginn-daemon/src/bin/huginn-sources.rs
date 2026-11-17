@@ -80,6 +80,19 @@ fn http(name: &str, value: String) -> Result<String> {
     Ok(value)
 }
 
+/// The Matrix reader's bearer travels in clear, and this build speaks no TLS: only a loopback host may be named.
+fn loopback_http(name: &str, value: String) -> Result<String> {
+    let value = http(name, value)?;
+    let authority = value["http://".len()..].split(['/', '?', '#']).next().unwrap_or("");
+    let host = match authority.strip_prefix('[') {
+        Some(inner) => inner.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    let loopback = !authority.contains('@') && (host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
+    ensure!(loopback, "--{name} must name a loopback host (localhost, 127.0.0.0/8 or [::1]): the bearer token travels in clear and this build has no TLS, got {value:?}");
+    Ok(value)
+}
+
 fn absolute(name: &str, value: &str) -> Result<PathBuf> {
     let path = PathBuf::from(value);
     ensure!(path.is_absolute(), "--{name} must be an absolute path");
@@ -101,7 +114,7 @@ fn chat_options(singles: &BTreeMap<String, String>, excluded: Vec<String>) -> Re
     let path = absolute("matrix-token-file", &singles["matrix-token-file"])?;
     let token = std::fs::read_to_string(&path).with_context(|| format!("reading --matrix-token-file {}", path.display()))?.trim().to_owned();
     ensure!(!token.is_empty(), "--matrix-token-file {} is empty", path.display());
-    Ok(Some(ChatOptions { matrix_url: http("matrix-url", singles["matrix-url"].clone())?, token, estate: Estate::new(ids)? }))
+    Ok(Some(ChatOptions { matrix_url: loopback_http("matrix-url", singles["matrix-url"].clone())?, token, estate: Estate::new(ids)? }))
 }
 
 fn parse(mut args: impl Iterator<Item = String>, now: DateTime<Utc>) -> Result<Command> {
@@ -239,31 +252,31 @@ mod tests {
     fn chat_flags_come_all_or_none() {
         let (_dir, token) = with_token("  sekret-token\n");
         let lock = "--lock-file /l";
-        let full = format!("{BASE} --matrix-url http://m --matrix-token-file {token} {IDS} {lock}");
+        let full = format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} {IDS} {lock}");
         let Ok(Command::Run(options)) = parse(args(&full), now()) else { panic!("full chat flags must parse") };
         assert_eq!(options.chat.as_ref().unwrap().token, "sekret-token", "trimmed");
         assert!(matches!(parse(args(BASE), now()), Ok(Command::Run(Options { chat: None, lock_file: None, .. }))));
-        assert!(error(&format!("{BASE} --matrix-url http://m {lock}")).contains("--matrix-token-file is missing"));
+        assert!(error(&format!("{BASE} --matrix-url http://localhost {lock}")).contains("--matrix-token-file is missing"));
         assert!(error(&format!("{BASE} --matrix-token-file {token} {IDS} {lock}")).contains("--matrix-url is missing"));
-        assert!(error(&format!("{BASE} --matrix-url http://m --matrix-token-file {token} {lock}")).contains("--chat-exclude-room is missing"));
-        assert!(error(&format!("{BASE} --matrix-url http://m --matrix-token-file {token} {IDS}")).contains("--lock-file is required"));
+        assert!(error(&format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} {lock}")).contains("--chat-exclude-room is missing"));
+        assert!(error(&format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} {IDS}")).contains("--lock-file is required"));
     }
 
     #[test]
     fn chat_flag_values_are_checked_and_never_print_the_token() {
         let (_dir, token) = with_token("sekret-token");
-        let on = |extra: &str| format!("{BASE} --matrix-url http://m --matrix-token-file {token} --lock-file /l {extra}");
+        let on = |extra: &str| format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} --lock-file /l {extra}");
         assert!(error(&on("--chat-exclude-room !a:s --chat-exclude-room !b:s")).contains("exactly 3"));
         assert!(error(&on(&format!("{IDS} --chat-exclude-room !d:s"))).contains("exactly 3"));
         assert!(error(&on("--chat-exclude-room !a:s --chat-exclude-room !a:s --chat-exclude-room !b:s")).contains("repeat"));
         assert!(error(&on("--chat-exclude-room !a:s --chat-exclude-room !b:s --chat-exclude-room #c:s")).contains("beginning with !"));
         assert!(error(&format!("{BASE} --matrix-url https://m --matrix-token-file {token} --lock-file /l {IDS}")).contains("plain http://"));
-        assert!(error(&format!("{BASE} --matrix-url http://m --matrix-token-file rel --lock-file /l {IDS}")).contains("absolute"));
-        assert!(error(&format!("{BASE} --matrix-url http://m --matrix-token-file {token} --lock-file rel {IDS}")).contains("absolute"));
+        assert!(error(&format!("{BASE} --matrix-url http://localhost --matrix-token-file rel --lock-file /l {IDS}")).contains("absolute"));
+        assert!(error(&format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} --lock-file rel {IDS}")).contains("absolute"));
         let (_empty, empty) = with_token(" \n");
-        let message = error(&format!("{BASE} --matrix-url http://m --matrix-token-file {empty} --lock-file /l {IDS}"));
+        let message = error(&format!("{BASE} --matrix-url http://localhost --matrix-token-file {empty} --lock-file /l {IDS}"));
         assert!(message.contains(&empty) && message.contains("empty"));
-        let missing = error(&format!("{BASE} --matrix-url http://m --matrix-token-file /nowhere/t --lock-file /l {IDS}"));
+        let missing = error(&format!("{BASE} --matrix-url http://localhost --matrix-token-file /nowhere/t --lock-file /l {IDS}"));
         assert!(missing.contains("/nowhere/t"));
         for text in [on(IDS), on("--chat-exclude-room !a:s")] {
             assert!(!error(&format!("{text} --nope x")).contains("sekret-token"));
@@ -291,7 +304,34 @@ mod tests {
         assert!(bad("2025-11-09T00:00:00Z", t, "!r:s", "r").contains("366"));
         assert!(purge(&format!("--room !r:s --from {f} --to {t} --request {}", "x".repeat(121))).contains("--request"));
         assert!(purge("--room !r:s --from 2026-11-10T00:00:00Z --to 2026-11-11T00:00:00Z").contains("--request is required"));
-        assert!(parse(args(&format!("chat-purge --qdrant-url http://q --lock-file /l {good} --matrix-url http://m")), now()).is_err(), "no Matrix flags");
+        assert!(parse(args(&format!("chat-purge --qdrant-url http://q --lock-file /l {good} --matrix-url http://localhost")), now()).is_err(), "no Matrix flags");
+    }
+
+    #[test]
+    fn matrix_url_must_be_loopback_http() {
+        let (_dir, token) = with_token("sekret-token");
+        let with = |url: &str| format!("{BASE} --matrix-url {url} --matrix-token-file {token} --lock-file /l {IDS}");
+        for good in ["http://localhost", "http://127.0.0.1:8008", "http://127.9.9.9/", "http://[::1]:8008", "http://LOCALHOST:1/x"] {
+            assert!(parse(args(&with(good)), now()).is_ok(), "{good}");
+        }
+        for bad in ["http://matrix.example", "http://10.0.0.5:8008", "http://localhost@evil.example", "http://127.0.0.1.evil.example", "http://localhost.evil.example", "http://[::2]", "https://localhost"] {
+            assert!(error(&with(bad)).contains("--matrix-url"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_held_lock_exits_3_through_execute_for_both_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        let held = take_lock(&lock).ok().unwrap();
+        let lock = lock.display().to_string();
+        let good = "--room !r:s --from 2026-11-10T00:00:00Z --to 2026-11-11T00:00:00Z --request r";
+        let purge = parse(args(&format!("chat-purge --qdrant-url http://127.0.0.1:1 --lock-file {lock} {good}")), now()).unwrap();
+        assert!(matches!(execute(purge), Err(Stop::Locked)));
+        let (_t, token) = with_token("sekret-token");
+        let run = parse(args(&format!("{BASE} --matrix-url http://localhost --matrix-token-file {token} {IDS} --lock-file {lock}")), now()).unwrap();
+        assert!(matches!(execute(run), Err(Stop::Locked)));
+        drop(held);
     }
 
     #[test]
