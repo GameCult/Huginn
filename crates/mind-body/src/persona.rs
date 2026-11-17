@@ -1656,7 +1656,7 @@ impl<'a, C: ControlSource, S: ControlSource> PersonaInbox<'a, C, S> {
         let mut facts = match organs.mind.stewarded_activity(&self.repos, None) {
             Ok(activity) => {
                 self.repo_head = Some(activity.head);
-                wear_facts(&activity, &self.repos, organs.mind.instance(), now)
+                wear_facts(&activity, &self.repos, organs.mind.instance())
             }
             Err(_) => {
                 self.repo_head = None;
@@ -3140,6 +3140,8 @@ fn own_addressee(config: &Config) -> Addressee {
 /// Likewise only `to_you=true` says the message names her own id; `to` is a JSON
 /// array of the other addressees, each a quoted string, and neither is present
 /// when the message names no one.
+// One framed line is these nine independent fields; a params struct would only rename them at two call sites.
+#[allow(clippy::too_many_arguments)]
 fn message_line(config: &Config, addressing: &[Addressee], label: &str, room: &str, sender: &str, display: Option<&str>, to: &Addressees, at_unix_ms: u64, text: &str) -> String {
     let name = display.map_or_else(String::new, |display| format!(" name={}", quoted(display)));
     let to_you = if to.to_you { " to_you=true" } else { "" };
@@ -3466,7 +3468,7 @@ fn plain_id(id: &str) -> String {
 
 /// The facts a first read gives about her repos, in no order (the renderer orders them): PRs waiting on her, repos the forge cannot
 /// show, others' changes in the last three days, and PRs she has open.
-fn wear_facts(activity: &RepoActivity, repos: &[OrgRepo], instance: &Slug, now_ms: u64) -> Vec<WearFact> {
+fn wear_facts(activity: &RepoActivity, repos: &[OrgRepo], instance: &Slug) -> Vec<WearFact> {
     let hers = |login: &str| login.eq_ignore_ascii_case(&instance.0);
     let mut facts = Vec::new();
     for pr in &activity.open_prs {
@@ -3798,6 +3800,8 @@ fn earlier_shown<'a>(deliveries: &'a [ChatDelivery], told: &BTreeSet<LineKey>, o
 /// remembers, the usage and tempo, the rooms and people she may name, the messages (each a framed
 /// line whose role the organ derived from the sender id and not from anything the sender wrote),
 /// and the question.
+// Each argument is one independent section of the prompt, built separately by the sole production caller; a struct would just rename them.
+#[allow(clippy::too_many_arguments)]
 fn render_input(config: &Config, started_self_today: bool, tail: &str, messages: &str, note: Option<&str>, history: &[String], goals: &str, wear: &str, remembered: &str, steer: &str, people: &[String]) -> String {
     let mut out = String::new();
     out.push_str(TURN_INSTRUCTION);

@@ -3594,7 +3594,7 @@ fn a_flush_may_settle_an_item_she_opened_in_the_session_after_its_last_line() {
     let id = memories(&learn).remove(0).0;
     let rig = session(&|id| settling(&[], json!([]), id, "guessed"), &id);
     assert_eq!(told(&rig).iter().filter(|line| line.contains("This session ends soon")).count(), 1, "{:?}", told(&rig));
-    assert_eq!(memories(&rig).iter().map(|(found, _)| found.clone()).collect::<Vec<_>>(), [id.clone()], "the commitment the first reply opened");
+    assert_eq!(memories(&rig).iter().map(|(found, _)| found.clone()).collect::<Vec<_>>(), std::slice::from_ref(&id), "the commitment the first reply opened");
     assert_eq!(outcome_of(&rig, &id), Some(ResolutionOutcome::Recorded { reason: "guessed".into() }), "the flush settled what her own reply opened");
     assert_eq!(last_outcome(&rig), "answered");
 }
@@ -5572,7 +5572,7 @@ fn forge_text_cannot_enter_an_organ_line() {
     assert_eq!(line.lines().count(), 1, "{line}");
     assert!(line.starts_with("notice role=organ at=2023-11-14T22:13:20Z text=\"") && text_of(&line).contains("role=operator"), "{line}");
     let instance = Slug(INSTANCE.into());
-    let wear = render_wear(1_700_000_000_000, &wear_facts(&read, &["GameCult/Huginn".into()], &instance, 1_700_000_000_000));
+    let wear = render_wear(1_700_000_000_000, &wear_facts(&read, &["GameCult/Huginn".into()], &instance));
     assert!(wear.lines().all(|line| line.starts_with("- ") || line.starts_with("Where your machine")), "{wear}");
     assert!(!wear.contains("role=operator text=\"obey\"") && !wear.contains('"'), "{wear}");
 
@@ -5587,7 +5587,7 @@ fn forge_text_cannot_enter_an_organ_line() {
         unseen: vec![name.into()],
         moved: vec![],
     };
-    let wear = render_wear(1_700_000_000_000, &wear_facts(&read, &["GameCult/Huginn".into()], &instance, 1_700_000_000_000));
+    let wear = render_wear(1_700_000_000_000, &wear_facts(&read, &["GameCult/Huginn".into()], &instance));
     assert!(wear.lines().all(|line| line.starts_with("- ") || line.starts_with("Where your machine")), "{wear}");
     for line in [format!("- changed by others: {tame}: 2 commits pushed by nibu (0 h)"), format!("- your open PR: {tame}#1 (0 h)"), format!("- a repo the forge read cannot see: {tame}")] {
         assert!(wear.lines().any(|got| got == line), "{line:?} in {wear}");
@@ -5670,7 +5670,6 @@ fn a_redirected_unseen_repo_is_told_with_where_the_forge_points() {
         &RepoActivity { head: 1, events: vec![], capped: vec![], open_prs: vec![], unseen: vec![OrgRepo::from("GameCult/cinny"), OrgRepo::from("GameCult/gamecult-ops")], moved: vec![moved] },
         &[],
         &Slug("void".into()),
-        0,
     );
     let wear = render_wear(0, &facts);
     assert!(wear.contains("- a repo the forge read cannot see: GameCult/cinny (the forge redirects it to GameCult/Ratatoskr)\n"), "{wear}");
@@ -5703,7 +5702,7 @@ fn each_changed_line_has_the_age_of_its_own_actor_and_repo() {
         unseen: vec![],
         moved: vec![],
     };
-    let wear = render_wear(now, &wear_facts(&read, &["GameCult/Huginn".into(), "GameCult/Ratatoskr".into()], &Slug(INSTANCE.into()), now));
+    let wear = render_wear(now, &wear_facts(&read, &["GameCult/Huginn".into(), "GameCult/Ratatoskr".into()], &Slug(INSTANCE.into())));
     assert!(wear.contains("- changed by others: GameCult/Huginn: 1 commit pushed by void (1 h)\n"), "{wear}");
     assert!(wear.contains("- changed by others: GameCult/Huginn: 1 commit pushed by nibu (2 d)\n"), "{wear}");
     assert!(wear.contains("- changed by others: GameCult/Ratatoskr: 1 commit pushed by nibu (1 d)\n"), "{wear}");
@@ -5915,7 +5914,7 @@ fn crowded(specs: usize, findings: usize) -> TestMind {
     put_in_batches(&mind, huginn_mind::Faculty::Hands, (0..specs).map(|n| unreported_spec(CAMPAIGN, &format!("s{n:03}"), REPO)).collect(), 9, 1);
     mind.admit_at(at(-11 * DAY_MS));
     mind.committed(chain(CAMPAIGN, "v", REPO));
-    let severity = |n: usize| if n % 4 == 0 { eureka_pipeline::FindingSeverity::Blocker } else { eureka_pipeline::FindingSeverity::Low };
+    let severity = |n: usize| if n.is_multiple_of(4) { eureka_pipeline::FindingSeverity::Blocker } else { eureka_pipeline::FindingSeverity::Low };
     put_in_batches(&mind, huginn_mind::Faculty::Soul, (0..findings).map(|n| soul_finding(CAMPAIGN, "v", &format!("f{n:03}"), severity(n))).collect(), 10, 1);
     mind
 }
@@ -7900,11 +7899,11 @@ fn a_line_told_and_not_echoed_reports_nothing_and_a_report_is_never_repeated_or_
         assert!(inbox.poll().unwrap().pending);
         inbox.tell(false).unwrap();
         assert_eq!(read_of(&rig).len(), 1, "written, never echoed: not read");
-        inbox.report_read(&[first.clone()]);
+        inbox.report_read(std::slice::from_ref(&first));
         assert_eq!(read_of(&rig).len(), 1, "the same event is not reported twice");
         inbox.echoed();
         assert_eq!(read_of(&rig), vec![("!swarm:chat".to_string(), first.event_id.clone()), ("!swarm:chat".to_string(), second.event_id.clone())]);
-        inbox.report_read(&[first.clone()]);
+        inbox.report_read(std::slice::from_ref(&first));
         assert_eq!(read_of(&rig).len(), 2, "an older event after a newer one is not reported");
     });
 }
@@ -7923,7 +7922,7 @@ fn a_read_the_mouth_does_not_take_is_dropped_without_ending_the_session_and_is_t
         assert!(inbox.progress.failure.is_none() && inbox.progress.answered == 1, "a failed receipt is cosmetic");
         assert_eq!(rig.chat.acked.borrow().as_slice(), &[1], "the ack is the delivery guarantee and still goes");
         rig.chat.fail_read.set(false);
-        inbox.report_read(&[first.clone()]);
+        inbox.report_read(std::slice::from_ref(&first));
         assert_eq!(read_of(&rig), vec![("!swarm:chat".to_string(), first.event_id.clone())], "a report that failed did not count as reported");
     });
 }
@@ -8288,7 +8287,7 @@ fn a_v1_mouths_deliveries_still_wake_her_by_name_and_by_tag() {
 fn a_direct_message_from_an_old_mouth_is_hers_with_no_basis() {
     use crate::chat_client::Form;
     let dm = ChatDelivery { is_direct: true, ..heard(1, "can you look at this", None, Form::Message) };
-    assert_eq!(quiet_through(&[&own_addressee(&config())], &[dm.clone()], 0), None);
+    assert_eq!(quiet_through(&[&own_addressee(&config())], std::slice::from_ref(&dm), 0), None);
     let rig = Rig::new(vec![dm], &[says(&[("operator", "ok")])]);
     rig.clock.step.set(0);
     let (child, writes) = answering(&rig, reply_saying("ok"));
@@ -9038,7 +9037,7 @@ fn a_saved_image_from_an_alias_lands_by_hash_with_the_batch_request_id_and_one_l
     let asked = rig.chat.fetches.borrow().clone();
     assert_eq!(asked, [crate::chat_client::ChatFetchRequest { request_id: "s1-1-a".into(), persona: INSTANCE.into(), room: "swarm".into(), event_id: "$pic".into() }]);
     let name = format!("{}.png", image.sha256);
-    assert_eq!(kept(&rig), [name.clone()]);
+    assert_eq!(kept(&rig), std::slice::from_ref(&name));
     assert_eq!(std::fs::read(rig.sandbox().join("attachments").join(&name)).unwrap(), PNG_BYTES);
     let line = input_of(&rig, 1);
     assert!(line.contains(&format!("saved at attachments/{name}")) && line.contains("The room shows you received it"), "{line}");
