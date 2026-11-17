@@ -22,7 +22,7 @@ use huginn_mind::desk_wire::{
     ForkList, ForkOption, ForkRecord, ForkRefusal, ForkRefusalCode, ForkRef, ListSchema, ListStatus, RecordSchema,
 };
 use huginn_mind::envelope::{OperationFailure, decode_desk_request, encode_desk_failure, encode_desk_request, encode_desk_response};
-use huginn_mind::eureka_pipeline::{AccountId, DeskAuthority, Short, Slug};
+use huginn_mind::eureka_pipeline::{AccountId, DeskAuthority, Slug};
 
 const RUNTIME: &str = "huginn-eureka";
 /// Account ids as Bifrost sends them: `UserAccount.Id` rendered lowercase D-format
@@ -37,10 +37,6 @@ const NON_DECIDER: &str = "9e8d7c6b-5a49-4382-b1a0-f9e8d7c6b5a4";
 /// A question Eureka's mind holds (asked 2026-11-11). The answers, notes and hash in `record()` are
 /// synthetic: the hash is CultLib's sample digest, not this question's.
 const FORK: &str = "eureka-substrate:question:desk-listing-authority";
-
-fn s(text: &str) -> Short {
-    Short(text.into())
-}
 
 fn a(text: &str) -> AccountId {
     AccountId(text.into())

@@ -663,7 +663,6 @@ fn an_import_never_cites_or_resolves_a_follow_up_the_receiver_wrote() {
     let native = follow_up("FU-N", r(K::Question, &q1));
     let native_ref = r(K::FollowUp, &pipeline_key(&native).unwrap());
     committed(admit(&mut recv, vec![native]));
-    let before = head(&recv);
     // An imported record that withdraws the receiver's own follow-up mixes a replay into her work.
     assert_eq!(
         refusal(import_from_kiko(&mut recv, vec![resolution(native_ref.clone(), ResolutionOutcome::Withdrawn { reason: "x".into() })])),
