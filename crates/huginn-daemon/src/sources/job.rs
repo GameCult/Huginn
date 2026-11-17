@@ -124,5 +124,5 @@ pub fn purge<S: SourceIndex>(index: &mut S, purge: &Purge) -> Result<String> {
         bail!("the source collection is absent or not Huginn's");
     };
     let windows = cursors.get(&purge_key(&purge.room_id)).map(|held| parse_windows(held)).transpose()?.map_or(0, |held| held.len());
-    Ok(format!("chat-purge requested: {} {}..{} request={} windows={windows}", purge.room_id, purge.from, purge.to, purge.request))
+    Ok(format!("chat-purge requested: {} {}..{} request={:?} windows={windows}", purge.room_id, purge.from, purge.to, purge.request))
 }

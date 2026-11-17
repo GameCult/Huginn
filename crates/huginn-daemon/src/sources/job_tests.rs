@@ -115,7 +115,7 @@ fn a_full_run_over_a_fake_synapse() {
 
     // The steward asks for the window; then the room edits, redacts and leaks a key.
     let request = Purge::check("!swarm:s", "2026-11-10T00:00:00Z", "2026-11-11T00:00:00Z", "follow_up:x", now()).unwrap();
-    assert_eq!(purge(&mut rig.index, &request).unwrap(), "chat-purge requested: !swarm:s 2026-11-10T00:00:00Z..2026-11-11T00:00:00Z request=follow_up:x windows=1");
+    assert_eq!(purge(&mut rig.index, &request).unwrap(), "chat-purge requested: !swarm:s 2026-11-10T00:00:00Z..2026-11-11T00:00:00Z request=\"follow_up:x\" windows=1");
     let before = rig.index.cursors();
     assert_eq!(purge(&mut rig.index, &request).unwrap().ends_with("windows=1"), true);
     assert_eq!(rig.index.cursors(), before, "a repeated request writes nothing");
@@ -217,6 +217,15 @@ fn exit_status_is_clean_only_when_forge_and_chat_both_are() {
     assert_eq!(status, 1);
     assert!(complained.iter().any(|line| line.contains("the forge is down")), "{complained:?}");
     assert!(said.iter().any(|line| line.contains("(!swarm:s)")), "chat ran after the forge failed: {said:?}");
+}
+
+#[test]
+fn a_request_cannot_forge_a_journal_line() {
+    let mut rig = Rig::new();
+    rig.go::<HttpMatrix>(None);
+    let request = Purge::check("!swarm:s", "2026-11-10T00:00:00Z", "2026-11-11T00:00:00Z", "x\nrefused: !forged:s", now()).unwrap();
+    let line = purge(&mut rig.index, &request).unwrap();
+    assert_eq!(line.lines().count(), 1, "{line:?}");
 }
 
 #[test]
