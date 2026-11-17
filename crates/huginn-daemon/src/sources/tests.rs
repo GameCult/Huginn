@@ -25,23 +25,23 @@ fn git_in(dir: &Path, args: &[&str]) -> String {
 }
 
 /// A working repo on disk, committed to by the test.
-struct Remote {
+pub(super) struct Remote {
     dir: tempfile::TempDir,
 }
 
 impl Remote {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         git_in(dir.path(), &["init", "--quiet", "-b", "main"]);
         Self { dir }
     }
 
-    fn path(&self) -> PathBuf {
+    pub(super) fn path(&self) -> PathBuf {
         self.dir.path().to_path_buf()
     }
 
     /// Writes files, removes paths, commits everything and returns the commit.
-    fn commit(&self, write: &[(&str, &[u8])], remove: &[&str]) -> String {
+    pub(super) fn commit(&self, write: &[(&str, &[u8])], remove: &[&str]) -> String {
         for (path, bytes) in write {
             let full = self.dir.path().join(path);
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -56,13 +56,13 @@ impl Remote {
     }
 }
 
-struct FakeForge {
+pub(super) struct FakeForge {
     repos: Vec<(SourceRepo, PathBuf)>,
     shortfall: Option<String>,
 }
 
 impl FakeForge {
-    fn of(repos: &[(&str, &Remote)]) -> Self {
+    pub(super) fn of(repos: &[(&str, &Remote)]) -> Self {
         Self {
             repos: repos
                 .iter()
