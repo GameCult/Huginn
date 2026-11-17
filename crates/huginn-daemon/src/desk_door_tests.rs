@@ -20,7 +20,7 @@ use cultnet_rs::{
     decode_cultnet_message_from_slice, encode_cultnet_message_to_vec, encode_frame,
 };
 use huginn_mind::desk_wire::{
-    DESK_MAX_RESPONSE_BYTES, DESK_REQUEST_SCHEMA, DESK_SERVICE_ID, DeskRequest, DeskResponse, ForkAnswer, ForkAnswerCode, ForkAnswerRequest, ForkCursor,
+    DESK_REQUEST_SCHEMA, DESK_SERVICE_ID, DeskRequest, DeskResponse, ForkAnswer, ForkAnswerCode, ForkAnswerRequest, ForkCursor,
     ForkEntry, ForkLimit, ForkList, ListStatus, RequestSchema,
 };
 use huginn_mind::envelope::{OperationFailure, decode_desk_response, decode_response, encode_desk_request, encode_request};

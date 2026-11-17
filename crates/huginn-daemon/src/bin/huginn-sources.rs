@@ -58,8 +58,11 @@ enum Stop {
     Locked,
 }
 
+/// The single-valued options and the repeated ones, by name.
+type Collected = (BTreeMap<String, String>, BTreeMap<String, Vec<String>>);
+
 /// The options named, each once, except those in `repeated`, which keep every value.
-fn collect(args: impl Iterator<Item = String>, once: &[&str], repeated: &[&str]) -> Result<(BTreeMap<String, String>, BTreeMap<String, Vec<String>>)> {
+fn collect(args: impl Iterator<Item = String>, once: &[&str], repeated: &[&str]) -> Result<Collected> {
     let mut args = args;
     let mut singles = BTreeMap::new();
     let mut many: BTreeMap<String, Vec<String>> = BTreeMap::new();

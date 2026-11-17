@@ -180,7 +180,7 @@ impl HttpForge {
                 capped.push(repo.clone());
             }
         }
-        events.sort_by(|a, b| b.id.cmp(&a.id));
+        events.sort_by_key(|event| std::cmp::Reverse(event.id));
         // The cursor never moves backwards: a read that saw nothing new keeps the one it was given.
         head = head.max(after.unwrap_or(0));
         let (mut open_prs, mut unseen) = (Vec::new(), dark.clone());
@@ -251,7 +251,7 @@ fn redirect_target(base: &str, location: &str) -> Option<OrgRepo> {
     let at = segments.windows(3).position(|window| window == ["api", "v1", "repos"])?;
     let plain = |segment: &&str| !segment.is_empty() && *segment != "." && *segment != ".." && segment.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
     let [owner, name, "activities", "feeds"] = segments[at + 3..] else { return None };
-    if !segments[..at].iter().all(|segment| plain(segment)) || !plain(&owner) || !plain(&name) {
+    if !segments[..at].iter().all(plain) || !plain(&owner) || !plain(&name) {
         return None;
     }
     let repo = OrgRepo(format!("{owner}/{name}"));
@@ -583,9 +583,9 @@ mod tests {
         let mut first_page: Vec<Value> = (0..PAGE as u32).map(|n| pr(n + 100, "kiko", "GameCult/Elsewhere")).collect();
         first_page[0] = pr(8, "nibu", "GameCult/Ratatoskr");
         first_page[1] = pr(42, "Eureka", "GameCult/Eureka");
-        let search = vec![Value::Array(first_page).to_string(), Value::Array(vec![pr(9, "void", "GameCult/Huginn")]).to_string()];
+        let search = [Value::Array(first_page).to_string(), Value::Array(vec![pr(9, "void", "GameCult/Huginn")]).to_string()];
         let names: Vec<Value> = (0..61).map(|n| json!({ "full_name": match n { 0 => "GameCult/ratatoskr".to_owned(), 1 => "GameCult/Huginn".to_owned(), n => format!("GameCult/r{n}") } })).collect();
-        let listing = vec![Value::Array(names[..PAGE].to_vec()).to_string(), Value::Array(names[PAGE..].to_vec()).to_string()];
+        let listing = [Value::Array(names[..PAGE].to_vec()).to_string(), Value::Array(names[PAGE..].to_vec()).to_string()];
         let sample = sample();
         let (base, asked) = forge_of(move |path| {
             if is_feed(path) && path.contains("/GameCult/Ghost/") {
@@ -626,7 +626,7 @@ mod tests {
         let full = |from: u32| Value::Array((0..PAGE as u32).map(|n| pr(from + n, "GameCult/Elsewhere")).collect()).to_string();
         let mut third: Vec<Value> = (0..PAGE as u32).map(|n| pr(300 + n, "GameCult/Elsewhere")).collect();
         third[PAGE - 1] = pr(7, "GameCult/Huginn");
-        let search = vec![full(100), full(200), Value::Array(third).to_string(), "[]".to_owned()];
+        let search = [full(100), full(200), Value::Array(third).to_string(), "[]".to_owned()];
         let (base, asked) = forge_of(move |path| {
             if is_feed(path) {
                 Some("[]".to_owned())
@@ -746,9 +746,7 @@ mod tests {
             let (base, _) = forge_of(move |path| {
                 if is_feed(path) && path.contains("/GameCult/cinny/") {
                     Some(dark())
-                } else if is_feed(path) {
-                    Some("[]".to_owned().into())
-                } else if path.contains("/issues/search") {
+                } else if is_feed(path) || path.contains("/issues/search") {
                     Some("[]".to_owned().into())
                 } else {
                     Some(listing.clone().into())
