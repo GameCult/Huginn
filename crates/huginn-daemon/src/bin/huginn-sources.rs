@@ -340,6 +340,28 @@ mod tests {
     }
 
     #[test]
+    fn the_lock_is_held_for_the_whole_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        // A qdrant that accepts the run's first request and says nothing: the run is mid-flight while we probe the lock.
+        let qdrant = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", qdrant.local_addr().unwrap());
+        let run = parse(args(&format!("--state-root /s --qdrant-url {url} --ollama-url http://127.0.0.1:1 --embedding-model m --lock-file {}", lock.display())), now()).unwrap();
+        let worker = std::thread::spawn(move || execute(run));
+        let (connection, _) = qdrant.accept().unwrap();
+        assert!(matches!(take_lock(&lock), Err(Stop::Locked)), "the run must hold the lock while it works");
+        drop(connection);
+        // Refuse any retry the same way until the run gives up.
+        qdrant.set_nonblocking(true).unwrap();
+        while !worker.is_finished() {
+            drop(qdrant.accept());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(worker.join().unwrap().is_ok());
+        assert!(take_lock(&lock).is_ok(), "the lock is released when the run ends");
+    }
+
+    #[test]
     fn a_held_lock_stops_the_run_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lock");
