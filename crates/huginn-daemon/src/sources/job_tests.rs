@@ -260,3 +260,28 @@ fn chat_purge_makes_no_matrix_request() {
     purge(&mut rig.index, &request).unwrap();
     assert_eq!(asked.seen().len(), made);
 }
+
+#[test]
+fn a_retirement_failure_goes_to_the_complaint_stream() {
+    struct Left;
+    impl RoomHistory for Left {
+        fn joined_rooms(&mut self) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn facts(&mut self, _room_id: &str) -> Result<super::room_scope::RoomFacts> {
+            bail!("unreachable")
+        }
+        fn events_after(&mut self, _room_id: &str, _after: Option<&str>, _limit: u32) -> Result<Option<super::chat::EventPage>> {
+            bail!("unreachable")
+        }
+    }
+    let world = rooms(vec![("!swarm:s", vec![], vec![message("$m1", "@a:s", 1, "words")])]);
+    let (base, _) = synapse(&world);
+    let mut rig = Rig::new();
+    rig.go(Some(&mut HttpMatrix::new(&base, TOKEN)));
+    rig.index.state.lock().unwrap().fail_chat_deletes = true;
+    let out = rig.go(Some(&mut Left));
+    assert_eq!(out.status, 1);
+    assert!(out.complained.iter().any(|line| line.starts_with("huginn-sources: retiring !swarm:s failed")), "{:?}", out.complained);
+    assert!(!out.said.iter().any(|line| line.contains("retiring")), "{:?}", out.said);
+}

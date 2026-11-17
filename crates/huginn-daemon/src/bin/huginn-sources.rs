@@ -85,7 +85,12 @@ fn loopback_http(name: &str, value: String) -> Result<String> {
     let value = http(name, value)?;
     let authority = value["http://".len()..].split(['/', '?', '#']).next().unwrap_or("");
     let host = match authority.strip_prefix('[') {
-        Some(inner) => inner.split(']').next().unwrap_or(""),
+        // The bracket must end the authority or be followed by the port, so `[::1].evil.example` names no loopback.
+        Some(inner) => match inner.split_once(']') {
+            Some((host, "")) => host,
+            Some((host, port)) if port.starts_with(':') => host,
+            _ => "",
+        },
         None => authority.split(':').next().unwrap_or(""),
     };
     let loopback = !authority.contains('@') && (host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
@@ -314,7 +319,7 @@ mod tests {
         for good in ["http://localhost", "http://127.0.0.1:8008", "http://127.9.9.9/", "http://[::1]:8008", "http://LOCALHOST:1/x"] {
             assert!(parse(args(&with(good)), now()).is_ok(), "{good}");
         }
-        for bad in ["http://matrix.example", "http://10.0.0.5:8008", "http://localhost@evil.example", "http://127.0.0.1.evil.example", "http://localhost.evil.example", "http://[::2]", "https://localhost"] {
+        for bad in ["http://matrix.example", "http://10.0.0.5:8008", "http://localhost@evil.example", "http://127.0.0.1.evil.example", "http://localhost.evil.example", "http://[::2]", "https://localhost", "http://127.0.0.1:pw@evil.example", "http://[::1].evil.example", "http://[::1]x"] {
             assert!(error(&with(bad)).contains("--matrix-url"), "{bad}");
         }
     }
