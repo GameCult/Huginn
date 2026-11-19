@@ -60,16 +60,6 @@ pub(crate) enum Lane {
     Salient,
 }
 
-impl Lane {
-    fn heading(self) -> &'static str {
-        match self {
-            Self::About => "About the people here:",
-            Self::Relevant => "Near what was said:",
-            Self::Salient => "Weighed most:",
-        }
-    }
-}
-
 /// One recalled document as a line of the turn's input, the people it names, and what the Projector's Select stage
 /// scores it by.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +101,7 @@ pub(crate) struct Recalled {
     pub search: Search,
 }
 
+#[cfg(test)]
 impl Recalled {
     /// Every item shown, in merge order.
     pub(crate) fn entries(&self) -> impl Iterator<Item = &Entry> {
@@ -346,30 +337,6 @@ pub(crate) fn select(mind: &dyn MindPort, cue: &Cue) -> Result<Recalled> {
         fill(Lane::Salient, salient, salient_matched, SALIENT_LIMIT, SALIENT_BYTES, &mut seen, cue),
     ];
     Ok(Recalled { lanes, search })
-}
-
-/// The section of a turn's input: one heading per lane that shows or left out anything, one line each,
-/// and after a lane that left something out a line saying how many.
-pub(crate) fn render(recalled: &Recalled) -> String {
-    let mut out = String::from("What you remember (from your own mind; `huginn view <id>` reads a record):\n");
-    for shown in &recalled.lanes {
-        if shown.entries.is_empty() && shown.left_out == 0 {
-            continue;
-        }
-        out.push_str(shown.lane.heading());
-        out.push('\n');
-        shown.entries.iter().for_each(|entry| out.push_str(&entry.line));
-        if shown.left_out > 0 {
-            out.push_str(&format!("({} more not shown.)\n", shown.left_out));
-        }
-    }
-    if recalled.lanes.iter().all(|shown| shown.entries.is_empty() && shown.left_out == 0) {
-        out.push_str("- nothing is remembered yet.\n");
-    }
-    if recalled.search == Search::Unavailable {
-        out.push_str("(The search of your memory is unavailable this turn; only what concerns the senders and what weighs most are shown.)\n");
-    }
-    out
 }
 
 #[cfg(test)]
