@@ -149,16 +149,13 @@ mind_body::heartbeat: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Outco
 mind_body::heartbeat: const DEFAULT_BEAT_S : u32
 mind_body::heartbeat: fn poll (organs : & Organs , config : & Config) -> Result < Outcome >
 mind_body::heartbeat: impl Config
-mind_body::heartbeat: impl Config: fn new (personas : Vec < PersonaId > , operators : Vec < String > , night : Option < Night > , beat_s : u32) -> Result < Self >
+mind_body::heartbeat: impl Config: fn new (personas : Vec < PersonaId > , operators : Vec < String > , beat_s : u32) -> Result < Self >
 mind_body::heartbeat: impl Control for FileControl
 mind_body::heartbeat: impl FileStore
 mind_body::heartbeat: impl FileStore: fn check (& self) -> Result < () >
 mind_body::heartbeat: impl FileStore: fn latest (& self) -> Result < Option < PollTrace > >
 mind_body::heartbeat: impl FileStore: fn new (path : impl Into < PathBuf >) -> Self
 mind_body::heartbeat: impl HeartbeatView for FileStore
-mind_body::heartbeat: impl Night
-mind_body::heartbeat: impl Night: fn from_settings (window : Option < & str > , minds : Option < & str >) -> Result < Option < Self > >
-mind_body::heartbeat: impl Night: fn parse (window : & str , minds : & str) -> Result < Self >
 mind_body::heartbeat: impl PersonaId
 mind_body::heartbeat: impl PersonaId: fn parse (spec : & str) -> Result < Self >
 mind_body::heartbeat: impl Row < '_ >
@@ -169,22 +166,16 @@ mind_body::heartbeat: pub trait Control { fn envelope (& self) -> SwarmEffective
 mind_body::heartbeat: pub trait HeartbeatView { fn addressing (& self) -> Result < Option < Addressing > > ; }
 mind_body::heartbeat: pub trait Store { fn load (& self) -> Result < Option < HeartbeatState > > ; fn save (& self , state : & HeartbeatState) -> Result < () > ; fn record (& self , trace : & PollTrace) -> Result < () > ; fn load_addressing (& self) -> Result < Option < Addressing > > ; fn save_addressing (& self , addressing : & Addressing) -> Result < () > ; }
 mind_body::heartbeat: struct Addressing # [derive (Clone , Debug , Default , PartialEq , Eq , DatabaseEntry)] pub-fields[minds: Vec < Addressee >]
-mind_body::heartbeat: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[personas: Vec < PersonaId >, operators: Vec < String >, night: Option < Night >, beat_s: u32]
+mind_body::heartbeat: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[personas: Vec < PersonaId >, operators: Vec < String >, beat_s: u32]
 mind_body::heartbeat: struct FileControl  pub-fields[]
 mind_body::heartbeat: struct FileStore  pub-fields[]
-mind_body::heartbeat: struct HeartbeatState # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[last_beat_at: DateTime < Utc >, handled_mentions: Vec < String >, last_turn_at: BTreeMap < String , DateTime < Utc > >, last_night_at: BTreeMap < String , DateTime < Utc > >]
+mind_body::heartbeat: struct HeartbeatState # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[last_beat_at: DateTime < Utc >, handled_mentions: Vec < String >, last_turn_at: BTreeMap < String , DateTime < Utc > >]
 mind_body::heartbeat: struct InstanceTrace # [derive (Clone , Debug , PartialEq , Eq , serde :: Serialize , serde :: Deserialize)] pub-fields[instance: String, vote_beat_s: Option < u32 >, urgency_permille: u16, addressed: bool, busy: bool, released: bool, idle_s: i64, score: String, note: String]
-mind_body::heartbeat: struct Night # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[from_min: u32, to_min: u32, minds: Vec < Slug >]
 mind_body::heartbeat: struct Organs< 'a >  pub-fields[seats: & 'a [Seat < 'a >], control: & 'a dyn Control, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, store: & 'a dyn Store]
 mind_body::heartbeat: struct PersonaId # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[slug: Slug, public_name: String, handle: String, matrix_id: String, huginn: SocketAddr]
 mind_body::heartbeat: struct PollTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[at: DateTime < Utc >, tempo_s: u32, instances: Vec < InstanceTrace >, launches: Vec < String >]
 mind_body::heartbeat: struct Seat< 'a >  pub-fields[who: PersonaId, mind: & 'a dyn MindPort, chat: & 'a dyn Chat]
 mind_body::launch: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum StopScope < 'a > { Mind (& 'a Slug) , Swarm , }
-mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Declined { Admission (MindRefusal) , Conflict , AlreadyAdmitted , StartFailed , GrantForOtherInstance , PersonaRunTakesNoClaims , }
-mind_body::launch: # [derive (Clone , Debug , PartialEq , Eq)] pub enum LaunchOutcome { Launched { run : PipelineRef , } , NotQueued { item : PipelineRef , } , Tripped { run : PipelineRef , question : PipelineRef , } , Busy { run : PipelineRef , } , Refused (Declined) , }
-mind_body::launch: const START_GRACE_S : i64
-mind_body::launch: fn open_and_launch (ports : & Ports , request : LaunchRequest) -> Result < LaunchOutcome >
-mind_body::launch: fn run_label (now : DateTime < Utc >) -> Label
 mind_body::launch: impl Clock for SystemClock
 mind_body::launch: impl Default for SystemdLauncher
 mind_body::launch: impl Launcher for SystemdLauncher
@@ -195,8 +186,6 @@ mind_body::launch: impl SystemdLauncher: fn stop (& self , scope : StopScope < '
 mind_body::launch: pub trait Clock { fn now (& self) -> DateTime < Utc > ; }
 mind_body::launch: pub trait Launcher { fn start (& self , instance : & Slug , turn : RunTurn) -> Result < () > ; fn alive (& self , instance : & Slug , turn : RunTurn) -> bool ; }
 mind_body::launch: pub trait Systemctl { fn run (& self , args : & [& str]) -> Result < SystemctlReply > ; }
-mind_body::launch: struct LaunchRequest  pub-fields[turn: RunTurn, claims: Vec < PipelineRef >, agent: String, grant: Grant]
-mind_body::launch: struct Ports< 'a >  pub-fields[mind: & 'a dyn MindPort, launcher: & 'a dyn Launcher, clock: & 'a dyn Clock, host: & 'a str]
 mind_body::launch: struct SystemClock  pub-fields[]
 mind_body::launch: struct SystemctlReply  pub-fields[success: bool, code: Option < i32 >, stdout: String]
 mind_body::launch: struct SystemdLauncher  pub-fields[]
@@ -242,13 +231,7 @@ mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pu
 mind_body::persona: struct FileTrace  pub-fields[]
 mind_body::persona: struct TraceItem # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[provenance: String, room: String, text: String]
 mind_body::persona: struct TurnTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[run: String, turn: u32, at: DateTime < Utc >, inputs: Vec < TraceItem >, outputs: Vec < TraceItem >, outcome: String]
-mind_body::queue: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Breaker { Clear , Trip { run : PipelineRef } , }
-mind_body::queue: const CONSECUTIVE : usize
-mind_body::queue: const EMPTY_SHARE : usize
-mind_body::queue: const WINDOW : usize
-mind_body::queue: fn breaker (mind : & dyn MindPort , item : & PipelineRef , ending : & [PipelineRef]) -> Result < Breaker >
 mind_body::queue: fn on_hold (mind : & dyn MindPort) -> Result < Held >
-mind_body::queue: fn queue (mind : & dyn MindPort , instance : & Slug , ending : & [PipelineRef] , held : & Held ,) -> Result < Vec < PipelineRef > >
 mind_body::queue: impl Held
 mind_body::queue: impl Held: fn contains (& self , item : & PipelineRef) -> bool
 mind_body::queue: impl Held: fn items (& self) -> & [PipelineRef]
