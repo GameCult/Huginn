@@ -686,6 +686,7 @@ mod door_smoke {
             state_root: root.path().to_path_buf(),
             instance: slug(INSTANCE),
             bind: "127.0.0.1:0".parse().unwrap(),
+            persona_bind: None,
             qdrant_url: "http://127.0.0.1:1".into(),
             ollama_urls: vec!["http://127.0.0.1:1".into()],
             reserve_ollama_urls: Vec::new(),

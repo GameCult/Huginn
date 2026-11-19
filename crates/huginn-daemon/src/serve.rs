@@ -1650,7 +1650,7 @@ mod tests {
             state_root: root.path().to_path_buf(),
             instance: slug(INSTANCE),
             bind: port,
-            persona_bind: None,
+            persona_bind: Some("127.0.0.1:0".parse().unwrap()),
             qdrant_url: "http://127.0.0.1:1".into(),
             ollama_urls: vec!["http://127.0.0.1:1".into()],
             reserve_ollama_urls: Vec::new(),
@@ -1674,6 +1674,8 @@ mod tests {
         drop(occupied);
         let started = started(&options).expect("both gates open");
         assert_eq!(started.hub.local_addr().unwrap(), port);
+        let door = started.persona.as_ref().expect("the persona door was asked for and bound");
+        assert_ne!(door.local_addr().unwrap(), port, "the persona door is its own listener");
     }
 
     #[test]
