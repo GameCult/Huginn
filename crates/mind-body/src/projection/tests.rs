@@ -527,7 +527,7 @@ fn a_lower_temperature_concentrates_the_selection() {
     }
     // Everything is included, so only the order decides what the caps keep.
     let mut cold = Tuning::default();
-    cold.select.temperature = 0.01;
+    cold.select.temperature = 0.0005;
     cold.select.inclusion_score = 1e-9;
     let distinct: BTreeSet<Vec<String>> = (1..=20).map(|seed| ids(&packet_tuned(TurnKind::Chat, &rich, &room, &History::default(), seed, &cold))).collect();
     assert_eq!(distinct.len(), 1, "near zero temperature takes the top scores every time: {distinct:?}");

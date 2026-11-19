@@ -677,7 +677,7 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
         match bonds.iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == *id) {
             Some(bond) if full < tuning.select.people_full => {
                 let line = bond_line(bond, name, tuning);
-                if used + line.len() + 1 <= budget {
+                if used + line.len() < budget {
                     full += 1;
                     used += line.len() + 1;
                     ids.push(text(bond, &["id"]).to_owned());
@@ -689,7 +689,7 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
             _ => named.push(name.clone()),
         }
     }
-    if let Some(line) = also_here(&named).filter(|line| used + line.len() + 1 <= budget) {
+    if let Some(line) = also_here(&named).filter(|line| used + line.len() < budget) {
         used += line.len() + 1;
         fixed.push(line);
     }
