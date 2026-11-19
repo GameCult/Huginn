@@ -70,13 +70,20 @@ impl Lane {
     }
 }
 
-/// One recalled document as a line of the turn's input, and the people it names.
+/// One recalled document as a line of the turn's input, the people it names, and what the Projector's Select stage
+/// scores it by.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub id: String,
     pub line: String,
     /// The Matrix ids its `about` and origin name.
     pub people: Vec<String>,
+    pub kind: PipelineKind,
+    /// A memory's salience; none for another kind.
+    pub salience_permille: Option<u16>,
+    pub admitted_at: String,
+    /// The daemon's nearness to the turn's words, in thousandths of its score; the relevant lane's alone.
+    pub nearness_permille: Option<u16>,
 }
 
 /// One lane's result: what it shows and how many it left out.
@@ -267,9 +274,9 @@ fn line_of(view: &PipelineDocumentView, names: &BTreeMap<&str, &str>) -> Option<
 /// elsewhere, within the lane's item limit and byte budget (a line that does
 /// not fit is skipped, a later shorter one may). `matched` is how many the
 /// lane's query matched, so what it left out is counted exactly.
-fn fill(lane: Lane, candidates: Vec<PipelineDocumentView>, matched: usize, limit: usize, budget: usize, seen: &mut Vec<String>, cue: &Cue) -> Shown {
+fn fill(lane: Lane, candidates: Vec<(PipelineDocumentView, Option<u16>)>, matched: usize, limit: usize, budget: usize, seen: &mut Vec<String>, cue: &Cue) -> Shown {
     let (mut entries, mut bytes, mut elsewhere) = (Vec::new(), 0usize, 0usize);
-    for view in candidates {
+    for (view, nearness_permille) in candidates {
         let id = view.id.id.0.clone();
         if seen.contains(&id) || cue.listed.contains(&id) {
             elsewhere += 1;
@@ -281,14 +288,18 @@ fn fill(lane: Lane, candidates: Vec<PipelineDocumentView>, matched: usize, limit
         }
         seen.push(id.clone());
         bytes += line.len();
-        let people = match &view.document {
-            PipelineDocument::Memory(memory) => people_of(memory),
-            _ => Vec::new(),
+        let (people, salience_permille) = match &view.document {
+            PipelineDocument::Memory(memory) => (people_of(memory), Some(memory.salience_permille)),
+            _ => (Vec::new(), None),
         };
-        entries.push(Entry { id, line, people });
+        entries.push(Entry { id, line, people, kind: view.id.kind, salience_permille, admitted_at: view.admission.admitted_at.clone(), nearness_permille });
     }
     let left_out = matched.saturating_sub(entries.len() + elsewhere);
     Shown { lane, entries, left_out }
+}
+
+fn unscored(views: Vec<PipelineDocumentView>) -> Vec<(PipelineDocumentView, Option<u16>)> {
+    views.into_iter().map(|view| (view, None)).collect()
 }
 
 /// Whether a view is an open ask or commitment: a memory of those sorts.
@@ -304,23 +315,28 @@ pub(crate) fn select(mind: &dyn MindPort, cue: &Cue) -> Result<Recalled> {
     } else {
         let page = mind.query(&newest(any_of(recalled_memories_in_force(), "about", &cue.senders), POOL))?;
         let matched = page.matched as usize;
-        (ranked(documents(page)?, cue.now), matched)
+        (unscored(ranked(documents(page)?, cue.now)), matched)
     };
     let (relevant, search) = match near_text(cue) {
         None => (Vec::new(), Search::Skipped),
         Some(text) => {
             let kinds = [PipelineKind::Memory, PipelineKind::FollowUp, PipelineKind::Ruling];
             let members = in_force(Selection { schemas: Some(kinds.iter().map(|kind| kind.type_id().to_string()).collect()), projection: "document".into(), ..Selection::default() });
-            match mind.query_near(&members, &text, POOL).and_then(documents) {
+            let scored = mind.query_near(&members, &text, POOL).and_then(|page| {
+                let scores = page.scores.clone().unwrap_or_default();
+                let nearness = scores.iter().map(|score| Some((f64::from(*score) * 1000.0).round().clamp(0.0, 1000.0) as u16)).chain(std::iter::repeat(None));
+                Ok(documents(page)?.into_iter().zip(nearness).collect::<Vec<_>>())
+            });
+            match scored {
                 // An open ask or commitment is shown by the responsibilities section; it never comes here.
-                Ok(found) => (found.into_iter().filter(|view| !is_open_item(view)).collect::<Vec<_>>(), Search::Ran),
+                Ok(found) => (found.into_iter().filter(|(view, _)| !is_open_item(view)).collect::<Vec<_>>(), Search::Ran),
                 Err(_) => (Vec::new(), Search::Unavailable),
             }
         }
     };
     let page = mind.query(&newest(recalled_memories_in_force(), POOL))?;
     let salient_matched = page.matched as usize;
-    let salient = ranked(documents(page)?, cue.now);
+    let salient = unscored(ranked(documents(page)?, cue.now));
 
     let mut seen = Vec::<String>::new();
     let relevant_found = relevant.len();

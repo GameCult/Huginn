@@ -23,6 +23,10 @@ publish.workspace = true
 # two until the workspace pin and the kit's meet.
 # `rmp-serde` is also the lease wire (`lease_client`): the connector's MessagePack frames.
 #
+# Ghostlight's `ghostlight-persona-projection`, pinned to a revision, builds the Projector's prompt (`projection`), so
+# the membrane's text stays Ghostlight's; the Projector asks through the connector kit's client (`model-connector`).
+# `toml` reads `persona-tuning.toml`, the Projector's knobs (`projection::tuning`); parse and serde only.
+#
 # `serde_json` reads Claude Code's stream-json, a foreign owner's wire (`self_run`);
 # `uuid`'s v5 makes a Self run's session id derivable from the run's id.
 [dependencies]
@@ -33,12 +37,14 @@ cultcache-rs.workspace = true
 cultnet-rs.workspace = true
 eureka-pipeline = { path = "../eureka-pipeline" }
 eureka-state = { path = "../eureka-state", default-features = false }
+ghostlight-persona-projection = { git = "https://github.com/GameCult/Ghostlight.git", rev = "c43eb54962ed4a09cc737ecac73a16b0d7ce62b4", package = "ghostlight-persona-projection" }
 huginn-mind = { path = "../huginn-mind" }
 model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "c1802d85bee3ae04b0c5737563c8343c1fef515d", package = "model-connector" }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+toml = { version = "0.9", default-features = false, features = ["std", "serde", "parse"] }
 unicode-general-category = "1"
 uuid = { version = "1", default-features = false, features = ["v5"] }
 
@@ -58,6 +64,9 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 tempfile = "3"
+# A real kit server (`serve` over a scripted `ProviderBackend`) proves the Projector's connector wire, not a fake of it.
+# Same revision as the dependency; the `daemon` feature is test-only.
+model-connector = { git = "https://eureka.gamecult.org/forge/GameCult/ModelConnector.git", rev = "c1802d85bee3ae04b0c5737563c8343c1fef515d", package = "model-connector", features = ["daemon"] }
 
 [lib]
 name = "mind_body"
