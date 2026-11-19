@@ -1056,6 +1056,7 @@ fn a_beat_respects_a_small_cap() {
         let room = Room { tail: (0..6).map(|at| message("#swarm:gamecult.org", "@kiko:gamecult.org", "", &"x".repeat(150), 30 - at, false)).collect(), ..Room::default() };
         let packet = packet_tuned(TurnKind::Beat, &state(), &room, &History::default(), 1, &tuning);
         assert!(packet.stimulus.len() <= cap, "cap {cap}: {} {:?}", packet.stimulus.len(), packet.stimulus);
+        assert!(!packet.stimulus.trim_end().ends_with("Lately in her rooms:"), "cap {cap}: no heading over nothing: {:?}", packet.stimulus);
     }
 }
 

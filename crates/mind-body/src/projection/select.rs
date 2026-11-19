@@ -577,13 +577,15 @@ fn newest_section(heading: &str, lines: &[String], cap: usize) -> String {
     if !out.push(heading) {
         return String::new();
     }
+    let mut shown = false;
     if dropped > 0 {
-        out.push(&format!("({dropped} earlier not shown)"));
+        shown |= out.push(&format!("({dropped} earlier not shown)"));
     }
     for line in kept {
-        out.push(line);
+        shown |= out.push(line);
     }
-    out.out
+    // A heading over nothing says nothing.
+    if shown { out.out } else { String::new() }
 }
 
 /// The messages to her as lines under the `addressed_bytes` ceiling: whole messages, newest first, until the ceiling;
