@@ -1102,6 +1102,47 @@ pub(crate) mod tests {
         );
     }
 
+    /// Every read the persona door answers reaches the mind there: none of the
+    /// source, chat, activity and roots reads is refused as `NotThisDoor`.
+    /// What the mind then says (a search, or `Unavailable` with no index or
+    /// forge) is the mind's, the same at either door.
+    #[test]
+    fn the_persona_door_hands_every_other_read_to_the_mind() {
+        use huginn_mind::wire::{ChatWindowQuery, SourceQuery};
+        let (_root, mut daemon) = seeded();
+        let reads = [
+            HuginnMindRequest::SearchSources {
+                instance: slug(INSTANCE),
+                query: SourceQuery { text: Line("reconcile".into()), texts: vec![], top_k: 5, repo: None, front: false },
+            },
+            HuginnMindRequest::SearchChat {
+                instance: slug(INSTANCE),
+                query: ChatQuery { texts: vec![Line("release".into())], rooms: vec![], after_ms: None, before_ms: None, top_k: 5 },
+            },
+            HuginnMindRequest::ChatWindow {
+                instance: slug(INSTANCE),
+                query: ChatWindowQuery { event_id: Short("$a".into()), before: 5, after: 0 },
+            },
+            HuginnMindRequest::StewardedActivity { instance: slug(INSTANCE), repos: vec![], after: None },
+            HuginnMindRequest::RootsTouched { instance: slug(INSTANCE) },
+        ];
+        for read in reads {
+            let operation = read.operation();
+            let at_door = daemon.handle_at(Door::Persona, read.clone(), now());
+            assert!(
+                !matches!(at_door, Handled::Answered(HuginnMindResponse::Refused(MindRefusal::NotThisDoor))),
+                "{operation} is refused at the persona door"
+            );
+            if let (Handled::Answered(at_door), Handled::Answered(at_full)) = (at_door, daemon.handle_at(Door::Full, read, now())) {
+                assert_eq!(at_door, at_full, "{operation} answers the same at either door");
+            }
+        }
+        assert!(matches!(
+            daemon.handle_at(Door::Persona, HuginnMindRequest::RootsTouched { instance: slug(INSTANCE) }, now()).answered(),
+            HuginnMindResponse::RootsTouched(_)
+        ));
+    }
+
     /// A declared instance outside `Slug`'s grammar is refused by its own
     /// name, `InvalidFormat`, on the read path, before the identity
     /// comparison ever runs: it is not merely a foreign mind, it names no
