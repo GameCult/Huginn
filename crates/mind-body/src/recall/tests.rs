@@ -156,7 +156,7 @@ fn the_semantic_ask_is_the_batchs_words_newest_first_plus_names_cut_on_a_charact
         let (selection, text, top_k) = &asked.near[0];
         assert_eq!((text.as_str(), *top_k), ("newest words\nolder words\nLibby", POOL));
         let kinds: Vec<_> = selection.schemas.clone().unwrap();
-        assert_eq!(kinds, [K::Memory, K::FollowUp, K::Ruling].map(|kind| kind.type_id().to_string()));
+        assert_eq!(kinds, [K::Memory.type_id().to_string()], "only memories are offered");
         assert!(selection.cursor.is_none() && !selection.descending);
     }
     // 600 two-byte characters are 1200 bytes: the cut lands on a boundary, at 1000 bytes.
@@ -344,6 +344,7 @@ fn a_memory_reads_where_and_from_whom_never_the_subject_as_the_place() {
 #[test]
 fn recall_reads_only_memories_of_the_cued_sorts() {
     let mind = seeded();
+    mind.committed(vec![spec("x")]);
     mind.committed(vec![follow_up("fork-it", &spec_ref("x")), ruling("R1", None), memory("did", MemorySort::Did, "shaders were shipped", &[LIBBY]), memory("idea", MemorySort::Idea, "shaders could sing", &[LIBBY])]);
     let port = Recording::over(&mind);
     let recalled = select(&port, &cue(&[LIBBY], &["shaders"])).unwrap();
