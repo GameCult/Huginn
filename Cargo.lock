@@ -353,6 +353,26 @@ dependencies = [
 [[package]]
 name = "cultcache-rs"
 version = "0.3.1"
+source = "git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23#a4eae9056152335662f1115f97bf35fb00ab6d23"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cultcache-rs-derive 0.2.0 (git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23)",
+ "fs2",
+ "redb",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "serde_stacker",
+ "stacker",
+ "uuid",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "cultcache-rs"
+version = "0.3.1"
 source = "git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb#baf4ecf78fae634fafef956d3b85420162c074bb"
 dependencies = [
  "anyhow",
@@ -372,29 +392,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "cultcache-rs"
-version = "0.3.1"
-source = "git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23#a4eae9056152335662f1115f97bf35fb00ab6d23"
-dependencies = [
- "anyhow",
- "chrono",
- "cultcache-rs-derive 0.2.0 (git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23)",
- "fs2",
- "redb",
- "rmp-serde",
- "serde",
- "serde_bytes",
- "serde_json",
- "serde_stacker",
- "stacker",
- "uuid",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "cultcache-rs-derive"
 version = "0.2.0"
-source = "git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb#baf4ecf78fae634fafef956d3b85420162c074bb"
+source = "git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23#a4eae9056152335662f1115f97bf35fb00ab6d23"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -404,7 +404,7 @@ dependencies = [
 [[package]]
 name = "cultcache-rs-derive"
 version = "0.2.0"
-source = "git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23#a4eae9056152335662f1115f97bf35fb00ab6d23"
+source = "git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb#baf4ecf78fae634fafef956d3b85420162c074bb"
 dependencies = [
  "proc-macro2",
  "quote",
