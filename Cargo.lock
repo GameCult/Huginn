@@ -852,16 +852,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ghostlight-persona-projection"
-version = "0.1.0"
-source = "git+https://github.com/GameCult/Ghostlight.git?rev=c43eb54962ed4a09cc737ecac73a16b0d7ce62b4#c43eb54962ed4a09cc737ecac73a16b0d7ce62b4"
-dependencies = [
- "serde",
- "sha2",
- "unicode-segmentation",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1108,7 +1098,6 @@ dependencies = [
  "cultnet-rs 0.3.0",
  "eureka-pipeline",
  "eureka-state",
- "ghostlight-persona-projection",
  "huginn-mind",
  "libc",
  "model-connector",
@@ -1122,7 +1111,6 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "unicode-general-category",
- "ureq",
  "uuid",
 ]
 
@@ -1133,7 +1121,6 @@ source = "git+https://eureka.gamecult.org/forge/GameCult/ModelConnector.git?rev=
 dependencies = [
  "aes-gcm",
  "base64",
- "cultcache-rs 0.3.1 (git+https://github.com/GameCult/CultLib.git?rev=a4eae9056152335662f1115f97bf35fb00ab6d23)",
  "cultnet-rs 0.2.0",
  "rand_core 0.6.4",
  "rmp-serde",
@@ -1992,12 +1979,6 @@ checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
 dependencies = [
  "tinyvec",
 ]
-
-[[package]]
-name = "unicode-segmentation"
-version = "1.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "universal-hash"

@@ -17,10 +17,6 @@
 //! pending chat as the inbox and one typed reply per result (`chat_client` is the chat wire and
 //! port and `chat_rudp` its RUDP transport to Bifrost's mouth).
 //!
-//! `stream` is the stream organ: the `mind-stream` binary projects her own state through
-//! Ghostlight's Projector, lets a base model continue it, and admits the least familiar
-//! continuation as a `thought` with its whole trace. It admits nothing else.
-//!
 //! `lease_client` asks the Claude connector for a session's credential and the
 //! plan's usage windows. `self_run` carries one Self run inside `mind-self@<instance>`: the
 //! `mind-self-run` binary runs `claude` over stream-json for her one open Self
@@ -50,7 +46,6 @@ pub mod queue;
 mod recall;
 pub mod self_run;
 mod sleep;
-pub mod stream;
 pub mod tempo;
 
 #[cfg(test)]

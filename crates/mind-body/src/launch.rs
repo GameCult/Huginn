@@ -124,7 +124,8 @@ fn template(turn: RunTurn) -> &'static str {
     }
 }
 
-/// The stream's unit template: not a run slot, so only a brake hold names it.
+/// The stream's unit template: not a run slot, so only a brake hold names it. The organ is parked
+/// (tag `parked/divergence-stream`); a hold still stops its unit wherever a host has it installed.
 const STREAM_TEMPLATE: &str = "mind-stream";
 
 /// A template's unit for one instance, the instance held to the leaf's grammar
