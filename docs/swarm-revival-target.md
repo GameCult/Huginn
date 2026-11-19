@@ -1,5 +1,7 @@
 # Swarm revival: target shape (draft)
 
+> **Superseded in part by C2 (Huginn `66b85c8`).** The Persona turn, the per-instance waker, the start-Self-run tool and the Self-run launch path this draft plans around are deleted or parked; the live Persona, heartbeat and Self-run rows are in `docs/eureka-body-map.md`, "The persona-only body (after C2)". The mind, instance, share and lifecycle tables below still describe the intended swarm shape, not the running one.
+
 Status: draft target, Imagination (`imagination-swarm`), session
 `self-2026-10-09-eureka`, 2026-10-10, written at Huginn `441b1fc`. Campaign
 `eureka-body` in Eureka's mind (instance `eureka`). This is a step-0b pass
