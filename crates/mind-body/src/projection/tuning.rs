@@ -27,6 +27,11 @@ const TEMPERATURE_RANGE: std::ops::RangeInclusive<f64> = 0.01..=10.0;
 /// The ceiling of the messages to her: at least a long message whole, and far under the connector's 256 KiB frame, which
 /// also carries the rest of the prompt.
 const ADDRESSED_RANGE: std::ops::RangeInclusive<usize> = 1024..=64 * 1024;
+/// The most bytes any one part of the prompt may take: with the identity, the guidance and the messages to her
+/// (`ADDRESSED_RANGE`), the Projector's prompt stays far under the connector's 256 KiB frame.
+const PART_BYTES_MAX: usize = 32 * 1024;
+/// The most words a lived stream may be given: a thin moment gets a thin stream, and no budget needs a book.
+const WORDS_MAX: usize = 2000;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -180,6 +185,24 @@ impl Tuning {
         ] {
             if bytes == 0 {
                 bail!("{name} must be above 0");
+            }
+        }
+        for (name, bytes) in [
+            ("select.context_bytes", select.context_bytes),
+            ("select.stimulus_bytes", select.stimulus_bytes),
+            ("select.heard_bytes", select.heard_bytes),
+            ("select.identity_bytes", select.identity_bytes),
+            ("select.bond_summary_bytes", select.bond_summary_bytes),
+            ("select.item_bytes", select.item_bytes),
+            ("projector.guidance", self.projector.guidance.len()),
+        ] {
+            if bytes > PART_BYTES_MAX {
+                bail!("{name} must be at most {PART_BYTES_MAX} bytes, not {bytes}: the prompt must fit the connector's frame");
+            }
+        }
+        for (name, words) in [("projector.words", self.projector.words), ("projector.beat_words", self.projector.beat_words)] {
+            if words > WORDS_MAX {
+                bail!("{name} must be at most {WORDS_MAX}, not {words}");
             }
         }
         if select.identity_bytes.checked_add(FIXED_ROOM).is_none_or(|needed| select.context_bytes < needed) {

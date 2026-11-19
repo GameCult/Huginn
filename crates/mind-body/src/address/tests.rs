@@ -140,12 +140,37 @@ fn a_direct_message_is_for_her_whatever_the_basis() {
 }
 
 #[test]
-fn a_name_inside_a_path_or_an_identifier_is_not_her_name() {
-    let eureka = Addressee::new("@eureka:chat", ["Eureka"]);
-    for path in ["the trace at /var/lib/mind-eureka/persona-trace.cc grew", "see eureka.cc", "eureka_state is a crate", "C:\\eureka\\x", "mind-eureka@ is a unit"] {
-        assert!(!addresses(&eureka, &said(path, &[])), "{path:?} does not name her");
+fn a_name_glued_to_a_word_is_not_her_name_and_every_other_boundary_is() {
+    // Soul's 72 forms (third pass on C3a): every one names her except the six glued to a word.
+    let eureka = Addressee::new("@eureka:chat", ["eureka", "Eureka"]);
+    let glued = ["Eurekas idea", "Eurekaさん", "ÉEureka", "Eureka-chan", "/var/lib/mind-eureka/x", "mind-eureka"];
+    let forms = [
+        "Eureka, are you there", "Eureka: look", "eureka?", "Eureka!", "Eureka.", "Eureka's turn", "Eureka’s turn", "Eurekas idea", "the Eureka's", "ask eureka about it",
+        "thanks eureka", "eureka", "Eureka\n", "`eureka`", "**Eureka**", "*Eureka*", "_Eureka_", "__Eureka__", "~~Eureka~~", "[Eureka](https://matrix.to/#/@eureka:gamecult.org)",
+        "https://matrix.to/#/@eureka:gamecult.org hi", "@eureka:gamecult.org hi", "@eureka hi", "<@eureka>", "(Eureka)", "\"Eureka\"", "«Eureka»", "—Eureka—", "Eureka—can you",
+        "Eureka--can you", "Eureka - can you", "Eureka/Libby, can you two", "Libby/Eureka can you", "Eureka/Nibu", "ok...Eureka?", "ok… Eureka?", "Hmm.Eureka?", "Eureka.Can you",
+        "Eureka...", "Eureka…", "#eureka", "Eurekaさん", "エウレカ Eureka", "Eureka、", "Eureka。", "ÉEureka", "Eureka-chan", "Eureka_bot", "Eureka\\", "\\Eureka",
+        "Eureka:\n> quoted", "> Eureka hi", "Eureka;", "Eureka'", "'Eureka'", "Eureka(?)", "Eureka+Libby", "Eureka&Libby", "Eureka|Libby", "Eureka=", "Eureka.  ",
+        "/var/lib/mind-eureka/x", "eureka.cc", "eureka_state", "mind-eureka", "eureka.gamecult.org", "https://eureka.gamecult.org/forge", "C:\\eureka\\x", "Eureka.rs",
+    ];
+    assert_eq!(forms.len(), 72);
+    for form in forms {
+        assert_eq!(addresses(&eureka, &said(form, &[])), !glued.contains(&form), "{form:?}");
     }
-    for spoken in ["Eureka.", "Eureka, are you there?", "ask eureka.", "(Eureka)", "@Eureka hi", "\"Eureka\" said it", "Eureka's turn"] {
-        assert!(addresses(&eureka, &said(spoken, &[])), "{spoken:?} names her");
+    // Each side of the rule on its own: a hyphen joins only with a letter or digit beyond it, before and after.
+    for (text, names) in [("x-eureka", false), ("eureka-x", false), ("--eureka", true), ("eureka--", true), ("x--eureka", true), ("eureka--x", true), ("-eureka", true), ("eureka-", true), (".eureka", true), ("eureka.x", true), ("x.eureka", true)] {
+        assert_eq!(addresses(&eureka, &said(text, &[])), names, "{text:?}");
+    }
+}
+
+#[test]
+fn a_project_name_holds_at_every_boundary_but_a_glued_one() {
+    for repo in ["GameCult/Huginn", "GameCult/CultLib", "GameCult/gamecult-ops", "GameCult/cultcache-rs"] {
+        let steward = steward(repo, &[]);
+        let short = repo.split_once('/').unwrap().1;
+        for text in [format!("{repo} PR #76"), format!("{short}/main is red"), format!("_{short}_ is down"), format!("see {short}--now"), format!("{short}.toml"), format!("{short}'s build")] {
+            assert!(addresses(&steward, &said(&text, &[])), "{text:?}");
+        }
+        assert!(!addresses(&steward, &said(&format!("mind-{short}"), &[])), "{short} glued by a hyphen");
     }
 }

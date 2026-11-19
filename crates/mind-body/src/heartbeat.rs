@@ -220,6 +220,10 @@ pub trait Store {
 /// What a Persona unit may read of `heartbeat.cc`: the swarm's addressing. Read-only.
 pub trait HeartbeatView {
     fn addressing(&self) -> Result<Option<Addressing>>;
+    /// When the store was last written, so a reader can tell a stale table; none when there is no store at all.
+    fn written_at(&self) -> Option<DateTime<Utc>> {
+        None
+    }
 }
 
 /// The store as a CultCache single-file store under the unit's state directory.
@@ -314,6 +318,10 @@ impl FileStore {
 impl HeartbeatView for FileStore {
     fn addressing(&self) -> Result<Option<Addressing>> {
         self.load_addressing()
+    }
+
+    fn written_at(&self) -> Option<DateTime<Utc>> {
+        std::fs::metadata(&self.path).and_then(|meta| meta.modified()).ok().map(DateTime::<Utc>::from)
     }
 }
 

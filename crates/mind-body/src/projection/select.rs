@@ -14,9 +14,9 @@
 //!
 //! Who a message is to is `address::is_for`'s, the rule the heartbeat woke her by, and nothing else here. People are
 //! keyed by their full Matrix id; only the operator and the Minds of the swarm are keyed by the names their bonds use,
-//! and an unbonded speaker is shown with the id, never under a bonded person's name. Every message body is rendered by
-//! one escape (`spoken`): quotes escaped, a line break shown as ` ⏎ `, so no text can forge a line; speaker and room come
-//! from the mouth's metadata alone.
+//! and an unbonded speaker is shown by the display name the mouth reports, quoted and escaped, with the Matrix id after
+//! it, never under a bonded person's name. Every message body and display name is rendered by one escape (`spoken`, a
+//! JSON string), so no text can forge a line; speaker and room come from the mouth's metadata alone.
 //!
 //! Never read: `agencyPressure`, `candidateActions`, `privateNotes` and `provenance`. A memory tagged with a direct
 //! message room (`room:!…`) is selectable only in that room.
@@ -262,22 +262,11 @@ fn relevance_log(item_text: &str, touching: &BTreeSet<String>) -> f64 {
     (1.0 + (shared as f64 / 3.0).min(1.0)).ln()
 }
 
-/// A message body as every line renders it: in quotation marks, its own quotes and backslashes escaped, a line break
-/// shown as ` ⏎ ` and other control characters dropped, so a body can never end its line or start another.
+/// A message body or a display name as every line renders it: a JSON string, quotes, backslashes and every control
+/// character escaped (`\n`, `\t`, `\r`, `\u…`, and the Unicode line separators too), so no text can end its line or
+/// start another, and the escape is reversible: nothing is dropped.
 pub(crate) fn spoken(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' | '\u{2028}' | '\u{2029}' | '\u{0085}' => out.push_str(" ⏎ "),
-            c if c.is_control() => {}
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    crate::persona::quoted(text)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -520,11 +509,12 @@ fn cap_of(pool: Pool, tuning: &Tuning) -> usize {
 fn name_of(line: &RoomLine, inputs: &Inputs) -> String {
     let person = inputs.people.person_of(&line.sender);
     let bonded = items(inputs.state, &["affect", "socialBonds"]).iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == person).map(|bond| text(bond, &["object", "label"]).to_owned()).filter(|label| !label.is_empty());
-    let name = bonded.unwrap_or_else(|| {
-        let display = one_line(&line.display);
-        if display.is_empty() { line.sender.clone() } else { format!("{display} ({})", line.sender) }
-    });
-    clip(&one_line(&name), NAME_BYTES)
+    match bonded {
+        Some(label) => clip(&one_line(&label), NAME_BYTES),
+        // A display name is the speaker's own text: quoted and escaped, at most `NAME_BYTES`, the real id always after it.
+        None if !line.display.trim().is_empty() => format!("{} ({})", spoken(&clip(line.display.trim(), NAME_BYTES)), line.sender),
+        None => line.sender.clone(),
+    }
 }
 
 /// Lines appended under a byte cap: a line that would pass it is refused whole.
@@ -588,34 +578,55 @@ fn newest_section(heading: &str, lines: &[String], cap: usize) -> String {
     if shown { out.out } else { String::new() }
 }
 
-/// The messages to her as lines under the `addressed_bytes` ceiling: whole messages, newest first, until the ceiling;
-/// a note counting the older ones left out; and a single message larger than the ceiling clipped on a grapheme boundary
-/// with how many bytes more it held, never paraphrased. Chronological order, with the counts.
-fn said_to_her(to_her: &[&RoomLine], render: impl Fn(&RoomLine, &str) -> String, ceiling: usize) -> (Vec<String>, usize, usize) {
-    let mut kept: Vec<String> = Vec::new();
+/// Which messages to her a turn shows: whole messages, newest first, until the `addressed_bytes` ceiling, and a single
+/// message larger than the ceiling clipped on a grapheme boundary (`cut`, the bytes of its text kept). Decided once, on
+/// the stimulus's lines, and rendered for the stimulus and the heard lines alike.
+struct Addressed<'a> {
+    /// Chronological: each message shown, and where its text is cut if it is.
+    shown: Vec<(&'a RoomLine, Option<usize>)>,
+    left_out: usize,
+    clipped: usize,
+}
+
+impl Addressed<'_> {
+    fn lines(&self, render: impl Fn(&RoomLine, &str) -> String) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        if self.left_out > 0 {
+            lines.push(format!("({} more said to her, not shown)", self.left_out));
+        }
+        lines.extend(self.shown.iter().map(|(line, cut)| match cut {
+            None => render(line, &spoken(&line.text)),
+            Some(cut) => render(line, &format!("{} [… {} bytes more]", spoken(&line.text[..*cut]), line.text.len() - cut)),
+        }));
+        lines
+    }
+}
+
+fn said_to_her<'a>(to_her: &[&'a RoomLine], render: impl Fn(&RoomLine, &str) -> String, ceiling: usize) -> Addressed<'a> {
+    let mut shown: Vec<(&RoomLine, Option<usize>)> = Vec::new();
     let mut used = 0;
     let mut clipped = 0;
     for line in to_her.iter().rev() {
         let whole = render(line, &spoken(&line.text));
         if used + whole.len() < ceiling {
             used += whole.len() + 1;
-            kept.push(whole);
+            shown.push((line, None));
             continue;
         }
-        if kept.is_empty() {
+        if shown.is_empty() {
             // One message larger than the ceiling: as much of it as fits, cut between graphemes.
             let ends: Vec<usize> = line.text.grapheme_indices(true).map(|(at, grapheme)| at + grapheme.len()).collect();
             let fitting = |end: usize| render(line, &format!("{} [… {} bytes more]", spoken(&line.text[..end]), line.text.len() - end));
             let fit = ends.partition_point(|end| fitting(*end).len() < ceiling);
             let cut = if fit == 0 { 0 } else { ends[fit - 1] };
             clipped = line.text.len() - cut;
-            kept.push(fitting(cut));
+            shown.push((line, Some(cut)));
         }
         break;
     }
-    let left_out = to_her.len() - kept.len();
-    kept.reverse();
-    (kept, left_out, clipped)
+    let left_out = to_her.len() - shown.len();
+    shown.reverse();
+    Addressed { shown, left_out, clipped }
 }
 
 fn chat_stimulus(inputs: &Inputs, tuning: &Tuning) -> (String, String, Overflow) {
@@ -628,14 +639,16 @@ fn chat_stimulus(inputs: &Inputs, tuning: &Tuning) -> (String, String, Overflow)
     // Heard lines are prose for the Persona: the speaker and the room from the mouth, then the escaped words.
     let heard = |line: &RoomLine, body: &str| format!("{}, in {}: {body}", name_of(line, inputs), line.room);
     let ceiling = tuning.select.addressed_bytes;
-    let (typed_to_her, left_out, clipped) = said_to_her(&to_her, typed, ceiling);
-    let (heard_to_her, _, _) = said_to_her(&to_her, heard, ceiling);
-    let note = (left_out > 0).then(|| format!("({left_out} more said to her, not shown)"));
+    // One selection, rendered twice: the stimulus and the heard lines show the same messages to her and the same count.
+    let addressed = said_to_her(&to_her, typed, ceiling);
+    let (left_out, clipped) = (addressed.left_out, addressed.clipped);
+    let typed_to_her = addressed.lines(typed);
+    let heard_to_her = addressed.lines(heard);
 
     let mut stimulus = String::new();
     if !typed_to_her.is_empty() {
         stimulus.push_str("Said to her:");
-        for line in note.iter().chain(&typed_to_her) {
+        for line in &typed_to_her {
             stimulus.push('\n');
             stimulus.push_str(line);
         }

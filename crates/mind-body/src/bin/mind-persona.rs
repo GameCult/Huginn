@@ -19,7 +19,9 @@
 //! `--state`), and with `--renders` the Projector's narrations of K successive turns; `--judge` renders a second state
 //! too and asks the model which narration came from which. It writes nothing and reads no brake. It reads
 //! `MIND_PERSONA_OPERATOR`, `MIND_PERSONA_MINDS` and `MIND_PERSONA_SELF_SENDER` (required), and the heartbeat's addressing
-//! from `MIND_HEARTBEAT_STATE` when set; the room comes from the mouth when `BIFROST_CHAT_ENDPOINT`
+//! from `MIND_HEARTBEAT_STATE`, which a run by hand must set as the unit does (`/var/lib/mind-heartbeat/heartbeat.cc`):
+//! without it "said to her" knows only her own names, never her projects', and stderr says so before the report; the
+//! room comes from the mouth when `BIFROST_CHAT_ENDPOINT`
 //! and `BIFROST_CHAT_KEY_FILE` are set; the tuning is `MIND_PERSONA_TUNING`, else
 //! `/etc/gamecult/minds/<instance>/persona-tuning.toml`; renders need `MIND_PERSONA_CONNECTOR_ENDPOINT`
 //! (`<loopback ip>:<port>`) and the `connector-key` credential in `CREDENTIALS_DIRECTORY`. Without `--select-only` or
@@ -150,7 +152,16 @@ fn run_project(args: &[String]) -> Result<String> {
         own_sender: required("MIND_PERSONA_SELF_SENDER")?,
         tuning,
     };
-    Ok(serde_json::to_string_pretty(&project(&organs, &request, now)?)?)
+    let report = project(&organs, &request, now)?;
+    let addressing = &report["addressing"];
+    // The addressing source is what decides "said to her": said first, where a person running this by hand sees it.
+    eprintln!(
+        "mind-persona project: addressing from {} ({}); table written {}",
+        addressing["source"].as_str().unwrap_or("?"),
+        addressing["why"].as_str().unwrap_or("?"),
+        addressing["age_minutes"].as_i64().map_or_else(|| "never".to_owned(), |minutes| format!("{minutes} min ago")),
+    );
+    Ok(serde_json::to_string_pretty(&report)?)
 }
 
 #[allow(clippy::disallowed_methods, reason = "the binary reads its own arguments")]

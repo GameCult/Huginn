@@ -20,8 +20,34 @@ use super::tuning::Tuning;
 
 /// One tool-less model turn. `KitModel` is the one live owner; a test answers with recorded text.
 pub trait Model {
-    /// One turn of `model`: `prompt` is its one user text and `request_id` its identity on the connector.
-    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> Result<Answer>;
+    /// One turn of `model`: `prompt` is its one user text and `request_id` its identity on the connector. A failed turn
+    /// keeps whatever usage the connector reported for it.
+    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> std::result::Result<Answer, Failed>;
+}
+
+/// A turn that produced no answer: why, and what it cost when the connector's receipt says (a refusal, a fault before
+/// the provider, or a failure with no usage block costs none). A receipt whose usage block is missing or malformed does
+/// not decode at all: that is model-connector's error, reported as the reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failed {
+    pub reason: String,
+    pub usage: Option<Spent>,
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.reason)
+    }
+}
+
+impl Failed {
+    fn without_usage(reason: impl Into<String>) -> Self {
+        Self { reason: reason.into(), usage: None }
+    }
+}
+
+fn spent(model: &str, usage: &model_connector::Usage) -> Spent {
+    Spent { model: model.to_owned(), input_tokens: usage.input_tokens, output_tokens: usage.output_tokens, cache_read_tokens: usage.cache_read_tokens, cache_write_tokens: usage.cache_write_tokens, reasoning_tokens: usage.reasoning_tokens }
 }
 
 /// A model's answer, and what the turn cost as the connector counted it: none when the answerer counts nothing.
@@ -75,15 +101,15 @@ impl KitModel {
 }
 
 impl Model for KitModel {
-    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> Result<Answer> {
+    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> std::result::Result<Answer, Failed> {
         let mut request = ProviderRequest::new(request_id, request_id, model, INSTRUCTIONS, MAX_OUTPUT_TOKENS);
         request.input = vec![InputItem::UserText { text: prompt.to_owned() }];
         request.reasoning_effort = Some(ReasoningEffort::Low);
         let expires = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default() + INVOCATION_LIFE_MS;
-        let invocation = TransportInvocation::new(&self.caller, expires, Sha256::digest(prompt.as_bytes()).into(), request).map_err(|_| anyhow!("the request is not a valid connector request"))?;
-        let result = self.client.execute(&invocation).map_err(|fault| anyhow!("the connector did not answer: {fault}"))?;
+        let invocation = TransportInvocation::new(&self.caller, expires, Sha256::digest(prompt.as_bytes()).into(), request).map_err(|_| Failed::without_usage("the request is not a valid connector request"))?;
+        let result = self.client.execute(&invocation).map_err(|fault| Failed::without_usage(format!("the connector did not answer: {fault}")))?;
         match result.disposition {
-            TransportDisposition::Refused(reason) => bail!("the connector refused the call: {reason:?}"),
+            TransportDisposition::Refused(reason) => Err(Failed::without_usage(format!("the connector refused the call: {reason:?}"))),
             TransportDisposition::Transported { events, receipt } => match receipt.outcome {
                 TransportOutcome::Completed { stop_reason: StopReason::EndTurn, usage, .. } => Ok(Answer {
                     text: events
@@ -93,17 +119,10 @@ impl Model for KitModel {
                             _ => None,
                         })
                         .collect(),
-                    usage: Some(Spent {
-                        model: model.to_owned(),
-                        input_tokens: usage.input_tokens,
-                        output_tokens: usage.output_tokens,
-                        cache_read_tokens: usage.cache_read_tokens,
-                        cache_write_tokens: usage.cache_write_tokens,
-                        reasoning_tokens: usage.reasoning_tokens,
-                    }),
+                    usage: Some(spent(model, &usage)),
                 }),
-                TransportOutcome::Completed { stop_reason, .. } => bail!("the model's turn ended early: {stop_reason:?}"),
-                TransportOutcome::Failed { kind, .. } => bail!("the provider failed the call: {kind:?}"),
+                TransportOutcome::Completed { stop_reason, usage, .. } => Err(Failed { reason: format!("the model's turn ended early: {stop_reason:?}"), usage: Some(spent(model, &usage)) }),
+                TransportOutcome::Failed { kind, usage, .. } => Err(Failed { reason: format!("the provider failed the call: {kind:?}"), usage: usage.as_ref().map(|usage| spent(model, usage)) }),
             },
         }
     }
@@ -122,52 +141,79 @@ pub(crate) fn projector_prompt(packet: &Packet, tuning: &Tuning) -> String {
     build_projector_prompt(&ProjectorPrompt { identity: &packet.identity, typed_context: &packet.context, visible_stimulus: &packet.stimulus, domain_guidance: &guidance, word_budget: word_budget(packet.kind, tuning) })
 }
 
-/// `text` held to `max` whitespace-separated words; the model's count is not trusted. An overrun is cut at the last
-/// sentence end inside the budget, so the stream ends on a whole sentence; only when the budget holds no sentence end
-/// is it cut after the `max`-th word.
-pub(crate) fn cap_words(text: &str, max: usize) -> String {
-    let text = text.trim();
-    let mut words = 0;
-    let mut in_word = false;
-    for (at, c) in text.char_indices() {
-        if c.is_whitespace() {
-            in_word = false;
-        } else if !in_word {
-            in_word = true;
-            words += 1;
-            if words > max {
-                let within = text[..at].trim_end();
-                return last_sentence_end(within).map_or_else(|| within.to_owned(), |end| within[..end].to_owned());
-            }
-        }
-    }
-    text.to_owned()
+/// A character that is a word on its own: Han, kana and Hangul are written without spaces, so each counts as one.
+fn cjk(c: char) -> bool {
+    matches!(u32::from(c), 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0x20000..=0x2FFFF)
 }
 
-/// The byte just past the last sentence end in `text`: a `.`, `!`, `?` or `…`, with any closing quotes or brackets after
-/// it, followed by whitespace or the end of the text.
+/// CJK and full-width punctuation (`。`, `，`, `！`, `？`, `「」`): it belongs to the word before it and starts none.
+fn cjk_punctuation(c: char) -> bool {
+    matches!(u32::from(c), 0x3000..=0x303F | 0xFF01..=0xFF0F | 0xFF1A..=0xFF20 | 0xFF3B..=0xFF40 | 0xFF5B..=0xFF65)
+}
+
+/// The byte offset where each word of `text` begins: a run of non-space characters is one word, and a CJK character is
+/// a word of its own.
+fn word_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut in_word = false;
+    for (at, c) in text.char_indices() {
+        if c.is_whitespace() || cjk_punctuation(c) {
+            in_word = false;
+        } else if cjk(c) {
+            starts.push(at);
+            in_word = false;
+        } else if !in_word {
+            starts.push(at);
+            in_word = true;
+        }
+    }
+    starts
+}
+
+/// The share of the budget a sentence cut must keep; below it the word cut keeps more of the stream.
+const SENTENCE_CUT_FLOOR: f64 = 0.6;
+
+/// `text` held to `max` words (whitespace-separated, each CJK character one); the model's count is not trusted. An
+/// overrun is cut at the last sentence end inside the budget, so the stream ends on a whole sentence, when that keeps
+/// at least 60% of the budget; otherwise, or with no sentence end inside it, it is cut after the `max`-th word. No
+/// abbreviation list: a cut after "e.g." is accepted.
+pub(crate) fn cap_words(text: &str, max: usize) -> String {
+    let text = text.trim();
+    let starts = word_starts(text);
+    let Some(&over) = starts.get(max) else { return text.to_owned() };
+    let within = text[..over].trim_end();
+    match last_sentence_end(within) {
+        Some(end) if words(&within[..end]) as f64 >= SENTENCE_CUT_FLOOR * max as f64 => within[..end].to_owned(),
+        _ => within.to_owned(),
+    }
+}
+
+/// The byte just past the last sentence end in `text`: a `.`, `!`, `?` or `…` with any closing quotes or brackets after
+/// it, followed by whitespace or the end of the text; or a `。`, `！` or `？`, which ends a sentence where it stands.
 fn last_sentence_end(text: &str) -> Option<usize> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut found = None;
     for (index, (at, c)) in chars.iter().enumerate() {
-        if !matches!(c, '.' | '!' | '?' | '…') {
+        let full_width = matches!(c, '。' | '！' | '？');
+        if !full_width && !matches!(c, '.' | '!' | '?' | '…') {
             continue;
         }
         let mut end = at + c.len_utf8();
         let mut next = index + 1;
-        while let Some((close_at, close)) = chars.get(next).filter(|(_, close)| matches!(close, '"' | '\'' | '”' | '’' | ')' | ']')) {
+        while let Some((close_at, close)) = chars.get(next).filter(|(_, close)| matches!(close, '"' | '\'' | '”' | '’' | ')' | ']' | '」' | '』')) {
             end = close_at + close.len_utf8();
             next += 1;
         }
-        if chars.get(next).is_none_or(|(_, after)| after.is_whitespace()) {
+        if full_width || chars.get(next).is_none_or(|(_, after)| after.is_whitespace()) {
             found = Some(end);
         }
     }
     found
 }
 
+/// Words as the cap counts them.
 pub(crate) fn words(text: &str) -> usize {
-    text.split_whitespace().count()
+    word_starts(text).len()
 }
 
 /// The one kebab form that is ordinary English: "short-term" folds to the schema key `shortTerm`, and prose must not fail

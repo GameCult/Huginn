@@ -30,7 +30,7 @@ use crate::address::{Addressee, is_for, localpart};
 use crate::chat_client::{Chat, ChatPending, Form};
 use crate::heartbeat::HeartbeatView;
 
-pub use narrate::{Answer, KitModel, Model, Spent, connector_key};
+pub use narrate::{Answer, Failed, KitModel, Model, Spent, connector_key};
 pub use select::TurnKind;
 pub use tuning::{TUNING_FILE, TUNING_ROOT};
 
@@ -129,19 +129,28 @@ pub struct Request {
 }
 
 /// Her addressee: the heartbeat's row for her when its table holds one, else her own names (handle and public name).
-fn own_addressee(addressing: Option<&dyn HeartbeatView>, own_sender: &str, public_name: &str) -> (Addressee, Value) {
+/// Her addressee and where it came from: `{source, why, written_at, age_minutes}`. The heartbeat's row when its table
+/// holds one; else her own names (handle and public name), with why: no store configured, no heartbeat file, a file
+/// that could not be read, or a table without her row. The table's age is the store's last write: under a held swarm
+/// brake the heartbeat does not poll, so an old table is a stale one.
+fn own_addressee(addressing: Option<&dyn HeartbeatView>, own_sender: &str, public_name: &str, now: DateTime<Utc>) -> (Addressee, Value) {
+    let written_at = addressing.and_then(HeartbeatView::written_at);
+    let age = written_at.map(|at| (now - at).num_minutes());
+    let report = |source: &str, why: &str| json!({ "source": source, "why": why, "written_at": written_at.map(|at| at.to_rfc3339()), "age_minutes": age });
     let table = addressing.map(|view| view.addressing());
     if let Some(Ok(Some(table))) = &table
         && let Some(row) = table.minds.iter().find(|row| row.matrix_id() == own_sender)
     {
-        return (row.clone(), json!("heartbeat"));
+        return (row.clone(), report("heartbeat", "her row in the heartbeat's addressing table"));
     }
-    let why = match table {
-        None => "own names only: no heartbeat addressing is configured".to_owned(),
-        Some(Err(fault)) => format!("own names only: the heartbeat addressing could not be read: {fault:#}"),
-        Some(Ok(_)) => "own names only: the heartbeat addressing has no row for her".to_owned(),
+    let why = match (&table, written_at) {
+        (None, _) => "no heartbeat addressing is configured (MIND_HEARTBEAT_STATE is not set)".to_owned(),
+        (Some(Err(fault)), _) => format!("the heartbeat addressing could not be read: {fault:#}"),
+        (Some(Ok(_)), None) => "there is no heartbeat file".to_owned(),
+        (Some(Ok(None)), Some(_)) => "the heartbeat file holds no addressing table".to_owned(),
+        (Some(Ok(Some(_))), Some(_)) => "the heartbeat's addressing table has no row for her".to_owned(),
     };
-    (Addressee::new(own_sender, [localpart(own_sender), public_name]), json!(why))
+    (Addressee::new(own_sender, [localpart(own_sender), public_name]), report("own names only", &why))
 }
 
 /// The room through the mouth's pending read, which acks nothing: new messages and the tail, own lines kept for the
@@ -195,15 +204,19 @@ fn packet_json(packet: &Packet) -> Value {
 
 /// One narration of one packet: the request id names the instance, the seed and the moment, because the kit's replay
 /// store answers a repeated id with its first answer.
-fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuning::Tuning, tag: &str, now: DateTime<Utc>) -> Result<Value> {
+/// A failed call is a record with its reason and what it cost, never the end of the report.
+fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuning::Tuning, tag: &str, now: DateTime<Utc>) -> Value {
     let request_id = format!("{AGENT}:{instance}:project:{tag}:{}:{}", packet.seed, now.timestamp_millis());
-    let answer = model.ask(&request_id, &tuning.projector.model, &projector_prompt(packet, tuning))?;
+    let ids: Vec<String> = packet.selected.iter().map(|pick| pick.id.clone()).collect();
+    let answer = match model.ask(&request_id, &tuning.projector.model, &projector_prompt(packet, tuning)) {
+        Ok(answer) => answer,
+        Err(failed) => return json!({ "seed": packet.seed, "lens": packet.lens, "selected": ids, "failed": failed.reason, "usage": failed.usage }),
+    };
     let raw = answer.text;
     let budget = word_budget(packet.kind, tuning);
     let narration = cap_words(&raw, budget);
-    let ids: Vec<String> = packet.selected.iter().map(|pick| pick.id.clone()).collect();
     let named: Vec<String> = packet.ids.clone();
-    Ok(json!({
+    json!({
         "seed": packet.seed,
         "lens": packet.lens,
         "selected": ids,
@@ -212,7 +225,7 @@ fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuni
         "field_names": field_names(&narration, &named),
         "usage": answer.usage,
         "narration": narration,
-    }))
+    })
 }
 
 /// K successive turns over one state: each packet under the freshness the earlier ones left.
@@ -242,7 +255,7 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
         }
     };
     let public_name = state.get("publicName").and_then(Value::as_str).unwrap_or_default().to_owned();
-    let (own, addressing) = own_addressee(organs.addressing, &request.own_sender, &public_name);
+    let (own, addressing) = own_addressee(organs.addressing, &request.own_sender, &public_name, now);
     let (room, room_report) = match organs.chat {
         Some(chat) => read_room(chat, request, &own),
         None => (Room { here: request.room.clone(), ..Room::default() }, json!({ "read": false, "why": "no mouth is configured" })),
@@ -269,8 +282,10 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
     report["model"] = json!(tuning.projector.model);
     let packets = successive(&inputs, tuning, renders.max(1));
     report["packet"] = packet_json(&packets[0]);
-    let narrations: Vec<Value> = packets.iter().map(|packet| narrate_one(model, &request.instance, packet, tuning, "a", now)).collect::<Result<_>>()?;
-    let texts = |narrations: &[Value]| narrations.iter().map(|one| one["narration"].as_str().unwrap_or_default().to_owned()).collect::<Vec<_>>();
+    let narrations: Vec<Value> = packets.iter().map(|packet| narrate_one(model, &request.instance, packet, tuning, "a", now)).collect();
+    let texts = |narrations: &[Value]| narrations.iter().filter_map(|one| one["narration"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+    let failed = |narrations: &[Value]| narrations.iter().filter(|one| one.get("failed").is_some()).count();
+    report["failed_renders"] = json!(failed(&narrations));
     report["distinct_2"] = json!(distinct_2(&texts(&narrations)));
     report["embedding_distance"] = json!("not measured: the daemon offers no embedding verb");
     let leaked = narrations.iter().any(|one| one["field_names"].as_array().is_some_and(|names| !names.is_empty()));
@@ -279,7 +294,7 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
     if let Some(other) = &request.judge_against {
         let other_inputs = Inputs { state: other, ..inputs };
         let others = successive(&other_inputs, tuning, renders.max(1));
-        let other_narrations: Vec<Value> = others.iter().map(|packet| narrate_one(model, &request.instance, packet, tuning, "b", now)).collect::<Result<_>>()?;
+        let other_narrations: Vec<Value> = others.iter().map(|packet| narrate_one(model, &request.instance, packet, tuning, "b", now)).collect();
         let mut verdicts = Vec::new();
         let mut right = 0usize;
         for (at, (narration, truth)) in narrations.iter().map(|one| (one, 'A')).chain(other_narrations.iter().map(|one| (one, 'B'))).enumerate() {
@@ -287,16 +302,26 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
             // The two descriptions swap places on odd turns, so a judge that always answers one letter scores half.
             let swapped = at % 2 == 1;
             let (first, second) = if swapped { (b, a) } else { (a, b) };
-            let text = narration["narration"].as_str().unwrap_or_default();
-            let answer = model.ask(&format!("{AGENT}:{}:judge:{at}:{}", request.instance, now.timestamp_millis()), &tuning.projector.model, &judge_prompt(first, second, text))?;
+            // A narration that failed has nothing to judge; it is counted under the renders' failures.
+            let Some(text) = narration["narration"].as_str() else { continue };
+            let answer = match model.ask(&format!("{AGENT}:{}:judge:{at}:{}", request.instance, now.timestamp_millis()), &tuning.projector.model, &judge_prompt(first, second, text)) {
+                Ok(answer) => answer,
+                Err(failed) => {
+                    verdicts.push(json!({ "from": truth.to_string(), "failed": failed.reason, "usage": failed.usage }));
+                    continue;
+                }
+            };
             let letter = judged(&answer.text).map(|letter| if swapped { if letter == 'A' { 'B' } else { 'A' } } else { letter });
             let correct = letter == Some(truth);
             right += usize::from(correct);
             verdicts.push(json!({ "from": truth.to_string(), "judged": letter.map(String::from), "correct": correct, "usage": answer.usage }));
         }
-        let accuracy = right as f64 / verdicts.len().max(1) as f64;
+        // Accuracy over the verdicts the judge gave; a failed call is no verdict, and any failure fails the eval.
+        let judged_count = verdicts.iter().filter(|verdict| verdict.get("failed").is_none()).count();
+        let failures = verdicts.len() - judged_count + failed(&narrations) + failed(&other_narrations);
+        let accuracy = right as f64 / judged_count.max(1) as f64;
         report["against"] = json!({ "packet": packet_json(&others[0]), "renders": other_narrations, "distinct_2": distinct_2(&texts(&other_narrations)) });
-        report["judge"] = json!({ "accuracy": accuracy, "pass_at": JUDGE_PASS, "passed": accuracy >= JUDGE_PASS && !leaked, "verdicts": verdicts });
+        report["judge"] = json!({ "accuracy": accuracy, "pass_at": JUDGE_PASS, "failures": failures, "passed": accuracy >= JUDGE_PASS && !leaked && failures == 0, "verdicts": verdicts });
     }
     report["renders"] = Value::Array(narrations);
     Ok(report)
