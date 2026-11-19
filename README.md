@@ -42,7 +42,7 @@ edits `.cc` state. Huginn reads and writes minds.
 
 ## Layout
 
-A Cargo workspace of five crates (`crates/eureka-pipeline` holds the document shapes and keys, `crates/mind-body` the control store, launch primitive and `mind-heartbeat` timeline; the three below are the mind, the daemon and the client):
+A Cargo workspace of five crates (`crates/eureka-pipeline` holds the document shapes and keys, `crates/mind-body` the control store, unit launcher, `mind-heartbeat`, the inert `mind-persona` organ and the `mind-self-run` actuator; the three below are the mind, the daemon and the client):
 
 - `crates/huginn-mind`: storage, identity, admission, and queries and derived
   status over memory documents.

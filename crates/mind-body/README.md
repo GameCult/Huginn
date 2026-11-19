@@ -1,7 +1,7 @@
 # mind-body
 
-The Mind's body: the control store, the launch primitive, the `mind-heartbeat`
-timeline and the `mind-self-run` actuator.
+The Mind's body: the control store, the unit launcher, the `mind-heartbeat`, the
+inert `mind-persona` organ and the `mind-self-run` actuator.
 
 `mind-self-run --instance <slug> [--endpoint rudp://<ip>:<port>]` runs inside
 `mind-self@<instance>`. It finds her one open Self run, starts `claude` over
@@ -12,7 +12,9 @@ wrong or the mind cannot be reached.
 
 ## The heartbeat
 
-`mind-heartbeat` is the one process that decides who wakes and when: each beat falls when the Minds' voted tempo has passed and goes to the Mind that has waited longest, bent by the urgency she declares and a member addressing her; the operator tagging or naming a Persona launches her at once. `mind-heartbeat timeline` prints its latest record.
+`mind-heartbeat` is the one process that decides who wakes and when. It starts a Persona's unit and writes no Mind: the beat (`HEARTBEAT_BEAT_S`, default 1800 s) goes to the idle, released Mind that has waited longest, bent by a member addressing her, and the operator or another Mind naming a Persona wakes her at once, once per message. `mind-heartbeat timeline` prints its latest record.
+
+`mind-persona` is inert: it reads the brakes and exits `dead` or `no organ`. It writes nothing. Nothing launches `mind-self-run`.
 
 The actuator has its own ignored test, `the_real_bin_finds_her_run_...` in
 `tests/self_run.rs`: the real `mind-self-run` against the real daemon with a
