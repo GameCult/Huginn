@@ -78,7 +78,7 @@ use huginn_mind::{Mind, MindRefusal, MindStore, OwnedRedbMessagePackBackingStore
 use crate::bodies::{
     DEFERRED_BUDGET_BYTES, DEFERRED_CHUNK_BYTES, DeferredBodies,
 };
-use crate::daemon::{Daemon, Handled, IndexSink, Search, SearchTicket, runtime_id};
+use crate::daemon::{Daemon, Door, Handled, IndexSink, Search, SearchTicket, runtime_id};
 use crate::desk_door::{DeskDoor, bind_desk};
 use huginn_mind::envelope::{OperationFailure, decode_request, encode_failure, encode_response};
 use huginn_mind::MAX_DEFERRED_BODY_BYTES;
@@ -111,6 +111,10 @@ pub struct Options {
     pub state_root: PathBuf,
     pub instance: Slug,
     pub bind: SocketAddr,
+    /// The persona door (`--persona-bind`): a second RUDP listener answering
+    /// only what `HuginnMindRequest::reaches_persona_door` accepts. Absent,
+    /// the daemon has no persona door.
+    pub persona_bind: Option<SocketAddr>,
     pub qdrant_url: String,
     /// The GPU hosts: all take embedding at once. One is the plain case.
     pub ollama_urls: Vec<String>,
@@ -134,7 +138,7 @@ pub struct DeskOptions {
 /// Exactly `--state-root`, `--instance`, `--bind`, `--qdrant-url`,
 /// `--ollama-url` and `--embedding-model`, each required, each once, except
 /// `--ollama-url`, which repeats for each GPU host, and the optional
-/// `--reserve-ollama-url`, which repeats for each CPU host, and the optional `--forge-url`, once, and the optional pair `--desk-socket` (an absolute path) and `--desk-peer-uid` (a uid other than 0), both or neither, each once. The URLs are plain
+/// `--reserve-ollama-url`, which repeats for each CPU host, and the optional `--forge-url` and `--persona-bind` (an ip:port other than `--bind`), each once, and the optional pair `--desk-socket` (an absolute path) and `--desk-peer-uid` (a uid other than 0), both or neither, each once. The URLs are plain
 /// `http://`: this build carries no TLS.
 pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     let mut args = args;
@@ -143,7 +147,7 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     while let Some(name) = args.next() {
         let name = name.strip_prefix("--").with_context(|| format!("expected --option, got {name:?}"))?;
         ensure!(
-            matches!(name, "state-root" | "instance" | "bind" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model" | "forge-url" | "desk-socket" | "desk-peer-uid"),
+            matches!(name, "state-root" | "instance" | "bind" | "persona-bind" | "qdrant-url" | "ollama-url" | "reserve-ollama-url" | "embedding-model" | "forge-url" | "desk-socket" | "desk-peer-uid"),
             "unsupported Huginn option --{name}"
         );
         let value = args.next().with_context(|| format!("missing value for --{name}"))?;
@@ -167,10 +171,20 @@ pub fn parse_options(args: impl Iterator<Item = String>) -> Result<Options> {
     };
     let embedding_model = take("embedding-model")?;
     ensure!(!embedding_model.is_empty(), "--embedding-model must name a model");
+    let bind: SocketAddr = bind.parse().with_context(|| format!("--bind must be an ip:port, got {bind:?}"))?;
+    let persona_bind = match values.get("persona-bind") {
+        None => None,
+        Some(door) => {
+            let door: SocketAddr = door.parse().with_context(|| format!("--persona-bind must be an ip:port, got {door:?}"))?;
+            ensure!(door != bind, "--persona-bind must not be --bind: the persona door is its own listener");
+            Some(door)
+        }
+    };
     Ok(Options {
         state_root,
         instance: Slug(take("instance")?),
-        bind: bind.parse().with_context(|| format!("--bind must be an ip:port, got {bind:?}"))?,
+        bind,
+        persona_bind,
         qdrant_url: url("qdrant-url")?,
         ollama_urls: {
             ensure!(!ollama_urls.is_empty(), "--ollama-url is required; repeat it for each GPU host");
@@ -206,6 +220,7 @@ where
 {
     let mind = Mind::open(&options.state_root, &options.instance)?;
     let hub = bind(options.bind, &runtime_id(&options.instance))?;
+    let persona = options.persona_bind.map(|door| bind(door, &runtime_id(&options.instance))).transpose()?;
     let desk = options.desk.as_ref().map(|desk| bind_desk(&desk.socket, desk.peer_uid)).transpose()?;
     let startup_entries = mind.index_entries(None)?;
     let sink = WorkerSink::spawn(embedder, index, &options.instance, mind.genesis_receipt_id()?, startup_entries, backoff);
@@ -214,14 +229,16 @@ where
         Some(url) => daemon.with_forge(crate::sources::forge::HttpForge::new(url)),
         None => daemon,
     };
-    Ok(Started { daemon, hub, registry: schema_registry()?, desk })
+    Ok(Started { daemon, hub, persona, registry: schema_registry()?, desk })
 }
 
 /// What `startup` hands the loop: the daemon over the opened mind, the bound RUDP hub, the
-/// catalog the RUDP door advertises, and the desk door when one was asked for.
+/// persona door's hub when one was asked for, the catalog both RUDP doors advertise, and the
+/// desk door when one was asked for.
 pub struct Started {
     pub daemon: Daemon<OwnedRedbMessagePackBackingStore, WorkerSink>,
     pub hub: CultNetRudpServerHub,
+    pub persona: Option<CultNetRudpServerHub>,
     pub registry: CultNetSchemaRegistry,
     pub desk: Option<DeskDoor>,
 }
@@ -321,12 +338,14 @@ impl Routed {
 }
 
 /// One message in, one message out, or a search to wait for. Nothing here
-/// reaches a mind except through `Daemon::handle`, and an envelope that does
+/// reaches a mind except through `Daemon::handle_at`, at the `door` the message
+/// arrived on, and an envelope that does
 /// not decode never gets that far. A chunk request is answered from `bodies`
 /// alone, on the session it came in on; every operation's reply leaves through
 /// `respond`.
 pub fn answer<S: MindStore, I: IndexSink<S>>(
     daemon: &mut Daemon<S, I>,
+    door: Door,
     registry: &CultNetSchemaRegistry,
     bodies: &mut DeferredBodies,
     message: CultNetMessage,
@@ -345,7 +364,7 @@ pub fn answer<S: MindStore, I: IndexSink<S>>(
         CultNetMessage::OperationRequest { message_id, operation, .. } => match decode_request(&message) {
             Ok((message_id, request)) => {
                 let operation = request.operation();
-                match daemon.handle(request, now) {
+                match daemon.handle_at(door, request, now) {
                     Handled::Answered(response) => respond(&response, &message_id, operation, &runtime_id, bodies, now),
                     Handled::Searching(search) => return Routed::Search { message_id, operation, search },
                 }
@@ -483,9 +502,11 @@ fn deliver(
     deferred
 }
 
-/// A semantic query on its way through the index: who asked, what to call the
-/// answer, the search to finish, and when the client stops being promised one.
+/// A semantic query on its way through the index: who asked, at which door,
+/// what to call the answer, the search to finish, and when the client stops
+/// being promised one.
 struct Waiting {
+    door: Door,
     session: CultNetRudpServerSessionContext,
     message_id: String,
     operation: &'static str,
@@ -494,9 +515,11 @@ struct Waiting {
 }
 
 /// Until `stopping`: expire what timed out, resend what was not acknowledged,
-/// answer every frame waiting on the socket, then answer every semantic query
-/// the index has finished or that has waited out the index's own
-/// `search_deadline`. A semantic
+/// answer every frame waiting on either RUDP door's socket, then answer every
+/// semantic query the index has finished or that has waited out the index's
+/// own `search_deadline`. A frame on `hub` is asked at `Door::Full`, one on
+/// `persona` at `Door::Persona`, and a search's answer leaves by the door it
+/// came in at. A semantic
 /// query is never answered inline: `answer` hands back a `Search`, the loop
 /// holds it beside its session and goes on serving, and the embedder and the
 /// vector store are the worker's to wait on. A hostile datagram and a departed
@@ -505,51 +528,18 @@ struct Waiting {
 pub fn run<S: MindStore, I: IndexSink<S>>(
     daemon: &mut Daemon<S, I>,
     hub: &mut CultNetRudpServerHub,
+    mut persona: Option<&mut CultNetRudpServerHub>,
     registry: &CultNetSchemaRegistry,
     mut desk: Option<&mut DeskDoor>,
     stopping: &AtomicBool,
     options: &ServeOptions,
 ) -> Result<()> {
-    let timeout_ms = options.session_timeout.as_millis() as u64;
     let mut bodies = DeferredBodies::new(DEFERRED_BUDGET_BYTES, options.deferred_ttl);
     let mut waiting: BTreeMap<SearchTicket, Waiting> = BTreeMap::new();
     while !stopping.load(Ordering::Relaxed) {
-        hub.remove_timed_out_sessions(timeout_ms);
-        if let Err(error) = hub.poll_resends() {
-            eprintln!("huginn: resending to a peer failed: {error:#}");
-        }
-        let mut served = 0_u32;
-        loop {
-            let event = match hub.receive_event_once() {
-                Ok(Some(event)) => event,
-                Ok(None) => break,
-                Err(error) => {
-                    eprintln!("huginn: a datagram was not readable and was discarded: {error:#}");
-                    break;
-                }
-            };
-            let CultNetRudpServerEvent::Frame { session, frame } = event else {
-                continue;
-            };
-            if frame.channel_id != "schema" {
-                continue;
-            }
-            let message = match decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)
-            {
-                Ok(message) => message,
-                Err(error) => {
-                    eprintln!("huginn: a frame was not a CultNet message and was discarded: {error:#}");
-                    continue;
-                }
-            };
-            match answer(daemon, registry, &mut bodies, message, Utc::now()) {
-                Routed::Reply(reply) => send(hub, &session, &reply),
-                Routed::Search { message_id, operation, search } => {
-                    let until = Instant::now() + daemon.search_deadline();
-                    waiting.insert(search.ticket, Waiting { session, message_id, operation, search, until });
-                }
-            }
-            served += 1;
+        let mut served = serve_frames(daemon, hub, Door::Full, registry, &mut bodies, &mut waiting, options);
+        if let Some(door) = persona.as_deref_mut() {
+            served += serve_frames(daemon, door, Door::Persona, registry, &mut bodies, &mut waiting, options);
         }
         let desk_served = desk.as_deref_mut().map_or(0, |door| door.serve_ready(daemon, Utc::now()));
         let finished = collect_searches(daemon, &waiting);
@@ -558,13 +548,71 @@ pub fn run<S: MindStore, I: IndexSink<S>>(
             let Some(asked) = waiting.remove(&ticket) else { continue };
             let response = daemon.finish(asked.search, found);
             let reply = respond(&response, &asked.message_id, asked.operation, &daemon.runtime_id(), &mut bodies, Utc::now());
-            send(hub, &asked.session, &reply);
+            let out = match asked.door {
+                Door::Full => &mut *hub,
+                Door::Persona => match persona.as_deref_mut() {
+                    Some(door) => door,
+                    None => continue,
+                },
+            };
+            send(out, &asked.session, &reply);
         }
         if served == 0 && desk_served == 0 && !answered {
             std::thread::sleep(options.idle_sleep);
         }
     }
     Ok(())
+}
+
+/// One pass over one RUDP door: expire its idle sessions, resend what it has
+/// unacknowledged, and answer every frame waiting on its socket as asked at
+/// `door`. Returns how many frames it answered or queued.
+fn serve_frames<S: MindStore, I: IndexSink<S>>(
+    daemon: &mut Daemon<S, I>,
+    hub: &mut CultNetRudpServerHub,
+    door: Door,
+    registry: &CultNetSchemaRegistry,
+    bodies: &mut DeferredBodies,
+    waiting: &mut BTreeMap<SearchTicket, Waiting>,
+    options: &ServeOptions,
+) -> u32 {
+    hub.remove_timed_out_sessions(options.session_timeout.as_millis() as u64);
+    if let Err(error) = hub.poll_resends() {
+        eprintln!("huginn: resending to a peer failed: {error:#}");
+    }
+    let mut served = 0_u32;
+    loop {
+        let event = match hub.receive_event_once() {
+            Ok(Some(event)) => event,
+            Ok(None) => break,
+            Err(error) => {
+                eprintln!("huginn: a datagram was not readable and was discarded: {error:#}");
+                break;
+            }
+        };
+        let CultNetRudpServerEvent::Frame { session, frame } = event else {
+            continue;
+        };
+        if frame.channel_id != "schema" {
+            continue;
+        }
+        let message = match decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0) {
+            Ok(message) => message,
+            Err(error) => {
+                eprintln!("huginn: a frame was not a CultNet message and was discarded: {error:#}");
+                continue;
+            }
+        };
+        match answer(daemon, door, registry, bodies, message, Utc::now()) {
+            Routed::Reply(reply) => send(hub, &session, &reply),
+            Routed::Search { message_id, operation, search } => {
+                let until = Instant::now() + daemon.search_deadline();
+                waiting.insert(search.ticket, Waiting { door, session, message_id, operation, search, until });
+            }
+        }
+        served += 1;
+    }
+    served
 }
 
 /// What the index has finished, then what has waited too long: the latter as
@@ -680,14 +728,14 @@ mod tests {
             ("m-5b", request("m-5b", MIND_SERVICE_ID, "Admit", MIND_REQUEST_SCHEMA, admit), "operation-mismatch"),
         ];
         for (id, message, code) in cases {
-            let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), message, now()).reply();
+            let reply = answer(&mut daemon, Door::Full, &registry, &mut fresh_bodies(), message, now()).reply();
             assert_eq!(rejected(&reply).0, id, "the client's own correlation key is echoed");
             assert_eq!(rejected(&reply).1, code);
         }
         // The sixth code, `not-an-operation-request`, is the codec's and is
         // pinned in `huginn_mind::envelope::tests`: `answer` never produces it, because a
         // message of another family is answered with `Error` instead.
-        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), CultNetMessage::Error { error: "hello".into(), code: None, details: None }, now()).reply();
+        let reply = answer(&mut daemon, Door::Full, &registry, &mut fresh_bodies(), CultNetMessage::Error { error: "hello".into(), code: None, details: None }, now()).reply();
         let CultNetMessage::Error { error, .. } = &reply else { panic!("expected an error, got {reply:?}") };
         assert!(
             !error.is_empty() && error.contains("cultnet.operation_request.v0") && error.contains("cultnet.schema_catalog_request.v0"),
@@ -699,7 +747,7 @@ mod tests {
         // A mind's refusal is an answer on the response schema, not a failure
         // of the envelope: the client decodes it as the typed refusal it is.
         let read = HuginnMindRequest::Query { instance: slug(OTHER), selection: Selection::default(), semantic: None };
-        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), encode_request("m-r", &read, None).unwrap(), now()).reply();
+        let reply = answer(&mut daemon, Door::Full, &registry, &mut fresh_bodies(), encode_request("m-r", &read, None).unwrap(), now()).reply();
         let CultNetMessage::OperationResponse { status, payload_schema, .. } = &reply else {
             panic!("expected an operation response, got {reply:?}");
         };
@@ -717,7 +765,7 @@ mod tests {
             schema_ids: None,
             kinds: None,
         };
-        let reply = answer(&mut daemon, &registry, &mut fresh_bodies(), catalog, now()).reply();
+        let reply = answer(&mut daemon, Door::Full, &registry, &mut fresh_bodies(), catalog, now()).reply();
         let CultNetMessage::SchemaCatalogResponse { message_id, schemas } = reply else {
             panic!("expected a catalog response");
         };
@@ -785,7 +833,7 @@ mod tests {
 
         let loop_stopping = Arc::clone(&stopping);
         let serving = std::thread::spawn(move || {
-            let result = run(&mut daemon, &mut hub, &registry, None, &loop_stopping, &ServeOptions::default());
+            let result = run(&mut daemon, &mut hub, None, &registry, None, &loop_stopping, &ServeOptions::default());
             (result, daemon)
         });
 
@@ -874,6 +922,43 @@ mod tests {
         panic!("{name} never connected");
     }
 
+    /// Over loopback, the persona door's listener refuses an admission by name and answers a
+    /// read, and the full door's listener admits the same batch: only that admission lands.
+    #[test]
+    fn the_persona_listener_refuses_an_admission_the_full_listener_takes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut daemon = open_unindexed(root.path(), &slug(INSTANCE)).unwrap();
+        let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
+        let mut door = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
+        let full = format!("rudp://{}", hub.local_addr().unwrap());
+        let persona = format!("rudp://{}", door.local_addr().unwrap());
+        let registry = schema_registry().unwrap();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let loop_stopping = Arc::clone(&stopping);
+        let serving = std::thread::spawn(move || {
+            let result = run(&mut daemon, &mut hub, Some(&mut door), &registry, None, &loop_stopping, &ServeOptions::default());
+            (result, daemon)
+        });
+
+        let admit = HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)]));
+        let mut her = connect(&persona, "persona");
+        assert_eq!(ask(&mut her, "p-admit", &admit), HuginnMindResponse::Refused(MindRefusal::NotThisDoor));
+        let HuginnMindResponse::Whoami(status) = ask(&mut her, "p-whoami", &HuginnMindRequest::Whoami) else {
+            panic!("the persona door answers whoami")
+        };
+        assert_eq!(status.documents, 0, "the refused admission wrote nothing");
+        let mut self_faculty = connect(&full, "full");
+        assert!(matches!(
+            ask(&mut self_faculty, "f-admit", &admit),
+            HuginnMindResponse::Admit(PipelineAdmissionOutcome::Committed { .. })
+        ));
+
+        stopping.store(true, Ordering::Relaxed);
+        let (result, mut daemon) = serving.join().unwrap();
+        result.unwrap();
+        assert_eq!(documents(&mut daemon), 1, "only the full door's admission landed");
+    }
+
     /// One client admits batches that close, withdraw and re-open records while three others read
     /// the same mind: fresh queries, cursor walks across commits, a hop and whoami. The loop is
     /// serial, so every answer is one snapshot's; at quiesce each answer must equal what a fresh
@@ -892,7 +977,7 @@ mod tests {
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
         let serving = std::thread::spawn(move || {
-            let result = run(&mut daemon, &mut hub, &registry, None, &loop_stopping, &ServeOptions::default());
+            let result = run(&mut daemon, &mut hub, None, &registry, None, &loop_stopping, &ServeOptions::default());
             (result, daemon)
         });
 
@@ -1057,7 +1142,7 @@ mod tests {
         at: DateTime<Utc>,
     ) -> CultMeshCdnArtifactManifest {
         let registry = schema_registry().unwrap();
-        deferred_manifest(&answer(daemon, &registry, bodies, encode_request(message_id, read, None).unwrap(), at).reply())
+        deferred_manifest(&answer(daemon, Door::Full, &registry, bodies, encode_request(message_id, read, None).unwrap(), at).reply())
     }
 
     /// Whether the first chunk of a manifest is still served at an injected time.
@@ -1068,7 +1153,7 @@ mod tests {
         at: DateTime<Utc>,
     ) -> bool {
         let registry = schema_registry().unwrap();
-        found(&answer(daemon, &registry, bodies, chunk_request(manifest, 0), at).reply())
+        found(&answer(daemon, Door::Full, &registry, bodies, chunk_request(manifest, 0), at).reply())
     }
 
     /// An answer larger than one send can carry is deferred to the body plane
@@ -1133,7 +1218,7 @@ mod tests {
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
         let serving = std::thread::spawn(move || {
-            let result = run(&mut daemon, &mut hub, &registry, None, &loop_stopping, &ServeOptions::default());
+            let result = run(&mut daemon, &mut hub, None, &registry, None, &loop_stopping, &ServeOptions::default());
             (result, daemon)
         });
 
@@ -1381,7 +1466,7 @@ mod tests {
         let manifest = ask_deferred(&mut daemon, &mut bodies, "m-v", &read, t0);
         assert!(manifest.chunks.len() >= 2, "the fixture needs a second chunk to serve");
         let mut chunk = |index: usize, at: i64| {
-            answer(&mut daemon, &registry, &mut bodies, chunk_request(&manifest, index), after(at)).reply()
+            answer(&mut daemon, Door::Full, &registry, &mut bodies, chunk_request(&manifest, index), after(at)).reply()
         };
         assert!(found(&chunk(0, 59)), "inside the TTL");
         assert!(found(&chunk(1, 118)), "serving a chunk slid the expiry past the first TTL");
@@ -1394,7 +1479,7 @@ mod tests {
         let again = ask_deferred(&mut daemon, &mut bodies, "m-v2", &read, after(179));
         assert_eq!(again.content_hash, manifest.content_hash, "the same answer is the same body");
         let bytes = fetch_content(&again, MAX_DEFERRED_BODY_BYTES, |request| {
-            Ok(answer(&mut daemon, &registry, &mut bodies, request, after(180)).reply())
+            Ok(answer(&mut daemon, Door::Full, &registry, &mut bodies, request, after(180)).reply())
         })
         .unwrap();
         assert_eq!(bytes, expected);
@@ -1494,7 +1579,7 @@ mod tests {
             ("record_key", chunk("m", "abc", &huge)),
         ];
         for (case, message) in refused {
-            let reply = answer(&mut daemon, &registry, &mut bodies, message, now()).reply();
+            let reply = answer(&mut daemon, Door::Full, &registry, &mut bodies, message, now()).reply();
             let CultNetMessage::Error { error, .. } = &reply else {
                 panic!("{case}: expected a transport error, got {reply:?}");
             };
@@ -1503,9 +1588,9 @@ mod tests {
         }
         assert_eq!(documents(&mut daemon), 0);
 
-        let reply = answer(&mut daemon, &registry, &mut bodies, whoami(&at, MIND_SERVICE_ID, "whoami", MIND_REQUEST_SCHEMA), now()).reply();
+        let reply = answer(&mut daemon, Door::Full, &registry, &mut bodies, whoami(&at, MIND_SERVICE_ID, "whoami", MIND_REQUEST_SCHEMA), now()).reply();
         assert_eq!(decode_response(&reply).unwrap().0, at, "a field of exactly the bound is served");
-        let reply = answer(&mut daemon, &registry, &mut bodies, chunk(&at, &at, &at), now()).reply();
+        let reply = answer(&mut daemon, Door::Full, &registry, &mut bodies, chunk(&at, &at, &at), now()).reply();
         assert!(!found(&reply), "an unknown chunk is answered found: false, not refused at the door");
     }
 
@@ -1565,6 +1650,7 @@ mod tests {
             state_root: root.path().to_path_buf(),
             instance: slug(INSTANCE),
             bind: port,
+            persona_bind: None,
             qdrant_url: "http://127.0.0.1:1".into(),
             ollama_urls: vec!["http://127.0.0.1:1".into()],
             reserve_ollama_urls: Vec::new(),
@@ -1604,6 +1690,7 @@ mod tests {
                 state_root: PathBuf::from(root),
                 instance: slug("yggdrasil"),
                 bind: "127.0.0.1:17872".parse().unwrap(),
+                persona_bind: None,
                 qdrant_url: "http://127.0.0.1:6333".into(),
                 ollama_urls: vec!["http://10.77.0.4:11434".into()],
                 reserve_ollama_urls: Vec::new(),
@@ -1647,5 +1734,11 @@ mod tests {
         assert_eq!(parse_options(args(&forged)).unwrap().forge_url.as_deref(), Some("http://127.0.0.1:3310"));
         assert!(parse_options(args(&[good.to_vec(), vec!["--forge-url", "https://127.0.0.1:3310"]].concat())).is_err());
         assert!(parse_options(args(&[forged.clone(), vec!["--forge-url", "http://127.0.0.1:3311"]].concat())).is_err());
+        // The persona door is optional, once, an ip:port, and never the full door's.
+        let door = [good.to_vec(), vec!["--persona-bind", "127.0.0.1:17862"]].concat();
+        assert_eq!(parse_options(args(&door)).unwrap().persona_bind, Some("127.0.0.1:17862".parse().unwrap()));
+        assert!(parse_options(args(&[door.clone(), vec!["--persona-bind", "127.0.0.1:17863"]].concat())).is_err());
+        assert!(parse_options(args(&[good.to_vec(), vec!["--persona-bind", "not-an-address"]].concat())).is_err());
+        assert!(parse_options(args(&[good.to_vec(), vec!["--persona-bind", "127.0.0.1:17872"]].concat())).is_err());
     }
 }

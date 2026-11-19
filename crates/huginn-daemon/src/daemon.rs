@@ -109,6 +109,17 @@ impl Handled {
     }
 }
 
+/// Which RUDP listener a request arrived on. `Full` is `--bind`, which the
+/// faculties that write the mind reach. `Persona` is `--persona-bind`, the
+/// only listener a Persona's uid can reach (the host fence decides that): it
+/// answers what `HuginnMindRequest::reaches_persona_door` accepts and refuses
+/// the rest with `MindRefusal::NotThisDoor` before the mind is asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Door {
+    Full,
+    Persona,
+}
+
 /// The door checks an account id; the Mind's desk calls take it as the text it is.
 fn short_id(id: AccountId) -> Short {
     Short(id.0)
@@ -175,6 +186,16 @@ impl<S: MindStore, I: IndexSink<S>> Daemon<S, I> {
     /// The envelope's `source_runtime_id` on every response this daemon sends.
     pub fn runtime_id(&self) -> String {
         runtime_id(self.mind.instance())
+    }
+
+    /// One request as it arrived at `door`: a request the door does not
+    /// answer is refused before the mind sees it, and every other goes to
+    /// `handle`. The wire reaches the mind only through here.
+    pub fn handle_at(&mut self, door: Door, request: HuginnMindRequest, now: DateTime<Utc>) -> Handled {
+        if door == Door::Persona && !request.reaches_persona_door() {
+            return Handled::Answered(HuginnMindResponse::Refused(MindRefusal::NotThisDoor));
+        }
+        self.handle(request, now)
     }
 
     /// One request, one answer, or a search to finish. `Admit` goes to the mind whole, because the
@@ -1009,6 +1030,76 @@ pub(crate) mod tests {
         };
         assert_eq!(daemon.handle(put, now()).answered(), HuginnMindResponse::Refused(foreign));
         assert_eq!(status(&mut daemon).persona, huginn_mind::wire::PersonaStatus::Absent);
+    }
+
+    /// The persona door refuses an admission before the mind sees it, so the
+    /// store is unchanged, and answers the reads and her own persona put; the
+    /// full door admits the same batch.
+    #[test]
+    fn the_persona_door_refuses_an_admission_and_answers_reads_and_her_persona() {
+        let (_root, mut daemon) = seeded();
+        let before = status(&mut daemon);
+        let admit = || HuginnMindRequest::Admit(batch(INSTANCE, vec![identity(INSTANCE)]));
+        assert_eq!(
+            daemon.handle_at(Door::Persona, admit(), now()).answered(),
+            HuginnMindResponse::Refused(MindRefusal::NotThisDoor)
+        );
+        assert_eq!(status(&mut daemon), before, "nothing was written");
+
+        let state = serde_json::json!({
+            "schemaVersion": "gamecult.persona_state.v0",
+            "provenance": {
+                "sourceSystem": "huginn", "sourceDocumentId": INSTANCE, "sourceUpdatedAt": "2026-11-19T10:00:00Z",
+                "exportedAt": "2026-11-19T10:00:00Z", "authority": "canonical"
+            },
+            "personaId": INSTANCE,
+            "publicName": "Test Persona",
+            "presentation": { "voiceSummary": "plain" },
+            "activationProfile": {
+                "underlyingOrganization": {}, "stableDispositions": {}, "behavioralDimensions": {},
+                "presentationStrategy": {}, "voiceStyle": {}, "situationalState": {}
+            },
+            "thoughtMemory": { "shortTerm": [], "memories": [], "incubation": [] },
+            "agencyPressure": { "pressures": [] },
+            "candidateActions": { "actions": [] },
+            "affect": {
+                "needs": [], "socialBonds": [], "statusReads": [], "moodDimensions": [],
+                "socialBiases": [], "doctrineStances": []
+            },
+            "updatedAt": "2026-11-19T10:00:00Z"
+        });
+        let put = HuginnMindRequest::PersonaPut {
+            instance: slug(INSTANCE),
+            provenance: provenance(),
+            state,
+            expected_updated_at: None,
+        };
+        assert!(matches!(
+            daemon.handle_at(Door::Persona, put, now()).answered(),
+            HuginnMindResponse::PersonaPut(huginn_mind::PersonaPutOutcome::Committed { .. })
+        ));
+        assert!(matches!(
+            daemon.handle_at(Door::Persona, HuginnMindRequest::PersonaGet { instance: slug(INSTANCE) }, now()).answered(),
+            HuginnMindResponse::Persona(Some(_))
+        ));
+        let query = HuginnMindRequest::Query { instance: slug(INSTANCE), selection: Selection::default(), semantic: None };
+        let HuginnMindResponse::Query(page) = daemon.handle_at(Door::Persona, query, now()).answered() else {
+            panic!("a query answers a page at the persona door")
+        };
+        let id = match page.items {
+            PipelinePageItems::Headers(items) => items[0].id.clone(),
+            PipelinePageItems::Documents(items) => items[0].id.clone(),
+        };
+        assert!(matches!(
+            daemon.handle_at(Door::Persona, HuginnMindRequest::View { instance: slug(INSTANCE), id }, now()).answered(),
+            HuginnMindResponse::View(Some(_))
+        ));
+        assert_eq!(status(&mut daemon).documents, before.documents, "a persona put writes no pipeline document");
+
+        assert!(
+            matches!(daemon.handle_at(Door::Full, admit(), now()).answered(), HuginnMindResponse::Admit(_)),
+            "the full door hands the same batch to admission"
+        );
     }
 
     /// A declared instance outside `Slug`'s grammar is refused by its own

@@ -1,5 +1,5 @@
-//! The process: open one instance's mind, bind one socket, serve until a stop
-//! signal. A mind that will not open ends the process with the refusal on
+//! The process: open one instance's mind, bind its socket (and the persona
+//! door's, when asked), serve until a stop signal. A mind that will not open ends the process with the refusal on
 //! stderr and no socket ever bound.
 
 use std::sync::Arc;
@@ -15,7 +15,7 @@ fn main() -> Result<()> {
     let options = parse_options(std::env::args().skip(1))?;
     let embedder = pool(&options.ollama_urls, &options.reserve_ollama_urls, &options.embedding_model);
     let index = QdrantIndex::new(&options.qdrant_url);
-    let Started { mut daemon, mut hub, registry, mut desk } = match startup(&options, embedder, index, Backoff::default()) {
+    let Started { mut daemon, mut hub, mut persona, registry, mut desk } = match startup(&options, embedder, index, Backoff::default()) {
         Ok(started) => started,
         Err(error) => {
             eprintln!("huginn-daemon refuses to serve {}: {error:#}", options.instance.0);
@@ -33,8 +33,11 @@ fn main() -> Result<()> {
     }
 
     eprintln!("huginn-daemon serving {} on {}", options.instance.0, hub.local_addr()?);
+    if let Some(door) = &persona {
+        eprintln!("huginn-daemon serving the persona door on {}", door.local_addr()?);
+    }
     if let Some(door) = &desk {
         eprintln!("huginn-daemon serving the desk door on {}", door.path().display());
     }
-    run(&mut daemon, &mut hub, &registry, desk.as_mut(), &stopping, &ServeOptions::default())
+    run(&mut daemon, &mut hub, persona.as_mut(), &registry, desk.as_mut(), &stopping, &ServeOptions::default())
 }
