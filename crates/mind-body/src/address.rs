@@ -110,7 +110,7 @@ pub(crate) fn names_whole_word(text: &str, name: &str, exact: bool) -> bool {
 
 /// A character that joins a word to more of the same token: a letter, a digit, or a path or identifier joint.
 fn joins(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '\')
+    c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '\\')
 }
 
 /// Whether the text after a name carries the token on: a joining character, or a `.` with a letter or digit after it.
