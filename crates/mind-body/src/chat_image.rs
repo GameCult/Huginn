@@ -69,8 +69,7 @@ pub(crate) fn load(store: Option<&Path>, room_id: &str, image: &ChatImage) -> Re
     Ok(Image { media_type, base64: STANDARD.encode(&bytes) })
 }
 
-/// The verified bytes of `image` and the media type they sniff as: everything `load` checks, before it encodes. The one verifier;
-/// the attachment saver calls it too, and holds no check of its own.
+/// The verified bytes of `image` and the media type they sniff as: everything `load` checks, before it encodes. The one verifier.
 pub(crate) fn load_bytes(store: &Path, room_id: &str, image: &ChatImage) -> Result<(Vec<u8>, &'static str), Skip> {
     if image.size > MAX_BYTES {
         return Err(Skip::TooLarge);

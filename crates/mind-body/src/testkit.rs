@@ -18,7 +18,7 @@ use eureka_pipeline::{
     PipelineTarget, QuestionOption, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Slug, StructuralDelta, TargetInvariant,
 };
 use huginn_mind::{
-    Faculty, HuginnMindRequest, ImportSource, HuginnMindResponse, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome,
+    Faculty, HuginnMindRequest, HuginnMindResponse, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome,
     PipelineDocumentView, PipelineProvenance, PipelineSelectionPage,
 };
 use tempfile::TempDir;
@@ -116,15 +116,6 @@ impl TestMind {
         this
     }
 
-    /// A mind holding only its identity: no stewardship, no campaign.
-    pub(crate) fn bare() -> Self {
-        let dir = TempDir::new().unwrap();
-        let mind = Mind::open(dir.path(), &Slug(INSTANCE.into())).unwrap();
-        let this = Self { _dir: dir, instance: Slug(INSTANCE.into()), mind: RefCell::new(mind), now: Cell::new(at(0)) };
-        this.put(vec![instance(INSTANCE)]);
-        this
-    }
-
     /// The same, for another instance name.
     pub(crate) fn seeded_as(name: &str) -> Self {
         let dir = TempDir::new().unwrap();
@@ -153,26 +144,6 @@ impl TestMind {
             documents,
         };
         self.mind.borrow_mut().admit(batch, self.now.get())
-    }
-
-    /// Admits as an import of a giver's receipt committed at `committed_at`, one second after the last admission here.
-    pub(crate) fn committed_imported(&self, committed_at: &str, documents: Vec<PipelineDocument>) {
-        self.now.set(self.now.get() + Duration::seconds(1));
-        let source = ImportSource {
-            instance: Slug("giver".into()),
-            receipt_id: format!("giver-{committed_at}").as_str().into(),
-            ordinal: 1,
-            committed_at: committed_at.into(),
-            faculty: Faculty::Hands,
-            agent: "test".into(),
-            session: "test".into(),
-            tool: "test".into(),
-            external: vec![],
-        };
-        let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into(), imported_from: Some(source) };
-        let batch = PipelineAdmissionBatch { instance: self.instance.clone(), provenance, documents };
-        let outcome = self.mind.borrow_mut().admit(batch, self.now.get());
-        assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
     }
 
     pub(crate) fn committed(&self, documents: Vec<PipelineDocument>) {
@@ -334,15 +305,6 @@ pub(crate) fn campaign_named(slug: &str, title: &str) -> PipelineDocument {
         working_branch: "main".into(),
         target_doc: doc_ref(),
     })
-}
-
-/// A campaign opened on `repos`, with its first target and the one invariant.
-pub(crate) fn campaign_on(slug: &str, repos: &[&str]) -> Vec<PipelineDocument> {
-    let PipelineDocument::Campaign(mut opened) = campaign_named(slug, slug) else { unreachable!("a campaign") };
-    opened.repos = repos.iter().map(|repo| (*repo).into()).collect();
-    let PipelineDocument::Target(mut first) = target() else { unreachable!("a target") };
-    first.campaign = Slug(slug.into());
-    vec![PipelineDocument::Campaign(opened), PipelineDocument::Target(first)]
 }
 
 fn target() -> PipelineDocument {

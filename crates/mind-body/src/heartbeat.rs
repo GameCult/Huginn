@@ -1,60 +1,50 @@
-//! The heartbeat: the one process that decides which Persona takes a turn and
-//! when (rulings `eureka-body:ruling:shared-heartbeat-joint-lever`,
-//! `self-declared-urgency-etiquette`, `operator-mention-fills-initiative`).
+//! The heartbeat: the one process that decides which Persona wakes and when
+//! (rulings `eureka-body:ruling:persona-only-heartbeat`,
+//! `operator-mention-fills-initiative`).
 //!
-//! The Minds share one heartbeat and jointly hold the lever to it. Its tempo is
-//! `tempo::tally` of every Mind's newest vote, a `Pulse` in her own mind. When a
-//! beat falls (the beat has passed since the last one) exactly one Persona takes
-//! a turn: `tempo::pick` over the idle, released Minds, by how long each has
-//! waited, bent by the urgency she declared for herself, a member addressing her
-//! and (a later cut) topics she subscribed to. Two things launch a Persona off
-//! the beat: the operator tagging or naming her, once per message, and her own
-//! Self run having ended since her last turn. A beat's launch for a Mind whose
-//! Self holds briefs (`inbox::derive`) is a Self run claiming them, in place of
-//! her Persona turn: a session that ended with a brief open, or a brief admitted
-//! after its flush, is never an orphan, and a Self start takes the beat like any
-//! launch. A brief an open question holds (raised in it, or in a run that claims it:
-//! the repetition breaker's trip holds the claims of the run it belongs to) is
-//! neither claimed nor told until that question is answered or withdrawn; other
-//! briefs are. Nothing is metered here:
-//! no meter and no model call.
+//! The beat is the configured `Config::beat_s`. When a beat falls (the beat has
+//! passed since the last one) exactly one Persona wakes: `tempo::pick` over the
+//! idle, released Minds, by how long each has waited since the heartbeat last
+//! woke her, bent by a member addressing her and (a later cut) topics she
+//! subscribed to. The operator or another Mind tagging or naming her wakes her
+//! off the beat, once per message. Inside the night window a listed Mind wakes
+//! once for her night. Nothing is metered here: no meter and no model call.
+//!
+//! A wake starts her unit and nothing else: the heartbeat writes no mind (ruling
+//! `persona-only-heartbeat`: her Mind is written only by Self sessions). It reads
+//! her mind only for the names her projects go by. Busy is systemd's own: a
+//! Persona whose unit is active is busy, and a start of an active unit is a no-op.
 //!
 //! The heartbeat owns `heartbeat.cc` and is its only writer; Persona units read
-//! it. The brakes stay the operator's and are read on every poll. Busy and idle
-//! are the slot's: a Persona run whose unit lives (or is within its start grace) is busy; a dead holder is not, and the next launch closes it. The launch is
-//! `open_and_launch`, the only opener. The heartbeat never acks a delivery; the
-//! Persona turn drains them.
+//! its addressing. The brakes stay the operator's and are read on every poll. The
+//! heartbeat never acks a delivery.
 //!
 //! A held swarm brake ends the poll before the mind or the mouth is touched.
 
+use std::collections::BTreeMap;
 use std::fmt;
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, SecondsFormat, Timelike, Utc};
 use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
-use cultnet_rs::Selection;
-use eureka_pipeline::{OrgRepo, PipelineKind, PipelineRef, ResolutionOutcome, RunOperator, RunTurn, Slug};
-use huginn_mind::{PipelineDocumentSummary, PipelineFacts, PipelinePageItems};
+use eureka_pipeline::{OrgRepo, PipelineKind, RunTurn, Slug};
+use huginn_mind::PipelineFacts;
 
 use crate::address::{Addressee, Name, is_for, project_names};
 use crate::chat_client::{Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
-use crate::launch::{Clock, LaunchOutcome, LaunchRequest, Launcher, Ports, open_and_launch, slot};
-use crate::queue::{MindPort, any_of, citing, claims_of, headers, in_force, of_kind, on_hold};
-use crate::self_run::inbox;
+use crate::launch::{Clock, Launcher};
+use crate::queue::{MindPort, headers, in_force, of_kind};
 use crate::tempo::{self, Standing};
 
-/// The admitting agent's name on every run the heartbeat opens.
-pub const AGENT: &str = "mind-heartbeat";
 /// How many handled operator mentions the state remembers.
 const MENTIONS_KEPT: usize = 64;
-/// How many of an instance's latest Self runs a poll looks at.
-const RECENT: u32 = 8;
 /// The most pages of pending chat one poll reads for one Persona.
 const PENDING_PAGES: usize = 16;
+/// The beat, in seconds, when `HEARTBEAT_BEAT_S` is not set.
+pub const DEFAULT_BEAT_S: u32 = 1800;
 
 /// Who a Persona is, for the two things the heartbeat matches on: the Matrix
 /// user id its tags carry, and the names a message may call it by. Each Mind is
@@ -106,6 +96,8 @@ pub struct Config {
     pub operators: Vec<String>,
     /// The nightly window and the Minds that sleep in it; none, no one sleeps.
     pub night: Option<Night>,
+    /// Seconds between beats: `HEARTBEAT_BEAT_S`, else `DEFAULT_BEAT_S`.
+    pub beat_s: u32,
 }
 
 /// The heartbeat's night: a daily window in UTC minutes (it may wrap midnight) and the Minds that sleep in it.
@@ -164,10 +156,13 @@ impl Night {
 }
 
 impl Config {
-    /// Refuses no Persona, or a Persona twice.
-    pub fn new(personas: Vec<PersonaId>, operators: Vec<String>, night: Option<Night>) -> Result<Self> {
+    /// Refuses no Persona, a Persona twice, or a beat of zero seconds.
+    pub fn new(personas: Vec<PersonaId>, operators: Vec<String>, night: Option<Night>, beat_s: u32) -> Result<Self> {
         if personas.is_empty() {
             bail!("no persona is configured");
+        }
+        if beat_s == 0 {
+            bail!("the beat is zero seconds");
         }
         for (index, persona) in personas.iter().enumerate() {
             if personas
@@ -182,21 +177,28 @@ impl Config {
             personas,
             operators,
             night,
+            beat_s,
         })
     }
 }
 
-/// `heartbeat.cc`'s state: when the last beat fell, and the operator messages
-/// already answered with a launch (once per message, bounded). A later cut adds
-/// the cache of scored deliveries beside them.
+/// `heartbeat.cc`'s state: when the last beat fell, the operator messages
+/// already answered with a wake (once per message, bounded), and when the
+/// heartbeat last woke each Persona and last started each night.
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "eureka.heartbeat.state.v1", schema = "HeartbeatState")]
 pub struct HeartbeatState {
     #[cultcache(key = 0)]
     pub last_beat_at: DateTime<Utc>,
-    /// `<instance>:<event id>` of each operator message that launched a Persona.
+    /// `<instance>:<event id>` of each operator message that woke a Persona.
     #[cultcache(key = 1)]
     pub handled_mentions: Vec<String>,
+    /// When the heartbeat last started each Persona's turn, by instance slug.
+    #[cultcache(key = 2, default)]
+    pub last_turn_at: BTreeMap<String, DateTime<Utc>>,
+    /// When the heartbeat last started each Persona's night, by instance slug.
+    #[cultcache(key = 3, default)]
+    pub last_night_at: BTreeMap<String, DateTime<Utc>>,
 }
 
 const STATE_KEY: &str = "state";
@@ -217,9 +219,9 @@ const ADDRESSING_KEY: &str = "addressing";
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstanceTrace {
     pub instance: String,
-    /// Her newest tempo vote, in seconds per beat.
+    /// Retired: always none. Kept so the records `heartbeat.cc` holds from before the cut still decode (nothing migrates the file).
     pub vote_beat_s: Option<u32>,
-    /// The urgency in force for her: declared and not yet consumed by a turn.
+    /// The urgency in force for her: 1000 when a member addresses her, else 0.
     pub urgency_permille: u16,
     /// A member's pending message addresses her.
     pub addressed: bool,
@@ -238,7 +240,7 @@ pub struct InstanceTrace {
 pub struct PollTrace {
     #[cultcache(key = 0)]
     pub at: DateTime<Utc>,
-    /// The beat in force: the tally of the Minds' votes.
+    /// The beat in force: `Config::beat_s`.
     #[cultcache(key = 1)]
     pub tempo_s: u32,
     #[cultcache(key = 2)]
@@ -253,8 +255,8 @@ impl fmt::Display for PollTrace {
         for row in &self.instances {
             write!(
                 f,
-                "  {}: vote {:?} urgency {} addressed {} busy {} released {} idle {}s score {:?}",
-                row.instance, row.vote_beat_s, row.urgency_permille, row.addressed, row.busy, row.released, row.idle_s, row.score
+                "  {}: urgency {} addressed {} busy {} released {} idle {}s score {:?}",
+                row.instance, row.urgency_permille, row.addressed, row.busy, row.released, row.idle_s, row.score
             )?;
             if !row.note.is_empty() {
                 write!(f, " note {}", row.note)?;
@@ -277,10 +279,8 @@ pub trait Store {
     fn save_addressing(&self, addressing: &Addressing) -> Result<()>;
 }
 
-/// What a Persona unit may read of `heartbeat.cc`: the newest trace, which
-/// carries the tempo and every Mind's vote and declared urgency, and the swarm's addressing. Read-only.
+/// What a Persona unit may read of `heartbeat.cc`: the swarm's addressing. Read-only.
 pub trait HeartbeatView {
-    fn latest(&self) -> Result<Option<PollTrace>>;
     fn addressing(&self) -> Result<Option<Addressing>>;
 }
 
@@ -356,6 +356,13 @@ impl Store for FileStore {
 }
 
 impl FileStore {
+    /// The newest poll trace: what `mind-heartbeat timeline` prints.
+    pub fn latest(&self) -> Result<Option<PollTrace>> {
+        let mut all = self.snapshot()?.get_all_with_keys::<PollTrace>()?;
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(all.pop().map(|(_, trace)| trace))
+    }
+
     /// The file read without a lock and without a write, as the control stores are.
     fn snapshot(&self) -> Result<CultCache> {
         let mut cache = Self::registered()?;
@@ -367,12 +374,6 @@ impl FileStore {
 }
 
 impl HeartbeatView for FileStore {
-    fn latest(&self) -> Result<Option<PollTrace>> {
-        let mut all = self.snapshot()?.get_all_with_keys::<PollTrace>()?;
-        all.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(all.pop().map(|(_, trace)| trace))
-    }
-
     fn addressing(&self) -> Result<Option<Addressing>> {
         self.load_addressing()
     }
@@ -410,12 +411,11 @@ pub struct Organs<'a> {
     pub control: &'a dyn Control,
     pub launcher: &'a dyn Launcher,
     pub clock: &'a dyn Clock,
-    pub host: &'a str,
     pub store: &'a dyn Store,
 }
 
-/// What one poll did. Every outcome is an answer; only a mind, store or
-/// mouth that cannot be reached is an error.
+/// What one poll did. Every outcome is an answer; only a store that cannot be
+/// reached is an error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// The swarm brake is held; nothing else was touched.
@@ -433,77 +433,6 @@ impl fmt::Display for Outcome {
             Self::Polled { launched } => write!(f, "polled: launched {}", launched.iter().map(|slug| slug.0.as_str()).collect::<Vec<_>>().join(", ")),
         }
     }
-}
-
-fn parse_time(text: &str) -> Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(text)
-        .map(|at| at.with_timezone(&Utc))
-        .map_err(|_| anyhow!("the mind gave a time that is not a timestamp"))
-}
-
-/// When a run was last resolved and how: its resolution of the highest sequence.
-fn latest_resolution(
-    mind: &dyn MindPort,
-    run: &PipelineRef,
-) -> Result<Option<(DateTime<Utc>, ResolutionOutcome)>> {
-    let closures = Selection {
-        cites: Some(citing(run, Some("subject"))),
-        ..of_kind(PipelineKind::Resolution)
-    };
-    let mut ending: Option<(u32, DateTime<Utc>, ResolutionOutcome)> = None;
-    for header in headers(mind, &closures)? {
-        if let PipelineFacts::Resolution {
-            sequence, outcome, ..
-        } = header.facts
-            && ending
-                .as_ref()
-                .is_none_or(|(latest, ..)| sequence >= *latest)
-        {
-            ending = Some((
-                sequence,
-                parse_time(&header.admission.admitted_at)?,
-                outcome,
-            ));
-        }
-    }
-    Ok(ending.map(|(_, at, outcome)| (at, outcome)))
-}
-
-/// When her newest Persona turn that actually ran was admitted: one bounded read
-/// of the runs the mind indexes as `ran`. A turn withdrawn unrun never happened,
-/// so it neither resets her wait nor counts as her last turn, and the cost of
-/// finding the last real turn does not grow with how many were withdrawn.
-fn last_turn(mind: &dyn MindPort, instance: &Slug) -> Result<Option<PipelineDocumentSummary>> {
-    let turn = format!("{:?}", RunTurn::PersonaTurn);
-    let operator = format!("{:?}", RunOperator::Mind);
-    let runs = any_of(
-        any_of(
-            any_of(
-                any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]),
-                "turn",
-                &[&turn],
-            ),
-            "operated_by",
-            &[&operator],
-        ),
-        "ran",
-        &["true"],
-    );
-    newest(mind, runs)
-}
-
-/// When her newest Sleep run was admitted, whatever became of it: a night that failed still counts.
-fn last_sleep(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime<Utc>>> {
-    let operator = format!("{:?}", RunOperator::Mind);
-    let runs = any_of(any_of(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]), "turn", &["Sleep"]), "operated_by", &[&operator]);
-    newest(mind, runs)?.map(|header| parse_time(&header.admission.admitted_at)).transpose()
-}
-
-/// The newest document a selection holds, by admission ordinal: one query.
-fn newest(mind: &dyn MindPort, selection: Selection) -> Result<Option<PipelineDocumentSummary>> {
-    let asking = Selection { descending: true, limit: Some(1), ..selection };
-    let PipelinePageItems::Headers(found) = mind.query(&asking)?.items else { bail!("the mind answered documents to a header selection") };
-    Ok(found.into_iter().next())
 }
 
 /// Every repo she stewards in force and the chat names of those repos: one query on her mind.
@@ -546,84 +475,14 @@ fn read_pending(chat: &dyn Chat) -> Result<Vec<ChatDelivery>> {
     Ok(all)
 }
 
-fn label_of(run: &eureka_pipeline::PipelineRef) -> String {
-    run.id.0.rsplit(':').next().unwrap_or_default().to_string()
-}
-
-/// Her standing vote: the newest pulse that votes or withdraws, by admission
-/// ordinal. A vote stands until she casts another or withdraws it, however many
-/// pulses of other kinds follow; a withdrawal leaves her silent.
-fn standing_vote(mind: &dyn MindPort, instance: &Slug) -> Result<Option<u32>> {
-    let pulses = any_of(any_of(of_kind(PipelineKind::Pulse), "root", &[&instance.0]), "voted", &["true"]);
-    Ok(newest(mind, pulses)?.and_then(|header| match header.facts {
-        PipelineFacts::Pulse { tempo_vote_beat_s, tempo_vote_withdrawn: false, .. } => tempo_vote_beat_s,
-        _ => None,
-    }))
-}
-
-/// The urgency she declared for herself and no turn has consumed: her newest
-/// declaration, if it was admitted after her newest Persona turn, by admission
-/// ordinal like the vote: the wall clock never decides what a turn consumed.
-fn pending_urgency(mind: &dyn MindPort, instance: &Slug, last_turn: Option<&PipelineDocumentSummary>) -> Result<u16> {
-    let pulses = any_of(any_of(of_kind(PipelineKind::Pulse), "root", &[&instance.0]), "urged", &["true"]);
-    let Some(header) = newest(mind, pulses)? else { return Ok(0) };
-    let PipelineFacts::Pulse { urgency_permille: Some(urgency), .. } = header.facts else { return Ok(0) };
-    Ok(if last_turn.is_none_or(|turn| header.admission.ordinal > turn.admission.ordinal) { urgency } else { 0 })
-}
-
-/// When her Self runs last ended: the latest resolution among her recent Self runs.
-fn last_self_end(mind: &dyn MindPort, instance: &Slug) -> Result<Option<DateTime<Utc>>> {
-    let turn = format!("{:?}", RunTurn::SelfRun);
-    let operator = format!("{:?}", RunOperator::Mind);
-    let runs = any_of(any_of(any_of(of_kind(PipelineKind::Run), "root", &[&instance.0]), "turn", &[&turn]), "operated_by", &[&operator]);
-    let selection = Selection { descending: true, limit: Some(RECENT), ..runs };
-    let PipelinePageItems::Headers(runs) = mind.query(&selection)?.items else { bail!("the mind answered documents to a header selection") };
-    let mut newest = None;
-    for run in runs {
-        if let Some((ended, _)) = latest_resolution(mind, &run.id)? {
-            newest = newest.max(Some(ended));
-        }
-    }
-    Ok(newest)
-}
-
-/// One Persona reads from her own Mind.
-struct MindRead {
-    busy: bool,
-    /// When her newest Persona turn was admitted.
-    last_turn: Option<DateTime<Utc>>,
-    /// Her standing vote for a beat.
-    vote: Option<u32>,
-    /// The urgency she declared and no turn has consumed.
-    urgency: u16,
-    self_end: Option<DateTime<Utc>>,
-    /// When her newest Sleep run was admitted.
-    last_sleep: Option<DateTime<Utc>>,
-}
-
-fn read_mind(organs: &Organs, mind: &dyn MindPort, slug: &Slug) -> Result<MindRead> {
-    let turn = last_turn(mind, slug)?;
-    Ok(MindRead {
-        // Busy is the slot's own reading of life: a holder whose unit is not active
-        // (past its start grace) is dead, not busy, so the next launch reaches
-        // `slot` step 0 and closes it there.
-        busy: slot(&ports(organs, mind), slug, RunTurn::PersonaTurn, organs.clock.now())?.live.is_some(),
-        last_turn: turn.as_ref().map(|header| parse_time(&header.admission.admitted_at)).transpose()?,
-        vote: standing_vote(mind, slug)?,
-        urgency: pending_urgency(mind, slug, turn.as_ref())?,
-        self_end: last_self_end(mind, slug)?,
-        last_sleep: last_sleep(mind, slug)?,
-    })
-}
-
 struct Row<'a> {
     seat: &'a Seat<'a>,
-    read: Option<MindRead>,
     released: bool,
+    /// Her unit is active.
+    busy: bool,
     pending: Vec<ChatDelivery>,
     /// Whom a delivery may address in her: her roster names and her projects' names as the last poll that read her pending chat left them.
     addressee: Addressee,
-    busy: bool,
     note: String,
 }
 
@@ -633,7 +492,7 @@ impl Row<'_> {
     }
 
     fn idle(&self) -> bool {
-        self.released && !self.busy && self.read.is_some()
+        self.released && !self.busy
     }
 
     /// A member (not the operator) has a pending message that names or tags her.
@@ -642,100 +501,31 @@ impl Row<'_> {
     }
 }
 
-enum Launched {
-    Run(String),
+enum Woke {
+    Started,
     Busy,
     Refused(String),
 }
 
-fn ports<'a>(organs: &Organs<'a>, mind: &'a dyn MindPort) -> Ports<'a> {
-    Ports {
-        mind,
-        launcher: organs.launcher,
-        clock: organs.clock,
-        host: organs.host,
+/// The one way the heartbeat wakes a Persona, for a turn or her night: her brake
+/// read again, then her unit started unless it is active. No run is opened and
+/// nothing is admitted.
+fn wake(organs: &Organs, row: &Row, turn: RunTurn) -> Woke {
+    if !matches!(organs.control.effective(row.slug()), Effective::Released(_)) {
+        return Woke::Refused("the brake is held".into());
+    }
+    if organs.launcher.alive(row.slug(), turn) {
+        return Woke::Busy;
+    }
+    match organs.launcher.start(row.slug(), turn) {
+        Ok(()) => Woke::Started,
+        Err(error) => Woke::Refused(format!("start failed: {error}")),
     }
 }
 
-/// The one way the heartbeat starts a run: the same brake read and the same
-/// opener for a Persona turn (a beat, an operator mention, a Self run that ended)
-/// and for the Self run a beat gives to the briefs her Self holds.
-fn launch(
-    organs: &Organs,
-    row: &Row,
-    turn: RunTurn,
-    claims: Vec<PipelineRef>,
-) -> Result<Launched> {
-    let Effective::Released(grant) = organs.control.effective(row.slug()) else {
-        return Ok(Launched::Refused("the brake is held".into()));
-    };
-    let request = LaunchRequest {
-        turn,
-        claims,
-        agent: AGENT.into(),
-        grant,
-    };
-    let ports = ports(organs, row.seat.mind);
-    Ok(match open_and_launch(&ports, request) {
-        Ok(LaunchOutcome::Launched { run }) => Launched::Run(label_of(&run)),
-        Ok(LaunchOutcome::Busy { .. }) => Launched::Busy,
-        Ok(LaunchOutcome::Tripped { run, question }) => {
-            let held = claims_of(row.seat.mind, &run).map_or(0, |claims| claims.len());
-            Launched::Refused(format!("tripped: {} holds the {held} claims of {}", question.id.0, run.id.0))
-        }
-        Ok(_) => Launched::Refused("launch refused".into()),
-        Err(error) => Launched::Refused(format!("launch failed: {error}")),
-    })
-}
-
-/// The most briefs one Self run claims.
-const BRIEFS_PER_SELF_RUN: usize = 64;
-
-/// What a Self run would claim for this Mind, read at one instant.
-struct Claimable {
-    /// The briefs in force that no live Self run holds and no open question holds.
-    claims: Vec<PipelineRef>,
-    /// How many briefs an open question holds.
-    held: usize,
-    /// Self runs in force whose unit is gone: the launch closes them.
-    dead: Vec<PipelineRef>,
-}
-
-/// The briefs a Self run would claim for this Mind: those in force that no live
-/// Self run holds and no open question holds. A Self run claims up to
-/// `BRIEFS_PER_SELF_RUN` briefs and every run it ends empty counts against all
-/// of them, so one cause trips them together; a trip holds the claims of its
-/// run, not the Mind, until the operator answers or withdraws its question, and
-/// the count starts afresh. Whether a holder lives is `launch::slot`'s answer
-/// (a dead one is closed by the launch, so it does not stop the successor), and
-/// what is held is `queue::on_hold`'s. The read here only chooses the claims;
-/// the launch's gate reads the hold again at admission and decides.
-fn claimable(organs: &Organs, row: &Row) -> Result<Claimable> {
-    let mind = row.seat.mind;
-    let found = slot(
-        &ports(organs, mind),
-        row.slug(),
-        RunTurn::SelfRun,
-        organs.clock.now(),
-    )?;
-    if found.live.is_some() {
-        return Ok(Claimable {
-            claims: Vec::new(),
-            held: 0,
-            dead: Vec::new(),
-        });
-    }
-    let (free, held) = inbox::derive_counting_held(mind, &on_hold(mind)?, &HashSet::new())?;
-    let claims = free
-        .into_iter()
-        .map(|brief| PipelineRef { kind: PipelineKind::FollowUp, id: brief.id.as_str().into() })
-        .take(BRIEFS_PER_SELF_RUN)
-        .collect();
-    Ok(Claimable {
-        claims,
-        held,
-        dead: found.dead,
-    })
+/// What a wake is called in the trace: her slug and the turn.
+fn wake_label(slug: &Slug, turn: RunTurn) -> String {
+    format!("{}:{turn:?}", slug.0)
 }
 
 /// One poll.
@@ -745,7 +535,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     }
     let now = organs.clock.now();
     let stored = organs.store.load()?;
-    let mut state = stored.clone().unwrap_or(HeartbeatState { last_beat_at: DateTime::<Utc>::UNIX_EPOCH, handled_mentions: vec![] });
+    let mut state = stored.clone().unwrap_or(HeartbeatState { last_beat_at: DateTime::<Utc>::UNIX_EPOCH, handled_mentions: vec![], last_turn_at: BTreeMap::new(), last_night_at: BTreeMap::new() });
     let mut eventful = false;
     // The table as the last poll left it; unreadable counts as none, is noted in the trace, and is not overwritten.
     let (stored_addressing, addressing_unread) = match organs.store.load_addressing() {
@@ -756,23 +546,19 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     let mut rows: Vec<Row> = Vec::new();
     for seat in organs.seats {
         let released = matches!(organs.control.effective(&seat.who.slug), Effective::Released(_));
-        // One Mind daemon down skips her for this poll; the others are served.
-        let (read, note) = match read_mind(organs, seat.mind, &seat.who.slug) {
-            Ok(read) => (Some(read), String::new()),
-            Err(error) => {
-                eventful = true;
-                (None, format!("skipped: her mind could not be read: {error}"))
-            }
-        };
+        let busy = organs.launcher.alive(&seat.who.slug, RunTurn::PersonaTurn);
         // Her last-read names when the table holds her, else her roster names alone.
         let roster = Addressee::new(&seat.who.matrix_id, [seat.who.public_name.as_str(), seat.who.handle.as_str()]);
         let kept = stored_addressing.minds.iter().find(|stored| stored.matrix_id() == seat.who.matrix_id).cloned().unwrap_or_else(|| roster.clone());
-        let mut row = Row { seat, busy: read.as_ref().is_some_and(|read| read.busy), read, released, pending: vec![], addressee: kept, note };
-        // Pending chat, read-only, for a released Mind whose mind could be read.
-        if row.released && row.read.is_some() {
+        let mut row = Row { seat, released, busy, pending: vec![], addressee: kept, note: String::new() };
+        // Pending chat, read-only, for a released Mind.
+        if row.released {
             match read_pending(seat.chat) {
                 Ok(deliveries) => row.pending = deliveries,
-                Err(_) => row.note = "chat: pending failed".into(),
+                Err(_) => {
+                    eventful = true;
+                    row.note = "chat: pending failed".into();
+                }
             }
             // Her projects' names address her too; read only when something is pending. A failed read keeps her last-read row.
             if !row.pending.is_empty() {
@@ -785,16 +571,12 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
         rows.push(row);
     }
 
-    // The tempo is the tally over the votes cast by the Minds of the roster, braked or not; a Mind with no vote or no readable mind abstains and is not counted.
-    let votes: Vec<Option<u32>> = rows.iter().map(|row| row.read.as_ref().and_then(|read| read.vote)).collect();
-    let beat_s = tempo::tally(&votes);
-
+    let beat_s = config.beat_s;
     let mut launches: Vec<String> = Vec::new();
     let mut launched: Vec<Slug> = Vec::new();
 
-    // Off the beat: the operator or another Mind of the roster naming her, once per message, and her Self run
-    // having ended since her last turn. Neither waits for the beat; both need her
-    // idle and released.
+    // Off the beat: the operator or another Mind of the roster naming her, once per message. It does not wait for the beat;
+    // it needs her idle and released.
     for row in &mut rows {
         if !row.idle() {
             continue;
@@ -809,66 +591,60 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
                 .map(|delivery| format!("{}:{}", slug.0, delivery.event_id))
                 .find(|key| !state.handled_mentions.contains(key))
         };
-        let self_ended = row.read.as_ref().is_some_and(|read| match (read.self_end, read.last_turn) {
-            (Some(ended), Some(turn)) => ended > turn,
-            (Some(_), None) => true,
-            _ => false,
-        });
-        if mentioned.is_none() && !self_ended {
-            continue;
-        }
-        match launch(organs, row, RunTurn::PersonaTurn, vec![])? {
-            Launched::Run(label) => {
-                if let Some(key) = mentioned {
-                    state.handled_mentions.push(key);
-                    let excess = state.handled_mentions.len().saturating_sub(MENTIONS_KEPT);
-                    state.handled_mentions.drain(..excess);
-                }
+        let Some(key) = mentioned else { continue };
+        match wake(organs, row, RunTurn::PersonaTurn) {
+            Woke::Started => {
+                state.handled_mentions.push(key);
+                let excess = state.handled_mentions.len().saturating_sub(MENTIONS_KEPT);
+                state.handled_mentions.drain(..excess);
+                state.last_turn_at.insert(slug.0.clone(), now);
                 row.busy = true;
-                launches.push(label);
+                launches.push(wake_label(&slug, RunTurn::PersonaTurn));
                 launched.push(slug);
             }
-            Launched::Busy => row.busy = true,
-            Launched::Refused(why) => row.note = why,
+            Woke::Busy => row.busy = true,
+            Woke::Refused(why) => row.note = why,
         }
     }
 
-    // The night: inside the window, one Sleep run for a listed Mind who is idle and released and has not slept
-    // since the window opened (a failed night counts). The operator's mention went first above: she is busy then.
-    // A window that passes without a night is not made up.
+    // The night: inside the window, one night for a listed Mind who is idle and released and has not been started for one
+    // since the window opened. The operator's mention went first above: she is busy then. A window that passes without a
+    // night is not made up.
     if let Some(night) = &config.night
         && let Some(opened) = night.opened(now)
     {
         for row in &mut rows {
-            if !row.idle() || !night.minds.contains(row.slug()) || row.read.as_ref().is_some_and(|read| read.last_sleep.is_some_and(|slept| slept >= opened)) {
+            let slept = state.last_night_at.get(&row.slug().0).is_some_and(|slept| *slept >= opened);
+            if !row.idle() || !night.minds.contains(row.slug()) || slept {
                 continue;
             }
-            match launch(organs, row, RunTurn::Sleep, vec![])? {
-                Launched::Run(label) => {
-                    row.note = format!("asleep {label}");
+            match wake(organs, row, RunTurn::Sleep) {
+                Woke::Started => {
+                    let slug = row.slug().clone();
+                    state.last_night_at.insert(slug.0.clone(), now);
+                    row.note = "asleep".into();
                     row.busy = true;
-                    launched.push(row.slug().clone());
-                    launches.push(label);
+                    launches.push(wake_label(&slug, RunTurn::Sleep));
+                    launched.push(slug);
                     break;
                 }
-                Launched::Busy => row.busy = true,
-                Launched::Refused(why) => row.note = why,
+                Woke::Busy => row.busy = true,
+                Woke::Refused(why) => row.note = why,
             }
         }
     }
 
-    // On the beat: when the beat has passed, one launch for the winner of the pick.
+    // On the beat: when the beat has passed, one wake for the winner of the pick.
     let due = (now - state.last_beat_at).num_seconds() >= i64::from(beat_s);
     let standings: Vec<Standing> = rows
         .iter()
         .map(|row| {
-            let read = row.read.as_ref();
+            let last = state.last_turn_at.get(&row.slug().0).copied();
             Standing {
                 slug: row.slug().0.clone(),
                 eligible: row.idle(),
-                waited_s: read.and_then(|read| read.last_turn).map(|turn| u64::try_from((now - turn).num_seconds()).unwrap_or(0)),
-                last_turn_ms: read.and_then(|read| read.last_turn).map(|turn| turn.timestamp_millis()),
-                self_permille: read.map_or(0, |read| read.urgency),
+                waited_s: last.map(|turn| u64::try_from((now - turn).num_seconds()).unwrap_or(0)),
+                last_turn_ms: last.map(|turn| turn.timestamp_millis()),
                 // The seam for topic subscriptions (a later cut): a Mind's nearest subscription scores her deliveries here.
                 topic_permille: 0,
                 addressed_by_member: row.addressed_by_member(config),
@@ -876,51 +652,21 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
         })
         .collect();
     // A winner whose unit cannot start loses the beat to the next of the pick, so
-    // one failing Mind never starves the others; a launch ends the beat.
+    // one failing Mind never starves the others; a wake ends the beat.
     let mut passed: Vec<Standing> = standings.clone();
     while due && let Some(winner) = tempo::pick(&passed, beat_s) {
-        // Her Self holds briefs: the beat is a Self run for them; otherwise a Persona turn.
-        let Claimable {
-            claims,
-            held,
-            dead,
-        } = claimable(organs, &rows[winner]).unwrap_or_else(|error| {
-            rows[winner].note = format!("briefs: {error}");
-            Claimable {
-                claims: Vec::new(),
-                held: 0,
-                dead: Vec::new(),
-            }
-        });
-        let mut notes: Vec<String> = Vec::new();
-        if held > 0 {
-            notes.push(format!("{held} briefs held by open questions"));
-        }
-        if !claims.is_empty() && !dead.is_empty() {
-            let ids: Vec<&str> = dead.iter().map(|run| run.id.0.as_str()).collect();
-            notes.push(format!(
-                "closing the Self run whose unit is gone: {}",
-                ids.join(", ")
-            ));
-        }
-        if !notes.is_empty() {
-            rows[winner].note = notes.join("; ");
-        }
-        let turn = if claims.is_empty() {
-            RunTurn::PersonaTurn
-        } else {
-            RunTurn::SelfRun
-        };
-        match launch(organs, &rows[winner], turn, claims)? {
-            Launched::Run(label) => {
+        match wake(organs, &rows[winner], RunTurn::PersonaTurn) {
+            Woke::Started => {
+                let slug = rows[winner].slug().clone();
                 state.last_beat_at = now;
-                rows[winner].busy = turn == RunTurn::PersonaTurn;
-                launches.push(label);
-                launched.push(rows[winner].slug().clone());
+                state.last_turn_at.insert(slug.0.clone(), now);
+                rows[winner].busy = true;
+                launches.push(wake_label(&slug, RunTurn::PersonaTurn));
+                launched.push(slug);
                 break;
             }
-            Launched::Busy => rows[winner].busy = true,
-            Launched::Refused(why) => rows[winner].note = why,
+            Woke::Busy => rows[winner].busy = true,
+            Woke::Refused(why) => rows[winner].note = why,
         }
         passed[winner].eligible = false;
     }
@@ -948,8 +694,8 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
                 .zip(&standings)
                 .map(|(row, standing)| InstanceTrace {
                     instance: row.slug().0.clone(),
-                    vote_beat_s: row.read.as_ref().and_then(|read| read.vote),
-                    urgency_permille: standing.self_permille,
+                    vote_beat_s: None,
+                    urgency_permille: tempo::urgency_permille(standing),
                     addressed: standing.addressed_by_member,
                     busy: row.busy,
                     released: row.released,

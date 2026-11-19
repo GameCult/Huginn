@@ -1,13 +1,11 @@
 //! Credential redaction: the only code that knows the shape of a secret in text.
 //!
-//! `redact_url_userinfo` redacts URL credentials (the Self run's journal and reply,
-//! the Persona's structured output). `scrub` is chat ingest's door: every message body
+//! `redact_url_userinfo` redacts URL credentials (the Self run's journal and reply). `scrub` is chat ingest's door: every message body
 //! passes it before it is chunked, embedded or stored, and it also runs the URL rule.
 //! Shapes only; nothing here reads meaning, and a hit is a kind, never a value.
 
 /// The one redaction of URL credentials. Call it at each place a string the CLI produced enters the journal, her mind or chat: today
-/// the Self result (`result_text`: journal line and Reply) and the structured output of a Persona or Sleep result
-/// (`persona::structured_output`, string by string). It does not cover claude's stderr (inherited) or the CLI's transcript files.
+/// the Self result (`result_text`: journal line and Reply). It does not cover claude's stderr (inherited) or the CLI's transcript files.
 ///
 /// A forge token rides in a remote URL, so every `scheme://` and every protocol-relative `//` opens an authority, read as git, curl and
 /// RFC 3986 read it: it ends at the first `/`, `?`, `#`, backslash, quote, backtick, parenthesis, bracket, angle bracket or ASCII whitespace
@@ -466,7 +464,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426614174000", "!abc:s", "$Ab3dEf-9_zQ", "user@example.com", "ssh://git@host/r.git",
             "https://github.com/@user", "pkg@1.2.3", "the bearer of bad news", "Authorization is a header",
             "padding like dGVzdA== in prose", "```\nlet x = 1;\n```", "the BEGIN PRIVATE KEY header", "a token of thanks",
-            "AKIAshort", "ghp_short", "eyJ is a prefix", "naïve café — 日本語 with Bearer in it",
+            "AKIAshort", "ghp_short", "eyJ is a prefix", "naÃ¯ve cafÃ© â€” æ—¥æœ¬èªž with Bearer in it",
         ] {
             let out = scrub(same);
             assert_eq!(out.text, same);
@@ -476,9 +474,9 @@ mod tests {
 
     #[test]
     fn multibyte_text_around_a_secret_never_panics_the_scrub() {
-        let body = format!("日本 \u{a0}é Bearer {} → ünï", "A1b2".repeat(6));
-        assert_eq!(scrub(&body).text, "日本 \u{a0}é <redacted> → ünï");
-        let seed = "é日 sk-aaaaaaaaaaaaaaaaaaaa -----BEGIN PRIVATE KEY----- authorization: é eyJa.b.c https://u:p@h/x";
+        let body = format!("æ—¥æœ¬ \u{a0}Ã© Bearer {} â†’ Ã¼nÃ¯", "A1b2".repeat(6));
+        assert_eq!(scrub(&body).text, "æ—¥æœ¬ \u{a0}Ã© <redacted> â†’ Ã¼nÃ¯");
+        let seed = "Ã©æ—¥ sk-aaaaaaaaaaaaaaaaaaaa -----BEGIN PRIVATE KEY----- authorization: Ã© eyJa.b.c https://u:p@h/x";
         let chars: Vec<char> = seed.chars().collect();
         for start in 0..chars.len() {
             for end in start..=chars.len() {

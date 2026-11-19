@@ -144,12 +144,3 @@ fn a_credential_split_by_the_reply_limit_is_redacted_before_the_cut() {
     assert!(reply_of(&mind, 2).is_some(), "the credential's place straddles the cut");
     assert!(!first.text.0.contains("CANARY") && !reply_of(&mind, 2).unwrap().text.0.contains("CANARY"));
 }
-
-#[test]
-fn persona_and_sleep_structured_output_is_redacted_string_by_string() {
-    let line = json!({"type": "result", "structured_output": {"say": format!("https://u:{CANARY}@h/x,"), "n": 3, "list": [format!("https://{CANARY}@h")]}}).to_string();
-    let text = crate::persona::structured_output(&line).unwrap();
-    assert!(!text.contains(CANARY), "{text}");
-    let back: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(back, json!({"say": "https://<redacted>@h/x,", "n": 3, "list": ["https://<redacted>@h"]}));
-}

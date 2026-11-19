@@ -8,14 +8,13 @@
 //! repetition breaker, the one-live-Self-run rule, and the single path that
 //! opens a run in the mind and only then starts its unit.
 //!
-//! `heartbeat` runs the swarm's shared heartbeat over them: the one process,
-//! the `mind-heartbeat` binary, that decides who wakes and when, by the rule in
-//! `tempo` (the Minds' votes make the beat; the pick chooses who takes it).
+//! `heartbeat` runs the swarm's shared heartbeat: the one process, the
+//! `mind-heartbeat` binary, that decides which Persona wakes and when, on the
+//! configured beat by the pick in `tempo`. It starts her unit and writes no mind.
 //!
-//! `persona` is the Persona organ: one start of `mind-persona@<instance>` carries her live
-//! `claude` session under bubblewrap in her sandbox, driven by the Self's own driver, with her
-//! pending chat as the inbox and one typed reply per result (`chat_client` is the chat wire and
-//! port and `chat_rudp` its RUDP transport to Bifrost's mouth).
+//! `persona` is the Persona organ: one start of `mind-persona@<instance>` reads the brakes, and
+//! until the three-stage turn lands it carries no turn. It keeps what a turn's input is made of
+//! (`chat_client` is the chat wire and port and `chat_rudp` its RUDP transport to Bifrost's mouth).
 //!
 //! `lease_client` asks the Claude connector for a session's credential and the
 //! plan's usage windows. `self_run` carries one Self run inside `mind-self@<instance>`: the
@@ -31,8 +30,8 @@
 #![forbid(unsafe_code)]
 
 mod address;
-mod attachment;
 pub mod chat_client;
+#[allow(dead_code, reason = "the loader is kept for the three-stage turn's perception (map C3): its first caller removes this allow; `Image` is live through `self_run::session`")]
 mod chat_image;
 pub mod chat_rudp;
 pub mod cli;
@@ -43,9 +42,9 @@ pub mod launch;
 pub mod lease_client;
 pub mod persona;
 pub mod queue;
+#[allow(dead_code, reason = "kept for the three-stage turn's Select stage (map C3 reuses recall.rs): its first caller removes this allow")]
 mod recall;
 pub mod self_run;
-mod sleep;
 pub mod tempo;
 
 #[cfg(test)]
