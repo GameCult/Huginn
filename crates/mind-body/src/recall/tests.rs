@@ -345,7 +345,7 @@ fn a_memory_reads_where_and_from_whom_never_the_subject_as_the_place() {
 fn recall_reads_only_memories_of_the_cued_sorts() {
     let mind = seeded();
     mind.committed(vec![spec("x")]);
-    mind.committed(vec![follow_up("fork-it", &spec_ref("x")), ruling("R1", None), memory("did", MemorySort::Did, "shaders were shipped", &[LIBBY]), memory("idea", MemorySort::Idea, "shaders could sing", &[LIBBY])]);
+    mind.committed(vec![follow_up("fork-it", &spec_ref("x")), ruling("R1", None), memory("did-it", MemorySort::Did, "shaders were shipped", &[LIBBY]), memory("sing", MemorySort::Idea, "shaders could sing", &[LIBBY])]);
     let port = Recording::over(&mind);
     let recalled = select(&port, &cue(&[LIBBY], &["shaders"])).unwrap();
     let asked = port.asked.borrow();
@@ -353,11 +353,11 @@ fn recall_reads_only_memories_of_the_cued_sorts() {
     for selection in asked.plain.iter().chain(asked.near.iter().map(|(selection, ..)| selection)) {
         assert!(selection.schemas.iter().flatten().all(|schema| *schema == memory), "{selection:?}");
     }
-    assert!(all_ids(&recalled).contains(&key("did")), "Did is among the test's sorts");
+    assert!(all_ids(&recalled).contains(&key("did-it")), "Did is among the test's sorts");
     let only_ideas = vec!["Idea".to_owned()];
     let narrow = select(&Recording::over(&mind), &Cue { sorts: &only_ideas, ..cue(&[LIBBY], &["shaders"]) }).unwrap();
     let shown = all_ids(&narrow);
-    assert!(shown.contains(&key("idea")) && !shown.contains(&key("did")), "only the cued sorts are recalled: {shown:?}");
+    assert!(shown.contains(&key("sing")) && !shown.contains(&key("did-it")), "only the cued sorts are recalled: {shown:?}");
 }
 #[test]
 fn an_open_item_that_is_the_nearest_match_is_dropped_from_the_relevant_lane() {
