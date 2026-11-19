@@ -26,7 +26,9 @@ use eureka_state::HuginnClient;
 use huginn_mind::HuginnMindResponse;
 use serde_json::{Value, json};
 
+use crate::address::{Addressee, is_for, localpart};
 use crate::chat_client::{Chat, ChatPending, Form};
+use crate::heartbeat::HeartbeatView;
 
 pub use narrate::{KitModel, Model, connector_key};
 pub use select::TurnKind;
@@ -97,6 +99,9 @@ pub struct Organs<'a> {
     pub persona: Option<&'a dyn PersonaSource>,
     /// The mouth, for the room; none shows no room.
     pub chat: Option<&'a dyn MouthReader>,
+    /// The heartbeat's addressing table, read-only: her names and her projects' names, the ones the heartbeat woke her
+    /// by. None, or a table without her, addresses her by her own names only, and the report says so.
+    pub addressing: Option<&'a dyn HeartbeatView>,
     /// The Projector and the judge; required for renders.
     pub model: Option<&'a dyn Model>,
 }
@@ -116,13 +121,32 @@ pub struct Request {
     /// A second state: renders both and asks the judge which narration came from which.
     pub judge_against: Option<Value>,
     pub operators: Vec<String>,
+    /// The Matrix ids of the swarm's Minds: their bonds name them by localpart; anyone else is keyed by full id.
+    pub minds: Vec<String>,
+    /// Her own Matrix id. Required: without it her own lines would read as said to her.
     pub own_sender: String,
     pub tuning: PathBuf,
 }
 
+/// Her addressee: the heartbeat's row for her when its table holds one, else her own names (handle and public name).
+fn own_addressee(addressing: Option<&dyn HeartbeatView>, own_sender: &str, public_name: &str) -> (Addressee, Value) {
+    let table = addressing.map(|view| view.addressing());
+    if let Some(Ok(Some(table))) = &table
+        && let Some(row) = table.minds.iter().find(|row| row.matrix_id() == own_sender)
+    {
+        return (row.clone(), json!("heartbeat"));
+    }
+    let why = match table {
+        None => "own names only: no heartbeat addressing is configured".to_owned(),
+        Some(Err(fault)) => format!("own names only: the heartbeat addressing could not be read: {fault:#}"),
+        Some(Ok(_)) => "own names only: the heartbeat addressing has no row for her".to_owned(),
+    };
+    (Addressee::new(own_sender, [localpart(own_sender), public_name]), json!(why))
+}
+
 /// The room through the mouth's pending read, which acks nothing: new messages and the tail, own lines kept for the
 /// Select stage to drop. A refusal is reported, never hidden.
-fn read_room(chat: &dyn MouthReader, request: &Request, public_name: &str) -> (Room, Value) {
+fn read_room(chat: &dyn MouthReader, request: &Request, own: &Addressee) -> (Room, Value) {
     let pending = match chat.pending() {
         Ok(pending) => pending,
         Err(fault) => return (Room { here: request.room.clone(), ..Room::default() }, json!({ "read": false, "why": format!("{fault:#}") })),
@@ -138,7 +162,8 @@ fn read_room(chat: &dyn MouthReader, request: &Request, public_name: &str) -> (R
             display: delivery.sender_display.clone(),
             text: delivery.text.clone(),
             at_ms: delivery.at_unix_ms,
-            to_her: delivery.is_direct || delivery.mentions.contains(&request.own_sender) || (!public_name.is_empty() && crate::address::names_whole_word(&delivery.text, public_name, false)),
+            // The heartbeat's rule, the one that woke her: never a second opinion here.
+            to_her: is_for(own, delivery),
         })
         .collect();
     let tail: Vec<RoomLine> = pending
@@ -202,6 +227,9 @@ fn successive(inputs: &Inputs, tuning: &tuning::Tuning, renders: usize) -> Vec<P
 
 /// What Select builds, and with renders what the Projector narrates, as one JSON report. Writes nothing.
 pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result<Value> {
+    if !request.own_sender.starts_with('@') || !request.own_sender.contains(':') {
+        bail!("her own Matrix id (MIND_PERSONA_SELF_SENDER) is required: without it her own lines would read as said to her");
+    }
     let loaded = tuning::load(&request.tuning)?;
     let tuning = &loaded.tuning;
     let (state, receipt) = match &request.state {
@@ -212,13 +240,14 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
         }
     };
     let public_name = state.get("publicName").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let (own, addressing) = own_addressee(organs.addressing, &request.own_sender, &public_name);
     let (room, room_report) = match organs.chat {
-        Some(chat) => read_room(chat, request, &public_name),
+        Some(chat) => read_room(chat, request, &own),
         None => (Room { here: request.room.clone(), ..Room::default() }, json!({ "read": false, "why": "no mouth is configured" })),
     };
     // Freshness and her own recent words come from trace v2, which the commit writes (C3c); until then there is none.
     let history = History::default();
-    let people = People { operators: &request.operators, own_sender: &request.own_sender };
+    let people = People { operators: &request.operators, minds: &request.minds, own_sender: &request.own_sender };
     let inputs = Inputs { kind: request.kind, state: &state, room: &room, history: &history, observation: None, people, now, seed: request.seed };
 
     let mut report = json!({
@@ -227,6 +256,7 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
         "state": if request.state.is_some() { "given" } else { "stored" },
         "tuning": { "path": request.tuning.display().to_string(), "source": loaded.source, "sha256": loaded.sha256 },
         "room": room_report,
+        "addressing": addressing,
         "history": "none: freshness and her own recent words come from trace v2, which the commit writes (C3c)",
     });
     let Some(renders) = request.renders else {

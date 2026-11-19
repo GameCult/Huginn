@@ -18,7 +18,8 @@
 //! (`mind_body::projection::project`): it prints, as JSON, the packet the Select stage builds from her stored state (or
 //! `--state`), and with `--renders` the Projector's narrations of K successive turns; `--judge` renders a second state
 //! too and asks the model which narration came from which. It writes nothing and reads no brake. It reads
-//! `MIND_PERSONA_OPERATOR` and `MIND_PERSONA_SELF_SENDER`; the room comes from the mouth when `BIFROST_CHAT_ENDPOINT`
+//! `MIND_PERSONA_OPERATOR`, `MIND_PERSONA_MINDS` and `MIND_PERSONA_SELF_SENDER` (required), and the heartbeat's addressing
+//! from `MIND_HEARTBEAT_STATE` when set; the room comes from the mouth when `BIFROST_CHAT_ENDPOINT`
 //! and `BIFROST_CHAT_KEY_FILE` are set; the tuning is `MIND_PERSONA_TUNING`, else
 //! `/etc/gamecult/minds/<instance>/persona-tuning.toml`; renders need `MIND_PERSONA_CONNECTOR_ENDPOINT`
 //! (`<loopback ip>:<port>`) and the `connector-key` credential in `CREDENTIALS_DIRECTORY`. Without `--select-only` or
@@ -34,6 +35,7 @@ use mind_body::chat_rudp::{RudpChat, connection_id};
 use mind_body::cli::instance_and_endpoint;
 use mind_body::control::{CONTROL_ROOT, FileSource, control_path, swarm_path};
 use mind_body::persona::{Config, carry};
+use mind_body::heartbeat::{FileStore, HeartbeatView};
 use mind_body::projection::{HuginnPersonaSource, KitModel, Model, MouthReader, Organs as ProjectOrgans, Request as ProjectRequest, TUNING_FILE, TUNING_ROOT, TurnKind, connector_key, project};
 
 const USAGE: &str = "usage: mind-persona --instance <slug> [--endpoint rudp://<ip>:<port>] [--rooms a,b] [--operator id[,id]] [--minds id[,id]] [--self-sender id]";
@@ -128,7 +130,13 @@ fn run_project(args: &[String]) -> Result<String> {
         }
         None => None,
     };
-    let organs = ProjectOrgans { persona: Some(&persona), chat: chat.as_ref().map(|chat| chat as &dyn MouthReader), model: model.as_ref().map(|model| model as &dyn Model) };
+    let heartbeat = setting("MIND_HEARTBEAT_STATE").map(FileStore::new);
+    let organs = ProjectOrgans {
+        persona: Some(&persona),
+        chat: chat.as_ref().map(|chat| chat as &dyn MouthReader),
+        addressing: heartbeat.as_ref().map(|store| store as &dyn HeartbeatView),
+        model: model.as_ref().map(|model| model as &dyn Model),
+    };
     let request = ProjectRequest {
         instance: instance.0.clone(),
         kind,
@@ -138,7 +146,8 @@ fn run_project(args: &[String]) -> Result<String> {
         renders,
         judge_against: judge,
         operators: setting("MIND_PERSONA_OPERATOR").map(|ids| ids.split(',').map(str::to_owned).collect()).unwrap_or_default(),
-        own_sender: setting("MIND_PERSONA_SELF_SENDER").unwrap_or_default(),
+        minds: setting("MIND_PERSONA_MINDS").map(|ids| ids.split(',').map(str::to_owned).collect()).unwrap_or_default(),
+        own_sender: required("MIND_PERSONA_SELF_SENDER")?,
         tuning,
     };
     Ok(serde_json::to_string_pretty(&project(&organs, &request, now)?)?)

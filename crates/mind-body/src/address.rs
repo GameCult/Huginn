@@ -94,7 +94,9 @@ pub(crate) fn project_names(repo: &OrgRepo, listed: &[Short]) -> Vec<Name> {
 }
 
 /// Whether `text` holds `name` as a whole word, in any case or exactly as written: the characters on either side are not letters or
-/// digits. An identity match on a name, not a judgement of meaning.
+/// digits, and not the joints of a path or an identifier (`-`, `_`, `/`, `\`, and a `.` with more of the token after it), so
+/// `/var/lib/mind-eureka/` or `eureka.cc` never names her while "Eureka." ends a sentence that does. An identity match on a name,
+/// not a judgement of meaning.
 pub(crate) fn names_whole_word(text: &str, name: &str, exact: bool) -> bool {
     let (text, name) = if exact { (text.to_string(), name.to_string()) } else { (text.to_lowercase(), name.to_lowercase()) };
     if name.is_empty() {
@@ -102,10 +104,23 @@ pub(crate) fn names_whole_word(text: &str, name: &str, exact: bool) -> bool {
     }
     // Every character offset, not every non-overlapping match: a name may overlap itself ("ab ab" in "xab ab ab").
     text.char_indices().any(|(start, _)| {
-        text[start..].starts_with(&name)
-            && !text[..start].chars().next_back().is_some_and(char::is_alphanumeric)
-            && !text[start + name.len()..].chars().next().is_some_and(char::is_alphanumeric)
+        text[start..].starts_with(&name) && !text[..start].chars().next_back().is_some_and(|before| joins(before) || before == '.') && !continues(&text[start + name.len()..])
     })
+}
+
+/// A character that joins a word to more of the same token: a letter, a digit, or a path or identifier joint.
+fn joins(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '\')
+}
+
+/// Whether the text after a name carries the token on: a joining character, or a `.` with a letter or digit after it.
+fn continues(after: &str) -> bool {
+    let mut chars = after.chars();
+    match chars.next() {
+        Some('.') => chars.next().is_some_and(char::is_alphanumeric),
+        Some(c) => joins(c),
+        None => false,
+    }
 }
 
 #[cfg(test)]

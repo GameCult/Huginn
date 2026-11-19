@@ -22,6 +22,11 @@ const GUIDANCE: &str = "This person is a Mind of the GameCult swarm. She lives i
 
 /// The context room the fixed slots need beside the identity: the hour and the mood lines always fit.
 const FIXED_ROOM: usize = 256;
+/// The temperatures a selection may run at: colder is deterministic in all but name, hotter is noise.
+const TEMPERATURE_RANGE: std::ops::RangeInclusive<f64> = 0.01..=10.0;
+/// The ceiling of the messages to her: at least a long message whole, and far under the connector's 256 KiB frame, which
+/// also carries the rest of the prompt.
+const ADDRESSED_RANGE: std::ops::RangeInclusive<usize> = 1024..=64 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -56,6 +61,9 @@ pub struct SelectTuning {
     pub stimulus_bytes: usize,
     /// What was said to her, verbatim, for the Persona stage.
     pub heard_bytes: usize,
+    /// The ceiling of the messages to her, in the stimulus and in the heard lines alike: they pass the stimulus and heard
+    /// caps whole, newest first, up to this, and the older ones are counted.
+    pub addressed_bytes: usize,
     pub identity_bytes: usize,
     /// One bond line's summary, in bytes.
     pub bond_summary_bytes: usize,
@@ -111,6 +119,7 @@ impl Default for SelectTuning {
             context_bytes: 2500,
             stimulus_bytes: 1500,
             heard_bytes: 1500,
+            addressed_bytes: 8 * 1024,
             identity_bytes: 300,
             bond_summary_bytes: 300,
             item_bytes: 400,
@@ -141,7 +150,19 @@ impl Tuning {
     pub(crate) fn validate(&self) -> Result<()> {
         let select = &self.select;
         let positive = |name: &str, value: f64| if value.is_finite() && value > 0.0 { Ok(()) } else { Err(anyhow::anyhow!("{name} must be a finite number above 0, not {value}")) };
-        positive("select.temperature", select.temperature)?;
+        if !(select.temperature.is_finite() && TEMPERATURE_RANGE.contains(&select.temperature)) {
+            bail!("select.temperature must be from {} to {}, not {}", TEMPERATURE_RANGE.start(), TEMPERATURE_RANGE.end(), select.temperature);
+        }
+        if self.projector.model.trim().is_empty() {
+            bail!("projector.model must name a model");
+        }
+        if !ADDRESSED_RANGE.contains(&select.addressed_bytes) {
+            bail!("select.addressed_bytes must be from {} to {}, not {}", ADDRESSED_RANGE.start(), ADDRESSED_RANGE.end(), select.addressed_bytes);
+        }
+        let caps = &select.caps;
+        if [caps.memories_about_present, caps.other_memories, caps.needs, caps.incubation, caps.stance, caps.value, caps.said].iter().all(|cap| *cap == 0) {
+            bail!("select.caps are all 0: a packet could hold nothing of her");
+        }
         positive("select.inclusion_score", select.inclusion_score)?;
         positive("select.memory_tau_h", select.memory_tau_h)?;
         if !(select.freshness_base.is_finite() && (0.0..=1.0).contains(&select.freshness_base)) {
@@ -161,7 +182,7 @@ impl Tuning {
                 bail!("{name} must be above 0");
             }
         }
-        if select.context_bytes < select.identity_bytes + FIXED_ROOM {
+        if select.identity_bytes.checked_add(FIXED_ROOM).is_none_or(|needed| select.context_bytes < needed) {
             bail!("select.context_bytes must leave {FIXED_ROOM} bytes beside select.identity_bytes for the hour and the mood");
         }
         let lens = &self.lens;

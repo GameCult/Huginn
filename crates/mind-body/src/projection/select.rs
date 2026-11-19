@@ -7,8 +7,16 @@
 //! Every packet carries its fixed slots: identity, the hour, her mood as change, a bond line for each person
 //! present, and the stimulus. The rest comes from her state's pools. Each candidate is ordered by
 //! `log(score) / T` plus Gumbel noise and included with probability `1 - exp(-score / inclusion_score)`, where
-//! `score = salience × recency × touch × unresolved × freshness`; then each pool's cap and the context budget bound
-//! what is kept. A cap is a maximum, never a target: a pool with fewer candidates than its cap still rotates.
+//! `score = salience × recency × touch × relevance × unresolved × freshness`; then each pool's cap and the context
+//! budget bound what is kept. A cap is a maximum, never a target: a pool with fewer candidates than its cap still
+//! rotates. Recency decays only the short-term items: a crystallized memory, a value or a stance is as near as it ever
+//! was, and comes forward by what the room is touching (`relevance`, a lexical overlap with the stimulus).
+//!
+//! Who a message is to is `address::is_for`'s, the rule the heartbeat woke her by, and nothing else here. People are
+//! keyed by their full Matrix id; only the operator and the Minds of the swarm are keyed by the names their bonds use,
+//! and an unbonded speaker is shown with the id, never under a bonded person's name. Every message body is rendered by
+//! one escape (`spoken`): quotes escaped, a line break shown as ` ⏎ `, so no text can forge a line; speaker and room come
+//! from the mouth's metadata alone.
 //!
 //! Never read: `agencyPressure`, `candidateActions`, `privateNotes` and `provenance`. A memory tagged with a direct
 //! message room (`room:!…`) is selectable only in that room.
@@ -23,7 +31,6 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::tuning::{LensWeights, Tuning};
 use crate::address::localpart;
-use crate::persona::quoted;
 
 /// Touch: what the room is touching.
 const TOUCH_PRESENT: f64 = 1.0;
@@ -93,13 +100,22 @@ pub(crate) struct History {
 #[derive(Clone, Copy)]
 pub(crate) struct People<'a> {
     pub operators: &'a [String],
+    /// The Matrix ids of the swarm's Minds: their bonds name them by localpart.
+    pub minds: &'a [String],
     pub own_sender: &'a str,
 }
 
 impl People<'_> {
-    /// The id a bond names a person by: `operator` for the operator, the Matrix localpart for anyone else.
+    /// The id a bond names a person by: `operator` for the operator, a Mind's localpart for a Mind of the swarm, and the
+    /// full Matrix id for anyone else, so `@libby:evil.example` is never Libby.
     pub(crate) fn person_of(&self, sender: &str) -> String {
-        if self.operators.iter().any(|operator| operator == sender) { "operator".into() } else { localpart(sender).to_lowercase() }
+        if self.operators.iter().any(|operator| operator == sender) {
+            "operator".into()
+        } else if self.minds.iter().any(|mind| mind == sender) {
+            localpart(sender).to_lowercase()
+        } else {
+            sender.to_lowercase()
+        }
     }
 }
 
@@ -179,10 +195,14 @@ pub(crate) struct Packet {
     pub selected: Vec<Pick>,
 }
 
+/// What the messages to her cost past the caps: bytes over the stimulus and heard caps, the older messages to her the
+/// `addressed_bytes` ceiling left out, and the bytes clipped from a single message larger than the ceiling.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct Overflow {
     pub stimulus: usize,
     pub heard: usize,
+    pub said_to_her_not_shown: usize,
+    pub clipped_bytes: usize,
 }
 
 struct Candidate {
@@ -228,6 +248,36 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The words of a text that can carry a topic: four letters or more, lowercased.
+fn content_words(text: &str) -> BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|word| word.chars().count() >= 4).map(str::to_lowercase).collect()
+}
+
+/// `ln(1 + min(1, shared / 3))`: how much of an item the room is touching, by the content words it shares with the
+/// stimulus. Lexical and cheap; no embedder.
+fn relevance_log(item_text: &str, touching: &BTreeSet<String>) -> f64 {
+    let shared = content_words(item_text).intersection(touching).count();
+    (1.0 + (shared as f64 / 3.0).min(1.0)).ln()
+}
+
+/// A message body as every line renders it: in quotation marks, its own quotes and backslashes escaped, a line break
+/// shown as ` ⏎ ` and other control characters dropped, so a body can never end its line or start another.
+pub(crate) fn spoken(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' | '\u{2028}' | '\u{2029}' | '\u{0085}' => out.push_str(" ⏎ "),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -384,7 +434,7 @@ fn about_present(item: &Value, present: &BTreeSet<String>) -> bool {
     present.contains(&target) || items(item, &["tags"]).iter().filter_map(Value::as_str).filter_map(|tag| tag.strip_prefix("about:")).any(|id| present.contains(&id.to_lowercase()))
 }
 
-fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>) -> Vec<Candidate> {
+fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touching: &BTreeSet<String>) -> Vec<Candidate> {
     let state = inputs.state;
     let here = inputs.room.here.as_deref();
     let item_bytes = tuning.select.item_bytes;
@@ -397,8 +447,9 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>) -> V
         out.push(Candidate { id: id.to_owned(), pool, line, log_score });
     };
 
-    let memories = items(state, &["thoughtMemory", "memories"]).iter().chain(items(state, &["thoughtMemory", "shortTerm"]));
-    for memory in memories.filter(|memory| live(memory) && !private_elsewhere(memory, here)) {
+    let crystallized = items(state, &["thoughtMemory", "memories"]).iter().map(|memory| (memory, false));
+    let memories = crystallized.chain(items(state, &["thoughtMemory", "shortTerm"]).iter().map(|memory| (memory, true)));
+    for (memory, short_term) in memories.filter(|(memory, _)| live(memory) && !private_elsewhere(memory, here)) {
         let about = about_present(memory, present);
         let pool = if about { Pool::MemoriesAboutPresent } else { Pool::OtherMemories };
         let touch = if about { TOUCH_PRESENT } else if in_room(memory, here) { TOUCH_ROOM } else { TOUCH_ELSE };
@@ -409,7 +460,9 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>) -> V
         }
         let line = format!("- memory [{}]: {}", text(memory, &["id"]), clip(&one_line(&body), item_bytes));
         let salience = number(memory, &["intensity"]).unwrap_or(SALIENCE_UNSTATED);
-        push(text(memory, &["id"]), pool, line, salience, recency_log(time(memory), inputs.now, tuning.select.memory_tau_h), touch, 1.0);
+        // Only the day's short-term items fade; a crystallized memory comes forward by what the room touches.
+        let nearness = if short_term { recency_log(time(memory), inputs.now, tuning.select.memory_tau_h) } else { relevance_log(&body, touching) };
+        push(text(memory, &["id"]), pool, line, salience, nearness, touch, 1.0);
     }
 
     for need in items(state, &["affect", "needs"]).iter().filter(|need| live(need)) {
@@ -429,17 +482,18 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>) -> V
     for stance in items(state, &["affect", "doctrineStances"]).iter().filter(|stance| live(stance)) {
         let touch = if about_present(stance, present) { TOUCH_PRESENT } else { TOUCH_ELSE };
         let line = format!("- stance [{}]: {}", text(stance, &["id"]), clip(&one_line(text(stance, &["summary"])), item_bytes));
-        push(text(stance, &["id"]), Pool::Stance, line, number(stance, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), 0.0, touch, 1.0);
+        push(text(stance, &["id"]), Pool::Stance, line, number(stance, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), relevance_log(text(stance, &["summary"]), touching), touch, 1.0);
     }
 
     for value in items(state, &["values"]) {
         let line = format!("- value [{}] {}: {}", text(value, &["id"]), clip(text(value, &["label"]), NAME_BYTES), clip(&one_line(text(value, &["summary"])), item_bytes));
-        push(text(value, &["id"]), Pool::Value, line, number(value, &["priority"]).unwrap_or(SALIENCE_UNSTATED), 0.0, TOUCH_ELSE, 1.0);
+        let relevance = relevance_log(&format!("{} {}", text(value, &["label"]), text(value, &["summary"])), touching);
+        push(text(value, &["id"]), Pool::Value, line, number(value, &["priority"]).unwrap_or(SALIENCE_UNSTATED), relevance, TOUCH_ELSE, 1.0);
     }
 
     for said in &inputs.history.said {
         let touch = if Some(said.room.as_str()) == here { TOUCH_ROOM } else { TOUCH_ELSE };
-        let line = format!("- she said [{}] in {}: {}", said.id, said.room, quoted(&clip(&said.text, item_bytes)));
+        let line = format!("- she said [{}] in {}: {}", said.id, said.room, spoken(&clip(&said.text, item_bytes)));
         push(&said.id, Pool::Said, line, SALIENCE_UNSTATED, recency_log(Some(said.at), inputs.now, tuning.select.memory_tau_h), touch, 1.0);
     }
     out
@@ -461,11 +515,151 @@ fn cap_of(pool: Pool, tuning: &Tuning) -> usize {
 // ---------------------------------------------------------------------------------------------
 // The stimulus, the people present and the fixed slots.
 
+/// How a speaker reads: a bonded person by the bond's label; anyone else by their display name with the Matrix id beside
+/// it, so a stranger called "Meta" never reads as the operator.
 fn name_of(line: &RoomLine, inputs: &Inputs) -> String {
     let person = inputs.people.person_of(&line.sender);
-    let bonded = items(inputs.state, &["affect", "socialBonds"]).iter().find(|bond| text(bond, &["object", "id"]).to_lowercase() == person).map(|bond| text(bond, &["object", "label"]).to_owned());
-    let name = bonded.filter(|label| !label.is_empty()).or_else(|| Some(line.display.trim().to_owned()).filter(|name| !name.is_empty())).unwrap_or_else(|| localpart(&line.sender).to_owned());
+    let bonded = items(inputs.state, &["affect", "socialBonds"]).iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == person).map(|bond| text(bond, &["object", "label"]).to_owned()).filter(|label| !label.is_empty());
+    let name = bonded.unwrap_or_else(|| {
+        let display = one_line(&line.display);
+        if display.is_empty() { line.sender.clone() } else { format!("{display} ({})", line.sender) }
+    });
     clip(&one_line(&name), NAME_BYTES)
+}
+
+/// Lines appended under a byte cap: a line that would pass it is refused whole.
+struct Lines {
+    out: String,
+    cap: usize,
+}
+
+impl Lines {
+    fn new(cap: usize) -> Self {
+        Self { out: String::new(), cap }
+    }
+
+    fn fits(&self, line: &str) -> bool {
+        self.out.len() + line.len() + usize::from(!self.out.is_empty()) <= self.cap
+    }
+
+    fn push(&mut self, line: &str) -> bool {
+        if !self.fits(line) {
+            return false;
+        }
+        if !self.out.is_empty() {
+            self.out.push('\n');
+        }
+        self.out.push_str(line);
+        true
+    }
+}
+
+/// A section of room lines under `cap` bytes: its heading, a note counting the older lines that did not fit, then the
+/// newest whole lines that did. Empty when there are no lines, or not even the heading fits.
+fn newest_section(heading: &str, lines: &[String], cap: usize) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    // The note is at most this long: "(NNNNN earlier not shown)".
+    let note_room = 32;
+    let mut kept: Vec<&String> = Vec::new();
+    let mut used = heading.len() + note_room;
+    for line in lines.iter().rev() {
+        if used + line.len() + 1 > cap {
+            break;
+        }
+        used += line.len() + 1;
+        kept.push(line);
+    }
+    kept.reverse();
+    let dropped = lines.len() - kept.len();
+    let mut out = Lines::new(cap);
+    if !out.push(heading) {
+        return String::new();
+    }
+    if dropped > 0 {
+        out.push(&format!("({dropped} earlier not shown)"));
+    }
+    for line in kept {
+        out.push(line);
+    }
+    out.out
+}
+
+/// The messages to her as lines under the `addressed_bytes` ceiling: whole messages, newest first, until the ceiling;
+/// a note counting the older ones left out; and a single message larger than the ceiling clipped on a grapheme boundary
+/// with how many bytes more it held, never paraphrased. Chronological order, with the counts.
+fn said_to_her(to_her: &[&RoomLine], render: impl Fn(&RoomLine, &str) -> String, ceiling: usize) -> (Vec<String>, usize, usize) {
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0;
+    let mut clipped = 0;
+    for line in to_her.iter().rev() {
+        let whole = render(line, &spoken(&line.text));
+        if used + whole.len() + 1 <= ceiling {
+            used += whole.len() + 1;
+            kept.push(whole);
+            continue;
+        }
+        if kept.is_empty() {
+            // One message larger than the ceiling: as much of it as fits, cut between graphemes.
+            let ends: Vec<usize> = line.text.grapheme_indices(true).map(|(at, grapheme)| at + grapheme.len()).collect();
+            let fitting = |end: usize| render(line, &format!("{} [… {} bytes more]", spoken(&line.text[..end]), line.text.len() - end));
+            let fit = ends.partition_point(|end| fitting(*end).len() < ceiling);
+            let cut = if fit == 0 { 0 } else { ends[fit - 1] };
+            clipped = line.text.len() - cut;
+            kept.push(fitting(cut));
+        }
+        break;
+    }
+    let left_out = to_her.len() - kept.len();
+    kept.reverse();
+    (kept, left_out, clipped)
+}
+
+fn chat_stimulus(inputs: &Inputs, tuning: &Tuning) -> (String, String, Overflow) {
+    let messages: Vec<&RoomLine> = inputs.room.messages.iter().filter(|line| line.sender != inputs.people.own_sender).collect();
+    if messages.is_empty() {
+        return ("Nothing new was said.".into(), String::new(), Overflow::default());
+    }
+    let (to_her, others): (Vec<&RoomLine>, Vec<&RoomLine>) = messages.into_iter().partition(|line| line.to_her);
+    let typed = |line: &RoomLine, body: &str| format!("- {} in {}: {body}", name_of(line, inputs), line.room);
+    // Heard lines are prose for the Persona: the speaker and the room from the mouth, then the escaped words.
+    let heard = |line: &RoomLine, body: &str| format!("{}, in {}: {body}", name_of(line, inputs), line.room);
+    let ceiling = tuning.select.addressed_bytes;
+    let (typed_to_her, left_out, clipped) = said_to_her(&to_her, typed, ceiling);
+    let (heard_to_her, _, _) = said_to_her(&to_her, heard, ceiling);
+    let note = (left_out > 0).then(|| format!("({left_out} more said to her, not shown)"));
+
+    let mut stimulus = String::new();
+    if !typed_to_her.is_empty() {
+        stimulus.push_str("Said to her:");
+        for line in note.iter().chain(&typed_to_her) {
+            stimulus.push('\n');
+            stimulus.push_str(line);
+        }
+    }
+    let others_typed: Vec<String> = others.iter().map(|line| typed(line, &spoken(&line.text))).collect();
+    let room_left = tuning.select.stimulus_bytes.saturating_sub(stimulus.len() + 1);
+    let also = newest_section("Also in the room:", &others_typed, room_left);
+    if !also.is_empty() {
+        if !stimulus.is_empty() {
+            stimulus.push('\n');
+        }
+        stimulus.push_str(&also);
+    }
+
+    let mut heard_text = heard_to_her.join("\n");
+    let others_heard: Vec<String> = others.iter().map(|line| heard(line, &spoken(&line.text))).collect();
+    let heard_left = tuning.select.heard_bytes.saturating_sub(heard_text.len() + 1);
+    let (kept, _) = newest_that_fit(&others_heard, heard_left);
+    for line in kept {
+        if !heard_text.is_empty() {
+            heard_text.push('\n');
+        }
+        heard_text.push_str(&line);
+    }
+    let overflow = Overflow { stimulus: stimulus.len().saturating_sub(tuning.select.stimulus_bytes), heard: heard_text.len().saturating_sub(tuning.select.heard_bytes), said_to_her_not_shown: left_out, clipped_bytes: clipped };
+    (stimulus, heard_text, overflow)
 }
 
 /// Whole lines, newest kept, that fit `budget` bytes with their newlines, and how many older ones did not.
@@ -484,60 +678,14 @@ fn newest_that_fit(lines: &[String], budget: usize) -> (Vec<String>, usize) {
     (kept, dropped)
 }
 
-/// A section: its heading, the lines to her whole, then the newest other lines that fit what is left of `cap`, with a
-/// note counting the others that did not. Returns the text and how many bytes the lines to her took past `cap`.
-fn section_to_her(heading: &str, to_her: &[String], others_heading: &str, others: &[String], cap: usize) -> (String, usize) {
-    let mut out = String::new();
-    if !to_her.is_empty() {
-        out.push_str(heading);
-        for line in to_her {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    if !others.is_empty() {
-        let heading = if to_her.is_empty() { heading } else { others_heading };
-        // The note is at most this long: "(NNNNN earlier not shown)\n".
-        let note_room = 32;
-        let left = cap.saturating_sub(out.len() + heading.len() + note_room);
-        let (kept, dropped) = newest_that_fit(others, left);
-        if !kept.is_empty() || dropped > 0 {
-            out.push_str(heading);
-        }
-        if dropped > 0 {
-            let _ = writeln!(out, "({dropped} earlier not shown)");
-        }
-        for line in kept {
-            out.push_str(&line);
-            out.push('\n');
-        }
-    }
-    let out = out.trim_end().to_owned();
-    let over = out.len().saturating_sub(cap);
-    (out, over)
-}
-
-fn chat_stimulus(inputs: &Inputs, tuning: &Tuning) -> (String, String, Overflow) {
-    let messages: Vec<&RoomLine> = inputs.room.messages.iter().filter(|line| line.sender != inputs.people.own_sender).collect();
-    if messages.is_empty() {
-        return ("Nothing new was said.".into(), String::new(), Overflow::default());
-    }
-    let typed = |line: &&RoomLine| format!("- {} in {}: {}", name_of(line, inputs), line.room, quoted(&line.text));
-    // Heard lines are prose for the Persona: the words exactly as said, inside plain quotation marks.
-    let heard = |line: &&RoomLine| format!("{}, in {}: \"{}\"", name_of(line, inputs), line.room, line.text);
-    let (to_her, others): (Vec<&RoomLine>, Vec<&RoomLine>) = messages.into_iter().partition(|line| line.to_her);
-    let (stimulus, stimulus_over) = section_to_her("Said to her:\n", &to_her.iter().map(typed).collect::<Vec<_>>(), "Also in the room:\n", &others.iter().map(typed).collect::<Vec<_>>(), tuning.select.stimulus_bytes);
-    let (heard_text, heard_over) = section_to_her("", &to_her.iter().map(heard).collect::<Vec<_>>(), "", &others.iter().map(heard).collect::<Vec<_>>(), tuning.select.heard_bytes);
-    (stimulus, heard_text, Overflow { stimulus: stimulus_over, heard: heard_over })
-}
-
 fn hours(now: DateTime<Utc>, at_ms: u64) -> i64 {
     let at = i64::try_from(at_ms).ok().and_then(DateTime::<Utc>::from_timestamp_millis).unwrap_or(now);
     (now - at).num_hours().max(0)
 }
 
 /// A beat: nothing addressed her; when she last heard from each person she is bound to (the relatedness cue, most
-/// recently heard first, a note counting any the budget left out); then the newest lines of her rooms in what is left.
+/// recently heard first, in at most two thirds of the cap, a note counting any left out); then the newest lines of her
+/// rooms in what is left. Every line is refused whole that would pass the cap.
 fn beat_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
     let cap = tuning.select.stimulus_bytes;
     let mut contacts: Vec<(Option<u64>, String)> = Vec::new();
@@ -551,39 +699,33 @@ fn beat_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
         }));
     }
     contacts.sort_by_key(|(last, _)| std::cmp::Reverse(*last));
-    let mut out = String::from("Nothing addressed her.\n");
-    // The relatedness cue takes at most two thirds of the stimulus, so the room keeps a share.
-    let note_room = 40;
-    let contact_cap = (cap * 2 / 3).saturating_sub(out.len() + note_room);
-    let mut used = 0;
+    let mut out = Lines::new(cap);
+    out.push("Nothing addressed her.");
+    let note_room = 48;
+    let contact_cap = cap * 2 / 3;
     let mut left_out = 0;
     for (_, line) in &contacts {
-        if used + line.len() + 1 > contact_cap {
+        if out.out.len() + line.len() + 1 + note_room > contact_cap || !out.push(line) {
             left_out += 1;
-            continue;
         }
-        used += line.len() + 1;
-        out.push_str(line);
-        out.push('\n');
     }
     if left_out > 0 {
-        let _ = writeln!(out, "({left_out} more people she is bound to not shown)");
+        out.push(&format!("({left_out} more people she is bound to not shown)"));
     }
     let others: Vec<&RoomLine> = inputs.room.tail.iter().filter(|line| line.sender != inputs.people.own_sender).collect();
     let shown = &others[others.len().saturating_sub(tuning.select.beat_tail_lines)..];
-    let lines: Vec<String> = shown.iter().map(|line| format!("- {} in {}, {} h ago: {}", name_of(line, inputs), line.room, hours(inputs.now, line.at_ms), quoted(&clip(&line.text, tuning.select.item_bytes / 2)))).collect();
-    let (section, _) = section_to_her("Lately in her rooms:\n", &[], "", &lines, cap.saturating_sub(out.len() + 1));
-    if !section.is_empty() {
-        out.push('\n');
-        out.push_str(&section);
+    let lines: Vec<String> = shown.iter().map(|line| format!("- {} in {}, {} h ago: {}", name_of(line, inputs), line.room, hours(inputs.now, line.at_ms), spoken(&clip(&line.text, tuning.select.item_bytes / 2)))).collect();
+    let section = newest_section("Lately in her rooms:", &lines, cap.saturating_sub(out.out.len() + 2));
+    if !section.is_empty() && out.push("") {
+        out.push(&section);
     }
-    out.trim_end().to_owned()
+    out.out
 }
 
 fn reflection_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
     let lines: Vec<String> = items(inputs.state, &["thoughtMemory", "shortTerm"]).iter().filter(|item| live(item)).map(|item| format!("- {}", clip(&one_line(text(item, &["summary"])), tuning.select.item_bytes))).collect();
-    let (section, _) = section_to_her("Since she last took stock:\n", &[], "", &lines, tuning.select.stimulus_bytes);
-    if section.is_empty() { "Since she last took stock: nothing new.".into() } else { section }
+    let section = newest_section("Since she last took stock:", &lines, tuning.select.stimulus_bytes);
+    if section.is_empty() { clip("Since she last took stock: nothing new.", tuning.select.stimulus_bytes) } else { section }
 }
 
 /// The people present, newest first: who spoke to her or in her room this turn, or in the beat's lines.
@@ -694,14 +836,14 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
         fixed.push(line);
     }
 
-    let mut pool = candidates(inputs, tuning, &present_ids);
-    let present_names: Vec<String> = present.iter().map(|(_, name)| name.clone()).collect();
-    let lens = draw_lens(&tuning.lens, &present_names, &pool, &mut draw);
+    // What the room is touching: the content words of what was said there, and of a follow-up's finding.
+    let touching: BTreeSet<String> = inputs.room.messages.iter().chain(&inputs.room.tail).map(|line| line.text.as_str()).chain(inputs.observation).flat_map(content_words).collect();
+    let pool = candidates(inputs, tuning, &present_ids, &touching);
     // Gumbel-top-k over log(score)/T orders the candidates as sampling without replacement from the softmax would; each
     // is then included with a probability its score sets, so a cap is a maximum, never a target.
     let temperature = tuning.select.temperature;
     let mut keyed: Vec<(f64, bool, Candidate)> = pool
-        .drain(..)
+        .into_iter()
         .map(|candidate| {
             let key = candidate.log_score / temperature + draw.gumbel();
             let include = draw.unit() < 1.0 - (-candidate.log_score.exp() / tuning.select.inclusion_score).exp();
@@ -722,6 +864,9 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
         taken.push(candidate);
     }
     taken.sort_by_key(|candidate| candidate.pool);
+    // The lens is drawn from what the packet holds: never a want, a memory or a wondering it does not carry.
+    let present_names: Vec<String> = present.iter().map(|(_, name)| name.clone()).collect();
+    let lens = draw_lens(&tuning.lens, &present_names, &taken, &mut draw);
     let mut lines = fixed;
     lines.extend(taken.iter().map(|candidate| candidate.line.clone()));
     ids.extend(taken.iter().map(|candidate| candidate.id.clone()));

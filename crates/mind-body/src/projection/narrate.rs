@@ -119,10 +119,10 @@ pub(crate) fn words(text: &str) -> usize {
 /// Her persona state's schema: its property names are the identifiers a narration must never carry.
 const PERSONA_SCHEMA: &str = include_str!("../../../../schemas/cultnet/gamecult.persona_state.v0.schema.json");
 
-/// An identifier as compared: lowercased with its underscores gone, so `socialBonds`, `SocialBonds` and `social_bonds`
-/// are one.
+/// An identifier as compared: lowercased with its underscores and hyphens gone, so `socialBonds`, `SocialBonds`,
+/// `social_bonds`, `social-bonds`, `SOCIAL_BONDS` and `socialbonds` are one.
 fn folded(identifier: &str) -> String {
-    identifier.chars().filter(|c| *c != '_').flat_map(char::to_lowercase).collect()
+    identifier.chars().filter(|c| !matches!(c, '_' | '-')).flat_map(char::to_lowercase).collect()
 }
 
 /// Whether a word is shaped like an identifier rather than prose: an underscore, or a capital after its first letter.
@@ -163,16 +163,18 @@ fn identifiers() -> BTreeSet<String> {
     keys.into_iter().filter(|key| identifier_shaped(key)).map(|key| folded(&key)).collect()
 }
 
-/// The identifiers of typed state a narration carries: a word shaped like an identifier that names a property of her
-/// persona schema or a tuning key, in any case convention, and any id the packet named (`ids`), as an exact token when
-/// it cannot be a plain word, or inside brackets as the packet writes it. A small deterministic guard on identifiers,
-/// never on meaning: "need-to-know", "trust:" and "Tension:" are prose.
+/// The identifiers of typed state a narration carries: any token that folds to a compound property name of her persona
+/// schema or a tuning key, in every case convention (camelCase, PascalCase, snake_case, SCREAMING_CASE, kebab-case and
+/// run together), and any id the packet named (`ids`), as an exact token when it cannot be a plain word, or inside
+/// brackets as the packet writes it. Only compound names are known, so a plain word such as `trust`, `tension` or
+/// `values` is prose: "need-to-know", "trust:" and "Tension:" pass. A small deterministic guard on identifiers, never on
+/// meaning.
 pub(crate) fn field_names(narration: &str, ids: &[String]) -> Vec<String> {
     let known = identifiers();
     let mut found = BTreeSet::new();
-    for word in narration.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|word| !word.is_empty()) {
-        if identifier_shaped(word) && known.contains(&folded(word)) {
-            found.insert(word.to_owned());
+    for token in narration.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')).map(|token| token.trim_matches('-')).filter(|token| !token.is_empty()) {
+        if known.contains(&folded(token)) {
+            found.insert(token.to_owned());
         }
     }
     let tokens: BTreeSet<&str> = narration.split_whitespace().map(|token| token.trim_matches(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_' || c == ':'))).collect();

@@ -138,3 +138,14 @@ fn a_direct_message_is_for_her_whatever_the_basis() {
     assert!(!is_for(&nibu, &ChatDelivery { form: Form::Notice, ..dm.clone() }));
     assert!(!is_for(&nibu, &ChatDelivery { form: Form::Edit, ..dm }));
 }
+
+#[test]
+fn a_name_inside_a_path_or_an_identifier_is_not_her_name() {
+    let eureka = Addressee::new("@eureka:chat", ["Eureka"]);
+    for path in ["the trace at /var/lib/mind-eureka/persona-trace.cc grew", "see eureka.cc", "eureka_state is a crate", "C:\eureka\x", "mind-eureka@ is a unit"] {
+        assert!(!addresses(&eureka, &said(path, &[])), "{path:?} does not name her");
+    }
+    for spoken in ["Eureka.", "Eureka, are you there?", "ask eureka.", "(Eureka)", "@Eureka hi", "\"Eureka\" said it", "Eureka's turn"] {
+        assert!(addresses(&eureka, &said(spoken, &[])), "{spoken:?} names her");
+    }
+}
