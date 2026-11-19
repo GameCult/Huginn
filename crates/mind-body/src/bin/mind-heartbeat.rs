@@ -23,7 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use eureka_state::HuginnClient;
 use mind_body::chat_rudp::{RudpChat, connection_id};
-use mind_body::heartbeat::{Config, DEFAULT_BEAT_S, FileControl, FileStore, Night, Organs, PersonaId, Seat, poll};
+use mind_body::heartbeat::{Config, DEFAULT_BEAT_S, FileControl, FileStore, Organs, PersonaId, Seat, poll};
 use mind_body::launch::{SystemClock, SystemdLauncher};
 use mind_body::queue::HuginnMind;
 
@@ -58,9 +58,8 @@ fn config() -> Result<Config> {
         .map(PersonaId::parse)
         .collect::<Result<Vec<_>>>()?;
     let operators = required("MIND_PERSONA_OPERATOR")?.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect();
-    let night = Night::from_settings(setting("HEARTBEAT_SLEEP_UTC").as_deref(), setting("HEARTBEAT_SLEEP_MINDS").as_deref())?;
     let beat_s = u32::try_from(whole("HEARTBEAT_BEAT_S", i64::from(DEFAULT_BEAT_S))?).map_err(|_| anyhow!("HEARTBEAT_BEAT_S is out of range"))?;
-    Config::new(personas, operators, night, beat_s)
+    Config::new(personas, operators, beat_s)
 }
 
 fn store() -> Result<FileStore> {

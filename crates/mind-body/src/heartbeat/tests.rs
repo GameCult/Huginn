@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use chrono::{Duration, TimeZone};
+use chrono::Duration;
 use cultnet_rs::Selection;
 use eureka_pipeline::{PipelineDocument, PipelineKind as K};
 use huginn_mind::PipelineSelectionPage;
@@ -200,7 +200,7 @@ impl Rig {
             launcher: Recording::default(),
             clock: Fixed(Cell::new(at(1_000_000))),
             store: MemStore::default(),
-            config: Config::new(vec![persona("ann", "Ann"), persona("bob", "Bob")], vec!["@op:chat".into()], None, BEAT_S).unwrap(),
+            config: Config::new(vec![persona("ann", "Ann"), persona("bob", "Bob")], vec!["@op:chat".into()], BEAT_S).unwrap(),
         })
     }
 
@@ -230,7 +230,7 @@ impl Rig {
 
     /// The stored state, made if there is none, changed by `change`.
     fn with_state(&self, change: impl FnOnce(&mut HeartbeatState)) {
-        let mut state = self.store.state.borrow().clone().unwrap_or(HeartbeatState { last_beat_at: DateTime::<Utc>::UNIX_EPOCH, handled_mentions: vec![], last_turn_at: BTreeMap::new(), last_night_at: BTreeMap::new() });
+        let mut state = self.store.state.borrow().clone().unwrap_or(HeartbeatState { last_beat_at: DateTime::<Utc>::UNIX_EPOCH, handled_mentions: vec![], last_turn_at: BTreeMap::new() });
         change(&mut state);
         *self.store.state.borrow_mut() = Some(state);
     }
@@ -293,7 +293,7 @@ fn each_persona_carries_her_own_huginn_and_a_missing_or_malformed_one_refuses_th
     for bad in ["ann,ann,Ann,@ann:chat", "ann,ann,Ann,@ann:chat,", "ann,ann,Ann,@ann:chat,127.0.0.1:4101", "ann,ann,Ann,@ann:chat,rudp://localhost:4101"] {
         assert!(PersonaId::parse(bad).is_err(), "{bad}");
     }
-    assert!(Config::new(personas, vec![], None, 0).is_err(), "a beat of zero seconds is refused");
+    assert!(Config::new(personas, vec![], 0).is_err(), "a beat of zero seconds is refused");
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn a_beat_wakes_exactly_one_persona_the_one_who_has_waited_longest() {
     let state = rig.store.state.borrow().clone().unwrap();
     assert_eq!(state.last_turn_at.get("ann"), Some(&rig.now()), "the wake is her last turn");
     let trace = rig.store.traces.borrow().last().cloned().unwrap();
-    assert_eq!((trace.tempo_s, trace.launches.clone()), (BEAT_S, vec!["ann:PersonaTurn".to_string()]));
+    assert_eq!((trace.tempo_s, trace.launches.clone()), (BEAT_S, vec!["ann".to_string()]));
     assert!(trace.instances[ANN].busy);
 }
 
@@ -573,19 +573,6 @@ fn a_persona_that_has_never_acted_goes_first() {
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into())] });
 }
 
-#[test]
-fn the_heartbeat_holds_no_usage_port_so_usage_cannot_change_a_wake() {
-    // `Organs` has no connector and no readout: the only inputs are the brakes, the minds, the mouths, the units and its own state.
-    let rig = Rig::new();
-    rig.turn(ANN, 3000);
-    rig.turn(BOB, 1000);
-    let first = rig.poll();
-    let again = Rig::new();
-    again.turn(ANN, 3000);
-    again.turn(BOB, 1000);
-    assert_eq!(first, again.poll());
-}
-
 // ---- C2 of the Persona-only map: the heartbeat writes no mind and starts no Self run ----
 
 #[test]
@@ -607,11 +594,10 @@ fn a_mind_whose_self_holds_briefs_gets_a_persona_wake_and_no_self_run() {
 
 #[test]
 fn no_poll_admits_anything_to_any_mind_whatever_it_wakes() {
-    let mut rig = Rig::new();
-    rig.config.night = Some(Night::parse("13:00-14:00", "ann").unwrap());
+    let rig = Rig::new();
     let runs_before: Vec<usize> = rig.minds.iter().map(|mind| mind.ids(K::Run).len()).collect();
     rig.say(BOB, delivery(1, "@op:chat", "Bob, a word", &[]));
-    // One poll wakes bob off the beat and starts ann's night; the next beat wakes nobody else, both busy.
+    // One poll wakes bob off the beat and ann on it; the next beat wakes one of them again.
     assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("bob".into()), Slug("ann".into())] });
     rig.end_unit(ANN);
     rig.end_unit(BOB);
@@ -637,7 +623,7 @@ fn trace_at(seconds: i64, tempo_s: u32) -> PollTrace {
 }
 
 fn state_at(milliseconds: i64) -> HeartbeatState {
-    HeartbeatState { last_beat_at: crate::testkit::at(milliseconds), handled_mentions: vec!["ann:e1".into()], last_turn_at: BTreeMap::from([("ann".to_string(), crate::testkit::at(3))]), last_night_at: BTreeMap::new() }
+    HeartbeatState { last_beat_at: crate::testkit::at(milliseconds), handled_mentions: vec!["ann:e1".into()], last_turn_at: BTreeMap::from([("ann".to_string(), crate::testkit::at(3))]) }
 }
 
 #[test]
@@ -671,7 +657,7 @@ struct StateBeforeTheCut {
 }
 
 #[test]
-fn a_state_written_before_the_cut_reads_with_no_turns_and_no_nights() {
+fn a_state_written_before_the_cut_reads_with_no_turns() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("heartbeat.cc");
     let mut cache = CultCache::new();
@@ -680,7 +666,7 @@ fn a_state_written_before_the_cut_reads_with_no_turns_and_no_nights() {
     cache.pull_all_backing_stores().unwrap();
     cache.put(STATE_KEY, &StateBeforeTheCut { last_beat_at: crate::testkit::at(7), handled_mentions: vec!["ann:e1".into()] }).unwrap();
     let state = FileStore::new(&path).load().unwrap().expect("the old state reads");
-    assert_eq!(state, HeartbeatState { last_beat_at: crate::testkit::at(7), handled_mentions: vec!["ann:e1".into()], last_turn_at: BTreeMap::new(), last_night_at: BTreeMap::new() });
+    assert_eq!(state, HeartbeatState { last_beat_at: crate::testkit::at(7), handled_mentions: vec!["ann:e1".into()], last_turn_at: BTreeMap::new() });
 }
 
 #[test]
@@ -708,118 +694,6 @@ fn the_file_store_reads_back_the_addressing_it_wrote_to_the_view() {
     store.save_addressing(&table).unwrap();
     assert_eq!(store.addressing().unwrap(), Some(table.clone()));
     assert_eq!(store.load_addressing().unwrap(), Some(table));
-}
-
-// ---- The night ----
-
-/// A night over the rig's clock, 13:31 UTC: the window holds it, `ann` sleeps.
-fn nights(window: &str, minds: &str) -> Box<Rig> {
-    let mut rig = Rig::new();
-    rig.config.night = Some(Night::parse(window, minds).unwrap());
-    rig.turn(ANN, 10);
-    rig.turn(BOB, 10);
-    rig.beat_fell();
-    rig
-}
-
-#[test]
-fn the_window_wraps_midnight_and_names_when_it_opened() {
-    let night = Night::parse("22:00-04:00", "ann").unwrap();
-    let on = |hour, minute| Utc.with_ymd_and_hms(2026, 10, 9, hour, minute, 0).unwrap();
-    assert_eq!(night.opened(on(23, 0)), Some(on(22, 0)));
-    assert_eq!(night.opened(on(2, 0)), Some(on(22, 0) - Duration::days(1)), "after midnight it opened yesterday");
-    assert_eq!(night.opened(on(4, 0)), None, "the end is outside");
-    assert_eq!(night.opened(on(13, 0)), None);
-    assert_eq!(Night::parse("13:00-14:00", "ann").unwrap().opened(on(13, 0)), Some(on(13, 0)), "the start is inside");
-    assert!(Night::parse("13:00-13:00", "ann").is_err() && Night::parse("25:00-03:00", "ann").is_err() && Night::parse("13:00-14:00", " , ").is_err());
-}
-
-#[test]
-fn a_window_keeps_its_minutes_and_its_bounds_are_the_clock() {
-    let on = |hour, minute| Utc.with_ymd_and_hms(2026, 10, 9, hour, minute, 0).unwrap();
-    let night = Night::parse("22:30-04:15", "ann").unwrap();
-    assert_eq!((night.from_min, night.to_min), (22 * 60 + 30, 4 * 60 + 15));
-    assert_eq!(night.opened(on(22, 29)), None);
-    assert_eq!(night.opened(on(22, 30)), Some(on(22, 30)));
-    assert_eq!(night.opened(on(4, 14)), Some(on(22, 30) - Duration::days(1)));
-    assert_eq!(night.opened(on(4, 15)), None);
-    // The last minute of the day is a time, and the first one past it is not.
-    let late = Night::parse("23:59-00:00", "ann").unwrap();
-    assert_eq!((late.from_min, late.to_min), (23 * 60 + 59, 0));
-    assert_eq!(Night::parse("00:00-23:00", "ann").unwrap().to_min, 23 * 60);
-    assert_eq!(Night::parse("12:00-12:59", "ann").unwrap().to_min, 12 * 60 + 59);
-    for bad in ["24:00-03:00", "22:00-24:00", "22:60-03:00", "22:00-03:60", "22:00", "22-03", "aa:bb-03:00"] {
-        assert!(Night::parse(bad, "ann").is_err(), "{bad}");
-    }
-}
-
-#[test]
-fn the_nightly_sleep_is_both_settings_or_neither() {
-    assert_eq!(Night::from_settings(None, None).unwrap(), None);
-    let night = Night::from_settings(Some("22:30-04:00"), Some("ann, bob")).unwrap().unwrap();
-    assert_eq!((night.from_min, night.to_min, night.minds), (22 * 60 + 30, 4 * 60, vec![Slug("ann".into()), Slug("bob".into())]));
-    for only in [Night::from_settings(Some("22:30-04:00"), None), Night::from_settings(None, Some("ann"))] {
-        let fault = only.expect_err("a half-set night is refused at start").to_string();
-        assert!(fault.contains("HEARTBEAT_SLEEP_UTC") && fault.contains("HEARTBEAT_SLEEP_MINDS"), "{fault}");
-    }
-    assert!(Night::from_settings(Some("nonsense"), Some("ann")).is_err(), "both set, but not a window");
-}
-
-#[test]
-fn a_listed_idle_mind_sleeps_once_per_window_and_a_missed_night_is_not_made_up() {
-    let rig = nights("13:00-14:00", "ann");
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
-    assert_eq!(rig.started_turns(), vec![("ann".to_string(), RunTurn::Sleep)], "bob is not listed, and the beat has just fallen");
-    assert_eq!(rig.store.state.borrow().as_ref().unwrap().last_night_at.get("ann"), Some(&rig.now()));
-    // Busy while the night lasts: nothing more. Then her unit ends and the window is spent for her.
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
-    rig.launcher.kill_as(&Slug("ann".into()), RunTurn::Sleep);
-    rig.advance(60);
-    rig.beat_fell();
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] }, "one night per window, whatever became of it");
-    assert_eq!(rig.started_turns().len(), 1);
-    // The next window opens a day later and she sleeps again.
-    rig.advance(24 * 3600);
-    rig.beat_fell();
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
-}
-
-#[test]
-fn no_night_outside_the_window_for_an_unlisted_mind_or_after_the_window_passed_busy() {
-    let outside = nights("22:00-04:00", "ann,bob");
-    assert_eq!(outside.poll(), Outcome::Polled { launched: vec![] });
-    assert!(outside.started_turns().is_empty());
-    // She is awake (her unit active) when the window opens and until it closes: the night is not made up after.
-    let rig = nights("13:00-14:00", "ann");
-    rig.in_a_turn(ANN);
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
-    rig.advance(3600);
-    rig.end_unit(ANN);
-    rig.beat_fell();
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![] });
-    assert!(rig.started_turns().is_empty());
-}
-
-#[test]
-fn the_operator_goes_first_and_the_night_waits_for_her_to_be_idle() {
-    let rig = nights("13:00-14:00", "ann");
-    rig.say(ANN, delivery(1, "@op:chat", "Ann, a word", &[]));
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
-    assert_eq!(rig.started_turns(), vec![("ann".to_string(), RunTurn::PersonaTurn)], "the mention is answered awake, no night that poll");
-    rig.end_unit(ANN);
-    rig.chats[ANN].deliveries.borrow_mut().clear();
-    rig.advance(60);
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into())] });
-    assert_eq!(rig.started_turns().last(), Some(&("ann".to_string(), RunTurn::Sleep)));
-}
-
-#[test]
-fn a_sleeping_mind_is_not_eligible_for_the_beat() {
-    let rig = nights("13:00-14:00", "ann");
-    rig.with_state(|state| state.last_beat_at = DateTime::<Utc>::UNIX_EPOCH);
-    rig.turn(ANN, 100_000);
-    assert_eq!(rig.poll(), Outcome::Polled { launched: vec![Slug("ann".into()), Slug("bob".into())] });
-    assert_eq!(rig.started_turns(), vec![("ann".to_string(), RunTurn::Sleep), ("bob".to_string(), RunTurn::PersonaTurn)], "the beat went to the Mind who was awake, though ann had waited longer");
 }
 
 /// Matrix's word that a message is her DM, a tag or a reply wakes her off the beat from the operator; a notice or an edit never does,

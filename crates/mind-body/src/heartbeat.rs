@@ -7,17 +7,16 @@
 //! idle, released Minds, by how long each has waited since the heartbeat last
 //! woke her, bent by a member addressing her and (a later cut) topics she
 //! subscribed to. The operator or another Mind tagging or naming her wakes her
-//! off the beat, once per message. Inside the night window a listed Mind wakes
-//! once for her night. Nothing is metered here: no meter and no model call.
+//! off the beat, once per message. There is no night wake until reflection and
+//! consolidation return (map C4). Nothing is metered here: no meter and no model call.
 //!
 //! A wake starts her unit and nothing else: the heartbeat writes no mind (ruling
 //! `persona-only-heartbeat`: her Mind is written only by Self sessions). It reads
 //! her mind only for the names her projects go by. Busy is systemd's own: a
 //! Persona whose unit is active is busy, and a start of an active unit is a no-op.
 //!
-//! The heartbeat owns `heartbeat.cc` and is its only writer; Persona units read
-//! its addressing. The brakes stay the operator's and are read on every poll. The
-//! heartbeat never acks a delivery.
+//! The heartbeat owns `heartbeat.cc` and is its only writer. The brakes stay the
+//! operator's and are read on every poll. The heartbeat never acks a delivery.
 //!
 //! A held swarm brake ends the poll before the mind or the mouth is touched.
 
@@ -27,7 +26,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, SecondsFormat, Timelike, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use cultcache_rs::{CultCache, DatabaseEntry, SingleFileMessagePackBackingStore};
 use eureka_pipeline::{OrgRepo, PipelineKind, RunTurn, Slug};
 use huginn_mind::PipelineFacts;
@@ -94,70 +93,13 @@ pub struct Config {
     pub personas: Vec<PersonaId>,
     /// Sender ids that are the operator.
     pub operators: Vec<String>,
-    /// The nightly window and the Minds that sleep in it; none, no one sleeps.
-    pub night: Option<Night>,
     /// Seconds between beats: `HEARTBEAT_BEAT_S`, else `DEFAULT_BEAT_S`.
     pub beat_s: u32,
 }
 
-/// The heartbeat's night: a daily window in UTC minutes (it may wrap midnight) and the Minds that sleep in it.
-/// The heartbeat alone decides who sleeps and when: one Sleep run per Mind per window, never made up if the window
-/// passes without one.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Night {
-    pub from_min: u32,
-    pub to_min: u32,
-    pub minds: Vec<Slug>,
-}
-
-impl Night {
-    /// The nightly sleep from the two settings that name it: both or neither, so a half-set deploy fails at start
-    /// instead of quietly never sleeping, or sleeping no one.
-    pub fn from_settings(window: Option<&str>, minds: Option<&str>) -> Result<Option<Self>> {
-        match (window, minds) {
-            (Some(window), Some(minds)) => Self::parse(window, minds).map(Some),
-            (None, None) => Ok(None),
-            _ => bail!("HEARTBEAT_SLEEP_UTC and HEARTBEAT_SLEEP_MINDS are set together or not at all"),
-        }
-    }
-
-    /// `window` is `HH:MM-HH:MM` in UTC, `minds` the slugs comma-separated.
-    pub fn parse(window: &str, minds: &str) -> Result<Self> {
-        let minute = |text: &str| -> Result<u32> {
-            let (hour, minute) = text.trim().split_once(':').ok_or_else(|| anyhow!("the night window is HH:MM-HH:MM"))?;
-            let (hour, minute) = (hour.parse::<u32>()?, minute.parse::<u32>()?);
-            if hour > 23 || minute > 59 {
-                bail!("the night window is HH:MM-HH:MM");
-            }
-            Ok(hour * 60 + minute)
-        };
-        let (from, to) = window.split_once('-').ok_or_else(|| anyhow!("the night window is HH:MM-HH:MM"))?;
-        let (from_min, to_min) = (minute(from)?, minute(to)?);
-        if from_min == to_min {
-            bail!("the night window is empty");
-        }
-        let minds: Vec<Slug> = minds.split(',').map(|slug| Slug(slug.trim().to_string())).filter(|slug| !slug.0.is_empty()).collect();
-        if minds.is_empty() {
-            bail!("no Mind is listed to sleep");
-        }
-        Ok(Self { from_min, to_min, minds })
-    }
-
-    /// When the window `now` is inside opened, or none outside it.
-    fn opened(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let minute = now.hour() * 60 + now.minute();
-        let inside = if self.from_min < self.to_min { (self.from_min..self.to_min).contains(&minute) } else { minute >= self.from_min || minute < self.to_min };
-        if !inside {
-            return None;
-        }
-        let day = if minute >= self.from_min { now.date_naive() } else { now.date_naive().pred_opt()? };
-        Some(day.and_hms_opt(self.from_min / 60, self.from_min % 60, 0)?.and_utc())
-    }
-}
-
 impl Config {
     /// Refuses no Persona, a Persona twice, or a beat of zero seconds.
-    pub fn new(personas: Vec<PersonaId>, operators: Vec<String>, night: Option<Night>, beat_s: u32) -> Result<Self> {
+    pub fn new(personas: Vec<PersonaId>, operators: Vec<String>, beat_s: u32) -> Result<Self> {
         if personas.is_empty() {
             bail!("no persona is configured");
         }
@@ -176,7 +118,6 @@ impl Config {
         Ok(Self {
             personas,
             operators,
-            night,
             beat_s,
         })
     }
@@ -184,7 +125,7 @@ impl Config {
 
 /// `heartbeat.cc`'s state: when the last beat fell, the operator messages
 /// already answered with a wake (once per message, bounded), and when the
-/// heartbeat last woke each Persona and last started each night.
+/// heartbeat last woke each Persona.
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(type = "eureka.heartbeat.state.v1", schema = "HeartbeatState")]
 pub struct HeartbeatState {
@@ -196,9 +137,6 @@ pub struct HeartbeatState {
     /// When the heartbeat last started each Persona's turn, by instance slug.
     #[cultcache(key = 2, default)]
     pub last_turn_at: BTreeMap<String, DateTime<Utc>>,
-    /// When the heartbeat last started each Persona's night, by instance slug.
-    #[cultcache(key = 3, default)]
-    pub last_night_at: BTreeMap<String, DateTime<Utc>>,
 }
 
 const STATE_KEY: &str = "state";
@@ -507,10 +445,10 @@ enum Woke {
     Refused(String),
 }
 
-/// The one way the heartbeat wakes a Persona, for a turn or her night: her brake
-/// read again, then her unit started unless it is active. No run is opened and
-/// nothing is admitted.
-fn wake(organs: &Organs, row: &Row, turn: RunTurn) -> Woke {
+/// The one way the heartbeat wakes a Persona: her brake read again, then her
+/// unit started unless it is active. No run is opened and nothing is admitted.
+fn wake(organs: &Organs, row: &Row) -> Woke {
+    let turn = RunTurn::PersonaTurn;
     if !matches!(organs.control.effective(row.slug()), Effective::Released(_)) {
         return Woke::Refused("the brake is held".into());
     }
@@ -523,11 +461,6 @@ fn wake(organs: &Organs, row: &Row, turn: RunTurn) -> Woke {
     }
 }
 
-/// What a wake is called in the trace: her slug and the turn.
-fn wake_label(slug: &Slug, turn: RunTurn) -> String {
-    format!("{}:{turn:?}", slug.0)
-}
-
 /// One poll.
 pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     if let SwarmEffective::Held(reason) = organs.control.envelope() {
@@ -535,7 +468,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     }
     let now = organs.clock.now();
     let stored = organs.store.load()?;
-    let mut state = stored.clone().unwrap_or(HeartbeatState { last_beat_at: DateTime::<Utc>::UNIX_EPOCH, handled_mentions: vec![], last_turn_at: BTreeMap::new(), last_night_at: BTreeMap::new() });
+    let mut state = stored.clone().unwrap_or(HeartbeatState { last_beat_at: DateTime::<Utc>::UNIX_EPOCH, handled_mentions: vec![], last_turn_at: BTreeMap::new() });
     let mut eventful = false;
     // The table as the last poll left it; unreadable counts as none, is noted in the trace, and is not overwritten.
     let (stored_addressing, addressing_unread) = match organs.store.load_addressing() {
@@ -592,45 +525,18 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
                 .find(|key| !state.handled_mentions.contains(key))
         };
         let Some(key) = mentioned else { continue };
-        match wake(organs, row, RunTurn::PersonaTurn) {
+        match wake(organs, row) {
             Woke::Started => {
                 state.handled_mentions.push(key);
                 let excess = state.handled_mentions.len().saturating_sub(MENTIONS_KEPT);
                 state.handled_mentions.drain(..excess);
                 state.last_turn_at.insert(slug.0.clone(), now);
                 row.busy = true;
-                launches.push(wake_label(&slug, RunTurn::PersonaTurn));
+                launches.push(slug.0.clone());
                 launched.push(slug);
             }
             Woke::Busy => row.busy = true,
             Woke::Refused(why) => row.note = why,
-        }
-    }
-
-    // The night: inside the window, one night for a listed Mind who is idle and released and has not been started for one
-    // since the window opened. The operator's mention went first above: she is busy then. A window that passes without a
-    // night is not made up.
-    if let Some(night) = &config.night
-        && let Some(opened) = night.opened(now)
-    {
-        for row in &mut rows {
-            let slept = state.last_night_at.get(&row.slug().0).is_some_and(|slept| *slept >= opened);
-            if !row.idle() || !night.minds.contains(row.slug()) || slept {
-                continue;
-            }
-            match wake(organs, row, RunTurn::Sleep) {
-                Woke::Started => {
-                    let slug = row.slug().clone();
-                    state.last_night_at.insert(slug.0.clone(), now);
-                    row.note = "asleep".into();
-                    row.busy = true;
-                    launches.push(wake_label(&slug, RunTurn::Sleep));
-                    launched.push(slug);
-                    break;
-                }
-                Woke::Busy => row.busy = true,
-                Woke::Refused(why) => row.note = why,
-            }
         }
     }
 
@@ -655,13 +561,13 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
     // one failing Mind never starves the others; a wake ends the beat.
     let mut passed: Vec<Standing> = standings.clone();
     while due && let Some(winner) = tempo::pick(&passed, beat_s) {
-        match wake(organs, &rows[winner], RunTurn::PersonaTurn) {
+        match wake(organs, &rows[winner]) {
             Woke::Started => {
                 let slug = rows[winner].slug().clone();
                 state.last_beat_at = now;
                 state.last_turn_at.insert(slug.0.clone(), now);
                 rows[winner].busy = true;
-                launches.push(wake_label(&slug, RunTurn::PersonaTurn));
+                launches.push(slug.0.clone());
                 launched.push(slug);
                 break;
             }

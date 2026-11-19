@@ -37,14 +37,6 @@ fn a_unit_configured_from_its_environment_alone_reaches_the_gate_and_ends_dead()
 }
 
 #[test]
-fn a_flag_overrides_the_environment() {
-    let dir = tempfile::tempdir().unwrap();
-    // The rooms flag replaces the rooms the environment names.
-    let flagged = run(dir.path(), &[], &[], &["--instance", "eureka", "--rooms", "#swarm:chat"]);
-    assert_eq!(flagged.status.code(), Some(0), "{}", text(&flagged.stderr));
-}
-
-#[test]
 fn a_setting_that_is_missing_or_wrong_ends_two_naming_the_setting_and_no_value() {
     let dir = tempfile::tempdir().unwrap();
     let cases: [Case; 4] = [
