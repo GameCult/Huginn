@@ -403,7 +403,7 @@ fn a_hundred_and_twenty_bonds_never_overflow_a_beat() {
 fn a_crowd_or_a_huge_label_never_squeezes_out_the_mood() {
     let messages: Vec<RoomLine> = (0..300).map(|at| message("#swarm:gamecult.org", &format!("@stranger{at}:gamecult.org"), &format!("Stranger {at}"), "hi", 300 - at, false)).collect();
     let packet = packet_of(TurnKind::Chat, &state(), &Room { messages, ..Room::default() }, &History::default(), 1);
-    assert!(packet.context.contains("- mood") && packet.context.contains("- also here: Stranger 299") && packet.context.contains(" more"), "{}", packet.context);
+    assert!(packet.context.contains("- mood") && packet.context.contains("- also here: \"Stranger 299\" (@stranger299:gamecult.org)") && packet.context.contains(" more"), "{}", packet.context);
     assert!(packet.identity.len() + packet.context.len() <= 2500);
     let mut huge = state();
     huge["affect"]["socialBonds"] = json!([{ "id": "bond-libby", "object": { "id": "libby", "kind": "person", "label": "L".repeat(3000) }, "relationshipKind": "k".repeat(3000), "status": "active", "summary": "s" }]);
@@ -462,7 +462,8 @@ fn the_narration_is_cut_at_its_word_budget() {
 #[test]
 fn an_overrun_is_cut_at_the_last_sentence_end_inside_the_budget() {
     assert_eq!(cap_words("One two three. Four five six! Seven eight nine ten", 8), "One two three. Four five six!");
-    assert_eq!(cap_words("She said \"go.\" Then she left the room for good", 6), "She said \"go.\"");
+    assert_eq!(cap_words("She said \"go.\" Then she left the room for good", 6), "She said \"go.\" Then she left", "three of six is under the 60% floor");
+    assert_eq!(cap_words("She said \"go.\" Then she left the room for good", 5), "She said \"go.\"", "three of five is the floor");
     assert_eq!(cap_words("Is it late? It is… and quiet now", 5), "Is it late? It is…");
     assert_eq!(cap_words("Version 1.2 is out and running", 3), "Version 1.2 is", "a dot inside a token is no sentence end");
     assert_eq!(cap_words("one two three four five six", 4), "one two three four", "no sentence end inside the budget: the word cut");
@@ -1115,7 +1116,8 @@ fn every_range_is_validated_on_its_own() {
     refused(&|t| t.select.memory_tau_h = 0.0, "select.memory_tau_h");
     refused(&|t| t.select.memory_tau_h = f64::NAN, "select.memory_tau_h");
     refused(&|t| t.select.context_bytes = t.select.identity_bytes + 255, "select.context_bytes");
-    refused(&|t| t.select.identity_bytes = usize::MAX, "select.context_bytes");
+    refused(&|t| t.select.identity_bytes = usize::MAX, "select.identity_bytes");
+    refused(&|t| t.select.identity_bytes = 32 * 1024, "select.context_bytes");
     refused(&|t| t.lens.wondering = -1.0, "lens");
     refused(&|t| t.lens.person_present = f64::INFINITY, "lens");
     refused(&|t| t.lens.body_and_hour = 0.0, "lens");
