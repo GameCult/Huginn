@@ -4,9 +4,8 @@
 //! hand on them. The brakes are the operator's consent, not her body: the store
 //! is root-owned and no organ of hers writes it.
 //!
-//! `launch` and `queue` are the launch primitive: the work queue, the
-//! repetition breaker, the one-live-Self-run rule, and the single path that
-//! opens a run in the mind and only then starts its unit.
+//! `launch` holds her units under systemd and the reads of the runs a Self run
+//! holds; `queue` is her port to her mind and what an open question holds.
 //!
 //! `heartbeat` runs the swarm's shared heartbeat: the one process, the
 //! `mind-heartbeat` binary, that decides which Persona wakes and when, on the
