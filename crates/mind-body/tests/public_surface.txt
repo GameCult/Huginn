@@ -7,6 +7,7 @@ mind_body: mod heartbeat
 mind_body: mod launch
 mind_body: mod lease_client
 mind_body: mod persona
+mind_body: mod projection
 mind_body: mod queue
 mind_body: mod self_run
 mind_body: mod tempo
@@ -231,6 +232,43 @@ mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pu
 mind_body::persona: struct FileTrace  pub-fields[]
 mind_body::persona: struct TraceItem # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[provenance: String, room: String, text: String]
 mind_body::persona: struct TurnTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[run: String, turn: u32, at: DateTime < Utc >, inputs: Vec < TraceItem >, outputs: Vec < TraceItem >, outcome: String]
+mind_body::projection: fn project (organs : & Organs , request : & Request , now : DateTime < Utc >) -> Result < Value >
+mind_body::projection: impl HuginnPersonaSource
+mind_body::projection: impl HuginnPersonaSource: fn new (client : HuginnClient) -> Self
+mind_body::projection: impl PersonaSource for HuginnPersonaSource
+mind_body::projection: impl< T : Chat > MouthReader for T
+mind_body::projection: pub trait MouthReader { fn pending (& self) -> Result < ChatPending > ; }
+mind_body::projection: pub trait PersonaSource { fn persona (& self) -> Result < (Value , String) > ; }
+mind_body::projection: pub use narrate :: { KitModel , Model , connector_key } ;
+mind_body::projection: pub use select :: TurnKind ;
+mind_body::projection: pub use tuning :: { TUNING_FILE , TUNING_ROOT } ;
+mind_body::projection: struct HuginnPersonaSource  pub-fields[]
+mind_body::projection: struct Organs< 'a >  pub-fields[persona: Option < & 'a dyn PersonaSource >, chat: Option < & 'a dyn MouthReader >, model: Option < & 'a dyn Model >]
+mind_body::projection: struct Request  pub-fields[instance: String, kind: TurnKind, state: Option < Value >, room: Option < String >, seed: u64, renders: Option < usize >, judge_against: Option < Value >, operators: Vec < String >, own_sender: String, tuning: PathBuf]
+mind_body::projection::narrate: fn connector_key (credentials : & Path) -> Result < String >
+mind_body::projection::narrate: impl KitModel
+mind_body::projection::narrate: impl KitModel: fn open (endpoint : SocketAddr , connection_key : String , caller : & str , timeout : Duration) -> Result < Self >
+mind_body::projection::narrate: impl Model for KitModel
+mind_body::projection::narrate: pub trait Model { fn ask (& self , request_id : & str , model : & str , prompt : & str) -> Result < String > ; }
+mind_body::projection::narrate: struct KitModel  pub-fields[]
+mind_body::projection::select: # [derive (Clone , Copy , Debug , PartialEq , Eq , Serialize)] # [serde (rename_all = "snake_case")] pub enum TurnKind { Chat , Beat , FollowUp , Reflection , }
+mind_body::projection::select: impl Draw
+mind_body::projection::select: impl Lens
+mind_body::projection::select: impl People < '_ >
+mind_body::projection::tuning: const TUNING_FILE : & str
+mind_body::projection::tuning: const TUNING_ROOT : & str
+mind_body::projection::tuning: fn load (path : & Path) -> Result < Loaded >
+mind_body::projection::tuning: impl Default for LensWeights
+mind_body::projection::tuning: impl Default for PoolCaps
+mind_body::projection::tuning: impl Default for ProjectorTuning
+mind_body::projection::tuning: impl Default for SelectTuning
+mind_body::projection::tuning: impl Tuning
+mind_body::projection::tuning: struct LensWeights # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[body_and_hour: f64, person_present: f64, unresolved_want: f64, memory_surfacing: f64, wondering: f64]
+mind_body::projection::tuning: struct Loaded # [derive (Clone , Debug , PartialEq , Serialize)] pub-fields[tuning: Tuning, source: & 'static str, sha256: String]
+mind_body::projection::tuning: struct PoolCaps # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[memories_about_present: usize, other_memories: usize, needs: usize, incubation: usize, stance: usize, value: usize, said: usize]
+mind_body::projection::tuning: struct ProjectorTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String, guidance: String, words: usize, beat_words: usize]
+mind_body::projection::tuning: struct SelectTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[temperature: f64, inclusion_score: f64, context_bytes: usize, stimulus_bytes: usize, heard_bytes: usize, identity_bytes: usize, bond_summary_bytes: usize, item_bytes: usize, memory_tau_h: f64, freshness_base: f64, freshness_window: usize, people_full: usize, beat_tail_lines: usize, caps: PoolCaps]
+mind_body::projection::tuning: struct Tuning # [derive (Clone , Debug , Default , PartialEq , Serialize , Deserialize)] pub-fields[projector: ProjectorTuning, select: SelectTuning, lens: LensWeights]
 mind_body::queue: fn on_hold (mind : & dyn MindPort) -> Result < Held >
 mind_body::queue: impl Held
 mind_body::queue: impl Held: fn contains (& self , item : & PipelineRef) -> bool
@@ -242,8 +280,6 @@ mind_body::queue: impl< 'a > HuginnMind < 'a >
 mind_body::queue: pub trait MindPort { fn instance (& self) -> & Slug ; fn query (& self , selection : & Selection) -> Result < PipelineSelectionPage > ; fn query_near (& self , _selection : & Selection , _text : & str , _top_k : u32) -> Result < PipelineSelectionPage > { bail ! ("this mind port has no semantic index") } fn stewarded_activity (& self , _repos : & [OrgRepo] , _after : Option < u64 >) -> Result < RepoActivity > { bail ! ("this mind port has no forge to read") } fn roots_touched (& self) -> Result < Vec < RootTouched > > { bail ! ("this mind port has no roots to read") } fn admit (& self , agent : & str , session : & str , documents : Vec < PipelineDocument >) -> Result < PipelineAdmissionOutcome > ; }
 mind_body::queue: struct Held # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[]
 mind_body::queue: struct HuginnMind< 'a >  pub-fields[]
-mind_body::recall: impl Lane
-mind_body::recall: impl Recalled
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq , PartialOrd , Ord)] pub enum Stop { Interrupt , Terminate , Kill , }
 mind_body::self_run: # [derive (Clone , Copy , Debug , PartialEq , Eq)] pub enum Cause { Own , FlushRequested , Signalled (Stop) , Unstoppable , }
 mind_body::self_run: # [derive (Clone , Debug , PartialEq , Eq)] pub enum Read { Line (String) , Timeout , Eof , Exited (Option < i32 >) , }
