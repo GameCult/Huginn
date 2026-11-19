@@ -164,7 +164,7 @@ mind_body::heartbeat: impl Store for FileStore
 mind_body::heartbeat: impl fmt :: Display for Outcome
 mind_body::heartbeat: impl fmt :: Display for PollTrace
 mind_body::heartbeat: pub trait Control { fn envelope (& self) -> SwarmEffective ; fn effective (& self , instance : & Slug) -> Effective ; }
-mind_body::heartbeat: pub trait HeartbeatView { fn addressing (& self) -> Result < Option < Addressing > > ; }
+mind_body::heartbeat: pub trait HeartbeatView { fn addressing (& self) -> Result < Option < Addressing > > ; fn written_at (& self) -> Option < DateTime < Utc > > { None } }
 mind_body::heartbeat: pub trait Store { fn load (& self) -> Result < Option < HeartbeatState > > ; fn save (& self , state : & HeartbeatState) -> Result < () > ; fn record (& self , trace : & PollTrace) -> Result < () > ; fn load_addressing (& self) -> Result < Option < Addressing > > ; fn save_addressing (& self , addressing : & Addressing) -> Result < () > ; }
 mind_body::heartbeat: struct Addressing # [derive (Clone , Debug , Default , PartialEq , Eq , DatabaseEntry)] pub-fields[minds: Vec < Addressee >]
 mind_body::heartbeat: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[personas: Vec < PersonaId >, operators: Vec < String >, beat_s: u32]
@@ -239,21 +239,25 @@ mind_body::projection: impl PersonaSource for HuginnPersonaSource
 mind_body::projection: impl< T : Chat > MouthReader for T
 mind_body::projection: pub trait MouthReader { fn pending (& self) -> Result < ChatPending > ; }
 mind_body::projection: pub trait PersonaSource { fn persona (& self) -> Result < (Value , String) > ; }
-mind_body::projection: pub use narrate :: { Answer , KitModel , Model , Spent , connector_key } ;
+mind_body::projection: pub use narrate :: { Answer , Failed , KitModel , Model , Spent , connector_key } ;
 mind_body::projection: pub use select :: TurnKind ;
 mind_body::projection: pub use tuning :: { TUNING_FILE , TUNING_ROOT } ;
 mind_body::projection: struct HuginnPersonaSource  pub-fields[]
 mind_body::projection: struct Organs< 'a >  pub-fields[persona: Option < & 'a dyn PersonaSource >, chat: Option < & 'a dyn MouthReader >, addressing: Option < & 'a dyn HeartbeatView >, model: Option < & 'a dyn Model >]
 mind_body::projection: struct Request  pub-fields[instance: String, kind: TurnKind, state: Option < Value >, room: Option < String >, seed: u64, renders: Option < usize >, judge_against: Option < Value >, operators: Vec < String >, minds: Vec < String >, own_sender: String, tuning: PathBuf]
 mind_body::projection::narrate: fn connector_key (credentials : & Path) -> Result < String >
+mind_body::projection::narrate: impl Failed
 mind_body::projection::narrate: impl KitModel
 mind_body::projection::narrate: impl KitModel: fn open (endpoint : SocketAddr , connection_key : String , caller : & str , timeout : Duration) -> Result < Self >
 mind_body::projection::narrate: impl Model for KitModel
-mind_body::projection::narrate: pub trait Model { fn ask (& self , request_id : & str , model : & str , prompt : & str) -> Result < Answer > ; }
+mind_body::projection::narrate: impl std :: fmt :: Display for Failed
+mind_body::projection::narrate: pub trait Model { fn ask (& self , request_id : & str , model : & str , prompt : & str) -> std :: result :: Result < Answer , Failed > ; }
 mind_body::projection::narrate: struct Answer # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[text: String, usage: Option < Spent >]
+mind_body::projection::narrate: struct Failed # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[reason: String, usage: Option < Spent >]
 mind_body::projection::narrate: struct KitModel  pub-fields[]
 mind_body::projection::narrate: struct Spent # [derive (Clone , Debug , PartialEq , Eq , Serialize)] pub-fields[model: String, input_tokens: u64, output_tokens: u64, cache_read_tokens: u64, cache_write_tokens: u64, reasoning_tokens: Option < u64 >]
 mind_body::projection::select: # [derive (Clone , Copy , Debug , PartialEq , Eq , Serialize)] # [serde (rename_all = "snake_case")] pub enum TurnKind { Chat , Beat , FollowUp , Reflection , }
+mind_body::projection::select: impl Addressed < '_ >
 mind_body::projection::select: impl Draw
 mind_body::projection::select: impl Lens
 mind_body::projection::select: impl Lines
