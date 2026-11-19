@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use ghostlight_persona_projection::{ProjectorPrompt, build_projector_prompt};
 use model_connector::{ConnectorClient, InputItem, ProviderRequest, ReasoningEffort, StopReason, TransportDisposition, TransportEventPayload, TransportInvocation, TransportOutcome};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::select::{Packet, TurnKind};
@@ -20,7 +21,25 @@ use super::tuning::Tuning;
 /// One tool-less model turn. `KitModel` is the one live owner; a test answers with recorded text.
 pub trait Model {
     /// One turn of `model`: `prompt` is its one user text and `request_id` its identity on the connector.
-    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> Result<String>;
+    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> Result<Answer>;
+}
+
+/// A model's answer, and what the turn cost as the connector counted it: none when the answerer counts nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Answer {
+    pub text: String,
+    pub usage: Option<Spent>,
+}
+
+/// One turn's tokens, by the model that ran it, as the connector's receipt reports them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Spent {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub reasoning_tokens: Option<u64>,
 }
 
 /// What the connector's request asks of the model beside the user text. It names no membrane text: that is Ghostlight's.
@@ -56,7 +75,7 @@ impl KitModel {
 }
 
 impl Model for KitModel {
-    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> Result<String> {
+    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> Result<Answer> {
         let mut request = ProviderRequest::new(request_id, request_id, model, INSTRUCTIONS, MAX_OUTPUT_TOKENS);
         request.input = vec![InputItem::UserText { text: prompt.to_owned() }];
         request.reasoning_effort = Some(ReasoningEffort::Low);
@@ -66,13 +85,23 @@ impl Model for KitModel {
         match result.disposition {
             TransportDisposition::Refused(reason) => bail!("the connector refused the call: {reason:?}"),
             TransportDisposition::Transported { events, receipt } => match receipt.outcome {
-                TransportOutcome::Completed { stop_reason: StopReason::EndTurn, .. } => Ok(events
-                    .into_iter()
-                    .filter_map(|event| match event.payload {
-                        TransportEventPayload::TextDelta { text } => Some(text),
-                        _ => None,
-                    })
-                    .collect()),
+                TransportOutcome::Completed { stop_reason: StopReason::EndTurn, usage, .. } => Ok(Answer {
+                    text: events
+                        .into_iter()
+                        .filter_map(|event| match event.payload {
+                            TransportEventPayload::TextDelta { text } => Some(text),
+                            _ => None,
+                        })
+                        .collect(),
+                    usage: Some(Spent {
+                        model: model.to_owned(),
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        cache_read_tokens: usage.cache_read_tokens,
+                        cache_write_tokens: usage.cache_write_tokens,
+                        reasoning_tokens: usage.reasoning_tokens,
+                    }),
+                }),
                 TransportOutcome::Completed { stop_reason, .. } => bail!("the model's turn ended early: {stop_reason:?}"),
                 TransportOutcome::Failed { kind, .. } => bail!("the provider failed the call: {kind:?}"),
             },
@@ -93,7 +122,9 @@ pub(crate) fn projector_prompt(packet: &Packet, tuning: &Tuning) -> String {
     build_projector_prompt(&ProjectorPrompt { identity: &packet.identity, typed_context: &packet.context, visible_stimulus: &packet.stimulus, domain_guidance: &guidance, word_budget: word_budget(packet.kind, tuning) })
 }
 
-/// `text` cut after its `max`-th word; the model's count is not trusted.
+/// `text` held to `max` whitespace-separated words; the model's count is not trusted. An overrun is cut at the last
+/// sentence end inside the budget, so the stream ends on a whole sentence; only when the budget holds no sentence end
+/// is it cut after the `max`-th word.
 pub(crate) fn cap_words(text: &str, max: usize) -> String {
     let text = text.trim();
     let mut words = 0;
@@ -105,11 +136,34 @@ pub(crate) fn cap_words(text: &str, max: usize) -> String {
             in_word = true;
             words += 1;
             if words > max {
-                return text[..at].trim_end().to_owned();
+                let within = text[..at].trim_end();
+                return last_sentence_end(within).map_or_else(|| within.to_owned(), |end| within[..end].to_owned());
             }
         }
     }
     text.to_owned()
+}
+
+/// The byte just past the last sentence end in `text`: a `.`, `!`, `?` or `…`, with any closing quotes or brackets after
+/// it, followed by whitespace or the end of the text.
+fn last_sentence_end(text: &str) -> Option<usize> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut found = None;
+    for (index, (at, c)) in chars.iter().enumerate() {
+        if !matches!(c, '.' | '!' | '?' | '…') {
+            continue;
+        }
+        let mut end = at + c.len_utf8();
+        let mut next = index + 1;
+        while let Some((close_at, close)) = chars.get(next).filter(|(_, close)| matches!(close, '"' | '\'' | '”' | '’' | ')' | ']')) {
+            end = close_at + close.len_utf8();
+            next += 1;
+        }
+        if chars.get(next).is_none_or(|(_, after)| after.is_whitespace()) {
+            found = Some(end);
+        }
+    }
+    found
 }
 
 pub(crate) fn words(text: &str) -> usize {

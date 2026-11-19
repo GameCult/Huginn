@@ -30,7 +30,7 @@ use crate::address::{Addressee, is_for, localpart};
 use crate::chat_client::{Chat, ChatPending, Form};
 use crate::heartbeat::HeartbeatView;
 
-pub use narrate::{KitModel, Model, connector_key};
+pub use narrate::{Answer, KitModel, Model, Spent, connector_key};
 pub use select::TurnKind;
 pub use tuning::{TUNING_FILE, TUNING_ROOT};
 
@@ -197,7 +197,8 @@ fn packet_json(packet: &Packet) -> Value {
 /// store answers a repeated id with its first answer.
 fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuning::Tuning, tag: &str, now: DateTime<Utc>) -> Result<Value> {
     let request_id = format!("{AGENT}:{instance}:project:{tag}:{}:{}", packet.seed, now.timestamp_millis());
-    let raw = model.ask(&request_id, &tuning.projector.model, &projector_prompt(packet, tuning))?;
+    let answer = model.ask(&request_id, &tuning.projector.model, &projector_prompt(packet, tuning))?;
+    let raw = answer.text;
     let budget = word_budget(packet.kind, tuning);
     let narration = cap_words(&raw, budget);
     let ids: Vec<String> = packet.selected.iter().map(|pick| pick.id.clone()).collect();
@@ -209,6 +210,7 @@ fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuni
         "words": words(&narration),
         "cut_at_budget": words(&raw) > budget,
         "field_names": field_names(&narration, &named),
+        "usage": answer.usage,
         "narration": narration,
     }))
 }
@@ -287,10 +289,10 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
             let (first, second) = if swapped { (b, a) } else { (a, b) };
             let text = narration["narration"].as_str().unwrap_or_default();
             let answer = model.ask(&format!("{AGENT}:{}:judge:{at}:{}", request.instance, now.timestamp_millis()), &tuning.projector.model, &judge_prompt(first, second, text))?;
-            let letter = judged(&answer).map(|letter| if swapped { if letter == 'A' { 'B' } else { 'A' } } else { letter });
+            let letter = judged(&answer.text).map(|letter| if swapped { if letter == 'A' { 'B' } else { 'A' } } else { letter });
             let correct = letter == Some(truth);
             right += usize::from(correct);
-            verdicts.push(json!({ "from": truth.to_string(), "judged": letter.map(String::from), "correct": correct }));
+            verdicts.push(json!({ "from": truth.to_string(), "judged": letter.map(String::from), "correct": correct, "usage": answer.usage }));
         }
         let accuracy = right as f64 / verdicts.len().max(1) as f64;
         report["against"] = json!({ "packet": packet_json(&others[0]), "renders": other_narrations, "distinct_2": distinct_2(&texts(&other_narrations)) });

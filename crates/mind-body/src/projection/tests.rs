@@ -457,6 +457,16 @@ fn the_narration_is_cut_at_its_word_budget() {
     assert_eq!(words(&cut), 150);
     assert!(cut.ends_with("w149"));
     assert_eq!(cap_words("  a b\n c  ", 150), "a b\n c");
+}
+
+#[test]
+fn an_overrun_is_cut_at_the_last_sentence_end_inside_the_budget() {
+    assert_eq!(cap_words("One two three. Four five six! Seven eight nine ten", 8), "One two three. Four five six!");
+    assert_eq!(cap_words("She said \"go.\" Then she left the room for good", 6), "She said \"go.\"");
+    assert_eq!(cap_words("Is it late? It is… and quiet now", 5), "Is it late? It is…");
+    assert_eq!(cap_words("Version 1.2 is out and running", 3), "Version 1.2 is", "a dot inside a token is no sentence end");
+    assert_eq!(cap_words("one two three four five six", 4), "one two three four", "no sentence end inside the budget: the word cut");
+    assert_eq!(cap_words("Short. Whole.", 4), "Short. Whole.", "inside the budget nothing is cut");
     let tuning = Tuning::default();
     assert_eq!((word_budget(TurnKind::Chat, &tuning), word_budget(TurnKind::Beat, &tuning)), (150, 90));
 }
@@ -575,9 +585,11 @@ impl Recorded {
 }
 
 impl Model for Recorded {
-    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> Result<String> {
+    fn ask(&self, request_id: &str, model: &str, prompt: &str) -> Result<Answer> {
         self.calls.borrow_mut().push((request_id.to_owned(), model.to_owned(), prompt.to_owned()));
-        Ok(if prompt.starts_with("<!-- membrane:") { (self.narration)(prompt) } else { (self.judge)(prompt) })
+        let text = if prompt.starts_with("<!-- membrane:") { (self.narration)(prompt) } else { (self.judge)(prompt) };
+        let usage = Spent { model: model.to_owned(), input_tokens: prompt.len() as u64, output_tokens: text.len() as u64, cache_read_tokens: 7, cache_write_tokens: 3, reasoning_tokens: None };
+        Ok(Answer { text, usage: Some(usage) })
     }
 }
 
@@ -802,7 +814,9 @@ fn a_kit_call_is_one_tool_less_turn_by_her_instance() {
     let backend = Scripted::ending(StopReason::EndTurn, &["I turn ", "it over."]);
     let (model, _root) = kit(Arc::clone(&backend), KIT_MODEL);
     let id = "mind-persona:eureka:project:a:1:1";
-    assert_eq!(model.ask(id, KIT_MODEL, "The projector prompt.").unwrap(), "I turn it over.");
+    let answer = model.ask(id, KIT_MODEL, "The projector prompt.").unwrap();
+    assert_eq!(answer.text, "I turn it over.");
+    assert_eq!(answer.usage, Some(Spent { model: KIT_MODEL.into(), input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: None }), "the receipt's usage, by the model that ran");
     let seen = backend.seen.lock().unwrap();
     let (caller, request) = &seen[0];
     assert_eq!(caller, INSTANCE);
@@ -1115,4 +1129,24 @@ fn every_range_is_validated_on_its_own() {
     edge.select.temperature = 0.01;
     edge.select.addressed_bytes = 1024;
     assert!(edge.validate().is_ok(), "the edges themselves are allowed");
+}
+
+#[test]
+fn every_render_and_every_judge_call_carries_its_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let stored = Stored(state());
+    let mut tense = state();
+    tense["affect"]["socialBonds"][0]["tension"] = json!(0.9);
+    let chat = mouth();
+    let model = Recorded::discriminating();
+    let organs = Organs { persona: Some(&stored), chat: Some(&chat), addressing: None, model: Some(&model) };
+    let report = project(&organs, &request(dir.path(), Some(2), Some(tense)), now()).unwrap();
+    for render in report["renders"].as_array().unwrap().iter().chain(report["against"]["renders"].as_array().unwrap()) {
+        let usage = &render["usage"];
+        assert_eq!((usage["model"].as_str(), usage["cache_read_tokens"].as_u64(), usage["cache_write_tokens"].as_u64()), (Some("claude-sonnet-5-5"), Some(7), Some(3)), "{render}");
+        assert!(usage["input_tokens"].as_u64().unwrap() > 0 && usage["output_tokens"].as_u64().unwrap() > 0);
+    }
+    for verdict in report["judge"]["verdicts"].as_array().unwrap() {
+        assert_eq!(verdict["usage"]["output_tokens"].as_u64(), Some(1), "the judge answered one letter: {verdict}");
+    }
 }
