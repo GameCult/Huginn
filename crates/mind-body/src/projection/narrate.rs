@@ -116,6 +116,10 @@ pub(crate) fn words(text: &str) -> usize {
     text.split_whitespace().count()
 }
 
+/// The one kebab form that is ordinary English: "short-term" folds to the schema key `shortTerm`, and prose must not fail
+/// the judge for it. `shortTerm`, `short_term` and the run-together `shortterm` are still caught.
+const KEBAB_ENGLISH: &str = "short-term";
+
 /// Her persona state's schema: its property names are the identifiers a narration must never carry.
 const PERSONA_SCHEMA: &str = include_str!("../../../../schemas/cultnet/gamecult.persona_state.v0.schema.json");
 
@@ -173,7 +177,7 @@ pub(crate) fn field_names(narration: &str, ids: &[String]) -> Vec<String> {
     let known = identifiers();
     let mut found = BTreeSet::new();
     for token in narration.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')).map(|token| token.trim_matches('-')).filter(|token| !token.is_empty()) {
-        if known.contains(&folded(token)) {
+        if known.contains(&folded(token)) && !token.eq_ignore_ascii_case(KEBAB_ENGLISH) {
             found.insert(token.to_owned());
         }
     }

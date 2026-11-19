@@ -1065,8 +1065,11 @@ fn the_guard_catches_every_case_convention() {
     for leak in ["social-bonds", "socialbonds", "SOCIAL_BONDS", "SocialBonds", "candidate-actions", "the voice-summary", "inclusion-score", "activationProfile.situationalState"] {
         assert!(!field_names(leak, &[]).is_empty(), "{leak:?}");
     }
-    // The cost, recorded: a schema key that reads as English hyphenated is flagged too.
-    assert_eq!(field_names("a short-term thing", &[]), ["short-term"]);
+    // The one exemption: "short-term" is ordinary English; its identifier forms are still caught.
+    assert!(field_names("a short-term thing, and a Short-Term one", &[]).is_empty());
+    for leak in ["shortTerm", "short_term", "ShortTerm", "shortterm"] {
+        assert_eq!(field_names(&format!("her {leak} list"), &[]), [leak], "{leak}");
+    }
     for prose in ["the DevOps crew", "an iPhone", "GameCult", "PlayStation", "need-to-know", "trust: she waits"] {
         assert!(field_names(prose, &[]).is_empty(), "{prose:?}");
     }
