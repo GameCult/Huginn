@@ -353,11 +353,11 @@ dependencies = [
 [[package]]
 name = "cultcache-rs"
 version = "0.3.1"
-source = "git+https://github.com/GameCult/CultLib.git?rev=75188fdefa0b4baf131dbfd94e77d06a965f0cc6#75188fdefa0b4baf131dbfd94e77d06a965f0cc6"
+source = "git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb#baf4ecf78fae634fafef956d3b85420162c074bb"
 dependencies = [
  "anyhow",
  "chrono",
- "cultcache-rs-derive 0.2.0 (git+https://github.com/GameCult/CultLib.git?rev=75188fdefa0b4baf131dbfd94e77d06a965f0cc6)",
+ "cultcache-rs-derive 0.2.0 (git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb)",
  "fs2",
  "redb",
  "rmp-serde",
@@ -394,7 +394,7 @@ dependencies = [
 [[package]]
 name = "cultcache-rs-derive"
 version = "0.2.0"
-source = "git+https://github.com/GameCult/CultLib.git?rev=75188fdefa0b4baf131dbfd94e77d06a965f0cc6#75188fdefa0b4baf131dbfd94e77d06a965f0cc6"
+source = "git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb#baf4ecf78fae634fafef956d3b85420162c074bb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -439,13 +439,13 @@ dependencies = [
 [[package]]
 name = "cultnet-rs"
 version = "0.3.0"
-source = "git+https://github.com/GameCult/CultLib.git?rev=75188fdefa0b4baf131dbfd94e77d06a965f0cc6#75188fdefa0b4baf131dbfd94e77d06a965f0cc6"
+source = "git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb#baf4ecf78fae634fafef956d3b85420162c074bb"
 dependencies = [
  "aes-gcm",
  "anyhow",
  "base64",
  "chrono",
- "cultcache-rs 0.3.1 (git+https://github.com/GameCult/CultLib.git?rev=75188fdefa0b4baf131dbfd94e77d06a965f0cc6)",
+ "cultcache-rs 0.3.1 (git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb)",
  "ed25519-dalek",
  "fs2",
  "hmac",
@@ -612,7 +612,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "cultcache-rs 0.3.1 (git+https://github.com/GameCult/CultLib.git?rev=75188fdefa0b4baf131dbfd94e77d06a965f0cc6)",
+ "cultcache-rs 0.3.1 (git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb)",
  "rmp-serde",
  "schemars",
  "serde",
@@ -929,7 +929,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "cultcache-rs 0.3.1 (git+https://github.com/GameCult/CultLib.git?rev=75188fdefa0b4baf131dbfd94e77d06a965f0cc6)",
+ "cultcache-rs 0.3.1 (git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb)",
  "cultnet-rs 0.3.0",
  "eureka-pipeline",
  "jsonschema",
@@ -1104,7 +1104,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "cultcache-rs 0.3.1 (git+https://github.com/GameCult/CultLib.git?rev=75188fdefa0b4baf131dbfd94e77d06a965f0cc6)",
+ "cultcache-rs 0.3.1 (git+https://github.com/GameCult/CultLib.git?rev=baf4ecf78fae634fafef956d3b85420162c074bb)",
  "cultnet-rs 0.3.0",
  "eureka-pipeline",
  "eureka-state",
