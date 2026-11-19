@@ -595,7 +595,7 @@ fn said_to_her(to_her: &[&RoomLine], render: impl Fn(&RoomLine, &str) -> String,
     let mut clipped = 0;
     for line in to_her.iter().rev() {
         let whole = render(line, &spoken(&line.text));
-        if used + whole.len() + 1 <= ceiling {
+        if used + whole.len() < ceiling {
             used += whole.len() + 1;
             kept.push(whole);
             continue;
@@ -640,7 +640,11 @@ fn chat_stimulus(inputs: &Inputs, tuning: &Tuning) -> (String, String, Overflow)
     }
     let others_typed: Vec<String> = others.iter().map(|line| typed(line, &spoken(&line.text))).collect();
     let room_left = tuning.select.stimulus_bytes.saturating_sub(stimulus.len() + 1);
-    let also = newest_section("Also in the room:", &others_typed, room_left);
+    let mut also = newest_section("Also in the room:", &others_typed, room_left);
+    if also.is_empty() && !others_typed.is_empty() {
+        // The messages to her took the room: the others are counted, never silently gone.
+        also = format!("({} more in the room not shown)", others_typed.len());
+    }
     if !also.is_empty() {
         if !stimulus.is_empty() {
             stimulus.push('\n');

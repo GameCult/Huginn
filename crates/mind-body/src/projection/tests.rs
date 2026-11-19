@@ -256,8 +256,8 @@ fn an_item_shown_five_times_in_a_row_drops_out() {
 
 #[test]
 fn an_item_scoring_minus_twenty_one_almost_never_appears() {
-    // A memory three weeks old against a 24-hour time constant: recency alone is about exp(-21).
-    let state = json!({ "publicName": "Eureka", "thoughtMemory": { "memories": [{ "id": "ancient", "summary": "Long ago.", "createdAt": hours_ago(21 * 24) }] } });
+    // A short-term item three weeks old against a 24-hour time constant: recency alone is about exp(-21).
+    let state = json!({ "publicName": "Eureka", "thoughtMemory": { "shortTerm": [{ "id": "ancient", "summary": "Long ago.", "createdAt": hours_ago(21 * 24) }] } });
     let packet = packet_of(TurnKind::Beat, &state, &Room::default(), &History::default(), 1);
     assert!(packet.selected.is_empty() || packet.selected[0].log_score < -20.0);
     let shown = (1..=500).filter(|seed| !packet_of(TurnKind::Beat, &state, &Room::default(), &History::default(), *seed).selected.is_empty()).count();
@@ -327,7 +327,8 @@ fn every_message_to_her_survives() {
         assert!(packet.heard.contains(&format!("\"{words}\"")) && packet.stimulus.contains(&words), "message {at} to her was dropped");
     }
     let kept = packet.stimulus.matches("aside").count();
-    assert!(packet.stimulus.contains(&format!("({} earlier not shown)", 30 - kept)) || kept == 30, "the note counts exactly the others left out: {}", packet.stimulus);
+    let note = if kept == 0 { "(30 more in the room not shown)".to_owned() } else { format!("({} earlier not shown)", 30 - kept) };
+    assert!(packet.stimulus.contains(&note) || kept == 30, "the note counts exactly the others left out: {}", packet.stimulus);
 }
 
 #[test]
