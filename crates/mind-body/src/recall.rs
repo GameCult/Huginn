@@ -1,20 +1,20 @@
-//! What of her own mind enters a Persona turn besides what she is always shown, and in what words.
+//! What of her own mind the Projector's Select stage may draw on, and in what words.
 //!
 //! Ruling `eureka-body:ruling:persona-memory-written-not-transcript`: what she
 //! must still know when the conversation is gone is written into her mind as
-//! typed memory, and a later turn reads it back from there. Open asks and open
-//! commitments are not recalled. This module owns the cued, ranked remainder
-//! and nothing else. It reads only her own mind through `MindPort`; it reads no
+//! typed memory, and a later turn reads it back from there. Only memories of the
+//! sorts the cue names are recalled (`persona-tuning.toml`'s `recall_sorts`): her
+//! Mind is mostly the mission's record, and work is not hers. This module owns the
+//! cued, ranked candidates and nothing else. It reads only her own mind through `MindPort`; it reads no
 //! chat (the lines shown beside a message are conversation, never memory),
 //! keeps no cache between turns, and holds no index: the daemon's index answers
 //! `MindPort::query_near`, and a rank only orders.
 //!
-//! Three lanes, merged in this order and de-duplicated by id, none showing an
-//! open item:
+//! Three lanes, merged in this order and de-duplicated by id:
 //! - `about`: memory in force about any other sender of this batch, ranked by
 //!   `weight` from the newest `POOL` of them.
-//! - `relevant`: memory, follow-up and ruling in force nearest the batch's
-//!   words, in the daemon's order. A wake has no words and skips it.
+//! - `relevant`: memory in force nearest the batch's words, in the daemon's
+//!   order. A wake has no words and skips it.
 //! - `salient`: memory in force ranked by `weight` from the newest `POOL`.
 //!   On a wake, which has no senders and no words, this is all that runs.
 //!
@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use cultnet_rs::Selection;
-use eureka_pipeline::{MemoryOrigin, MemorySort, PipelineDocument, PipelineKind, RulingAuthority};
+use eureka_pipeline::{MemoryOrigin, MemorySort, PipelineDocument, PipelineKind};
 use huginn_mind::{PipelineDocumentView, PipelinePageItems};
 
 use crate::persona::quoted;
@@ -49,8 +49,6 @@ const POOL: u32 = 32;
 pub(crate) const RECENCY_HALF_LIFE_H: f64 = 72.0;
 /// The longest semantic text, in bytes, cut on a character boundary.
 pub(crate) const NEAR_TEXT_MAX: usize = 1000;
-/// The sorts recall may show: the ones that are not open items.
-const RECALLED_SORTS: [&str; 5] = ["Decided", "Learned", "Did", "Idea", "Rapport"];
 
 /// Which lane brought an item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -68,9 +66,7 @@ pub(crate) struct Entry {
     pub line: String,
     /// The Matrix ids its `about` and origin name.
     pub people: Vec<String>,
-    pub kind: PipelineKind,
-    /// A memory's salience; none for another kind.
-    pub salience_permille: Option<u16>,
+    pub salience_permille: u16,
     pub admitted_at: String,
     /// The daemon's nearness to the turn's words, in thousandths of its score; the relevant lane's alone.
     pub nearness_permille: Option<u16>,
@@ -117,8 +113,8 @@ pub(crate) struct Cue<'a> {
     pub texts: Vec<&'a str>,
     /// Display names by sender id, to read a line with.
     pub names: BTreeMap<&'a str, &'a str>,
-    /// Follow-ups and rulings the responsibilities section already lists.
-    pub listed: &'a [String],
+    /// The memory sorts that may be recalled, as the mind spells them (`Learned`, `Idea`, ...).
+    pub sorts: &'a [String],
     /// The time recency is measured against.
     pub now: DateTime<Utc>,
 }
@@ -152,8 +148,9 @@ fn newest(selection: Selection, limit: u32) -> Selection {
     Selection { descending: true, limit: Some(limit), projection: "document".into(), ..selection }
 }
 
-fn recalled_memories_in_force() -> Selection {
-    any_of(in_force(of_kind(PipelineKind::Memory)), "sort", &RECALLED_SORTS)
+fn recalled_memories_in_force(sorts: &[String]) -> Selection {
+    let sorts: Vec<&str> = sorts.iter().map(String::as_str).collect();
+    any_of(in_force(of_kind(PipelineKind::Memory)), "sort", &sorts)
 }
 
 /// How much a memory weighs: its salience in thousandths of one, plus a
@@ -207,12 +204,8 @@ pub(crate) fn origin_phrase(origin: &MemoryOrigin, names: &BTreeMap<&str, &str>)
 }
 
 /// One memory as its line: date, where and from whom she learned it, what it
-/// is and whom it concerns, then her words. The one way a memory reads, for
-/// recall and for the open items the responsibilities section shows, which pass
-/// `with_id` to lead with the id she settles it by. `about` is never the place.
-pub(crate) fn memory_line(view: &PipelineDocumentView, names: &BTreeMap<&str, &str>, with_id: bool) -> Option<String> {
-    // An open item of the responsibilities (the one caller that leads with the id) shows a clipped text; recall shows it whole.
-    let PipelineDocument::Memory(memory) = &view.document else { return None };
+/// is and whom it concerns, then her words, quoted on one line. `about` is never the place.
+fn memory_line(view: &PipelineDocumentView, memory: &eureka_pipeline::PipelineMemory, names: &BTreeMap<&str, &str>) -> String {
     let date = view.admission.admitted_at.get(..10).unwrap_or(&view.admission.admitted_at);
     let origin = origin_phrase(&memory.origin, names);
     let about = who(memory.about.iter().map(|id| id.0.as_str()), names);
@@ -223,67 +216,28 @@ pub(crate) fn memory_line(view: &PipelineDocumentView, names: &BTreeMap<&str, &s
         (sort, true) => format!("{sort:?}"),
         (sort, false) => format!("{sort:?} about {about}"),
     };
-    let lead = if with_id { format!("{} ", view.id.id.0) } else { String::new() };
-    Some(format!("- {lead}({date}, {origin}, {sort}): {}\n", quoted(&if with_id { clipped(&memory.text.0) } else { memory.text.0.clone() })))
+    format!("- ({date}, {origin}, {sort}): {}\n", quoted(&memory.text.0))
 }
 
-/// The most bytes of an item's text a listed line carries; the rest is one `huginn view` away.
-pub(crate) const LINE_TEXT_MAX_BYTES: usize = 160;
-
-/// `text` cut to about `LINE_TEXT_MAX_BYTES` on a character boundary, with an ellipsis where it was cut.
-pub(crate) fn clipped(text: &str) -> String {
-    if text.len() <= LINE_TEXT_MAX_BYTES {
-        return text.to_owned();
-    }
-    let cut = (0..=LINE_TEXT_MAX_BYTES).rev().find(|at| text.is_char_boundary(*at)).unwrap_or(0);
-    format!("{}…", &text[..cut])
-}
-
-/// One recalled document as its line, or None for a kind recall does not show.
-fn line_of(view: &PipelineDocumentView, names: &BTreeMap<&str, &str>) -> Option<String> {
-    match &view.document {
-        PipelineDocument::Memory(_) => memory_line(view, names, false),
-        PipelineDocument::FollowUp(follow_up) => Some(format!("- You set yourself to: {}\n", quoted(follow_up.item.0.lines().next().unwrap_or("")))),
-        PipelineDocument::Ruling(ruling) => {
-            let title = quoted(&ruling.title.0);
-            Some(match &ruling.authority {
-                RulingAuthority::Steward { steward, repo, .. } => {
-                    // A display name is a member's text: keep it to one line.
-                    let who: String = names.get(steward.0.as_str()).copied().unwrap_or(steward.0.as_str()).chars().filter(|c| !c.is_control()).collect();
-                    format!("- {who} ruled, as steward of {}: {title}\n", repo.0)
-                }
-                RulingAuthority::Mind => format!("- You ruled: {title}\n"),
-                RulingAuthority::Operator => format!("- The operator ruled: {title}\n"),
-                RulingAuthority::Standing | RulingAuthority::Defaulted => format!("- Ruled: {title}\n"),
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Fills one lane from its ranked candidates: each not yet shown or listed
-/// elsewhere, within the lane's item limit and byte budget (a line that does
+/// Fills one lane from its ranked candidates: each not yet shown by an earlier lane, within the lane's item limit and byte budget (a line that does
 /// not fit is skipped, a later shorter one may). `matched` is how many the
 /// lane's query matched, so what it left out is counted exactly.
 fn fill(lane: Lane, candidates: Vec<(PipelineDocumentView, Option<u16>)>, matched: usize, limit: usize, budget: usize, seen: &mut Vec<String>, cue: &Cue) -> Shown {
     let (mut entries, mut bytes, mut elsewhere) = (Vec::new(), 0usize, 0usize);
     for (view, nearness_permille) in candidates {
         let id = view.id.id.0.clone();
-        if seen.contains(&id) || cue.listed.contains(&id) {
+        if seen.contains(&id) {
             elsewhere += 1;
             continue;
         }
-        let Some(line) = line_of(&view, &cue.names) else { continue };
+        let PipelineDocument::Memory(memory) = &view.document else { continue };
+        let line = memory_line(&view, memory, &cue.names);
         if entries.len() == limit || bytes + line.len() > budget {
             continue;
         }
         seen.push(id.clone());
         bytes += line.len();
-        let (people, salience_permille) = match &view.document {
-            PipelineDocument::Memory(memory) => (people_of(memory), Some(memory.salience_permille)),
-            _ => (Vec::new(), None),
-        };
-        entries.push(Entry { id, line, people, kind: view.id.kind, salience_permille, admitted_at: view.admission.admitted_at.clone(), nearness_permille });
+        entries.push(Entry { id, line, people: people_of(memory), salience_permille: memory.salience_permille, admitted_at: view.admission.admitted_at.clone(), nearness_permille });
     }
     let left_out = matched.saturating_sub(entries.len() + elsewhere);
     Shown { lane, entries, left_out }
@@ -293,39 +247,32 @@ fn unscored(views: Vec<PipelineDocumentView>) -> Vec<(PipelineDocumentView, Opti
     views.into_iter().map(|view| (view, None)).collect()
 }
 
-/// Whether a view is an open ask or commitment: a memory of those sorts.
-fn is_open_item(view: &PipelineDocumentView) -> bool {
-    matches!(&view.document, PipelineDocument::Memory(memory) if matches!(memory.sort, MemorySort::Asked | MemorySort::Committed))
-}
-
 /// Selects what her mind gives this turn. A mind that cannot be read fails the
 /// turn; an index that cannot be asked only loses the relevant lane.
 pub(crate) fn select(mind: &dyn MindPort, cue: &Cue) -> Result<Recalled> {
     let (about, about_matched) = if cue.senders.is_empty() {
         (Vec::new(), 0)
     } else {
-        let page = mind.query(&newest(any_of(recalled_memories_in_force(), "about", &cue.senders), POOL))?;
+        let page = mind.query(&newest(any_of(recalled_memories_in_force(cue.sorts), "about", &cue.senders), POOL))?;
         let matched = page.matched as usize;
         (unscored(ranked(documents(page)?, cue.now)), matched)
     };
     let (relevant, search) = match near_text(cue) {
         None => (Vec::new(), Search::Skipped),
         Some(text) => {
-            let kinds = [PipelineKind::Memory, PipelineKind::FollowUp, PipelineKind::Ruling];
-            let members = in_force(Selection { schemas: Some(kinds.iter().map(|kind| kind.type_id().to_string()).collect()), projection: "document".into(), ..Selection::default() });
+            let members = Selection { projection: "document".into(), ..recalled_memories_in_force(cue.sorts) };
             let scored = mind.query_near(&members, &text, POOL).and_then(|page| {
                 let scores = page.scores.clone().unwrap_or_default();
                 let nearness = scores.iter().map(|score| Some((f64::from(*score) * 1000.0).round().clamp(0.0, 1000.0) as u16)).chain(std::iter::repeat(None));
                 Ok(documents(page)?.into_iter().zip(nearness).collect::<Vec<_>>())
             });
             match scored {
-                // An open ask or commitment is shown by the responsibilities section; it never comes here.
-                Ok(found) => (found.into_iter().filter(|(view, _)| !is_open_item(view)).collect::<Vec<_>>(), Search::Ran),
+                Ok(found) => (found, Search::Ran),
                 Err(_) => (Vec::new(), Search::Unavailable),
             }
         }
     };
-    let page = mind.query(&newest(recalled_memories_in_force(), POOL))?;
+    let page = mind.query(&newest(recalled_memories_in_force(cue.sorts), POOL))?;
     let salient_matched = page.matched as usize;
     let salient = unscored(ranked(documents(page)?, cue.now));
 

@@ -344,6 +344,76 @@ fn tuning_absent_is_the_defaults_and_a_file_overrides_and_an_unknown_key_refuses
     assert!(format!("{:#}", tuning::load(&path).unwrap_err()).contains("temprature"), "a mistyped knob refuses the file");
 }
 
+/// A mind holding one memory of each sort, all about Libby and all on her words.
+fn mind_of_every_sort() -> TestMind {
+    let mind = TestMind::seeded();
+    let documents = super::tuning::MEMORY_SORTS
+        .iter()
+        .map(|sort| {
+            let parsed: MemorySort = serde_json::from_value(json!(sort)).unwrap();
+            memory(&format!("sort-{}", sort.to_lowercase()), parsed, &format!("the door and Libby, {sort}"), &["@libby:gamecult.org"])
+        })
+        .collect();
+    mind.committed(documents);
+    mind
+}
+
+/// Every Mind memory id `project` offered Select on 40 seeds, with the tuning at `dir`.
+fn recalled_on_every_seed(mind: &TestMind, dir: &std::path::Path) -> (BTreeSet<String>, Value) {
+    let stored = Stored(state());
+    let chat = mouth();
+    let organs = Organs { persona: Some(&stored), mind: Some(mind), chat: Some(&chat), model: None };
+    let mut shown = BTreeSet::new();
+    let mut last = Value::Null;
+    for seed in 1..=40 {
+        let report = project(&organs, &Request { seed, ..request(dir, None, None) }, now()).unwrap();
+        let recalled: Vec<String> = report["packet"]["selected"].as_array().unwrap().iter().filter(|pick| pick["pool"] == "recall").map(|pick| pick["id"].as_str().unwrap().to_owned()).collect();
+        assert!(recalled.len() <= 1, "the default recall cap is one item a packet: {recalled:?}");
+        shown.extend(recalled);
+        last = report;
+    }
+    (shown, last)
+}
+
+#[test]
+fn recall_offers_only_the_tunings_sorts_and_the_default_keeps_work_out() {
+    let mind = mind_of_every_sort();
+    let dir = tempfile::tempdir().unwrap();
+    let (shown, report) = recalled_on_every_seed(&mind, dir.path());
+    assert_eq!(report["recall"]["sorts"], json!(["Learned", "Idea", "Decided", "Rapport"]), "the report says which sorts it used");
+    for work in ["committed", "did", "asked"] {
+        assert!(!shown.iter().any(|id| id.ends_with(&format!("sort-{work}"))), "{work} is work and never reaches her by default: {shown:?}");
+    }
+    assert!(!shown.is_empty(), "some allowed sort is recalled: {shown:?}");
+    std::fs::write(dir.path().join(TUNING_FILE), "[select]\nrecall_sorts = [\"Committed\", \"Did\"]\n").unwrap();
+    let (shown, report) = recalled_on_every_seed(&mind, dir.path());
+    assert_eq!(report["recall"]["sorts"], json!(["Committed", "Did"]));
+    assert!(shown.iter().any(|id| id.ends_with("sort-committed") || id.ends_with("sort-did")), "an experiment that names them admits them: {shown:?}");
+    assert!(shown.iter().all(|id| id.ends_with("sort-committed") || id.ends_with("sort-did")), "and only them: {shown:?}");
+}
+
+#[test]
+fn the_recall_cap_holds_and_a_tuning_may_raise_it() {
+    let mind = mind_of_every_sort();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(TUNING_FILE), "[select.caps]\nrecall = 3\n").unwrap();
+    let stored = Stored(state());
+    let chat = mouth();
+    let organs = Organs { persona: Some(&stored), mind: Some(&mind), chat: Some(&chat), model: None };
+    let most = (1..=40)
+        .map(|seed| project(&organs, &Request { seed, ..request(dir.path(), None, None) }, now()).unwrap()["packet"]["selected"].as_array().unwrap().iter().filter(|pick| pick["pool"] == "recall").count())
+        .max()
+        .unwrap();
+    assert!((2..=3).contains(&most), "a raised cap admits more, and never past it: {most}");
+}
+
+#[test]
+fn a_recall_sort_the_mind_does_not_know_refuses_the_tuning() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(TUNING_FILE), "[select]\nrecall_sorts = [\"Learnt\"]\n").unwrap();
+    assert!(format!("{:#}", tuning::load(&dir.path().join(TUNING_FILE)).unwrap_err()).contains("Learnt"));
+}
+
 #[test]
 fn a_lower_temperature_concentrates_the_selection() {
     let room = chat_room();

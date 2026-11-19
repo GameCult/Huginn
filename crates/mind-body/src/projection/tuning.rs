@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -65,8 +65,14 @@ pub struct SelectTuning {
     pub people_full: usize,
     /// The room lines a beat shows.
     pub beat_tail_lines: usize,
+    /// The sorts of her Mind's memories recall may offer, as the mind spells them. Her Mind is mostly the mission's
+    /// record: Committed, Did and Asked are work and stay out unless an experiment names them.
+    pub recall_sorts: Vec<String>,
     pub caps: PoolCaps,
 }
+
+/// Every memory sort the mind knows.
+pub(crate) const MEMORY_SORTS: [&str; 7] = ["Asked", "Committed", "Decided", "Learned", "Did", "Idea", "Rapport"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -114,6 +120,7 @@ impl Default for SelectTuning {
             freshness_window: 5,
             people_full: 2,
             beat_tail_lines: 6,
+            recall_sorts: ["Learned", "Idea", "Decided", "Rapport"].map(String::from).to_vec(),
             caps: PoolCaps::default(),
         }
     }
@@ -121,7 +128,8 @@ impl Default for SelectTuning {
 
 impl Default for PoolCaps {
     fn default() -> Self {
-        Self { memories_about_present: 2, other_memories: 2, needs: 1, incubation: 1, stance: 1, recall: 2, value: 1, said: 1 }
+        // One recalled item a packet: her own persona state is what she is made of; her Mind only seasons it.
+        Self { memories_about_present: 2, other_memories: 2, needs: 1, incubation: 1, stance: 1, recall: 1, value: 1, said: 1 }
     }
 }
 
@@ -151,6 +159,9 @@ pub fn load(path: &Path) -> Result<Loaded> {
     };
     let text = std::str::from_utf8(&bytes).with_context(|| format!("the tuning {} is not UTF-8", path.display()))?;
     let tuning: Tuning = toml::from_str(text).with_context(|| format!("the tuning {} is not a tuning", path.display()))?;
+    if let Some(unknown) = tuning.select.recall_sorts.iter().find(|sort| !MEMORY_SORTS.contains(&sort.as_str())) {
+        bail!("the tuning {} names {unknown:?} in recall_sorts, which is not a memory sort ({})", path.display(), MEMORY_SORTS.join(", "));
+    }
     Ok(Loaded { tuning, source: "file", sha256: hex(&Sha256::digest(&bytes)) })
 }
 

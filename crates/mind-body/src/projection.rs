@@ -19,7 +19,6 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use eureka_pipeline::PipelineKind;
 use eureka_state::HuginnClient;
 use huginn_mind::HuginnMindResponse;
 use serde_json::{Value, json};
@@ -134,18 +133,18 @@ fn read_room(chat: &dyn Chat, request: &Request, public_name: &str) -> (Room, Va
     (Room { messages, tail, here: request.room.clone() }, report)
 }
 
-/// What her Mind recalls for this room, as Select candidates: memories and rulings, never follow-ups (work is not hers).
-fn read_recall(mind: &dyn MindPort, room: &Room, now: DateTime<Utc>) -> Result<(Vec<Recalled>, Value)> {
+/// What her Mind recalls for this room, as Select candidates: memories of the tuning's `recall_sorts` and nothing else.
+fn read_recall(mind: &dyn MindPort, room: &Room, sorts: &[String], now: DateTime<Utc>) -> Result<(Vec<Recalled>, Value)> {
     let lines = room.messages.iter().chain(room.tail.iter());
     let mut senders: Vec<&str> = lines.clone().map(|line| line.sender.as_str()).collect();
     senders.dedup();
     let names: BTreeMap<&str, &str> = lines.map(|line| (line.sender.as_str(), line.display.as_str())).filter(|(_, name)| !name.is_empty()).collect();
     let texts: Vec<&str> = room.messages.iter().rev().map(|line| line.text.as_str()).collect();
-    let cue = recall::Cue { senders, texts, names, listed: &[], now };
+    let cue = recall::Cue { senders, texts, names, sorts, now };
     let recalled = recall::select(mind, &cue)?;
     let mut out = Vec::new();
     for shown in &recalled.lanes {
-        for entry in shown.entries.iter().filter(|entry| matches!(entry.kind, PipelineKind::Memory | PipelineKind::Ruling)) {
+        for entry in &shown.entries {
             let touch = match shown.lane {
                 recall::Lane::About => TOUCH_ABOUT,
                 recall::Lane::Relevant => entry.nearness_permille.map_or(TOUCH_RELEVANT_UNSCORED, |near| f64::from(near.max(1)) / 1000.0),
@@ -154,14 +153,14 @@ fn read_recall(mind: &dyn MindPort, room: &Room, now: DateTime<Utc>) -> Result<(
             out.push(Recalled {
                 id: entry.id.clone(),
                 text: entry.line.trim().trim_start_matches("- ").to_owned(),
-                salience: f64::from(entry.salience_permille.unwrap_or(500)) / 1000.0,
+                salience: f64::from(entry.salience_permille) / 1000.0,
                 admitted_at: DateTime::parse_from_rfc3339(&entry.admitted_at).ok().map(|at| at.with_timezone(&Utc)),
                 touch,
             });
         }
     }
     let search = format!("{:?}", recalled.search).to_lowercase();
-    let report = json!({ "asked": true, "items": out.len(), "search": search });
+    let report = json!({ "asked": true, "sorts": sorts, "items": out.len(), "search": search });
     Ok((out, report))
 }
 
@@ -228,8 +227,8 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
         None => (Room { here: request.room.clone(), ..Room::default() }, json!({ "read": false, "why": "no mouth is configured" })),
     };
     let (recall, recall_report) = match organs.mind {
-        Some(mind) => read_recall(mind, &room, now)?,
-        None => (Vec::new(), json!({ "asked": false })),
+        Some(mind) => read_recall(mind, &room, &tuning.select.recall_sorts, now)?,
+        None => (Vec::new(), json!({ "asked": false, "sorts": tuning.select.recall_sorts })),
     };
     // Freshness and her own recent words come from trace v2, which the commit writes (C3c); until then there is none.
     let history = History::default();
