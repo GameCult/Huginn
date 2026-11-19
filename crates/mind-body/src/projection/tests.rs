@@ -1287,8 +1287,10 @@ fn the_report_says_how_old_the_addressing_table_is_and_why_it_was_not_used() {
     let written = now() - chrono::Duration::minutes(90);
     let with_her = run(&Stale(Some(crate::heartbeat::Addressing { minds: vec![hers] }), Some(written)));
     assert_eq!((with_her["source"].as_str(), with_her["age_minutes"].as_i64()), (Some("heartbeat"), Some(90)));
-    let without_her = run(&Stale(Some(crate::heartbeat::Addressing { minds: vec![other] }), Some(written)));
-    assert!(without_her["why"].as_str().unwrap().contains("no row for her"), "{without_her}");
+    for written_at in [Some(written), None] {
+        let without_her = run(&Stale(Some(crate::heartbeat::Addressing { minds: vec![other.clone()] }), written_at));
+        assert!(without_her["why"].as_str().unwrap().contains("no row for her"), "a table without her is that, whatever its age: {without_her}");
+    }
     let no_file = run(&Stale(None, None));
     assert!(no_file["why"].as_str().unwrap().contains("no heartbeat file") && no_file["age_minutes"].is_null(), "{no_file}");
     let no_table = run(&Stale(None, Some(written)));

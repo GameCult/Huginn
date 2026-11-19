@@ -146,9 +146,9 @@ fn own_addressee(addressing: Option<&dyn HeartbeatView>, own_sender: &str, publi
     let why = match (&table, written_at) {
         (None, _) => "no heartbeat addressing is configured (MIND_HEARTBEAT_STATE is not set)".to_owned(),
         (Some(Err(fault)), _) => format!("the heartbeat addressing could not be read: {fault:#}"),
-        (Some(Ok(_)), None) => "there is no heartbeat file".to_owned(),
+        (Some(Ok(Some(_))), _) => "the heartbeat's addressing table has no row for her".to_owned(),
+        (Some(Ok(None)), None) => "there is no heartbeat file".to_owned(),
         (Some(Ok(None)), Some(_)) => "the heartbeat file holds no addressing table".to_owned(),
-        (Some(Ok(Some(_))), Some(_)) => "the heartbeat's addressing table has no row for her".to_owned(),
     };
     (Addressee::new(own_sender, [localpart(own_sender), public_name]), report("own names only", &why))
 }
