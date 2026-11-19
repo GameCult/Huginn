@@ -66,7 +66,8 @@ pub struct SelectTuning {
     /// The room lines a beat shows.
     pub beat_tail_lines: usize,
     /// The sorts of her Mind's memories recall may offer, as the mind spells them. Her Mind is mostly the mission's
-    /// record: Committed, Did and Asked are work and stay out unless an experiment names them.
+    /// record: Committed, Did, Asked and Decided (her Mind files mission decisions as Decided) are work and stay out unless
+    /// an experiment names them.
     pub recall_sorts: Vec<String>,
     pub caps: PoolCaps,
 }
@@ -120,7 +121,7 @@ impl Default for SelectTuning {
             freshness_window: 5,
             people_full: 2,
             beat_tail_lines: 6,
-            recall_sorts: ["Learned", "Idea", "Decided", "Rapport"].map(String::from).to_vec(),
+            recall_sorts: ["Learned", "Idea", "Rapport"].map(String::from).to_vec(),
             caps: PoolCaps::default(),
         }
     }

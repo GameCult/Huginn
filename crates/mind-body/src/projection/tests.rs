@@ -380,8 +380,8 @@ fn recall_offers_only_the_tunings_sorts_and_the_default_keeps_work_out() {
     let mind = mind_of_every_sort();
     let dir = tempfile::tempdir().unwrap();
     let (shown, report) = recalled_on_every_seed(&mind, dir.path());
-    assert_eq!(report["recall"]["sorts"], json!(["Learned", "Idea", "Decided", "Rapport"]), "the report says which sorts it used");
-    for work in ["committed", "did", "asked"] {
+    assert_eq!(report["recall"]["sorts"], json!(["Learned", "Idea", "Rapport"]), "the report says which sorts it used");
+    for work in ["committed", "did", "asked", "decided"] {
         assert!(!shown.iter().any(|id| id.ends_with(&format!("sort-{work}"))), "{work} is work and never reaches her by default: {shown:?}");
     }
     assert!(!shown.is_empty(), "some allowed sort is recalled: {shown:?}");
