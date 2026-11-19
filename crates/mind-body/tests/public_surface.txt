@@ -205,7 +205,6 @@ mind_body::lease_client: pub enum Lent { Granted (Box < dyn Lease >) , Refused (
 mind_body::lease_client: pub trait Lease { fn token (& self) -> & TokenFd ; fn plan_quota (& self) -> & [PlanQuota] ; }
 mind_body::lease_client: pub trait Lender { fn lend (& self , request : & LeaseRequest) -> Result < Lent > ; }
 mind_body::lease_client: struct Inheritable  pub-fields[]
-ygg-verify: exit 0
 mind_body::lease_client: struct LeaseRefused # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[kind: LeaseRefusalKind, detail: String]
 mind_body::lease_client: struct LeaseRequest # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[expires_at_unix_ms: u64]
 mind_body::lease_client: struct SocketLender  pub-fields[]
