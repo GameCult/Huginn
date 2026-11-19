@@ -92,7 +92,7 @@ fn declared_names(node: &Value, names: &mut BTreeSet<String>) {
 
 /// Rule 1: the document is valid against the published schema. The first
 /// failure is the refusal; it names where and which keyword, never the value.
-pub(crate) fn validate_shape(state: &Value) -> Result<(), MindRefusal> {
+fn validate_shape(state: &Value) -> Result<(), MindRefusal> {
     let compiled = compiled()?;
     let Err(error) = compiled.validator.validate(state) else { return Ok(()) };
     let mut path = error
@@ -113,6 +113,21 @@ pub(crate) fn validate_shape(state: &Value) -> Result<(), MindRefusal> {
         path: format!("/{}", path.join("/")),
         message: format!("fails the published schema's {} rule", error.kind().keyword()),
     })
+}
+
+/// Rules P1 to P3 of a put, the ones that read the document alone: it is valid against the published schema (P1), it is
+/// this mind's (`personaId` is `instance`, P2), and its provenance is canonical (P3). A put applies these first and then
+/// the rules that read the store; a reader of a state file outside the mind (`mind-persona project --state`) applies
+/// these and nothing else, so a file it accepts is one a put would not refuse for its content.
+pub fn validate_document(instance: &Slug, state: &Value) -> Result<(), MindRefusal> {
+    validate_shape(state)?;
+    if state.get("personaId").and_then(Value::as_str) != Some(instance.0.as_str()) {
+        return Err(MindRefusal::PersonaForeign { instance: instance.0.clone() });
+    }
+    if state.pointer("/provenance/authority").and_then(Value::as_str) != Some("canonical") {
+        return Err(MindRefusal::PersonaNotCanonical);
+    }
+    Ok(())
 }
 
 /// A stored persona envelope's document.

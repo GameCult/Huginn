@@ -16,8 +16,9 @@
 //! (`chat_client` is the chat wire and port and `chat_rudp` its RUDP transport to Bifrost's mouth).
 //!
 //! `projection` is the Projector of the Persona-only turn: the Select stage chooses what she can feel and the
-//! Projector narrates it as her lived stream, under `persona-tuning.toml`; `mind-persona project` runs both and writes
-//! nothing.
+//! Projector narrates it as her lived stream, under `persona-tuning.toml`; the Persona stage continues it in her prose.
+//! `mind-persona project` runs them and writes nothing; `projection::harness` runs it over mocked rooms, batches of
+//! candidate states and a simulated swarm.
 //!
 //! `lease_client` asks the Claude connector for a session's credential and the
 //! plan's usage windows. `self_run` carries one Self run inside `mind-self@<instance>`: the

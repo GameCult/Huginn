@@ -268,17 +268,9 @@ impl<S: MindStore> Mind<S> {
         if self.is_empty() {
             return Err(MindRefusal::MissingIdentity);
         }
-        // P1
-        persona::validate_shape(&state)?;
-        // P2
+        // P1 to P3: the document alone, the one check an offline reader of a state file shares.
         let mind = self.instance().clone();
-        if state.get("personaId").and_then(Value::as_str) != Some(mind.0.as_str()) {
-            return Err(MindRefusal::PersonaForeign { instance: mind.0 });
-        }
-        // P3
-        if state.pointer("/provenance/authority").and_then(Value::as_str) != Some("canonical") {
-            return Err(MindRefusal::PersonaNotCanonical);
-        }
+        persona::validate_document(&mind, &state)?;
         // P4
         let stored = self.stored_updated_at()?;
         if stored != expected_updated_at {

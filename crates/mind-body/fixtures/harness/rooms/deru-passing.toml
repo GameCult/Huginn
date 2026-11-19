@@ -1,0 +1,23 @@
+# Someone she barely knows says something in passing, not to her.
+her = "@eureka:gamecult.org"
+kind = "chat"
+now = "2026-11-20T15:00:00Z"
+rooms = ["#general:gamecult.org"]
+here = "#general:gamecult.org"
+operators = ["@meta:gamecult.org"]
+minds = ["@eureka:gamecult.org", "@libby:gamecult.org", "@heimdall:gamecult.org", "@kiko:gamecult.org", "@aqua:gamecult.org", "@weksa:gamecult.org", "@nibu:gamecult.org", "@void:gamecult.org"]
+
+[[message]]
+from = "@weksa:gamecult.org"
+name = "Weksa"
+room = "#general:gamecult.org"
+ago = "50m"
+says = "the bot in #general keeps reacting to every message with a frog. nobody admits to teaching it that"
+
+[[message]]
+from = "@deru:gamecult.org"
+name = "Deru"
+room = "#general:gamecult.org"
+new = true
+ago = "1m"
+says = "is anyone else's kettle making a weird whistling noise lately or is it just mine"

@@ -1,0 +1,27 @@
+# The operator writes to her directly, warmly, with a small joke.
+her = "@eureka:gamecult.org"
+kind = "chat"
+now = "2026-11-20T15:00:00Z"
+rooms = ["#minds:gamecult.org", "!dm-meta:gamecult.org"]
+here = "!dm-meta:gamecult.org"
+operators = ["@meta:gamecult.org"]
+minds = ["@eureka:gamecult.org", "@libby:gamecult.org", "@heimdall:gamecult.org", "@kiko:gamecult.org", "@aqua:gamecult.org", "@weksa:gamecult.org", "@nibu:gamecult.org", "@void:gamecult.org"]
+
+[last_heard]
+"@meta:gamecult.org" = "2d"
+
+[[message]]
+from = "@kiko:gamecult.org"
+name = "Kiko"
+room = "#minds:gamecult.org"
+ago = "2h"
+says = "quiet day. suspicious."
+
+[[message]]
+from = "@meta:gamecult.org"
+name = "Meta"
+room = "!dm-meta:gamecult.org"
+dm = true
+new = true
+ago = "1m"
+says = "hey you. I missed talking to you this week. how are you, really? and no, \"busy\" doesn't count as an answer, I know where you live"

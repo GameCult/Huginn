@@ -1,4 +1,5 @@
-//! The Projector's narration, and the judge that measures it: one tool-less connector call each.
+//! The Projector's narration, the Persona stage's continuation, and the judge that measures them: one tool-less
+//! connector call each.
 //!
 //! `KitModel` is the stream organ's `KitProjector`, copied here when the stream was parked
 //! (`persona-only-divergence-parked`), so the Projector has one caller on the connector.
@@ -10,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
-use ghostlight_persona_projection::{ProjectorPrompt, build_projector_prompt};
+use ghostlight_persona_projection::{PersonaPrompt, ProjectorPrompt, build_persona_prompt, build_projector_prompt};
 use model_connector::{ConnectorClient, InputItem, ProviderRequest, ReasoningEffort, StopReason, TransportDisposition, TransportEventPayload, TransportInvocation, TransportOutcome};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -172,6 +173,44 @@ fn word_starts(text: &str) -> Vec<usize> {
 
 /// The share of the budget a sentence cut must keep; below it the word cut keeps more of the stream.
 const SENTENCE_CUT_FLOOR: f64 = 0.6;
+
+// ---------------------------------------------------------------------------------------------
+// The Persona stage.
+
+/// What the Persona is shown as her moment: the Projector's narration, then what was said to her and in her room,
+/// verbatim, as code rendered it (map section 3.2: the Projector never paraphrases what she heard).
+pub(crate) fn lived_stream(narration: &str, heard: &str) -> String {
+    if heard.trim().is_empty() { narration.to_owned() } else { format!("{narration}\n\n{heard}") }
+}
+
+/// The Persona stage's prompt: Ghostlight's prose-only membrane over her identity and her lived stream. No field name,
+/// number, schema or instruction of hers reaches it (invariant 7); the guidance is the tuning's setting line.
+pub(crate) fn persona_prompt(packet: &Packet, narration: &str, tuning: &Tuning) -> String {
+    build_persona_prompt(&PersonaPrompt { identity: &packet.identity, lived_stream: &lived_stream(narration, &packet.heard), domain_guidance: tuning.persona.guidance.trim(), word_budget: tuning.persona.words })
+}
+
+/// The words her prose says aloud: each span inside straight or curly double quotation marks, in prose order (map
+/// section 5.5: speech needs quoted spoken words). A preview of what the Interpreter (C3b) will be asked to quote, not
+/// its decision: a quotation she only recalls reads here as said. An unclosed quote says nothing.
+pub(crate) fn would_say(prose: &str) -> Vec<String> {
+    let mut said = Vec::new();
+    let mut open: Option<(char, usize)> = None;
+    for (at, c) in prose.char_indices() {
+        match (open, c) {
+            (None, '"') => open = Some(('"', at + 1)),
+            (None, '\u{201C}') => open = Some(('\u{201D}', at + c.len_utf8())),
+            (Some((close, start)), c) if c == close => {
+                let span = prose[start..at].trim();
+                if !span.is_empty() {
+                    said.push(span.to_owned());
+                }
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    said
+}
 
 /// `text` held to `max` words (whitespace-separated, each CJK character one); the model's count is not trusted. An
 /// overrun is cut at the last sentence end inside the budget, so the stream ends on a whole sentence, when that keeps
