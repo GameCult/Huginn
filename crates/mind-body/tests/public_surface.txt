@@ -243,8 +243,8 @@ mind_body::projection: pub use narrate :: { KitModel , Model , connector_key } ;
 mind_body::projection: pub use select :: TurnKind ;
 mind_body::projection: pub use tuning :: { TUNING_FILE , TUNING_ROOT } ;
 mind_body::projection: struct HuginnPersonaSource  pub-fields[]
-mind_body::projection: struct Organs< 'a >  pub-fields[persona: Option < & 'a dyn PersonaSource >, chat: Option < & 'a dyn MouthReader >, model: Option < & 'a dyn Model >]
-mind_body::projection: struct Request  pub-fields[instance: String, kind: TurnKind, state: Option < Value >, room: Option < String >, seed: u64, renders: Option < usize >, judge_against: Option < Value >, operators: Vec < String >, own_sender: String, tuning: PathBuf]
+mind_body::projection: struct Organs< 'a >  pub-fields[persona: Option < & 'a dyn PersonaSource >, chat: Option < & 'a dyn MouthReader >, addressing: Option < & 'a dyn HeartbeatView >, model: Option < & 'a dyn Model >]
+mind_body::projection: struct Request  pub-fields[instance: String, kind: TurnKind, state: Option < Value >, room: Option < String >, seed: u64, renders: Option < usize >, judge_against: Option < Value >, operators: Vec < String >, minds: Vec < String >, own_sender: String, tuning: PathBuf]
 mind_body::projection::narrate: fn connector_key (credentials : & Path) -> Result < String >
 mind_body::projection::narrate: impl KitModel
 mind_body::projection::narrate: impl KitModel: fn open (endpoint : SocketAddr , connection_key : String , caller : & str , timeout : Duration) -> Result < Self >
@@ -254,6 +254,7 @@ mind_body::projection::narrate: struct KitModel  pub-fields[]
 mind_body::projection::select: # [derive (Clone , Copy , Debug , PartialEq , Eq , Serialize)] # [serde (rename_all = "snake_case")] pub enum TurnKind { Chat , Beat , FollowUp , Reflection , }
 mind_body::projection::select: impl Draw
 mind_body::projection::select: impl Lens
+mind_body::projection::select: impl Lines
 mind_body::projection::select: impl People < '_ >
 mind_body::projection::tuning: const TUNING_FILE : & str
 mind_body::projection::tuning: const TUNING_ROOT : & str
@@ -267,7 +268,7 @@ mind_body::projection::tuning: struct LensWeights # [derive (Clone , Debug , Par
 mind_body::projection::tuning: struct Loaded # [derive (Clone , Debug , PartialEq , Serialize)] pub-fields[tuning: Tuning, source: & 'static str, sha256: String]
 mind_body::projection::tuning: struct PoolCaps # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[memories_about_present: usize, other_memories: usize, needs: usize, incubation: usize, stance: usize, value: usize, said: usize]
 mind_body::projection::tuning: struct ProjectorTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String, guidance: String, words: usize, beat_words: usize]
-mind_body::projection::tuning: struct SelectTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[temperature: f64, inclusion_score: f64, context_bytes: usize, stimulus_bytes: usize, heard_bytes: usize, identity_bytes: usize, bond_summary_bytes: usize, item_bytes: usize, memory_tau_h: f64, freshness_base: f64, freshness_window: usize, people_full: usize, beat_tail_lines: usize, caps: PoolCaps]
+mind_body::projection::tuning: struct SelectTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[temperature: f64, inclusion_score: f64, context_bytes: usize, stimulus_bytes: usize, heard_bytes: usize, addressed_bytes: usize, identity_bytes: usize, bond_summary_bytes: usize, item_bytes: usize, memory_tau_h: f64, freshness_base: f64, freshness_window: usize, people_full: usize, beat_tail_lines: usize, caps: PoolCaps]
 mind_body::projection::tuning: struct Tuning # [derive (Clone , Debug , Default , PartialEq , Serialize , Deserialize)] pub-fields[projector: ProjectorTuning, select: SelectTuning, lens: LensWeights]
 mind_body::queue: fn on_hold (mind : & dyn MindPort) -> Result < Held >
 mind_body::queue: impl Held
