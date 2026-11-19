@@ -2792,13 +2792,16 @@ mod tests {
     /// The upgrade gate on a real store (ruling readback-gate-and-materialized-image):
     /// the one function `Mind::read_back` over a scratch copy of a state root.
     /// Opens the store read-write, so run it on a copy, never the live file.
-    /// Measured about 30 s in debug at 11,328 documents.
+    /// `HUGINN_MIND_INSTANCE` names the instance whose store it opens, `eureka`
+    /// when unset, so every Mind's store is gated the same way before a release
+    /// moves her daemon. Measured about 30 s in debug at 11,328 documents.
     #[test]
     #[ignore = "needs HUGINN_MIND_SNAPSHOT, a scratch copy of a Huginn state root"]
     fn stored_documents_read_back() {
         let root = std::env::var("HUGINN_MIND_SNAPSHOT").expect("HUGINN_MIND_SNAPSHOT names a scratch copy of the state root");
+        let instance = std::env::var("HUGINN_MIND_INSTANCE").unwrap_or_else(|_| "eureka".into());
         let started = std::time::Instant::now();
-        let mind = Mind::open(std::path::Path::new(&root), &Slug("eureka".into())).unwrap();
+        let mind = Mind::open(std::path::Path::new(&root), &Slug(instance)).unwrap();
         let count = mind.read_back().unwrap();
         println!("read back {count} stored documents in {:?}", started.elapsed());
     }

@@ -2302,6 +2302,11 @@
           "required": [
             "Unavailable"
           ]
+        },
+        {
+          "description": "The request reached the persona door, which answers reads and the\nmind's own persona document and nothing that writes the mind\n(`HuginnMindRequest::reaches_persona_door`). Nothing was written.",
+          "type": "string",
+          "const": "NotThisDoor"
         }
       ]
     },

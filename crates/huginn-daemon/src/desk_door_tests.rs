@@ -467,7 +467,7 @@ mod door_smoke {
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
         let serving = std::thread::spawn(move || {
-            run(&mut daemon, &mut hub, &registry, Some(&mut door), &loop_stopping, &ServeOptions::default()).unwrap();
+            run(&mut daemon, &mut hub, None, &registry, Some(&mut door), &loop_stopping, &ServeOptions::default()).unwrap();
         });
 
         let mut stalled = connect(&path);
@@ -591,7 +591,7 @@ mod door_smoke {
         let registry = schema_registry().unwrap();
         let mut bodies = crate::bodies::DeferredBodies::new(1 << 20, Duration::from_secs(60));
         let desk = raw(MIND_SERVICE_ID, DESK_REQUEST_SCHEMA, "answer", "m-1", rmp_serde::to_vec_named(&answer("x", DeskAuthority::Operator, &["x"], wire(&hash, R1))).unwrap());
-        let CultNetMessage::OperationResponse { payload_schema, diagnostics, .. } = crate::serve::answer(&mut daemon, &registry, &mut bodies, desk, now()).reply() else {
+        let CultNetMessage::OperationResponse { payload_schema, diagnostics, .. } = crate::serve::answer(&mut daemon, crate::daemon::Door::Full, &registry, &mut bodies, desk, now()).reply() else {
             panic!("expected a response")
         };
         assert_eq!(payload_schema, huginn_mind::envelope::FAILURE_SCHEMA);
@@ -686,6 +686,7 @@ mod door_smoke {
             state_root: root.path().to_path_buf(),
             instance: slug(INSTANCE),
             bind: "127.0.0.1:0".parse().unwrap(),
+            persona_bind: None,
             qdrant_url: "http://127.0.0.1:1".into(),
             ollama_urls: vec!["http://127.0.0.1:1".into()],
             reserve_ollama_urls: Vec::new(),

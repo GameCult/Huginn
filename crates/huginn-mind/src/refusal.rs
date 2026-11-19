@@ -117,6 +117,10 @@ pub enum MindRefusal {
     /// reached.
     CursorInvalid { message: String },
     Unavailable { detail: String },
+    /// The request reached the persona door, which answers reads and the
+    /// mind's own persona document and nothing that writes the mind
+    /// (`HuginnMindRequest::reaches_persona_door`). Nothing was written.
+    NotThisDoor,
 }
 
 impl std::fmt::Display for MindRefusal {

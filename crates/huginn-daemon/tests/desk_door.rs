@@ -549,13 +549,13 @@ fn a_busy_pass_is_not_followed_by_the_idle_sleep() {
     ];
     let options = parse_options(args.iter().map(|arg| arg.to_string())).unwrap();
     let embedder = pool(&options.ollama_urls, &options.reserve_ollama_urls, &options.embedding_model);
-    let Started { mut daemon, mut hub, registry, desk: mut door } =
+    let Started { mut daemon, mut hub, persona: _, registry, desk: mut door } =
         startup(&options, embedder, QdrantIndex::new(&options.qdrant_url), Backoff::default()).unwrap();
     let stopping = Arc::new(AtomicBool::new(false));
     let loop_stopping = Arc::clone(&stopping);
     let serving = std::thread::spawn(move || {
         let serve = ServeOptions { idle_sleep: Duration::from_millis(600), ..ServeOptions::default() };
-        run(&mut daemon, &mut hub, &registry, door.as_mut(), &loop_stopping, &serve)
+        run(&mut daemon, &mut hub, None, &registry, door.as_mut(), &loop_stopping, &serve)
     });
     std::thread::sleep(Duration::from_millis(100));
     let frame = framed(&catalog_request());

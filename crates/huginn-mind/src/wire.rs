@@ -430,6 +430,28 @@ impl HuginnMindRequest {
         }
     }
 
+    /// Whether the persona door answers this request. The persona door is the
+    /// daemon's second listener, the only one a Persona's uid can reach: it
+    /// serves the mind's reads and her own persona document, and refuses
+    /// every write to the mind (`MindRefusal::NotThisDoor`). The match has no
+    /// wildcard, so a new request does not compile until it is classified
+    /// here.
+    pub fn reaches_persona_door(&self) -> bool {
+        match self {
+            Self::Whoami
+            | Self::View { .. }
+            | Self::Query { .. }
+            | Self::PersonaGet { .. }
+            | Self::PersonaPut { .. }
+            | Self::SearchSources { .. }
+            | Self::SearchChat { .. }
+            | Self::ChatWindow { .. }
+            | Self::StewardedActivity { .. }
+            | Self::RootsTouched { .. } => true,
+            Self::Admit(_) => false,
+        }
+    }
+
     /// The instance the request declares; `Whoami` declares none.
     pub fn instance(&self) -> Option<&Slug> {
         match self {
@@ -633,6 +655,7 @@ mod tests {
                 scores: Some(vec![0.5]),
             }),
             HuginnMindResponse::Refused(refusal),
+            HuginnMindResponse::Refused(MindRefusal::NotThisDoor),
             HuginnMindResponse::Persona(None),
             HuginnMindResponse::Persona(Some(PersonaStateView {
                 value: serde_json::json!({ "personaId": INSTANCE }),

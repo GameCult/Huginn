@@ -143,9 +143,10 @@ fn quick() -> Backoff {
     Backoff { initial: Duration::from_millis(1), max: Duration::from_millis(2), recheck: Duration::from_secs(3600), search_deadline: Duration::from_secs(30) }
 }
 
-/// A daemon serving a mind over a real socket, with the ports the test gave it.
+/// A daemon serving a mind over real sockets, its full door and its persona door, with the ports the test gave it.
 struct Harness {
     endpoint: String,
+    persona_endpoint: String,
     stopping: Arc<AtomicBool>,
     serving: Option<JoinHandle<Result<()>>>,
     embedder: FakeEmbedder,
@@ -172,19 +173,31 @@ impl Harness {
         let mut daemon: Daemon<OwnedRedbMessagePackBackingStore, WorkerSink> = Daemon::new(mind, sink);
         let mut hub = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
         let endpoint = format!("rudp://{}", hub.local_addr().unwrap());
+        let mut door = bind("127.0.0.1:0".parse().unwrap(), &daemon.runtime_id()).unwrap();
+        let persona_endpoint = format!("rudp://{}", door.local_addr().unwrap());
         let registry = schema_registry().unwrap();
         let stopping = Arc::new(AtomicBool::new(false));
         let loop_stopping = Arc::clone(&stopping);
         let options = ServeOptions::default();
-        let serving = std::thread::spawn(move || run(&mut daemon, &mut hub, &registry, None, &loop_stopping, &options));
-        Self { endpoint, stopping, serving: Some(serving), embedder, index, _root: root }
+        let serving =
+            std::thread::spawn(move || run(&mut daemon, &mut hub, Some(&mut door), &registry, None, &loop_stopping, &options));
+        Self { endpoint, persona_endpoint, stopping, serving: Some(serving), embedder, index, _root: root }
     }
 
     fn client(&self) -> Client {
+        Self::client_at(&self.endpoint)
+    }
+
+    /// A client of the persona door.
+    fn persona_client(&self) -> Client {
+        Self::client_at(&self.persona_endpoint)
+    }
+
+    fn client_at(endpoint: &str) -> Client {
         let mut client = CultMesh::create_rudp_client_for_endpoint(
             "semantic-test".to_string(),
             CULTNET_OPERATION_CONNECTION_ID,
-            &self.endpoint,
+            endpoint,
             CultMeshRudpSocketOptions::default(),
         )
         .unwrap();
@@ -272,8 +285,19 @@ fn healthy() -> Harness {
 /// the members.
 #[test]
 fn a_semantic_query_returns_only_documents_the_mind_holds_and_the_selection_admits() {
+    a_semantic_query_returns_only_documents_the_mind_holds_and_the_selection_admits_at(Harness::client);
+}
+
+/// The same semantic read asked at the persona door: the search is held while the index works, and its answer leaves by
+/// the persona door's own hub to the session that asked there.
+#[test]
+fn a_semantic_query_at_the_persona_door_is_answered_through_the_persona_door() {
+    a_semantic_query_returns_only_documents_the_mind_holds_and_the_selection_admits_at(Harness::persona_client);
+}
+
+fn a_semantic_query_returns_only_documents_the_mind_holds_and_the_selection_admits_at(client_of: fn(&Harness) -> Client) {
     let harness = healthy();
-    let mut client = harness.client();
+    let mut client = client_of(&harness);
     until_index(&mut client, "Current", |status| *status == IndexStatus::Current);
     harness.index.state.lock().unwrap().hits = vec![
         hit("question", id("question", "Q1"), 0.95),
