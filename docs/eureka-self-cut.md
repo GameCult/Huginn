@@ -161,7 +161,7 @@ From r3 B3, now read as a deletion list rather than a body to rebuild:
   2026-10-01). `inventory.md:581-588, 726-785` describes the Starfire cognition
   body and the "intended Epiphany deployment body (not installed)". These are
   deleted or rewritten in the same cut.
-- What stays: `huginn.service`, the Bifrost units (`bifrost-persona-feedback`,
+- What stays: `huginn.service` (since C1, 2026-11-19, this is `huginn@eureka`), the Bifrost units (`bifrost-persona-feedback`,
   `bifrost-persona-mouth`, the watchdog timer), `codex-connector.service` as a
   dead unit until the connector cuts land, the `gamecult-model` group and its
   key files, user `codex-connector`.

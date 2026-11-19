@@ -1,5 +1,7 @@
 # Swarm revival: target shape (draft)
 
+> **Superseded in part by C1 (Huginn `57b931f`, 2026-11-19).** Personas reach their Mind only at a persona door (port + 1000) that refuses `Admit`, behind the `mind-fence` nft rules; Eureka's daemon is `huginn@eureka`, not `huginn.service`. See `docs/eureka-body-map.md`.
+>
 > **Superseded in part by C2 (Huginn `66b85c8`).** The Persona turn, the per-instance waker, the start-Self-run tool and the Self-run launch path this draft plans around are deleted or parked; the live Persona, heartbeat and Self-run rows are in `docs/eureka-body-map.md`, "The persona-only body (after C2)". The mind, instance, share and lifecycle tables below still describe the intended swarm shape, not the running one.
 
 Status: draft target, Imagination (`imagination-swarm`), session
