@@ -13,12 +13,12 @@ use model_connector::PlanQuota;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{
-    CommitRange, CutVerification, Date, DocRef, MemoryOrigin, MemorySort, PipelineCampaign, PipelineCutReport, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
+    CutVerification, Date, DocRef, MemoryOrigin, MemorySort, PipelineCampaign, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
     PipelineInstance, PipelineKind, PipelineMemory, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, PipelineStewardship,
     PipelineTarget, QuestionOption, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Slug, StructuralDelta, TargetInvariant,
 };
 use huginn_mind::{
-    Faculty, HuginnMindRequest, ImportSource, HuginnMindResponse, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome,
+    Faculty, HuginnMindRequest, HuginnMindResponse, Mind, OwnedRedbMessagePackBackingStore, PipelineAdmissionBatch, PipelineAdmissionOutcome,
     PipelineDocumentView, PipelineProvenance, PipelineSelectionPage,
 };
 use tempfile::TempDir;
@@ -59,20 +59,12 @@ pub(crate) struct Recording {
 }
 
 impl Recording {
-    pub(crate) fn kill(&self, turn: RunTurn) {
-        self.running.borrow_mut().retain(|unit| *unit != (Slug(INSTANCE.into()), turn.slot()));
-    }
-
-    /// `kill` for a named instance.
+    /// Her unit of `turn`'s slot ends.
     pub(crate) fn kill_as(&self, instance: &Slug, turn: RunTurn) {
         self.running.borrow_mut().retain(|unit| *unit != (instance.clone(), turn.slot()));
     }
 
-    pub(crate) fn revive(&self, turn: RunTurn) {
-        self.revive_as(&Slug(INSTANCE.into()), turn);
-    }
-
-    /// `revive` for a named instance.
+    /// Her unit of `turn`'s slot is active.
     pub(crate) fn revive_as(&self, instance: &Slug, turn: RunTurn) {
         self.running.borrow_mut().push((instance.clone(), turn.slot()));
     }
@@ -116,15 +108,6 @@ impl TestMind {
         this
     }
 
-    /// A mind holding only its identity: no stewardship, no campaign.
-    pub(crate) fn bare() -> Self {
-        let dir = TempDir::new().unwrap();
-        let mind = Mind::open(dir.path(), &Slug(INSTANCE.into())).unwrap();
-        let this = Self { _dir: dir, instance: Slug(INSTANCE.into()), mind: RefCell::new(mind), now: Cell::new(at(0)) };
-        this.put(vec![instance(INSTANCE)]);
-        this
-    }
-
     /// The same, for another instance name.
     pub(crate) fn seeded_as(name: &str) -> Self {
         let dir = TempDir::new().unwrap();
@@ -153,26 +136,6 @@ impl TestMind {
             documents,
         };
         self.mind.borrow_mut().admit(batch, self.now.get())
-    }
-
-    /// Admits as an import of a giver's receipt committed at `committed_at`, one second after the last admission here.
-    pub(crate) fn committed_imported(&self, committed_at: &str, documents: Vec<PipelineDocument>) {
-        self.now.set(self.now.get() + Duration::seconds(1));
-        let source = ImportSource {
-            instance: Slug("giver".into()),
-            receipt_id: format!("giver-{committed_at}").as_str().into(),
-            ordinal: 1,
-            committed_at: committed_at.into(),
-            faculty: Faculty::Hands,
-            agent: "test".into(),
-            session: "test".into(),
-            tool: "test".into(),
-            external: vec![],
-        };
-        let provenance = PipelineProvenance { faculty: Faculty::Hands, agent: "test".into(), session: "test".into(), tool: "test".into(), imported_from: Some(source) };
-        let batch = PipelineAdmissionBatch { instance: self.instance.clone(), provenance, documents };
-        let outcome = self.mind.borrow_mut().admit(batch, self.now.get());
-        assert!(matches!(outcome, PipelineAdmissionOutcome::Committed { .. }), "{outcome:?}");
     }
 
     pub(crate) fn committed(&self, documents: Vec<PipelineDocument>) {
@@ -258,26 +221,6 @@ impl MindPort for TestMind {
     }
 }
 
-/// A mind whose admissions answer as told, over a real mind's reads.
-pub(crate) struct Answering<'a> {
-    pub(crate) inner: &'a TestMind,
-    pub(crate) outcome: PipelineAdmissionOutcome,
-}
-
-impl MindPort for Answering<'_> {
-    fn instance(&self) -> &Slug {
-        self.inner.instance()
-    }
-
-    fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage> {
-        self.inner.query(selection)
-    }
-
-    fn admit(&self, _agent: &str, _session: &str, _documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
-        Ok(self.outcome.clone())
-    }
-}
-
 /// One of her memories: `sort` and `text`, about `about`, learned in #swarm, salience 500.
 pub(crate) fn memory(label: &str, sort: MemorySort, text: &str, about: &[&str]) -> PipelineDocument {
     memory_from(label, sort, text, about, MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec![] }, 500)
@@ -334,15 +277,6 @@ pub(crate) fn campaign_named(slug: &str, title: &str) -> PipelineDocument {
         working_branch: "main".into(),
         target_doc: doc_ref(),
     })
-}
-
-/// A campaign opened on `repos`, with its first target and the one invariant.
-pub(crate) fn campaign_on(slug: &str, repos: &[&str]) -> Vec<PipelineDocument> {
-    let PipelineDocument::Campaign(mut opened) = campaign_named(slug, slug) else { unreachable!("a campaign") };
-    opened.repos = repos.iter().map(|repo| (*repo).into()).collect();
-    let PipelineDocument::Target(mut first) = target() else { unreachable!("a target") };
-    first.campaign = Slug(slug.into());
-    vec![PipelineDocument::Campaign(opened), PipelineDocument::Target(first)]
 }
 
 fn target() -> PipelineDocument {
@@ -404,26 +338,6 @@ fn delta() -> StructuralDelta {
         targets_added: vec![],
         targets_removed: vec![],
     }
-}
-
-pub(crate) fn report(cut: &str) -> PipelineDocument {
-    PipelineDocument::CutReport(PipelineCutReport {
-        campaign: Slug(CAMPAIGN.into()),
-        cut_spec: id("cut_spec", &format!("cut-{cut}.r1")).as_str().into(),
-        attempt: 1,
-        repo: REPO.into(),
-        branch: "eureka-body/x".into(),
-        commits: vec![eureka_pipeline::ReportCommit { sha: Sha("df7507b".into()), subject: "Land the cut".into(), builds: true }],
-        range: CommitRange { base: Sha("df7507b".into()), head: Sha("df7507b".into()) },
-        verification: vec![],
-        mutations: vec![],
-        deviations: vec![],
-        forks: vec![],
-        structural_delta: delta(),
-        landed_names: vec![],
-        undone: vec![],
-        promises: vec![],
-    })
 }
 
 /// A question raised in `item`, which blocks it.
@@ -497,32 +411,6 @@ pub(crate) fn recorded() -> ResolutionOutcome {
 
 pub(crate) fn withdrawn() -> ResolutionOutcome {
     ResolutionOutcome::Withdrawn { reason: "never ran".into() }
-}
-
-/// Her Self run on `item`, ended, as `n` in a history: opened, closed, and
-/// followed by a follow-up sourced from `item` when `leaves_something` (the
-/// document that cites the item, which makes the run non-empty).
-pub(crate) fn ended_run(mind: &TestMind, item: &PipelineRef, prefix: &str, n: usize, leaves_something: bool) {
-    let label = format!("{prefix}{n}");
-    mind.committed(vec![run(&label, RunTurn::SelfRun, RunOperator::Mind, std::slice::from_ref(item))]);
-    let mut closing = vec![close(run_ref(&label), recorded())];
-    if leaves_something {
-        closing.push(follow_up(&format!("{prefix}left{n}"), item));
-    }
-    mind.committed(closing);
-}
-
-/// A history of ended runs on `item`, oldest first; `true` leaves a document.
-pub(crate) fn history(mind: &TestMind, item: &PipelineRef, runs: &[bool]) {
-    history_as(mind, item, "h", runs);
-}
-
-/// The same, with run labels `<prefix>0`, `<prefix>1`, and so on, for a mind
-/// holding the histories of several items.
-pub(crate) fn history_as(mind: &TestMind, item: &PipelineRef, prefix: &str, runs: &[bool]) {
-    for (n, leaves_something) in runs.iter().enumerate() {
-        ended_run(mind, item, prefix, n, *leaves_something);
-    }
 }
 
 /// A follow-up sourced from `source`: work a run may claim that the queue does

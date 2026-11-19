@@ -1,8 +1,8 @@
 //! The operator's brakes, and the one reader of them.
 //!
-//! `Released` carries a `Grant`, the only value that opens a launch: it cannot
-//! be built outside this module, so a launch exists only as the reading of a
-//! released instance brake and a released swarm brake. The Grant names the
+//! `Released` carries a `Grant`: it cannot be built outside this module, so it
+//! exists only as the reading of a released instance brake and a released
+//! swarm brake. The Grant names the
 //! instance whose store was read and carries nothing else: no money, no cap. The store is at a fixed place, `CONTROL_ROOT`,
 //! and the one reader takes the instance only: no function, argument, variable
 //! or flag lets a caller choose a root, a path or a source, so a Grant is the
@@ -92,9 +92,7 @@ pub enum Effective {
 
 /// The proof that the instance brake and the swarm brake were released when
 /// read, in the root-owned stores of `instance`. Its fields are private and only
-/// `read_effective` makes one; `open_and_launch` takes it by value and refuses
-/// one read for another instance, so one reading opens at most one run, of the
-/// instance it was read for.
+/// `read_effective` makes one.
 ///
 /// Outside this crate the type system leaves no way to make one: the fields are
 /// private, there is no public constructor, and the derives give no path (no
@@ -113,7 +111,7 @@ pub enum Effective {
 /// ```
 ///
 /// ```compile_fail,E0599
-/// // not Clone, so a reading cannot be copied into a second run
+/// // not Clone, so a reading cannot be copied
 /// fn copy(grant: &mind_body::control::Grant) -> mind_body::control::Grant {
 ///     grant.clone()
 /// }
@@ -139,13 +137,6 @@ impl Grant {
     /// The instance whose control store this was read from.
     pub fn instance(&self) -> &Slug {
         &self.instance
-    }
-
-    /// A Grant for a launch test that has no store. It names its instance like
-    /// any other, so the launch's instance check judges it.
-    #[cfg(test)]
-    pub(crate) fn for_test(instance: Slug) -> Self {
-        Self { instance }
     }
 }
 
@@ -235,11 +226,6 @@ pub fn load_state(source: &impl ControlSource) -> Result<ControlState> {
 /// ```compile_fail
 /// // there is no reader over a source of the caller's
 /// let _ = mind_body::control::read_effective_from;
-/// ```
-///
-/// ```compile_fail
-/// // and the test constructor is not in the library build
-/// let _ = mind_body::control::Grant::for_test;
 /// ```
 ///
 /// The same preamble with the real call compiles:

@@ -67,96 +67,6 @@ fn a_brake_payload_that_does_not_decode_makes_the_store_undecodable() {
     assert_eq!(effective(&path), held(HeldReason::Undecodable));
 }
 
-
-
-mod grant {
-    //! A Grant is the proof that this instance's own control store released: the
-    //! reader derives the path from the instance, and a launch refuses a Grant
-    //! read for another instance before it asks the mind anything.
-
-    use anyhow::{Result, anyhow};
-    use cultnet_rs::Selection;
-    use eureka_pipeline::{PipelineDocument, RunTurn};
-    use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
-
-    use super::*;
-    use crate::launch::{Clock, Declined, LaunchOutcome, LaunchRequest, Launcher, Ports, open_and_launch};
-    use crate::queue::MindPort;
-
-    fn slug(name: &str) -> Slug {
-        Slug(name.into())
-    }
-
-    fn read(root: &Path, instance: &str) -> Effective {
-        with_root(root, || read_effective(&slug(instance)))
-    }
-
-    /// A mind that answers nothing: a launch that reaches it has gone past the
-    /// instance check.
-    struct SilentMind(Slug);
-
-    impl MindPort for SilentMind {
-        fn instance(&self) -> &Slug {
-            &self.0
-        }
-
-        fn query(&self, _selection: &Selection) -> Result<PipelineSelectionPage> {
-            Err(anyhow!("the launch asked the mind"))
-        }
-
-        fn admit(&self, _agent: &str, _session: &str, _documents: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
-            Err(anyhow!("the launch admitted"))
-        }
-    }
-
-    struct NoUnits;
-
-    impl Launcher for NoUnits {
-        fn start(&self, _instance: &Slug, _turn: RunTurn) -> Result<()> {
-            Err(anyhow!("the launch started a unit"))
-        }
-
-        fn alive(&self, _instance: &Slug, _turn: RunTurn) -> bool {
-            false
-        }
-    }
-
-    struct Now;
-
-    impl Clock for Now {
-        fn now(&self) -> DateTime<Utc> {
-            at(100)
-        }
-    }
-
-    fn launch_as(mind_instance: &str, grant: Grant, turn: RunTurn) -> Result<LaunchOutcome> {
-        let mind = SilentMind(slug(mind_instance));
-        let ports = Ports { mind: &mind, launcher: &NoUnits, clock: &Now, host: "host" };
-        open_and_launch(&ports, LaunchRequest { turn, claims: vec![], agent: "agent".into(), grant })
-    }
-
-    #[test]
-    fn a_grant_read_for_one_instance_cannot_launch_another() {
-        let root = tempfile::tempdir().unwrap();
-        release(root.path(), "void");
-        for turn in [RunTurn::SelfRun, RunTurn::PersonaTurn] {
-            let Effective::Released(grant) = read(root.path(), "void") else { panic!("void's store is released") };
-            // The mind is eureka's; the silent mind and the unit-less launcher fail loudly if the launch goes on.
-            let outcome = launch_as("eureka", grant, turn).unwrap();
-            assert_eq!(outcome, LaunchOutcome::Refused(Declined::GrantForOtherInstance), "{turn:?}");
-        }
-    }
-
-    #[test]
-    fn the_matching_grant_is_not_stopped_by_the_instance_check() {
-        let root = tempfile::tempdir().unwrap();
-        release(root.path(), "void");
-        let Effective::Released(grant) = read(root.path(), "void") else { panic!("void's store is released") };
-        let error = launch_as("void", grant, RunTurn::SelfRun).unwrap_err();
-        assert!(format!("{error:#}").contains("asked the mind"), "{error:#}");
-    }
-}
-
 /// The swarm store with its brake released, and nothing else in it.
 fn release_swarm(root: &Path) {
     SwarmWriter::open(swarm_path(root)).unwrap().set_brake(true, at(0), "op").unwrap();
@@ -248,12 +158,6 @@ fn the_stores_are_written_world_readable_and_root_only_writable() {
     }
     #[cfg(not(unix))]
     let _ = path;
-}
-
-/// A named instance store with its brake released, and a released swarm.
-fn release(root: &Path, name: &str) {
-    ControlWriter::open(root.join(name).join("control.cc")).unwrap().set_brake(true, at(0), "op").unwrap();
-    release_swarm(root);
 }
 
 #[test]

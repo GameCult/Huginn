@@ -3,9 +3,7 @@
 //! Ruling `eureka-body:ruling:persona-memory-written-not-transcript`: what she
 //! must still know when the conversation is gone is written into her mind as
 //! typed memory, and a later turn reads it back from there. Open asks and open
-//! commitments are not recalled: `persona::render_responsibilities` shows them
-//! on every turn beside her stewardships, because they stay in front of her
-//! until a resolution closes them. This module owns the cued, ranked remainder
+//! commitments are not recalled. This module owns the cued, ranked remainder
 //! and nothing else. It reads only her own mind through `MindPort`; it reads no
 //! chat (the lines shown beside a message are conversation, never memory),
 //! keeps no cache between turns, and holds no index: the daemon's index answers

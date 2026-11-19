@@ -39,11 +39,6 @@ impl Addressee {
         self
     }
 
-    /// The repos she stewards, as the heartbeat last read them.
-    pub(crate) fn repos(&self) -> &[OrgRepo] {
-        &self.repos
-    }
-
     pub(crate) fn matrix_id(&self) -> &str {
         &self.matrix_id
     }

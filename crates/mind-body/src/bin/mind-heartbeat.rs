@@ -12,8 +12,9 @@
 //! Environment: `HEARTBEAT_PERSONAS` (`slug,handle,Public Name,@matrix:id,rudp://<ip>:<port>`
 //! entries separated by `;`, the last field her own Huginn daemon: each Mind is
 //! its own daemon), `MIND_PERSONA_OPERATOR` (id[,id]), `HEARTBEAT_POLL_S`,
-//! `BIFROST_CHAT_ENDPOINT` and `BIFROST_CHAT_KEY_FILE`, and `STATE_DIRECTORY`
-//! (`heartbeat.cc` lives there). The heartbeat holds no connector key.
+//! `HEARTBEAT_BEAT_S` (seconds between beats, default 1800), `BIFROST_CHAT_ENDPOINT`,
+//! `BIFROST_CHAT_KEY_FILE`, and `STATE_DIRECTORY` (`heartbeat.cc` lives there).
+//! The heartbeat holds no connector key.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -22,16 +23,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use eureka_state::HuginnClient;
 use mind_body::chat_rudp::{RudpChat, connection_id};
-use mind_body::heartbeat::{Config, FileControl, FileStore, HeartbeatView, Night, Organs, PersonaId, Seat, poll};
+use mind_body::heartbeat::{Config, DEFAULT_BEAT_S, FileControl, FileStore, Organs, PersonaId, Seat, poll};
 use mind_body::launch::{SystemClock, SystemdLauncher};
 use mind_body::queue::HuginnMind;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 const CHAT_TIMEOUT: Duration = Duration::from_secs(20);
-
-fn host() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|name| name.trim().to_string()).ok().filter(|name| !name.is_empty()).unwrap_or_else(|| "unknown".into())
-}
 
 #[allow(clippy::disallowed_methods, reason = "the binary reads its own environment, and hands it to the library")]
 fn setting(name: &str) -> Option<String> {
@@ -61,8 +58,8 @@ fn config() -> Result<Config> {
         .map(PersonaId::parse)
         .collect::<Result<Vec<_>>>()?;
     let operators = required("MIND_PERSONA_OPERATOR")?.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect();
-    let night = Night::from_settings(setting("HEARTBEAT_SLEEP_UTC").as_deref(), setting("HEARTBEAT_SLEEP_MINDS").as_deref())?;
-    Config::new(personas, operators, night)
+    let beat_s = u32::try_from(whole("HEARTBEAT_BEAT_S", i64::from(DEFAULT_BEAT_S))?).map_err(|_| anyhow!("HEARTBEAT_BEAT_S is out of range"))?;
+    Config::new(personas, operators, beat_s)
 }
 
 fn store() -> Result<FileStore> {
@@ -94,8 +91,7 @@ fn run() -> Result<()> {
         .map(|(who, (mind, chat))| Seat { who: who.clone(), mind, chat })
         .collect();
     let launcher = SystemdLauncher::new();
-    let host = host();
-    let organs = Organs { seats: &seats, control: &FileControl, launcher: &launcher, clock: &SystemClock, host: &host, store: &store };
+    let organs = Organs { seats: &seats, control: &FileControl, launcher: &launcher, clock: &SystemClock, store: &store };
     loop {
         match poll(&organs, &config) {
             Ok(outcome) => println!("{outcome}"),

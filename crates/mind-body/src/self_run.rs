@@ -229,8 +229,8 @@ fn flush_text(why: Why) -> String {
     format!("{cause} {FLUSH_MESSAGE} Close each brief that is done by the closing rule; a brief whose change is not on its default branch stays open, or is superseded by your own follow-up when it waits on someone else, and the next session continues it.")
 }
 
-/// The label of a run, the last segment of its id (`<instance>:run:<label>`): what the opening receipt of every run already carries as its session
-/// (`launch::run_label`), so a `huginn` admission and the run's own receipts name one session in one spelling.
+/// The label of a run, the last segment of its id (`<instance>:run:<label>`): what the opening receipt of every run already carries as its session,
+/// so a `huginn` admission and the run's own receipts name one session in one spelling.
 fn run_label(run: &PipelineRef) -> &str {
     run.id.0.rsplit(':').next().unwrap_or(&run.id.0)
 }
