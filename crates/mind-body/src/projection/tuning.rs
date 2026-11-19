@@ -2,8 +2,10 @@
 //!
 //! The file is optional. Absent, the code's defaults hold and the source reads `defaults`; present, every key it
 //! names overrides one default and any key the code does not know refuses the file, so a mistyped experiment fails
-//! loudly instead of running on the default it meant to change. The file's SHA-256 is carried with every packet,
-//! so a reader of the trace can tell which tuning a turn ran under.
+//! loudly instead of running on the default it meant to change. A value out of its range refuses the file too.
+//!
+//! The SHA-256 carried with every packet is of the effective tuning, serialized whole with its defaults: a file that
+//! spells out the defaults hashes as no file does, and two builds whose defaults differ hash differently.
 
 use std::path::Path;
 
@@ -17,6 +19,9 @@ pub const TUNING_FILE: &str = "persona-tuning.toml";
 
 /// The setting the Projector renders for. No task: in the Persona-only shape nothing is work she owes.
 const GUIDANCE: &str = "This person is a Mind of the GameCult swarm. She lives in its chat rooms among the operator, the other Minds and whoever drops by, and no task is waiting on her in this moment. Render the moment as she lives it: who is here and how they sit with her, what she carries, what she wants.";
+
+/// The context room the fixed slots need beside the identity: the hour and the mood lines always fit.
+const FIXED_ROOM: usize = 256;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -38,12 +43,14 @@ pub struct ProjectorTuning {
     pub beat_words: usize,
 }
 
-/// The selection: its temperature, its budgets, its half-lives, the freshness decay and the pool caps.
+/// The selection: its temperature and inclusion, its budgets, its half-life, the freshness decay and the pool caps.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SelectTuning {
-    /// The softmax temperature of the sampled remainder.
+    /// The softmax temperature that orders the candidates.
     pub temperature: f64,
+    /// The score at which a candidate is included 63% of the time: inclusion is `1 - exp(-score / inclusion_score)`.
+    pub inclusion_score: f64,
     /// Identity plus typed context, in bytes.
     pub context_bytes: usize,
     pub stimulus_bytes: usize,
@@ -54,27 +61,19 @@ pub struct SelectTuning {
     pub bond_summary_bytes: usize,
     /// One selected item's text, in bytes.
     pub item_bytes: usize,
-    /// The recency time constant of her own memories and short-term items, in hours.
+    /// The recency time constant of her memories and short-term items, in hours.
     pub memory_tau_h: f64,
-    /// The recency time constant of what her Mind recalls, in hours.
-    pub recall_tau_h: f64,
-    /// freshness = base ^ (times shown in the last `freshness_window` projections).
+    /// freshness = base ^ (times shown in the last `freshness_window` projections); 0 never repeats an item in the window.
     pub freshness_base: f64,
     pub freshness_window: usize,
     /// People present shown with a full bond line; the rest are named.
     pub people_full: usize,
     /// The room lines a beat shows.
     pub beat_tail_lines: usize,
-    /// The sorts of her Mind's memories recall may offer, as the mind spells them. Her Mind is mostly the mission's
-    /// record: Committed, Did, Asked and Decided (her Mind files mission decisions as Decided) are work and stay out unless
-    /// an experiment names them.
-    pub recall_sorts: Vec<String>,
     pub caps: PoolCaps,
 }
 
-/// Every memory sort the mind knows.
-pub(crate) const MEMORY_SORTS: [&str; 7] = ["Asked", "Committed", "Decided", "Learned", "Did", "Idea", "Rapport"];
-
+/// The most items each pool may give a packet. A maximum, never a target.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PoolCaps {
@@ -83,7 +82,6 @@ pub struct PoolCaps {
     pub needs: usize,
     pub incubation: usize,
     pub stance: usize,
-    pub recall: usize,
     pub value: usize,
     pub said: usize,
 }
@@ -109,6 +107,7 @@ impl Default for SelectTuning {
     fn default() -> Self {
         Self {
             temperature: 0.7,
+            inclusion_score: 0.5,
             context_bytes: 2500,
             stimulus_bytes: 1500,
             heard_bytes: 1500,
@@ -116,12 +115,10 @@ impl Default for SelectTuning {
             bond_summary_bytes: 300,
             item_bytes: 400,
             memory_tau_h: 24.0,
-            recall_tau_h: 72.0,
             freshness_base: 0.5,
             freshness_window: 5,
             people_full: 2,
             beat_tail_lines: 6,
-            recall_sorts: ["Learned", "Idea", "Rapport"].map(String::from).to_vec(),
             caps: PoolCaps::default(),
         }
     }
@@ -129,8 +126,7 @@ impl Default for SelectTuning {
 
 impl Default for PoolCaps {
     fn default() -> Self {
-        // One recalled item a packet: her own persona state is what she is made of; her Mind only seasons it.
-        Self { memories_about_present: 2, other_memories: 2, needs: 1, incubation: 1, stance: 1, recall: 1, value: 1, said: 1 }
+        Self { memories_about_present: 2, other_memories: 2, needs: 1, incubation: 1, stance: 1, value: 1, said: 1 }
     }
 }
 
@@ -140,32 +136,72 @@ impl Default for LensWeights {
     }
 }
 
-/// The tuning a wake ran under, and which file it was.
+impl Tuning {
+    /// Refuses a value the stages cannot run on, naming the knob.
+    pub(crate) fn validate(&self) -> Result<()> {
+        let select = &self.select;
+        let positive = |name: &str, value: f64| if value.is_finite() && value > 0.0 { Ok(()) } else { Err(anyhow::anyhow!("{name} must be a finite number above 0, not {value}")) };
+        positive("select.temperature", select.temperature)?;
+        positive("select.inclusion_score", select.inclusion_score)?;
+        positive("select.memory_tau_h", select.memory_tau_h)?;
+        if !(select.freshness_base.is_finite() && (0.0..=1.0).contains(&select.freshness_base)) {
+            bail!("select.freshness_base must be from 0 to 1, not {}", select.freshness_base);
+        }
+        for (name, bytes) in [
+            ("select.context_bytes", select.context_bytes),
+            ("select.stimulus_bytes", select.stimulus_bytes),
+            ("select.heard_bytes", select.heard_bytes),
+            ("select.identity_bytes", select.identity_bytes),
+            ("select.bond_summary_bytes", select.bond_summary_bytes),
+            ("select.item_bytes", select.item_bytes),
+            ("projector.words", self.projector.words),
+            ("projector.beat_words", self.projector.beat_words),
+        ] {
+            if bytes == 0 {
+                bail!("{name} must be above 0");
+            }
+        }
+        if select.context_bytes < select.identity_bytes + FIXED_ROOM {
+            bail!("select.context_bytes must leave {FIXED_ROOM} bytes beside select.identity_bytes for the hour and the mood");
+        }
+        let lens = &self.lens;
+        let weights = [lens.body_and_hour, lens.person_present, lens.unresolved_want, lens.memory_surfacing, lens.wondering];
+        if weights.iter().any(|weight| !weight.is_finite() || *weight < 0.0) || lens.body_and_hour <= 0.0 {
+            bail!("lens weights must be finite and not negative, and lens.body_and_hour, the one lens every turn has, above 0");
+        }
+        Ok(())
+    }
+
+    /// The SHA-256 of the effective tuning, serialized whole.
+    pub(crate) fn sha256(&self) -> String {
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+}
+
+/// The tuning a wake ran under, and where it came from.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Loaded {
     pub tuning: Tuning,
     /// `file` or `defaults`.
     pub source: &'static str,
-    /// The file's SHA-256, hex; for the defaults, the SHA-256 of no bytes.
+    /// The effective tuning's SHA-256, hex.
     pub sha256: String,
 }
 
-/// The tuning at `path`, or the defaults when no file is there. A file that cannot be read or parsed, or that names a
-/// key the code does not know, is an error: the wake does not run on a tuning nobody wrote.
+/// The tuning at `path`, or the defaults when no file is there. A file that cannot be read or parsed, that names a key
+/// the code does not know, or that sets a value out of its range is an error: the wake does not run on a tuning nobody
+/// meant.
 pub fn load(path: &Path) -> Result<Loaded> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Loaded { tuning: Tuning::default(), source: "defaults", sha256: hex(&Sha256::digest(b"")) }),
+    let (tuning, source) = match std::fs::read(path) {
+        Ok(bytes) => {
+            let text = std::str::from_utf8(&bytes).with_context(|| format!("the tuning {} is not UTF-8", path.display()))?;
+            (toml::from_str::<Tuning>(text).with_context(|| format!("the tuning {} is not a tuning", path.display()))?, "file")
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Tuning::default(), "defaults"),
         Err(error) => return Err(error).with_context(|| format!("the tuning {} could not be read", path.display())),
     };
-    let text = std::str::from_utf8(&bytes).with_context(|| format!("the tuning {} is not UTF-8", path.display()))?;
-    let tuning: Tuning = toml::from_str(text).with_context(|| format!("the tuning {} is not a tuning", path.display()))?;
-    if let Some(unknown) = tuning.select.recall_sorts.iter().find(|sort| !MEMORY_SORTS.contains(&sort.as_str())) {
-        bail!("the tuning {} names {unknown:?} in recall_sorts, which is not a memory sort ({})", path.display(), MEMORY_SORTS.join(", "));
-    }
-    Ok(Loaded { tuning, source: "file", sha256: hex(&Sha256::digest(&bytes)) })
-}
-
-fn hex(digest: &[u8]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    tuning.validate().with_context(|| format!("the tuning {} is out of range", path.display()))?;
+    let sha256 = tuning.sha256();
+    Ok(Loaded { tuning, source, sha256 })
 }

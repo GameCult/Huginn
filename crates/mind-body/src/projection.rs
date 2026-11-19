@@ -6,15 +6,18 @@
 //! the pinned `ghostlight-persona-projection`). Every knob of both is `persona-tuning.toml` (`tuning`), read at each
 //! wake, its hash carried with the packet.
 //!
+//! The Projector shows her self and her room: her persona state and what the mouth showed. It does not read her Mind;
+//! that is the Interpreter's read tools' (C3b), when wondering leads to reading.
+//!
 //! `project` is the experiment tool over both (`mind-persona project`): what Select would build from her real or a
-//! hypothetical state, and what the Projector would narrate. It has no port that writes: it puts no persona state,
-//! admits nothing, sends and acks no chat and appends no trace, so it runs under a held brake.
+//! hypothetical state, and what the Projector would narrate. Its organs are read-only by type: `PersonaSource` gets,
+//! `MouthReader` reads pending chat, `Model` asks. None of them can put, admit, send, ack or open a conversation, so
+//! `project` cannot write and runs under a held brake.
 
 mod narrate;
 mod select;
 mod tuning;
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
@@ -23,23 +26,17 @@ use eureka_state::HuginnClient;
 use huginn_mind::HuginnMindResponse;
 use serde_json::{Value, json};
 
-use crate::chat_client::{Chat, Form};
-use crate::queue::MindPort;
-use crate::recall;
+use crate::chat_client::{Chat, ChatPending, Form};
 
 pub use narrate::{KitModel, Model, connector_key};
 pub use select::TurnKind;
 pub use tuning::{TUNING_FILE, TUNING_ROOT};
 
 use narrate::{cap_words, distinct_2, field_names, judge_prompt, judged, projector_prompt, word_budget, words};
-use select::{History, Inputs, Packet, People, Recalled, Room, RoomLine, select};
+use select::{History, Inputs, Packet, People, Room, RoomLine, select};
 
 /// The agent name on the connector's request ids.
 const AGENT: &str = "mind-persona";
-/// The touch of a recalled item by the lane that brought it.
-const TOUCH_ABOUT: f64 = 1.0;
-const TOUCH_SALIENT: f64 = 0.3;
-const TOUCH_RELEVANT_UNSCORED: f64 = 0.6;
 /// The judge passes at this share of narrations attributed to the right packet.
 const JUDGE_PASS: f64 = 0.8;
 
@@ -70,14 +67,36 @@ impl PersonaSource for HuginnPersonaSource {
     }
 }
 
-/// What `project` reads through. None of them is asked to write.
+/// The mouth, read: pending deliveries and the room tail, which acks nothing. The only chat port `project` holds.
+pub trait MouthReader {
+    fn pending(&self) -> Result<ChatPending>;
+}
+
+impl<T: Chat> MouthReader for T {
+    fn pending(&self) -> Result<ChatPending> {
+        Chat::pending(self, 0)
+    }
+}
+
+/// What `project` reads through. Each is a read-only port by type: holding an `Organs`, no code can send, ack or open
+/// a conversation, or put her state.
+///
+/// ```compile_fail
+/// fn acks(organs: &mind_body::projection::Organs) {
+///     organs.chat.unwrap().ack(1).unwrap();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn sends(organs: &mind_body::projection::Organs, request: &mind_body::chat_client::ChatSendRequest) {
+///     organs.chat.unwrap().send(request).unwrap();
+/// }
+/// ```
 pub struct Organs<'a> {
     /// Her stored state; not asked when the request carries a state.
     pub persona: Option<&'a dyn PersonaSource>,
-    /// Her Mind, for recall; none recalls nothing.
-    pub mind: Option<&'a dyn MindPort>,
     /// The mouth, for the room; none shows no room.
-    pub chat: Option<&'a dyn Chat>,
+    pub chat: Option<&'a dyn MouthReader>,
     /// The Projector and the judge; required for renders.
     pub model: Option<&'a dyn Model>,
 }
@@ -103,8 +122,8 @@ pub struct Request {
 
 /// The room through the mouth's pending read, which acks nothing: new messages and the tail, own lines kept for the
 /// Select stage to drop. A refusal is reported, never hidden.
-fn read_room(chat: &dyn Chat, request: &Request, public_name: &str) -> (Room, Value) {
-    let pending = match chat.pending(0) {
+fn read_room(chat: &dyn MouthReader, request: &Request, public_name: &str) -> (Room, Value) {
+    let pending = match chat.pending() {
         Ok(pending) => pending,
         Err(fault) => return (Room { here: request.room.clone(), ..Room::default() }, json!({ "read": false, "why": format!("{fault:#}") })),
     };
@@ -133,37 +152,6 @@ fn read_room(chat: &dyn Chat, request: &Request, public_name: &str) -> (Room, Va
     (Room { messages, tail, here: request.room.clone() }, report)
 }
 
-/// What her Mind recalls for this room, as Select candidates: memories of the tuning's `recall_sorts` and nothing else.
-fn read_recall(mind: &dyn MindPort, room: &Room, sorts: &[String], now: DateTime<Utc>) -> Result<(Vec<Recalled>, Value)> {
-    let lines = room.messages.iter().chain(room.tail.iter());
-    let mut senders: Vec<&str> = lines.clone().map(|line| line.sender.as_str()).collect();
-    senders.dedup();
-    let names: BTreeMap<&str, &str> = lines.map(|line| (line.sender.as_str(), line.display.as_str())).filter(|(_, name)| !name.is_empty()).collect();
-    let texts: Vec<&str> = room.messages.iter().rev().map(|line| line.text.as_str()).collect();
-    let cue = recall::Cue { senders, texts, names, sorts, now };
-    let recalled = recall::select(mind, &cue)?;
-    let mut out = Vec::new();
-    for shown in &recalled.lanes {
-        for entry in &shown.entries {
-            let touch = match shown.lane {
-                recall::Lane::About => TOUCH_ABOUT,
-                recall::Lane::Relevant => entry.nearness_permille.map_or(TOUCH_RELEVANT_UNSCORED, |near| f64::from(near.max(1)) / 1000.0),
-                recall::Lane::Salient => TOUCH_SALIENT,
-            };
-            out.push(Recalled {
-                id: entry.id.clone(),
-                text: entry.line.trim().trim_start_matches("- ").to_owned(),
-                salience: f64::from(entry.salience_permille) / 1000.0,
-                admitted_at: DateTime::parse_from_rfc3339(&entry.admitted_at).ok().map(|at| at.with_timezone(&Utc)),
-                touch,
-            });
-        }
-    }
-    let search = format!("{:?}", recalled.search).to_lowercase();
-    let report = json!({ "asked": true, "sorts": sorts, "items": out.len(), "search": search });
-    Ok((out, report))
-}
-
 fn packet_json(packet: &Packet) -> Value {
     json!({
         "kind": packet.kind,
@@ -172,6 +160,7 @@ fn packet_json(packet: &Packet) -> Value {
         "present": packet.present,
         "selected": packet.selected,
         "bytes": { "identity": packet.identity.len(), "context": packet.context.len(), "identity_and_context": packet.identity.len() + packet.context.len(), "stimulus": packet.stimulus.len(), "heard": packet.heard.len() },
+        "overflow": packet.overflow,
         "identity": packet.identity,
         "context": packet.context,
         "stimulus": packet.stimulus,
@@ -187,13 +176,14 @@ fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuni
     let budget = word_budget(packet.kind, tuning);
     let narration = cap_words(&raw, budget);
     let ids: Vec<String> = packet.selected.iter().map(|pick| pick.id.clone()).collect();
+    let named: Vec<String> = packet.ids.clone();
     Ok(json!({
         "seed": packet.seed,
         "lens": packet.lens,
         "selected": ids,
         "words": words(&narration),
         "cut_at_budget": words(&raw) > budget,
-        "field_names": field_names(&narration, &ids),
+        "field_names": field_names(&narration, &named),
         "narration": narration,
     }))
 }
@@ -226,14 +216,10 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
         Some(chat) => read_room(chat, request, &public_name),
         None => (Room { here: request.room.clone(), ..Room::default() }, json!({ "read": false, "why": "no mouth is configured" })),
     };
-    let (recall, recall_report) = match organs.mind {
-        Some(mind) => read_recall(mind, &room, &tuning.select.recall_sorts, now)?,
-        None => (Vec::new(), json!({ "asked": false, "sorts": tuning.select.recall_sorts })),
-    };
     // Freshness and her own recent words come from trace v2, which the commit writes (C3c); until then there is none.
     let history = History::default();
     let people = People { operators: &request.operators, own_sender: &request.own_sender };
-    let inputs = Inputs { kind: request.kind, state: &state, room: &room, recall: &recall, history: &history, observation: None, people, now, seed: request.seed };
+    let inputs = Inputs { kind: request.kind, state: &state, room: &room, history: &history, observation: None, people, now, seed: request.seed };
 
     let mut report = json!({
         "instance": request.instance,
@@ -241,8 +227,7 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
         "state": if request.state.is_some() { "given" } else { "stored" },
         "tuning": { "path": request.tuning.display().to_string(), "source": loaded.source, "sha256": loaded.sha256 },
         "room": room_report,
-        "recall": recall_report,
-        "history": "none: trace v2 is not written yet",
+        "history": "none: freshness and her own recent words come from trace v2, which the commit writes (C3c)",
     });
     let Some(renders) = request.renders else {
         report["packet"] = packet_json(&select(&inputs, tuning));

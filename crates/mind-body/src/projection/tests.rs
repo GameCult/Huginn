@@ -4,19 +4,16 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
-use cultnet_rs::Selection;
-use eureka_pipeline::{MemorySort, PipelineDocument, PipelineKind, Slug};
-use huginn_mind::{PipelineAdmissionOutcome, PipelineSelectionPage};
 use serde_json::{Value, json};
 
 use super::narrate::{INSTRUCTIONS, MAX_OUTPUT_TOKENS};
-use super::select::Pool;
+use super::select::{Overflow, Pool};
 use super::tuning::Tuning;
 use super::*;
-use crate::chat_client::{ChatDelivery, ChatFetchReceipt, ChatFetchRequest, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatRead, ChatSendReceipt, ChatSendRequest, TailLine};
-use crate::testkit::{INSTANCE, TestMind, memory, reference};
+use crate::chat_client::{Chat, ChatDelivery, ChatFetchReceipt, ChatFetchRequest, ChatOpenDirectReceipt, ChatOpenDirectRequest, ChatPending, ChatRead, ChatSendReceipt, ChatSendRequest, TailLine};
+use crate::testkit::INSTANCE;
 
 const OWN: &str = "@eureka:gamecult.org";
 const OPERATOR: &str = "@meta:gamecult.org";
@@ -94,7 +91,7 @@ fn packet_of(kind: TurnKind, state: &Value, room: &Room, history: &History, seed
 
 fn packet_tuned(kind: TurnKind, state: &Value, room: &Room, history: &History, seed: u64, tuning: &Tuning) -> Packet {
     let operators = operators();
-    let inputs = Inputs { kind, state, room, recall: &[], history, observation: None, people: People { operators: &operators, own_sender: OWN }, now: now(), seed };
+    let inputs = Inputs { kind, state, room, history, observation: None, people: People { operators: &operators, own_sender: OWN }, now: now(), seed };
     select(&inputs, tuning)
 }
 
@@ -218,16 +215,57 @@ fn twenty_seeds_rotate_through_at_least_three_selections() {
     assert!(lenses.len() >= 3, "the lens rotates too: {lenses:?}");
 }
 
+/// A state whose every pool holds no more candidates than its cap: one need, one wondering, one stance, one value.
+fn sparse() -> Value {
+    json!({
+        "publicName": "Eureka",
+        "affect": {
+            "needs": [{ "id": "need-relatedness", "label": "company", "intensity": 0.6 }],
+            "doctrineStances": [{ "id": "stance-deletion", "summary": "Deleting is progress.", "intensity": 0.7 }],
+        },
+        "thoughtMemory": { "incubation": [{ "id": "w0", "summary": "Whether the trace could be smaller." }] },
+        "values": [{ "id": "coherence", "label": "Coherence", "priority": 0.9, "summary": "Coherence over velocity." }],
+    })
+}
+
+#[test]
+fn a_pool_at_or_under_its_cap_still_rotates() {
+    let distinct: BTreeSet<Vec<String>> = (1..=50).map(|seed| ids(&packet_of(TurnKind::Beat, &sparse(), &Room::default(), &History::default(), seed))).collect();
+    assert!(distinct.len() >= 2, "a cap is a maximum, never a target: {distinct:?}");
+}
+
 #[test]
 fn an_item_shown_five_times_in_a_row_drops_out() {
-    let room = Room::default();
-    let picked = |history: &History| (1..=20).filter(|seed| ids(&packet_of(TurnKind::Beat, &state(), &room, history, *seed)).iter().any(|id| id == "coherence")).count();
+    // One value alone in its pool: nothing competes with it, so only its own score decides.
+    let state = json!({ "publicName": "Eureka", "values": [{ "id": "coherence", "label": "Coherence", "priority": 0.9, "summary": "Coherence over velocity." }] });
+    let picked = |history: &History| (1..=50).filter(|seed| ids(&packet_of(TurnKind::Beat, &state, &Room::default(), history, *seed)).iter().any(|id| id == "coherence")).count();
     let fresh = picked(&History::default());
     let worn = picked(&History { recent: vec![vec!["coherence".to_owned()]; 5], ..History::default() });
-    assert!(fresh >= 5, "the heavier value usually wins when fresh: {fresh}/20");
-    assert!(worn <= 1, "after five showings it has dropped out: {worn}/20");
     let older = picked(&History { recent: [vec![vec!["coherence".to_owned()]; 5], vec![vec![]; 5]].concat(), ..History::default() });
-    assert!(older >= 5, "showings older than the window are forgotten: {older}/20");
+    assert!(fresh >= 10, "fresh, it is often included: {fresh}/50");
+    assert!(worn <= 3, "after five showings it has dropped out: {worn}/50");
+    assert!(older >= 10, "showings older than the window are forgotten: {older}/50");
+}
+
+#[test]
+fn an_item_scoring_minus_twenty_one_almost_never_appears() {
+    // A memory three weeks old against a 24-hour time constant: recency alone is about exp(-21).
+    let state = json!({ "publicName": "Eureka", "thoughtMemory": { "memories": [{ "id": "ancient", "summary": "Long ago.", "createdAt": hours_ago(21 * 24) }] } });
+    let packet = packet_of(TurnKind::Beat, &state, &Room::default(), &History::default(), 1);
+    assert!(packet.selected.is_empty() || packet.selected[0].log_score < -20.0);
+    let shown = (1..=500).filter(|seed| !packet_of(TurnKind::Beat, &state, &Room::default(), &History::default(), *seed).selected.is_empty()).count();
+    assert_eq!(shown, 0, "never-include is the floor for a score of e^-21");
+}
+
+#[test]
+fn freshness_base_zero_never_repeats_inside_the_window() {
+    let mut tuning = Tuning::default();
+    tuning.select.freshness_base = 0.0;
+    let worn = History { recent: vec![vec!["coherence".to_owned()]], ..History::default() };
+    for seed in 1..=50 {
+        let packet = packet_tuned(TurnKind::Beat, &sparse(), &Room::default(), &worn, seed, &tuning);
+        assert!(!ids(&packet).contains(&"coherence".to_owned()) && packet.selected.iter().all(|pick| !pick.log_score.is_nan()), "seed {seed}: {:?}", packet.selected);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -239,10 +277,49 @@ fn messages_addressed_to_her_appear_verbatim() {
     let room = Room { messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", said, 2, true)], tail: vec![], here: None };
     let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
     assert_eq!(packet.heard, format!("Libby, in #swarm:gamecult.org: \"{said}\""), "the Persona hears the exact words");
-    assert!(packet.stimulus.contains(&crate::persona::quoted(said)) && packet.stimulus.contains(", to her"), "{}", packet.stimulus);
+    assert!(packet.stimulus.starts_with("Said to her:\n") && packet.stimulus.contains(&crate::persona::quoted(said)), "{}", packet.stimulus);
     let own = Room { messages: vec![message("#swarm:gamecult.org", OWN, "Eureka", "my own line", 1, false)], tail: vec![], here: None };
     let packet = packet_of(TurnKind::Chat, &state(), &own, &History::default(), 1);
     assert!(!whole(&packet).contains("my own line"), "her own last lines are not shown");
+}
+
+#[test]
+fn a_short_message_to_her_survives_long_chatter_after_it() {
+    let room = Room {
+        messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", "Eureka, are you ok?", 3, true), message("#swarm:gamecult.org", "@kiko:gamecult.org", "Kiko", &"log line spam ".repeat(120), 1, false)],
+        tail: vec![],
+        here: None,
+    };
+    let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
+    assert!(packet.stimulus.starts_with("Said to her:\n- Libby in #swarm:gamecult.org: \"Eureka, are you ok?\""), "{}", packet.stimulus);
+    assert!(packet.heard.starts_with("Libby, in #swarm:gamecult.org: \"Eureka, are you ok?\""), "{}", packet.heard);
+    assert!(packet.stimulus.contains("(1 earlier not shown)") && !packet.stimulus.contains("spam"), "the chatter that does not fit is counted, never cut: {}", packet.stimulus);
+    assert!(packet.stimulus.len() <= 1500 && packet.overflow == Overflow::default());
+}
+
+#[test]
+fn a_message_to_her_over_the_cap_goes_in_whole_and_the_overflow_is_recorded() {
+    let big = format!("Eureka, {}", "please read this whole thing ".repeat(70));
+    assert_eq!(big.len(), 2038);
+    let room = Room { messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", &big, 1, true)], tail: vec![], here: None };
+    let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
+    assert_eq!(packet.heard, format!("Libby, in #swarm:gamecult.org: \"{big}\""));
+    assert!(packet.stimulus.contains(big.trim_end()) && !packet.stimulus.contains("not shown"), "no note claims messages that do not exist: {}", &packet.stimulus[..80]);
+    assert_eq!(packet.overflow, Overflow { stimulus: packet.stimulus.len() - 1500, heard: packet.heard.len() - 1500 });
+    assert!(packet.overflow.stimulus > 0 && packet.overflow.heard > 0);
+}
+
+#[test]
+fn every_message_to_her_survives() {
+    let messages: Vec<RoomLine> = (0..30).map(|at| message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", &format!("Eureka, message {at} 💜 ok"), 100 - at, true)).chain((0..30).map(|at| message("#swarm:gamecult.org", "@kiko:gamecult.org", "Kiko", &format!("aside {at}"), 50 - at, false))).collect();
+    let room = Room { messages, tail: vec![], here: None };
+    let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
+    for at in 0..30 {
+        let words = format!("Eureka, message {at} 💜 ok");
+        assert!(packet.heard.contains(&format!("\"{words}\"")) && packet.stimulus.contains(&words), "message {at} to her was dropped");
+    }
+    let kept = packet.stimulus.matches("aside").count();
+    assert!(packet.stimulus.contains(&format!("({} earlier not shown)", 30 - kept)) || kept == 30, "the note counts exactly the others left out: {}", packet.stimulus);
 }
 
 #[test]
@@ -265,7 +342,7 @@ fn reflection_and_follow_up_stimuli() {
     let operators = operators();
     let room = Room::default();
     let history = History::default();
-    let inputs = Inputs { kind: TurnKind::FollowUp, state: &state(), room: &room, recall: &[], history: &history, observation: Some("Libby's change deleted 40 lines."), people: People { operators: &operators, own_sender: OWN }, now: now(), seed: 1 };
+    let inputs = Inputs { kind: TurnKind::FollowUp, state: &state(), room: &room, history: &history, observation: Some("Libby's change deleted 40 lines."), people: People { operators: &operators, own_sender: OWN }, now: now(), seed: 1 };
     let state_value = state();
     let follow = select(&Inputs { state: &state_value, ..inputs }, &Tuning::default());
     assert_eq!(follow.stimulus, "She just found: Libby's change deleted 40 lines.");
@@ -286,7 +363,7 @@ fn budgets_hold_under_adversarial_sizes() {
         bond["summary"] = json!(huge);
         bond["relationshipKind"] = json!("friend");
     }
-    let messages = (0..50).map(|at| message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", &format!("{at} {}", "word ".repeat(200)), 60 - at, true)).collect();
+    let messages = (0..50).map(|at| message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", &format!("{at} {}", "word ".repeat(200)), 60 - at, false)).collect();
     let room = Room { messages, tail: vec![], here: None };
     let tuning = Tuning::default();
     for kind in [TurnKind::Chat, TurnKind::Beat, TurnKind::Reflection] {
@@ -299,6 +376,68 @@ fn budgets_hold_under_adversarial_sizes() {
     }
     let packet = packet_of(TurnKind::Chat, &big, &room, &History::default(), 1);
     assert!(packet.stimulus.contains("earlier not shown") && packet.stimulus.contains("49 word"), "the newest messages are the ones kept: {}", &packet.stimulus[..200]);
+}
+
+#[test]
+fn a_hundred_and_twenty_bonds_never_overflow_a_beat() {
+    let mut crowd = state();
+    crowd["affect"]["socialBonds"] = Value::Array((0..120).map(|at| json!({ "id": format!("bond-p{at}"), "object": { "id": format!("p{at}"), "kind": "person", "label": format!("Person Number {at} with a long name") }, "status": "active" })).collect());
+    let tail: Vec<RoomLine> = (0..6).map(|at| message("#swarm:gamecult.org", &format!("@p{at}:gamecult.org"), "", &"x".repeat(150), 30 - at, false)).collect();
+    let packet = packet_of(TurnKind::Beat, &crowd, &Room { tail, ..Room::default() }, &History::default(), 1);
+    assert!(packet.stimulus.len() <= 1500, "{}", packet.stimulus.len());
+    assert!(packet.stimulus.contains("more people she is bound to not shown)") && packet.stimulus.contains("Lately in her rooms:"), "{}", packet.stimulus);
+    assert!(packet.stimulus.contains("- last heard from Person Number 5 with a long name 0 h ago"), "the most recently heard come first: {}", packet.stimulus);
+}
+
+#[test]
+fn a_crowd_or_a_huge_label_never_squeezes_out_the_mood() {
+    let messages: Vec<RoomLine> = (0..300).map(|at| message("#swarm:gamecult.org", &format!("@stranger{at}:gamecult.org"), &format!("Stranger {at}"), "hi", 300 - at, false)).collect();
+    let packet = packet_of(TurnKind::Chat, &state(), &Room { messages, ..Room::default() }, &History::default(), 1);
+    assert!(packet.context.contains("- mood") && packet.context.contains("- also here: Stranger 299") && packet.context.contains(" more"), "{}", packet.context);
+    assert!(packet.identity.len() + packet.context.len() <= 2500);
+    let mut huge = state();
+    huge["affect"]["socialBonds"] = json!([{ "id": "bond-libby", "object": { "id": "libby", "kind": "person", "label": "L".repeat(3000) }, "relationshipKind": "k".repeat(3000), "status": "active", "summary": "s" }]);
+    let room = Room { messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", "hi", 1, true)], ..Room::default() };
+    let packet = packet_of(TurnKind::Chat, &huge, &room, &History::default(), 1);
+    assert!(packet.context.contains("- mood") && packet.context.contains("- bond [bond-libby]"), "{}", packet.context);
+    assert!(packet.identity.len() + packet.context.len() <= 2500 && packet.heard.len() < 3000);
+}
+
+#[test]
+fn the_identity_cap_holds_on_its_own() {
+    let mut long = state();
+    long["presentation"]["voiceSummary"] = json!("dry ".repeat(500));
+    let mut tuning = Tuning::default();
+    tuning.select.identity_bytes = 50;
+    let packet = packet_tuned(TurnKind::Beat, &long, &Room::default(), &History::default(), 1, &tuning);
+    assert!(packet.identity.len() <= 50 && packet.identity.starts_with("Eureka (she/her). dry") && packet.identity.ends_with('…'), "{:?}", packet.identity);
+}
+
+#[test]
+fn a_candidate_that_does_not_fit_is_skipped_and_a_shorter_one_still_fits() {
+    let state = json!({ "publicName": "Eureka", "values": [
+        { "id": "long", "label": "Long", "priority": 0.9, "summary": "y".repeat(380) },
+        { "id": "short", "label": "Short", "priority": 0.9, "summary": "fits" },
+    ] });
+    let mut tuning = Tuning::default();
+    tuning.select.caps.value = 2;
+    tuning.select.inclusion_score = 1e-9;
+    let fixed = packet_tuned(TurnKind::Beat, &json!({ "publicName": "Eureka" }), &Room::default(), &History::default(), 1, &tuning);
+    tuning.select.context_bytes = fixed.identity.len() + fixed.context.len() + 1 + 60;
+    for seed in 1..=10 {
+        let packet = packet_tuned(TurnKind::Beat, &state, &Room::default(), &History::default(), seed, &tuning);
+        assert_eq!(ids(&packet), ["short"], "seed {seed}: {}", packet.context);
+        assert!(packet.identity.len() + packet.context.len() <= tuning.select.context_bytes);
+    }
+}
+
+#[test]
+fn clipping_never_splits_a_grapheme() {
+    let mut family = state();
+    family["publicName"] = json!("👩‍👩‍👧‍👦".repeat(40));
+    let packet = packet_of(TurnKind::Beat, &family, &Room::default(), &History::default(), 1);
+    let body = packet.identity.trim_end_matches('…');
+    assert!(packet.identity.len() <= 300 && !body.ends_with('\u{200d}') && body.ends_with('👦'), "{:?}", packet.identity);
 }
 
 #[test]
@@ -317,12 +456,12 @@ fn the_narration_is_cut_at_its_word_budget() {
 
 #[test]
 fn field_names_are_caught_and_prose_is_not() {
-    let selected = vec!["bond-libby".to_owned(), "t1-m0".to_owned(), "curse".to_owned()];
-    for leak in ["Her socialBonds hum.", "bond-kiko pulls at her", "trust: 0.6 with Libby", "Tension = high", "the t1-m0 note", "a [curse] tag", "mind-persona wakes", "currentActivation rises"] {
-        assert!(!field_names(leak, &selected).is_empty(), "{leak:?} leaks an identifier");
+    let ids = vec!["bond-libby".to_owned(), "t1-m0".to_owned(), "curse".to_owned()];
+    for leak in ["Her socialBonds hum.", "SocialBonds hum", "social_bonds hum", "her voiceStyle shifts", "her stableDispositions", "behavioralDimensions", "the inclusion_score", "context_bytes", "beat_words", "presentationStrategy", "currentActivation rises", "bond-libby pulls at her", "the t1-m0 note", "a [curse] tag"] {
+        assert!(!field_names(leak, &ids).is_empty(), "{leak:?} leaks an identifier");
     }
-    for prose in ["She trusts Libby, and the tension between them is old.", "Her curse is the knife.", "A mind-numbing hour.", "She feels her trust thin; valence is a word she would never use aloud."] {
-        assert!(field_names(prose, &selected).is_empty(), "{prose:?} is prose: {:?}", field_names(prose, &selected));
+    for prose in ["She keeps it need-to-know.", "A bond-deep loyalty.", "It comes down to trust: she waits.", "The stance-taking tires her.", "Tension: that is the word.", "trust=0.6", "She trusts Libby, and the tension between them is old.", "Her curse is the knife.", "A mind-numbing hour.", "a Learned memory", "Values matter."] {
+        assert!(field_names(prose, &ids).is_empty(), "{prose:?} is prose: {:?}", field_names(prose, &ids));
     }
 }
 
@@ -344,82 +483,53 @@ fn tuning_absent_is_the_defaults_and_a_file_overrides_and_an_unknown_key_refuses
     assert!(format!("{:#}", tuning::load(&path).unwrap_err()).contains("temprature"), "a mistyped knob refuses the file");
 }
 
-/// A mind holding one memory of each sort, all about Libby and all on her words.
-fn mind_of_every_sort() -> TestMind {
-    let mind = TestMind::seeded();
-    let documents = super::tuning::MEMORY_SORTS
-        .iter()
-        .map(|sort| {
-            let parsed: MemorySort = serde_json::from_value(json!(sort)).unwrap();
-            memory(&format!("sort-{}", sort.to_lowercase()), parsed, &format!("the door and Libby, {sort}"), &["@libby:gamecult.org"])
-        })
-        .collect();
-    mind.committed(documents);
-    mind
+#[test]
+fn the_hash_is_of_the_effective_tuning() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(TUNING_FILE);
+    let absent = tuning::load(&path).unwrap();
+    std::fs::write(&path, "[select]\ntemperature = 0.7\ncontext_bytes = 2500\n\n[projector]\nwords = 150\n").unwrap();
+    let spelled = tuning::load(&path).unwrap();
+    assert_eq!((absent.source, spelled.source), ("defaults", "file"));
+    assert_eq!(absent.sha256, spelled.sha256, "a file that spells out the defaults is the defaults");
+    let mut other_build = Tuning::default();
+    other_build.select.item_bytes += 1;
+    assert_ne!(other_build.sha256(), Tuning::default().sha256(), "two builds with different defaults hash differently");
 }
 
-/// Every Mind memory id `project` offered Select on 40 seeds, with the tuning at `dir`.
-fn recalled_on_every_seed(mind: &TestMind, dir: &std::path::Path) -> (BTreeSet<String>, Value) {
-    let stored = Stored(state());
-    let chat = mouth();
-    let organs = Organs { persona: Some(&stored), mind: Some(mind), chat: Some(&chat), model: None };
-    let mut shown = BTreeSet::new();
-    let mut last = Value::Null;
-    for seed in 1..=40 {
-        let report = project(&organs, &Request { seed, ..request(dir, None, None) }, now()).unwrap();
-        let recalled: Vec<String> = report["packet"]["selected"].as_array().unwrap().iter().filter(|pick| pick["pool"] == "recall").map(|pick| pick["id"].as_str().unwrap().to_owned()).collect();
-        assert!(recalled.len() <= 1, "the default recall cap is one item a packet: {recalled:?}");
-        shown.extend(recalled);
-        last = report;
+#[test]
+fn a_value_out_of_range_refuses_the_tuning() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(TUNING_FILE);
+    for (body, names) in [
+        ("[select]\ntemperature = nan\n", "select.temperature"),
+        ("[select]\ntemperature = 0.0\n", "select.temperature"),
+        ("[select]\ntemperature = -1.0\n", "select.temperature"),
+        ("[select]\nfreshness_base = -0.5\n", "select.freshness_base"),
+        ("[select]\ncontext_bytes = 0\n", "select.context_bytes"),
+        ("[select]\nstimulus_bytes = 0\n", "select.stimulus_bytes"),
+        ("[select]\nheard_bytes = 0\n", "select.heard_bytes"),
+        ("[select]\ninclusion_score = 0.0\n", "select.inclusion_score"),
+        ("[projector]\nwords = 0\n", "projector.words"),
+    ] {
+        std::fs::write(&path, body).unwrap();
+        let fault = format!("{:#}", tuning::load(&path).unwrap_err());
+        assert!(fault.contains(names), "{body:?}: {fault}");
     }
-    (shown, last)
-}
-
-#[test]
-fn recall_offers_only_the_tunings_sorts_and_the_default_keeps_work_out() {
-    let mind = mind_of_every_sort();
-    let dir = tempfile::tempdir().unwrap();
-    let (shown, report) = recalled_on_every_seed(&mind, dir.path());
-    assert_eq!(report["recall"]["sorts"], json!(["Learned", "Idea", "Rapport"]), "the report says which sorts it used");
-    for work in ["committed", "did", "asked", "decided"] {
-        assert!(!shown.iter().any(|id| id.ends_with(&format!("sort-{work}"))), "{work} is work and never reaches her by default: {shown:?}");
-    }
-    assert!(!shown.is_empty(), "some allowed sort is recalled: {shown:?}");
-    std::fs::write(dir.path().join(TUNING_FILE), "[select]\nrecall_sorts = [\"Committed\", \"Did\"]\n").unwrap();
-    let (shown, report) = recalled_on_every_seed(&mind, dir.path());
-    assert_eq!(report["recall"]["sorts"], json!(["Committed", "Did"]));
-    assert!(shown.iter().any(|id| id.ends_with("sort-committed") || id.ends_with("sort-did")), "an experiment that names them admits them: {shown:?}");
-    assert!(shown.iter().all(|id| id.ends_with("sort-committed") || id.ends_with("sort-did")), "and only them: {shown:?}");
-}
-
-#[test]
-fn the_recall_cap_holds_and_a_tuning_may_raise_it() {
-    let mind = mind_of_every_sort();
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(TUNING_FILE), "[select.caps]\nrecall = 3\n").unwrap();
-    let stored = Stored(state());
-    let chat = mouth();
-    let organs = Organs { persona: Some(&stored), mind: Some(&mind), chat: Some(&chat), model: None };
-    let most = (1..=40)
-        .map(|seed| project(&organs, &Request { seed, ..request(dir.path(), None, None) }, now()).unwrap()["packet"]["selected"].as_array().unwrap().iter().filter(|pick| pick["pool"] == "recall").count())
-        .max()
-        .unwrap();
-    assert!((2..=3).contains(&most), "a raised cap admits more, and never past it: {most}");
-}
-
-#[test]
-fn a_recall_sort_the_mind_does_not_know_refuses_the_tuning() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(TUNING_FILE), "[select]\nrecall_sorts = [\"Learnt\"]\n").unwrap();
-    assert!(format!("{:#}", tuning::load(&dir.path().join(TUNING_FILE)).unwrap_err()).contains("Learnt"));
 }
 
 #[test]
 fn a_lower_temperature_concentrates_the_selection() {
     let room = chat_room();
+    let mut rich = state();
+    for at in 0..6 {
+        rich["thoughtMemory"]["memories"].as_array_mut().unwrap().push(json!({ "id": format!("day-{at}"), "summary": format!("Something from day {at}."), "createdAt": hours_ago(10 + at) }));
+    }
+    // Everything is included, so only the order decides what the caps keep.
     let mut cold = Tuning::default();
     cold.select.temperature = 0.01;
-    let distinct: BTreeSet<Vec<String>> = (1..=20).map(|seed| ids(&packet_tuned(TurnKind::Chat, &state(), &room, &History::default(), seed, &cold))).collect();
+    cold.select.inclusion_score = 1e-9;
+    let distinct: BTreeSet<Vec<String>> = (1..=20).map(|seed| ids(&packet_tuned(TurnKind::Chat, &rich, &room, &History::default(), seed, &cold))).collect();
     assert_eq!(distinct.len(), 1, "near zero temperature takes the top scores every time: {distinct:?}");
 }
 
@@ -516,28 +626,6 @@ fn mouth() -> ReadOnlyMouth {
     ReadOnlyMouth { pending: ChatPending { persona: "eureka".into(), deliveries, tail: Some(tail), tail_gaps: vec![] }, reads: Cell::new(0) }
 }
 
-/// A mind that counts admissions over a real one's reads.
-struct Counting<'a> {
-    inner: &'a TestMind,
-    admits: Cell<u32>,
-}
-
-impl MindPort for Counting<'_> {
-    fn instance(&self) -> &Slug {
-        self.inner.instance()
-    }
-    fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage> {
-        self.inner.query(selection)
-    }
-    fn query_near(&self, selection: &Selection, text: &str, top_k: u32) -> Result<PipelineSelectionPage> {
-        self.inner.query_near(selection, text, top_k)
-    }
-    fn admit(&self, _: &str, _: &str, _: Vec<PipelineDocument>) -> Result<PipelineAdmissionOutcome> {
-        self.admits.set(self.admits.get() + 1);
-        Err(anyhow!("project admitted"))
-    }
-}
-
 struct Stored(Value);
 
 impl PersonaSource for Stored {
@@ -550,67 +638,40 @@ fn request(dir: &std::path::Path, renders: Option<usize>, judge_against: Option<
     Request { instance: INSTANCE.into(), kind: TurnKind::Chat, state: None, room: Some("#swarm:gamecult.org".into()), seed: 5, renders, judge_against, operators: operators(), own_sender: OWN.into(), tuning: dir.join(TUNING_FILE) }
 }
 
-fn mind() -> TestMind {
-    let mind = TestMind::seeded();
-    mind.committed(vec![memory("libby-door", MemorySort::Learned, "Libby fixed the door at last", &["@libby:gamecult.org"]), crate::testkit::follow_up("work-item", &reference(PipelineKind::Memory, &format!("{INSTANCE}:memory:libby-door")))]);
-    mind
-}
-
 #[test]
 fn project_in_every_mode_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let trace = dir.path().join("persona-trace.cc");
     std::fs::write(&trace, b"trace bytes").unwrap();
-    let test_mind = mind();
-    let before: Vec<Vec<String>> = [PipelineKind::Memory, PipelineKind::FollowUp, PipelineKind::Thought, PipelineKind::Run].iter().map(|kind| test_mind.ids(*kind)).collect();
-    let counting = Counting { inner: &test_mind, admits: Cell::new(0) };
     let stored = Stored(state());
     let chat = mouth();
     let model = Recorded::discriminating();
-    let organs = Organs { persona: Some(&stored), mind: Some(&counting), chat: Some(&chat), model: Some(&model) };
+    let organs = Organs { persona: Some(&stored), chat: Some(&chat), model: Some(&model) };
     let mut other = state();
     other["affect"]["socialBonds"][1]["tension"] = json!(0.0);
     for (renders, judge) in [(None, None), (Some(3), None), (Some(2), Some(other))] {
         let report = project(&organs, &request(dir.path(), renders, judge), now()).unwrap();
         assert_eq!(report["persona_receipt"], "mind-commit-1");
     }
-    assert_eq!(counting.admits.get(), 0, "nothing was admitted");
-    let after: Vec<Vec<String>> = [PipelineKind::Memory, PipelineKind::FollowUp, PipelineKind::Thought, PipelineKind::Run].iter().map(|kind| test_mind.ids(*kind)).collect();
-    assert_eq!(before, after, "her mind holds what it held");
     assert_eq!(std::fs::read(&trace).unwrap(), b"trace bytes", "the trace is untouched");
     assert_eq!(chat.reads.get(), 3, "the mouth was only read");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no file was written beside the trace");
 }
 
 #[test]
-fn project_select_only_reads_the_room_and_recall_and_never_shows_work() {
+fn project_select_only_reads_the_room_and_the_state_and_nothing_else() {
     let dir = tempfile::tempdir().unwrap();
-    let test_mind = mind();
     let stored = Stored(state());
     let chat = mouth();
-    let organs = Organs { persona: Some(&stored), mind: Some(&test_mind), chat: Some(&chat), model: None };
+    let organs = Organs { persona: Some(&stored), chat: Some(&chat), model: None };
     let report = project(&organs, &request(dir.path(), None, None), now()).unwrap();
     assert_eq!(report["tuning"]["source"], "defaults");
     assert_eq!((report["room"]["read"].as_bool(), report["room"]["messages"].as_u64()), (Some(true), Some(1)), "only the room asked for");
     let packet = &report["packet"];
     assert!(packet["heard"].as_str().unwrap().contains("Libby, in #swarm:gamecult.org: \"Eureka, the door?\""), "{packet}");
     assert!(!packet.to_string().contains("elsewhere"), "another room's message is not this turn's");
-    assert!(!packet.to_string().contains("work-item") && !packet.to_string().contains("Later."), "a follow-up is work, never recalled to her");
+    assert!(report.get("recall").is_none() && !packet["context"].as_str().unwrap().contains("recalls"), "the Projector does not read her Mind");
     assert!(report.get("renders").is_none(), "select-only calls no model");
-}
-
-#[test]
-fn project_recall_reaches_the_packet_when_drawn() {
-    let dir = tempfile::tempdir().unwrap();
-    let test_mind = mind();
-    let stored = Stored(state());
-    let chat = mouth();
-    let organs = Organs { persona: Some(&stored), mind: Some(&test_mind), chat: Some(&chat), model: None };
-    let drawn = (1..=20).any(|seed| {
-        let report = project(&organs, &Request { seed, ..request(dir.path(), None, None) }, now()).unwrap();
-        report["packet"]["context"].as_str().unwrap().contains("her mind recalls")
-    });
-    assert!(drawn, "a memory about the person speaking is recalled on some seed");
 }
 
 #[test]
@@ -618,7 +679,7 @@ fn renders_are_successive_turns_under_freshness_and_carry_the_guard() {
     let dir = tempfile::tempdir().unwrap();
     let stored = Stored(state());
     let model = Recorded::new(|_| "She waits. socialBonds hum.".into(), |_| "A".into());
-    let organs = Organs { persona: Some(&stored), mind: None, chat: None, model: Some(&model) };
+    let organs = Organs { persona: Some(&stored), chat: None, model: Some(&model) };
     let report = project(&organs, &Request { kind: TurnKind::Beat, ..request(dir.path(), Some(4), None) }, now()).unwrap();
     let renders = report["renders"].as_array().unwrap();
     assert_eq!(renders.len(), 4);
@@ -643,7 +704,7 @@ fn the_judge_scores_a_discriminating_projector_and_fails_a_blind_one() {
     eased["affect"]["socialBonds"][0]["tension"] = json!(0.9);
     let chat = mouth();
     let model = Recorded::discriminating();
-    let organs = Organs { persona: Some(&stored), mind: None, chat: Some(&chat), model: Some(&model) };
+    let organs = Organs { persona: Some(&stored), chat: Some(&chat), model: Some(&model) };
     let report = project(&organs, &request(dir.path(), Some(5), Some(eased.clone())), now()).unwrap();
     assert_eq!((report["judge"]["accuracy"].as_f64(), report["judge"]["passed"].as_bool()), (Some(1.0), Some(true)), "{}", report["judge"]);
     assert_eq!(report["judge"]["verdicts"].as_array().unwrap().len(), 10);
@@ -658,14 +719,14 @@ fn the_judge_scores_a_discriminating_projector_and_fails_a_blind_one() {
 fn renders_without_a_connector_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let stored = Stored(state());
-    let organs = Organs { persona: Some(&stored), mind: None, chat: None, model: None };
+    let organs = Organs { persona: Some(&stored), chat: None, model: None };
     assert!(format!("{:#}", project(&organs, &request(dir.path(), Some(1), None), now()).unwrap_err()).contains("connector"));
 }
 
 #[test]
 fn a_given_state_is_projected_without_reading_the_stored_one() {
     let dir = tempfile::tempdir().unwrap();
-    let organs = Organs { persona: None, mind: None, chat: None, model: None };
+    let organs = Organs { persona: None, chat: None, model: None };
     let mut given = state();
     given["publicName"] = json!("Hypothetical");
     let report = project(&organs, &Request { state: Some(given), ..request(dir.path(), None, None) }, now()).unwrap();

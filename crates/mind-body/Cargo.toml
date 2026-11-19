@@ -46,6 +46,8 @@ serde_json = "1"
 sha2 = "0.10"
 toml = { version = "0.9", default-features = false, features = ["std", "serde", "parse"] }
 unicode-general-category = "1"
+# Clips on grapheme boundaries (`projection::select::clip`), so no ZWJ sequence is split; already in the graph through Ghostlight.
+unicode-segmentation = "1"
 uuid = { version = "1", default-features = false, features = ["v5"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -46,7 +46,6 @@ pub mod lease_client;
 pub mod persona;
 pub mod projection;
 pub mod queue;
-mod recall;
 pub mod self_run;
 pub mod tempo;
 

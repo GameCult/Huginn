@@ -30,13 +30,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use eureka_state::HuginnClient;
-use mind_body::chat_client::Chat;
 use mind_body::chat_rudp::{RudpChat, connection_id};
 use mind_body::cli::instance_and_endpoint;
 use mind_body::control::{CONTROL_ROOT, FileSource, control_path, swarm_path};
 use mind_body::persona::{Config, carry};
-use mind_body::projection::{HuginnPersonaSource, KitModel, Model, Organs as ProjectOrgans, Request as ProjectRequest, TUNING_FILE, TUNING_ROOT, TurnKind, connector_key, project};
-use mind_body::queue::HuginnMind;
+use mind_body::projection::{HuginnPersonaSource, KitModel, Model, MouthReader, Organs as ProjectOrgans, Request as ProjectRequest, TUNING_FILE, TUNING_ROOT, TurnKind, connector_key, project};
 
 const USAGE: &str = "usage: mind-persona --instance <slug> [--endpoint rudp://<ip>:<port>] [--rooms a,b] [--operator id[,id]] [--minds id[,id]] [--self-sender id]";
 const PROJECT_USAGE: &str = "usage: mind-persona project --instance <slug> [--endpoint rudp://<ip>:<port>] [--kind chat|beat|reflection] [--room <r>] [--seed N] [--state <file>] [--select-only | --renders K [--judge <state-file>]]";
@@ -115,7 +113,6 @@ fn run_project(args: &[String]) -> Result<String> {
     let now = chrono::Utc::now();
     let tuning = setting("MIND_PERSONA_TUNING").map_or_else(|| Path::new(TUNING_ROOT).join(&instance.0).join(TUNING_FILE), PathBuf::from);
     let persona = HuginnPersonaSource::new(HuginnClient::new(address, instance.clone(), TIMEOUT));
-    let mind = HuginnMind::new(HuginnClient::new(address, instance.clone(), TIMEOUT));
     let chat = match (setting("BIFROST_CHAT_ENDPOINT"), setting("BIFROST_CHAT_KEY_FILE")) {
         (Some(endpoint), Some(_)) => {
             let endpoint: SocketAddr = endpoint.strip_prefix("rudp://").and_then(|address| address.parse().ok()).ok_or_else(|| anyhow!("BIFROST_CHAT_ENDPOINT is not rudp://<ip>:<port>"))?;
@@ -131,7 +128,7 @@ fn run_project(args: &[String]) -> Result<String> {
         }
         None => None,
     };
-    let organs = ProjectOrgans { persona: Some(&persona), mind: Some(&mind), chat: chat.as_ref().map(|chat| chat as &dyn Chat), model: model.as_ref().map(|model| model as &dyn Model) };
+    let organs = ProjectOrgans { persona: Some(&persona), chat: chat.as_ref().map(|chat| chat as &dyn MouthReader), model: model.as_ref().map(|model| model as &dyn Model) };
     let request = ProjectRequest {
         instance: instance.0.clone(),
         kind,

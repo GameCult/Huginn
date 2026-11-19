@@ -116,54 +116,70 @@ pub(crate) fn words(text: &str) -> usize {
     text.split_whitespace().count()
 }
 
-/// Schema keys of her persona state, as identifiers. A narration that carries one leaked the storage.
-const SCHEMA_KEYS: [&str; 22] = [
-    "currentActivation", "socialBonds", "doctrineStances", "thoughtMemory", "shortTerm", "agencyPressure", "activationProfile", "situationalState", "moodDimensions", "candidateActions", "privateNotes",
-    "publicName", "publicDescription", "voiceSummary", "relationshipKind", "lastEvidence", "actionImplication", "schemaVersion", "updatedAt", "createdAt", "salience_permille", "persona_state",
-];
-/// Id prefixes of typed state, and the organ labels a `mind-` id begins with (a bare `mind-` is prose: "mind-numbing").
-const ID_PREFIXES: [&str; 10] = ["bond-", "need-", "stance-", "mind-commit", "mind-persona", "mind-heartbeat", "mind-stream", "mind-control", "mind-self", "mind-eureka"];
-/// Keys a number is stored under: the word is prose, the word followed by `:` or `=` is a field.
-const VALUE_KEYS: [&str; 8] = ["trust", "tension", "intensity", "plasticity", "valence", "arousal", "dominance", "salience"];
+/// Her persona state's schema: its property names are the identifiers a narration must never carry.
+const PERSONA_SCHEMA: &str = include_str!("../../../../schemas/cultnet/gamecult.persona_state.v0.schema.json");
 
-/// The identifiers of typed state a narration carries: schema keys, typed ids, `key: value` fields, and the packet's own
-/// selected ids where an id is no plain word. A small deterministic guard on identifiers, never on meaning.
-pub(crate) fn field_names(narration: &str, selected_ids: &[String]) -> Vec<String> {
+/// An identifier as compared: lowercased with its underscores gone, so `socialBonds`, `SocialBonds` and `social_bonds`
+/// are one.
+fn folded(identifier: &str) -> String {
+    identifier.chars().filter(|c| *c != '_').flat_map(char::to_lowercase).collect()
+}
+
+/// Whether a word is shaped like an identifier rather than prose: an underscore, or a capital after its first letter.
+fn identifier_shaped(word: &str) -> bool {
+    word.contains('_') || word.chars().skip(1).any(char::is_uppercase)
+}
+
+fn keys_of(value: &serde_json::Value, schema: bool, into: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map {
+                if schema && key == "properties"
+                    && let Some(properties) = inner.as_object()
+                {
+                    into.extend(properties.keys().cloned());
+                }
+                if !schema {
+                    into.insert(key.clone());
+                }
+                keys_of(inner, schema, into);
+            }
+        }
+        serde_json::Value::Array(values) => values.iter().for_each(|inner| keys_of(inner, schema, into)),
+        _ => {}
+    }
+}
+
+/// The folded compound identifiers of the persona schema and of the tuning: a plain word such as `trust` or
+/// `tension` is prose and is not among them.
+fn identifiers() -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    if let Ok(schema) = serde_json::from_str::<serde_json::Value>(PERSONA_SCHEMA) {
+        keys_of(&schema, true, &mut keys);
+    }
+    if let Ok(tuning) = serde_json::to_value(Tuning::default()) {
+        keys_of(&tuning, false, &mut keys);
+    }
+    keys.into_iter().filter(|key| identifier_shaped(key)).map(|key| folded(&key)).collect()
+}
+
+/// The identifiers of typed state a narration carries: a word shaped like an identifier that names a property of her
+/// persona schema or a tuning key, in any case convention, and any id the packet named (`ids`), as an exact token when
+/// it cannot be a plain word, or inside brackets as the packet writes it. A small deterministic guard on identifiers,
+/// never on meaning: "need-to-know", "trust:" and "Tension:" are prose.
+pub(crate) fn field_names(narration: &str, ids: &[String]) -> Vec<String> {
+    let known = identifiers();
     let mut found = BTreeSet::new();
-    let tokens: Vec<&str> = narration.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_' || c == ':')).filter(|token| !token.is_empty()).collect();
-    for token in &tokens {
-        let bare = token.trim_matches(|c: char| c == ':' || c == '-');
-        if SCHEMA_KEYS.contains(&bare) {
-            found.insert(bare.to_owned());
-        }
-        if ID_PREFIXES.iter().any(|prefix| bare.to_lowercase().starts_with(prefix) && bare.trim_end_matches('-').len() > "bond".len()) {
-            found.insert(bare.to_owned());
+    for word in narration.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|word| !word.is_empty()) {
+        if identifier_shaped(word) && known.contains(&folded(word)) {
+            found.insert(word.to_owned());
         }
     }
-    let lower = narration.to_lowercase();
-    for key in VALUE_KEYS {
-        let mut from = 0;
-        while let Some(at) = lower[from..].find(key) {
-            let start = from + at;
-            let end = start + key.len();
-            let word_start = start == 0 || !lower[..start].chars().next_back().is_some_and(char::is_alphanumeric);
-            let rest = lower[end..].trim_start_matches([' ', '"', '\'']);
-            if word_start && (rest.starts_with(':') || rest.starts_with('=')) {
-                found.insert(key.to_owned());
-            }
-            from = end;
-        }
-    }
-    for id in selected_ids.iter().filter(|id| id.contains(['-', '_', ':']) || id.chars().any(|c| c.is_ascii_digit())) {
-        if narration.contains(id.as_str()) {
+    let tokens: BTreeSet<&str> = narration.split_whitespace().map(|token| token.trim_matches(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_' || c == ':'))).collect();
+    for id in ids {
+        let compound = id.contains(['-', '_', ':']) || id.chars().any(|c| c.is_ascii_digit());
+        if (compound && tokens.contains(id.as_str())) || narration.contains(&format!("[{id}]")) {
             found.insert(id.clone());
-        }
-    }
-    if narration.contains('[') && narration.contains(']') {
-        for id in selected_ids {
-            if narration.contains(&format!("[{id}]")) {
-                found.insert(id.clone());
-            }
         }
     }
     found.into_iter().collect()
