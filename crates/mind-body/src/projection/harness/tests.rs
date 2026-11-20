@@ -42,8 +42,8 @@ impl Scripted {
 }
 
 /// The recorded Interpreter of the tests: each double-quoted span of her prose is a line she says, citing itself,
-/// mentioning no one. A test double that keeps the tests' prose readable, not the speech rule: quotation marks mean
-/// nothing to code, and the live Interpreter is a model.
+/// mentioning no one. A test double that keeps the tests' prose readable, not the speech rule: to code a quotation is
+/// only a text whose sentences are whole, and the live Interpreter is a model.
 pub(crate) fn quoted_lines(prompt: &str) -> String {
     let prose = prompt.split("Her prose:\n").nth(1).unwrap_or_default();
     let say: Vec<Value> = prose.split('"').enumerate().filter(|(at, part)| at % 2 == 1 && !part.trim().is_empty()).map(|(_, part)| json!({ "spans": [part], "mentions": [], "reply_to": null })).collect();

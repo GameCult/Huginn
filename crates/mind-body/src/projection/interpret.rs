@@ -4,18 +4,24 @@
 //! The Persona writes her thought, and when she means to say something she writes the words she would type. The
 //! Interpreter decides whether she says them now: it answers with zero or more lines, each a list of spans of her prose
 //! cited verbatim, with the people she addresses (Matrix mentions and a reply target, as structured fields). Code builds
-//! each line, never the model: the line is its spans, located in her prose in order by Ghostlight's
-//! `SourceSpan::locate`, joined with one space. So a line is always her own words verbatim. What this gives up: indirect
-//! speech ("I'll tell her I'm fine" says nothing) and any paraphrase by the Interpreter.
+//! each line, never the model: each span is located in her prose by Ghostlight's `SourceSpan::locate` and must be whole
+//! sentences (UAX #29 sentence segmentation, the Unicode family `locate`'s word boundaries come from), and the spans of
+//! one line must be consecutive sentences; the line is that one unbroken run of her prose. A quotation's inside is
+//! segmented as a text of its own, so a quoted sentence is whole. So a line is always whole sentences of her own,
+//! verbatim and in their order: no stitching, no dropped negation, no condition lifted off its clause. What this gives
+//! up: indirect speech ("I'll tell her I'm fine" says nothing), any paraphrase by the Interpreter, and half a sentence:
+//! she says a sentence whole or not at all.
 //!
-//! Code keeps a line only when every span locates in her prose, in order; drops a line that is mostly one long run of
-//! the words she heard (an echo, measured on message bodies alone); keeps at most `MAX_LINES` distinct lines; and keeps
-//! a mention or a reply target only for someone this packet showed her (`Packet::people`). She speaks only in the turn's
-//! room. Every refusal and drop is reported. Nothing here posts: the commit (C3c) will.
+//! Code keeps a line only when it is built so; drops an echo (at least `ECHO_MIN_WORDS` words, at least `ECHO_OVERLAP`
+//! of its word trigrams in the bodies the stimulus quoted to her); drops a line that shares a run of three words with a
+//! private item the packet showed her as known privately (`Packet::private`); keeps at most `MAX_LINES` distinct lines;
+//! and keeps a mention or a reply target only for someone this packet showed her (`Packet::people`). She speaks only in
+//! the turn's room. Every refusal and drop is reported. Nothing here posts: the commit (C3c) will.
 
 use ghostlight_persona_projection::SourceSpan;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::narrate::{Model, heard_overlap, lived_stream};
 use super::select::Packet;
@@ -23,21 +29,22 @@ use super::tuning::Tuning;
 
 /// The most lines she says in one turn.
 pub(crate) const MAX_LINES: usize = 2;
-/// A line of at least this many words whose word trigrams are mostly what she heard is an echo, not her speech.
-const ECHO_MIN_WORDS: usize = 4;
-const ECHO_OVERLAP: f64 = 0.5;
+/// A line of at least this many words whose word trigrams are at least this share of what she heard is an echo, not
+/// her speech.
+const ECHO_MIN_WORDS: usize = 8;
+const ECHO_OVERLAP: f64 = 0.8;
 
 /// What to say, where, to whom, and the gaps: Huginn's chat Interpreter, beside nothing of Ghostlight's but its span rule.
 const SPEECH_PROMPT: &str = "You decide what one person says aloud in a chat room this turn, from her own prose. You never write her words: you cite them.
 
 Below are who she is, the room and who is in it, what reached her, her lived moment, and her prose. Decide which words of her prose she chooses to say aloud now, in this room. A line is speech only when her prose shows her choosing to say it now. Wondering whether to speak, deciding to wait or stay quiet, or saying that she says nothing, is not speech. Words she recalls or quotes from someone else are never her speech.
 
-She speaks only in this room. In a room that is not a direct message, she does not say what she knows privately about someone: what the moment marks as known privately stays out of what she says to the room. Whether a line fits who is listening is yours to judge.
+She speaks only in this room. What she knows privately is listed below as private: she says none of it here, and nothing that gives it away. A private matter may be said plainly only to the person it concerns, in a direct message with exactly that person; nothing listed is that here. Whether a line fits who is listening is yours to judge.
 
 Answer with one JSON object and nothing else:
-{\"say\": [{\"spans\": [\"<exact words of her prose, copied character for character>\"], \"mentions\": [\"<Matrix id of someone listed whom she addresses directly>\"], \"reply_to\": \"<Matrix id of the person whose message she answers, or null>\"}], \"gaps\": [{\"kind\": \"conditional | addressee | elsewhere\", \"quote\": \"<exact words of her prose>\", \"detail\": \"<why>\"}]}
+{\"say\": [{\"spans\": [\"<whole sentences of her prose, copied character for character>\"], \"mentions\": [\"<Matrix id of someone listed whom she addresses directly>\"], \"reply_to\": \"<Matrix id of the person whose message she answers, or null>\"}], \"gaps\": [{\"kind\": \"conditional | addressee | elsewhere\", \"quote\": \"<exact words of her prose>\", \"detail\": \"<why>\"}]}
 
-A line is its spans joined in order: cite exactly the words she would type, one span or a few in the order they appear, nothing she only describes. At most two lines. Record a gap instead of guessing: conditional when she might say something but has not chosen to, addressee when she means to say it but whom to is unclear, elsewhere when she means it for another room or another time. An empty say list is the usual answer in a busy room.";
+A line is whole sentences of her prose, the words she would type and nothing she only describes: each span is one sentence or several, from its first character to its last, and the spans of one line are consecutive sentences. Inside a quotation, its own sentences count. She never says half a sentence; if only part of a sentence is speech, she says nothing of it. At most two lines. Record a gap instead of guessing: conditional when she might say something but has not chosen to, addressee when she means to say it but whom to is unclear, elsewhere when she means it for another room or another time. An empty say list is the usual answer in a busy room.";
 
 #[derive(Debug, Deserialize)]
 struct Answer {
@@ -65,8 +72,12 @@ pub(crate) fn speech_prompt(packet: &Packet, narration: &str, prose: &str) -> St
     if people.is_empty() {
         people.push_str("- no one else has spoken here lately\n");
     }
+    let mut private: String = packet.private.iter().map(|words| format!("- private: {words}\n")).collect();
+    if private.is_empty() {
+        private.push_str("- none\n");
+    }
     format!(
-        "{SPEECH_PROMPT}\n\nWho she is:\n{}\n\nThe room: {} ({}).\nWho is in it, as label \u{2014} Matrix id:\n{people}\nWhat reached her:\n{}\n\nHer lived moment:\n{}\n\nHer prose:\n{prose}",
+        "{SPEECH_PROMPT}\n\nWho she is:\n{}\n\nThe room: {} ({}).\nWho is in it, as label \u{2014} Matrix id:\n{people}\nWhat she knows privately, none of it to be said here:\n{private}\nWhat reached her:\n{}\n\nHer lived moment:\n{}\n\nHer prose:\n{prose}",
         packet.identity,
         packet.room.as_deref().unwrap_or("none"),
         packet.room_kind.words(),
@@ -82,30 +93,93 @@ fn json_of(text: &str) -> Option<Answer> {
     serde_json::from_str(&text[start..=end]).ok()
 }
 
-/// The line her cited spans make: each located in her prose after the one before it, joined with one space; or why not.
+/// The sentences a line may be made of, as byte ranges of her prose without the space around them, in lists: her
+/// prose's own sentences (UAX #29), then each quotation's inside, segmented as a text of its own.
+fn sentences(prose: &str) -> Vec<Vec<(usize, usize)>> {
+    let segment = |offset: usize, text: &str| -> Vec<(usize, usize)> {
+        text.split_sentence_bound_indices()
+            .filter_map(|(at, sentence)| {
+                let start = at + sentence.len() - sentence.trim_start().len();
+                let end = at + sentence.trim_end().len();
+                (start < end).then_some((offset + start, offset + end))
+            })
+            .collect()
+    };
+    let mut lists = vec![segment(0, prose)];
+    lists.extend(quotations(prose).into_iter().map(|(start, end)| segment(start, &prose[start..end])));
+    lists
+}
+
+/// The insides of her quotations, as byte ranges: between a pair of straight double quotes, or a curly pair. An
+/// unclosed quotation is none.
+fn quotations(prose: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut open: Option<(usize, char)> = None;
+    for (at, c) in prose.char_indices() {
+        match open {
+            None if c == '"' => open = Some((at + 1, '"')),
+            None if c == '\u{201C}' => open = Some((at + c.len_utf8(), '\u{201D}')),
+            Some((start, close)) if c == close => {
+                out.push((start, at));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The line her cited spans make, or why not. Each span is located in her prose after the one before it and must be
+/// whole sentences of one list (`sentences`), each span's first sentence the one after the last span's last; the line is
+/// her prose from the first sentence to the last, verbatim.
 fn built(prose: &str, spans: &[String]) -> Result<(String, Vec<Value>), &'static str> {
+    let lists = sentences(prose);
     let mut from = 0;
-    let mut words = Vec::new();
+    // The list the line is in, and its last sentence so far.
+    let mut run: Option<(usize, usize)> = None;
+    let mut first = None;
     let mut located = Vec::new();
     for span in spans.iter().map(|span| span.trim()).filter(|span| !span.is_empty()) {
         let Some(found) = prose.get(from..).and_then(|rest| SourceSpan::locate(rest, span)) else {
             return Err("a span is not in her prose, word for word and in order");
         };
         let (start, end) = (from + found.start_byte(), from + found.end_byte());
+        let whole: Vec<(usize, usize, usize)> = lists
+            .iter()
+            .enumerate()
+            .filter_map(|(list, sentences)| {
+                let opens = sentences.iter().position(|sentence| sentence.0 == start)?;
+                let closes = sentences.iter().position(|sentence| sentence.1 == end)?;
+                (opens <= closes).then_some((list, opens, closes))
+            })
+            .collect();
+        if whole.is_empty() {
+            return Err("a span is not whole sentences of her prose: she says a sentence whole or not at all");
+        }
+        let Some(&(list, _, closes)) = whole.iter().find(|(list, opens, _)| run.is_none_or(|(in_list, last)| in_list == *list && last + 1 == *opens)) else {
+            return Err("the spans are not consecutive sentences of her prose");
+        };
+        run = Some((list, closes));
+        first.get_or_insert(start);
         located.push(json!({ "quote": found.verbatim(), "start_byte": start, "end_byte": end }));
-        words.push(found.verbatim().to_owned());
         from = end;
     }
-    if words.is_empty() {
-        return Err("no words");
+    match first {
+        Some(first) => Ok((prose[first..from].to_owned(), located)),
+        None => Err("no words"),
     }
-    Ok((words.join(" "), located))
 }
 
-/// Whether a line is someone else's words: long enough to judge, and mostly a run of what she heard, by word trigrams
-/// against the message bodies alone (`heard_overlap`). Short answers such as "ok" or "Hi" are never echoes.
+/// Whether a line is someone else's words: long enough to judge, and nearly all a run of what she heard, by word
+/// trigrams against the bodies the stimulus quoted (`heard_overlap`). Short answers such as "ok" or "Hi" are never
+/// echoes, and a line that answers a claim by naming it is not one.
 fn echo(line: &str, bodies: &[String]) -> bool {
     line.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|word| !word.is_empty()).count() >= ECHO_MIN_WORDS && heard_overlap(line, &bodies.join("\n")) >= ECHO_OVERLAP
+}
+
+/// Whether a line tells a private item the packet showed her: it shares a run of three words with the item's words.
+fn tells(line: &str, private: &[String]) -> bool {
+    private.iter().any(|words| heard_overlap(line, words) > 0.0)
 }
 
 /// One speech decision: the Interpreter's call, then code's hold on each line. The report carries the lines said, the
@@ -135,6 +209,8 @@ pub(crate) fn decide(model: &dyn Model, request_id: &str, packet: &Packet, narra
         };
         let why = if echo(&text, &packet.bodies) {
             Some("mostly words she heard: an echo, not her speech")
+        } else if tells(&text, &packet.private) {
+            Some("it tells what she knows privately, in a room it may not be said in")
         } else if said.iter().any(|kept| kept["text"] == text.as_str()) {
             Some("the same line again")
         } else if said.len() >= MAX_LINES {
