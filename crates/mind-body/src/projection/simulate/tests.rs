@@ -60,9 +60,9 @@ fn is_tobiah(prompt: &str) -> bool {
     prompt.contains("Who you are:\nTobiah")
 }
 
-/// Both speak every turn, neither naming the other.
+/// Both speak every turn, neither naming the other: each line a standalone quotation, sayable.
 fn chatty() -> Scripted {
-    Scripted::new(|prompt| if is_tobiah(prompt) { "\"what a day\" he says".into() } else { "\"mm, the deploy went fine\" she says".into() })
+    Scripted::new(|prompt| if is_tobiah(prompt) { "\"what a day\"".into() } else { "\"mm, the deploy went fine\"".into() })
 }
 
 /// Both speak every turn, each naming the other.

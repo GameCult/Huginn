@@ -155,13 +155,13 @@ fn a_fixture_that_is_not_a_room_is_refused_naming_what_is_wrong() {
 #[test]
 fn through_the_interpreter_her_prose_continues_the_narration_and_the_interpreter_decides_what_is_said() {
     let dir = tempfile::tempdir().unwrap();
-    let model = Scripted::new(|_| "He smiles at the screen. \"Missed you too, friend,\" he types. He does not mention the kettle.".into());
+    let model = Scripted::new(|_| "He smiles at the screen, then types. \"Missed you too, friend.\" He does not mention the kettle.".into());
     let fixture = room("operator-warm.toml");
     let harness = harness(dir.path(), Some(&NeverAsked), Some(&model));
     let organs = Organs { persona: harness.persona, chat: Some(&fixture), addressing: fixture.addressee(), model: harness.model };
     let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 3, Some(1), Through::Interpreter), fixture.now).unwrap();
     let render = &report["renders"][0];
-    assert_eq!(render["interpreter"]["said"][0]["text"], "Missed you too, friend,", "{render}");
+    assert_eq!(render["interpreter"]["said"][0]["text"], "Missed you too, friend.", "{render}");
     assert_eq!(render["interpreter"]["said"][0]["room"], "!dm-meta:gamecult.org");
     assert_eq!(report["interpreter_model"], "claude-sonnet-5-5");
     assert_eq!(render["persona"]["words"], 17);
