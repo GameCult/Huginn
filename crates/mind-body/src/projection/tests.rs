@@ -1413,12 +1413,34 @@ fn a_room_is_named_by_the_key_the_tail_carries_and_a_public_rooms_id_is_reported
     assert!(by_id["room"]["why"].as_str().unwrap().contains("named by its alias"), "{}", by_id["room"]);
 }
 
+/// The test state with Kiko's bond and the memory about Libby marked private, and the operator's bond not.
+fn marked() -> Value {
+    let mut marked = state();
+    marked["affect"]["socialBonds"][1]["extensions"] = json!({ "privacy": "private" });
+    marked["thoughtMemory"]["memories"][1]["tags"] = json!(["private"]);
+    marked
+}
+
 #[test]
-fn what_she_knows_of_someone_is_known_privately_except_in_a_direct_message_with_them() {
+fn a_private_marking_frames_a_fact_about_someone_absent_and_an_unmarked_one_renders_plainly() {
+    // Libby is not here; Kiko and the operator are not either: only Meta speaks in #minds.
     let public = Room { messages: vec![message("#minds:gamecult.org", OPERATOR, "Meta", "how is everyone?", 2, false)], here: Some("#minds:gamecult.org".into()), ..Room::default() };
-    let packet = packet_of(TurnKind::Chat, &state(), &public, &History::default(), 1);
-    assert!(packet.context.contains("She knows privately: The operator rules on what the work is for."), "{}", packet.context);
-    let dm = Room { messages: vec![message("!dm-meta:gamecult.org", OPERATOR, "Meta", "how are you?", 2, true)], here: Some("!dm-meta:gamecult.org".into()), direct: vec!["!dm-meta:gamecult.org".into()], ..Room::default() };
-    let packet = packet_of(TurnKind::Chat, &state(), &dm, &History::default(), 1);
-    assert!(packet.context.contains("The operator rules on what the work is for.") && !packet.context.contains("knows privately: The operator"), "{}", packet.context);
+    let shown = |seed| packet_of(TurnKind::Chat, &marked(), &public, &History::default(), seed).context;
+    let memory = (1..=40).map(shown).find(|context| context.contains("[libby-sounds]")).expect("the memory about Libby is selected on some seed");
+    assert!(memory.contains("- memory [libby-sounds]: she knows privately: Libby laughed at the door fix."), "{memory}");
+    let context = shown(1);
+    assert!(context.contains("The operator rules on what the work is for.") && !context.contains("knows privately: The operator"), "an unmarked bond is plain: {context}");
+}
+
+#[test]
+fn a_private_fact_about_someone_present_in_public_is_left_out_and_plain_in_a_direct_message_with_them() {
+    // Kiko is here, in #minds: her marked bond's summary is left out, and no hint of it remains.
+    let public = Room { messages: vec![message("#minds:gamecult.org", "@kiko:gamecult.org", "Kiko", "afternoon", 2, false)], here: Some("#minds:gamecult.org".into()), ..Room::default() };
+    let packet = packet_of(TurnKind::Chat, &marked(), &public, &History::default(), 1);
+    let line = packet.context.lines().find(|line| line.starts_with("- bond [bond-kiko]")).unwrap_or_else(|| panic!("{}", packet.context)).to_owned();
+    assert!(!line.contains("massaging the pipeline") && !line.contains("privately"), "{line}");
+    // In a direct message with Kiko it is plain.
+    let dm = Room { messages: vec![message("!dm-kiko:gamecult.org", "@kiko:gamecult.org", "Kiko", "hey", 2, true)], here: Some("!dm-kiko:gamecult.org".into()), direct: vec!["!dm-kiko:gamecult.org".into()], ..Room::default() };
+    let packet = packet_of(TurnKind::Chat, &marked(), &dm, &History::default(), 1);
+    assert!(packet.context.contains("Kiko pokes her to stop massaging the pipeline.") && !packet.context.contains("privately"), "{}", packet.context);
 }

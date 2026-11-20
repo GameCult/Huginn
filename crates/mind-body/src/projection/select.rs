@@ -507,11 +507,11 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
         if body.is_empty() {
             continue;
         }
-        let person = text(memory, &["target", "id"]).to_lowercase();
-        let about_someone = text(memory, &["target", "kind"]) == "person" && !person.is_empty();
-        let body = match privately(inputs, &person) {
-            Some(forms) if about_someone => format!("{} knows privately: {body}", forms.subj),
-            _ => body,
+        let person = if text(memory, &["target", "kind"]) == "person" { text(memory, &["target", "id"]).to_lowercase() } else { String::new() };
+        let body = match scope(inputs, memory, &person, present) {
+            Scope::Framed(forms) => format!("{} knows privately: {body}", forms.subj),
+            Scope::Omitted => continue,
+            Scope::Plain => body,
         };
         let line = format!("- memory [{}]: {}", text(memory, &["id"]), clip(&one_line(&body), item_bytes));
         let salience = number(memory, &["intensity"]).unwrap_or(SALIENCE_UNSTATED);
@@ -845,7 +845,7 @@ fn present_people(inputs: &Inputs, tuning: &Tuning) -> Vec<(String, String)> {
 
 /// A bond line: the person, the kind of bond after a dash (a label may hold a comma: "Meta, the operator"), trust and
 /// friction as words when the bond carries them, and its summary. What the bond does not carry is left out.
-fn bond_line(bond: &Value, name: &str, tuning: &Tuning, private: Option<Forms>) -> String {
+fn bond_line(bond: &Value, name: &str, tuning: &Tuning, scope: Scope) -> String {
     let feel: Vec<&str> = [number(bond, &["trust"]).map(trust_words), number(bond, &["tension"]).map(friction_words)].into_iter().flatten().collect();
     let custom = text(bond, &["customRelationshipKind"]);
     let kind = clip(&one_line(if custom.is_empty() { text(bond, &["relationshipKind"]) } else { custom }), NAME_BYTES);
@@ -854,8 +854,9 @@ fn bond_line(bond: &Value, name: &str, tuning: &Tuning, private: Option<Forms>) 
         let _ = write!(line, " \u{2014} {kind}");
     }
     let summary = clip(&one_line(text(bond, &["summary"])), tuning.select.bond_summary_bytes);
-    let summary = match private {
-        Some(forms) if !summary.is_empty() => format!("{} knows privately: {summary}", forms.cap_subj),
+    let summary = match scope {
+        Scope::Framed(forms) if !summary.is_empty() => format!("{} knows privately: {summary}", forms.cap_subj),
+        Scope::Omitted => String::new(),
         _ => summary,
     };
     match (feel.is_empty(), summary.is_empty()) {
@@ -1060,13 +1061,42 @@ fn pronoun_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
     (!parts.is_empty()).then(|| clip(&format!("- pronouns: {}", parts.join("; ")), ALSO_HERE_BYTES))
 }
 
-/// Whether what she knows of `person` (a bond's or memory's id) is framed as known privately here: everywhere but a
-/// direct message with that person. Structural, never a reading of the fact: whether a line fits its audience stays the
-/// Interpreter's judgement. Her pronouns when it is.
-fn privately(inputs: &Inputs, person: &str) -> Option<Forms> {
-    let room = turn_room(inputs)?;
-    let partner = room_kind(inputs, room) == RoomKind::Direct && inputs.room.messages.iter().chain(&inputs.room.tail).any(|line| line.room == room && inputs.people.person_of(&line.sender) == person);
-    (!partner).then(|| forms(inputs.state))
+/// How a bond's or memory's content reaches the packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    /// As it is: unmarked, or marked private in a direct message with the person it is about.
+    Plain,
+    /// "She knows privately: …": marked private, about someone who is not here.
+    Framed(Forms),
+    /// Left out: marked private, about someone present in a room that is not a direct message with them. Nothing private
+    /// about a person is hinted at to their face in public.
+    Omitted,
+}
+
+/// Whether an item is marked private: `extensions.privacy` is "private" (a bond or a memory), or a memory's tags hold
+/// "private". Unmarked is shared. The convention is the Persona State Standard's, read without a schema change.
+fn marked_private(item: &Value) -> bool {
+    text(item, &["extensions", "privacy"]) == "private" || items(item, &["tags"]).iter().any(|tag| tag.as_str() == Some("private"))
+}
+
+/// The scope of an item about `person` (a bond's or memory's id) here. Structural: whether a line fits its audience
+/// stays the Interpreter's judgement.
+fn scope(inputs: &Inputs, item: &Value, person: &str, present: &BTreeSet<String>) -> Scope {
+    if !marked_private(item) || person.is_empty() {
+        return Scope::Plain;
+    }
+    let Some(room) = turn_room(inputs) else {
+        return Scope::Framed(forms(inputs.state));
+    };
+    let direct = room_kind(inputs, room) == RoomKind::Direct;
+    let with_them = direct && inputs.room.messages.iter().chain(&inputs.room.tail).any(|line| line.room == room && inputs.people.person_of(&line.sender) == person);
+    if with_them {
+        Scope::Plain
+    } else if present.contains(person) {
+        Scope::Omitted
+    } else {
+        Scope::Framed(forms(inputs.state))
+    }
 }
 
 /// A part as a sentence: its first letter upper-cased, a full stop after it.
@@ -1112,7 +1142,7 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     for (id, name) in &present {
         match bonds.iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == *id) {
             Some(bond) if full < tuning.select.people_full => {
-                let line = bond_line(bond, name, tuning, privately(inputs, id));
+                let line = bond_line(bond, name, tuning, scope(inputs, bond, id, &present_ids));
                 if used + line.len() < budget {
                     full += 1;
                     used += line.len() + 1;
