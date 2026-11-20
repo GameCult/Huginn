@@ -18,8 +18,8 @@
 //! it, never under a bonded person's name. Every message body and display name is rendered by one escape (`spoken`, a
 //! JSON string), so no text can forge a line; speaker and room come from the mouth's metadata alone.
 //!
-//! Never read: `agencyPressure`, `candidateActions`, `privateNotes` and `provenance`. A memory tagged with a direct
-//! message room (`room:!…`) is selectable only in that room.
+//! Never read: `agencyPressure`, `candidateActions`, `privateNotes` and `provenance`. Whether an item is private, and
+//! whom it concerns, is read by one function (`concerns`); how a private item reaches the packet, by one other (`scope`).
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -250,8 +250,11 @@ pub(crate) struct Packet {
     /// The one room she may speak in this turn, and its kind.
     pub room: Option<String>,
     pub room_kind: RoomKind,
-    /// The bodies of the messages she heard this turn, without speakers or rooms: what an echo is measured against.
+    /// The bodies of the lines the stimulus quoted to her this turn, without speakers or rooms: a chat turn's messages,
+    /// a beat's tail lines. What an echo is measured against.
     pub bodies: Vec<String>,
+    /// The words of each private item this packet shows her as known privately: none of them may be said in this room.
+    pub private: Vec<String>,
 }
 
 /// What the messages to her cost past the caps: bytes over the stimulus and heard caps, the older messages to her the
@@ -269,6 +272,8 @@ struct Candidate {
     pool: Pool,
     line: String,
     log_score: f64,
+    /// The item's words, when the line shows them as known privately.
+    private: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -470,11 +475,6 @@ fn recency_log(at: Option<DateTime<Utc>>, now: DateTime<Utc>, tau_h: f64) -> f64
     at.map_or(0.0, |at| -((now - at).num_seconds().max(0) as f64 / 3600.0) / tau_h)
 }
 
-/// The memory's tags name a direct-message room other than the turn's: private matter stays in its room.
-fn private_elsewhere(item: &Value, here: Option<&str>) -> bool {
-    items(item, &["tags"]).iter().filter_map(Value::as_str).filter_map(|tag| tag.strip_prefix("room:")).any(|room| room.starts_with('!') && Some(room) != here)
-}
-
 fn in_room(item: &Value, here: Option<&str>) -> bool {
     here.is_some_and(|here| items(item, &["tags"]).iter().filter_map(Value::as_str).any(|tag| tag.strip_prefix("room:") == Some(here)))
 }
@@ -488,18 +488,27 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
     let state = inputs.state;
     let here = inputs.room.here.as_deref();
     let item_bytes = tuning.select.item_bytes;
+    let her = forms(state);
     let mut out = Vec::new();
-    let mut push = |id: &str, pool: Pool, line: String, salience: f64, recency: f64, touch: f64, unresolved: f64| {
+    // Every item passes `scope` here: left out, its words shown as known privately, or as written. `line` renders the
+    // item around its words.
+    let mut push = |id: &str, pool: Pool, scope: Scope, words: &str, line: &dyn Fn(&str) -> String, salience: f64, recency: f64, touch: f64, unresolved: f64| {
         if id.is_empty() || salience <= 0.0 {
             return;
         }
+        let (line, private) = match scope {
+            Scope::Omitted => return,
+            Scope::Framed => (line(&format!("{} knows privately: {words}", her.subj)), Some(one_line(words))),
+            Scope::Plain => (line(words), None),
+        };
         let log_score = salience.ln() + recency + touch.ln() + unresolved.ln() + freshness_log(id, inputs.history, tuning);
-        out.push(Candidate { id: id.to_owned(), pool, line, log_score });
+        out.push(Candidate { id: id.to_owned(), pool, line, log_score, private });
     };
+    let scoped = |item: &Value| scope(inputs, concerns(item).as_ref(), present);
 
     let crystallized = items(state, &["thoughtMemory", "memories"]).iter().map(|memory| (memory, false));
     let memories = crystallized.chain(items(state, &["thoughtMemory", "shortTerm"]).iter().map(|memory| (memory, true)));
-    for (memory, short_term) in memories.filter(|(memory, _)| live(memory) && !private_elsewhere(memory, here)) {
+    for (memory, short_term) in memories.filter(|(memory, _)| live(memory)) {
         let about = about_present(memory, present);
         let pool = if about { Pool::MemoriesAboutPresent } else { Pool::OtherMemories };
         let touch = if about { TOUCH_PRESENT } else if in_room(memory, here) { TOUCH_ROOM } else { TOUCH_ELSE };
@@ -507,37 +516,34 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
         if body.is_empty() {
             continue;
         }
-        let person = if text(memory, &["target", "kind"]) == "person" { text(memory, &["target", "id"]).to_lowercase() } else { String::new() };
-        let body = match scope(inputs, memory, &person, present) {
-            Scope::Framed(forms) => format!("{} knows privately: {body}", forms.subj),
-            Scope::Omitted => continue,
-            Scope::Plain => body,
-        };
-        let line = format!("- memory [{}]: {}", text(memory, &["id"]), clip(&one_line(&body), item_bytes));
         let salience = number(memory, &["intensity"]).unwrap_or(SALIENCE_UNSTATED);
         // Only the day's short-term items fade; a crystallized memory comes forward by what the room touches.
         let nearness = if short_term { recency_log(time(memory), inputs.now, tuning.select.memory_tau_h) } else { relevance_log(&body, touching) };
-        push(text(memory, &["id"]), pool, line, salience, nearness, touch, 1.0);
+        let line = |words: &str| format!("- memory [{}]: {}", text(memory, &["id"]), clip(&one_line(words), item_bytes));
+        push(text(memory, &["id"]), pool, scoped(memory), &body, &line, salience, nearness, touch, 1.0);
     }
 
     for need in items(state, &["affect", "needs"]).iter().filter(|need| live(need)) {
         let intensity = number(need, &["intensity"]).unwrap_or(SALIENCE_UNSTATED);
         let Some(name) = [text(need, &["label"]), text(need, &["summary"])].into_iter().find(|name| !name.is_empty()) else { continue };
-        let line = format!("- need [{}]: {}, {}", text(need, &["id"]), clip(&one_line(name), item_bytes), need_movement(need, inputs.history.previous.as_ref(), forms(state).poss));
-        push(text(need, &["id"]), Pool::Needs, line, intensity, 0.0, TOUCH_ELSE, 1.0 + intensity);
+        let movement = need_movement(need, inputs.history.previous.as_ref(), her.poss);
+        let line = |words: &str| format!("- need [{}]: {}, {movement}", text(need, &["id"]), clip(&one_line(words), item_bytes));
+        push(text(need, &["id"]), Pool::Needs, scoped(need), name, &line, intensity, 0.0, TOUCH_ELSE, 1.0 + intensity);
     }
 
-    for wondering in items(state, &["thoughtMemory", "incubation"]).iter().filter(|item| live(item) && !private_elsewhere(item, here) && !text(item, &["summary"]).is_empty()) {
+    for wondering in items(state, &["thoughtMemory", "incubation"]).iter().filter(|item| live(item) && !text(item, &["summary"]).is_empty()) {
         let days = time(wondering).map_or(0.0, |at| (inputs.now - at).num_seconds().max(0) as f64 / 86_400.0);
         let touch = if about_present(wondering, present) { TOUCH_PRESENT } else { TOUCH_ELSE };
-        let line = format!("- wondering [{}]: {}", text(wondering, &["id"]), clip(&one_line(text(wondering, &["summary"])), item_bytes));
-        push(text(wondering, &["id"]), Pool::Incubation, line, number(wondering, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), 0.0, touch, (1.0 + days / 7.0).min(INCUBATION_UNRESOLVED_MAX));
+        let line = |words: &str| format!("- wondering [{}]: {}", text(wondering, &["id"]), clip(&one_line(words), item_bytes));
+        let unresolved = (1.0 + days / 7.0).min(INCUBATION_UNRESOLVED_MAX);
+        push(text(wondering, &["id"]), Pool::Incubation, scoped(wondering), text(wondering, &["summary"]), &line, number(wondering, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), 0.0, touch, unresolved);
     }
 
     for stance in items(state, &["affect", "doctrineStances"]).iter().filter(|stance| live(stance) && !text(stance, &["summary"]).is_empty()) {
         let touch = if about_present(stance, present) { TOUCH_PRESENT } else { TOUCH_ELSE };
-        let line = format!("- stance [{}]: {}", text(stance, &["id"]), clip(&one_line(text(stance, &["summary"])), item_bytes));
-        push(text(stance, &["id"]), Pool::Stance, line, number(stance, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), relevance_log(text(stance, &["summary"]), touching), touch, 1.0);
+        let line = |words: &str| format!("- stance [{}]: {}", text(stance, &["id"]), clip(&one_line(words), item_bytes));
+        let relevance = relevance_log(text(stance, &["summary"]), touching);
+        push(text(stance, &["id"]), Pool::Stance, scoped(stance), text(stance, &["summary"]), &line, number(stance, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), relevance, touch, 1.0);
     }
 
     for value in items(state, &["values"]).iter().filter(|value| !text(value, &["label"]).is_empty() || !text(value, &["summary"]).is_empty()) {
@@ -549,13 +555,16 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
             _ => format!("- value [{}]: {summary}", text(value, &["id"])),
         };
         let relevance = relevance_log(&format!("{} {}", text(value, &["label"]), text(value, &["summary"])), touching);
-        push(text(value, &["id"]), Pool::Value, line, number(value, &["priority"]).unwrap_or(SALIENCE_UNSTATED), relevance, TOUCH_ELSE, 1.0);
+        // A value has no target, tags or extensions: nothing marks it private.
+        push(text(value, &["id"]), Pool::Value, Scope::Plain, &line, &str::to_owned, number(value, &["priority"]).unwrap_or(SALIENCE_UNSTATED), relevance, TOUCH_ELSE, 1.0);
     }
 
     for said in &inputs.history.said {
         let touch = if Some(said.room.as_str()) == here { TOUCH_ROOM } else { TOUCH_ELSE };
-        let line = format!("- {} said [{}] in {}: {}", forms(state).subj, said.id, said.room, spoken(&clip(&said.text, item_bytes)));
-        push(&said.id, Pool::Said, line, SALIENCE_UNSTATED, recency_log(Some(said.at), inputs.now, tuning.select.memory_tau_h), touch, 1.0);
+        // What she said in a direct message is private about its partner: shown only there, still only the two of them.
+        let partner = direct(inputs, &said.room).then(|| Concerns::Partner(said.room.clone()));
+        let line = |words: &str| format!("- {} said [{}] in {}: {}", her.subj, said.id, said.room, spoken(&clip(words, item_bytes)));
+        push(&said.id, Pool::Said, scope(inputs, partner.as_ref(), present), &said.text, &line, SALIENCE_UNSTATED, recency_log(Some(said.at), inputs.now, tuning.select.memory_tau_h), touch, 1.0);
     }
     out
 }
@@ -806,14 +815,18 @@ fn beat_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
     if left_out > 0 {
         out.push(&format!("({left_out} more people {} {} bound to not shown)", her.subj, her.be));
     }
-    let others: Vec<&RoomLine> = inputs.room.tail.iter().filter(|line| line.sender != inputs.people.own_sender).collect();
-    let shown = &others[others.len().saturating_sub(tuning.select.beat_tail_lines)..];
-    let lines: Vec<String> = shown.iter().map(|line| format!("- {} in {}, {} h ago: {}", name_of(line, inputs), line.room, hours(inputs.now, line.at_ms), spoken(&clip(&line.text, tuning.select.item_bytes / 2)))).collect();
+    let lines: Vec<String> = beat_tail(inputs, tuning).iter().map(|line| format!("- {} in {}, {} h ago: {}", name_of(line, inputs), line.room, hours(inputs.now, line.at_ms), spoken(&clip(&line.text, tuning.select.item_bytes / 2)))).collect();
     let section = newest_section(&format!("Lately in {} rooms:", her.poss), &lines, cap.saturating_sub(out.out.len() + 2));
     if !section.is_empty() && out.push("") {
         out.push(&section);
     }
     out.out
+}
+
+/// The tail lines a beat's stimulus quotes: the newest `beat_tail_lines` of others'.
+fn beat_tail<'a>(inputs: &'a Inputs, tuning: &Tuning) -> Vec<&'a RoomLine> {
+    let others: Vec<&RoomLine> = inputs.room.tail.iter().filter(|line| line.sender != inputs.people.own_sender).collect();
+    others[others.len().saturating_sub(tuning.select.beat_tail_lines)..].to_vec()
 }
 
 fn reflection_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
@@ -845,7 +858,7 @@ fn present_people(inputs: &Inputs, tuning: &Tuning) -> Vec<(String, String)> {
 
 /// A bond line: the person, the kind of bond after a dash (a label may hold a comma: "Meta, the operator"), trust and
 /// friction as words when the bond carries them, and its summary. What the bond does not carry is left out.
-fn bond_line(bond: &Value, name: &str, tuning: &Tuning, scope: Scope) -> String {
+fn bond_line(bond: &Value, name: &str, tuning: &Tuning, scope: Scope, her: Forms) -> String {
     let feel: Vec<&str> = [number(bond, &["trust"]).map(trust_words), number(bond, &["tension"]).map(friction_words)].into_iter().flatten().collect();
     let custom = text(bond, &["customRelationshipKind"]);
     let kind = clip(&one_line(if custom.is_empty() { text(bond, &["relationshipKind"]) } else { custom }), NAME_BYTES);
@@ -855,7 +868,7 @@ fn bond_line(bond: &Value, name: &str, tuning: &Tuning, scope: Scope) -> String 
     }
     let summary = clip(&one_line(text(bond, &["summary"])), tuning.select.bond_summary_bytes);
     let summary = match scope {
-        Scope::Framed(forms) if !summary.is_empty() => format!("{} knows privately: {summary}", forms.cap_subj),
+        Scope::Framed if !summary.is_empty() => format!("{} knows privately: {summary}", her.cap_subj),
         Scope::Omitted => String::new(),
         _ => summary,
     };
@@ -938,7 +951,7 @@ pub(crate) fn turn_room<'a>(inputs: &'a Inputs) -> Option<&'a str> {
 }
 
 fn room_kind(inputs: &Inputs, room: &str) -> RoomKind {
-    if inputs.room.direct.iter().any(|direct| direct == room) {
+    if direct(inputs, room) {
         RoomKind::Direct
     } else if inputs.room.own.iter().any(|own| own == room) {
         RoomKind::Own
@@ -1061,41 +1074,81 @@ fn pronoun_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
     (!parts.is_empty()).then(|| clip(&format!("- pronouns: {}", parts.join("; ")), ALSO_HERE_BYTES))
 }
 
-/// How a bond's or memory's content reaches the packet.
+/// How an item's content reaches the packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
-    /// As it is: unmarked, or marked private in a direct message with the person it is about.
+    /// As it is: shared, or private and this is the room where it may be said.
     Plain,
-    /// "She knows privately: …": marked private, about someone who is not here.
-    Framed(Forms),
-    /// Left out: marked private, about someone present in a room that is not a direct message with them. Nothing private
-    /// about a person is hinted at to their face in public.
+    /// "She knows privately: …": private, about someone who is not in the turn's room.
+    Framed,
+    /// Left out: private, and whom it concerns is in the room, or cannot be told apart from who is. Nothing private about
+    /// a person is hinted at to their face.
     Omitted,
 }
 
-/// Whether an item is marked private: `extensions.privacy` is "private" (a bond or a memory), or a memory's tags hold
-/// "private". Unmarked is shared. The convention is the Persona State Standard's, read without a schema change.
-fn marked_private(item: &Value) -> bool {
-    text(item, &["extensions", "privacy"]) == "private" || items(item, &["tags"]).iter().any(|tag| tag.as_str() == Some("private"))
+/// Whom a private item concerns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Concerns {
+    /// One person, keyed as her bonds key people.
+    Person(String),
+    /// The other member of the direct message a `room:!…` tag (or her line's room) names, when no person is named.
+    Partner(String),
+    /// No person named: private about everyone.
+    Everyone,
 }
 
-/// The scope of an item about `person` (a bond's or memory's id) here. Structural: whether a line fits its audience
-/// stays the Interpreter's judgement.
-fn scope(inputs: &Inputs, item: &Value, person: &str, present: &BTreeSet<String>) -> Scope {
-    if !marked_private(item) || person.is_empty() {
-        return Scope::Plain;
+/// Whether an item is private, and whom it concerns: the one owner of that reading, for the bonds and every pool. Private
+/// is `extensions.privacy` "private", a `private` tag, or a tag naming a direct message (`room:!…`); anything else is
+/// shared (None). It concerns the person its `target` (a bond's `object`) names when that is a person, else the person
+/// an `about:` tag names, else the partner of the direct message its room tag names, else everyone. The convention is
+/// the Persona State Standard's, read without a schema change.
+fn concerns(item: &Value) -> Option<Concerns> {
+    let tags: Vec<&str> = items(item, &["tags"]).iter().filter_map(Value::as_str).collect();
+    let direct = tags.iter().filter_map(|tag| tag.strip_prefix("room:")).find(|room| room.starts_with('!'));
+    if text(item, &["extensions", "privacy"]) != "private" && !tags.contains(&"private") && direct.is_none() {
+        return None;
     }
-    let Some(room) = turn_room(inputs) else {
-        return Scope::Framed(forms(inputs.state));
+    let named = ["target", "object"].into_iter().find(|key| text(item, &[*key, "kind"]) == "person").map(|key| text(item, &[key, "id"]).to_lowercase());
+    let about = || tags.iter().find_map(|tag| tag.strip_prefix("about:")).map(|id| id.trim().to_lowercase());
+    Some(match (named.filter(|id| !id.is_empty()).or_else(about).filter(|id| !id.is_empty()), direct) {
+        (Some(person), _) => Concerns::Person(person),
+        (None, Some(room)) => Concerns::Partner(room.to_owned()),
+        (None, None) => Concerns::Everyone,
+    })
+}
+
+/// Whether a room is a direct message: the mouth said so, or it is keyed by a room id, as only a direct message is.
+fn direct(inputs: &Inputs, room: &str) -> bool {
+    room.starts_with('!') || inputs.room.direct.iter().any(|direct| direct == room)
+}
+
+/// Everyone a room's lines show in it but her, keyed as her bonds key people. Matrix tells her body no membership, so a
+/// member who never spoke in the lines she has is not counted.
+fn members(inputs: &Inputs, room: &str) -> BTreeSet<String> {
+    inputs.room.messages.iter().chain(&inputs.room.tail).filter(|line| line.room == room && line.sender != inputs.people.own_sender).map(|line| inputs.people.person_of(&line.sender)).collect()
+}
+
+/// How an item reaches the packet here, by whom it concerns (`concerns`; None is shared, and plain). Plain only where it
+/// may be said: about one person, in a direct message with exactly her and that person; about a direct message's
+/// partner, in that direct message, still only the two of them; about everyone, in a room of her own. Elsewhere it is
+/// left out when whom it concerns is in the room (everyone always is, and a partner unnamed cannot be told apart), and
+/// framed as known privately when they are not. Structural: whether a line fits its audience stays the Interpreter's
+/// judgement.
+fn scope(inputs: &Inputs, concerns: Option<&Concerns>, present: &BTreeSet<String>) -> Scope {
+    let Some(concerns) = concerns else {
+        return Scope::Plain;
     };
-    let direct = room_kind(inputs, room) == RoomKind::Direct;
-    let with_them = direct && inputs.room.messages.iter().chain(&inputs.room.tail).any(|line| line.room == room && inputs.people.person_of(&line.sender) == person);
-    if with_them {
-        Scope::Plain
-    } else if present.contains(person) {
-        Scope::Omitted
-    } else {
-        Scope::Framed(forms(inputs.state))
+    let room = turn_room(inputs);
+    let members = room.map(|room| members(inputs, room)).unwrap_or_default();
+    // The one other person of a direct message that has exactly two members.
+    let with = room.filter(|room| room_kind(inputs, room) == RoomKind::Direct && members.len() == 1).and_then(|_| members.first());
+    match concerns {
+        Concerns::Person(person) if with == Some(person) => Scope::Plain,
+        Concerns::Person(person) if present.contains(person) || members.contains(person) => Scope::Omitted,
+        Concerns::Person(_) => Scope::Framed,
+        Concerns::Partner(dm) if with.is_some() && room == Some(dm.as_str()) => Scope::Plain,
+        Concerns::Everyone if room.is_some_and(|room| room_kind(inputs, room) == RoomKind::Own) => Scope::Plain,
+        Concerns::Partner(_) | Concerns::Everyone => Scope::Omitted,
     }
 }
 
@@ -1138,16 +1191,21 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     let mut used: usize = fixed.iter().map(|line| line.len() + 1).sum();
     let mut ids = Vec::new();
     let mut named = Vec::new();
+    let mut private = Vec::new();
     let mut full = 0;
     for (id, name) in &present {
         match bonds.iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == *id) {
             Some(bond) if full < tuning.select.people_full => {
-                let line = bond_line(bond, name, tuning, scope(inputs, bond, id, &present_ids));
+                let scope = scope(inputs, concerns(bond).as_ref(), &present_ids);
+                let line = bond_line(bond, name, tuning, scope, forms(inputs.state));
                 if used + line.len() < budget {
                     full += 1;
                     used += line.len() + 1;
                     ids.push(text(bond, &["id"]).to_owned());
                     fixed.push(line);
+                    if scope == Scope::Framed && !text(bond, &["summary"]).is_empty() {
+                        private.push(one_line(text(bond, &["summary"])));
+                    }
                 } else {
                     named.push(name.clone());
                 }
@@ -1204,6 +1262,12 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     let mut lines = fixed;
     lines.extend(taken.iter().map(|candidate| candidate.line.clone()));
     ids.extend(taken.iter().map(|candidate| candidate.id.clone()));
+    private.extend(taken.iter().filter_map(|candidate| candidate.private.clone()));
+    let bodies = match inputs.kind {
+        TurnKind::Chat => inputs.room.messages.iter().map(|line| line.text.clone()).collect(),
+        TurnKind::Beat => beat_tail(inputs, tuning).iter().map(|line| line.text.clone()).collect(),
+        TurnKind::FollowUp | TurnKind::Reflection => Vec::new(),
+    };
     let selected = taken.into_iter().map(|candidate| Pick { id: candidate.id, pool: candidate.pool, log_score: candidate.log_score }).collect();
-    Packet { kind: inputs.kind, seed: inputs.seed, lens, identity, context: lines.join("\n"), stimulus, heard, overflow, present: present_names, ids, selected, forms: forms(inputs.state), people: people_in_view(inputs, tuning), room: turn_room(inputs).map(str::to_owned), room_kind: turn_room(inputs).map_or(RoomKind::Public, |room| room_kind(inputs, room)), bodies: inputs.room.messages.iter().map(|line| line.text.clone()).collect() }
+    Packet { kind: inputs.kind, seed: inputs.seed, lens, identity, context: lines.join("\n"), stimulus, heard, overflow, present: present_names, ids, selected, forms: forms(inputs.state), people: people_in_view(inputs, tuning), room: turn_room(inputs).map(str::to_owned), room_kind: turn_room(inputs).map_or(RoomKind::Public, |room| room_kind(inputs, room)), bodies, private }
 }
