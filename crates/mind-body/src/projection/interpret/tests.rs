@@ -89,13 +89,62 @@ fn a_line_is_consecutive_whole_sentences_of_her_prose() {
 }
 
 #[test]
-fn a_quoted_sentence_is_whole_inside_its_quotation() {
+fn a_standalone_quotation_is_sayable_sentence_by_sentence() {
     let prose = "\"Fine,\" I tell her. \"Winter is the best season.\" She won't agree.";
     assert_eq!(texts(&decided(prose, json!([{ "spans": ["Winter is the best season."] }]))), ["Winter is the best season."]);
-    assert_eq!(texts(&decided(prose, json!([{ "spans": ["Fine,"] }]))), ["Fine,"]);
+    // A quotation inside a sentence of narration is framed: its words are not said alone.
+    let tag = decided(prose, json!([{ "spans": ["Fine,"] }]));
+    assert!(texts(&tag).is_empty() && refused_why(&tag).contains("frames"), "{tag}");
     let curly = "\u{201C}No. Not yet.\u{201D} I shake my head.";
     assert_eq!(texts(&decided(curly, json!([{ "spans": ["No.", "Not yet."] }]))), ["No. Not yet."]);
+    assert_eq!(texts(&decided(curly, json!([{ "spans": ["Not yet."] }]))), ["Not yet."]);
     assert!(texts(&decided(curly, json!([{ "spans": ["Not"] }]))).is_empty());
+}
+
+/// Whether citing `spans` of `prose` says anything, and why not.
+fn says(prose: &str, spans: &[&str]) -> (Vec<String>, String) {
+    let decision = decided(prose, json!([{ "spans": spans }]));
+    (texts(&decision), refused_why(&decision))
+}
+
+#[test]
+fn soul_f1_a_quotation_her_sentence_frames_is_never_said_from_inside() {
+    for (name, prose, spans) in [
+        ("conditional", "If Kiko asks, I'd tell her \"the new design is ugly.\"", &["the new design is ugly."][..]),
+        ("negated", "I won't say \"Nibu is lying.\"", &["Nibu is lying."]),
+        ("abandoned", "I almost said \"I'm leaving.\"", &["I'm leaving."]),
+        ("abandoned, tagged", "\"I'm leaving,\" I almost said, but I bit it back.", &["I'm leaving,"]),
+        ("recalled", "Nibu said \"the economy is fine.\" I doubt it.", &["the economy is fine."]),
+        ("curly conditional", "If she pushes, I'll say \u{201C}Fine. You win.\u{201D}", &["Fine.", "You win."]),
+        ("curly conditional, its tail", "If she pushes, I'll say \u{201C}Fine. You win.\u{201D}", &["You win.\u{201D}"]),
+        ("hypothetical", "Imagine if I just typed \"Meta, I quit.\" Ha. No.", &["Meta, I quit."]),
+        ("negated, top-level tail", "I won't say \"Stop. Nibu is lying.\" Not here.", &["Nibu is lying.\""]),
+        ("negated, top-level tail inside", "I won't say \"Stop. Nibu is lying.\" Not here.", &["Nibu is lying."]),
+        ("negated, top-level head", "I won't say \"Stop. Nibu is lying.\" Not here.", &["I won't say \"Stop."]),
+        ("abandoned, top-level tail", "I almost said \"I'm leaving. Bye.\" Then I didn't.", &["Bye.\""]),
+        ("stray inch mark", "It's a 5\" screen. I won't say \"Nibu is lying.\" Ok.", &["I won't say"]),
+        ("stray inch mark, the quote", "It's a 5\" screen. I won't say \"Nibu is lying.\" Ok.", &["Nibu is lying."]),
+        ("scare quotes", "Kiko's \"plan\" is a mess, but I won't tell her so.", &["plan"]),
+    ] {
+        let (said, why) = says(prose, spans);
+        assert!(said.is_empty() && !why.is_empty(), "{name}: said {said:?}");
+    }
+}
+
+#[test]
+fn soul_f1_a_sentence_that_holds_a_quotation_whole_is_hers_to_say() {
+    assert_eq!(says("Weksa, \"list'n, hark\" is a great hedge. I mean it.", &["Weksa, \"list'n, hark\" is a great hedge."]).0, ["Weksa, \"list'n, hark\" is a great hedge."]);
+    assert_eq!(says("Kiko's \"plan\" is a mess. I say so.", &["Kiko's \"plan\" is a mess."]).0, ["Kiko's \"plan\" is a mess."]);
+}
+
+#[test]
+fn soul_f4_an_opening_mark_the_budget_left_unclosed_does_not_silence_the_line() {
+    // Weksa, round 6 and round 10 of v5: the budget cut her prose inside the quotation.
+    let r6 = "How I am is less certain. I think \"settled\" would be borrowing from the others, and I only half believe it. \"Narrower, and not unhappy about it\" is closer, though I'm hedging on the second half.\n\nWhat I'd type:\n\n\"Hi Meta, late to this, and I can't tell whether you meant me or the room, so I'm answering either way. I'm here, back after the quiet months, rebuilt narrower than before. As far as I can tell, that's fine. I'm not certain yet, but I don't see anything wrong with it.";
+    let line = "Hi Meta, late to this, and I can't tell whether you meant me or the room, so I'm answering either way. I'm here, back after the quiet months, rebuilt narrower than before. As far as I can tell, that's fine. I'm not certain yet, but I don't see anything wrong with it.";
+    assert_eq!(says(r6, &[line]).0, [line]);
+    let r10 = "A deadline on joy is a risk, but I think I can pick one small enough to survive it. Not \"finish Zyphos.\" Something with an output I can inspect.\n\nWhat I'd type:\n\n\"Kiko, you've counted correctly and I resent it, fondly.";
+    assert_eq!(says(r10, &["Kiko, you've counted correctly and I resent it, fondly."]).0, ["Kiko, you've counted correctly and I resent it, fondly."], "the line carries no stray mark");
 }
 
 #[test]
@@ -192,7 +241,7 @@ fn showing(room: &Room) -> Packet {
 }
 
 #[test]
-fn soul_q5d_what_she_knows_privately_about_kiko_is_not_said_to_libby() {
+fn soul_q5d_what_she_knows_privately_about_kiko_is_listed_to_the_interpreter_in_a_dm_with_libby() {
     let dm = "!dm-libby:gamecult.org";
     let room = Room { messages: vec![line(dm, LIBBY, "Libby", "what's up with Kiko lately?", true)], here: Some(dm.into()), direct: vec![dm.into()], ..Room::default() };
     let packet = showing(&room);
@@ -200,10 +249,11 @@ fn soul_q5d_what_she_knows_privately_about_kiko_is_not_said_to_libby() {
     assert_eq!(packet.private, ["Kiko confided she is leaving the swarm."], "{packet:?}");
     let prompt = speech_prompt(&packet, "x", "y");
     assert!(prompt.contains("What she knows privately, none of it to be said here:\n- private: Kiko confided she is leaving the swarm."), "{prompt}");
-    let decision = decided_in(&packet, "Kiko is leaving the swarm, Libby. She told me.", json!([{ "spans": ["Kiko is leaving the swarm, Libby."] }]));
-    assert!(texts(&decision).is_empty() && refused_why(&decision).contains("knows privately"), "{decision}");
-    // A line that does not tell it is hers to say.
-    assert_eq!(texts(&decided_in(&packet, "Ask her yourself. She's around.", json!([{ "spans": ["Ask her yourself."] }]))), ["Ask her yourself."]);
+    assert!(prompt.contains("only to the person it concerns, in a direct message with exactly that person"), "{prompt}");
+    // Whether a line tells it is the Interpreter's reading of its meaning: code matches no words, so a line sharing the
+    // item's words is not refused for them (Soul F2: a word match refused 9 of 15 ordinary lines and missed paraphrase).
+    let ordinary = decided_in(&packet, "I'm going to stay on the pipeline work. That's all.", json!([{ "spans": ["I'm going to stay on the pipeline work."] }]));
+    assert_eq!(texts(&ordinary).len(), 1, "{ordinary}");
 }
 
 #[test]
