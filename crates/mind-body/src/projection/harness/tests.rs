@@ -218,3 +218,69 @@ fn a_batch_state_without_a_file_is_her_stored_state() {
     let report = batch(&harness(dir.path(), Some(&Stored), Some(&model)), &plan).unwrap();
     assert!(report.contains("## stored × quiet, sample 1") && !report.contains("failed"), "{report}");
 }
+
+fn group_line_of(dir: &Path, name: &str) -> Option<String> {
+    let fixture = room(name);
+    let harness = harness(dir, None, None);
+    let organs = Organs { persona: None, chat: Some(&fixture), addressing: fixture.addressee(), model: None };
+    let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 1, None, Through::Projector), fixture.now).unwrap();
+    report["packet"]["context"].as_str().unwrap().lines().find(|line| line.starts_with("- the conversation")).map(str::to_owned)
+}
+
+#[test]
+fn the_group_state_reads_each_scenario_room_as_the_golden_file_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rendered = String::new();
+    for name in ["quiet-beat.toml", "operator-warm.toml", "mind-teases.toml", "deru-passing.toml"] {
+        let line = group_line_of(dir.path(), name).unwrap_or_else(|| "(none)".into());
+        assert!(line.len() <= 360, "the slot holds its byte budget: {line}");
+        rendered.push_str(&format!("{name}: {line}
+"));
+    }
+    let golden = include_str!("../../../fixtures/harness/golden-group.txt").replace("
+", "
+");
+    assert_eq!(rendered, golden, "the group state moved; if deliberately, the new golden file is:
+{rendered}");
+}
+
+#[test]
+fn the_group_state_is_off_when_the_tuning_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("persona-tuning.toml"), "[select]
+group_state = false
+").unwrap();
+    assert!(group_line_of(dir.path(), "mind-teases.toml").is_none());
+}
+
+/// Round 1 of a crowded room: the operator asks everyone, and `answered` Minds have answered before this one's turn.
+fn chorus(answered: usize) -> Fixture {
+    let minds = ["@weksa:gamecult.org", "@heimdall:gamecult.org", "@kiko:gamecult.org", "@libby:gamecult.org", "@void:gamecult.org", "@nibu:gamecult.org", "@aqua:gamecult.org"];
+    let mut text = String::from("her = \"@eureka:gamecult.org\"\nkind = \"chat\"\nnow = \"2026-11-20T15:05:00Z\"\nrooms = [\"#minds:gamecult.org\"]\nhere = \"#minds:gamecult.org\"\noperators = [\"@meta:gamecult.org\"]\nminds = [\"@eureka:gamecult.org\", \"@weksa:gamecult.org\", \"@heimdall:gamecult.org\", \"@kiko:gamecult.org\", \"@libby:gamecult.org\", \"@void:gamecult.org\", \"@nibu:gamecult.org\", \"@aqua:gamecult.org\"]\n");
+    text.push_str("[[message]]\nfrom = \"@meta:gamecult.org\"\nname = \"Meta\"\nroom = \"#minds:gamecult.org\"\nago = \"5m\"\nnew = true\nsays = \"afternoon, all of you. no tasks today. how's everyone doing?\"\n");
+    for (at, mind) in minds.iter().take(answered).enumerate() {
+        text.push_str(&format!("[[message]]\nfrom = \"{mind}\"\nname = \"{}\"\nroom = \"#minds:gamecult.org\"\nago = \"{}s\"\nnew = true\nsays = \"afternoon, Meta. doing well, thanks.\"\n", crate::address::localpart(mind), 240 - at * 20));
+    }
+    Fixture::parse(&text).unwrap()
+}
+
+#[test]
+fn the_third_to_eighth_responder_sees_a_covered_question_and_no_duty() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path(), None, None);
+    let mut rendered = String::new();
+    for answered in 2..=7 {
+        let fixture = chorus(answered);
+        let organs = Organs { persona: None, chat: Some(&fixture), addressing: None, model: None };
+        let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 1, None, Through::Projector), fixture.now).unwrap();
+        let context = report["packet"]["context"].as_str().unwrap().to_owned();
+        let line = context.lines().find(|line| line.starts_with("- the conversation")).unwrap_or_else(|| panic!("{context}")).to_owned();
+        assert!(line.contains("asked the room a question, and") && line.contains("answered it"), "{line}");
+        for duty in ["owe", "haven't", "have not", "open", "still", "waiting on her", "to her", "unanswered"] {
+            assert!(!line.contains(duty), "responder {}: {duty} in {line}", answered + 1);
+        }
+        rendered.push_str(&format!("responder {}: {line}\n", answered + 1));
+    }
+    let golden = include_str!("../../../fixtures/harness/golden-chorus.txt").replace("\r\n", "\n");
+    assert_eq!(rendered, golden, "the chorus's group state moved; if deliberately, the new golden file is:\n{rendered}");
+}

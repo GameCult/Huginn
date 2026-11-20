@@ -2,13 +2,14 @@
 //! one `project` through the Persona stage, and each one's quoted lines join the room as from her Matrix id, so the
 //! next one hears them.
 //!
-//! Who wakes is the real rule: `address::is_for` over each persona's names, plus ruling
-//! `persona-only-wake-humans-in-rooms` (an addressed message, any human message in her rooms, the beat). Another Mind's
-//! unaddressed message wakes no one, unless the plan asks for the swarm's old loop (`wake = "all_messages"`), kept as a
-//! control. Those woken in one round go in an order drawn from the seed, each against the room as it stands at her turn.
+//! Who wakes is the heartbeat's: `heartbeat::wakes` under the plan's `WakePolicy`, over each persona's addressee as the
+//! heartbeat's addressing table holds it (her stewarded projects' names included) when the plan names the table. The
+//! beat is the heartbeat's too: when it falls, one Persona wakes, the winner of `tempo::pick`. Those woken in one round
+//! go in an order drawn from the seed, each against the room as it stands at her turn.
 //!
 //! Her state does not move during a run: the Interpreter (C3b) and the commit (C3c) are not built. `state_after_turn`
-//! is the seam where they will.
+//! is the seam where they will. An explicit addressee (the Interpreter naming whom she speaks to) cannot be simulated
+//! until then either: a spoken line addresses another persona only by the names in its text.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -19,26 +20,19 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::harness::{Harness, Line, Message, cosine, pending_for, state_file, turn_markdown, usage_markdown, usage_total};
+use super::harness::{Harness, Line, Message, RETELL_FLAG, cosine, pending_for, state_file, turn_markdown, usage_markdown, usage_total};
 use super::select::Draw;
+use super::tuning;
 use super::{MouthReader, Organs, Request, Through, TurnKind, project};
 use crate::address::{Addressee, is_for, localpart};
 use crate::chat_client::ChatPending;
-use crate::heartbeat::{Addressing, HeartbeatView};
+use crate::heartbeat::{Addressing, DEFAULT_BEAT_S, FileStore, HeartbeatView, LineFacts, Speaker, WakeCause, WakePolicy, addressed_by_member, wakes};
+use crate::tempo::{Standing, pick};
 
 /// The most personas a simulation holds: the swarm.
 const CAST_MAX: usize = 8;
-
-/// Who a message wakes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Wake {
-    /// The ruled set: a message for her, any human message in her rooms, the beat.
-    #[default]
-    HumansInRooms,
-    /// The swarm's old loop, as a control: any message in her rooms, a Mind's too.
-    AllMessages,
-}
+/// How many transcript lines the report quotes as representative.
+const REPRESENTATIVE_LINES: usize = 18;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,17 +42,25 @@ struct SimFile {
     repeats: usize,
     #[serde(default)]
     seed: u64,
-    #[serde(default)]
-    wake: Wake,
-    /// Every this many rounds the beat wakes everyone who was not woken otherwise; 0 is no beat.
-    #[serde(default)]
-    beat_every: usize,
+    #[serde(default = "ruled")]
+    wake: WakePolicy,
+    /// The heartbeat's beat, in seconds of simulated time; 0 is no beat.
+    #[serde(default = "beat_s")]
+    beat_s: u32,
     #[serde(default = "two")]
     round_minutes: i64,
+    /// An exchange in a room is its run of lines with no gap longer than this between one and the next; she is in it when
+    /// one of them is hers (`humans_pace`).
+    #[serde(default = "exchange_gap")]
+    exchange_gap_minutes: i64,
     start: DateTime<Utc>,
     rooms: Vec<String>,
     #[serde(default)]
     operators: Vec<String>,
+    /// The heartbeat's store (`heartbeat.cc`), read without a lock or a write, for its addressing table: each persona's
+    /// names and her stewarded projects' names. None addresses each by her own names.
+    #[serde(default)]
+    addressing: Option<PathBuf>,
     cast: Vec<CastEntry>,
     #[serde(default, rename = "message")]
     script: Vec<Message>,
@@ -72,6 +74,18 @@ fn two() -> i64 {
     2
 }
 
+fn exchange_gap() -> i64 {
+    20
+}
+
+fn ruled() -> WakePolicy {
+    WakePolicy::Ruled
+}
+
+fn beat_s() -> u32 {
+    DEFAULT_BEAT_S
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CastEntry {
@@ -82,15 +96,18 @@ struct CastEntry {
     /// Her rooms; none is every room of the plan.
     #[serde(default)]
     rooms: Vec<String>,
-    /// More names she answers to, beside her handle and display name.
+    /// The rooms that are hers, where any human line wakes her under `humans_pace`. Neither the heartbeat's table nor
+    /// `persona.env` records which rooms a Mind owns, so the plan says; a direct message is always hers.
     #[serde(default)]
-    names: Vec<String>,
+    own_rooms: Vec<String>,
 }
 
 struct Member {
     entry: CastEntry,
     state: Value,
     addressee: Addressee,
+    /// Where her addressee came from: the heartbeat's table, or her own names.
+    names_from: &'static str,
     rooms: Vec<String>,
 }
 
@@ -122,8 +139,33 @@ fn state_after_turn(state: Value, _turn: &Value) -> Value {
     state
 }
 
-/// How a Mind's line addressed her, by the evidence `is_for` had: a Matrix tag or a reply to her (`mention or reply`),
-/// her Matrix id written as plain text (`id as text`), or one of her names in the text (`name in text`).
+fn speaker(line: &Line, member: &Member, operators: &[String], cast: &[String]) -> Speaker {
+    if line.from == member.entry.id {
+        Speaker::Her
+    } else if operators.contains(&line.from) {
+        Speaker::Operator
+    } else if cast.contains(&line.from) {
+        Speaker::Mind
+    } else {
+        Speaker::Member
+    }
+}
+
+/// For each line, how many Mind lines in a row came before it in its room since a human last spoke there.
+fn mind_runs(lines: &[Line], cast: &[String]) -> Vec<usize> {
+    let mut run: BTreeMap<&str, usize> = BTreeMap::new();
+    lines
+        .iter()
+        .map(|line| {
+            let before = run.get(line.room.as_str()).copied().unwrap_or(0);
+            run.insert(&line.room, if cast.contains(&line.from) { before + 1 } else { 0 });
+            before
+        })
+        .collect()
+}
+
+/// How a Mind's line addressed her, by the evidence `is_for` had, strongest first: a Matrix tag or a reply to her, her
+/// Matrix id written as plain text, or one of her names in the text.
 fn how_addressed(line: &Line, at: usize, member: &Member, lines: &[Line]) -> &'static str {
     let delivery = line.delivery(at, &member.entry.id, lines);
     if delivery.mentions.contains(&member.entry.id) || delivery.basis.is_some() {
@@ -135,39 +177,71 @@ fn how_addressed(line: &Line, at: usize, member: &Member, lines: &[Line]) -> &'s
     }
 }
 
-/// Why she wakes this round, by the plan's rule, and the Minds' lines that addressed her; none leaves her asleep. A
-/// human outranks a Mind: a wake a human's line would cause is counted as the human's, so the Mind-addressed wakes are
-/// exactly those no human caused.
-fn wake_reason(lines: &[Line], seen: usize, member: &Member, cast: &[String], wake: Wake, beat: bool) -> Option<(&'static str, Vec<Value>)> {
-    let (mut human_addressed, mut human, mut mind) = (false, false, false);
-    let mut by_minds = Vec::new();
+/// One wake: why (the strongest cause among her new lines, under the plan's policy) and, when only Minds' lines caused
+/// it, the strongest evidence that addressed her and the lines that did.
+struct Woken {
+    cause: WakeCause,
+    how: Option<&'static str>,
+    by: Vec<Value>,
+}
+
+/// Whether she spoke in the exchange a line continues: walking back through the lines of its room while each is within
+/// `gap` of the one after it.
+fn in_exchange(lines: &[Line], at: usize, her: &str, gap: Duration) -> bool {
+    let room = &lines[at].room;
+    let mut after = lines[at].at_ms;
+    for line in lines[..at].iter().rev().filter(|line| line.room == *room) {
+        if after.saturating_sub(line.at_ms) > u64::try_from(gap.num_milliseconds()).unwrap_or(0) {
+            return false;
+        }
+        if line.from == her {
+            return true;
+        }
+        after = line.at_ms;
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments, reason = "one wake decision's inputs, each a plan or room fact")]
+fn woken(lines: &[Line], runs: &[usize], seen: usize, member: &Member, operators: &[String], cast: &[String], policy: WakePolicy, gap: Duration) -> Option<Woken> {
+    let mut found: Vec<(usize, WakeCause)> = Vec::new();
     for (at, line) in lines.iter().enumerate().skip(seen) {
-        if line.from == member.entry.id || !(member.rooms.contains(&line.room) || line.dm) {
+        if !line.visible_to(&member.entry.id, &member.rooms) {
             continue;
         }
-        let is_human = !cast.contains(&line.from);
-        let addressed = is_for(&member.addressee, &line.delivery(at, &member.entry.id, lines));
-        match (is_human, addressed) {
-            (true, true) => human_addressed = true,
-            (true, false) => human = true,
-            (false, true) => by_minds.push(json!({ "from": line.from, "how": how_addressed(line, at, member, lines), "says": line.says })),
-            (false, false) => mind = true,
+        let delivery = line.delivery(at, &member.entry.id, lines);
+        let facts = LineFacts { mind_run: runs[at], own_room: member.entry.own_rooms.contains(&line.room), in_exchange: in_exchange(lines, at, &member.entry.id, gap) };
+        if let Some(cause) = wakes(policy, &member.addressee, &delivery, speaker(line, member, operators, cast), facts) {
+            found.push((at, cause));
         }
     }
-    let why = if human_addressed {
-        "addressed by a human"
-    } else if human {
-        "a human in her rooms"
-    } else if !by_minds.is_empty() {
-        "addressed by a Mind"
-    } else if wake == Wake::AllMessages && mind {
-        "a message in her rooms"
-    } else if beat {
-        "the beat"
-    } else {
-        return None;
-    };
-    Some((why, if why == "addressed by a Mind" { by_minds } else { Vec::new() }))
+    let cause = found.iter().map(|(_, cause)| *cause).min()?;
+    if cause != WakeCause::AddressedByMind {
+        return Some(Woken { cause, how: None, by: vec![] });
+    }
+    let addressing: Vec<usize> = found.iter().filter(|(_, cause)| *cause == WakeCause::AddressedByMind).map(|(at, _)| *at).collect();
+    let rank = |how: &str| ["mention or reply", "id as text", "name in text"].iter().position(|one| *one == how).unwrap_or(3);
+    let how = addressing.iter().map(|at| how_addressed(&lines[*at], *at, member, lines)).min_by_key(|how| rank(how));
+    let by = addressing.iter().map(|at| json!({ "from": lines[*at].from, "how": how_addressed(&lines[*at], *at, member, lines), "says": lines[*at].says })).collect();
+    Some(Woken { cause, how, by })
+}
+
+/// The wire spelling of a cause, and of the beat.
+fn cause_word(cause: Option<WakeCause>) -> &'static str {
+    match cause {
+        Some(WakeCause::AddressedByHuman) => "addressed_by_human",
+        Some(WakeCause::Human) => "human",
+        Some(WakeCause::AddressedByMind) => "addressed_by_mind",
+        Some(WakeCause::Mind) => "mind",
+        None => "beat",
+    }
+}
+
+/// The cast members a said line tags: an `@handle` of theirs in the text. The stand-in for the Interpreter's explicit
+/// addressee (C3b), which will carry a Matrix mention; a name without the `@` tags no one.
+fn explicit_mentions(says: &str, cast: &[String]) -> Vec<String> {
+    let tagged: Vec<String> = says.split(|c: char| !(c.is_alphanumeric() || c == '@' || c == '_' || c == '-' || c == '.')).filter_map(|word| word.strip_prefix('@')).map(|handle| handle.trim_end_matches('.').to_lowercase()).collect();
+    cast.iter().filter(|id| tagged.iter().any(|handle| handle == &localpart(id).to_lowercase() || id.to_lowercase() == format!("@{handle}"))).cloned().collect()
 }
 
 /// A seeded shuffle, so the order of those woken together is drawn, and replays.
@@ -191,24 +265,45 @@ pub fn simulate(harness: &Harness, plan_path: &Path) -> Result<String> {
         bail!("a simulation needs rounds, repeats, a room and a positive round_minutes");
     }
     let base = plan_path.parent().unwrap_or(Path::new("."));
+    let mut members = cast_of(&plan, base)?;
+    let group_state = tuning::load(&harness.tuning).map(|loaded| loaded.tuning.select.group_state).ok();
+    let runs: Vec<Value> = (0..plan.repeats).map(|repeat| run(harness, &plan, &mut members, repeat)).collect::<Result<_>>()?;
+    Ok(markdown(plan_path, &plan, &members, group_state, &runs))
+}
+
+/// The plan's cast: each persona's state, checked as a put would check it, and her addressee, from the heartbeat's
+/// table when the plan names it and the table holds her; and the script checked against the rooms.
+fn cast_of(plan: &SimFile, base: &Path) -> Result<Vec<Member>> {
+    let table = match &plan.addressing {
+        Some(path) => FileStore::new(base.join(path)).addressing().with_context(|| format!("the heartbeat store {} could not be read", path.display()))?.unwrap_or_default(),
+        None => Addressing::default(),
+    };
     let mut members = Vec::new();
     for entry in &plan.cast {
         let state = state_file(&base.join(&entry.state), localpart(&entry.id))?;
         let rooms = if entry.rooms.is_empty() { plan.rooms.clone() } else { entry.rooms.clone() };
-        let public = state["publicName"].as_str().unwrap_or_default().to_owned();
-        let names = [localpart(&entry.id), entry.name.as_str(), public.as_str()].into_iter().chain(entry.names.iter().map(String::as_str)).filter(|name| !name.is_empty());
-        members.push(Member { addressee: Addressee::new(&entry.id, names), entry: entry.clone(), state, rooms });
+        let (addressee, names_from) = match table.minds.iter().find(|row| row.matrix_id() == entry.id) {
+            Some(row) => (row.clone(), "the heartbeat's table"),
+            None => {
+                let public = state["publicName"].as_str().unwrap_or_default().to_owned();
+                let names = [localpart(&entry.id), entry.name.as_str(), public.as_str()].into_iter().filter(|name| !name.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+                (Addressee::new(&entry.id, names.iter().map(String::as_str)), "her own names")
+            }
+        };
+        members.push(Member { addressee, names_from, entry: entry.clone(), state, rooms });
     }
     for (at, message) in plan.script.iter().enumerate() {
         if message.ago.is_some() || message.new || message.tag {
             bail!("script message {} uses a room fixture's ago, new or tag: a script names its round and its mentions", at + 1);
         }
-        if !plan.rooms.contains(&message.room) {
+        if !message.dm && !plan.rooms.contains(&message.room) {
             bail!("script message {} is in {}, which is not one of the rooms", at + 1, message.room);
         }
+        if message.dm && message.to.as_ref().is_none_or(|to| !plan.cast.iter().any(|entry| entry.id == *to)) {
+            bail!("script message {} is a direct message: name its recipient, a cast member, in `to`", at + 1);
+        }
     }
-    let runs: Vec<Value> = (0..plan.repeats).map(|repeat| run(harness, &plan, &mut members, repeat)).collect::<Result<_>>()?;
-    Ok(markdown(plan_path, &plan, &runs))
+    Ok(members)
 }
 
 fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize) -> Result<Value> {
@@ -216,32 +311,61 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
     let cast: Vec<String> = members.iter().map(|member| member.entry.id.clone()).collect();
     let at_round = |round: usize| plan.start + Duration::minutes(plan.round_minutes * round as i64);
     let mut lines: Vec<Line> = Vec::new();
+    // Per line: the round, and the cause of the turn that spoke it (none for a script line).
     let mut rounds_of: Vec<usize> = Vec::new();
-    let scripted = |round: usize, lines: &mut Vec<Line>, rounds_of: &mut Vec<usize>| -> Result<()> {
+    let mut causes: Vec<Option<&'static str>> = Vec::new();
+    let scripted = |round: usize, lines: &mut Vec<Line>, rounds_of: &mut Vec<usize>, causes: &mut Vec<Option<&'static str>>| -> Result<()> {
         for (at, message) in plan.script.iter().enumerate().filter(|(_, message)| message.round.unwrap_or(0) == round) {
             lines.push(Line::of(message, at_round(round) + Duration::seconds(at as i64), None, at)?);
             rounds_of.push(round);
+            causes.push(None);
         }
         Ok(())
     };
-    scripted(0, &mut lines, &mut rounds_of)?;
+    scripted(0, &mut lines, &mut rounds_of, &mut causes)?;
     let opening = lines.len();
     let mut seen = vec![0usize; members.len()];
+    let mut last_turn: Vec<Option<DateTime<Utc>>> = vec![None; members.len()];
+    let mut last_beat = plan.start;
     let mut recent: Vec<Vec<Vec<String>>> = vec![Vec::new(); members.len()];
     let mut turns = Vec::new();
     let mut counter = 0u64;
     for round in 1..=plan.rounds {
-        scripted(round, &mut lines, &mut rounds_of)?;
-        let beat = plan.beat_every > 0 && round % plan.beat_every == 0;
-        let woken: Vec<(usize, (&'static str, Vec<Value>))> = members.iter().enumerate().filter_map(|(at, member)| wake_reason(&lines, seen[at], member, &cast, plan.wake, beat).map(|why| (at, why))).collect();
-        for (at, (why, addressed_by)) in shuffled(woken, seed ^ (round as u64).wrapping_mul(0x9E37_79B9)) {
+        scripted(round, &mut lines, &mut rounds_of, &mut causes)?;
+        let round_at = at_round(round);
+        let runs = mind_runs(&lines, &cast);
+        let mut woke: Vec<(usize, Option<Woken>)> = members.iter().enumerate().filter_map(|(at, member)| woken(&lines, &runs, seen[at], member, &plan.operators, &cast, plan.wake, Duration::minutes(plan.exchange_gap_minutes)).map(|why| (at, Some(why)))).collect();
+        // The beat, as the heartbeat's: when it has fallen, one more wake for the winner of `tempo::pick` among those
+        // not already woken.
+        if plan.beat_s > 0 && (round_at - last_beat).num_seconds() >= i64::from(plan.beat_s) {
+            let standings: Vec<Standing> = members
+                .iter()
+                .enumerate()
+                .map(|(at, member)| Standing {
+                    slug: localpart(&member.entry.id).to_owned(),
+                    eligible: !woke.iter().any(|(woken, _)| *woken == at),
+                    waited_s: last_turn[at].map(|turn| u64::try_from((round_at - turn).num_seconds()).unwrap_or(0)),
+                    last_turn_ms: last_turn[at].map(|turn| turn.timestamp_millis()),
+                    topic_permille: 0,
+                    addressed_by_member: addressed_by_member(&plan.operators, &member.addressee, &pending_for(&lines, &member.entry.id, &member.rooms, |index| index >= seen[at]).deliveries),
+                })
+                .collect();
+            if let Some(winner) = pick(&standings, plan.beat_s) {
+                woke.push((winner, None));
+                last_beat = round_at;
+            }
+        }
+        for (at, why) in shuffled(woke, seed ^ (round as u64).wrapping_mul(0x9E37_79B9)) {
             counter += 1;
             let member = &members[at];
             let id = member.entry.id.clone();
-            let fresh: Vec<&Line> = lines[seen[at]..].iter().filter(|line| line.from != id && (member.rooms.contains(&line.room) || line.dm)).collect();
-            let here = fresh.iter().rev().find(|line| line.mentions.contains(&id)).or(fresh.last()).map_or_else(|| member.rooms[0].clone(), |line| line.room.clone());
+            let fresh: Vec<&Line> = lines[seen[at]..].iter().filter(|line| line.from != id && line.visible_to(&id, &member.rooms)).collect();
+            let woke_on = fresh.iter().rev().find(|line| line.mentions.contains(&id) || line.dm_to.as_deref() == Some(id.as_str())).or(fresh.last()).copied();
+            let here = woke_on.map_or_else(|| member.rooms[0].clone(), |line| line.room.clone());
+            // Woken by a direct message, she answers in it: to its sender alone.
+            let dm_to = woke_on.filter(|line| line.dm_to.as_deref() == Some(id.as_str())).map(|line| line.from.clone());
             let kind = if fresh.is_empty() { TurnKind::Beat } else { TurnKind::Chat };
-            let now = at_round(round) + Duration::seconds(30 + counter as i64);
+            let now = round_at + Duration::seconds(30 + counter as i64);
             let request = Request {
                 instance: localpart(&id).to_owned(),
                 kind,
@@ -263,24 +387,32 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
             let organs = Organs { persona: None, chat: Some(&view), addressing: Some(&names), model: harness.model };
             let report = project(&organs, &request, now).unwrap_or_else(|fault| json!({ "error": format!("{fault:#}") }));
             seen[at] = lines.len();
+            last_turn[at] = Some(now);
             let render = &report["renders"][0];
             if let Some(selected) = render["selected"].as_array() {
                 recent[at].push(selected.iter().filter_map(Value::as_str).map(str::to_owned).collect());
             }
+            // A failed call is a failure, never a silence.
+            let failed = report.get("error").or_else(|| render.get("failed")).or_else(|| render["persona"].get("failed")).map(|fault| fault.as_str().unwrap_or_default().to_owned());
             let said: Vec<String> = render["persona"]["would_say"].as_array().map(|said| said.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
             let line = (!said.is_empty()).then(|| said.join(" "));
+            let cause = cause_word(why.as_ref().map(|why| why.cause));
             if let Some(says) = &line {
-                lines.push(Line { from: id.clone(), name: member.entry.name.clone(), room: here.clone(), at_ms: u64::try_from(now.timestamp_millis()).unwrap_or_default(), says: says.clone(), mentions: vec![], dm: false, follow_up: false, reply_to: None, new: false });
+                let mentions = explicit_mentions(says, &cast);
+                lines.push(Line { from: id.clone(), name: member.entry.name.clone(), room: here.clone(), at_ms: u64::try_from(now.timestamp_millis()).unwrap_or_default(), says: says.clone(), mentions, dm_to: dm_to.clone(), follow_up: false, reply_to: None, new: false });
                 rounds_of.push(round);
+                causes.push(Some(cause));
             }
-            let turn = json!({ "round": round, "persona": member.entry.name, "id": id, "woke": why, "addressed_by": addressed_by, "kind": kind, "room": here, "said": line, "report": report });
+            let outcome = if failed.is_some() { "failed" } else if line.is_some() { "spoke" } else { "silent" };
+            let (how, by) = why.map_or((None, vec![]), |why| (why.how, why.by));
+            let turn = json!({ "round": round, "persona": member.entry.name, "id": id, "woke": cause, "how": how, "addressed_by": by, "kind": kind, "room": here, "outcome": outcome, "failed": failed, "said": line, "report": report });
             let member = &mut members[at];
             member.state = state_after_turn(std::mem::take(&mut member.state), &turn);
             turns.push(turn);
         }
     }
-    let metrics = metrics(members, &lines, &rounds_of, opening, &turns, plan.rounds);
-    let transcript: Vec<Value> = lines.iter().zip(&rounds_of).map(|(line, round)| json!({ "round": round, "room": line.room, "from": line.from, "name": line.name, "says": line.says, "mind": cast.contains(&line.from) })).collect();
+    let metrics = metrics(members, &lines, &rounds_of, &causes, opening, &turns, plan.rounds);
+    let transcript: Vec<Value> = lines.iter().zip(&rounds_of).zip(&causes).map(|((line, round), cause)| json!({ "round": round, "room": line.room, "from": line.from, "name": line.name, "says": line.says, "mind": cast.contains(&line.from), "woke": cause })).collect();
     Ok(json!({ "repeat": repeat + 1, "seed": seed, "transcript": transcript, "turns": turns, "metrics": metrics }))
 }
 
@@ -311,12 +443,39 @@ fn mean_pairwise(texts: &BTreeMap<String, String>) -> Option<f64> {
 /// Which rounds a measure keeps.
 type Keep<'a> = &'a dyn Fn(usize) -> bool;
 
-fn metrics(members: &[Member], lines: &[Line], rounds_of: &[usize], opening: usize, turns: &[Value], rounds: usize) -> Value {
+/// A Mind-to-Mind reply: a Mind's line spoken in a turn another Mind's line woke.
+fn mind_reply(cause: Option<&str>) -> bool {
+    matches!(cause, Some("addressed_by_mind" | "mind"))
+}
+
+/// Per room: Mind-to-Mind replies in a row with no human line and no human-woken answer between them.
+fn reply_chains(lines: &[Line], causes: &[Option<&str>], opening: usize, cast: &[&str]) -> Value {
+    let mut rooms: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
+    for (line, cause) in lines.iter().zip(causes).skip(opening) {
+        let (longest, chains, total, run) = rooms.entry(line.room.clone()).or_default();
+        if cast.contains(&line.from.as_str()) && mind_reply(*cause) {
+            *run += 1;
+            *total += 1;
+            *longest = (*longest).max(*run);
+        } else {
+            *chains += usize::from(*run >= 3);
+            *run = 0;
+        }
+    }
+    let out: BTreeMap<String, Value> = rooms
+        .into_iter()
+        .map(|(room, (longest, chains, total, run))| (room, json!({ "longest": longest, "chains_of_3_or_more": chains + usize::from(run >= 3), "mind_to_mind_replies": total })))
+        .collect();
+    json!(out)
+}
+
+fn metrics(members: &[Member], lines: &[Line], rounds_of: &[usize], causes: &[Option<&str>], opening: usize, turns: &[Value], rounds: usize) -> Value {
     let cast: Vec<&str> = members.iter().map(|member| member.entry.id.as_str()).collect();
+    let outcome = |turn: &&Value, what: &str| turn["outcome"] == what;
     let mut per = BTreeMap::new();
     for member in members {
         let mine: Vec<&Value> = turns.iter().filter(|turn| turn["id"] == member.entry.id.as_str()).collect();
-        let spoke = mine.iter().filter(|turn| !turn["said"].is_null()).count();
+        let (spoke, silent, failed) = (mine.iter().filter(|turn| outcome(turn, "spoke")).count(), mine.iter().filter(|turn| outcome(turn, "silent")).count(), mine.iter().filter(|turn| outcome(turn, "failed")).count());
         let mut addressed = BTreeMap::new();
         for (at, line) in lines.iter().enumerate().skip(opening).filter(|(_, line)| line.from == member.entry.id) {
             for other in members.iter().filter(|other| other.entry.id != member.entry.id) {
@@ -325,22 +484,11 @@ fn metrics(members: &[Member], lines: &[Line], rounds_of: &[usize], opening: usi
                 }
             }
         }
-        per.insert(member.entry.name.clone(), json!({ "turns": mine.len(), "messages": spoke, "silence_rate": if mine.is_empty() { Value::Null } else { json!(1.0 - spoke as f64 / mine.len() as f64) }, "addressed": addressed }));
+        let answered = spoke + silent;
+        per.insert(member.entry.name.clone(), json!({ "turns": mine.len(), "messages": spoke, "failed": failed, "silence_rate": if answered == 0 { Value::Null } else { json!(silent as f64 / answered as f64) }, "addressed": addressed }));
     }
-    // Mind-to-Mind chains: runs of Mind lines with no human line between them.
-    let (mut longest, mut long_chains, mut run) = (0usize, 0usize, 0usize);
-    for line in &lines[opening..] {
-        if cast.contains(&line.from.as_str()) {
-            run += 1;
-            longest = longest.max(run);
-        } else {
-            long_chains += usize::from(run >= 3);
-            run = 0;
-        }
-    }
-    long_chains += usize::from(run >= 3);
     let half = rounds.div_ceil(2);
-    let spoken_by = |keep: &dyn Fn(usize) -> bool| -> BTreeMap<String, String> {
+    let spoken_by = |keep: Keep| -> BTreeMap<String, String> {
         let mut texts = BTreeMap::new();
         for (line, _) in lines.iter().zip(rounds_of).skip(opening).filter(|(line, round)| cast.contains(&line.from.as_str()) && keep(**round)) {
             let text: &mut String = texts.entry(line.from.clone()).or_default();
@@ -349,7 +497,7 @@ fn metrics(members: &[Member], lines: &[Line], rounds_of: &[usize], opening: usi
         }
         texts
     };
-    let prose_by = |keep: &dyn Fn(usize) -> bool| -> BTreeMap<String, String> {
+    let prose_by = |keep: Keep| -> BTreeMap<String, String> {
         let mut texts = BTreeMap::new();
         for turn in turns.iter().filter(|turn| turn["round"].as_u64().is_some_and(|round| keep(round as usize))) {
             let text: &mut String = texts.entry(turn["id"].as_str().unwrap_or_default().to_owned()).or_default();
@@ -360,31 +508,42 @@ fn metrics(members: &[Member], lines: &[Line], rounds_of: &[usize], opening: usi
     };
     let (all, early, late): (Keep, Keep, Keep) = (&|_| true, &|round| round <= half, &|round| round > half);
     let mind_lines: Vec<&Line> = lines[opening..].iter().filter(|line| cast.contains(&line.from.as_str())).collect();
+    const CAUSES: [&str; 5] = ["addressed_by_human", "human", "addressed_by_mind", "mind", "beat"];
+    let count_causes = |these: &[&Value]| -> BTreeMap<&str, usize> { CAUSES.iter().map(|cause| (*cause, these.iter().filter(|turn| turn["woke"] == *cause).count())).collect() };
     let wakes_by_round: Vec<Value> = (1..=rounds)
         .map(|round| {
             let these: Vec<&Value> = turns.iter().filter(|turn| turn["round"] == round).collect();
-            let count = |whys: &[&str]| these.iter().filter(|turn| whys.contains(&turn["woke"].as_str().unwrap_or_default())).count();
-            json!({ "round": round, "human": count(&["addressed by a human", "a human in her rooms"]), "mind_addressed": count(&["addressed by a Mind"]), "mind_unaddressed": count(&["a message in her rooms"]), "beat": count(&["the beat"]) })
+            json!({ "round": round, "causes": count_causes(&these) })
         })
         .collect();
-    let mind_addressed: Vec<Value> = turns
-        .iter()
-        .filter(|turn| turn["woke"] == "addressed by a Mind")
-        .flat_map(|turn| turn["addressed_by"].as_array().into_iter().flatten().map(move |by| json!({ "round": turn["round"], "persona": turn["persona"], "from": by["from"], "how": by["how"], "says": by["says"] })))
-        .collect();
+    let every: Vec<&Value> = turns.iter().collect();
+    let mind_woken: Vec<&Value> = turns.iter().filter(|turn| turn["woke"] == "addressed_by_mind").collect();
+    let by_how = |how: &str| mind_woken.iter().filter(|turn| turn["how"] == how).count();
+    let id_as_text: Vec<Value> = mind_woken.iter().filter(|turn| turn["how"] == "id as text").map(|turn| json!({ "round": turn["round"], "persona": turn["persona"], "by": turn["addressed_by"] })).collect();
+    let (silent, failed) = (turns.iter().filter(|turn| turn["outcome"] == "silent").count(), turns.iter().filter(|turn| turn["outcome"] == "failed").count());
+    let answered = turns.len() - failed;
     let work = mind_lines.iter().filter(|line| work_talk(&line.says)).count();
+    let overlaps: Vec<f64> = turns.iter().filter_map(|turn| turn["report"]["renders"][0]["heard_overlap"].as_f64()).collect();
+    let narration = json!({
+        "mean_heard_overlap": if overlaps.is_empty() { Value::Null } else { json!(overlaps.iter().sum::<f64>() / overlaps.len() as f64) },
+        "retelling": overlaps.iter().filter(|overlap| **overlap > RETELL_FLAG).count(),
+        "offers_options": turns.iter().filter(|turn| turn["report"]["renders"][0]["offers_options"] == true).count(),
+        "narrations": overlaps.len(),
+    });
     json!({
+        "narration": narration,
         "personas": per,
         "turns": turns.len(),
+        "wakes": count_causes(&every),
+        "failed": failed,
         "mind_messages": mind_lines.len(),
-        "silence_rate": if turns.is_empty() { Value::Null } else { json!(turns.iter().filter(|turn| turn["said"].is_null()).count() as f64 / turns.len() as f64) },
-        "mind_chain_longest": longest,
-        "mind_chains_of_3_or_more": long_chains,
+        "silence_rate": if answered == 0 { Value::Null } else { json!(silent as f64 / answered as f64) },
+        "reply_chains": reply_chains(lines, causes, opening, &cast),
         "convergence_lines": { "all": mean_pairwise(&spoken_by(all)), "first_half": mean_pairwise(&spoken_by(early)), "second_half": mean_pairwise(&spoken_by(late)) },
         "convergence_prose": { "all": mean_pairwise(&prose_by(all)), "first_half": mean_pairwise(&prose_by(early)), "second_half": mean_pairwise(&prose_by(late)) },
         "work_talk_share": if mind_lines.is_empty() { Value::Null } else { json!(work as f64 / mind_lines.len() as f64) },
         "wakes_by_round": wakes_by_round,
-        "mind_addressed": mind_addressed,
+        "mind_addressed_wakes": { "total": mind_woken.len(), "mention_or_reply": by_how("mention or reply"), "id_as_text": by_how("id as text"), "name_in_text": by_how("name in text"), "id_as_text_wakes": id_as_text },
     })
 }
 
@@ -397,57 +556,104 @@ fn number(value: &Value) -> String {
     value.as_f64().map_or_else(|| "n/a".into(), |number| format!("{number:.3}"))
 }
 
-fn markdown(plan_path: &Path, plan: &SimFile, runs: &[Value]) -> String {
+fn policy_words(policy: WakePolicy) -> String {
+    match policy {
+        WakePolicy::Live => "live: the operator or another Mind addressing her (the heartbeat's rule today)".into(),
+        WakePolicy::Ruled => "ruled: a line addressing her, from anyone, and any human line in her rooms".into(),
+        WakePolicy::HumansPace(cap) => format!("humans_pace (cap {cap}): a human's line wakes a Mind in her own room always, and in a public room when it addresses her or continues an exchange she is in; a Mind's line wakes another only by an explicit mention or a reply, while fewer than {cap} Mind lines in a row came before it in its room, never by a name in prose"),
+        WakePolicy::NamesWithCap(cap) => format!("names_with_cap {cap}: ruled, but a Mind's line past {cap} Mind lines in a row in its room wakes no one until a human speaks"),
+        WakePolicy::AllMessages => "all_messages: any line in her rooms, a Mind's too (the old loop, the control)".into(),
+    }
+}
+
+/// `count` lines spread evenly over the transcript, the first and the last included.
+fn representative(transcript: &[Value], count: usize) -> Vec<&Value> {
+    if transcript.len() <= count {
+        return transcript.iter().collect();
+    }
+    let mut at: Vec<usize> = (0..count).map(|index| index * (transcript.len() - 1) / (count - 1)).collect();
+    at.dedup();
+    at.into_iter().map(|index| &transcript[index]).collect()
+}
+
+fn transcript_line(line: &Value) -> String {
+    let who = if line["mind"] == true { line["name"].as_str().unwrap_or_default().to_owned() } else { format!("{} (human)", line["name"].as_str().unwrap_or_default()) };
+    let woke = line["woke"].as_str().map_or_else(String::new, |cause| format!(" _(woke: {cause})_"));
+    format!("- r{} {} **{who}**{woke}: {}", line["round"], line["room"].as_str().unwrap_or_default(), one_line(line["says"].as_str().unwrap_or_default()))
+}
+
+fn markdown(plan_path: &Path, plan: &SimFile, members: &[Member], group_state: Option<bool>, runs: &[Value]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Swarm simulation\n");
     let _ = writeln!(out, "> **State does not evolve during a run.** The Interpreter (C3b) and the commit (C3c) are not built, so every persona starts each turn from the state the plan gave her. `state_after_turn` in `projection/simulate.rs` is the seam where they will move it between rounds. Freshness carries over: each persona's earlier packets in the run count against repeating an item.\n");
+    let _ = writeln!(out, "> **Explicit addressee, stand-in.** Whom a line is to is the Interpreter's to say (C3b). Until then a said line that holds `@handle` of a cast member counts as a Matrix mention of that member; any other name in it is prose and tags no one.\n");
     let _ = writeln!(out, "- plan: `{}`", plan_path.display());
-    let _ = writeln!(out, "- cast: {}", plan.cast.iter().map(|entry| format!("{} (`{}`, `{}`)", entry.name, entry.id, entry.state.display())).collect::<Vec<_>>().join(", "));
-    let _ = writeln!(out, "- rooms: {}; rounds: {}; repeats: {}; seed: {}; minutes a round: {}", plan.rooms.join(", "), plan.rounds, plan.repeats, plan.seed, plan.round_minutes);
-    let _ = writeln!(out, "- wake: {}; beat: {}", match plan.wake { Wake::HumansInRooms => "ruled set (addressed, any human message in her rooms, the beat; another Mind's unaddressed message wakes no one)", Wake::AllMessages => "control: any message in her rooms wakes her, a Mind's too (the old loop)" }, if plan.beat_every == 0 { "off".to_owned() } else { format!("every {} rounds", plan.beat_every) });
+    let _ = writeln!(out, "- cast: {}", members.iter().map(|member| format!("{} (`{}`, `{}`, names from {})", member.entry.name, member.entry.id, member.entry.state.display(), member.names_from)).collect::<Vec<_>>().join(", "));
+    let _ = writeln!(out, "- rooms: {}; rounds: {}; repeats: {}; seed: {}; minutes a round: {}; an exchange ends at a gap over {} min", plan.rooms.join(", "), plan.rounds, plan.repeats, plan.seed, plan.round_minutes, plan.exchange_gap_minutes);
+    let owners: Vec<String> = members.iter().filter(|member| !member.entry.own_rooms.is_empty()).map(|member| format!("{}: {}", member.entry.name, member.entry.own_rooms.join(", "))).collect();
+    let _ = writeln!(out, "- own rooms (from the plan: neither the heartbeat's table nor `persona.env` records room ownership): {}", if owners.is_empty() { "none".to_owned() } else { owners.join("; ") });
+    let _ = writeln!(out, "- wake: {}; beat: {}", policy_words(plan.wake), if plan.beat_s == 0 { "off".to_owned() } else { format!("every {} s of simulated time, one Persona by `tempo::pick`", plan.beat_s) });
+    let _ = writeln!(out, "- group state in the Projector's packet: {}", match group_state { Some(true) => "on", Some(false) => "off", None => "unknown (the tuning did not load)" });
     let _ = writeln!(out, "- speech: the double-quoted spans of her prose, joined, posted to the room she woke in; none is silence. A preview of the Interpreter's speech, not its decision");
-    let _ = writeln!(out, "- wakes: a human-caused wake is counted as the human's even when a Mind also addressed her; Mind-addressed wakes are split by evidence (Matrix mention or reply, her id written as text, a name in the text). Spoken lines here carry no Matrix mention, so a Mind addresses another only through text
-- convergence is the mean pairwise cosine of speakers' word counts (lexical, cheap); work-talk share is a lexical heuristic over a fixed word list, not a classifier");
+    let _ = writeln!(out, "- wakes are counted per wake, by its strongest cause: addressed by a human, a human line, addressed by a Mind, a Mind's line (control only), the beat. A Mind-addressed wake's evidence is its strongest: a Matrix mention or reply, her id written as text, a name in the text");
+    let _ = writeln!(out, "- silence rate is per woken turn that did not fail; a failed call is counted apart. Reply chains are per room: Mind lines spoken in turns another Mind's line woke, in a row");
+    let _ = writeln!(out, "- convergence is the mean pairwise cosine of speakers' word counts (lexical, cheap); work-talk share is a lexical heuristic over a fixed word list, not a classifier");
     let _ = writeln!(out, "- read-only: nothing is posted, no state is put, no Mind is asked\n");
     for run in runs {
         let metrics = &run["metrics"];
+        let wakes = &metrics["wakes"];
         let _ = writeln!(out, "## Repeat {} (seed {})\n", run["repeat"], run["seed"]);
         let _ = writeln!(out, "### Metrics\n");
-        let _ = writeln!(out, "- turns: {}; Mind messages: {}; silence rate: {}", metrics["turns"], metrics["mind_messages"], number(&metrics["silence_rate"]));
-        let _ = writeln!(out, "- longest Mind-to-Mind chain with no human between: {}; chains of 3 or more: {}", metrics["mind_chain_longest"], metrics["mind_chains_of_3_or_more"]);
+        let _ = writeln!(
+            out,
+            "- wakes: {} (addressed by a human {}, a human line {}, addressed by a Mind {}, a Mind's line {}, the beat {}); failed {}",
+            metrics["turns"], wakes["addressed_by_human"], wakes["human"], wakes["addressed_by_mind"], wakes["mind"], wakes["beat"], metrics["failed"]
+        );
+        let _ = writeln!(out, "- Mind messages: {}; silence rate per woken turn: {}", metrics["mind_messages"], number(&metrics["silence_rate"]));
+        if let Some(rooms) = metrics["reply_chains"].as_object() {
+            for (room, chain) in rooms {
+                let _ = writeln!(out, "- reply chains in {room}: longest {}, chains of 3 or more {}, Mind-to-Mind replies {}", chain["longest"], chain["chains_of_3_or_more"], chain["mind_to_mind_replies"]);
+            }
+        }
+        let addressed = &metrics["mind_addressed_wakes"];
+        let _ = writeln!(out, "- Mind-addressed wakes: {} (Matrix mention or reply {}, her id written as text {}, a name in the text {})", addressed["total"], addressed["mention_or_reply"], addressed["id_as_text"], addressed["name_in_text"]);
         let _ = writeln!(out, "- convergence of spoken lines: all {}, first half {}, second half {}", number(&metrics["convergence_lines"]["all"]), number(&metrics["convergence_lines"]["first_half"]), number(&metrics["convergence_lines"]["second_half"]));
         let _ = writeln!(out, "- convergence of prose: all {}, first half {}, second half {}", number(&metrics["convergence_prose"]["all"]), number(&metrics["convergence_prose"]["first_half"]), number(&metrics["convergence_prose"]["second_half"]));
-        let _ = writeln!(out, "- work-talk share of Mind lines (heuristic): {}\n", number(&metrics["work_talk_share"]));
-        let _ = writeln!(out, "| persona | turns | messages | silence rate | addressed |\n|---|---|---|---|---|");
+        let _ = writeln!(out, "- work-talk share of Mind lines (heuristic): {}", number(&metrics["work_talk_share"]));
+        let narration = &metrics["narration"];
+        let _ = writeln!(out, "- narrations: {}; mean overlap with what she heard {}; retelling (over {RETELL_FLAG}) {}; offering her options {}\n", narration["narrations"], number(&narration["mean_heard_overlap"]), narration["retelling"], narration["offers_options"]);
+        let _ = writeln!(out, "| persona | wakes | messages | failed | silence rate | addressed |\n|---|---|---|---|---|---|");
         if let Some(personas) = metrics["personas"].as_object() {
             for (name, row) in personas {
-                let addressed = row["addressed"].as_object().map(|map| map.iter().map(|(who, count)| format!("{who} {count}")).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-                let _ = writeln!(out, "| {name} | {} | {} | {} | {addressed} |", row["turns"], row["messages"], number(&row["silence_rate"]));
+                let named = row["addressed"].as_object().map(|map| map.iter().map(|(who, count)| format!("{who} {count}")).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                let _ = writeln!(out, "| {name} | {} | {} | {} | {} | {named} |", row["turns"], row["messages"], row["failed"], number(&row["silence_rate"]));
             }
         }
-        let _ = writeln!(out, "\n### Wakes by round\n\nA wake a human's line would cause is counted as the human's; Mind-addressed wakes are those only a Mind's line caused.\n\n| round | human | Mind-addressed | Mind, unaddressed (control) | beat |\n|---|---|---|---|---|");
+        let _ = writeln!(out, "\n### Wakes by round\n\n| round | addressed by a human | a human line | addressed by a Mind | a Mind's line | beat |\n|---|---|---|---|---|---|");
         for row in metrics["wakes_by_round"].as_array().into_iter().flatten() {
-            let _ = writeln!(out, "| {} | {} | {} | {} | {} |", row["round"], row["human"], row["mind_addressed"], row["mind_unaddressed"], row["beat"]);
+            let causes = &row["causes"];
+            let _ = writeln!(out, "| {} | {} | {} | {} | {} | {} |", row["round"], causes["addressed_by_human"], causes["human"], causes["addressed_by_mind"], causes["mind"], causes["beat"]);
         }
-        let addressed = metrics["mind_addressed"].as_array().cloned().unwrap_or_default();
-        let by_how = |how: &str| addressed.iter().filter(|one| one["how"] == how).count();
-        let _ = writeln!(out, "\nMind-addressed wake evidence: {} lines; a Matrix mention or reply {}, her Matrix id written as text {}, a name in the text {}.\n", addressed.len(), by_how("mention or reply"), by_how("id as text"), by_how("name in text"));
-        let as_text: Vec<&Value> = addressed.iter().filter(|one| one["how"] == "id as text").collect();
+        let as_text = addressed["id_as_text_wakes"].as_array().cloned().unwrap_or_default();
         if !as_text.is_empty() {
-            let _ = writeln!(out, "Wakes where the only address was an id written as text (no mention, no reply):\n");
+            let _ = writeln!(out, "\nWakes whose only address was an id written as text (no mention, no reply):\n");
             for one in as_text {
-                let _ = writeln!(out, "- r{} {} woken by {}: {}", one["round"], one["persona"].as_str().unwrap_or_default(), one["from"].as_str().unwrap_or_default(), one_line(one["says"].as_str().unwrap_or_default()));
+                let by = one["by"].as_array().into_iter().flatten().map(|by| format!("{}: {}", by["from"].as_str().unwrap_or_default(), one_line(by["says"].as_str().unwrap_or_default()))).collect::<Vec<_>>().join("; ");
+                let _ = writeln!(out, "- r{} {}: {by}", one["round"], one["persona"].as_str().unwrap_or_default());
             }
+        }
+        let transcript = run["transcript"].as_array().cloned().unwrap_or_default();
+        let _ = writeln!(out, "\n### Representative lines\n");
+        for line in representative(&transcript, REPRESENTATIVE_LINES) {
+            let _ = writeln!(out, "{}", transcript_line(line));
         }
         let _ = writeln!(out, "\n### Transcript\n");
-        for line in run["transcript"].as_array().into_iter().flatten() {
-            let who = if line["mind"] == true { line["name"].as_str().unwrap_or_default().to_owned() } else { format!("{} (human)", line["name"].as_str().unwrap_or_default()) };
-            let _ = writeln!(out, "- r{} {} **{who}**: {}", line["round"], line["room"].as_str().unwrap_or_default(), one_line(line["says"].as_str().unwrap_or_default()));
+        for line in &transcript {
+            let _ = writeln!(out, "{}", transcript_line(line));
         }
         let _ = writeln!(out, "\n### Turns\n");
         for turn in run["turns"].as_array().into_iter().flatten() {
-            let said = if turn["said"].is_null() { "silent".to_owned() } else { "spoke".to_owned() };
-            let _ = writeln!(out, "<details><summary>round {}, {} (woke: {}, {} turn, {}): {said}</summary>\n", turn["round"], turn["persona"].as_str().unwrap_or_default(), turn["woke"].as_str().unwrap_or_default(), turn["kind"].as_str().unwrap_or_default(), turn["room"].as_str().unwrap_or_default());
+            let _ = writeln!(out, "<details><summary>round {}, {} (woke: {}, {} turn, {}): {}</summary>\n", turn["round"], turn["persona"].as_str().unwrap_or_default(), turn["woke"].as_str().unwrap_or_default(), turn["kind"].as_str().unwrap_or_default(), turn["room"].as_str().unwrap_or_default(), turn["outcome"].as_str().unwrap_or_default());
             let report = &turn["report"];
             if let Some(error) = report.get("error") {
                 let _ = writeln!(out, "**failed:** {}\n", error.as_str().unwrap_or_default());

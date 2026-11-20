@@ -7,6 +7,7 @@
 //! The SHA-256 carried with every packet is of the effective tuning, serialized whole with its defaults: a file that
 //! spells out the defaults hashes as no file does, and two builds whose defaults differ hash differently.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -17,12 +18,12 @@ use sha2::{Digest, Sha256};
 pub const TUNING_ROOT: &str = "/etc/gamecult/minds";
 pub const TUNING_FILE: &str = "persona-tuning.toml";
 
-/// The Persona stage's setting: where her words go, and the one convention that makes them speech (map section 5.5,
-/// invariant 5). It licenses nothing: Ghostlight's membrane already says a thin moment gets little or nothing.
-const PERSONA_GUIDANCE: &str = "She is in a chat room. Words she says aloud are typed into the room, and appear in her prose inside double quotation marks; nothing else she thinks or does leaves her head.";
+/// The Persona stage's setting (map section 2): she continues the Projector's paragraph, her interior, with speech only
+/// where her thought moves her to it, quoted (map section 5.5, invariant 5). It is not a reply to the room.
+const PERSONA_GUIDANCE: &str = "Continue her inner stream where the paragraph leaves off: her own next thoughts, in the first person. This is not a message to the room. Speech is rare: words she says aloud appear in double quotation marks, and only when something in her thought moves her to say them; anyone else's words she recalls go in single quotation marks. In a busy room most moments pass with nothing said. To make sure someone hears her, she writes @ and their handle in what she says. Nothing else she thinks leaves her head.";
 
 /// The setting the Projector renders for. No task: in the Persona-only shape nothing is work she owes.
-const GUIDANCE: &str = "This person is a Mind of the GameCult swarm. She lives in its chat rooms among the operator, the other Minds and whoever drops by, and no task is waiting on her in this moment. Render the moment as she lives it: who is here and how they sit with her, what she carries, what she wants.";
+const GUIDANCE: &str = "This person is a Mind of the GameCult swarm. She lives in its chat rooms among the operator, the other Minds and whoever drops by, and no task is waiting on her in this moment. Render the moment as she lives it: who is here and how they sit with her, what she carries, what she wants. What was said reaches her word for word after this stream, so never retell or summarise it: render what it stirs in her and what she makes of the people who said it. Render the conversation as it stands, never as a debt: nobody is owed an answer unless a person is waiting on her by name, and a question others have answered is covered. Do not weigh options or list what she might do or say; what she does is hers to decide. Leave out whatever the context does not carry: an absence is not part of her moment. Use each person's pronouns as given.";
 
 /// The context room the fixed slots need beside the identity: the hour and the mood lines always fit.
 const FIXED_ROOM: usize = 256;
@@ -36,14 +37,46 @@ const ADDRESSED_RANGE: std::ops::RangeInclusive<usize> = 1024..=64 * 1024;
 const PART_BYTES_MAX: usize = 32 * 1024;
 /// The most words a lived stream may be given: a thin moment gets a thin stream, and no budget needs a book.
 const WORDS_MAX: usize = 2000;
+/// The most room lines the group state reads: a recent window, not the room's history.
+const GROUP_LINES_MAX: usize = 40;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tuning {
     pub projector: ProjectorTuning,
     pub persona: PersonaTuning,
     pub select: SelectTuning,
     pub lens: LensWeights,
+    /// Each person's pronouns by Matrix id, for everyone the packet names: the persona schema has no pronoun field for
+    /// another person. A file's table replaces this one whole; anyone not listed is they/them.
+    pub pronouns: BTreeMap<String, String>,
+}
+
+/// The swarm's people as of 2026-11-20 (operator's word): she for the operator and five Minds, he for Heimdall and Deru,
+/// any for Void, rendered they/them.
+const PRONOUNS: [(&str, &str); 10] = [
+    ("@meta:gamecult.org", "she/her"),
+    ("@libby:gamecult.org", "she/her"),
+    ("@kiko:gamecult.org", "she/her"),
+    ("@aqua:gamecult.org", "she/her"),
+    ("@weksa:gamecult.org", "she/her"),
+    ("@nibu:gamecult.org", "she/her"),
+    ("@eureka:gamecult.org", "she/her"),
+    ("@heimdall:gamecult.org", "he/him"),
+    ("@void:gamecult.org", "they/them (any pronouns)"),
+    ("@deru:gamecult.org", "he/him"),
+];
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            projector: ProjectorTuning::default(),
+            persona: PersonaTuning::default(),
+            select: SelectTuning::default(),
+            lens: LensWeights::default(),
+            pronouns: PRONOUNS.iter().map(|(id, pronouns)| ((*id).to_owned(), (*pronouns).to_owned())).collect(),
+        }
+    }
 }
 
 /// The Projector's call: its model, its domain guidance and its word budgets.
@@ -97,6 +130,14 @@ pub struct SelectTuning {
     pub people_full: usize,
     /// The room lines a beat shows.
     pub beat_tail_lines: usize,
+    /// The group-state slot: who has been talking to whom, how long since a human spoke, what is addressed to her or
+    /// open to anyone, and how long the run of Mind lines is (prior art: group state in the prompt is what lets a
+    /// participant judge whether to speak).
+    pub group_state: bool,
+    /// The room lines the group state reads.
+    pub group_lines: usize,
+    /// The group-state slot's bytes.
+    pub group_bytes: usize,
     pub caps: PoolCaps,
 }
 
@@ -153,6 +194,9 @@ impl Default for SelectTuning {
             freshness_window: 5,
             people_full: 2,
             beat_tail_lines: 6,
+            group_state: true,
+            group_lines: 12,
+            group_bytes: 360,
             caps: PoolCaps::default(),
         }
     }
@@ -203,6 +247,8 @@ impl Tuning {
             ("select.identity_bytes", select.identity_bytes),
             ("select.bond_summary_bytes", select.bond_summary_bytes),
             ("select.item_bytes", select.item_bytes),
+            ("select.group_lines", select.group_lines),
+            ("select.group_bytes", select.group_bytes),
             ("projector.words", self.projector.words),
             ("projector.beat_words", self.projector.beat_words),
             ("persona.words", self.persona.words),
@@ -218,13 +264,18 @@ impl Tuning {
             ("select.identity_bytes", select.identity_bytes),
             ("select.bond_summary_bytes", select.bond_summary_bytes),
             ("select.item_bytes", select.item_bytes),
+            ("select.group_bytes", select.group_bytes),
             ("projector.guidance", self.projector.guidance.len()),
+            ("persona.guidance", self.persona.guidance.len()),
         ] {
             if bytes > PART_BYTES_MAX {
                 bail!("{name} must be at most {PART_BYTES_MAX} bytes, not {bytes}: the prompt must fit the connector's frame");
             }
         }
-        for (name, words) in [("projector.words", self.projector.words), ("projector.beat_words", self.projector.beat_words)] {
+        if select.group_lines > GROUP_LINES_MAX {
+            bail!("select.group_lines must be at most {GROUP_LINES_MAX}, not {}", select.group_lines);
+        }
+        for (name, words) in [("projector.words", self.projector.words), ("projector.beat_words", self.projector.beat_words), ("persona.words", self.persona.words)] {
             if words > WORDS_MAX {
                 bail!("{name} must be at most {WORDS_MAX}, not {words}");
             }

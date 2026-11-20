@@ -1,0 +1,4 @@
+quiet-beat.toml: - the conversation: lately libby to the room; Kiko to the room; the last 3 lines are the Minds' alone
+operator-warm.toml: - the conversation: lately Meta, who runs the place with him; Meta, who runs the place last spoke 1 min ago; Meta, who runs the place is waiting on him
+mind-teases.toml: - the conversation: lately he to the room; aqua to the room; Kiko with him; the last 3 lines are the Minds' alone
+deru-passing.toml: - the conversation: lately weksa to the room; Deru to the room; Deru last spoke 1 min ago

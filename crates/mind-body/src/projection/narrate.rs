@@ -138,7 +138,7 @@ pub(crate) fn word_budget(kind: TurnKind, tuning: &Tuning) -> usize {
 
 /// The Projector's prompt: Ghostlight's membrane over the packet, with the lens as where to begin.
 pub(crate) fn projector_prompt(packet: &Packet, tuning: &Tuning) -> String {
-    let guidance = format!("{}\n\nBegin from {}.", tuning.projector.guidance.trim(), packet.lens.words());
+    let guidance = format!("{}\n\nBegin from {}.", tuning.projector.guidance.trim(), packet.lens.words(&packet.forms));
     build_projector_prompt(&ProjectorPrompt { identity: &packet.identity, typed_context: &packet.context, visible_stimulus: &packet.stimulus, domain_guidance: &guidance, word_budget: word_budget(packet.kind, tuning) })
 }
 
@@ -187,6 +187,50 @@ pub(crate) fn lived_stream(narration: &str, heard: &str) -> String {
 /// number, schema or instruction of hers reaches it (invariant 7); the guidance is the tuning's setting line.
 pub(crate) fn persona_prompt(packet: &Packet, narration: &str, tuning: &Tuning) -> String {
     build_persona_prompt(&PersonaPrompt { identity: &packet.identity, lived_stream: &lived_stream(narration, &packet.heard), domain_guidance: tuning.persona.guidance.trim(), word_budget: tuning.persona.words })
+}
+
+/// Her prose with what she says aloud taken out: her interior, which never leaves her head.
+pub(crate) fn inner(prose: &str) -> String {
+    let mut out = String::with_capacity(prose.len());
+    let mut open: Option<char> = None;
+    for c in prose.chars() {
+        match (open, c) {
+            (None, '"') => open = Some('"'),
+            (None, '\u{201C}') => open = Some('\u{201D}'),
+            (Some(close), c) if c == close => {
+                open = None;
+                out.push('\u{2026}');
+            }
+            (Some(_), _) => {}
+            (None, c) => out.push(c),
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The share of the narration's word trigrams that also appear in what she heard: how much of the stream retells the
+/// messages the Persona is shown word for word anyway. A judge metric, never a filter: 0 is no retelling.
+pub(crate) fn heard_overlap(narration: &str, heard: &str) -> f64 {
+    let trigrams = |text: &str| -> Vec<(String, String, String)> {
+        let words: Vec<String> = text.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|word| !word.is_empty()).map(str::to_lowercase).collect();
+        words.windows(3).map(|three| (three[0].clone(), three[1].clone(), three[2].clone())).collect()
+    };
+    let told = trigrams(narration);
+    if told.is_empty() {
+        return 0.0;
+    }
+    let heard: BTreeSet<(String, String, String)> = trigrams(heard).into_iter().collect();
+    told.iter().filter(|three| heard.contains(three)).count() as f64 / told.len() as f64
+}
+
+/// Whether a narration lays out options for her: "I may…", "I could…", "she might…", "nothing asks me to…". The Projector
+/// renders the moment and the Persona decides; a menu of choices is the Projector deciding. A lexical flag on a narrow
+/// form, reported as a metric, never a filter.
+pub(crate) fn offers_options(narration: &str) -> bool {
+    let lower = format!(" {} ", narration.to_lowercase().replace('\u{2019}', "'"));
+    ["i may ", "i could ", "i might ", "she may ", "she could ", "she might ", "nothing asks me", "nothing asks her", "or i could", "or she could"]
+        .iter()
+        .any(|form| lower.contains(&format!(" {form}")) || lower.contains(&format!(". {form}")) || lower.contains(&format!(", {form}")))
 }
 
 /// The words her prose says aloud: each span inside straight or curly double quotation marks, in prose order (map

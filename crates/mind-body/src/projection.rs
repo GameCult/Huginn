@@ -39,7 +39,7 @@ pub use narrate::{Answer, Failed, KitModel, Model, Spent, connector_key};
 pub use select::TurnKind;
 pub use tuning::{TUNING_FILE, TUNING_ROOT};
 
-use narrate::{cap_words, distinct_2, field_names, judge_prompt, judged, persona_prompt, projector_prompt, word_budget, words, would_say};
+use narrate::{cap_words, distinct_2, field_names, heard_overlap, inner, judge_prompt, judged, offers_options, persona_prompt, projector_prompt, word_budget, words, would_say};
 use select::{History, Inputs, Packet, People, Room, RoomLine, select};
 
 /// The agent name on the connector's request ids.
@@ -180,7 +180,9 @@ fn read_room(chat: &dyn MouthReader, request: &Request, own: &Addressee) -> (Roo
         Ok(pending) => pending,
         Err(fault) => return (Room { here: request.room.clone(), last_heard: request.last_heard.clone(), ..Room::default() }, json!({ "read": false, "why": format!("{fault:#}") })),
     };
-    let wanted = |room: &str, id: &str| request.room.as_deref().is_none_or(|here| here == room || here == id);
+    // The turn's room by its alias, the name every line of the tail carries, when it was given by its Matrix id.
+    let here = request.room.as_ref().map(|here| pending.deliveries.iter().find(|delivery| delivery.room_id == *here).map_or_else(|| here.clone(), |delivery| delivery.room_alias.clone()));
+    let wanted = |room: &str, id: &str| here.as_deref().is_none_or(|here| here == room || here == id);
     let messages: Vec<RoomLine> = pending
         .deliveries
         .iter()
@@ -203,7 +205,7 @@ fn read_room(chat: &dyn MouthReader, request: &Request, own: &Addressee) -> (Roo
         .map(|line| RoomLine { room: line.room.clone(), sender: line.sender.clone(), display: String::new(), text: line.body.clone(), at_ms: line.at_unix_ms, to_her: false })
         .collect();
     let report = json!({ "read": true, "messages": messages.len(), "tail": tail.len(), "tail_gaps": pending.tail_gaps });
-    (Room { messages, tail, here: request.room.clone(), last_heard: request.last_heard.clone() }, report)
+    (Room { messages, tail, here, last_heard: request.last_heard.clone() }, report)
 }
 
 fn packet_json(packet: &Packet) -> Value {
@@ -247,6 +249,8 @@ fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuni
         "words": words(&narration),
         "cut_at_budget": words(&raw) > budget,
         "field_names": field_names(&narration, &named),
+        "heard_overlap": heard_overlap(&narration, &packet.heard),
+        "offers_options": offers_options(&narration),
         "usage": answer.usage,
         "narration": narration,
     });
@@ -258,6 +262,7 @@ fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuni
                     "words": words(&prose),
                     "cut_at_budget": words(&spoke.text) > tuning.persona.words,
                     "would_say": would_say(&prose),
+                    "inner": inner(&prose),
                     "usage": spoke.usage,
                     "prose": prose,
                 })

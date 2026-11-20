@@ -77,7 +77,7 @@ fn project_over_a_room_fixture_and_a_state_file_needs_no_daemon_and_no_mouth() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!((report["state"].as_str(), report["persona_receipt"].is_null()), (Some("given"), true), "{report}");
     assert!(report["packet"]["identity"].as_str().unwrap().starts_with("Tobiah Fenn"), "{report}");
-    assert!(report["packet"]["stimulus"].as_str().unwrap().contains("Said to her"), "Kiko's tagged reply is for her: {report}");
+    assert!(report["packet"]["stimulus"].as_str().unwrap().contains("Said to him"), "Kiko's tagged reply is for him, in his own pronouns: {report}");
     // Without any endpoint at all it runs the same.
     let output = Command::new(env!("CARGO_BIN_EXE_mind-persona")).args(args).env_clear().env("MIND_PERSONA_TUNING", "/nonexistent/persona-tuning.toml").output().unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
