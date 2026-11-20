@@ -1,4 +1,4 @@
-//! `persona-tuning.toml`: every knob of the Select stage and the Projector, read at each wake.
+//! `persona-tuning.toml`: every knob of the Select stage, the Projector and the Persona stage, read at each wake.
 //!
 //! The file is optional. Absent, the code's defaults hold and the source reads `defaults`; present, every key it
 //! names overrides one default and any key the code does not know refuses the file, so a mistyped experiment fails
@@ -16,6 +16,10 @@ use sha2::{Digest, Sha256};
 /// Where the tuning of an instance lives.
 pub const TUNING_ROOT: &str = "/etc/gamecult/minds";
 pub const TUNING_FILE: &str = "persona-tuning.toml";
+
+/// The Persona stage's setting: where her words go, and the one convention that makes them speech (map section 5.5,
+/// invariant 5). It licenses nothing: Ghostlight's membrane already says a thin moment gets little or nothing.
+const PERSONA_GUIDANCE: &str = "She is in a chat room. Words she says aloud are typed into the room, and appear in her prose inside double quotation marks; nothing else she thinks or does leaves her head.";
 
 /// The setting the Projector renders for. No task: in the Persona-only shape nothing is work she owes.
 const GUIDANCE: &str = "This person is a Mind of the GameCult swarm. She lives in its chat rooms among the operator, the other Minds and whoever drops by, and no task is waiting on her in this moment. Render the moment as she lives it: who is here and how they sit with her, what she carries, what she wants.";
@@ -37,6 +41,7 @@ const WORDS_MAX: usize = 2000;
 #[serde(default, deny_unknown_fields)]
 pub struct Tuning {
     pub projector: ProjectorTuning,
+    pub persona: PersonaTuning,
     pub select: SelectTuning,
     pub lens: LensWeights,
 }
@@ -51,6 +56,15 @@ pub struct ProjectorTuning {
     pub words: usize,
     /// On a beat: a thin moment gets a thin stream.
     pub beat_words: usize,
+}
+
+/// The Persona stage's call: its model, its voice and setting guidance and its word budget (map section 3.2).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PersonaTuning {
+    pub model: String,
+    pub guidance: String,
+    pub words: usize,
 }
 
 /// The selection: its temperature and inclusion, its budgets, its half-life, the freshness decay and the pool caps.
@@ -116,6 +130,12 @@ impl Default for ProjectorTuning {
     }
 }
 
+impl Default for PersonaTuning {
+    fn default() -> Self {
+        Self { model: "claude-sonnet-5-5".into(), guidance: PERSONA_GUIDANCE.into(), words: 180 }
+    }
+}
+
 impl Default for SelectTuning {
     fn default() -> Self {
         Self {
@@ -161,6 +181,9 @@ impl Tuning {
         if self.projector.model.trim().is_empty() {
             bail!("projector.model must name a model");
         }
+        if self.persona.model.trim().is_empty() {
+            bail!("persona.model must name a model");
+        }
         if !ADDRESSED_RANGE.contains(&select.addressed_bytes) {
             bail!("select.addressed_bytes must be from {} to {}, not {}", ADDRESSED_RANGE.start(), ADDRESSED_RANGE.end(), select.addressed_bytes);
         }
@@ -182,6 +205,7 @@ impl Tuning {
             ("select.item_bytes", select.item_bytes),
             ("projector.words", self.projector.words),
             ("projector.beat_words", self.projector.beat_words),
+            ("persona.words", self.persona.words),
         ] {
             if bytes == 0 {
                 bail!("{name} must be above 0");

@@ -107,6 +107,7 @@ mind_body::chat_rudp: impl RudpChat: fn reply_defects (& self) -> usize
 mind_body::chat_rudp: impl RudpChat: fn with_reply_link (mut self , on : bool) -> Self
 mind_body::chat_rudp: struct RudpChat  pub-fields[]
 mind_body::cli: fn instance_and_endpoint (args : & [String] , env_endpoint : Option < String > , usage : & str) -> Result < (Slug , SocketAddr) >
+mind_body::cli: fn instance_and_maybe_endpoint (args : & [String] , env_endpoint : Option < String > , usage : & str) -> Result < (Slug , Option < SocketAddr >) >
 mind_body::cli: fn operator_name (sudo_user : Option < String > , user : Option < String >) -> String
 mind_body::cli: fn run (args : & [String] , root : & Path , set_by : & str , now : DateTime < Utc > , out : & mut impl Write , stop_units : & mut dyn FnMut (StopScope < '_ >) -> Result < () > ,) -> Result < () >
 mind_body::connector: fn render_plan (windows : & [PlanQuota] , _now_ms : u64) -> String
@@ -232,11 +233,13 @@ mind_body::persona: struct Config # [derive (Clone , Debug , PartialEq , Eq)] pu
 mind_body::persona: struct FileTrace  pub-fields[]
 mind_body::persona: struct TraceItem # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[provenance: String, room: String, text: String]
 mind_body::persona: struct TurnTrace # [derive (Clone , Debug , PartialEq , Eq , DatabaseEntry)] pub-fields[run: String, turn: u32, at: DateTime < Utc >, inputs: Vec < TraceItem >, outputs: Vec < TraceItem >, outcome: String]
+mind_body::projection: # [derive (Clone , Copy , Debug , Default , PartialEq , Eq , serde :: Deserialize)] # [serde (rename_all = "snake_case")] pub enum Through { # [default] Projector , Persona , }
 mind_body::projection: fn project (organs : & Organs , request : & Request , now : DateTime < Utc >) -> Result < Value >
 mind_body::projection: impl HuginnPersonaSource
 mind_body::projection: impl HuginnPersonaSource: fn new (client : HuginnClient) -> Self
 mind_body::projection: impl PersonaSource for HuginnPersonaSource
 mind_body::projection: impl< T : Chat > MouthReader for T
+mind_body::projection: mod harness
 mind_body::projection: pub trait MouthReader { fn pending (& self) -> Result < ChatPending > ; }
 mind_body::projection: pub trait PersonaSource { fn persona (& self) -> Result < (Value , String) > ; }
 mind_body::projection: pub use narrate :: { Answer , Failed , KitModel , Model , Spent , connector_key } ;
@@ -244,7 +247,21 @@ mind_body::projection: pub use select :: TurnKind ;
 mind_body::projection: pub use tuning :: { TUNING_FILE , TUNING_ROOT } ;
 mind_body::projection: struct HuginnPersonaSource  pub-fields[]
 mind_body::projection: struct Organs< 'a >  pub-fields[persona: Option < & 'a dyn PersonaSource >, chat: Option < & 'a dyn MouthReader >, addressing: Option < & 'a dyn HeartbeatView >, model: Option < & 'a dyn Model >]
-mind_body::projection: struct Request  pub-fields[instance: String, kind: TurnKind, state: Option < Value >, room: Option < String >, seed: u64, renders: Option < usize >, judge_against: Option < Value >, operators: Vec < String >, minds: Vec < String >, own_sender: String, tuning: PathBuf]
+mind_body::projection: struct Request  pub-fields[instance: String, kind: TurnKind, state: Option < Value >, room: Option < String >, seed: u64, renders: Option < usize >, judge_against: Option < Value >, operators: Vec < String >, minds: Vec < String >, own_sender: String, tuning: PathBuf, through: Through, last_heard: Vec < (String , u64) >, recent: Vec < Vec < String > >]
+mind_body::projection::harness: fn batch (harness : & Harness , plan_path : & Path) -> Result < String >
+mind_body::projection::harness: fn fixture_request (harness : & Harness , fixture : & Fixture , state : Option < Value > , seed : u64 , renders : Option < usize > , through : Through) -> Request
+mind_body::projection::harness: fn state_file (path : & Path , instance : & str) -> Result < Value >
+mind_body::projection::harness: impl Fixture
+mind_body::projection::harness: impl Fixture: fn addressee (& self) -> Option < & dyn HeartbeatView >
+mind_body::projection::harness: impl Fixture: fn load (path : & Path) -> Result < Self >
+mind_body::projection::harness: impl Fixture: fn parse (text : & str) -> Result < Self >
+mind_body::projection::harness: impl HeartbeatView for Fixture
+mind_body::projection::harness: impl Line
+mind_body::projection::harness: impl MouthReader for Fixture
+mind_body::projection::harness: pub use super :: simulate :: simulate ;
+mind_body::projection::harness: struct Fixture # [derive (Clone , Debug)] pub-fields[her: String, names: Vec < String >, kind: TurnKind, now: DateTime < Utc >, here: Option < String >, operators: Vec < String >, minds: Vec < String >, last_heard: Vec < (String , u64) >]
+mind_body::projection::harness: struct Harness< 'a >  pub-fields[instance: String, persona: Option < & 'a dyn PersonaSource >, model: Option < & 'a dyn Model >, tuning: PathBuf]
+mind_body::projection::harness: struct Message # [derive (Clone , Debug , Deserialize)] pub-fields[from: String, name: String, room: String, ago: Option < String >, round: Option < usize >, says: String, new: bool, tag: bool, mentions: Vec < String >, dm: bool, follow_up: bool, reply_to: Option < usize >]
 mind_body::projection::narrate: fn connector_key (credentials : & Path) -> Result < String >
 mind_body::projection::narrate: impl Failed
 mind_body::projection::narrate: impl KitModel
@@ -256,26 +273,31 @@ mind_body::projection::narrate: struct Answer # [derive (Clone , Debug , Partial
 mind_body::projection::narrate: struct Failed # [derive (Clone , Debug , PartialEq , Eq)] pub-fields[reason: String, usage: Option < Spent >]
 mind_body::projection::narrate: struct KitModel  pub-fields[]
 mind_body::projection::narrate: struct Spent # [derive (Clone , Debug , PartialEq , Eq , Serialize)] pub-fields[model: String, input_tokens: u64, output_tokens: u64, cache_read_tokens: u64, cache_write_tokens: u64, reasoning_tokens: Option < u64 >]
-mind_body::projection::select: # [derive (Clone , Copy , Debug , PartialEq , Eq , Serialize)] # [serde (rename_all = "snake_case")] pub enum TurnKind { Chat , Beat , FollowUp , Reflection , }
+mind_body::projection::select: # [derive (Clone , Copy , Debug , PartialEq , Eq , Serialize , serde :: Deserialize)] # [serde (rename_all = "snake_case")] pub enum TurnKind { Chat , Beat , FollowUp , Reflection , }
 mind_body::projection::select: impl Addressed < '_ >
 mind_body::projection::select: impl Draw
 mind_body::projection::select: impl Lens
 mind_body::projection::select: impl Lines
 mind_body::projection::select: impl People < '_ >
+mind_body::projection::simulate: fn simulate (harness : & Harness , plan_path : & Path) -> Result < String >
+mind_body::projection::simulate: impl HeartbeatView for Names < '_ >
+mind_body::projection::simulate: impl MouthReader for View < '_ >
 mind_body::projection::tuning: const TUNING_FILE : & str
 mind_body::projection::tuning: const TUNING_ROOT : & str
 mind_body::projection::tuning: fn load (path : & Path) -> Result < Loaded >
 mind_body::projection::tuning: impl Default for LensWeights
+mind_body::projection::tuning: impl Default for PersonaTuning
 mind_body::projection::tuning: impl Default for PoolCaps
 mind_body::projection::tuning: impl Default for ProjectorTuning
 mind_body::projection::tuning: impl Default for SelectTuning
 mind_body::projection::tuning: impl Tuning
 mind_body::projection::tuning: struct LensWeights # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[body_and_hour: f64, person_present: f64, unresolved_want: f64, memory_surfacing: f64, wondering: f64]
 mind_body::projection::tuning: struct Loaded # [derive (Clone , Debug , PartialEq , Serialize)] pub-fields[tuning: Tuning, source: & 'static str, sha256: String]
+mind_body::projection::tuning: struct PersonaTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String, guidance: String, words: usize]
 mind_body::projection::tuning: struct PoolCaps # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[memories_about_present: usize, other_memories: usize, needs: usize, incubation: usize, stance: usize, value: usize, said: usize]
 mind_body::projection::tuning: struct ProjectorTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String, guidance: String, words: usize, beat_words: usize]
 mind_body::projection::tuning: struct SelectTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[temperature: f64, inclusion_score: f64, context_bytes: usize, stimulus_bytes: usize, heard_bytes: usize, addressed_bytes: usize, identity_bytes: usize, bond_summary_bytes: usize, item_bytes: usize, memory_tau_h: f64, freshness_base: f64, freshness_window: usize, people_full: usize, beat_tail_lines: usize, caps: PoolCaps]
-mind_body::projection::tuning: struct Tuning # [derive (Clone , Debug , Default , PartialEq , Serialize , Deserialize)] pub-fields[projector: ProjectorTuning, select: SelectTuning, lens: LensWeights]
+mind_body::projection::tuning: struct Tuning # [derive (Clone , Debug , Default , PartialEq , Serialize , Deserialize)] pub-fields[projector: ProjectorTuning, persona: PersonaTuning, select: SelectTuning, lens: LensWeights]
 mind_body::queue: fn on_hold (mind : & dyn MindPort) -> Result < Held >
 mind_body::queue: impl Held
 mind_body::queue: impl Held: fn contains (& self , item : & PipelineRef) -> bool

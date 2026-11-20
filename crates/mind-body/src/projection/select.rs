@@ -48,7 +48,7 @@ const NAME_BYTES: usize = 80;
 const ALSO_HERE_BYTES: usize = 300;
 
 /// What kind of turn the packet is for. The stimulus and nothing else differs between them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnKind {
     Chat,
@@ -75,6 +75,9 @@ pub(crate) struct Room {
     pub tail: Vec<RoomLine>,
     /// The room the turn is in, when it is one room.
     pub here: Option<String>,
+    /// When she last heard from people, by Matrix id, beyond what the tail shows: a fixture's table (`mind-persona project
+    /// --room`). The live turn has none yet; the tail is its only source.
+    pub last_heard: Vec<(String, u64)>,
 }
 
 /// One thing she said, from the trace.
@@ -352,10 +355,10 @@ fn need_movement(need: &Value, previous: Option<&Value>) -> String {
 // ---------------------------------------------------------------------------------------------
 // The seeded draw: splitmix64, so a turn id replays.
 
-struct Draw(u64);
+pub(crate) struct Draw(pub(crate) u64);
 
 impl Draw {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -711,7 +714,8 @@ fn beat_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
     for bond in items(inputs.state, &["affect", "socialBonds"]).iter().filter(|bond| live(bond) && text(bond, &["object", "kind"]) == "person") {
         let person = text(bond, &["object", "id"]).to_lowercase();
         let label = clip(&one_line([text(bond, &["object", "label"]), text(bond, &["object", "id"])].into_iter().find(|name| !name.is_empty()).unwrap_or_default()), NAME_BYTES);
-        let last = inputs.room.tail.iter().filter(|line| inputs.people.person_of(&line.sender) == person).map(|line| line.at_ms).max();
+        let heard = inputs.room.tail.iter().map(|line| (line.sender.as_str(), line.at_ms)).chain(inputs.room.last_heard.iter().map(|(sender, at)| (sender.as_str(), *at)));
+        let last = heard.filter(|(sender, _)| inputs.people.person_of(sender) == person).map(|(_, at)| at).max();
         contacts.push((last, match last {
             Some(at) => format!("- last heard from {label} {} h ago", hours(inputs.now, at)),
             None => format!("- nothing from {label} in her rooms lately"),

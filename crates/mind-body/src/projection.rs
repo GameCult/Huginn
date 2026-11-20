@@ -10,12 +10,17 @@
 //! that is the Interpreter's read tools' (C3b), when wondering leads to reading.
 //!
 //! `project` is the experiment tool over both (`mind-persona project`): what Select would build from her real or a
-//! hypothetical state, and what the Projector would narrate. Its organs are read-only by type: `PersonaSource` gets,
+//! hypothetical state, what the Projector would narrate, and with `Through::Persona` what she would answer in her own
+//! prose and which quoted lines of it would be said (the Persona stage, C3b's first piece). `harness` runs `project`
+//! over fixtures: one turn from a mocked room (`--room`), a plan of states by scenarios (`--batch`), and the cast of the
+//! swarm taking turns in one simulated room (`--simulate`). It adds no second turn: every case is one `project`. Its organs are read-only by type: `PersonaSource` gets,
 //! `MouthReader` reads pending chat, `Model` asks. None of them can put, admit, send, ack or open a conversation, so
 //! `project` cannot write and runs under a held brake.
 
+pub mod harness;
 mod narrate;
 mod select;
+mod simulate;
 mod tuning;
 
 use std::path::PathBuf;
@@ -34,7 +39,7 @@ pub use narrate::{Answer, Failed, KitModel, Model, Spent, connector_key};
 pub use select::TurnKind;
 pub use tuning::{TUNING_FILE, TUNING_ROOT};
 
-use narrate::{cap_words, distinct_2, field_names, judge_prompt, judged, projector_prompt, word_budget, words};
+use narrate::{cap_words, distinct_2, field_names, judge_prompt, judged, persona_prompt, projector_prompt, word_budget, words, would_say};
 use select::{History, Inputs, Packet, People, Room, RoomLine, select};
 
 /// The agent name on the connector's request ids.
@@ -106,6 +111,15 @@ pub struct Organs<'a> {
     pub model: Option<&'a dyn Model>,
 }
 
+/// How far a render runs: the Projector's narration, or on through the Persona stage to her prose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Through {
+    #[default]
+    Projector,
+    Persona,
+}
+
 /// What to project.
 pub struct Request {
     pub instance: String,
@@ -126,6 +140,12 @@ pub struct Request {
     /// Her own Matrix id. Required: without it her own lines would read as said to her.
     pub own_sender: String,
     pub tuning: PathBuf,
+    pub through: Through,
+    /// When she last heard from people (Matrix id, unix ms) beyond the room's tail: a fixture's table. Empty live.
+    pub last_heard: Vec<(String, u64)>,
+    /// The ids each earlier projection selected, oldest first, for freshness: a simulation's earlier turns of hers.
+    /// Empty live until trace v2 (C3c) carries them.
+    pub recent: Vec<Vec<String>>,
 }
 
 /// Her addressee: the heartbeat's row for her when its table holds one, else her own names (handle and public name).
@@ -158,7 +178,7 @@ fn own_addressee(addressing: Option<&dyn HeartbeatView>, own_sender: &str, publi
 fn read_room(chat: &dyn MouthReader, request: &Request, own: &Addressee) -> (Room, Value) {
     let pending = match chat.pending() {
         Ok(pending) => pending,
-        Err(fault) => return (Room { here: request.room.clone(), ..Room::default() }, json!({ "read": false, "why": format!("{fault:#}") })),
+        Err(fault) => return (Room { here: request.room.clone(), last_heard: request.last_heard.clone(), ..Room::default() }, json!({ "read": false, "why": format!("{fault:#}") })),
     };
     let wanted = |room: &str, id: &str| request.room.as_deref().is_none_or(|here| here == room || here == id);
     let messages: Vec<RoomLine> = pending
@@ -183,7 +203,7 @@ fn read_room(chat: &dyn MouthReader, request: &Request, own: &Addressee) -> (Roo
         .map(|line| RoomLine { room: line.room.clone(), sender: line.sender.clone(), display: String::new(), text: line.body.clone(), at_ms: line.at_unix_ms, to_her: false })
         .collect();
     let report = json!({ "read": true, "messages": messages.len(), "tail": tail.len(), "tail_gaps": pending.tail_gaps });
-    (Room { messages, tail, here: request.room.clone() }, report)
+    (Room { messages, tail, here: request.room.clone(), last_heard: request.last_heard.clone() }, report)
 }
 
 fn packet_json(packet: &Packet) -> Value {
@@ -202,13 +222,17 @@ fn packet_json(packet: &Packet) -> Value {
     })
 }
 
-/// One narration of one packet: the request id names the instance, the seed and the moment, because the kit's replay
-/// store answers a repeated id with its first answer.
-/// A failed call is a record with its reason and what it cost, never the end of the report.
-fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuning::Tuning, tag: &str, now: DateTime<Utc>) -> Value {
-    let request_id = format!("{AGENT}:{instance}:project:{tag}:{}:{}", packet.seed, now.timestamp_millis());
+/// A request id no earlier call carried: the kit's replay store answers a repeated id with its first answer, and a
+/// turn's clock may be a fixture's, the same on every run, so the id takes the wall clock.
+fn request_id(instance: &str, stage: &str, tag: &str, seed: u64) -> String {
+    format!("{AGENT}:{instance}:project:{stage}:{tag}:{seed}:{}", Utc::now().timestamp_nanos_opt().unwrap_or_default())
+}
+
+/// One render of one packet: the Projector's narration and, through the Persona stage, her prose over it, each its own
+/// call with its usage. A failed call is a record with its reason and what it cost, never the end of the report.
+fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuning::Tuning, tag: &str, through: Through) -> Value {
     let ids: Vec<String> = packet.selected.iter().map(|pick| pick.id.clone()).collect();
-    let answer = match model.ask(&request_id, &tuning.projector.model, &projector_prompt(packet, tuning)) {
+    let answer = match model.ask(&request_id(instance, "projector", tag, packet.seed), &tuning.projector.model, &projector_prompt(packet, tuning)) {
         Ok(answer) => answer,
         Err(failed) => return json!({ "seed": packet.seed, "lens": packet.lens, "selected": ids, "failed": failed.reason, "usage": failed.usage }),
     };
@@ -216,7 +240,7 @@ fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuni
     let budget = word_budget(packet.kind, tuning);
     let narration = cap_words(&raw, budget);
     let named: Vec<String> = packet.ids.clone();
-    json!({
+    let mut render = json!({
         "seed": packet.seed,
         "lens": packet.lens,
         "selected": ids,
@@ -225,7 +249,23 @@ fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuni
         "field_names": field_names(&narration, &named),
         "usage": answer.usage,
         "narration": narration,
-    })
+    });
+    if through == Through::Persona {
+        render["persona"] = match model.ask(&request_id(instance, "persona", tag, packet.seed), &tuning.persona.model, &persona_prompt(packet, &narration, tuning)) {
+            Ok(spoke) => {
+                let prose = cap_words(&spoke.text, tuning.persona.words);
+                json!({
+                    "words": words(&prose),
+                    "cut_at_budget": words(&spoke.text) > tuning.persona.words,
+                    "would_say": would_say(&prose),
+                    "usage": spoke.usage,
+                    "prose": prose,
+                })
+            }
+            Err(failed) => json!({ "failed": failed.reason, "usage": failed.usage }),
+        };
+    }
+    render
 }
 
 /// K successive turns over one state: each packet under the freshness the earlier ones left.
@@ -258,10 +298,11 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
     let (own, addressing) = own_addressee(organs.addressing, &request.own_sender, &public_name, now);
     let (room, room_report) = match organs.chat {
         Some(chat) => read_room(chat, request, &own),
-        None => (Room { here: request.room.clone(), ..Room::default() }, json!({ "read": false, "why": "no mouth is configured" })),
+        None => (Room { here: request.room.clone(), last_heard: request.last_heard.clone(), ..Room::default() }, json!({ "read": false, "why": "no mouth is configured" })),
     };
-    // Freshness and her own recent words come from trace v2, which the commit writes (C3c); until then there is none.
-    let history = History::default();
+    // Freshness and her own recent words come from trace v2, which the commit writes (C3c); until then only what the
+    // caller carried from earlier turns of its own.
+    let history = History { recent: request.recent.clone(), ..History::default() };
     let people = People { operators: &request.operators, minds: &request.minds, own_sender: &request.own_sender };
     let inputs = Inputs { kind: request.kind, state: &state, room: &room, history: &history, observation: None, people, now, seed: request.seed };
 
@@ -272,7 +313,7 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
         "tuning": { "path": request.tuning.display().to_string(), "source": loaded.source, "sha256": loaded.sha256 },
         "room": room_report,
         "addressing": addressing,
-        "history": "none: freshness and her own recent words come from trace v2, which the commit writes (C3c)",
+        "history": if request.recent.is_empty() { json!("none: freshness and her own recent words come from trace v2, which the commit writes (C3c)") } else { json!({ "recent_projections": request.recent.len() }) },
     });
     let Some(renders) = request.renders else {
         report["packet"] = packet_json(&select(&inputs, tuning));
@@ -280,9 +321,12 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
     };
     let model = organs.model.ok_or_else(|| anyhow!("renders need the connector, and none is configured"))?;
     report["model"] = json!(tuning.projector.model);
+    if request.through == Through::Persona {
+        report["persona_model"] = json!(tuning.persona.model);
+    }
     let packets = successive(&inputs, tuning, renders.max(1));
     report["packet"] = packet_json(&packets[0]);
-    let narrations: Vec<Value> = packets.iter().map(|packet| narrate_one(model, &request.instance, packet, tuning, "a", now)).collect();
+    let narrations: Vec<Value> = packets.iter().map(|packet| narrate_one(model, &request.instance, packet, tuning, "a", request.through)).collect();
     let texts = |narrations: &[Value]| narrations.iter().filter_map(|one| one["narration"].as_str().map(str::to_owned)).collect::<Vec<_>>();
     let failed = |narrations: &[Value]| narrations.iter().filter(|one| one.get("failed").is_some()).count();
     report["failed_renders"] = json!(failed(&narrations));
@@ -294,7 +338,7 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
     if let Some(other) = &request.judge_against {
         let other_inputs = Inputs { state: other, ..inputs };
         let others = successive(&other_inputs, tuning, renders.max(1));
-        let other_narrations: Vec<Value> = others.iter().map(|packet| narrate_one(model, &request.instance, packet, tuning, "b", now)).collect();
+        let other_narrations: Vec<Value> = others.iter().map(|packet| narrate_one(model, &request.instance, packet, tuning, "b", Through::Projector)).collect();
         let mut verdicts = Vec::new();
         let mut right = 0usize;
         for (at, (narration, truth)) in narrations.iter().map(|one| (one, 'A')).chain(other_narrations.iter().map(|one| (one, 'B'))).enumerate() {
@@ -304,7 +348,7 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
             let (first, second) = if swapped { (b, a) } else { (a, b) };
             // A narration that failed has nothing to judge; it is counted under the renders' failures.
             let Some(text) = narration["narration"].as_str() else { continue };
-            let answer = match model.ask(&format!("{AGENT}:{}:judge:{at}:{}", request.instance, now.timestamp_millis()), &tuning.projector.model, &judge_prompt(first, second, text)) {
+            let answer = match model.ask(&request_id(&request.instance, "judge", &at.to_string(), request.seed), &tuning.projector.model, &judge_prompt(first, second, text)) {
                 Ok(answer) => answer,
                 Err(failed) => {
                     verdicts.push(json!({ "from": truth.to_string(), "failed": failed.reason, "usage": failed.usage }));

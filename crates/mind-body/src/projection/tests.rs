@@ -75,6 +75,7 @@ fn chat_room() -> Room {
         messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", "Eureka, did you see the door fix?", 3, true), message("#swarm:gamecult.org", "@kiko:gamecult.org", "Kiko", "She saw it. She hated it.", 1, false)],
         tail: vec![],
         here: Some("#swarm:gamecult.org".into()),
+        ..Room::default()
     }
 }
 
@@ -281,12 +282,12 @@ fn freshness_base_zero_never_repeats_inside_the_window() {
 #[test]
 fn messages_addressed_to_her_appear_verbatim() {
     let said = "Eureka — \"is the door\" fixed?\nTell me straight.";
-    let room = Room { messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", said, 2, true)], tail: vec![], here: None };
+    let room = Room { messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", said, 2, true)], tail: vec![], here: None, ..Room::default() };
     let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
     let escaped = "\"Eureka — \\\"is the door\\\" fixed?\\nTell me straight.\"";
     assert_eq!(packet.heard, format!("Libby, in #swarm:gamecult.org: {escaped}"), "the Persona hears the exact words, escaped on one line");
     assert!(packet.stimulus.starts_with("Said to her:\n") && packet.stimulus.contains(escaped), "{}", packet.stimulus);
-    let own = Room { messages: vec![message("#swarm:gamecult.org", OWN, "Eureka", "my own line", 1, false)], tail: vec![], here: None };
+    let own = Room { messages: vec![message("#swarm:gamecult.org", OWN, "Eureka", "my own line", 1, false)], tail: vec![], here: None, ..Room::default() };
     let packet = packet_of(TurnKind::Chat, &state(), &own, &History::default(), 1);
     assert!(!whole(&packet).contains("my own line"), "her own last lines are not shown");
 }
@@ -297,6 +298,7 @@ fn a_short_message_to_her_survives_long_chatter_after_it() {
         messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", "Eureka, are you ok?", 3, true), message("#swarm:gamecult.org", "@kiko:gamecult.org", "Kiko", &"log line spam ".repeat(120), 1, false)],
         tail: vec![],
         here: None,
+        ..Room::default()
     };
     let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
     assert!(packet.stimulus.starts_with("Said to her:\n- Libby in #swarm:gamecult.org: \"Eureka, are you ok?\""), "{}", packet.stimulus);
@@ -309,7 +311,7 @@ fn a_short_message_to_her_survives_long_chatter_after_it() {
 fn a_message_to_her_over_the_cap_goes_in_whole_and_the_overflow_is_recorded() {
     let big = format!("Eureka, {}", "please read this whole thing ".repeat(70));
     assert_eq!(big.len(), 2038);
-    let room = Room { messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", &big, 1, true)], tail: vec![], here: None };
+    let room = Room { messages: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", &big, 1, true)], tail: vec![], here: None, ..Room::default() };
     let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
     assert_eq!(packet.heard, format!("Libby, in #swarm:gamecult.org: \"{big}\""));
     assert!(packet.stimulus.contains(big.trim_end()) && !packet.stimulus.contains("not shown"), "no note claims messages that do not exist: {}", &packet.stimulus[..80]);
@@ -320,7 +322,7 @@ fn a_message_to_her_over_the_cap_goes_in_whole_and_the_overflow_is_recorded() {
 #[test]
 fn every_message_to_her_survives() {
     let messages: Vec<RoomLine> = (0..30).map(|at| message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", &format!("Eureka, message {at} 💜 ok"), 100 - at, true)).chain((0..30).map(|at| message("#swarm:gamecult.org", "@kiko:gamecult.org", "Kiko", &format!("aside {at}"), 50 - at, false))).collect();
-    let room = Room { messages, tail: vec![], here: None };
+    let room = Room { messages, tail: vec![], here: None, ..Room::default() };
     let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
     for at in 0..30 {
         let words = format!("Eureka, message {at} 💜 ok");
@@ -333,7 +335,7 @@ fn every_message_to_her_survives() {
 
 #[test]
 fn a_beat_says_nothing_addressed_her_and_when_each_bond_was_last_heard() {
-    let room = Room { messages: vec![], tail: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "", "lunch?", 180, false), message("#swarm:gamecult.org", OPERATOR, "", "back later", 60, false)], here: None };
+    let room = Room { messages: vec![], tail: vec![message("#swarm:gamecult.org", "@libby:gamecult.org", "", "lunch?", 180, false), message("#swarm:gamecult.org", OPERATOR, "", "back later", 60, false)], here: None, ..Room::default() };
     let packet = packet_of(TurnKind::Beat, &state(), &room, &History::default(), 1);
     assert!(packet.stimulus.starts_with("Nothing addressed her."), "{}", packet.stimulus);
     assert!(packet.stimulus.contains("- last heard from Libby 3 h ago") && packet.stimulus.contains("- last heard from Meta, the operator 1 h ago") && packet.stimulus.contains("- nothing from Kiko in her rooms lately"), "{}", packet.stimulus);
@@ -373,7 +375,7 @@ fn budgets_hold_under_adversarial_sizes() {
         bond["relationshipKind"] = json!("friend");
     }
     let messages = (0..50).map(|at| message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", &format!("{at} {}", "word ".repeat(200)), 60 - at, false)).collect();
-    let room = Room { messages, tail: vec![], here: None };
+    let room = Room { messages, tail: vec![], here: None, ..Room::default() };
     let tuning = Tuning::default();
     for kind in [TurnKind::Chat, TurnKind::Beat, TurnKind::Reflection] {
         for seed in 1..=10 {
@@ -663,7 +665,7 @@ impl PersonaSource for Stored {
 }
 
 fn request(dir: &std::path::Path, renders: Option<usize>, judge_against: Option<Value>) -> Request {
-    Request { instance: INSTANCE.into(), kind: TurnKind::Chat, state: None, room: Some("#swarm:gamecult.org".into()), seed: 5, renders, judge_against, operators: operators(), minds: minds(), own_sender: OWN.into(), tuning: dir.join(TUNING_FILE) }
+    Request { instance: INSTANCE.into(), kind: TurnKind::Chat, state: None, room: Some("#swarm:gamecult.org".into()), seed: 5, renders, judge_against, operators: operators(), minds: minds(), own_sender: OWN.into(), tuning: dir.join(TUNING_FILE), through: Through::Projector, last_heard: vec![], recent: vec![] }
 }
 
 #[test]

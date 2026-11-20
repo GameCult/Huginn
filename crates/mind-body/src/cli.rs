@@ -45,6 +45,13 @@ const USAGE: &str =
 /// `rudp://<ip>:<port>` is refused with `usage` or a fixed message, and no
 /// value is echoed.
 pub fn instance_and_endpoint(args: &[String], env_endpoint: Option<String>, usage: &str) -> Result<(Slug, SocketAddr)> {
+    let (instance, endpoint) = instance_and_maybe_endpoint(args, env_endpoint, usage)?;
+    Ok((instance, endpoint.ok_or_else(|| anyhow!("no daemon endpoint: --endpoint or HUGINN_ENDPOINT"))?))
+}
+
+/// `instance_and_endpoint` for a binary that may run without a daemon (`mind-persona project` over a state file): no
+/// endpoint given is none, and one given is still checked.
+pub fn instance_and_maybe_endpoint(args: &[String], env_endpoint: Option<String>, usage: &str) -> Result<(Slug, Option<SocketAddr>)> {
     let (mut instance, mut endpoint) = (None, None);
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
@@ -60,12 +67,12 @@ pub fn instance_and_endpoint(args: &[String], env_endpoint: Option<String>, usag
     }
     let instance = Slug(instance.ok_or_else(|| anyhow!("{usage}"))?);
     instance.validate_slug().map_err(|_| anyhow!("the instance is not a slug"))?;
-    let endpoint = endpoint.or(env_endpoint).ok_or_else(|| anyhow!("no daemon endpoint: --endpoint or HUGINN_ENDPOINT"))?;
+    let Some(endpoint) = endpoint.or(env_endpoint) else { return Ok((instance, None)) };
     let address = endpoint
         .strip_prefix("rudp://")
         .and_then(|address| address.parse::<SocketAddr>().ok())
         .ok_or_else(|| anyhow!("the endpoint is not rudp://<ip>:<port>"))?;
-    Ok((instance, address))
+    Ok((instance, Some(address)))
 }
 
 /// Who made the change: `SUDO_USER`, else `USER`, else `unknown`. An empty
