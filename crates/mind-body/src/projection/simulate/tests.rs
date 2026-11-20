@@ -364,3 +364,23 @@ fn the_turn_is_in_the_room_of_the_line_that_woke_her() {
     let (_, run) = run_plan(&path, &silent());
     assert_eq!(run["turns"][0]["room"], "#tobiah:gamecult.org", "{}", run["turns"]);
 }
+
+#[test]
+fn soul_r7_woken_in_a_direct_message_and_a_room_at_once_she_takes_a_turn_in_each() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = plan(dir.path(), "\"ruled\"", 1, "");
+    let line = |room: &str, dm: bool, says: &str| format!("[[message]]\nround = 1\nfrom = \"@meta:gamecult.org\"\nname = \"Meta\"\nroom = \"{room}\"\n{}says = \"{says}\"\n", if dm { "dm = true\nto = \"@libby:gamecult.org\"\n" } else { "" });
+    let opening = "[[message]]\nfrom = \"@meta:gamecult.org\"\nname = \"Meta\"\nroom = \"#minds:gamecult.org\"\nsays = \"good afternoon, everyone\"\n";
+    let text = std::fs::read_to_string(&path).unwrap().replace(opening, &format!("{}{}", line("!dm-libby:gamecult.org", true, "just you: how are you, really?"), line("#minds:gamecult.org", false, "Libby, how was the gig?")));
+    std::fs::write(&path, text).unwrap();
+    let (_, run) = run_plan(&path, &silent());
+    let mut libby: Vec<(String, String)> = run["turns"].as_array().unwrap().iter().filter(|turn| turn["persona"] == "Libby").map(|turn| (turn["room"].as_str().unwrap().to_owned(), turn["kind"].as_str().unwrap().to_owned())).collect();
+    libby.sort();
+    assert_eq!(libby, vec![("!dm-libby:gamecult.org".to_owned(), "chat".to_owned()), ("#minds:gamecult.org".to_owned(), "chat".to_owned())], "{}", run["turns"]);
+    // Each turn read its own room's line, and no other's.
+    for turn in run["turns"].as_array().unwrap().iter().filter(|turn| turn["persona"] == "Libby") {
+        let stimulus = turn["report"]["renders"][0].to_string() + &turn["report"].to_string();
+        let (own, other) = if turn["room"] == "#minds:gamecult.org" { ("how was the gig", "how are you, really") } else { ("how are you, really", "how was the gig") };
+        assert!(stimulus.contains(own) && !stimulus.contains(other), "{}: {stimulus}", turn["room"]);
+    }
+}
