@@ -262,7 +262,7 @@ mind_body::projection::harness: impl MouthReader for Fixture
 mind_body::projection::harness: pub use super :: simulate :: simulate ;
 mind_body::projection::harness: struct Fixture # [derive (Clone , Debug)] pub-fields[her: String, names: Vec < String >, kind: TurnKind, now: DateTime < Utc >, here: Option < String >, operators: Vec < String >, minds: Vec < String >, last_heard: Vec < (String , u64) >]
 mind_body::projection::harness: struct Harness< 'a >  pub-fields[instance: String, persona: Option < & 'a dyn PersonaSource >, model: Option < & 'a dyn Model >, tuning: PathBuf]
-mind_body::projection::harness: struct Message # [derive (Clone , Debug , Deserialize)] pub-fields[from: String, name: String, room: String, ago: Option < String >, round: Option < usize >, says: String, new: bool, tag: bool, mentions: Vec < String >, dm: bool, follow_up: bool, reply_to: Option < usize >]
+mind_body::projection::harness: struct Message # [derive (Clone , Debug , Deserialize)] pub-fields[from: String, name: String, room: String, ago: Option < String >, round: Option < usize >, says: String, new: bool, tag: bool, mentions: Vec < String >, dm: bool, to: Option < String >, follow_up: bool, reply_to: Option < usize >]
 mind_body::projection::narrate: fn connector_key (credentials : & Path) -> Result < String >
 mind_body::projection::narrate: impl Failed
 mind_body::projection::narrate: impl KitModel
@@ -291,6 +291,7 @@ mind_body::projection::tuning: impl Default for PersonaTuning
 mind_body::projection::tuning: impl Default for PoolCaps
 mind_body::projection::tuning: impl Default for ProjectorTuning
 mind_body::projection::tuning: impl Default for SelectTuning
+mind_body::projection::tuning: impl Default for Tuning
 mind_body::projection::tuning: impl Tuning
 mind_body::projection::tuning: struct LensWeights # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[body_and_hour: f64, person_present: f64, unresolved_want: f64, memory_surfacing: f64, wondering: f64]
 mind_body::projection::tuning: struct Loaded # [derive (Clone , Debug , PartialEq , Serialize)] pub-fields[tuning: Tuning, source: & 'static str, sha256: String]
@@ -298,7 +299,7 @@ mind_body::projection::tuning: struct PersonaTuning # [derive (Clone , Debug , P
 mind_body::projection::tuning: struct PoolCaps # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[memories_about_present: usize, other_memories: usize, needs: usize, incubation: usize, stance: usize, value: usize, said: usize]
 mind_body::projection::tuning: struct ProjectorTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String, guidance: String, words: usize, beat_words: usize]
 mind_body::projection::tuning: struct SelectTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[temperature: f64, inclusion_score: f64, context_bytes: usize, stimulus_bytes: usize, heard_bytes: usize, addressed_bytes: usize, identity_bytes: usize, bond_summary_bytes: usize, item_bytes: usize, memory_tau_h: f64, freshness_base: f64, freshness_window: usize, people_full: usize, beat_tail_lines: usize, group_state: bool, group_lines: usize, group_bytes: usize, caps: PoolCaps]
-mind_body::projection::tuning: struct Tuning # [derive (Clone , Debug , Default , PartialEq , Serialize , Deserialize)] pub-fields[projector: ProjectorTuning, persona: PersonaTuning, select: SelectTuning, lens: LensWeights]
+mind_body::projection::tuning: struct Tuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[projector: ProjectorTuning, persona: PersonaTuning, select: SelectTuning, lens: LensWeights, pronouns: BTreeMap < String , String >]
 mind_body::queue: fn on_hold (mind : & dyn MindPort) -> Result < Held >
 mind_body::queue: impl Held
 mind_body::queue: impl Held: fn contains (& self , item : & PipelineRef) -> bool

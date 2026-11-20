@@ -32,7 +32,7 @@ use eureka_pipeline::{OrgRepo, PipelineKind, RunTurn, Slug};
 use huginn_mind::PipelineFacts;
 
 use crate::address::{Addressee, Name, is_for, project_names};
-use crate::chat_client::{Chat, ChatDelivery};
+use crate::chat_client::{Basis, Chat, ChatDelivery};
 use crate::control::{ControlSource, Effective, FileSource, HeldReason, SwarmEffective, read_effective, read_envelope, set_mode_world_readable};
 use crate::launch::{Clock, Launcher};
 use crate::queue::{MindPort, headers, in_force, of_kind};
@@ -98,10 +98,14 @@ pub struct Config {
 }
 
 impl Config {
-    /// Refuses no Persona, a Persona twice, or a beat of zero seconds.
+    /// Refuses no Persona, a Persona twice, a beat of zero seconds, or an operator id that is also a Persona's: one
+    /// sender is either the operator or a Mind, never both, or the wake rule could not tell which it heard.
     pub fn new(personas: Vec<PersonaId>, operators: Vec<String>, beat_s: u32) -> Result<Self> {
         if personas.is_empty() {
             bail!("no persona is configured");
+        }
+        if operators.iter().any(|operator| personas.iter().any(|persona| persona.matrix_id == *operator)) {
+            bail!("an operator id is also a persona's matrix id");
         }
         if beat_s == 0 {
             bail!("the beat is zero seconds");
@@ -393,6 +397,12 @@ pub(crate) fn stewardships_of(mind: &dyn MindPort) -> Result<(Vec<Name>, Vec<Org
     Ok((names, repos))
 }
 
+/// A member (anyone not the operator) has a pending delivery that addresses her: the beat's urgency. The one owner of
+/// that reading: the poll's rows and the simulator's beat both ask it, over the deliveries the mouth would give her.
+pub(crate) fn addressed_by_member(operators: &[String], who: &Addressee, pending: &[ChatDelivery]) -> bool {
+    pending.iter().any(|delivery| !operators.contains(&delivery.sender) && is_for(who, delivery))
+}
+
 /// Who sent a line, as the wake rule sees them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Speaker {
@@ -421,8 +431,11 @@ pub(crate) enum WakePolicy {
     Live,
     /// Ruling `persona-only-wake-humans-in-rooms`: a line addressing her, from anyone, and any human line in her rooms.
     Ruled,
-    /// Human lines only: each wakes every Mind in the room once; a Mind's line never wakes a Mind.
-    HumansPace,
+    /// Ruling `persona-only-humans-pace`: a human's line wakes her in her own room (a direct message, or a room that is
+    /// hers); in a public room only when it addresses her or continues an exchange she is in. A Mind's line wakes her
+    /// only by an explicit mention (a Matrix mention of her or a reply to her, never a name in prose), in any room, and
+    /// only while fewer than this many Mind lines in a row came before it in its room: the backstop.
+    HumansPace(usize),
     /// `Ruled`, with at most this many Mind lines in a row in a room before a human must speak again: a Mind's line past
     /// the cap wakes no one.
     NamesWithCap(usize),
@@ -441,10 +454,21 @@ pub(crate) enum WakeCause {
     Mind,
 }
 
-/// Whether a line in her rooms wakes `who` off the beat under `policy`, and why. `mind_run` is how many Mind lines in a
-/// row came before this one in its room since a human last spoke there. The one owner of the wake rule: the heartbeat's
-/// poll asks it with `Live`, the simulator with the policy under test.
-pub(crate) fn wakes(policy: WakePolicy, who: &Addressee, delivery: &ChatDelivery, speaker: Speaker, mind_run: usize) -> Option<WakeCause> {
+/// What the room says about a line, beside the line: the facts a policy may weigh. The live poll knows none of them yet
+/// and passes the default; `Live` reads none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LineFacts {
+    /// How many Mind lines in a row came before this one in its room since a human last spoke there.
+    pub mind_run: usize,
+    /// The line is in a room of hers: a direct message (the delivery says so) or a room configured as hers.
+    pub own_room: bool,
+    /// She has spoken in the room's current exchange: the lines before this one that follow each other without a long gap.
+    pub in_exchange: bool,
+}
+
+/// Whether a line in her rooms wakes `who` off the beat under `policy`, and why. The one owner of the wake rule: the
+/// heartbeat's poll asks it with `Live`, the simulator with the policy under test.
+pub(crate) fn wakes(policy: WakePolicy, who: &Addressee, delivery: &ChatDelivery, speaker: Speaker, facts: LineFacts) -> Option<WakeCause> {
     if speaker == Speaker::Her {
         return None;
     }
@@ -459,8 +483,11 @@ pub(crate) fn wakes(policy: WakePolicy, who: &Addressee, delivery: &ChatDelivery
     let wakes = match policy {
         WakePolicy::Live => addressed && matches!(speaker, Speaker::Operator | Speaker::Mind),
         WakePolicy::Ruled => human || addressed,
-        WakePolicy::HumansPace => human,
-        WakePolicy::NamesWithCap(cap) => human || (addressed && mind_run < cap),
+        WakePolicy::HumansPace(cap) => {
+            let explicit = delivery.mentions.iter().any(|id| id == who.matrix_id()) || matches!(delivery.basis, Some(Basis::Tag | Basis::Reply));
+            if human { addressed || delivery.is_direct || facts.own_room || facts.in_exchange } else { explicit && facts.mind_run < cap }
+        }
+        WakePolicy::NamesWithCap(cap) => human || (addressed && facts.mind_run < cap),
         WakePolicy::AllMessages => true,
     };
     wakes.then_some(cause)
@@ -523,7 +550,7 @@ impl Row<'_> {
 
     /// A member (not the operator) has a pending message that names or tags her.
     fn addressed_by_member(&self, config: &Config) -> bool {
-        self.pending.iter().any(|delivery| !config.operators.contains(&delivery.sender) && is_for(&self.addressee, delivery))
+        addressed_by_member(&config.operators, &self.addressee, &self.pending)
     }
 }
 
@@ -608,7 +635,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
             pending.sort_by_key(|delivery| delivery.seq);
             pending
                 .into_iter()
-                .filter(|delivery| wakes(WakePolicy::Live, &row.addressee, delivery, config.speaker(&row.addressee, delivery), 0).is_some())
+                .filter(|delivery| wakes(WakePolicy::Live, &row.addressee, delivery, config.speaker(&row.addressee, delivery), LineFacts::default()).is_some())
                 .map(|delivery| format!("{}:{}", slug.0, delivery.event_id))
                 .find(|key| !state.handled_mentions.contains(key))
         };

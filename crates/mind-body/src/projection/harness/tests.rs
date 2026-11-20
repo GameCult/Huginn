@@ -224,7 +224,7 @@ fn group_line_of(dir: &Path, name: &str) -> Option<String> {
     let harness = harness(dir, None, None);
     let organs = Organs { persona: None, chat: Some(&fixture), addressing: fixture.addressee(), model: None };
     let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 1, None, Through::Projector), fixture.now).unwrap();
-    report["packet"]["context"].as_str().unwrap().lines().find(|line| line.starts_with("- the room lately")).map(str::to_owned)
+    report["packet"]["context"].as_str().unwrap().lines().find(|line| line.starts_with("- the conversation")).map(str::to_owned)
 }
 
 #[test]
@@ -251,4 +251,36 @@ fn the_group_state_is_off_when_the_tuning_says_so() {
 group_state = false
 ").unwrap();
     assert!(group_line_of(dir.path(), "mind-teases.toml").is_none());
+}
+
+/// Round 1 of a crowded room: the operator asks everyone, and `answered` Minds have answered before this one's turn.
+fn chorus(answered: usize) -> Fixture {
+    let minds = ["@weksa:gamecult.org", "@heimdall:gamecult.org", "@kiko:gamecult.org", "@libby:gamecult.org", "@void:gamecult.org", "@nibu:gamecult.org", "@aqua:gamecult.org"];
+    let mut text = String::from("her = \"@eureka:gamecult.org\"\nkind = \"chat\"\nnow = \"2026-11-20T15:05:00Z\"\nrooms = [\"#minds:gamecult.org\"]\nhere = \"#minds:gamecult.org\"\noperators = [\"@meta:gamecult.org\"]\nminds = [\"@eureka:gamecult.org\", \"@weksa:gamecult.org\", \"@heimdall:gamecult.org\", \"@kiko:gamecult.org\", \"@libby:gamecult.org\", \"@void:gamecult.org\", \"@nibu:gamecult.org\", \"@aqua:gamecult.org\"]\n");
+    text.push_str("[[message]]\nfrom = \"@meta:gamecult.org\"\nname = \"Meta\"\nroom = \"#minds:gamecult.org\"\nago = \"5m\"\nnew = true\nsays = \"afternoon, all of you. no tasks today. how's everyone doing?\"\n");
+    for (at, mind) in minds.iter().take(answered).enumerate() {
+        text.push_str(&format!("[[message]]\nfrom = \"{mind}\"\nname = \"{}\"\nroom = \"#minds:gamecult.org\"\nago = \"{}s\"\nnew = true\nsays = \"afternoon, Meta. doing well, thanks.\"\n", crate::address::localpart(mind), 240 - at * 20));
+    }
+    Fixture::parse(&text).unwrap()
+}
+
+#[test]
+fn the_third_to_eighth_responder_sees_a_covered_question_and_no_duty() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path(), None, None);
+    let mut rendered = String::new();
+    for answered in 2..=7 {
+        let fixture = chorus(answered);
+        let organs = Organs { persona: None, chat: Some(&fixture), addressing: None, model: None };
+        let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 1, None, Through::Projector), fixture.now).unwrap();
+        let context = report["packet"]["context"].as_str().unwrap().to_owned();
+        let line = context.lines().find(|line| line.starts_with("- the conversation")).unwrap_or_else(|| panic!("{context}")).to_owned();
+        assert!(line.contains("asked the room a question, and") && line.contains("answered it"), "{line}");
+        for duty in ["owe", "haven't", "have not", "open", "still", "waiting on her", "to her", "unanswered"] {
+            assert!(!line.contains(duty), "responder {}: {duty} in {line}", answered + 1);
+        }
+        rendered.push_str(&format!("responder {}: {line}\n", answered + 1));
+    }
+    let golden = include_str!("../../../fixtures/harness/golden-chorus.txt").replace("\r\n", "\n");
+    assert_eq!(rendered, golden, "the chorus's group state moved; if deliberately, the new golden file is:\n{rendered}");
 }

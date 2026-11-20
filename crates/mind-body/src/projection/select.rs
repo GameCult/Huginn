@@ -47,6 +47,29 @@ const NAME_BYTES: usize = 80;
 /// The most bytes the line naming the unbonded people present takes.
 const ALSO_HERE_BYTES: usize = 300;
 
+/// Her pronouns as the packet speaks of her (from `presentation.pronouns`: he, she, or they for anything else, "any"
+/// included), with the verb forms that agree with them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Forms {
+    pub subj: &'static str,
+    pub cap_subj: &'static str,
+    pub obj: &'static str,
+    pub poss: &'static str,
+    pub be: &'static str,
+    pub has: &'static str,
+    /// The present tense's third-person `s`: "wants" or "want".
+    pub s: &'static str,
+}
+
+pub(crate) fn forms(state: &Value) -> Forms {
+    let pronouns = text(state, &["presentation", "pronouns"]).to_lowercase();
+    match pronouns.split(|c: char| !c.is_alphabetic()).find(|word| !word.is_empty()).unwrap_or_default() {
+        "he" => Forms { subj: "he", cap_subj: "He", obj: "him", poss: "his", be: "is", has: "has", s: "s" },
+        "she" => Forms { subj: "she", cap_subj: "She", obj: "her", poss: "her", be: "is", has: "has", s: "s" },
+        _ => Forms { subj: "they", cap_subj: "They", obj: "them", poss: "their", be: "are", has: "have", s: "" },
+    }
+}
+
 /// What kind of turn the packet is for. The stimulus and nothing else differs between them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,14 +169,14 @@ pub(crate) enum Lens {
 }
 
 impl Lens {
-    /// The lens as the domain guidance's "begin from …".
-    pub(crate) fn words(&self) -> String {
+    /// The lens as the domain guidance's "begin from …", in her pronouns.
+    pub(crate) fn words(&self, forms: &Forms) -> String {
         match self {
-            Self::BodyAndHour => "how she is, here, at this hour".into(),
+            Self::BodyAndHour => format!("how {} {}, here, at this hour", forms.subj, forms.be),
             Self::PersonPresent(name) => format!("{name}, who is here"),
-            Self::UnresolvedWant => "something she still wants and has not got".into(),
-            Self::MemorySurfacing => "a memory coming back to her".into(),
-            Self::Wondering => "something she has been wondering about".into(),
+            Self::UnresolvedWant => format!("something {} still want{} and {} not got", forms.subj, forms.s, forms.has),
+            Self::MemorySurfacing => format!("a memory coming back to {}", forms.obj),
+            Self::Wondering => format!("something {} {} been wondering about", forms.subj, forms.has),
         }
     }
 }
@@ -196,6 +219,9 @@ pub(crate) struct Packet {
     /// Every typed id the packet's lines name: the selected items' and the bonds' of the people present.
     pub ids: Vec<String>,
     pub selected: Vec<Pick>,
+    /// Her pronouns, for the words the prompts speak of her in.
+    #[serde(skip)]
+    pub forms: Forms,
 }
 
 /// What the messages to her cost past the caps: bytes over the stimulus and heard caps, the older messages to her the
@@ -310,11 +336,12 @@ fn activation(state: &Value, axis: &str) -> Option<f64> {
     number(state, &["activationProfile", "situationalState", axis, "currentActivation"])
 }
 
-/// Mood as change since her last turn; as a level only when there is no last turn to measure from.
-fn mood_line(state: &Value, previous: Option<&Value>) -> String {
+/// Mood as change since her last turn; as a level only when there is no last turn to measure from. None when her state
+/// carries no mood: an absence is left out of the packet, never narrated.
+fn mood_line(state: &Value, previous: Option<&Value>) -> Option<String> {
     let now: Vec<(usize, f64)> = MOOD_AXES.iter().enumerate().filter_map(|(at, (axis, ..))| activation(state, axis).map(|value| (at, value))).collect();
     if now.is_empty() {
-        return "- mood: none recorded".into();
+        return None;
     }
     let Some(previous) = previous else {
         let words: Vec<&str> = now
@@ -324,7 +351,7 @@ fn mood_line(state: &Value, previous: Option<&Value>) -> String {
                 if *value >= 0.5 { up } else { down }
             })
             .collect();
-        return format!("- mood, with no earlier turn to measure from: {} than middling", words.join(", "));
+        return Some(format!("- mood: {} than middling", words.join(", ")));
     };
     let moves: Vec<&str> = now
         .iter()
@@ -338,15 +365,16 @@ fn mood_line(state: &Value, previous: Option<&Value>) -> String {
             }
         })
         .collect();
-    if moves.is_empty() { "- mood: where it was at her last turn".into() } else { format!("- mood: {} than at her last turn", moves.join(", ")) }
+    let poss = forms(state).poss;
+    Some(if moves.is_empty() { format!("- mood: where it was at {poss} last turn") } else { format!("- mood: {} than at {poss} last turn", moves.join(", ")) })
 }
 
-fn need_movement(need: &Value, previous: Option<&Value>) -> String {
+fn need_movement(need: &Value, previous: Option<&Value>, poss: &str) -> String {
     let intensity = number(need, &["intensity"]).unwrap_or(SALIENCE_UNSTATED);
     let before = previous.and_then(|previous| items(previous, &["affect", "needs"]).iter().find(|old| text(old, &["id"]) == text(need, &["id"])).and_then(|old| number(old, &["intensity"])));
     match before.map(|before| intensity - before) {
-        Some(change) if change >= MOVE_MIN => "growing since her last turn".into(),
-        Some(change) if change <= -MOVE_MIN => "easing since her last turn".into(),
+        Some(change) if change >= MOVE_MIN => format!("growing since {poss} last turn"),
+        Some(change) if change <= -MOVE_MIN => format!("easing since {poss} last turn"),
         Some(_) => "where it was".into(),
         None => strength_words(intensity).into(),
     }
@@ -445,10 +473,9 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
         let about = about_present(memory, present);
         let pool = if about { Pool::MemoriesAboutPresent } else { Pool::OtherMemories };
         let touch = if about { TOUCH_PRESENT } else if in_room(memory, here) { TOUCH_ROOM } else { TOUCH_ELSE };
-        let mut body = text(memory, &["summary"]).to_owned();
-        let tension = text(memory, &["tension"]);
-        if !tension.is_empty() {
-            body = format!("{body} {tension}");
+        let body = [text(memory, &["summary"]), text(memory, &["tension"])].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
+        if body.is_empty() {
+            continue;
         }
         let line = format!("- memory [{}]: {}", text(memory, &["id"]), clip(&one_line(&body), item_bytes));
         let salience = number(memory, &["intensity"]).unwrap_or(SALIENCE_UNSTATED);
@@ -459,33 +486,39 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
 
     for need in items(state, &["affect", "needs"]).iter().filter(|need| live(need)) {
         let intensity = number(need, &["intensity"]).unwrap_or(SALIENCE_UNSTATED);
-        let name = [text(need, &["label"]), text(need, &["summary"]), text(need, &["id"])].into_iter().find(|name| !name.is_empty()).unwrap_or_default();
-        let line = format!("- need [{}]: {}, {}", text(need, &["id"]), clip(&one_line(name), item_bytes), need_movement(need, inputs.history.previous.as_ref()));
+        let Some(name) = [text(need, &["label"]), text(need, &["summary"])].into_iter().find(|name| !name.is_empty()) else { continue };
+        let line = format!("- need [{}]: {}, {}", text(need, &["id"]), clip(&one_line(name), item_bytes), need_movement(need, inputs.history.previous.as_ref(), forms(state).poss));
         push(text(need, &["id"]), Pool::Needs, line, intensity, 0.0, TOUCH_ELSE, 1.0 + intensity);
     }
 
-    for wondering in items(state, &["thoughtMemory", "incubation"]).iter().filter(|item| live(item) && !private_elsewhere(item, here)) {
+    for wondering in items(state, &["thoughtMemory", "incubation"]).iter().filter(|item| live(item) && !private_elsewhere(item, here) && !text(item, &["summary"]).is_empty()) {
         let days = time(wondering).map_or(0.0, |at| (inputs.now - at).num_seconds().max(0) as f64 / 86_400.0);
         let touch = if about_present(wondering, present) { TOUCH_PRESENT } else { TOUCH_ELSE };
         let line = format!("- wondering [{}]: {}", text(wondering, &["id"]), clip(&one_line(text(wondering, &["summary"])), item_bytes));
         push(text(wondering, &["id"]), Pool::Incubation, line, number(wondering, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), 0.0, touch, (1.0 + days / 7.0).min(INCUBATION_UNRESOLVED_MAX));
     }
 
-    for stance in items(state, &["affect", "doctrineStances"]).iter().filter(|stance| live(stance)) {
+    for stance in items(state, &["affect", "doctrineStances"]).iter().filter(|stance| live(stance) && !text(stance, &["summary"]).is_empty()) {
         let touch = if about_present(stance, present) { TOUCH_PRESENT } else { TOUCH_ELSE };
         let line = format!("- stance [{}]: {}", text(stance, &["id"]), clip(&one_line(text(stance, &["summary"])), item_bytes));
         push(text(stance, &["id"]), Pool::Stance, line, number(stance, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), relevance_log(text(stance, &["summary"]), touching), touch, 1.0);
     }
 
-    for value in items(state, &["values"]) {
-        let line = format!("- value [{}] {}: {}", text(value, &["id"]), clip(text(value, &["label"]), NAME_BYTES), clip(&one_line(text(value, &["summary"])), item_bytes));
+    for value in items(state, &["values"]).iter().filter(|value| !text(value, &["label"]).is_empty() || !text(value, &["summary"]).is_empty()) {
+        let summary = clip(&one_line(text(value, &["summary"])), item_bytes);
+        let label = clip(text(value, &["label"]), NAME_BYTES);
+        let line = match (label.is_empty(), summary.is_empty()) {
+            (false, false) => format!("- value [{}] {label}: {summary}", text(value, &["id"])),
+            (false, true) => format!("- value [{}] {label}", text(value, &["id"])),
+            _ => format!("- value [{}]: {summary}", text(value, &["id"])),
+        };
         let relevance = relevance_log(&format!("{} {}", text(value, &["label"]), text(value, &["summary"])), touching);
         push(text(value, &["id"]), Pool::Value, line, number(value, &["priority"]).unwrap_or(SALIENCE_UNSTATED), relevance, TOUCH_ELSE, 1.0);
     }
 
     for said in &inputs.history.said {
         let touch = if Some(said.room.as_str()) == here { TOUCH_ROOM } else { TOUCH_ELSE };
-        let line = format!("- she said [{}] in {}: {}", said.id, said.room, spoken(&clip(&said.text, item_bytes)));
+        let line = format!("- {} said [{}] in {}: {}", forms(state).subj, said.id, said.room, spoken(&clip(&said.text, item_bytes)));
         push(&said.id, Pool::Said, line, SALIENCE_UNSTATED, recency_log(Some(said.at), inputs.now, tuning.select.memory_tau_h), touch, 1.0);
     }
     out
@@ -592,10 +625,10 @@ struct Addressed<'a> {
 }
 
 impl Addressed<'_> {
-    fn lines(&self, render: impl Fn(&RoomLine, &str) -> String) -> Vec<String> {
+    fn lines(&self, obj: &str, render: impl Fn(&RoomLine, &str) -> String) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         if self.left_out > 0 {
-            lines.push(format!("({} more said to her, not shown)", self.left_out));
+            lines.push(format!("({} more said to {obj}, not shown)", self.left_out));
         }
         lines.extend(self.shown.iter().map(|(line, cut)| match cut {
             None => render(line, &spoken(&line.text)),
@@ -645,12 +678,13 @@ fn chat_stimulus(inputs: &Inputs, tuning: &Tuning) -> (String, String, Overflow)
     // One selection, rendered twice: the stimulus and the heard lines show the same messages to her and the same count.
     let addressed = said_to_her(&to_her, typed, ceiling);
     let (left_out, clipped) = (addressed.left_out, addressed.clipped);
-    let typed_to_her = addressed.lines(typed);
-    let heard_to_her = addressed.lines(heard);
+    let obj = forms(inputs.state).obj;
+    let typed_to_her = addressed.lines(obj, typed);
+    let heard_to_her = addressed.lines(obj, heard);
 
     let mut stimulus = String::new();
     if !typed_to_her.is_empty() {
-        stimulus.push_str("Said to her:");
+        stimulus.push_str(&format!("Said to {obj}:"));
         for line in &typed_to_her {
             stimulus.push('\n');
             stimulus.push_str(line);
@@ -718,12 +752,13 @@ fn beat_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
         let last = heard.filter(|(sender, _)| inputs.people.person_of(sender) == person).map(|(_, at)| at).max();
         contacts.push((last, match last {
             Some(at) => format!("- last heard from {label} {} h ago", hours(inputs.now, at)),
-            None => format!("- nothing from {label} in her rooms lately"),
+            None => format!("- nothing from {label} in {} rooms lately", forms(inputs.state).poss),
         }));
     }
     contacts.sort_by_key(|(last, _)| std::cmp::Reverse(*last));
     let mut out = Lines::new(cap);
-    out.push("Nothing addressed her.");
+    let her = forms(inputs.state);
+    out.push(&format!("Nothing addressed {}.", her.obj));
     let note_room = 48;
     let contact_cap = cap * 2 / 3;
     let mut left_out = 0;
@@ -733,12 +768,12 @@ fn beat_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
         }
     }
     if left_out > 0 {
-        out.push(&format!("({left_out} more people she is bound to not shown)"));
+        out.push(&format!("({left_out} more people {} {} bound to not shown)", her.subj, her.be));
     }
     let others: Vec<&RoomLine> = inputs.room.tail.iter().filter(|line| line.sender != inputs.people.own_sender).collect();
     let shown = &others[others.len().saturating_sub(tuning.select.beat_tail_lines)..];
     let lines: Vec<String> = shown.iter().map(|line| format!("- {} in {}, {} h ago: {}", name_of(line, inputs), line.room, hours(inputs.now, line.at_ms), spoken(&clip(&line.text, tuning.select.item_bytes / 2)))).collect();
-    let section = newest_section("Lately in her rooms:", &lines, cap.saturating_sub(out.out.len() + 2));
+    let section = newest_section(&format!("Lately in {} rooms:", her.poss), &lines, cap.saturating_sub(out.out.len() + 2));
     if !section.is_empty() && out.push("") {
         out.push(&section);
     }
@@ -747,8 +782,9 @@ fn beat_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
 
 fn reflection_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
     let lines: Vec<String> = items(inputs.state, &["thoughtMemory", "shortTerm"]).iter().filter(|item| live(item)).map(|item| format!("- {}", clip(&one_line(text(item, &["summary"])), tuning.select.item_bytes))).collect();
-    let section = newest_section("Since she last took stock:", &lines, tuning.select.stimulus_bytes);
-    if section.is_empty() { clip("Since she last took stock: nothing new.", tuning.select.stimulus_bytes) } else { section }
+    let subj = forms(inputs.state).subj;
+    let section = newest_section(&format!("Since {subj} last took stock:"), &lines, tuning.select.stimulus_bytes);
+    if section.is_empty() { clip(&format!("Since {subj} last took stock: nothing new."), tuning.select.stimulus_bytes) } else { section }
 }
 
 /// The people present, newest first: who spoke to her or in her room this turn, or in the beat's lines.
@@ -771,14 +807,30 @@ fn present_people(inputs: &Inputs, tuning: &Tuning) -> Vec<(String, String)> {
     out
 }
 
+/// A bond line: the person, the kind of bond after a dash (a label may hold a comma: "Meta, the operator"), trust and
+/// friction as words when the bond carries them, and its summary. What the bond does not carry is left out.
 fn bond_line(bond: &Value, name: &str, tuning: &Tuning) -> String {
-    let mut feel = vec![friction_words(number(bond, &["tension"]).unwrap_or(0.0))];
-    if let Some(trust) = number(bond, &["trust"]) {
-        feel.insert(0, trust_words(trust));
+    let feel: Vec<&str> = [number(bond, &["trust"]).map(trust_words), number(bond, &["tension"]).map(friction_words)].into_iter().flatten().collect();
+    let custom = text(bond, &["customRelationshipKind"]);
+    let kind = clip(&one_line(if custom.is_empty() { text(bond, &["relationshipKind"]) } else { custom }), NAME_BYTES);
+    let mut line = format!("- bond [{}] {name}", text(bond, &["id"]));
+    if !kind.is_empty() {
+        let _ = write!(line, " \u{2014} {kind}");
     }
-    let kind = clip(&one_line(text(bond, &["relationshipKind"])), NAME_BYTES);
-    let kind = if kind.is_empty() { String::new() } else { format!(", {kind}") };
-    format!("- bond [{}] {name}{kind}: {}. {}", text(bond, &["id"]), feel.join(", "), clip(&one_line(text(bond, &["summary"])), tuning.select.bond_summary_bytes))
+    let summary = clip(&one_line(text(bond, &["summary"])), tuning.select.bond_summary_bytes);
+    match (feel.is_empty(), summary.is_empty()) {
+        (true, true) => {}
+        (true, false) => {
+            let _ = write!(line, ": {summary}");
+        }
+        (false, true) => {
+            let _ = write!(line, ": {}.", feel.join(", "));
+        }
+        (false, false) => {
+            let _ = write!(line, ": {}. {summary}", feel.join(", "));
+        }
+    }
+    line
 }
 
 fn identity_of(state: &Value, tuning: &Tuning) -> String {
@@ -803,13 +855,13 @@ fn also_here(named: &[String]) -> Option<String> {
             break;
         }
         if shown > 0 {
-            line.push_str(", ");
+            line.push_str("; ");
         }
         line.push_str(name);
         shown += 1;
     }
     if shown < named.len() {
-        let _ = write!(line, "{}{} more", if shown > 0 { ", and " } else { "" }, named.len() - shown);
+        let _ = write!(line, "{}{} more", if shown > 0 { "; and " } else { "" }, named.len() - shown);
     }
     Some(line)
 }
@@ -833,70 +885,125 @@ fn names_of(line: &RoomLine, inputs: &Inputs) -> Vec<String> {
     [Some(localpart(&line.sender).to_owned()), Some(line.display.trim().to_owned()), bond_label(inputs, &line.sender)].into_iter().flatten().filter(|name| !name.is_empty()).collect()
 }
 
-/// The group-state slot (`select.group_state`): over the room's last `group_lines` lines, who spoke to whom (to her, to
-/// someone else present by name, or to the room); when a human last spoke; how many lines in a row are the Minds' alone;
-/// how many lines are to her; and whether a human's question to everyone stands open. Code reads names and question marks,
-/// not meaning: whom a line is to by the names in it is a cue, and the Interpreter (C3b) will know better. None when the
-/// room shows no line.
-fn group_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
-    let here = inputs.room.here.as_deref();
+/// The recent lines of one room, the one the group state and the pronouns describe: messages and tail together, each
+/// once, oldest first. The room is the turn's when it is one room; otherwise the room of the newest message to her, else
+/// of the newest message, else of the newest tail line. Never several rooms folded into one, so a direct message is
+/// only ever read as its own room.
+fn recent_lines<'a>(inputs: &'a Inputs) -> Vec<&'a RoomLine> {
+    let newest = |lines: &'a [RoomLine], keep: &dyn Fn(&RoomLine) -> bool| lines.iter().filter(|line| keep(line)).max_by_key(|line| line.at_ms).map(|line| line.room.as_str());
+    let Some(room) = inputs.room.here.as_deref().or_else(|| newest(&inputs.room.messages, &|line| line.to_her)).or_else(|| newest(&inputs.room.messages, &|_| true)).or_else(|| newest(&inputs.room.tail, &|_| true)) else {
+        return Vec::new();
+    };
     let mut lines: Vec<&RoomLine> = Vec::new();
     for line in inputs.room.messages.iter().chain(&inputs.room.tail) {
-        if here.is_some_and(|here| line.room != here) || lines.iter().any(|seen| seen.sender == line.sender && seen.at_ms == line.at_ms && seen.text == line.text) {
+        if line.room != room || lines.iter().any(|seen| seen.sender == line.sender && seen.at_ms == line.at_ms && seen.text == line.text) {
             continue;
         }
         lines.push(line);
     }
     lines.sort_by_key(|line| line.at_ms);
+    lines
+}
+
+/// How a sender reads in the group-state and pronoun lines: "she" for her; the bond's label; the display name; or, for a
+/// tail line that carries none, the handle in the Matrix id.
+fn label_of(line: &RoomLine, inputs: &Inputs) -> String {
+    if line.sender == inputs.people.own_sender {
+        forms(inputs.state).subj.to_owned()
+    } else if line.display.trim().is_empty() && bond_label(inputs, &line.sender).is_none() {
+        localpart(&line.sender).to_owned()
+    } else {
+        name_of(line, inputs)
+    }
+}
+
+/// The group-state slot (`select.group_state`): the conversation as it stands over the room's last `group_lines` lines.
+/// Who has been talking with whom; a human's question to the room that others have answered, as covered (one nobody
+/// answered is not mentioned); when a human last spoke; how many Mind lines in a row; and a human waiting on her by name
+/// since she last spoke. Never what she owes: the room's state, not her duty. Whom a line is to is read from the names in
+/// it and Matrix's word, a cue the Interpreter (C3b) will replace. None when the room shows no line.
+fn group_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
+    let lines = recent_lines(inputs);
     if lines.is_empty() {
         return None;
     }
-    let to_her = |line: &RoomLine| line.sender != inputs.people.own_sender && (line.to_her || [localpart(inputs.people.own_sender), text(inputs.state, &["publicName"])].iter().any(|name| crate::address::names_whole_word(&line.text, name, false)));
+    let own = inputs.people.own_sender;
+    let names_her = |line: &RoomLine| line.sender != own && (line.to_her || [localpart(own), text(inputs.state, &["publicName"])].iter().any(|name| crate::address::names_whole_word(&line.text, name, false)));
+    // Everything the line says is over these lines: its last `group_lines`.
     let window = &lines[lines.len().saturating_sub(tuning.select.group_lines)..];
-    // A tail line carries no display name: an unbonded sender there goes by the handle in her Matrix id.
-    let label = |line: &RoomLine| {
-        if line.sender == inputs.people.own_sender {
-            "she".to_owned()
-        } else if line.display.trim().is_empty() && bond_label(inputs, &line.sender).is_none() {
-            localpart(&line.sender).to_owned()
-        } else {
-            name_of(line, inputs)
-        }
-    };
-    let talk: Vec<String> = window
-        .iter()
-        .map(|line| {
-            let target = if to_her(line) {
-                "her".to_owned()
-            } else {
-                window.iter().filter(|other| other.sender != line.sender).find(|other| names_of(other, inputs).iter().any(|name| crate::address::names_whole_word(&line.text, name, false))).map_or_else(|| "the room".to_owned(), |other| label(other))
-            };
-            format!("{} to {target}", label(line))
-        })
-        .collect();
-    let mut parts = vec![format!("the room lately: {}", talk.join(", "))];
-    let last_human = lines.iter().rev().find(|line| !is_mind(inputs, &line.sender));
-    parts.push(match last_human {
-        Some(line) => format!("a human, {}, last spoke {} min ago", label(line), minutes(inputs.now, line.at_ms)),
-        None => "no human has spoken here lately".to_owned(),
+    let named_in = |line: &RoomLine| window.iter().filter(|other| other.sender != line.sender).find(|other| names_of(other, inputs).iter().any(|name| crate::address::names_whole_word(&line.text, name, false))).copied();
+    // A human's last line, when it is a question to the room (no one named), and who has answered it since.
+    let question = window.iter().rposition(|line| !is_mind(inputs, &line.sender)).filter(|at| {
+        let line = window[*at];
+        line.text.trim_end().ends_with('?') && !names_her(line) && named_in(line).is_none()
     });
-    let minds_in_a_row = lines.iter().rev().take_while(|line| is_mind(inputs, &line.sender)).count();
+    let mut answered: Vec<String> = Vec::new();
+    let mut talk: Vec<String> = Vec::new();
+    for (at, line) in window.iter().enumerate() {
+        let speaker = label_of(line, inputs);
+        let target = if names_her(line) { Some(forms(inputs.state).obj.to_owned()) } else { named_in(line).map(|other| label_of(other, inputs)) };
+        let answers = question.is_some_and(|asked| at > asked && line.sender != window[asked].sender && target.as_ref().is_none_or(|target| *target == label_of(window[asked], inputs)));
+        if answers {
+            if !answered.contains(&speaker) {
+                answered.push(speaker);
+            }
+            continue;
+        }
+        if question == Some(at) {
+            continue;
+        }
+        let pair = match target {
+            Some(target) => format!("{speaker} with {target}"),
+            None => format!("{speaker} to the room"),
+        };
+        if !talk.contains(&pair) {
+            talk.push(pair);
+        }
+    }
+    let mut parts = Vec::new();
+    if let Some(asked) = question
+        && !answered.is_empty()
+    {
+        parts.push(format!("{} asked the room a question, and {} answered it", label_of(window[asked], inputs), answered.join("; ")));
+    }
+    if !talk.is_empty() {
+        parts.push(format!("lately {}", talk.join("; ")));
+    }
+    if let Some(line) = window.iter().rev().find(|line| !is_mind(inputs, &line.sender)) {
+        parts.push(format!("{} last spoke {} min ago", label_of(line, inputs), minutes(inputs.now, line.at_ms)));
+    }
+    let minds_in_a_row = window.iter().rev().take_while(|line| is_mind(inputs, &line.sender)).count();
     if minds_in_a_row >= 2 {
         parts.push(format!("the last {minds_in_a_row} lines are the Minds' alone"));
     }
-    let addressed = lines.iter().filter(|line| to_her(line)).count();
-    if addressed > 0 {
-        parts.push(format!("{addressed} {} to her", if addressed == 1 { "line is" } else { "lines are" }));
+    // A human waiting on her by name: a line of a human's that names or tags her, after her own last line.
+    let her_last = window.iter().rposition(|line| line.sender == own);
+    if let Some(line) = window.iter().enumerate().rev().find(|(at, line)| her_last.is_none_or(|last| *at > last) && !is_mind(inputs, &line.sender) && names_her(line)).map(|(_, line)| line) {
+        parts.push(format!("{} is waiting on {}", label_of(line, inputs), forms(inputs.state).obj));
     }
-    if let Some(line) = last_human
-        && line.text.trim_end().ends_with('?')
-        && !to_her(line)
-        && !window.iter().filter(|other| other.sender != line.sender).any(|other| names_of(other, inputs).iter().any(|name| crate::address::names_whole_word(&line.text, name, false)))
-    {
-        parts.push(format!("{}'s question to everyone is open", label(line)));
-    }
-    Some(clip(&format!("- {}", parts.join("; ")), tuning.select.group_bytes))
+    (!parts.is_empty()).then(|| clip(&format!("- the conversation: {}", parts.join("; ")), tuning.select.group_bytes))
 }
+
+/// The pronouns of everyone the packet names from the room: `tuning.pronouns` by Matrix id (the persona state has no
+/// pronoun field for another person; `presentation.pronouns` is hers alone), and they/them for anyone it does not list.
+fn pronoun_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
+    let messages = inputs.room.messages.iter();
+    let shown_tail = recent_lines(inputs).into_iter().rev().take(tuning.select.group_lines.max(tuning.select.beat_tail_lines));
+    for line in messages.chain(shown_tail) {
+        if line.sender == inputs.people.own_sender || seen.contains(&line.sender.as_str()) {
+            continue;
+        }
+        seen.push(&line.sender);
+        let pronouns = tuning.pronouns.get(&line.sender).map_or(UNKNOWN_PRONOUNS, String::as_str);
+        parts.push(format!("{} \u{2014} {pronouns}", label_of(line, inputs)));
+    }
+    (!parts.is_empty()).then(|| clip(&format!("- pronouns: {}", parts.join("; ")), ALSO_HERE_BYTES))
+}
+
+/// The pronouns of a person nobody listed.
+const UNKNOWN_PRONOUNS: &str = "they/them";
 
 fn minutes(now: DateTime<Utc>, at_ms: u64) -> i64 {
     let at = i64::try_from(at_ms).ok().and_then(DateTime::<Utc>::from_timestamp_millis).unwrap_or(now);
@@ -912,7 +1019,7 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     let (stimulus, heard, overflow) = match inputs.kind {
         TurnKind::Chat => chat_stimulus(inputs, tuning),
         TurnKind::Beat => (beat_stimulus(inputs, tuning), String::new(), Overflow::default()),
-        TurnKind::FollowUp => (clip(&format!("She just found: {}", inputs.observation.unwrap_or("nothing")), tuning.select.stimulus_bytes), String::new(), Overflow::default()),
+        TurnKind::FollowUp => (clip(&format!("{} just found: {}", forms(inputs.state).cap_subj, inputs.observation.unwrap_or("nothing")), tuning.select.stimulus_bytes), String::new(), Overflow::default()),
         TurnKind::Reflection => (reflection_stimulus(inputs, tuning), String::new(), Overflow::default()),
     };
 
@@ -922,7 +1029,7 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     let present = present_people(inputs, tuning);
     let present_ids: BTreeSet<String> = present.iter().map(|(id, _)| id.clone()).collect();
     let bonds = items(inputs.state, &["affect", "socialBonds"]);
-    let mut fixed = vec![format!("- now: {}", inputs.now.format("%A %-d %B, %H:%M UTC")), mood_line(inputs.state, inputs.history.previous.as_ref())];
+    let mut fixed: Vec<String> = [Some(format!("- now: {}", inputs.now.format("%A %-d %B, %H:%M UTC"))), mood_line(inputs.state, inputs.history.previous.as_ref())].into_iter().flatten().collect();
     let mut used: usize = fixed.iter().map(|line| line.len() + 1).sum();
     let mut ids = Vec::new();
     let mut named = Vec::new();
@@ -950,6 +1057,10 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     if tuning.select.group_state
         && let Some(line) = group_line(inputs, tuning).filter(|line| used + line.len() < budget)
     {
+        used += line.len() + 1;
+        fixed.push(line);
+    }
+    if let Some(line) = pronoun_line(inputs, tuning).filter(|line| used + line.len() < budget) {
         used += line.len() + 1;
         fixed.push(line);
     }
@@ -989,5 +1100,5 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     lines.extend(taken.iter().map(|candidate| candidate.line.clone()));
     ids.extend(taken.iter().map(|candidate| candidate.id.clone()));
     let selected = taken.into_iter().map(|candidate| Pick { id: candidate.id, pool: candidate.pool, log_score: candidate.log_score }).collect();
-    Packet { kind: inputs.kind, seed: inputs.seed, lens, identity, context: lines.join("\n"), stimulus, heard, overflow, present: present_names, ids, selected }
+    Packet { kind: inputs.kind, seed: inputs.seed, lens, identity, context: lines.join("\n"), stimulus, heard, overflow, present: present_names, ids, selected, forms: forms(inputs.state) }
 }

@@ -144,8 +144,8 @@ fn the_same_seed_replays_the_same_packet() {
 fn present_people_get_their_bond_line_in_words_and_absent_people_none() {
     let packet = packet_of(TurnKind::Chat, &state(), &chat_room(), &History::default(), 1);
     assert_eq!(packet.present, ["Kiko", "Libby"], "newest first");
-    assert!(packet.context.contains("- bond [bond-kiko] Kiko, sparring partner: fair trust, heavy friction."), "{}", packet.context);
-    assert!(packet.context.contains("- bond [bond-libby] Libby, collaborator: fair trust, a little friction."), "{}", packet.context);
+    assert!(packet.context.contains("- bond [bond-kiko] Kiko \u{2014} sparring partner: fair trust, heavy friction."), "{}", packet.context);
+    assert!(packet.context.contains("- bond [bond-libby] Libby \u{2014} collaborator: fair trust, a little friction."), "{}", packet.context);
     assert!(!packet.context.contains("bond-operator"), "the operator is not here");
     assert!(!packet.context.contains("0.6") && !packet.context.contains("0.15"), "numbers reach the packet as words: {}", packet.context);
 }
@@ -157,21 +157,21 @@ fn two_states_differing_in_one_bonds_tension_give_different_packets() {
     let room = chat_room();
     let (tense, easy) = (packet_of(TurnKind::Chat, &state(), &room, &History::default(), 3), packet_of(TurnKind::Chat, &eased, &room, &History::default(), 3));
     assert_ne!(tense.context, easy.context);
-    assert!(tense.context.contains("Kiko, sparring partner: fair trust, heavy friction") && easy.context.contains("Kiko, sparring partner: fair trust, easy between them"));
+    assert!(tense.context.contains("Kiko \u{2014} sparring partner: fair trust, heavy friction") && easy.context.contains("Kiko \u{2014} sparring partner: fair trust, easy between them"));
 }
 
 #[test]
 fn mood_is_movement_since_her_last_turn() {
     let room = chat_room();
     let first = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
-    assert!(first.context.contains("- mood, with no earlier turn to measure from: lighter, more settled than middling"), "{}", first.context);
+    assert!(first.context.contains("- mood: lighter, more settled than middling"), "{}", first.context);
     let mut before = state();
     before["activationProfile"]["situationalState"]["valence"]["currentActivation"] = json!(0.5);
     before["activationProfile"]["situationalState"]["arousal"]["currentActivation"] = json!(0.41);
     let moved = packet_of(TurnKind::Chat, &state(), &room, &History { previous: Some(before), ..History::default() }, 1);
     assert!(moved.context.contains("- mood: lighter than at her last turn"), "{}", moved.context);
     let none = packet_of(TurnKind::Chat, &json!({ "publicName": "Eureka" }), &room, &History::default(), 1);
-    assert!(none.context.contains("- mood: none recorded"));
+    assert!(!none.context.contains("mood"), "a state without a mood has no mood line: {}", none.context);
 }
 
 #[test]
@@ -1059,8 +1059,8 @@ fn a_bond_line_or_the_crowd_line_that_does_not_fit_gives_way_to_the_mood() {
     tuning.select.context_bytes = identity + 200;
     let packet = packet_tuned(TurnKind::Chat, &fixed_only, &chat_room(), &History::default(), 1, &tuning);
     assert!(packet.context.contains("- mood") && !packet.context.contains("bond ["), "{}", packet.context);
-    assert!(packet.context.contains("- also here: Kiko, Libby"), "a bond line that does not fit names the person instead: {}", packet.context);
-    tuning.select.context_bytes = identity + 130;
+    assert!(packet.context.contains("- also here: Kiko; Libby"), "a bond line that does not fit names the person instead: {}", packet.context);
+    tuning.select.context_bytes = identity + 100;
     let packet = packet_tuned(TurnKind::Chat, &fixed_only, &chat_room(), &History::default(), 1, &tuning);
     assert!(packet.context.contains("- mood") && !packet.context.contains("also here"), "{}", packet.context);
     assert!(packet.identity.len() + packet.context.len() <= tuning.select.context_bytes);
@@ -1297,4 +1297,117 @@ fn the_report_says_how_old_the_addressing_table_is_and_why_it_was_not_used() {
     assert!(no_file["why"].as_str().unwrap().contains("no heartbeat file") && no_file["age_minutes"].is_null(), "{no_file}");
     let no_table = run(&Stale(None, Some(written)));
     assert!(no_table["why"].as_str().unwrap().contains("holds no addressing table"), "{no_table}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// What the Projector is shown: absences left out, pronouns, the guidance's rules, the narration checks.
+
+#[test]
+fn a_state_without_a_mood_or_with_bare_items_says_nothing_of_records_or_readings() {
+    let bare = json!({
+        "publicName": "Eureka",
+        "affect": {
+            "socialBonds": [{ "id": "bond-libby", "object": { "id": "libby", "kind": "person", "label": "Libby" }, "status": "active" }],
+            "needs": [{ "id": "need-empty", "intensity": 0.9, "status": "active" }],
+            "doctrineStances": [{ "id": "stance-empty", "intensity": 0.9, "status": "active" }],
+        },
+        "thoughtMemory": { "memories": [{ "id": "memory-empty", "status": "crystallized", "intensity": 0.9 }], "incubation": [{ "id": "w-empty", "status": "active" }] },
+        "values": [{ "id": "value-empty", "priority": 0.9 }],
+    });
+    for seed in 1..=20 {
+        let packet = packet_of(TurnKind::Chat, &bare, &chat_room(), &History::default(), seed);
+        let text = format!("{}\n{}", packet.context, packet.stimulus).to_lowercase();
+        for word in ["mood", "record", "reading", "measure", "none", "empty"] {
+            assert!(!text.contains(word), "{word} in: {text}");
+        }
+        assert!(packet.context.contains("- bond [bond-libby] Libby\n") || packet.context.ends_with("- bond [bond-libby] Libby"), "a bond with nothing in it names the person and no more: {}", packet.context);
+        assert!(!packet.context.contains("trust") && !packet.context.contains("friction") && !packet.context.contains("easy between"), "{}", packet.context);
+    }
+}
+
+#[test]
+fn every_person_the_packet_names_from_the_room_has_pronouns_and_an_unknown_one_is_they() {
+    let room = Room {
+        messages: vec![
+            message("#swarm:gamecult.org", OPERATOR, "Meta", "Eureka, how are you?", 4, true),
+            message("#swarm:gamecult.org", "@kiko:gamecult.org", "Kiko", "fine here", 3, false),
+            message("#swarm:gamecult.org", "@stranger:elsewhere.example", "Stranger", "hello all", 2, false),
+        ],
+        here: Some("#swarm:gamecult.org".into()),
+        ..Room::default()
+    };
+    let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
+    let line = packet.context.lines().find(|line| line.starts_with("- pronouns:")).unwrap_or_else(|| panic!("{}", packet.context));
+    assert!(line.contains("Meta, the operator \u{2014} she/her") && line.contains("Kiko \u{2014} she/her"), "{line}");
+    assert!(line.contains("(@stranger:elsewhere.example) \u{2014} they/them"), "{line}");
+    assert!(!line.contains("Eureka"), "her own pronouns are in her identity, not here: {line}");
+}
+
+#[test]
+fn the_projector_is_told_not_to_retell_not_to_offer_options_and_not_to_owe() {
+    let packet = packet_of(TurnKind::Chat, &state(), &chat_room(), &History::default(), 1);
+    let prompt = narrate::projector_prompt(&packet, &Tuning::default());
+    for rule in ["never retell or summarise it", "Do not weigh options", "never as a debt", "an absence is not part of her moment", "pronouns"] {
+        assert!(prompt.contains(rule), "{rule}");
+    }
+    let persona = narrate::persona_prompt(&packet, "The room is warm.", &Tuning::default());
+    assert!(persona.contains("Continue her inner stream") && persona.contains("This is not a message to the room") && persona.contains("most moments pass with nothing said"), "{persona}");
+}
+
+#[test]
+fn the_narration_checks_flag_an_option_menu_and_a_retelling_and_pass_a_reaction() {
+    // Round 1 of the humans_pace run of 2026-11-20, as the Projector wrote it.
+    let menu = "I owe Zyphos names. I may answer Meta honestly. That could include the Zyphos debt and the sketch, or I could just say how I'm doing. Nothing presses except the open question.";
+    let idle = "Nothing asks me to act on it now.";
+    let reaction = "Meta's warmth lands somewhere under her ribs. She likes being asked without a task attached; it makes her want to be honest, and a little playful.";
+    assert!(narrate::offers_options(menu) && narrate::offers_options(idle));
+    assert!(!narrate::offers_options(reaction));
+    let heard = "Kiko, in #minds: \"Two things I'm carrying: the link-target takeover finding is still open, and it's on your door and mine.\"";
+    let retold = "Kiko named two things she's carrying: the link-target takeover finding is still open, and it's on her door and mine.";
+    assert!(narrate::heard_overlap(retold, heard) > 0.5, "{}", narrate::heard_overlap(retold, heard));
+    assert!(narrate::heard_overlap(reaction, heard) < 0.05);
+}
+
+#[test]
+fn inner_is_her_prose_without_what_she_says_aloud() {
+    assert_eq!(narrate::inner("She grins. \"Winter, still.\" Then she lets it go."), "She grins. \u{2026} Then she lets it go.");
+    assert_eq!(narrate::inner("Only thought here."), "Only thought here.");
+}
+
+#[test]
+fn the_group_state_reads_one_room_and_never_folds_a_direct_message_in() {
+    let room = Room {
+        messages: vec![message("#swarm:gamecult.org", "@kiko:gamecult.org", "Kiko", "Eureka, door?", 2, true)],
+        tail: vec![message("!dm-deru:gamecult.org", "@deru:gamecult.org", "Deru", "SECRET between us", 1, false), message("#swarm:gamecult.org", "@libby:gamecult.org", "Libby", "lunch?", 5, false)],
+        ..Room::default()
+    };
+    let packet = packet_of(TurnKind::Chat, &state(), &room, &History::default(), 1);
+    let line = packet.context.lines().find(|line| line.starts_with("- the conversation")).unwrap_or_else(|| panic!("{}", packet.context)).to_owned();
+    assert!(line.contains("Kiko with her") && line.contains("Libby"), "{line}");
+    assert!(!line.contains("Deru") && !packet.context.contains("@deru"), "the direct message is its own room: {}", packet.context);
+}
+
+#[test]
+fn the_packet_speaks_of_her_in_her_own_pronouns() {
+    let mut him = state();
+    him["presentation"]["pronouns"] = json!("he/him");
+    let packet = packet_of(TurnKind::Chat, &him, &chat_room(), &History::default(), 1);
+    assert!(packet.stimulus.starts_with("Said to him:") && packet.context.contains("Libby with him"), "{}\n{}", packet.stimulus, packet.context);
+    let beat = packet_of(TurnKind::Beat, &him, &Room::default(), &History::default(), 1);
+    assert!(beat.stimulus.starts_with("Nothing addressed him."), "{}", beat.stimulus);
+    let mut them = state();
+    them["presentation"]["pronouns"] = json!("any (they for themself)");
+    let beat = packet_of(TurnKind::Beat, &them, &Room::default(), &History::default(), 1);
+    assert!(beat.stimulus.starts_with("Nothing addressed them.") && !beat.stimulus.contains(" her ") , "{}", beat.stimulus);
+}
+
+#[test]
+fn a_room_given_by_its_matrix_id_is_read_by_its_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let stored = Stored(state());
+    let chat = mouth();
+    let organs = Organs { persona: Some(&stored), chat: Some(&chat), addressing: None, model: None };
+    // The mouth's first delivery is in #swarm, room id !1:gamecult.org; its tail line carries the alias.
+    let report = project(&organs, &Request { room: Some("!1:gamecult.org".into()), ..request(dir.path(), None, None) }, now()).unwrap();
+    assert_eq!((report["room"]["messages"].as_u64(), report["room"]["tail"].as_u64()), (Some(1), Some(1)), "{}", report["room"]);
 }

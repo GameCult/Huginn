@@ -293,7 +293,9 @@ fn each_persona_carries_her_own_huginn_and_a_missing_or_malformed_one_refuses_th
     for bad in ["ann,ann,Ann,@ann:chat", "ann,ann,Ann,@ann:chat,", "ann,ann,Ann,@ann:chat,127.0.0.1:4101", "ann,ann,Ann,@ann:chat,rudp://localhost:4101"] {
         assert!(PersonaId::parse(bad).is_err(), "{bad}");
     }
-    assert!(Config::new(personas, vec![], 0).is_err(), "a beat of zero seconds is refused");
+    assert!(Config::new(personas.clone(), vec![], 0).is_err(), "a beat of zero seconds is refused");
+    let refused = Config::new(personas, vec!["@bob:chat".into()], 60).map(|_| ()).unwrap_err();
+    assert!(format!("{refused:#}").contains("operator id is also a persona"), "a sender is the operator or a Mind, never both");
 }
 
 #[test]

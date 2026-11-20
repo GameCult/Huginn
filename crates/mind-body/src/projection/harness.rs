@@ -29,6 +29,8 @@ use crate::heartbeat::{Addressing, HeartbeatView};
 
 pub use super::simulate::simulate;
 
+/// A narration whose word trigrams overlap what she heard past this share is marked as retelling it.
+pub(crate) const RETELL_FLAG: f64 = 0.15;
 /// The most room lines a view's tail carries, as a mouth's tail is bounded.
 const TAIL_LINES: usize = 40;
 
@@ -90,9 +92,12 @@ pub struct Message {
     /// Other Matrix ids it tags.
     #[serde(default)]
     pub mentions: Vec<String>,
-    /// A direct message to her.
+    /// A direct message: to her in a room fixture; to `to` in a simulation script.
     #[serde(default)]
     pub dm: bool,
+    /// The recipient of a direct message, by Matrix id. A room fixture's defaults to her; a script must name one.
+    #[serde(default)]
+    pub to: Option<String>,
     /// A reply in a conversation she opened (the mouth's follow-up basis).
     #[serde(default)]
     pub follow_up: bool,
@@ -111,7 +116,8 @@ pub(crate) struct Line {
     pub at_ms: u64,
     pub says: String,
     pub mentions: Vec<String>,
-    pub dm: bool,
+    /// A direct message, to this Matrix id: only its sender and its recipient see it.
+    pub dm_to: Option<String>,
     pub follow_up: bool,
     /// The index of the line it replies to.
     pub reply_to: Option<usize>,
@@ -128,18 +134,25 @@ impl Line {
         if message.tag {
             mentions.push(her.ok_or_else(|| anyhow!("message {} tags her, and a simulation has no one \"her\": name the ids in mentions", index + 1))?.to_owned());
         }
+        let dm_to = match (message.dm, &message.to) {
+            (true, Some(to)) if matrix_id(to) => Some(to.clone()),
+            (true, Some(to)) => bail!("message {} is a direct message to \"{to}\", which is not a Matrix id", index + 1),
+            (true, None) => Some(her.ok_or_else(|| anyhow!("message {} is a direct message to no one: a script names its recipient in `to`", index + 1))?.to_owned()),
+            (false, Some(_)) => bail!("message {} names a recipient but is not a direct message", index + 1),
+            (false, None) => None,
+        };
         let reply_to = match message.reply_to {
             Some(number) if number >= 1 && number <= index => Some(number - 1),
             Some(number) => bail!("message {} replies to message {number}, which is not an earlier one", index + 1),
             None => None,
         };
-        Ok(Self { from: message.from.clone(), name: message.name.clone(), room: message.room.clone(), at_ms: unix_ms(at), says: message.says.clone(), mentions, dm: message.dm, follow_up: message.follow_up, reply_to, new: message.new })
+        Ok(Self { from: message.from.clone(), name: message.name.clone(), room: message.room.clone(), at_ms: unix_ms(at), says: message.says.clone(), mentions, dm_to, follow_up: message.follow_up, reply_to, new: message.new })
     }
 
     /// What Matrix would say about this line to `viewer`: a direct message, a tag, a reply to a line of hers, or a
     /// follow-up.
     fn basis(&self, viewer: &str, lines: &[Line]) -> Option<Basis> {
-        if self.dm {
+        if self.dm_to.as_deref() == Some(viewer) {
             Some(Basis::Direct)
         } else if self.mentions.iter().any(|id| id == viewer) {
             Some(Basis::Tag)
@@ -149,6 +162,15 @@ impl Line {
             Some(Basis::FollowUp)
         } else {
             None
+        }
+    }
+
+    /// Whether `viewer` sees the line: a direct message only its sender and recipient; any other line every member of its
+    /// room (no rooms named is every room).
+    pub(crate) fn visible_to(&self, viewer: &str, rooms: &[String]) -> bool {
+        match &self.dm_to {
+            Some(to) => to == viewer || self.from == viewer,
+            None => rooms.is_empty() || rooms.contains(&self.room),
         }
     }
 
@@ -164,7 +186,7 @@ impl Line {
             at_unix_ms: self.at_ms,
             context: vec![],
             mentions: self.mentions.clone(),
-            is_direct: self.dm,
+            is_direct: self.dm_to.is_some(),
             image: None,
             basis: self.basis(viewer, lines),
             form: Form::Message,
@@ -176,7 +198,7 @@ impl Line {
 /// The mouth's pending read as `viewer` would get it from `lines`: the lines `new` says she has not had, from others,
 /// in her rooms, as deliveries; and every line of her rooms, hers included, as the tail.
 pub(crate) fn pending_for(lines: &[Line], viewer: &str, rooms: &[String], new: impl Fn(usize) -> bool) -> ChatPending {
-    let hers = |line: &Line| rooms.is_empty() || rooms.contains(&line.room) || line.dm;
+    let hers = |line: &Line| line.visible_to(viewer, rooms);
     let deliveries = lines.iter().enumerate().filter(|(at, line)| new(*at) && hers(line) && line.from != viewer).map(|(at, line)| line.delivery(at, viewer, lines)).collect();
     let tail: Vec<TailLine> = lines
         .iter()
@@ -462,6 +484,13 @@ Usage: {}
     if let Some(names) = render["field_names"].as_array().filter(|names| !names.is_empty()) {
         let _ = writeln!(out, "**Field names leaked:** {}\n", Value::Array(names.clone()));
     }
+    let _ = writeln!(
+        out,
+        "Narration checks: overlap with what she heard {}{}{}\n",
+        render["heard_overlap"].as_f64().map_or_else(|| "n/a".to_owned(), |overlap| format!("{overlap:.2}")),
+        if render["heard_overlap"].as_f64().is_some_and(|overlap| overlap > RETELL_FLAG) { " (retells)" } else { "" },
+        if render["offers_options"] == true { "; offers her options" } else { "" }
+    );
     let persona = &render["persona"];
     if let Some(failed) = persona["failed"].as_str() {
         let _ = writeln!(out, "**Persona call failed:** {failed}
@@ -469,6 +498,8 @@ Usage: {}
     } else if !persona.is_null() {
         let _ = writeln!(out, "**Her prose** ({} words{}):\n", persona["words"], if persona["cut_at_budget"] == true { ", cut at budget" } else { "" });
         quoted(out, persona["prose"].as_str().unwrap_or_default());
+        let _ = writeln!(out, "**Inner** (her prose with what she says aloud taken out):\n");
+        quoted(out, persona["inner"].as_str().unwrap_or_default());
         match persona["would_say"].as_array().filter(|said| !said.is_empty()) {
             Some(said) => {
                 let _ = writeln!(out, "**Would say:**\n");
