@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::address::is_for;
-use crate::projection::narrate::{Answer, Failed, Spent, would_say};
+use crate::projection::narrate::{Answer, Failed, Spent};
 
 const HER: &str = "@eureka:gamecult.org";
 
@@ -22,23 +22,45 @@ fn room(name: &str) -> Fixture {
     Fixture::load(&fixtures().join("rooms").join(name)).unwrap()
 }
 
-/// A recorded model: the Projector narrates a fixed line; the Persona stage answers by `persona(prompt)`. Every call is
-/// kept, with its usage counted.
+/// A recorded model: the Projector narrates a fixed line; the Persona stage answers by `persona(prompt)`; the
+/// Interpreter by `interpreter(prompt)`, by default `quoted_lines`. Every call is kept, with its usage counted.
 pub(crate) struct Scripted {
     pub calls: RefCell<Vec<(String, String)>>,
     pub persona: Box<dyn Fn(&str) -> String>,
+    pub interpreter: Box<dyn Fn(&str) -> String>,
 }
 
 impl Scripted {
     pub(crate) fn new(persona: impl Fn(&str) -> String + 'static) -> Self {
-        Self { calls: RefCell::default(), persona: Box::new(persona) }
+        Self { calls: RefCell::default(), persona: Box::new(persona), interpreter: Box::new(quoted_lines) }
     }
+
+    pub(crate) fn interpreting(mut self, interpreter: impl Fn(&str) -> String + 'static) -> Self {
+        self.interpreter = Box::new(interpreter);
+        self
+    }
+}
+
+/// The recorded Interpreter of the tests: each double-quoted span of her prose is a line said in the first room listed,
+/// resting on itself, mentioning no one. A test double that keeps the tests' prose readable, not the speech rule: the
+/// live Interpreter is a model told quotes are not speech.
+pub(crate) fn quoted_lines(prompt: &str) -> String {
+    let prose = prompt.split("Persona turn (already preserved verbatim as source evidence):\n").nth(1).unwrap_or_default();
+    let room = prompt.split("Rooms she may speak in: ").nth(1).and_then(|rooms| rooms.lines().next()).and_then(|rooms| rooms.split("; ").next()).unwrap_or_default();
+    let say: Vec<Value> = prose.split('"').enumerate().filter(|(at, part)| at % 2 == 1 && !part.trim().is_empty()).map(|(_, part)| json!({ "room": room, "text": part, "source_quote": part, "mentions": [], "reply_to": null })).collect();
+    json!({ "say": say }).to_string()
 }
 
 impl Model for Scripted {
     fn ask(&self, _request_id: &str, model: &str, prompt: &str) -> std::result::Result<Answer, Failed> {
         self.calls.borrow_mut().push((model.to_owned(), prompt.to_owned()));
-        let text = if prompt.starts_with("<!-- membrane:") { "The room is slow and so is he.".to_owned() } else { (self.persona)(prompt) };
+        let text = if prompt.contains(":interpreter -->") {
+            (self.interpreter)(prompt)
+        } else if prompt.starts_with("<!-- membrane:") {
+            "The room is slow and so is he.".to_owned()
+        } else {
+            (self.persona)(prompt)
+        };
         Ok(Answer { text, usage: Some(Spent { model: model.to_owned(), input_tokens: 10, output_tokens: 2, cache_read_tokens: 1, cache_write_tokens: 0, reasoning_tokens: None }) })
     }
 }
@@ -132,28 +154,22 @@ fn a_fixture_that_is_not_a_room_is_refused_naming_what_is_wrong() {
 }
 
 #[test]
-fn would_say_is_the_quoted_spans_of_her_prose() {
-    assert_eq!(would_say("She looks up. \"Fine,\" she says, then \u{201C}mostly.\u{201D}"), vec!["Fine,", "mostly."]);
-    assert!(would_say("She says nothing, and means it.").is_empty());
-    assert!(would_say("She starts: \"well").is_empty(), "an unclosed quote says nothing");
-    assert!(would_say("\"\" and \"  \"").is_empty());
-}
-
-#[test]
-fn through_persona_continues_the_narration_in_her_prose_and_reports_what_she_would_say() {
+fn through_the_interpreter_her_prose_continues_the_narration_and_the_interpreter_decides_what_is_said() {
     let dir = tempfile::tempdir().unwrap();
     let model = Scripted::new(|_| "He smiles at the screen. \"Missed you too, friend,\" he types. He does not mention the kettle.".into());
     let fixture = room("operator-warm.toml");
     let harness = harness(dir.path(), Some(&NeverAsked), Some(&model));
     let organs = Organs { persona: harness.persona, chat: Some(&fixture), addressing: fixture.addressee(), model: harness.model };
-    let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 3, Some(1), Through::Persona), fixture.now).unwrap();
+    let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 3, Some(1), Through::Interpreter), fixture.now).unwrap();
     let render = &report["renders"][0];
-    assert_eq!(render["persona"]["would_say"], json!(["Missed you too, friend,"]));
+    assert_eq!(render["interpreter"]["said"][0]["text"], "Missed you too, friend,", "{render}");
+    assert_eq!(render["interpreter"]["said"][0]["room"], "!dm-meta:gamecult.org");
+    assert_eq!(report["interpreter_model"], "claude-sonnet-5-5");
     assert_eq!(render["persona"]["words"], 17);
     assert_eq!((render["usage"]["input_tokens"].as_u64(), render["persona"]["usage"]["model"].as_str()), (Some(10), Some("claude-sonnet-5-5")));
     assert_eq!(report["persona_model"], "claude-sonnet-5-5");
     let calls = model.calls.borrow();
-    assert_eq!(calls.len(), 2, "one Projector call and one Persona call");
+    assert_eq!(calls.len(), 3, "one Projector call, one Persona call, one Interpreter call");
     let persona_prompt = &calls[1].1;
     assert!(persona_prompt.starts_with("Everything below is prose from inside one person's life."), "Ghostlight's Persona membrane");
     assert!(persona_prompt.contains("The room is slow and so is he.") && persona_prompt.contains("hey you. I missed talking to you this week"), "the narration, then what she heard verbatim: {persona_prompt}");
@@ -171,10 +187,10 @@ fn prose_over_budget_is_cut_and_silence_says_nothing() {
     let fixture = room("deru-passing.toml");
     let harness = harness(dir.path(), None, Some(&model));
     let organs = Organs { persona: None, chat: Some(&fixture), addressing: None, model: harness.model };
-    let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 1, Some(1), Through::Persona), fixture.now).unwrap();
+    let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 1, Some(1), Through::Interpreter), fixture.now).unwrap();
     let persona = &report["renders"][0]["persona"];
     assert_eq!((persona["words"].as_u64(), persona["cut_at_budget"].as_bool()), (Some(180), Some(true)));
-    assert_eq!(persona["would_say"], json!([]), "the quote past the budget is never said");
+    assert_eq!(report["renders"][0]["interpreter"]["said"], json!([]), "words past the budget are not her prose, so nothing rests on them");
 }
 
 #[test]
@@ -185,7 +201,7 @@ fn a_batch_runs_every_state_by_scenario_by_sample_into_one_report() {
     std::fs::write(
         &plan,
         format!(
-            "samples = 2\nseed = 7\nthrough = \"persona\"\n[[state]]\nname = \"control\"\nfile = {:?}\n[[scenario]]\nname = \"quiet\"\nroom = {:?}\n[[scenario]]\nname = \"teased\"\nroom = {:?}\n",
+            "samples = 2\nseed = 7\nthrough = \"interpreter\"\n[[state]]\nname = \"control\"\nfile = {:?}\n[[scenario]]\nname = \"quiet\"\nroom = {:?}\n[[scenario]]\nname = \"teased\"\nroom = {:?}\n",
             fixtures().join("states/control.json").display().to_string(),
             rooms.join("quiet-beat.toml").display().to_string(),
             rooms.join("mind-teases.toml").display().to_string()
@@ -198,8 +214,8 @@ fn a_batch_runs_every_state_by_scenario_by_sample_into_one_report() {
         assert!(report.contains(heading), "{heading}\n{report}");
     }
     assert!(report.contains("| control | teased | 2/2 |") && report.contains("| control | quiet | 0/2 |"), "{report}");
-    assert!(report.contains("- \"Winter, still.\"") && report.contains("**Would say:** nothing (silence)"), "{report}");
-    assert!(report.contains("| claude-sonnet-5-5 | 8 | 80 | 16 |"), "eight calls, two a case, in the footer: {report}");
+    assert!(report.contains("- in #minds:gamecult.org: Winter, still.") && report.contains("  - rests on: \"Winter, still.\"") && report.contains("**Interpreter: nothing said.**"), "{report}");
+    assert!(report.contains("| claude-sonnet-5-5 | 12 | 120 | 24 |"), "twelve calls, three a case, in the footer: {report}");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the batch wrote nothing; the caller writes the report");
 }
 

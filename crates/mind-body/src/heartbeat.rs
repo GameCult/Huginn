@@ -434,7 +434,8 @@ pub(crate) enum WakePolicy {
     /// Ruling `persona-only-humans-pace`: a human's line wakes her in her own room (a direct message, or a room that is
     /// hers); in a public room only when it addresses her or continues an exchange she is in. A Mind's line wakes her
     /// only by an explicit mention (a Matrix mention of her or a reply to her, never a name in prose), in any room, and
-    /// only while fewer than this many Mind lines in a row came before it in its room: the backstop.
+    /// only while fewer than this many Mind lines in a row came before it across her rooms (`LineFacts::mind_run`): the
+    /// backstop.
     HumansPace(usize),
     /// `Ruled`, with at most this many Mind lines in a row in a room before a human must speak again: a Mind's line past
     /// the cap wakes no one.
@@ -456,14 +457,23 @@ pub(crate) enum WakeCause {
 
 /// What the room says about a line, beside the line: the facts a policy may weigh. The live poll knows none of them yet
 /// and passes the default; `Live` reads none.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LineFacts {
-    /// How many Mind lines in a row came before this one in its room since a human last spoke there.
+    /// How many Mind lines in a row came before this one, across every room she sees, since a human last spoke in any of
+    /// them: the backstop counts a Mind-only run per Mind, not per room, so a loop cannot dodge it by changing rooms.
     pub mind_run: usize,
     /// The line is in a room of hers: a direct message (the delivery says so) or a room configured as hers.
     pub own_room: bool,
     /// She has spoken in the room's current exchange: the lines before this one that follow each other without a long gap.
     pub in_exchange: bool,
+}
+
+/// Fail-safe: a caller that has not counted the Mind run is at the cap, so a Mind's line wakes no one; the room facts
+/// are unknown, so none opens a wake.
+impl Default for LineFacts {
+    fn default() -> Self {
+        Self { mind_run: usize::MAX, own_room: false, in_exchange: false }
+    }
 }
 
 /// Whether a line in her rooms wakes `who` off the beat under `policy`, and why. The one owner of the wake rule: the

@@ -29,8 +29,8 @@ use crate::heartbeat::{Addressing, HeartbeatView};
 
 pub use super::simulate::simulate;
 
-/// A narration whose word trigrams overlap what she heard past this share is marked as retelling it.
-pub(crate) const RETELL_FLAG: f64 = 0.15;
+/// A narration whose word trigrams overlap what she heard past this share is marked as a high lexical overlap.
+pub(crate) const OVERLAP_FLAG: f64 = 0.15;
 /// The most room lines a view's tail carries, as a mouth's tail is bounded.
 const TAIL_LINES: usize = 40;
 
@@ -431,7 +431,7 @@ fn batch_markdown(plan_path: &Path, plan: &BatchFile, cases: &[Value]) -> String
     for state in &plan.states {
         for scenario in &plan.scenarios {
             let mine: Vec<&Value> = cases.iter().filter(|case| case["state"] == state.name.as_str() && case["scenario"] == scenario.name.as_str()).collect();
-            let spoke = mine.iter().filter(|case| render_of(case)["persona"]["would_say"].as_array().is_some_and(|said| !said.is_empty())).count();
+            let spoke = mine.iter().filter(|case| render_of(case)["interpreter"]["said"].as_array().is_some_and(|said| !said.is_empty())).count();
             let mean = |key: &dyn Fn(&Value) -> Option<u64>| mine.iter().filter_map(|case| key(render_of(case))).sum::<u64>() as f64 / mine.len().max(1) as f64;
             let _ = writeln!(out, "| {} | {} | {spoke}/{} | {:.0} | {:.0} |", state.name, scenario.name, mine.len(), mean(&|render| render["words"].as_u64()), mean(&|render| render["persona"]["words"].as_u64()));
         }
@@ -486,9 +486,9 @@ Usage: {}
     }
     let _ = writeln!(
         out,
-        "Narration checks: overlap with what she heard {}{}{}\n",
+        "Narration checks: lexical overlap with what she heard {}{}{}\n",
         render["heard_overlap"].as_f64().map_or_else(|| "n/a".to_owned(), |overlap| format!("{overlap:.2}")),
-        if render["heard_overlap"].as_f64().is_some_and(|overlap| overlap > RETELL_FLAG) { " (retells)" } else { "" },
+        if render["heard_overlap"].as_f64().is_some_and(|overlap| overlap > OVERLAP_FLAG) { " (high)" } else { "" },
         if render["offers_options"] == true { "; offers her options" } else { "" }
     );
     let persona = &render["persona"];
@@ -498,22 +498,41 @@ Usage: {}
     } else if !persona.is_null() {
         let _ = writeln!(out, "**Her prose** ({} words{}):\n", persona["words"], if persona["cut_at_budget"] == true { ", cut at budget" } else { "" });
         quoted(out, persona["prose"].as_str().unwrap_or_default());
-        let _ = writeln!(out, "**Inner** (her prose with what she says aloud taken out):\n");
-        quoted(out, persona["inner"].as_str().unwrap_or_default());
-        match persona["would_say"].as_array().filter(|said| !said.is_empty()) {
-            Some(said) => {
-                let _ = writeln!(out, "**Would say:**\n");
-                for line in said {
-                    let _ = writeln!(out, "- \"{}\"", line.as_str().unwrap_or_default());
-                }
-                out.push('\n');
-            }
-            None => {
-                let _ = writeln!(out, "**Would say:** nothing (silence)\n");
-            }
-        }
     }
-    let _ = writeln!(out, "Usage: projector {}; persona {}\n", usage_line(&render["usage"]), usage_line(&persona["usage"]));
+    interpreter_markdown(out, &render["interpreter"]);
+    let _ = writeln!(out, "Usage: projector {}; persona {}; interpreter {}\n", usage_line(&render["usage"]), usage_line(&persona["usage"]), usage_line(&render["interpreter"]["usage"]));
+}
+
+/// The Interpreter's speech decision: each line said with its room, mentions, reply target and the span of her prose it
+/// rests on; each line refused, with why; its gaps. None when the render did not run through the Interpreter.
+pub(crate) fn interpreter_markdown(out: &mut String, decision: &Value) {
+    if decision.is_null() {
+        return;
+    }
+    if let Some(failed) = decision["failed"].as_str() {
+        let _ = writeln!(out, "**Interpreter failed:** {failed}\n");
+        return;
+    }
+    let said = decision["said"].as_array().cloned().unwrap_or_default();
+    if said.is_empty() {
+        let _ = writeln!(out, "**Interpreter: nothing said.**\n");
+    } else {
+        let _ = writeln!(out, "**Interpreter: said**\n");
+        for line in &said {
+            let mentions = line["mentions"].as_array().map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            let reply = line["reply_to"].as_str().map_or_else(String::new, |id| format!("; reply to {id}"));
+            let _ = writeln!(out, "- in {}{}{}: {}", line["room"].as_str().unwrap_or_default(), if mentions.is_empty() { String::new() } else { format!(", mentioning {mentions}") }, reply, line["text"].as_str().unwrap_or_default());
+            let _ = writeln!(out, "  - rests on: \"{}\"", line["rests_on"]["quote"].as_str().unwrap_or_default());
+        }
+        out.push('\n');
+    }
+    for line in decision["refused"].as_array().into_iter().flatten() {
+        let _ = writeln!(out, "- refused ({}): {}", line["why"].as_str().unwrap_or_default(), line["text"].as_str().unwrap_or_default());
+    }
+    for gap in decision["gaps"].as_array().into_iter().flatten() {
+        let _ = writeln!(out, "- gap: {gap}");
+    }
+    out.push('\n');
 }
 
 fn fenced(out: &mut String, label: &str, text: &str) {

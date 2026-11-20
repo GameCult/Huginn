@@ -189,27 +189,8 @@ pub(crate) fn persona_prompt(packet: &Packet, narration: &str, tuning: &Tuning) 
     build_persona_prompt(&PersonaPrompt { identity: &packet.identity, lived_stream: &lived_stream(narration, &packet.heard), domain_guidance: tuning.persona.guidance.trim(), word_budget: tuning.persona.words })
 }
 
-/// Her prose with what she says aloud taken out: her interior, which never leaves her head.
-pub(crate) fn inner(prose: &str) -> String {
-    let mut out = String::with_capacity(prose.len());
-    let mut open: Option<char> = None;
-    for c in prose.chars() {
-        match (open, c) {
-            (None, '"') => open = Some('"'),
-            (None, '\u{201C}') => open = Some('\u{201D}'),
-            (Some(close), c) if c == close => {
-                open = None;
-                out.push('\u{2026}');
-            }
-            (Some(_), _) => {}
-            (None, c) => out.push(c),
-        }
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// The share of the narration's word trigrams that also appear in what she heard: how much of the stream retells the
-/// messages the Persona is shown word for word anyway. A judge metric, never a filter: 0 is no retelling.
+/// The share of the narration's word trigrams that also appear in what she heard: a lexical overlap, cheap and blind to
+/// paraphrase. A metric, never a filter: 0 is no shared word run.
 pub(crate) fn heard_overlap(narration: &str, heard: &str) -> f64 {
     let trigrams = |text: &str| -> Vec<(String, String, String)> {
         let words: Vec<String> = text.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|word| !word.is_empty()).map(str::to_lowercase).collect();
@@ -231,29 +212,6 @@ pub(crate) fn offers_options(narration: &str) -> bool {
     ["i may ", "i could ", "i might ", "she may ", "she could ", "she might ", "nothing asks me", "nothing asks her", "or i could", "or she could"]
         .iter()
         .any(|form| lower.contains(&format!(" {form}")) || lower.contains(&format!(". {form}")) || lower.contains(&format!(", {form}")))
-}
-
-/// The words her prose says aloud: each span inside straight or curly double quotation marks, in prose order (map
-/// section 5.5: speech needs quoted spoken words). A preview of what the Interpreter (C3b) will be asked to quote, not
-/// its decision: a quotation she only recalls reads here as said. An unclosed quote says nothing.
-pub(crate) fn would_say(prose: &str) -> Vec<String> {
-    let mut said = Vec::new();
-    let mut open: Option<(char, usize)> = None;
-    for (at, c) in prose.char_indices() {
-        match (open, c) {
-            (None, '"') => open = Some(('"', at + 1)),
-            (None, '\u{201C}') => open = Some(('\u{201D}', at + c.len_utf8())),
-            (Some((close, start)), c) if c == close => {
-                let span = prose[start..at].trim();
-                if !span.is_empty() {
-                    said.push(span.to_owned());
-                }
-                open = None;
-            }
-            _ => {}
-        }
-    }
-    said
 }
 
 /// `text` held to `max` words (whitespace-separated, each CJK character one); the model's count is not trusted. An

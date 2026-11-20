@@ -1,4 +1,4 @@
-quiet-beat.toml: - the conversation: lately libby to the room; Kiko to the room; the last 3 lines are the Minds' alone
-operator-warm.toml: - the conversation: lately Meta, who runs the place with him; Meta, who runs the place last spoke 1 min ago; Meta, who runs the place is waiting on him
-mind-teases.toml: - the conversation: lately he to the room; aqua to the room; Kiko with him; the last 3 lines are the Minds' alone
-deru-passing.toml: - the conversation: lately weksa to the room; Deru to the room; Deru last spoke 1 min ago
+quiet-beat.toml: - the conversation: Lately @libby:gamecult.org to the room; Kiko to the room. The last 3 lines are the Minds' alone.
+operator-warm.toml: - the conversation: Meta, who runs the place is waiting on him. Lately Meta, who runs the place with him. Meta, who runs the place last spoke 1 min ago.
+mind-teases.toml: - the conversation: Lately he to the room; @aqua:gamecult.org to the room; Kiko with him. The last 3 lines are the Minds' alone.
+deru-passing.toml: - the conversation: Lately @weksa:gamecult.org to the room; Deru to the room. Deru last spoke 1 min ago.

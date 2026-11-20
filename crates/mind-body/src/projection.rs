@@ -18,6 +18,7 @@
 //! `project` cannot write and runs under a held brake.
 
 pub mod harness;
+mod interpret;
 mod narrate;
 mod select;
 mod simulate;
@@ -39,7 +40,7 @@ pub use narrate::{Answer, Failed, KitModel, Model, Spent, connector_key};
 pub use select::TurnKind;
 pub use tuning::{TUNING_FILE, TUNING_ROOT};
 
-use narrate::{cap_words, distinct_2, field_names, heard_overlap, inner, judge_prompt, judged, offers_options, persona_prompt, projector_prompt, word_budget, words, would_say};
+use narrate::{cap_words, distinct_2, field_names, heard_overlap, judge_prompt, judged, offers_options, persona_prompt, projector_prompt, word_budget, words};
 use select::{History, Inputs, Packet, People, Room, RoomLine, select};
 
 /// The agent name on the connector's request ids.
@@ -118,6 +119,8 @@ pub enum Through {
     #[default]
     Projector,
     Persona,
+    /// On through the Interpreter's speech step: what she says aloud, decided from her prose (`interpret`).
+    Interpreter,
 }
 
 /// What to project.
@@ -180,13 +183,15 @@ fn read_room(chat: &dyn MouthReader, request: &Request, own: &Addressee) -> (Roo
         Ok(pending) => pending,
         Err(fault) => return (Room { here: request.room.clone(), last_heard: request.last_heard.clone(), ..Room::default() }, json!({ "read": false, "why": format!("{fault:#}") })),
     };
-    // The turn's room by its alias, the name every line of the tail carries, when it was given by its Matrix id.
-    let here = request.room.as_ref().map(|here| pending.deliveries.iter().find(|delivery| delivery.room_id == *here).map_or_else(|| here.clone(), |delivery| delivery.room_alias.clone()));
-    let wanted = |room: &str, id: &str| here.as_deref().is_none_or(|here| here == room || here == id);
+    // One key names a room everywhere: the one the tail carries, the alias for a public room and the id for a direct
+    // message (the mouth's alias of a direct room is its id). No table in her body maps a public room's id to its
+    // alias, so a public room given by its id matches nothing, and the report says so rather than guessing.
+    let here = request.room.clone();
+    let wanted = |room: &str| here.as_deref().is_none_or(|here| here == room);
     let messages: Vec<RoomLine> = pending
         .deliveries
         .iter()
-        .filter(|delivery| delivery.form == Form::Message && wanted(&delivery.room_alias, &delivery.room_id))
+        .filter(|delivery| delivery.form == Form::Message && wanted(&delivery.room_alias))
         .map(|delivery| RoomLine {
             room: delivery.room_alias.clone(),
             sender: delivery.sender.clone(),
@@ -201,10 +206,17 @@ fn read_room(chat: &dyn MouthReader, request: &Request, own: &Addressee) -> (Roo
         .tail
         .iter()
         .flatten()
-        .filter(|line| line.form == Form::Message && wanted(&line.room, &line.room))
+        .filter(|line| line.form == Form::Message && wanted(&line.room))
         .map(|line| RoomLine { room: line.room.clone(), sender: line.sender.clone(), display: String::new(), text: line.body.clone(), at_ms: line.at_unix_ms, to_her: false })
         .collect();
-    let report = json!({ "read": true, "messages": messages.len(), "tail": tail.len(), "tail_gaps": pending.tail_gaps });
+    let mut report = json!({ "read": true, "messages": messages.len(), "tail": tail.len(), "tail_gaps": pending.tail_gaps });
+    if let Some(here) = &here
+        && messages.is_empty()
+        && tail.is_empty()
+        && here.starts_with('!')
+    {
+        report["why"] = json!("no line carries this room id: a public room is named by its alias (#name:server), a direct message by its id");
+    }
     (Room { messages, tail, here, last_heard: request.last_heard.clone() }, report)
 }
 
@@ -254,21 +266,22 @@ fn narrate_one(model: &dyn Model, instance: &str, packet: &Packet, tuning: &tuni
         "usage": answer.usage,
         "narration": narration,
     });
-    if through == Through::Persona {
-        render["persona"] = match model.ask(&request_id(instance, "persona", tag, packet.seed), &tuning.persona.model, &persona_prompt(packet, &narration, tuning)) {
-            Ok(spoke) => {
-                let prose = cap_words(&spoke.text, tuning.persona.words);
-                json!({
-                    "words": words(&prose),
-                    "cut_at_budget": words(&spoke.text) > tuning.persona.words,
-                    "would_say": would_say(&prose),
-                    "inner": inner(&prose),
-                    "usage": spoke.usage,
-                    "prose": prose,
-                })
-            }
-            Err(failed) => json!({ "failed": failed.reason, "usage": failed.usage }),
-        };
+    if through == Through::Projector {
+        return render;
+    }
+    let prose = match model.ask(&request_id(instance, "persona", tag, packet.seed), &tuning.persona.model, &persona_prompt(packet, &narration, tuning)) {
+        Ok(spoke) => {
+            let prose = cap_words(&spoke.text, tuning.persona.words);
+            render["persona"] = json!({ "words": words(&prose), "cut_at_budget": words(&spoke.text) > tuning.persona.words, "usage": spoke.usage, "prose": prose });
+            prose
+        }
+        Err(failed) => {
+            render["persona"] = json!({ "failed": failed.reason, "usage": failed.usage });
+            return render;
+        }
+    };
+    if through == Through::Interpreter {
+        render["interpreter"] = interpret::decide(model, &request_id(instance, "interpreter", tag, packet.seed), packet, &narration, &prose, tuning);
     }
     render
 }
@@ -326,8 +339,11 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
     };
     let model = organs.model.ok_or_else(|| anyhow!("renders need the connector, and none is configured"))?;
     report["model"] = json!(tuning.projector.model);
-    if request.through == Through::Persona {
+    if request.through != Through::Projector {
         report["persona_model"] = json!(tuning.persona.model);
+    }
+    if request.through == Through::Interpreter {
+        report["interpreter_model"] = json!(tuning.interpreter.model);
     }
     let packets = successive(&inputs, tuning, renders.max(1));
     report["packet"] = packet_json(&packets[0]);
