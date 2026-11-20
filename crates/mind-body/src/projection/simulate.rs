@@ -4,9 +4,13 @@
 //!
 //! Who wakes is the heartbeat's: `heartbeat::wakes` under the plan's `WakePolicy`, over each persona's addressee as the
 //! heartbeat's addressing table holds it (her stewarded projects' names included) when the plan names the table. The
-//! beat is the heartbeat's too: when it falls, one Persona wakes, the winner of `tempo::pick`. A persona woken in several
-//! rooms in one round takes one turn in each. The turns of a round go in an order drawn from the seed, each against the
-//! room as it stands at that turn.
+//! beat is the heartbeat's too: when it falls, one Persona wakes, the winner of `tempo::pick`. Who wakes in a round is
+//! decided from the room as the round opens, as one heartbeat poll decides from the pending it read: a line spoken by a
+//! turn of this round wakes no one, and counts toward a cap, only from the next round. A persona takes at most one turn
+//! a round, as the live heartbeat never starts a Mind whose unit is still running: in the room of her earliest waking
+//! line. She reads only that room, and only that room is marked seen, so a line in another room that woke her wakes
+//! her again next round: no line is seen without a turn that read it. The turns of a round go in an order drawn from
+//! the seed, each against the room as it stands at that turn.
 //!
 //! Her state does not move during a run: the Interpreter (C3b) and the commit (C3c) are not built. `state_after_turn`
 //! is the seam where they will. An explicit addressee (the Interpreter naming whom she speaks to) cannot be simulated
@@ -112,17 +116,24 @@ struct Member {
     rooms: Vec<String>,
 }
 
-/// One persona's view of the room at her turn: the lines since her last turn are new.
+/// Per room, how many lines she had seen when a turn of hers last read it: a line at or past that is new to her.
+type Seen = BTreeMap<String, usize>;
+
+fn unseen(seen: &Seen, lines: &[Line], at: usize) -> bool {
+    at >= seen.get(&lines[at].room).copied().unwrap_or(0)
+}
+
+/// One persona's view of the room at her turn: the lines she has not seen are new.
 struct View<'a> {
     lines: &'a [Line],
     viewer: &'a str,
     rooms: &'a [String],
-    seen: usize,
+    seen: &'a Seen,
 }
 
 impl MouthReader for View<'_> {
     fn pending(&self) -> Result<ChatPending> {
-        Ok(pending_for(self.lines, self.viewer, self.rooms, |at| at >= self.seen))
+        Ok(pending_for(self.lines, self.viewer, self.rooms, |at| unseen(self.seen, self.lines, at)))
     }
 }
 
@@ -206,13 +217,13 @@ fn in_exchange(lines: &[Line], at: usize, her: &str, window: Duration) -> bool {
     lines[..at].iter().any(|earlier| earlier.room == line.room && earlier.from == her && earlier.at_ms >= since)
 }
 
-/// Her wakes: one per room a new line woke her in, in the order of each room's first waking line. A room's turn takes
-/// the strongest cause among its lines, so no room that woke her, a direct message least of all, is passed over.
+/// Her wake, if a line she has not seen wakes her: in the room of the earliest such line, with the strongest cause among
+/// that room's waking lines.
 #[allow(clippy::too_many_arguments, reason = "one wake decision's inputs, each a plan or room fact")]
-fn woken(lines: &[Line], runs: &[usize], seen: usize, member: &Member, operators: &[String], cast: &[String], policy: WakePolicy, gap: Duration) -> Vec<Woken> {
+fn woken(lines: &[Line], runs: &[usize], seen: &Seen, member: &Member, operators: &[String], cast: &[String], policy: WakePolicy, gap: Duration) -> Option<Woken> {
     let mut found: Vec<(usize, WakeCause)> = Vec::new();
-    for (at, line) in lines.iter().enumerate().skip(seen) {
-        if !line.visible_to(&member.entry.id, &member.rooms) {
+    for (at, line) in lines.iter().enumerate() {
+        if !unseen(seen, lines, at) || !line.visible_to(&member.entry.id, &member.rooms) {
             continue;
         }
         let delivery = line.delivery(at, &member.entry.id, lines);
@@ -221,28 +232,18 @@ fn woken(lines: &[Line], runs: &[usize], seen: usize, member: &Member, operators
             found.push((at, cause));
         }
     }
-    let mut rooms: Vec<&str> = Vec::new();
-    for (at, _) in &found {
-        if !rooms.contains(&lines[*at].room.as_str()) {
-            rooms.push(&lines[*at].room);
-        }
+    let room = &lines[found.first()?.0].room;
+    found.retain(|(at, _)| lines[*at].room == *room);
+    let cause = found.iter().map(|(_, cause)| *cause).min()?;
+    let line = found.iter().rev().find(|(_, found)| *found == cause).map_or(0, |(at, _)| *at);
+    if cause != WakeCause::AddressedByMind {
+        return Some(Woken { cause, line, how: None, by: vec![] });
     }
-    rooms
-        .into_iter()
-        .filter_map(|room| {
-            let found: Vec<(usize, WakeCause)> = found.iter().copied().filter(|(at, _)| lines[*at].room == room).collect();
-            let cause = found.iter().map(|(_, cause)| *cause).min()?;
-            let line = found.iter().rev().find(|(_, found)| *found == cause).map_or(0, |(at, _)| *at);
-            if cause != WakeCause::AddressedByMind {
-                return Some(Woken { cause, line, how: None, by: vec![] });
-            }
-            let addressing: Vec<usize> = found.iter().filter(|(_, cause)| *cause == WakeCause::AddressedByMind).map(|(at, _)| *at).collect();
-            let rank = |how: &str| ["mention or reply", "id as text", "name in text"].iter().position(|one| *one == how).unwrap_or(3);
-            let how = addressing.iter().map(|at| how_addressed(&lines[*at], *at, member, lines)).min_by_key(|how| rank(how));
-            let by = addressing.iter().map(|at| json!({ "from": lines[*at].from, "how": how_addressed(&lines[*at], *at, member, lines), "says": lines[*at].says })).collect();
-            Some(Woken { cause, line, how, by })
-        })
-        .collect()
+    let addressing: Vec<usize> = found.iter().filter(|(_, cause)| *cause == WakeCause::AddressedByMind).map(|(at, _)| *at).collect();
+    let rank = |how: &str| ["mention or reply", "id as text", "name in text"].iter().position(|one| *one == how).unwrap_or(3);
+    let how = addressing.iter().map(|at| how_addressed(&lines[*at], *at, member, lines)).min_by_key(|how| rank(how));
+    let by = addressing.iter().map(|at| json!({ "from": lines[*at].from, "how": how_addressed(&lines[*at], *at, member, lines), "says": lines[*at].says })).collect();
+    Some(Woken { cause, line, how, by })
 }
 
 /// The wire spelling of a cause, and of the beat.
@@ -339,7 +340,7 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
     };
     scripted(0, &mut lines, &mut rounds_of, &mut causes)?;
     let opening = lines.len();
-    let mut seen = vec![0usize; members.len()];
+    let mut seen: Vec<Seen> = vec![Seen::new(); members.len()];
     let mut last_turn: Vec<Option<DateTime<Utc>>> = vec![None; members.len()];
     let mut last_beat = plan.start;
     let mut recent: Vec<Vec<Vec<String>>> = vec![Vec::new(); members.len()];
@@ -348,9 +349,8 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
     for round in 1..=plan.rounds {
         scripted(round, &mut lines, &mut rounds_of, &mut causes)?;
         let round_at = at_round(round);
-        // One turn per room that woke her, each in its room; all of hers this round read from where the round found her.
-        let round_seen = seen.clone();
-        let mut woke: Vec<(usize, Option<Woken>)> = members.iter().enumerate().flat_map(|(at, member)| woken(&lines, &mind_runs(&lines, &cast, member), seen[at], member, &plan.operators, &cast, plan.wake, Duration::minutes(plan.exchange_minutes)).into_iter().map(move |why| (at, Some(why)))).collect();
+        // Decided from the room as the round opens, as a poll decides from the pending it read.
+        let mut woke: Vec<(usize, Option<Woken>)> = members.iter().enumerate().filter_map(|(at, member)| woken(&lines, &mind_runs(&lines, &cast, member), &seen[at], member, &plan.operators, &cast, plan.wake, Duration::minutes(plan.exchange_minutes)).map(|why| (at, Some(why)))).collect();
         // The beat, as the heartbeat's: when it has fallen, one more wake for the winner of `tempo::pick` among those
         // not already woken.
         if plan.beat_s > 0 && (round_at - last_beat).num_seconds() >= i64::from(plan.beat_s) {
@@ -363,7 +363,7 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
                     waited_s: last_turn[at].map(|turn| u64::try_from((round_at - turn).num_seconds()).unwrap_or(0)),
                     last_turn_ms: last_turn[at].map(|turn| turn.timestamp_millis()),
                     topic_permille: 0,
-                    addressed_by_member: addressed_by_member(&plan.operators, &member.addressee, &pending_for(&lines, &member.entry.id, &member.rooms, |index| index >= seen[at]).deliveries),
+                    addressed_by_member: addressed_by_member(&plan.operators, &member.addressee, &pending_for(&lines, &member.entry.id, &member.rooms, |index| unseen(&seen[at], &lines, index)).deliveries),
                 })
                 .collect();
             if let Some(winner) = pick(&standings, plan.beat_s) {
@@ -375,7 +375,7 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
             counter += 1;
             let member = &members[at];
             let id = member.entry.id.clone();
-            let fresh: Vec<&Line> = lines[round_seen[at]..].iter().filter(|line| line.from != id && line.visible_to(&id, &member.rooms)).collect();
+            let fresh: Vec<&Line> = lines.iter().enumerate().filter(|(index, line)| unseen(&seen[at], &lines, *index) && line.from != id && line.visible_to(&id, &member.rooms)).map(|(_, line)| line).collect();
             // The turn is in the room of the line that woke her; a beat's, in the room of the newest line she has not seen.
             let woke_on = why.as_ref().map(|why| &lines[why.line]).or(fresh.last().copied());
             let here = woke_on.map_or_else(|| member.rooms[0].clone(), |line| line.room.clone());
@@ -400,11 +400,12 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
                 recent: recent[at].clone(),
                 own_rooms: member.entry.own_rooms.clone(),
             };
-            let view = View { lines: &lines, viewer: &id, rooms: &member.rooms, seen: round_seen[at] };
+            let view = View { lines: &lines, viewer: &id, rooms: &member.rooms, seen: &seen[at] };
             let names = Names(&member.addressee);
             let organs = Organs { persona: None, chat: Some(&view), addressing: Some(&names), model: harness.model };
             let report = project(&organs, &request, now).unwrap_or_else(|fault| json!({ "error": format!("{fault:#}") }));
-            seen[at] = lines.len();
+            // Only the room she read is seen.
+            seen[at].insert(here.clone(), lines.len());
             last_turn[at] = Some(now);
             let render = &report["renders"][0];
             if let Some(selected) = render["selected"].as_array() {

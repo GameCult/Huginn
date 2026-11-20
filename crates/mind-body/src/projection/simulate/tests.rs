@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::Value;
@@ -365,22 +366,51 @@ fn the_turn_is_in_the_room_of_the_line_that_woke_her() {
     assert_eq!(run["turns"][0]["room"], "#tobiah:gamecult.org", "{}", run["turns"]);
 }
 
+/// Each persona's turns, as (round, room), in order.
+fn turns_by_persona(run: &Value) -> BTreeMap<String, Vec<(u64, String)>> {
+    let mut out: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
+    for turn in run["turns"].as_array().unwrap() {
+        out.entry(turn["persona"].as_str().unwrap().to_owned()).or_default().push((turn["round"].as_u64().unwrap(), turn["room"].as_str().unwrap().to_owned()));
+    }
+    out
+}
+
 #[test]
-fn soul_r7_woken_in_a_direct_message_and_a_room_at_once_she_takes_a_turn_in_each() {
+fn soul_f5_one_turn_a_round_and_a_room_that_woke_her_waits_for_the_next() {
     let dir = tempfile::tempdir().unwrap();
-    let path = plan(dir.path(), "\"ruled\"", 1, "");
+    let path = plan(dir.path(), "\"ruled\"", 2, "");
     let line = |room: &str, dm: bool, says: &str| format!("[[message]]\nround = 1\nfrom = \"@meta:gamecult.org\"\nname = \"Meta\"\nroom = \"{room}\"\n{}says = \"{says}\"\n", if dm { "dm = true\nto = \"@libby:gamecult.org\"\n" } else { "" });
     let opening = "[[message]]\nfrom = \"@meta:gamecult.org\"\nname = \"Meta\"\nroom = \"#minds:gamecult.org\"\nsays = \"good afternoon, everyone\"\n";
     let text = std::fs::read_to_string(&path).unwrap().replace(opening, &format!("{}{}", line("!dm-libby:gamecult.org", true, "just you: how are you, really?"), line("#minds:gamecult.org", false, "Libby, how was the gig?")));
     std::fs::write(&path, text).unwrap();
     let (_, run) = run_plan(&path, &silent());
-    let mut libby: Vec<(String, String)> = run["turns"].as_array().unwrap().iter().filter(|turn| turn["persona"] == "Libby").map(|turn| (turn["room"].as_str().unwrap().to_owned(), turn["kind"].as_str().unwrap().to_owned())).collect();
-    libby.sort();
-    assert_eq!(libby, vec![("!dm-libby:gamecult.org".to_owned(), "chat".to_owned()), ("#minds:gamecult.org".to_owned(), "chat".to_owned())], "{}", run["turns"]);
+    // Her earliest waking line is the direct message: round 1 is there; #minds, still unseen, wakes her in round 2.
+    assert_eq!(turns_by_persona(&run)["Libby"], vec![(1, "!dm-libby:gamecult.org".to_owned()), (2, "#minds:gamecult.org".to_owned())], "{}", run["turns"]);
     // Each turn read its own room's line, and no other's.
     for turn in run["turns"].as_array().unwrap().iter().filter(|turn| turn["persona"] == "Libby") {
-        let stimulus = turn["report"]["renders"][0].to_string() + &turn["report"].to_string();
+        let report = turn["report"].to_string();
         let (own, other) = if turn["room"] == "#minds:gamecult.org" { ("how was the gig", "how are you, really") } else { ("how are you, really", "how was the gig") };
-        assert!(stimulus.contains(own) && !stimulus.contains(other), "{}: {stimulus}", turn["room"]);
+        assert!(report.contains(own) && !report.contains(other), "{}: {report}", turn["room"]);
+    }
+}
+
+#[test]
+fn soul_f5_three_rooms_open_at_once_take_three_rounds_not_one() {
+    for wake in ["\"ruled\"", "{ names_with_cap = 2 }"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = plan(dir.path(), wake, 6, "");
+        let more = |room: &str, says: &str| format!("[[message]]\nfrom = \"@meta:gamecult.org\"\nname = \"Meta\"\nroom = \"{room}\"\nsays = \"{says}\"\n");
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("rooms = [\"#minds:gamecult.org\"]", "rooms = [\"#minds:gamecult.org\", \"#lab:gamecult.org\", \"#ops:gamecult.org\"]")
+            .replace("says = \"good afternoon, everyone\"\n", &format!("says = \"good afternoon, everyone\"\n{}{}", more("#lab:gamecult.org", "lab is open"), more("#ops:gamecult.org", "ops is open")));
+        std::fs::write(&path, text).unwrap();
+        let (_, run) = run_plan(&path, &namers());
+        for (who, turns) in turns_by_persona(&run) {
+            let rounds: Vec<u64> = turns.iter().map(|(round, _)| *round).collect();
+            assert!(rounds.windows(2).all(|pair| pair[0] < pair[1]), "{wake}: {who} took two turns in one round: {turns:?}");
+            let rooms: Vec<&str> = turns.iter().take(3).map(|(_, room)| room.as_str()).collect();
+            assert_eq!(rooms, ["#minds:gamecult.org", "#lab:gamecult.org", "#ops:gamecult.org"], "{wake}: {who} answers each room in the order it opened");
+        }
     }
 }
