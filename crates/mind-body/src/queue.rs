@@ -28,6 +28,7 @@ pub trait MindPort {
     fn query(&self, selection: &Selection) -> Result<PipelineSelectionPage>;
     /// The `top_k` documents of the selection nearest `text` by meaning, ranked: the same read as
     /// `query` with a semantic ask, so one call path carries both. A port with no index refuses.
+    /// Kept for C3b's Interpreter read tool (`mind_query`); no caller in this crate until then.
     fn query_near(&self, _selection: &Selection, _text: &str, _top_k: u32) -> Result<PipelineSelectionPage> {
         bail!("this mind port has no semantic index")
     }

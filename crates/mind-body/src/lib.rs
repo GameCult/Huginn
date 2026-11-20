@@ -15,6 +15,10 @@
 //! until the three-stage turn lands it carries no turn. It keeps what a turn's input is made of
 //! (`chat_client` is the chat wire and port and `chat_rudp` its RUDP transport to Bifrost's mouth).
 //!
+//! `projection` is the Projector of the Persona-only turn: the Select stage chooses what she can feel and the
+//! Projector narrates it as her lived stream, under `persona-tuning.toml`; `mind-persona project` runs both and writes
+//! nothing.
+//!
 //! `lease_client` asks the Claude connector for a session's credential and the
 //! plan's usage windows. `self_run` carries one Self run inside `mind-self@<instance>`: the
 //! `mind-self-run` binary runs `claude` over stream-json for her one open Self
@@ -40,9 +44,8 @@ pub mod heartbeat;
 pub mod launch;
 pub mod lease_client;
 pub mod persona;
+pub mod projection;
 pub mod queue;
-#[allow(dead_code, reason = "kept for the three-stage turn's Select stage (map C3 reuses recall.rs): its first caller removes this allow")]
-mod recall;
 pub mod self_run;
 pub mod tempo;
 

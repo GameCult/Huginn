@@ -13,8 +13,8 @@ use model_connector::PlanQuota;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cultnet_rs::Selection;
 use eureka_pipeline::{
-    CutVerification, Date, DocRef, MemoryOrigin, MemorySort, PipelineCampaign, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
-    PipelineInstance, PipelineKind, PipelineMemory, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, PipelineStewardship,
+    CutVerification, Date, DocRef, PipelineCampaign, PipelineCutSpec, PipelineDocument, PipelineFollowUp,
+    PipelineInstance, PipelineKind, PipelineQuestion, PipelineRef, PipelineResolution, PipelineRuling, PipelineRun, PipelineStewardship,
     PipelineTarget, QuestionOption, ResolutionOutcome, RulingAuthority, RunOperator, RunTurn, Sha, Slug, StructuralDelta, TargetInvariant,
 };
 use huginn_mind::{
@@ -117,11 +117,6 @@ impl TestMind {
         this
     }
 
-    /// The next admission lands exactly at `when`.
-    pub(crate) fn admit_at(&self, when: DateTime<Utc>) {
-        self.now.set(when - Duration::seconds(1));
-    }
-
     /// Admits as Hands, one second after the last admission.
     pub(crate) fn put(&self, documents: Vec<PipelineDocument>) -> PipelineAdmissionOutcome {
         self.put_as(Faculty::Hands, documents)
@@ -219,26 +214,6 @@ impl MindPort for TestMind {
         };
         Ok(self.mind.borrow_mut().admit(batch, self.now.get()))
     }
-}
-
-/// One of her memories: `sort` and `text`, about `about`, learned in #swarm, salience 500.
-pub(crate) fn memory(label: &str, sort: MemorySort, text: &str, about: &[&str]) -> PipelineDocument {
-    memory_from(label, sort, text, about, MemoryOrigin::Room { rooms: "swarm".into(), heard_from: vec![] }, 500)
-}
-
-/// One of her memories with the origin and salience the ranking tests need.
-pub(crate) fn memory_from(label: &str, sort: MemorySort, text: &str, about: &[&str], origin: MemoryOrigin, salience_permille: u16) -> PipelineDocument {
-    PipelineDocument::Memory(PipelineMemory {
-        instance: Slug(INSTANCE.into()),
-        label: eureka_pipeline::Label(label.into()),
-        sort,
-        text: text.into(),
-        about: about.iter().map(|who| (*who).into()).collect(),
-        origin,
-        sources: vec![],
-        salience_permille,
-        consolidates: vec![],
-    })
 }
 
 fn doc_ref() -> DocRef {

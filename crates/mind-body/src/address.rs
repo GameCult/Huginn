@@ -93,19 +93,28 @@ pub(crate) fn project_names(repo: &OrgRepo, listed: &[Short]) -> Vec<Name> {
     names
 }
 
-/// Whether `text` holds `name` as a whole word, in any case or exactly as written: the characters on either side are not letters or
-/// digits. An identity match on a name, not a judgement of meaning.
+/// Whether `text` holds `name` as a whole word, in any case or exactly as written. A name is glued, and so not her name,
+/// when a letter or digit touches it, or a single hyphen joins it to one (`mind-eureka`, `Eureka-chan`); everything else
+/// is a boundary on either side: whitespace, punctuation, `/`, `_`, `.`, `\`, and a double hyphen or a dash. So
+/// `/var/lib/mind-eureka/` never names her, and `_Eureka_`, `Eureka/Libby`, `ok...Eureka?` and `Huginn.toml` do. An
+/// identity match on a name, not a judgement of meaning.
 pub(crate) fn names_whole_word(text: &str, name: &str, exact: bool) -> bool {
     let (text, name) = if exact { (text.to_string(), name.to_string()) } else { (text.to_lowercase(), name.to_lowercase()) };
     if name.is_empty() {
         return false;
     }
     // Every character offset, not every non-overlapping match: a name may overlap itself ("ab ab" in "xab ab ab").
-    text.char_indices().any(|(start, _)| {
-        text[start..].starts_with(&name)
-            && !text[..start].chars().next_back().is_some_and(char::is_alphanumeric)
-            && !text[start + name.len()..].chars().next().is_some_and(char::is_alphanumeric)
-    })
+    text.char_indices().any(|(start, _)| text[start..].starts_with(&name) && !glued(text[..start].chars().rev()) && !glued(text[start + name.len()..].chars()))
+}
+
+/// Whether the characters leading away from a name, nearest first, glue it to more of a word: a letter or digit, or a
+/// single hyphen with a letter or digit beyond it.
+fn glued(mut away: impl Iterator<Item = char>) -> bool {
+    match away.next() {
+        Some(c) if c.is_alphanumeric() => true,
+        Some('-') => away.next().is_some_and(char::is_alphanumeric),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
