@@ -393,12 +393,92 @@ pub(crate) fn stewardships_of(mind: &dyn MindPort) -> Result<(Vec<Name>, Vec<Org
     Ok((names, repos))
 }
 
-/// Whether a delivery wakes `who` off the beat: the operator or another Mind of
-/// the roster addresses her. A Mind naming herself does not; a member does not.
-fn wakes(config: &Config, who: &Addressee, delivery: &ChatDelivery) -> bool {
-    let from_operator = config.operators.contains(&delivery.sender);
-    let from_other_mind = delivery.sender != who.matrix_id() && config.personas.iter().any(|mind| mind.matrix_id == delivery.sender);
-    (from_operator || from_other_mind) && is_for(who, delivery)
+/// Who sent a line, as the wake rule sees them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Speaker {
+    Operator,
+    /// Another Mind of the roster.
+    Mind,
+    /// A human who is not the operator: a member.
+    Member,
+    /// The Persona herself.
+    Her,
+}
+
+impl Speaker {
+    fn human(self) -> bool {
+        matches!(self, Self::Operator | Self::Member)
+    }
+}
+
+/// Which lines wake a Persona off the beat. `Live` is the heartbeat's rule today and the only one `poll` uses; the rest
+/// are what desk question `po-mind-wakes-mind` weighs, run in `mind-persona project --simulate` until it is answered.
+/// The beat is not here: every policy has it, and it wakes one Persona by `tempo::pick`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WakePolicy {
+    /// The operator or another Mind addressing her (`is_for`). A member's line does not.
+    Live,
+    /// Ruling `persona-only-wake-humans-in-rooms`: a line addressing her, from anyone, and any human line in her rooms.
+    Ruled,
+    /// Human lines only: each wakes every Mind in the room once; a Mind's line never wakes a Mind.
+    HumansPace,
+    /// `Ruled`, with at most this many Mind lines in a row in a room before a human must speak again: a Mind's line past
+    /// the cap wakes no one.
+    NamesWithCap(usize),
+    /// The swarm's old loop, a control: any line in her rooms but her own.
+    AllMessages,
+}
+
+/// Why a line wakes her, strongest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WakeCause {
+    AddressedByHuman,
+    Human,
+    AddressedByMind,
+    /// A Mind's line that does not address her: only the control wakes on it.
+    Mind,
+}
+
+/// Whether a line in her rooms wakes `who` off the beat under `policy`, and why. `mind_run` is how many Mind lines in a
+/// row came before this one in its room since a human last spoke there. The one owner of the wake rule: the heartbeat's
+/// poll asks it with `Live`, the simulator with the policy under test.
+pub(crate) fn wakes(policy: WakePolicy, who: &Addressee, delivery: &ChatDelivery, speaker: Speaker, mind_run: usize) -> Option<WakeCause> {
+    if speaker == Speaker::Her {
+        return None;
+    }
+    let addressed = is_for(who, delivery);
+    let human = speaker.human();
+    let cause = match (human, addressed) {
+        (true, true) => WakeCause::AddressedByHuman,
+        (true, false) => WakeCause::Human,
+        (false, true) => WakeCause::AddressedByMind,
+        (false, false) => WakeCause::Mind,
+    };
+    let wakes = match policy {
+        WakePolicy::Live => addressed && matches!(speaker, Speaker::Operator | Speaker::Mind),
+        WakePolicy::Ruled => human || addressed,
+        WakePolicy::HumansPace => human,
+        WakePolicy::NamesWithCap(cap) => human || (addressed && mind_run < cap),
+        WakePolicy::AllMessages => true,
+    };
+    wakes.then_some(cause)
+}
+
+impl Config {
+    /// Who sent a delivery, as `wakes` sees them.
+    fn speaker(&self, who: &Addressee, delivery: &ChatDelivery) -> Speaker {
+        if delivery.sender == who.matrix_id() {
+            Speaker::Her
+        } else if self.operators.contains(&delivery.sender) {
+            Speaker::Operator
+        } else if self.personas.iter().any(|mind| mind.matrix_id == delivery.sender) {
+            Speaker::Mind
+        } else {
+            Speaker::Member
+        }
+    }
 }
 
 /// The mouth pages a pending answer, so fewer deliveries may come than wait.
@@ -528,7 +608,7 @@ pub fn poll(organs: &Organs, config: &Config) -> Result<Outcome> {
             pending.sort_by_key(|delivery| delivery.seq);
             pending
                 .into_iter()
-                .filter(|delivery| wakes(config, &row.addressee, delivery))
+                .filter(|delivery| wakes(WakePolicy::Live, &row.addressee, delivery, config.speaker(&row.addressee, delivery), 0).is_some())
                 .map(|delivery| format!("{}:{}", slug.0, delivery.event_id))
                 .find(|key| !state.handled_mentions.contains(key))
         };

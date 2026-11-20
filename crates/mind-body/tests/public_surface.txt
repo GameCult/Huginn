@@ -161,6 +161,7 @@ mind_body::heartbeat: impl HeartbeatView for FileStore
 mind_body::heartbeat: impl PersonaId
 mind_body::heartbeat: impl PersonaId: fn parse (spec : & str) -> Result < Self >
 mind_body::heartbeat: impl Row < '_ >
+mind_body::heartbeat: impl Speaker
 mind_body::heartbeat: impl Store for FileStore
 mind_body::heartbeat: impl fmt :: Display for Outcome
 mind_body::heartbeat: impl fmt :: Display for PollTrace
@@ -296,7 +297,7 @@ mind_body::projection::tuning: struct Loaded # [derive (Clone , Debug , PartialE
 mind_body::projection::tuning: struct PersonaTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String, guidance: String, words: usize]
 mind_body::projection::tuning: struct PoolCaps # [derive (Clone , Debug , PartialEq , Eq , Serialize , Deserialize)] pub-fields[memories_about_present: usize, other_memories: usize, needs: usize, incubation: usize, stance: usize, value: usize, said: usize]
 mind_body::projection::tuning: struct ProjectorTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String, guidance: String, words: usize, beat_words: usize]
-mind_body::projection::tuning: struct SelectTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[temperature: f64, inclusion_score: f64, context_bytes: usize, stimulus_bytes: usize, heard_bytes: usize, addressed_bytes: usize, identity_bytes: usize, bond_summary_bytes: usize, item_bytes: usize, memory_tau_h: f64, freshness_base: f64, freshness_window: usize, people_full: usize, beat_tail_lines: usize, caps: PoolCaps]
+mind_body::projection::tuning: struct SelectTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[temperature: f64, inclusion_score: f64, context_bytes: usize, stimulus_bytes: usize, heard_bytes: usize, addressed_bytes: usize, identity_bytes: usize, bond_summary_bytes: usize, item_bytes: usize, memory_tau_h: f64, freshness_base: f64, freshness_window: usize, people_full: usize, beat_tail_lines: usize, group_state: bool, group_lines: usize, group_bytes: usize, caps: PoolCaps]
 mind_body::projection::tuning: struct Tuning # [derive (Clone , Debug , Default , PartialEq , Serialize , Deserialize)] pub-fields[projector: ProjectorTuning, persona: PersonaTuning, select: SelectTuning, lens: LensWeights]
 mind_body::queue: fn on_hold (mind : & dyn MindPort) -> Result < Held >
 mind_body::queue: impl Held

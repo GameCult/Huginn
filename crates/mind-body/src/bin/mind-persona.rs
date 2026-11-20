@@ -17,7 +17,8 @@
 //! [--room <fixture.toml>] [--seed N] [--state <file>] [--select-only | --renders K [--through projector|persona]
 //! [--judge <state-file>]]` is the experiment tool over the Projector and the Persona stage
 //! (`mind_body::projection::project`): it prints, as JSON, the packet the Select stage builds from her stored state (or
-//! `--state`, checked as a put would check it), and with `--renders` the Projector's narrations of K successive turns;
+//! `--state`, checked as a put checks its content, rules P1 to P3; P4 and P5 compare it with the stored document and are
+//! not checked), and with `--renders` the Projector's narrations of K successive turns;
 //! `--through persona` adds her prose and the quoted lines it would say; `--judge` renders a second state too and asks
 //! the model which narration came from which. It writes nothing and reads no brake.
 //!

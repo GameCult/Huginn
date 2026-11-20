@@ -34,6 +34,7 @@ const TAIL_LINES: usize = 40;
 
 /// A persona state file, checked as a put would check its content (huginn-mind's rules P1 to P3: the published schema,
 /// `personaId` is the instance, canonical provenance). A file this accepts is one a put would not refuse for what it says.
+/// P4 and P5 are not checked: they compare `updatedAt` with the stored document, and no store is read here.
 pub fn state_file(path: &Path, instance: &str) -> Result<Value> {
     let text = std::fs::read_to_string(path).with_context(|| format!("{} could not be read", path.display()))?;
     let state: Value = serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))?;

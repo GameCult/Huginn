@@ -36,6 +36,8 @@ const ADDRESSED_RANGE: std::ops::RangeInclusive<usize> = 1024..=64 * 1024;
 const PART_BYTES_MAX: usize = 32 * 1024;
 /// The most words a lived stream may be given: a thin moment gets a thin stream, and no budget needs a book.
 const WORDS_MAX: usize = 2000;
+/// The most room lines the group state reads: a recent window, not the room's history.
+const GROUP_LINES_MAX: usize = 40;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -97,6 +99,14 @@ pub struct SelectTuning {
     pub people_full: usize,
     /// The room lines a beat shows.
     pub beat_tail_lines: usize,
+    /// The group-state slot: who has been talking to whom, how long since a human spoke, what is addressed to her or
+    /// open to anyone, and how long the run of Mind lines is (prior art: group state in the prompt is what lets a
+    /// participant judge whether to speak).
+    pub group_state: bool,
+    /// The room lines the group state reads.
+    pub group_lines: usize,
+    /// The group-state slot's bytes.
+    pub group_bytes: usize,
     pub caps: PoolCaps,
 }
 
@@ -153,6 +163,9 @@ impl Default for SelectTuning {
             freshness_window: 5,
             people_full: 2,
             beat_tail_lines: 6,
+            group_state: true,
+            group_lines: 6,
+            group_bytes: 360,
             caps: PoolCaps::default(),
         }
     }
@@ -203,6 +216,8 @@ impl Tuning {
             ("select.identity_bytes", select.identity_bytes),
             ("select.bond_summary_bytes", select.bond_summary_bytes),
             ("select.item_bytes", select.item_bytes),
+            ("select.group_lines", select.group_lines),
+            ("select.group_bytes", select.group_bytes),
             ("projector.words", self.projector.words),
             ("projector.beat_words", self.projector.beat_words),
             ("persona.words", self.persona.words),
@@ -218,13 +233,18 @@ impl Tuning {
             ("select.identity_bytes", select.identity_bytes),
             ("select.bond_summary_bytes", select.bond_summary_bytes),
             ("select.item_bytes", select.item_bytes),
+            ("select.group_bytes", select.group_bytes),
             ("projector.guidance", self.projector.guidance.len()),
+            ("persona.guidance", self.persona.guidance.len()),
         ] {
             if bytes > PART_BYTES_MAX {
                 bail!("{name} must be at most {PART_BYTES_MAX} bytes, not {bytes}: the prompt must fit the connector's frame");
             }
         }
-        for (name, words) in [("projector.words", self.projector.words), ("projector.beat_words", self.projector.beat_words)] {
+        if select.group_lines > GROUP_LINES_MAX {
+            bail!("select.group_lines must be at most {GROUP_LINES_MAX}, not {}", select.group_lines);
+        }
+        for (name, words) in [("projector.words", self.projector.words), ("projector.beat_words", self.projector.beat_words), ("persona.words", self.persona.words)] {
             if words > WORDS_MAX {
                 bail!("{name} must be at most {WORDS_MAX}, not {words}");
             }

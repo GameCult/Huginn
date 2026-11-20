@@ -5,7 +5,7 @@
 //! here; reaching into it is the Interpreter's, through its read tools, when wondering leads to reading.
 //!
 //! Every packet carries its fixed slots: identity, the hour, her mood as change, a bond line for each person
-//! present, and the stimulus. The rest comes from her state's pools. Each candidate is ordered by
+//! present, the group state (who has been talking to whom, `group_line`), and the stimulus. The rest comes from her state's pools. Each candidate is ordered by
 //! `log(score) / T` plus Gumbel noise and included with probability `1 - exp(-score / inclusion_score)`, where
 //! `score = salience × recency × touch × relevance × unresolved × freshness`; then each pool's cap and the context
 //! budget bound what is kept. A cap is a maximum, never a target: a pool with fewer candidates than its cap still
@@ -815,6 +815,95 @@ fn also_here(named: &[String]) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The group state: what the room's recent lines say about who is talking to whom.
+
+/// Whether a sender is a Mind of the swarm (she is one); anyone else is a human.
+fn is_mind(inputs: &Inputs, sender: &str) -> bool {
+    sender == inputs.people.own_sender || inputs.people.minds.iter().any(|mind| mind == sender)
+}
+
+/// The label her bond with a sender gives them, when she has a live one.
+fn bond_label(inputs: &Inputs, sender: &str) -> Option<String> {
+    let person = inputs.people.person_of(sender);
+    items(inputs.state, &["affect", "socialBonds"]).iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == person).map(|bond| text(bond, &["object", "label"]).to_owned()).filter(|label| !label.is_empty())
+}
+
+/// The words a line may call its sender by: the Matrix localpart, the display name, and the bond's label when she has one.
+fn names_of(line: &RoomLine, inputs: &Inputs) -> Vec<String> {
+    [Some(localpart(&line.sender).to_owned()), Some(line.display.trim().to_owned()), bond_label(inputs, &line.sender)].into_iter().flatten().filter(|name| !name.is_empty()).collect()
+}
+
+/// The group-state slot (`select.group_state`): over the room's last `group_lines` lines, who spoke to whom (to her, to
+/// someone else present by name, or to the room); when a human last spoke; how many lines in a row are the Minds' alone;
+/// how many lines are to her; and whether a human's question to everyone stands open. Code reads names and question marks,
+/// not meaning: whom a line is to by the names in it is a cue, and the Interpreter (C3b) will know better. None when the
+/// room shows no line.
+fn group_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
+    let here = inputs.room.here.as_deref();
+    let mut lines: Vec<&RoomLine> = Vec::new();
+    for line in inputs.room.messages.iter().chain(&inputs.room.tail) {
+        if here.is_some_and(|here| line.room != here) || lines.iter().any(|seen| seen.sender == line.sender && seen.at_ms == line.at_ms && seen.text == line.text) {
+            continue;
+        }
+        lines.push(line);
+    }
+    lines.sort_by_key(|line| line.at_ms);
+    if lines.is_empty() {
+        return None;
+    }
+    let to_her = |line: &RoomLine| line.sender != inputs.people.own_sender && (line.to_her || [localpart(inputs.people.own_sender), text(inputs.state, &["publicName"])].iter().any(|name| crate::address::names_whole_word(&line.text, name, false)));
+    let window = &lines[lines.len().saturating_sub(tuning.select.group_lines)..];
+    // A tail line carries no display name: an unbonded sender there goes by the handle in her Matrix id.
+    let label = |line: &RoomLine| {
+        if line.sender == inputs.people.own_sender {
+            "she".to_owned()
+        } else if line.display.trim().is_empty() && bond_label(inputs, &line.sender).is_none() {
+            localpart(&line.sender).to_owned()
+        } else {
+            name_of(line, inputs)
+        }
+    };
+    let talk: Vec<String> = window
+        .iter()
+        .map(|line| {
+            let target = if to_her(line) {
+                "her".to_owned()
+            } else {
+                window.iter().filter(|other| other.sender != line.sender).find(|other| names_of(other, inputs).iter().any(|name| crate::address::names_whole_word(&line.text, name, false))).map_or_else(|| "the room".to_owned(), |other| label(other))
+            };
+            format!("{} to {target}", label(line))
+        })
+        .collect();
+    let mut parts = vec![format!("the room lately: {}", talk.join(", "))];
+    let last_human = lines.iter().rev().find(|line| !is_mind(inputs, &line.sender));
+    parts.push(match last_human {
+        Some(line) => format!("a human, {}, last spoke {} min ago", label(line), minutes(inputs.now, line.at_ms)),
+        None => "no human has spoken here lately".to_owned(),
+    });
+    let minds_in_a_row = lines.iter().rev().take_while(|line| is_mind(inputs, &line.sender)).count();
+    if minds_in_a_row >= 2 {
+        parts.push(format!("the last {minds_in_a_row} lines are the Minds' alone"));
+    }
+    let addressed = lines.iter().filter(|line| to_her(line)).count();
+    if addressed > 0 {
+        parts.push(format!("{addressed} {} to her", if addressed == 1 { "line is" } else { "lines are" }));
+    }
+    if let Some(line) = last_human
+        && line.text.trim_end().ends_with('?')
+        && !to_her(line)
+        && !window.iter().filter(|other| other.sender != line.sender).any(|other| names_of(other, inputs).iter().any(|name| crate::address::names_whole_word(&line.text, name, false)))
+    {
+        parts.push(format!("{}'s question to everyone is open", label(line)));
+    }
+    Some(clip(&format!("- {}", parts.join("; ")), tuning.select.group_bytes))
+}
+
+fn minutes(now: DateTime<Utc>, at_ms: u64) -> i64 {
+    let at = i64::try_from(at_ms).ok().and_then(DateTime::<Utc>::from_timestamp_millis).unwrap_or(now);
+    (now - at).num_minutes().max(0)
+}
+
+// ---------------------------------------------------------------------------------------------
 // The packet.
 
 pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
@@ -855,6 +944,12 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
         }
     }
     if let Some(line) = also_here(&named).filter(|line| used + line.len() < budget) {
+        used += line.len() + 1;
+        fixed.push(line);
+    }
+    if tuning.select.group_state
+        && let Some(line) = group_line(inputs, tuning).filter(|line| used + line.len() < budget)
+    {
         used += line.len() + 1;
         fixed.push(line);
     }

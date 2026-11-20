@@ -218,3 +218,37 @@ fn a_batch_state_without_a_file_is_her_stored_state() {
     let report = batch(&harness(dir.path(), Some(&Stored), Some(&model)), &plan).unwrap();
     assert!(report.contains("## stored × quiet, sample 1") && !report.contains("failed"), "{report}");
 }
+
+fn group_line_of(dir: &Path, name: &str) -> Option<String> {
+    let fixture = room(name);
+    let harness = harness(dir, None, None);
+    let organs = Organs { persona: None, chat: Some(&fixture), addressing: fixture.addressee(), model: None };
+    let report = project(&organs, &fixture_request(&harness, &fixture, Some(control()), 1, None, Through::Projector), fixture.now).unwrap();
+    report["packet"]["context"].as_str().unwrap().lines().find(|line| line.starts_with("- the room lately")).map(str::to_owned)
+}
+
+#[test]
+fn the_group_state_reads_each_scenario_room_as_the_golden_file_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rendered = String::new();
+    for name in ["quiet-beat.toml", "operator-warm.toml", "mind-teases.toml", "deru-passing.toml"] {
+        let line = group_line_of(dir.path(), name).unwrap_or_else(|| "(none)".into());
+        assert!(line.len() <= 360, "the slot holds its byte budget: {line}");
+        rendered.push_str(&format!("{name}: {line}
+"));
+    }
+    let golden = include_str!("../../../fixtures/harness/golden-group.txt").replace("
+", "
+");
+    assert_eq!(rendered, golden, "the group state moved; if deliberately, the new golden file is:
+{rendered}");
+}
+
+#[test]
+fn the_group_state_is_off_when_the_tuning_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("persona-tuning.toml"), "[select]
+group_state = false
+").unwrap();
+    assert!(group_line_of(dir.path(), "mind-teases.toml").is_none());
+}
