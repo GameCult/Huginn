@@ -1531,3 +1531,42 @@ fn what_she_said_in_a_direct_message_stays_in_it() {
     let public = History { said: vec![said("#swarm:gamecult.org")], ..History::default() };
     assert!((1..=60).any(|seed| packet_of(TurnKind::Chat, &state(), &chat_room(), &public, seed).context.contains("SAIDDM")), "a public line is shared");
 }
+
+#[test]
+fn soul_f6_a_mind_is_one_person_by_her_handle_or_her_full_matrix_id() {
+    let kiko_here = Room { messages: vec![message("#minds:gamecult.org", "@kiko:gamecult.org", "Kiko", "hi all", 2, false)], here: Some("#minds:gamecult.org".into()), ..Room::default() };
+    let kiko_dm = Room { messages: vec![message("!dm-kiko:gamecult.org", "@kiko:gamecult.org", "Kiko", "hey", 2, true)], here: Some("!dm-kiko:gamecult.org".into()), direct: vec!["!dm-kiko:gamecult.org".into()], ..Room::default() };
+    for (spelling, memory) in [
+        ("target, handle", json!({ "target": { "id": "kiko", "kind": "person" }, "tags": ["private"] })),
+        ("target, full id", json!({ "target": { "id": "@kiko:gamecult.org", "kind": "person" }, "tags": ["private"] })),
+        ("about, handle", json!({ "tags": ["private", "about:kiko"] })),
+        ("about, full id", json!({ "tags": ["private", "about:@kiko:gamecult.org"] })),
+    ] {
+        let mut marked = state();
+        let mut item = json!({ "id": "kiko-secret", "summary": "KIKOSECRET she is leaving.", "createdAt": hours_ago(3), "status": "crystallized", "intensity": 1.0 });
+        for (key, value) in memory.as_object().unwrap() {
+            item[key] = value.clone();
+        }
+        marked["thoughtMemory"]["memories"] = json!([item]);
+        assert_eq!(lines_with(&marked, &kiko_here, TurnKind::Chat, "KIKOSECRET"), None, "{spelling}: left out with Kiko here");
+        assert_eq!(lines_with(&marked, &kiko_dm, TurnKind::Chat, "KIKOSECRET"), Some(vec!["- memory [kiko-secret]: KIKOSECRET she is leaving.".to_owned()]), "{spelling}: plain with Kiko alone");
+    }
+    // A bond keyed by her full Matrix id is her bond, and the operator's full id is `operator`.
+    let mut full = state();
+    full["affect"]["socialBonds"][1]["object"]["id"] = "@kiko:gamecult.org".into();
+    full["affect"]["socialBonds"][2]["object"]["id"] = OPERATOR.into();
+    let both = Room { messages: vec![message("#minds:gamecult.org", "@kiko:gamecult.org", "Kiko", "hi", 3, false), message("#minds:gamecult.org", OPERATOR, "Meta", "hi", 2, false)], ..kiko_here };
+    let context = packet_of(TurnKind::Chat, &full, &both, &History::default(), 1).context;
+    assert!(context.contains("- bond [bond-kiko] Kiko") && context.contains("- bond [bond-operator] Meta, the operator"), "{context}");
+}
+
+#[test]
+fn soul_f7_a_value_carrying_a_mark_is_refused_not_rendered() {
+    let mut marked = state();
+    marked["values"] = json!([{ "id": "v-secret", "label": "SECRETVALUE", "priority": 0.9, "summary": "Never tell Kiko.", "extensions": { "privacy": "private" } }, { "id": "coherence", "label": "Coherence", "priority": 0.9, "summary": "Coherence over velocity." }]);
+    let own = Room { messages: vec![message("#eureka:gamecult.org", OPERATOR, "Meta", "morning", 2, false)], here: Some("#eureka:gamecult.org".into()), own: vec!["#eureka:gamecult.org".into()], ..Room::default() };
+    for room in [chat_room(), own] {
+        assert_eq!(lines_with(&marked, &room, TurnKind::Chat, "SECRETVALUE"), None);
+    }
+    assert!(lines_with(&marked, &chat_room(), TurnKind::Chat, "Coherence").is_some(), "an unmarked value still renders");
+}

@@ -155,15 +155,18 @@ pub(crate) struct People<'a> {
 }
 
 impl People<'_> {
-    /// The id a bond names a person by: `operator` for the operator, a Mind's localpart for a Mind of the swarm, and the
-    /// full Matrix id for anyone else, so `@libby:evil.example` is never Libby.
-    pub(crate) fn person_of(&self, sender: &str) -> String {
-        if self.operators.iter().any(|operator| operator == sender) {
+    /// The key a person goes by in her state, from a sender or from either spelling a seed may use: the operator's
+    /// Matrix id is `operator`, a Mind of the swarm's is her handle (`@kiko:gamecult.org` is `kiko`), anyone else's is
+    /// the full Matrix id, so `@libby:evil.example` is never Libby; a bare key (`operator`, `kiko`) is itself. One
+    /// operator is assumed: every operator id is `operator`.
+    pub(crate) fn person_of(&self, id: &str) -> String {
+        let id = id.trim();
+        if self.operators.iter().any(|operator| operator == id) {
             "operator".into()
-        } else if self.minds.iter().any(|mind| mind == sender) {
-            localpart(sender).to_lowercase()
+        } else if self.minds.iter().any(|mind| mind == id) {
+            localpart(id).to_lowercase()
         } else {
-            sender.to_lowercase()
+            id.to_lowercase()
         }
     }
 }
@@ -479,9 +482,9 @@ fn in_room(item: &Value, here: Option<&str>) -> bool {
     here.is_some_and(|here| items(item, &["tags"]).iter().filter_map(Value::as_str).any(|tag| tag.strip_prefix("room:") == Some(here)))
 }
 
-fn about_present(item: &Value, present: &BTreeSet<String>) -> bool {
-    let target = text(item, &["target", "id"]).to_lowercase();
-    present.contains(&target) || items(item, &["tags"]).iter().filter_map(Value::as_str).filter_map(|tag| tag.strip_prefix("about:")).any(|id| present.contains(&id.to_lowercase()))
+fn about_present(people: &People, item: &Value, present: &BTreeSet<String>) -> bool {
+    let target = people.person_of(text(item, &["target", "id"]));
+    present.contains(&target) || items(item, &["tags"]).iter().filter_map(Value::as_str).filter_map(|tag| tag.strip_prefix("about:")).any(|id| present.contains(&people.person_of(id)))
 }
 
 fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touching: &BTreeSet<String>) -> Vec<Candidate> {
@@ -504,12 +507,12 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
         let log_score = salience.ln() + recency + touch.ln() + unresolved.ln() + freshness_log(id, inputs.history, tuning);
         out.push(Candidate { id: id.to_owned(), pool, line, log_score, private });
     };
-    let scoped = |item: &Value| scope(inputs, concerns(item).as_ref(), present);
+    let scoped = |item: &Value| scope(inputs, concerns(&inputs.people, item).as_ref(), present);
 
     let crystallized = items(state, &["thoughtMemory", "memories"]).iter().map(|memory| (memory, false));
     let memories = crystallized.chain(items(state, &["thoughtMemory", "shortTerm"]).iter().map(|memory| (memory, true)));
     for (memory, short_term) in memories.filter(|(memory, _)| live(memory)) {
-        let about = about_present(memory, present);
+        let about = about_present(&inputs.people, memory, present);
         let pool = if about { Pool::MemoriesAboutPresent } else { Pool::OtherMemories };
         let touch = if about { TOUCH_PRESENT } else if in_room(memory, here) { TOUCH_ROOM } else { TOUCH_ELSE };
         let body = [text(memory, &["summary"]), text(memory, &["tension"])].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ");
@@ -533,20 +536,22 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
 
     for wondering in items(state, &["thoughtMemory", "incubation"]).iter().filter(|item| live(item) && !text(item, &["summary"]).is_empty()) {
         let days = time(wondering).map_or(0.0, |at| (inputs.now - at).num_seconds().max(0) as f64 / 86_400.0);
-        let touch = if about_present(wondering, present) { TOUCH_PRESENT } else { TOUCH_ELSE };
+        let touch = if about_present(&inputs.people, wondering, present) { TOUCH_PRESENT } else { TOUCH_ELSE };
         let line = |words: &str| format!("- wondering [{}]: {}", text(wondering, &["id"]), clip(&one_line(words), item_bytes));
         let unresolved = (1.0 + days / 7.0).min(INCUBATION_UNRESOLVED_MAX);
         push(text(wondering, &["id"]), Pool::Incubation, scoped(wondering), text(wondering, &["summary"]), &line, number(wondering, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), 0.0, touch, unresolved);
     }
 
     for stance in items(state, &["affect", "doctrineStances"]).iter().filter(|stance| live(stance) && !text(stance, &["summary"]).is_empty()) {
-        let touch = if about_present(stance, present) { TOUCH_PRESENT } else { TOUCH_ELSE };
+        let touch = if about_present(&inputs.people, stance, present) { TOUCH_PRESENT } else { TOUCH_ELSE };
         let line = |words: &str| format!("- stance [{}]: {}", text(stance, &["id"]), clip(&one_line(words), item_bytes));
         let relevance = relevance_log(text(stance, &["summary"]), touching);
         push(text(stance, &["id"]), Pool::Stance, scoped(stance), text(stance, &["summary"]), &line, number(stance, &["intensity"]).unwrap_or(SALIENCE_UNSTATED), relevance, touch, 1.0);
     }
 
-    for value in items(state, &["values"]).iter().filter(|value| !text(value, &["label"]).is_empty() || !text(value, &["summary"]).is_empty()) {
+    // A value has no target, tags or extensions in the schema, so nothing can mark it private; one that carries a mark
+    // anyway is not a valid value and is refused, never rendered.
+    for value in items(state, &["values"]).iter().filter(|value| concerns(&inputs.people, value).is_none() && (!text(value, &["label"]).is_empty() || !text(value, &["summary"]).is_empty())) {
         let summary = clip(&one_line(text(value, &["summary"])), item_bytes);
         let label = clip(text(value, &["label"]), NAME_BYTES);
         let line = match (label.is_empty(), summary.is_empty()) {
@@ -555,7 +560,6 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
             _ => format!("- value [{}]: {summary}", text(value, &["id"])),
         };
         let relevance = relevance_log(&format!("{} {}", text(value, &["label"]), text(value, &["summary"])), touching);
-        // A value has no target, tags or extensions: nothing marks it private.
         push(text(value, &["id"]), Pool::Value, Scope::Plain, &line, &str::to_owned, number(value, &["priority"]).unwrap_or(SALIENCE_UNSTATED), relevance, TOUCH_ELSE, 1.0);
     }
 
@@ -589,7 +593,7 @@ fn cap_of(pool: Pool, tuning: &Tuning) -> usize {
 /// it, so a stranger called "Meta" never reads as the operator.
 fn name_of(line: &RoomLine, inputs: &Inputs) -> String {
     let person = inputs.people.person_of(&line.sender);
-    let bonded = items(inputs.state, &["affect", "socialBonds"]).iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == person).map(|bond| text(bond, &["object", "label"]).to_owned()).filter(|label| !label.is_empty());
+    let bonded = items(inputs.state, &["affect", "socialBonds"]).iter().find(|bond| live(bond) && inputs.people.person_of(text(bond, &["object", "id"])) == person).map(|bond| text(bond, &["object", "label"]).to_owned()).filter(|label| !label.is_empty());
     match bonded {
         Some(label) => clip(&one_line(&label), NAME_BYTES),
         // A display name is the speaker's own text: quoted and escaped, at most `NAME_BYTES`, the real id always after it.
@@ -791,7 +795,7 @@ fn beat_stimulus(inputs: &Inputs, tuning: &Tuning) -> String {
     let cap = tuning.select.stimulus_bytes;
     let mut contacts: Vec<(Option<u64>, String)> = Vec::new();
     for bond in items(inputs.state, &["affect", "socialBonds"]).iter().filter(|bond| live(bond) && text(bond, &["object", "kind"]) == "person") {
-        let person = text(bond, &["object", "id"]).to_lowercase();
+        let person = inputs.people.person_of(text(bond, &["object", "id"]));
         let label = clip(&one_line([text(bond, &["object", "label"]), text(bond, &["object", "id"])].into_iter().find(|name| !name.is_empty()).unwrap_or_default()), NAME_BYTES);
         let heard = inputs.room.tail.iter().map(|line| (line.sender.as_str(), line.at_ms)).chain(inputs.room.last_heard.iter().map(|(sender, at)| (sender.as_str(), *at)));
         let last = heard.filter(|(sender, _)| inputs.people.person_of(sender) == person).map(|(_, at)| at).max();
@@ -931,7 +935,7 @@ fn is_mind(inputs: &Inputs, sender: &str) -> bool {
 /// The label her bond with a sender gives them, when she has a live one.
 fn bond_label(inputs: &Inputs, sender: &str) -> Option<String> {
     let person = inputs.people.person_of(sender);
-    items(inputs.state, &["affect", "socialBonds"]).iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == person).map(|bond| text(bond, &["object", "label"]).to_owned()).filter(|label| !label.is_empty())
+    items(inputs.state, &["affect", "socialBonds"]).iter().find(|bond| live(bond) && inputs.people.person_of(text(bond, &["object", "id"])) == person).map(|bond| text(bond, &["object", "label"]).to_owned()).filter(|label| !label.is_empty())
 }
 
 /// The words a line may call its sender by: the Matrix localpart, the display name, and the bond's label when she has one.
@@ -1102,14 +1106,14 @@ enum Concerns {
 /// shared (None). It concerns the person its `target` (a bond's `object`) names when that is a person, else the person
 /// an `about:` tag names, else the partner of the direct message its room tag names, else everyone. The convention is
 /// the Persona State Standard's, read without a schema change.
-fn concerns(item: &Value) -> Option<Concerns> {
+fn concerns(people: &People, item: &Value) -> Option<Concerns> {
     let tags: Vec<&str> = items(item, &["tags"]).iter().filter_map(Value::as_str).collect();
     let direct = tags.iter().filter_map(|tag| tag.strip_prefix("room:")).find(|room| room.starts_with('!'));
     if text(item, &["extensions", "privacy"]) != "private" && !tags.contains(&"private") && direct.is_none() {
         return None;
     }
-    let named = ["target", "object"].into_iter().find(|key| text(item, &[*key, "kind"]) == "person").map(|key| text(item, &[key, "id"]).to_lowercase());
-    let about = || tags.iter().find_map(|tag| tag.strip_prefix("about:")).map(|id| id.trim().to_lowercase());
+    let named = ["target", "object"].into_iter().find(|key| text(item, &[*key, "kind"]) == "person").map(|key| people.person_of(text(item, &[key, "id"])));
+    let about = || tags.iter().find_map(|tag| tag.strip_prefix("about:")).map(|id| people.person_of(id));
     Some(match (named.filter(|id| !id.is_empty()).or_else(about).filter(|id| !id.is_empty()), direct) {
         (Some(person), _) => Concerns::Person(person),
         (None, Some(room)) => Concerns::Partner(room.to_owned()),
@@ -1194,9 +1198,9 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     let mut private = Vec::new();
     let mut full = 0;
     for (id, name) in &present {
-        match bonds.iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == *id) {
+        match bonds.iter().find(|bond| live(bond) && inputs.people.person_of(text(bond, &["object", "id"])) == *id) {
             Some(bond) if full < tuning.select.people_full => {
-                let scope = scope(inputs, concerns(bond).as_ref(), &present_ids);
+                let scope = scope(inputs, concerns(&inputs.people, bond).as_ref(), &present_ids);
                 let line = bond_line(bond, name, tuning, scope, forms(inputs.state));
                 if used + line.len() < budget {
                     full += 1;
