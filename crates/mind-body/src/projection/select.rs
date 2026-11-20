@@ -101,6 +101,29 @@ pub(crate) struct Room {
     /// When she last heard from people, by Matrix id, beyond what the tail shows: a fixture's table (`mind-persona project
     /// --room`). The live turn has none yet; the tail is its only source.
     pub last_heard: Vec<(String, u64)>,
+    /// The rooms the mouth called direct messages (a delivery's `is_direct`), by the key the lines carry.
+    pub direct: Vec<String>,
+    /// The rooms that are hers, by key: the caller's (a simulation's plan); the live body records none yet.
+    pub own: Vec<String>,
+}
+
+/// Who a room's audience is, for what she may say there: a direct message, a room of her own, or a public room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RoomKind {
+    Direct,
+    Own,
+    Public,
+}
+
+impl RoomKind {
+    pub(crate) fn words(self) -> &'static str {
+        match self {
+            Self::Direct => "a direct message",
+            Self::Own => "her own room, open to its members",
+            Self::Public => "a public room",
+        }
+    }
 }
 
 /// One thing she said, from the trace.
@@ -222,10 +245,13 @@ pub(crate) struct Packet {
     /// Her pronouns, for the words the prompts speak of her in.
     #[serde(skip)]
     pub forms: Forms,
-    /// Whom the Interpreter may mention or reply to: (label, Matrix id).
+    /// Whom she may mention or reply to: the people this packet showed her from the room, (label, Matrix id).
     pub people: Vec<(String, String)>,
-    /// Where she may speak this turn: the turn's room, or the rooms the messages to her and around her came from.
-    pub rooms: Vec<String>,
+    /// The one room she may speak in this turn, and its kind.
+    pub room: Option<String>,
+    pub room_kind: RoomKind,
+    /// The bodies of the messages she heard this turn, without speakers or rooms: what an echo is measured against.
+    pub bodies: Vec<String>,
 }
 
 /// What the messages to her cost past the caps: bytes over the stimulus and heard caps, the older messages to her the
@@ -481,6 +507,12 @@ fn candidates(inputs: &Inputs, tuning: &Tuning, present: &BTreeSet<String>, touc
         if body.is_empty() {
             continue;
         }
+        let person = text(memory, &["target", "id"]).to_lowercase();
+        let about_someone = text(memory, &["target", "kind"]) == "person" && !person.is_empty();
+        let body = match privately(inputs, &person) {
+            Some(forms) if about_someone => format!("{} knows privately: {body}", forms.subj),
+            _ => body,
+        };
         let line = format!("- memory [{}]: {}", text(memory, &["id"]), clip(&one_line(&body), item_bytes));
         let salience = number(memory, &["intensity"]).unwrap_or(SALIENCE_UNSTATED);
         // Only the day's short-term items fade; a crystallized memory comes forward by what the room touches.
@@ -813,7 +845,7 @@ fn present_people(inputs: &Inputs, tuning: &Tuning) -> Vec<(String, String)> {
 
 /// A bond line: the person, the kind of bond after a dash (a label may hold a comma: "Meta, the operator"), trust and
 /// friction as words when the bond carries them, and its summary. What the bond does not carry is left out.
-fn bond_line(bond: &Value, name: &str, tuning: &Tuning) -> String {
+fn bond_line(bond: &Value, name: &str, tuning: &Tuning, private: Option<Forms>) -> String {
     let feel: Vec<&str> = [number(bond, &["trust"]).map(trust_words), number(bond, &["tension"]).map(friction_words)].into_iter().flatten().collect();
     let custom = text(bond, &["customRelationshipKind"]);
     let kind = clip(&one_line(if custom.is_empty() { text(bond, &["relationshipKind"]) } else { custom }), NAME_BYTES);
@@ -822,6 +854,10 @@ fn bond_line(bond: &Value, name: &str, tuning: &Tuning) -> String {
         let _ = write!(line, " \u{2014} {kind}");
     }
     let summary = clip(&one_line(text(bond, &["summary"])), tuning.select.bond_summary_bytes);
+    let summary = match private {
+        Some(forms) if !summary.is_empty() => format!("{} knows privately: {summary}", forms.cap_subj),
+        _ => summary,
+    };
     match (feel.is_empty(), summary.is_empty()) {
         (true, true) => {}
         (true, false) => {
@@ -893,9 +929,25 @@ fn names_of(line: &RoomLine, inputs: &Inputs) -> Vec<String> {
 /// once, oldest first. The room is the turn's when it is one room; otherwise the room of the newest message to her, else
 /// of the newest message, else of the newest tail line. Never several rooms folded into one, so a direct message is
 /// only ever read as its own room.
-fn recent_lines<'a>(inputs: &'a Inputs) -> Vec<&'a RoomLine> {
+/// The turn's room: the one it is in when it is one room; otherwise the room of the newest message to her, else of the
+/// newest message, else of the newest tail line. Where the packet describes and the only room she may speak in.
+pub(crate) fn turn_room<'a>(inputs: &'a Inputs) -> Option<&'a str> {
     let newest = |lines: &'a [RoomLine], keep: &dyn Fn(&RoomLine) -> bool| lines.iter().filter(|line| keep(line)).max_by_key(|line| line.at_ms).map(|line| line.room.as_str());
-    let Some(room) = inputs.room.here.as_deref().or_else(|| newest(&inputs.room.messages, &|line| line.to_her)).or_else(|| newest(&inputs.room.messages, &|_| true)).or_else(|| newest(&inputs.room.tail, &|_| true)) else {
+    inputs.room.here.as_deref().or_else(|| newest(&inputs.room.messages, &|line| line.to_her)).or_else(|| newest(&inputs.room.messages, &|_| true)).or_else(|| newest(&inputs.room.tail, &|_| true))
+}
+
+fn room_kind(inputs: &Inputs, room: &str) -> RoomKind {
+    if inputs.room.direct.iter().any(|direct| direct == room) {
+        RoomKind::Direct
+    } else if inputs.room.own.iter().any(|own| own == room) {
+        RoomKind::Own
+    } else {
+        RoomKind::Public
+    }
+}
+
+fn recent_lines<'a>(inputs: &'a Inputs) -> Vec<&'a RoomLine> {
+    let Some(room) = turn_room(inputs) else {
         return Vec::new();
     };
     let mut lines: Vec<&RoomLine> = Vec::new();
@@ -1008,38 +1060,22 @@ fn pronoun_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
     (!parts.is_empty()).then(|| clip(&format!("- pronouns: {}", parts.join("; ")), ALSO_HERE_BYTES))
 }
 
+/// Whether what she knows of `person` (a bond's or memory's id) is framed as known privately here: everywhere but a
+/// direct message with that person. Structural, never a reading of the fact: whether a line fits its audience stays the
+/// Interpreter's judgement. Her pronouns when it is.
+fn privately(inputs: &Inputs, person: &str) -> Option<Forms> {
+    let room = turn_room(inputs)?;
+    let partner = room_kind(inputs, room) == RoomKind::Direct && inputs.room.messages.iter().chain(&inputs.room.tail).any(|line| line.room == room && inputs.people.person_of(&line.sender) == person);
+    (!partner).then(|| forms(inputs.state))
+}
+
 /// A part as a sentence: its first letter upper-cased, a full stop after it.
 fn sentence(part: &str) -> String {
     let mut chars = part.chars();
     chars.next().map_or_else(String::new, |first| format!("{}{}.", first.to_uppercase(), chars.as_str()))
 }
 
-/// Whom the Interpreter may address: everyone the packet shows from the room, then the swarm's other Minds, who are in
-/// her rooms whether or not they spoke; a Mind she is bound to goes by the bond's label, any other by the id alone.
-fn addressable(inputs: &Inputs, tuning: &Tuning) -> Vec<(String, String)> {
-    let mut people = people_in_view(inputs, tuning);
-    for mind in inputs.people.minds.iter().filter(|mind| *mind != inputs.people.own_sender) {
-        if !people.iter().any(|(_, id)| id == mind) {
-            people.push((bond_label(inputs, mind).unwrap_or_else(|| mind.clone()), mind.clone()));
-        }
-    }
-    people
-}
 
-fn speaking_rooms(inputs: &Inputs) -> Vec<String> {
-    let mut rooms: Vec<String> = inputs.room.here.iter().cloned().collect();
-    for line in &inputs.room.messages {
-        if !rooms.contains(&line.room) {
-            rooms.push(line.room.clone());
-        }
-    }
-    if rooms.is_empty()
-        && let Some(line) = recent_lines(inputs).last()
-    {
-        rooms.push(line.room.clone());
-    }
-    rooms
-}
 
 /// The pronouns of a person nobody listed.
 const UNKNOWN_PRONOUNS: &str = "they/them";
@@ -1076,7 +1112,7 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     for (id, name) in &present {
         match bonds.iter().find(|bond| live(bond) && text(bond, &["object", "id"]).to_lowercase() == *id) {
             Some(bond) if full < tuning.select.people_full => {
-                let line = bond_line(bond, name, tuning);
+                let line = bond_line(bond, name, tuning, privately(inputs, id));
                 if used + line.len() < budget {
                     full += 1;
                     used += line.len() + 1;
@@ -1139,5 +1175,5 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     lines.extend(taken.iter().map(|candidate| candidate.line.clone()));
     ids.extend(taken.iter().map(|candidate| candidate.id.clone()));
     let selected = taken.into_iter().map(|candidate| Pick { id: candidate.id, pool: candidate.pool, log_score: candidate.log_score }).collect();
-    Packet { kind: inputs.kind, seed: inputs.seed, lens, identity, context: lines.join("\n"), stimulus, heard, overflow, present: present_names, ids, selected, forms: forms(inputs.state), people: addressable(inputs, tuning), rooms: speaking_rooms(inputs) }
+    Packet { kind: inputs.kind, seed: inputs.seed, lens, identity, context: lines.join("\n"), stimulus, heard, overflow, present: present_names, ids, selected, forms: forms(inputs.state), people: people_in_view(inputs, tuning), room: turn_room(inputs).map(str::to_owned), room_kind: turn_room(inputs).map_or(RoomKind::Public, |room| room_kind(inputs, room)), bodies: inputs.room.messages.iter().map(|line| line.text.clone()).collect() }
 }

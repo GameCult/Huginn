@@ -665,7 +665,7 @@ impl PersonaSource for Stored {
 }
 
 fn request(dir: &std::path::Path, renders: Option<usize>, judge_against: Option<Value>) -> Request {
-    Request { instance: INSTANCE.into(), kind: TurnKind::Chat, state: None, room: Some("#swarm:gamecult.org".into()), seed: 5, renders, judge_against, operators: operators(), minds: minds(), own_sender: OWN.into(), tuning: dir.join(TUNING_FILE), through: Through::Projector, last_heard: vec![], recent: vec![] }
+    Request { instance: INSTANCE.into(), kind: TurnKind::Chat, state: None, room: Some("#swarm:gamecult.org".into()), seed: 5, renders, judge_against, operators: operators(), minds: minds(), own_sender: OWN.into(), tuning: dir.join(TUNING_FILE), through: Through::Projector, last_heard: vec![], recent: vec![], own_rooms: vec![] }
 }
 
 #[test]
@@ -1411,4 +1411,14 @@ fn a_room_is_named_by_the_key_the_tail_carries_and_a_public_rooms_id_is_reported
     assert_eq!((by_alias["room"]["messages"].as_u64(), by_alias["room"]["tail"].as_u64()), (Some(1), Some(1)), "{}", by_alias["room"]);
     let by_id = project(&organs, &Request { room: Some("!1:gamecult.org".into()), ..request(dir.path(), None, None) }, now()).unwrap();
     assert!(by_id["room"]["why"].as_str().unwrap().contains("named by its alias"), "{}", by_id["room"]);
+}
+
+#[test]
+fn what_she_knows_of_someone_is_known_privately_except_in_a_direct_message_with_them() {
+    let public = Room { messages: vec![message("#minds:gamecult.org", OPERATOR, "Meta", "how is everyone?", 2, false)], here: Some("#minds:gamecult.org".into()), ..Room::default() };
+    let packet = packet_of(TurnKind::Chat, &state(), &public, &History::default(), 1);
+    assert!(packet.context.contains("She knows privately: The operator rules on what the work is for."), "{}", packet.context);
+    let dm = Room { messages: vec![message("!dm-meta:gamecult.org", OPERATOR, "Meta", "how are you?", 2, true)], here: Some("!dm-meta:gamecult.org".into()), direct: vec!["!dm-meta:gamecult.org".into()], ..Room::default() };
+    let packet = packet_of(TurnKind::Chat, &state(), &dm, &History::default(), 1);
+    assert!(packet.context.contains("The operator rules on what the work is for.") && !packet.context.contains("knows privately: The operator"), "{}", packet.context);
 }

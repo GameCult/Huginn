@@ -41,20 +41,19 @@ impl Scripted {
     }
 }
 
-/// The recorded Interpreter of the tests: each double-quoted span of her prose is a line said in the first room listed,
-/// resting on itself, mentioning no one. A test double that keeps the tests' prose readable, not the speech rule: the
-/// live Interpreter is a model told quotes are not speech.
+/// The recorded Interpreter of the tests: each double-quoted span of her prose is a line she says, citing itself,
+/// mentioning no one. A test double that keeps the tests' prose readable, not the speech rule: quotation marks mean
+/// nothing to code, and the live Interpreter is a model.
 pub(crate) fn quoted_lines(prompt: &str) -> String {
-    let prose = prompt.split("Persona turn (already preserved verbatim as source evidence):\n").nth(1).unwrap_or_default();
-    let room = prompt.split("Rooms she may speak in: ").nth(1).and_then(|rooms| rooms.lines().next()).and_then(|rooms| rooms.split("; ").next()).unwrap_or_default();
-    let say: Vec<Value> = prose.split('"').enumerate().filter(|(at, part)| at % 2 == 1 && !part.trim().is_empty()).map(|(_, part)| json!({ "room": room, "text": part, "source_quote": part, "mentions": [], "reply_to": null })).collect();
+    let prose = prompt.split("Her prose:\n").nth(1).unwrap_or_default();
+    let say: Vec<Value> = prose.split('"').enumerate().filter(|(at, part)| at % 2 == 1 && !part.trim().is_empty()).map(|(_, part)| json!({ "spans": [part], "mentions": [], "reply_to": null })).collect();
     json!({ "say": say }).to_string()
 }
 
 impl Model for Scripted {
     fn ask(&self, _request_id: &str, model: &str, prompt: &str) -> std::result::Result<Answer, Failed> {
         self.calls.borrow_mut().push((model.to_owned(), prompt.to_owned()));
-        let text = if prompt.contains(":interpreter -->") {
+        let text = if prompt.starts_with("You decide what one person says aloud") {
             (self.interpreter)(prompt)
         } else if prompt.starts_with("<!-- membrane:") {
             "The room is slow and so is he.".to_owned()
@@ -214,7 +213,7 @@ fn a_batch_runs_every_state_by_scenario_by_sample_into_one_report() {
         assert!(report.contains(heading), "{heading}\n{report}");
     }
     assert!(report.contains("| control | teased | 2/2 |") && report.contains("| control | quiet | 0/2 |"), "{report}");
-    assert!(report.contains("- in #minds:gamecult.org: Winter, still.") && report.contains("  - rests on: \"Winter, still.\"") && report.contains("**Interpreter: nothing said.**"), "{report}");
+    assert!(report.contains("- in #minds:gamecult.org: Winter, still.") && report.contains("  - her words: \"Winter, still.\"") && report.contains("**Interpreter: nothing said.**"), "{report}");
     assert!(report.contains("| claude-sonnet-5-5 | 12 | 120 | 24 |"), "twelve calls, three a case, in the footer: {report}");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the batch wrote nothing; the caller writes the report");
 }

@@ -151,15 +151,24 @@ fn speaker(line: &Line, member: &Member, operators: &[String], cast: &[String]) 
     }
 }
 
-/// For each line, how many Mind lines in a row came before it in its room since a human last spoke there.
+/// For each line, how many Mind lines in a row came before it in her current Mind-only run: one run across every room
+/// she sees, which a human's line ends only when it is in a room the run has lines in. Meta chatting in #eureka does not
+/// end a loop in #minds.
 fn mind_runs(lines: &[Line], cast: &[String], member: &Member) -> Vec<usize> {
     let mut run = 0usize;
+    let mut run_rooms: Vec<&str> = Vec::new();
     lines
         .iter()
         .map(|line| {
             let before = run;
             if line.visible_to(&member.entry.id, &member.rooms) {
-                run = if cast.contains(&line.from) { run + 1 } else { 0 };
+                if cast.contains(&line.from) {
+                    run += 1;
+                    run_rooms.push(&line.room);
+                } else if run_rooms.contains(&line.room.as_str()) {
+                    run = 0;
+                    run_rooms.clear();
+                }
             }
             before
         })
@@ -183,12 +192,13 @@ fn how_addressed(line: &Line, at: usize, member: &Member, lines: &[Line]) -> &'s
 /// it, the strongest evidence that addressed her and the lines that did.
 struct Woken {
     cause: WakeCause,
+    /// The newest line with that cause: its room is the turn's room.
+    line: usize,
     how: Option<&'static str>,
     by: Vec<Value>,
 }
 
-/// Whether she spoke in the exchange a line continues: walking back through the lines of its room while each is within
-/// `gap` of the one after it.
+/// Whether she is in the exchange a line belongs to: she spoke in its room within `window` before it.
 fn in_exchange(lines: &[Line], at: usize, her: &str, window: Duration) -> bool {
     let line = &lines[at];
     let since = line.at_ms.saturating_sub(u64::try_from(window.num_milliseconds()).unwrap_or(0));
@@ -209,14 +219,15 @@ fn woken(lines: &[Line], runs: &[usize], seen: usize, member: &Member, operators
         }
     }
     let cause = found.iter().map(|(_, cause)| *cause).min()?;
+    let line = found.iter().rev().find(|(_, found)| *found == cause).map_or(0, |(at, _)| *at);
     if cause != WakeCause::AddressedByMind {
-        return Some(Woken { cause, how: None, by: vec![] });
+        return Some(Woken { cause, line, how: None, by: vec![] });
     }
     let addressing: Vec<usize> = found.iter().filter(|(_, cause)| *cause == WakeCause::AddressedByMind).map(|(at, _)| *at).collect();
     let rank = |how: &str| ["mention or reply", "id as text", "name in text"].iter().position(|one| *one == how).unwrap_or(3);
     let how = addressing.iter().map(|at| how_addressed(&lines[*at], *at, member, lines)).min_by_key(|how| rank(how));
     let by = addressing.iter().map(|at| json!({ "from": lines[*at].from, "how": how_addressed(&lines[*at], *at, member, lines), "says": lines[*at].says })).collect();
-    Some(Woken { cause, how, by })
+    Some(Woken { cause, line, how, by })
 }
 
 /// The wire spelling of a cause, and of the beat.
@@ -348,7 +359,8 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
             let member = &members[at];
             let id = member.entry.id.clone();
             let fresh: Vec<&Line> = lines[seen[at]..].iter().filter(|line| line.from != id && line.visible_to(&id, &member.rooms)).collect();
-            let woke_on = fresh.iter().rev().find(|line| line.mentions.contains(&id) || line.dm_to.as_deref() == Some(id.as_str())).or(fresh.last()).copied();
+            // The turn is in the room of the line that woke her; a beat's, in the room of the newest line she has not seen.
+            let woke_on = why.as_ref().map(|why| &lines[why.line]).or(fresh.last().copied());
             let here = woke_on.map_or_else(|| member.rooms[0].clone(), |line| line.room.clone());
             // Woken by a direct message, she answers in it: to its sender alone.
             let dm_to = woke_on.filter(|line| line.dm_to.as_deref() == Some(id.as_str())).map(|line| line.from.clone());
@@ -369,6 +381,7 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
                 through: Through::Interpreter,
                 last_heard: vec![],
                 recent: recent[at].clone(),
+                own_rooms: member.entry.own_rooms.clone(),
             };
             let view = View { lines: &lines, viewer: &id, rooms: &member.rooms, seen: seen[at] };
             let names = Names(&member.addressee);
@@ -556,8 +569,8 @@ fn policy_words(policy: WakePolicy) -> String {
     match policy {
         WakePolicy::Live => "live: the operator or another Mind addressing her (the heartbeat's rule today)".into(),
         WakePolicy::Ruled => "ruled: a line addressing her, from anyone, and any human line in her rooms".into(),
-        WakePolicy::HumansPace(cap) => format!("humans_pace (cap {cap}): a human's line wakes a Mind in her own room always, and in a public room when it addresses her or continues an exchange she is in; a Mind's line wakes another only by an explicit mention or a reply, while fewer than {cap} Mind lines in a row came before it in its room, never by a name in prose"),
-        WakePolicy::NamesWithCap(cap) => format!("names_with_cap {cap}: ruled, but a Mind's line past {cap} Mind lines in a row in its room wakes no one until a human speaks"),
+        WakePolicy::HumansPace(cap) => format!("humans_pace (cap {cap}): a human's line wakes a Mind in her own room always, and in a public room when it addresses her or continues an exchange she is in; a Mind's line wakes another only by an explicit mention or a reply, while her current Mind-only run, across her rooms, is under {cap} lines, never by a name in prose"),
+        WakePolicy::NamesWithCap(cap) => format!("names_with_cap {cap}: ruled, but a Mind's line wakes no one once her current Mind-only run, across her rooms, has {cap} lines, until a human speaks where it runs"),
         WakePolicy::AllMessages => "all_messages: any line in her rooms, a Mind's too (the old loop, the control)".into(),
     }
 }

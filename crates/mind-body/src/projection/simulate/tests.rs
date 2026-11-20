@@ -243,27 +243,34 @@ fn a_seed_replays_its_order_and_another_seed_changes_it() {
 fn tagging(mention: bool) -> Scripted {
     let mentions = if mention { json!([LIBBY]) } else { json!([]) };
     Scripted::new(|prompt| if is_tobiah(prompt) { "\"ask @libby:gamecult.org, and Libby too\"".into() } else { "She lets it be.".into() }).interpreting(move |prompt| {
-        if !prompt.contains("Identity:\nTobiah") {
+        if !prompt.contains("Who she is:\nTobiah") {
             return json!({ "say": [] }).to_string();
         }
-        json!({ "say": [{ "room": "#minds:gamecult.org", "text": "ask @libby:gamecult.org, and Libby too", "source_quote": "ask @libby:gamecult.org, and Libby too", "mentions": mentions, "reply_to": null }] }).to_string()
+        json!({ "say": [{ "spans": ["ask @libby:gamecult.org, and Libby too"], "mentions": mentions, "reply_to": null }] }).to_string()
     })
 }
 
 #[test]
 fn only_the_interpreters_structured_mention_is_a_mention_and_an_at_in_the_text_is_not() {
+    // Libby says hello first, so the packet shows her to Tobiah: a mention reaches only someone shown.
+    let hello = "[[message]]\nround = 0\nfrom = \"@libby:gamecult.org\"\nname = \"Libby\"\nroom = \"#minds:gamecult.org\"\nsays = \"hello all\"\n";
+    let plan = |dir: &Path, wake: &str, rounds: usize| {
+        let path = plan(dir, wake, rounds, "");
+        std::fs::write(&path, format!("{}{hello}", std::fs::read_to_string(&path).unwrap())).unwrap();
+        path
+    };
     let dir = tempfile::tempdir().unwrap();
-    let (_, plain) = run_plan(&plan(dir.path(), "\"ruled\"", 3, ""), &tagging(false));
+    let (_, plain) = run_plan(&plan(dir.path(), "\"ruled\"", 3), &tagging(false));
     let addressed = &plain["metrics"]["mind_addressed_wakes"];
     assert_eq!(addressed["mention_or_reply"].as_u64(), Some(0), "an @id in the words tags no one: {addressed}");
     let dir = tempfile::tempdir().unwrap();
-    let (_, tagged) = run_plan(&plan(dir.path(), "\"ruled\"", 3, ""), &tagging(true));
+    let (_, tagged) = run_plan(&plan(dir.path(), "\"ruled\"", 3), &tagging(true));
     let addressed = &tagged["metrics"]["mind_addressed_wakes"];
     let libby_mind_wakes = turns(&tagged).iter().filter(|(_, who, why)| who == "Libby" && why == "addressed_by_mind").count();
     assert_eq!(addressed["mention_or_reply"].as_u64().unwrap() as usize, libby_mind_wakes, "{addressed}");
     // Under humans_pace a name or an @ in the words wakes no one; the structured mention does.
     let dir = tempfile::tempdir().unwrap();
-    let path = plan(dir.path(), "{ humans_pace = 4 }", 3, "");
+    let path = plan(dir.path(), "{ humans_pace = 4 }", 3);
     let opening = "says = \"good afternoon, everyone\"\n";
     std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace(opening, &format!("{opening}mentions = [\"{TOBIAH}\"]\n"))).unwrap();
     let woken_libby = |model: &Scripted| turns(&run_plan(&path, model).1).iter().any(|(_, who, _)| who == "Libby");
@@ -284,14 +291,18 @@ fn a_direct_message_in_one_of_the_plans_rooms_is_refused() {
 
 #[test]
 fn the_mind_run_is_counted_across_her_rooms_and_an_uncounted_run_is_at_the_cap() {
-    let her = Member { names_from: "test", addressee: Addressee::new(LIBBY, ["libby"]), entry: CastEntry { id: LIBBY.into(), name: "Libby".into(), state: PathBuf::new(), rooms: vec![], own_rooms: vec![] }, state: Value::Null, rooms: vec!["#a:x".into(), "#b:x".into()] };
-    let cast = vec![TOBIAH.to_owned(), LIBBY.to_owned(), "@kiko:x".to_owned()];
+    let her = Member { names_from: "test", addressee: Addressee::new("@kiko:x", ["kiko"]), entry: CastEntry { id: "@kiko:x".into(), name: "Kiko".into(), state: PathBuf::new(), rooms: vec![], own_rooms: vec![] }, state: Value::Null, rooms: vec!["#a:x".into(), "#b:x".into()] };
+    let cast = vec![TOBIAH.to_owned(), LIBBY.to_owned(), "@kiko:x".to_owned(), "@other:x".to_owned()];
     let line = |from: &str, room: &str| Line { from: from.into(), name: String::new(), room: room.into(), at_ms: 0, says: "hi".into(), mentions: vec![], dm_to: None, follow_up: false, reply_to: None, new: false };
-    let lines = [line("@meta:x", "#a:x"), line(TOBIAH, "#a:x"), line("@kiko:x", "#b:x"), line(TOBIAH, "#b:x"), line("@meta:x", "#c:x")];
+    let lines = [line("@meta:x", "#a:x"), line(TOBIAH, "#a:x"), line("@other:x", "#b:x"), line(TOBIAH, "#b:x"), line("@meta:x", "#c:x")];
     assert_eq!(mind_runs(&lines, &cast, &her), vec![0, 0, 1, 2, 3], "one run across #a and #b; a room she is not in does not break it");
+    // Soul's case: Meta chatting in #eureka does not end a loop in #minds; a word from Meta in #minds does.
+    let kiko = Member { rooms: vec!["#minds:x".into(), "#eureka:x".into()], ..her };
+    let lines = [line(TOBIAH, "#minds:x"), line(LIBBY, "#minds:x"), line("@meta:x", "#eureka:x"), line(TOBIAH, "#minds:x"), line("@meta:x", "#minds:x"), line(LIBBY, "#minds:x")];
+    assert_eq!(mind_runs(&lines, &cast, &kiko), vec![0, 1, 2, 2, 3, 0]);
     assert_eq!(LineFacts::default().mind_run, usize::MAX, "fail-safe: an uncounted run is at the cap");
-    let tagged = Line { mentions: vec![LIBBY.into()], ..line(TOBIAH, "#a:x") };
-    assert_eq!(wakes(WakePolicy::HumansPace(4), &her.addressee, &tagged.delivery(0, LIBBY, &[]), Speaker::Mind, LineFacts::default()), None);
+    let tagged = Line { mentions: vec!["@kiko:x".into()], ..line(TOBIAH, "#a:x") };
+    assert_eq!(wakes(WakePolicy::HumansPace(4), &kiko.addressee, &tagged.delivery(0, "@kiko:x", &[]), Speaker::Mind, LineFacts::default()), None);
 }
 
 #[test]
@@ -332,4 +343,24 @@ fn a_scripted_direct_message_reaches_and_wakes_only_its_recipient() {
     let model = silent();
     let harness = Harness { instance: "eureka".into(), persona: None, model: Some(&model), tuning: dir.path().join("persona-tuning.toml") };
     assert!(format!("{:#}", simulate(&harness, &path).unwrap_err()).contains("name its recipient"), "a direct message without a recipient is refused");
+}
+
+#[test]
+fn the_turn_is_in_the_room_of_the_line_that_woke_her() {
+    let dir = tempfile::tempdir().unwrap();
+    cast(dir.path());
+    let path = dir.path().join("plan.toml");
+    let line = |round: usize, from: &str, room: &str, says: &str| format!("[[message]]\nround = {round}\nfrom = \"{from}\"\nname = \"X\"\nroom = \"{room}\"\nsays = \"{says}\"\n");
+    // Meta speaks in Tobiah's own room, then Libby says something in #minds after it: Tobiah's turn is in his room.
+    std::fs::write(
+        &path,
+        format!(
+            "rounds = 1\nseed = 11\nwake = {{ humans_pace = 4 }}\nbeat_s = 0\nstart = \"2026-11-20T15:00:00Z\"\nrooms = [\"#minds:gamecult.org\", \"#tobiah:gamecult.org\"]\noperators = [\"@meta:gamecult.org\"]\n[[cast]]\nid = \"{TOBIAH}\"\nname = \"Tobiah\"\nstate = \"tobiah.json\"\nown_rooms = [\"#tobiah:gamecult.org\"]\n[[cast]]\nid = \"{LIBBY}\"\nname = \"Libby\"\nstate = \"libby.json\"\n{}{}",
+            line(0, "@meta:gamecult.org", "#tobiah:gamecult.org", "quiet in here"),
+            line(0, LIBBY, "#minds:gamecult.org", "hello all")
+        ),
+    )
+    .unwrap();
+    let (_, run) = run_plan(&path, &silent());
+    assert_eq!(run["turns"][0]["room"], "#tobiah:gamecult.org", "{}", run["turns"]);
 }

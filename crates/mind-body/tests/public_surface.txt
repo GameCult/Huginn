@@ -249,7 +249,7 @@ mind_body::projection: pub use select :: TurnKind ;
 mind_body::projection: pub use tuning :: { TUNING_FILE , TUNING_ROOT } ;
 mind_body::projection: struct HuginnPersonaSource  pub-fields[]
 mind_body::projection: struct Organs< 'a >  pub-fields[persona: Option < & 'a dyn PersonaSource >, chat: Option < & 'a dyn MouthReader >, addressing: Option < & 'a dyn HeartbeatView >, model: Option < & 'a dyn Model >]
-mind_body::projection: struct Request  pub-fields[instance: String, kind: TurnKind, state: Option < Value >, room: Option < String >, seed: u64, renders: Option < usize >, judge_against: Option < Value >, operators: Vec < String >, minds: Vec < String >, own_sender: String, tuning: PathBuf, through: Through, last_heard: Vec < (String , u64) >, recent: Vec < Vec < String > >]
+mind_body::projection: struct Request  pub-fields[instance: String, kind: TurnKind, state: Option < Value >, room: Option < String >, seed: u64, renders: Option < usize >, judge_against: Option < Value >, operators: Vec < String >, minds: Vec < String >, own_sender: String, tuning: PathBuf, through: Through, last_heard: Vec < (String , u64) >, recent: Vec < Vec < String > >, own_rooms: Vec < String >]
 mind_body::projection::harness: fn batch (harness : & Harness , plan_path : & Path) -> Result < String >
 mind_body::projection::harness: fn fixture_request (harness : & Harness , fixture : & Fixture , state : Option < Value > , seed : u64 , renders : Option < usize > , through : Through) -> Request
 mind_body::projection::harness: fn state_file (path : & Path , instance : & str) -> Result < Value >
@@ -281,6 +281,7 @@ mind_body::projection::select: impl Draw
 mind_body::projection::select: impl Lens
 mind_body::projection::select: impl Lines
 mind_body::projection::select: impl People < '_ >
+mind_body::projection::select: impl RoomKind
 mind_body::projection::simulate: fn simulate (harness : & Harness , plan_path : & Path) -> Result < String >
 mind_body::projection::simulate: impl HeartbeatView for Names < '_ >
 mind_body::projection::simulate: impl MouthReader for View < '_ >
@@ -295,7 +296,7 @@ mind_body::projection::tuning: impl Default for ProjectorTuning
 mind_body::projection::tuning: impl Default for SelectTuning
 mind_body::projection::tuning: impl Default for Tuning
 mind_body::projection::tuning: impl Tuning
-mind_body::projection::tuning: struct InterpreterTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String, guidance: String]
+mind_body::projection::tuning: struct InterpreterTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String]
 mind_body::projection::tuning: struct LensWeights # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[body_and_hour: f64, person_present: f64, unresolved_want: f64, memory_surfacing: f64, wondering: f64]
 mind_body::projection::tuning: struct Loaded # [derive (Clone , Debug , PartialEq , Serialize)] pub-fields[tuning: Tuning, source: & 'static str, sha256: String]
 mind_body::projection::tuning: struct PersonaTuning # [derive (Clone , Debug , PartialEq , Serialize , Deserialize)] pub-fields[model: String, guidance: String, words: usize]

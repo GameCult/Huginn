@@ -333,6 +333,7 @@ pub fn fixture_request(harness: &Harness, fixture: &Fixture, state: Option<Value
         through,
         last_heard: fixture.last_heard.clone(),
         recent: vec![],
+        own_rooms: vec![],
     }
 }
 
@@ -522,12 +523,14 @@ pub(crate) fn interpreter_markdown(out: &mut String, decision: &Value) {
             let mentions = line["mentions"].as_array().map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default();
             let reply = line["reply_to"].as_str().map_or_else(String::new, |id| format!("; reply to {id}"));
             let _ = writeln!(out, "- in {}{}{}: {}", line["room"].as_str().unwrap_or_default(), if mentions.is_empty() { String::new() } else { format!(", mentioning {mentions}") }, reply, line["text"].as_str().unwrap_or_default());
-            let _ = writeln!(out, "  - rests on: \"{}\"", line["rests_on"]["quote"].as_str().unwrap_or_default());
+            let spans: Vec<String> = line["rests_on"].as_array().into_iter().flatten().map(|span| format!("\"{}\"", span["quote"].as_str().unwrap_or_default())).collect();
+            let _ = writeln!(out, "  - her words: {}", spans.join(" + "));
         }
         out.push('\n');
     }
     for line in decision["refused"].as_array().into_iter().flatten() {
-        let _ = writeln!(out, "- refused ({}): {}", line["why"].as_str().unwrap_or_default(), line["text"].as_str().unwrap_or_default());
+        let what = line["text"].as_str().map_or_else(|| line["spans"].to_string(), str::to_owned);
+        let _ = writeln!(out, "- refused ({}): {what}", line["why"].as_str().unwrap_or_default());
     }
     for gap in decision["gaps"].as_array().into_iter().flatten() {
         let _ = writeln!(out, "- gap: {gap}");
