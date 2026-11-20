@@ -149,6 +149,8 @@ pub struct Request {
     /// The ids each earlier projection selected, oldest first, for freshness: a simulation's earlier turns of hers.
     /// Empty live until trace v2 (C3c) carries them.
     pub recent: Vec<Vec<String>>,
+    /// The rooms that are hers, by the key the lines carry: a simulation's plan. The live body records none yet.
+    pub own_rooms: Vec<String>,
 }
 
 /// Her addressee: the heartbeat's row for her when its table holds one, else her own names (handle and public name).
@@ -181,7 +183,7 @@ fn own_addressee(addressing: Option<&dyn HeartbeatView>, own_sender: &str, publi
 fn read_room(chat: &dyn MouthReader, request: &Request, own: &Addressee) -> (Room, Value) {
     let pending = match chat.pending() {
         Ok(pending) => pending,
-        Err(fault) => return (Room { here: request.room.clone(), last_heard: request.last_heard.clone(), ..Room::default() }, json!({ "read": false, "why": format!("{fault:#}") })),
+        Err(fault) => return (Room { here: request.room.clone(), last_heard: request.last_heard.clone(), own: request.own_rooms.clone(), ..Room::default() }, json!({ "read": false, "why": format!("{fault:#}") })),
     };
     // One key names a room everywhere: the one the tail carries, the alias for a public room and the id for a direct
     // message (the mouth's alias of a direct room is its id). No table in her body maps a public room's id to its
@@ -217,7 +219,8 @@ fn read_room(chat: &dyn MouthReader, request: &Request, own: &Addressee) -> (Roo
     {
         report["why"] = json!("no line carries this room id: a public room is named by its alias (#name:server), a direct message by its id");
     }
-    (Room { messages, tail, here, last_heard: request.last_heard.clone() }, report)
+    let direct = pending.deliveries.iter().filter(|delivery| delivery.is_direct).map(|delivery| delivery.room_alias.clone()).collect();
+    (Room { messages, tail, here, last_heard: request.last_heard.clone(), direct, own: request.own_rooms.clone() }, report)
 }
 
 fn packet_json(packet: &Packet) -> Value {
@@ -316,7 +319,7 @@ pub fn project(organs: &Organs, request: &Request, now: DateTime<Utc>) -> Result
     let (own, addressing) = own_addressee(organs.addressing, &request.own_sender, &public_name, now);
     let (room, room_report) = match organs.chat {
         Some(chat) => read_room(chat, request, &own),
-        None => (Room { here: request.room.clone(), last_heard: request.last_heard.clone(), ..Room::default() }, json!({ "read": false, "why": "no mouth is configured" })),
+        None => (Room { here: request.room.clone(), last_heard: request.last_heard.clone(), own: request.own_rooms.clone(), ..Room::default() }, json!({ "read": false, "why": "no mouth is configured" })),
     };
     // Freshness and her own recent words come from trace v2, which the commit writes (C3c); until then only what the
     // caller carried from earlier turns of its own.

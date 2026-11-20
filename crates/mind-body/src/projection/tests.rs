@@ -187,12 +187,32 @@ fn mission_pressure_private_notes_and_candidate_actions_never_reach_a_packet() {
     }
 }
 
+const DERU: &str = "@deru:gamecult.org";
+const DM_DERU: &str = "!dm-deru:gamecult.org";
+
+/// The line the `dm-secret` memory renders as over seeds 1 to 40, if any.
+fn dm_secret(state: &Value, room: &Room) -> Option<String> {
+    (1..=40).find_map(|seed| packet_of(TurnKind::Chat, state, room, &History::default(), seed).context.lines().find(|line| line.starts_with("- memory [dm-secret]")).map(str::to_owned))
+}
+
 #[test]
-fn a_direct_message_memory_stays_in_its_room() {
-    let shown = |room: Option<&str>| (1..=40).any(|seed| ids(&packet_of(TurnKind::Chat, &state(), &Room { here: room.map(str::to_owned), ..chat_room() }, &History::default(), seed)).iter().any(|id| id == "dm-secret"));
-    assert!(!shown(Some("#swarm:gamecult.org")), "a public room never sees the direct message's memory");
-    assert!(!shown(None));
-    assert!(shown(Some("!dm-deru:gamecult.org")), "its own room may");
+fn a_direct_message_memory_is_private_about_its_partner() {
+    // Its `room:` tag marks it private; its target names Deru by his full Matrix id, as an unbonded person is keyed.
+    let mut named = state();
+    named["thoughtMemory"]["memories"][2]["target"]["id"] = DERU.into();
+    let with_deru = Room { messages: vec![message(DM_DERU, DERU, "Deru", "so, the move", 2, true)], here: Some(DM_DERU.into()), direct: vec![DM_DERU.into()], ..Room::default() };
+    assert_eq!(dm_secret(&named, &with_deru).as_deref(), Some("- memory [dm-secret]: Deru told her about the move, privately."), "plain in the direct message with exactly him");
+    assert_eq!(dm_secret(&named, &chat_room()).as_deref(), Some("- memory [dm-secret]: she knows privately: Deru told her about the move, privately."), "framed where he is not");
+    let deru_in_public = Room { messages: vec![message("#swarm:gamecult.org", DERU, "Deru", "hi all", 2, false)], ..chat_room() };
+    assert_eq!(dm_secret(&named, &deru_in_public), None, "left out where he is, in public");
+    // Naming no person, it concerns the direct message's partner, whom no other room can tell apart: left out
+    // everywhere but that direct message, and there still only the two of them.
+    let mut partner = state();
+    partner["thoughtMemory"]["memories"][2].as_object_mut().unwrap().remove("target");
+    assert!(dm_secret(&partner, &with_deru).is_some_and(|line| !line.contains("privately:")));
+    assert_eq!(dm_secret(&partner, &chat_room()), None);
+    let three = Room { messages: [with_deru.messages.clone(), vec![message(DM_DERU, "@libby:gamecult.org", "Libby", "me too", 1, true)]].concat(), ..with_deru.clone() };
+    assert_eq!(dm_secret(&partner, &three), None, "a third person in the direct message");
 }
 
 #[test]
@@ -665,7 +685,7 @@ impl PersonaSource for Stored {
 }
 
 fn request(dir: &std::path::Path, renders: Option<usize>, judge_against: Option<Value>) -> Request {
-    Request { instance: INSTANCE.into(), kind: TurnKind::Chat, state: None, room: Some("#swarm:gamecult.org".into()), seed: 5, renders, judge_against, operators: operators(), minds: minds(), own_sender: OWN.into(), tuning: dir.join(TUNING_FILE), through: Through::Projector, last_heard: vec![], recent: vec![] }
+    Request { instance: INSTANCE.into(), kind: TurnKind::Chat, state: None, room: Some("#swarm:gamecult.org".into()), seed: 5, renders, judge_against, operators: operators(), minds: minds(), own_sender: OWN.into(), tuning: dir.join(TUNING_FILE), through: Through::Projector, last_heard: vec![], recent: vec![], own_rooms: vec![] }
 }
 
 #[test]
@@ -1411,4 +1431,142 @@ fn a_room_is_named_by_the_key_the_tail_carries_and_a_public_rooms_id_is_reported
     assert_eq!((by_alias["room"]["messages"].as_u64(), by_alias["room"]["tail"].as_u64()), (Some(1), Some(1)), "{}", by_alias["room"]);
     let by_id = project(&organs, &Request { room: Some("!1:gamecult.org".into()), ..request(dir.path(), None, None) }, now()).unwrap();
     assert!(by_id["room"]["why"].as_str().unwrap().contains("named by its alias"), "{}", by_id["room"]);
+}
+
+/// The test state with Kiko's bond and the memory about Libby marked private, and the operator's bond not.
+fn marked() -> Value {
+    let mut marked = state();
+    marked["affect"]["socialBonds"][1]["extensions"] = json!({ "privacy": "private" });
+    marked["thoughtMemory"]["memories"][1]["tags"] = json!(["private"]);
+    marked
+}
+
+#[test]
+fn a_private_marking_frames_a_fact_about_someone_absent_and_an_unmarked_one_renders_plainly() {
+    // Libby is not here; Kiko and the operator are not either: only Meta speaks in #minds.
+    let public = Room { messages: vec![message("#minds:gamecult.org", OPERATOR, "Meta", "how is everyone?", 2, false)], here: Some("#minds:gamecult.org".into()), ..Room::default() };
+    let shown = |seed| packet_of(TurnKind::Chat, &marked(), &public, &History::default(), seed).context;
+    let memory = (1..=40).map(shown).find(|context| context.contains("[libby-sounds]")).expect("the memory about Libby is selected on some seed");
+    assert!(memory.contains("- memory [libby-sounds]: she knows privately: Libby laughed at the door fix."), "{memory}");
+    let context = shown(1);
+    assert!(context.contains("The operator rules on what the work is for.") && !context.contains("knows privately: The operator"), "an unmarked bond is plain: {context}");
+}
+
+#[test]
+fn a_private_fact_about_someone_present_in_public_is_left_out_and_plain_in_a_direct_message_with_them() {
+    // Kiko is here, in #minds: her marked bond's summary is left out, and no hint of it remains.
+    let public = Room { messages: vec![message("#minds:gamecult.org", "@kiko:gamecult.org", "Kiko", "afternoon", 2, false)], here: Some("#minds:gamecult.org".into()), ..Room::default() };
+    let packet = packet_of(TurnKind::Chat, &marked(), &public, &History::default(), 1);
+    let line = packet.context.lines().find(|line| line.starts_with("- bond [bond-kiko]")).unwrap_or_else(|| panic!("{}", packet.context)).to_owned();
+    assert!(!line.contains("massaging the pipeline") && !line.contains("privately"), "{line}");
+    // In a direct message with Kiko it is plain.
+    let dm = Room { messages: vec![message("!dm-kiko:gamecult.org", "@kiko:gamecult.org", "Kiko", "hey", 2, true)], here: Some("!dm-kiko:gamecult.org".into()), direct: vec!["!dm-kiko:gamecult.org".into()], ..Room::default() };
+    let packet = packet_of(TurnKind::Chat, &marked(), &dm, &History::default(), 1);
+    assert!(packet.context.contains("Kiko pokes her to stop massaging the pipeline.") && !packet.context.contains("privately"), "{}", packet.context);
+}
+
+/// The first context over seeds 1 to 60 that carries `marker`, and its lines that do.
+fn lines_with(state: &Value, room: &Room, kind: TurnKind, marker: &str) -> Option<Vec<String>> {
+    (1..=60).map(|seed| packet_of(kind, state, room, &History::default(), seed).context).find(|context| context.contains(marker)).map(|context| context.lines().filter(|line| line.contains(marker)).map(str::to_owned).collect())
+}
+
+#[test]
+fn soul_q5a_a_private_memory_naming_its_person_by_an_about_tag_is_never_plain_in_public() {
+    let mut marked = state();
+    marked["thoughtMemory"]["memories"] = json!([{ "id": "secret-a", "summary": "SECRETA Libby told me her diagnosis.", "createdAt": hours_ago(20), "status": "crystallized", "intensity": 1.0, "tags": ["private", "about:libby"] }]);
+    let public = Room { messages: vec![message("#minds:gamecult.org", OPERATOR, "Meta", "how is Libby doing?", 2, false)], here: Some("#minds:gamecult.org".into()), ..Room::default() };
+    // Libby is not here: framed as known privately.
+    assert_eq!(lines_with(&marked, &public, TurnKind::Chat, "SECRETA"), Some(vec!["- memory [secret-a]: she knows privately: SECRETA Libby told me her diagnosis.".to_owned()]));
+    let present = Room { messages: vec![message("#minds:gamecult.org", "@libby:gamecult.org", "Libby", "hi all", 2, false)], ..public.clone() };
+    assert_eq!(lines_with(&marked, &present, TurnKind::Chat, "SECRETA"), None, "left out to her face");
+    // Naming no one, it is private about everyone: left out of public rooms and direct messages, plain in her own room.
+    marked["thoughtMemory"]["memories"][0]["tags"] = json!(["private"]);
+    assert_eq!(lines_with(&marked, &public, TurnKind::Chat, "SECRETA"), None);
+    let dm = Room { messages: vec![message("!dm-libby:gamecult.org", "@libby:gamecult.org", "Libby", "hey", 2, true)], here: Some("!dm-libby:gamecult.org".into()), direct: vec!["!dm-libby:gamecult.org".into()], ..Room::default() };
+    assert_eq!(lines_with(&marked, &dm, TurnKind::Chat, "SECRETA"), None);
+    let own = Room { messages: vec![message("#eureka:gamecult.org", OPERATOR, "Meta", "morning", 2, false)], here: Some("#eureka:gamecult.org".into()), own: vec!["#eureka:gamecult.org".into()], ..Room::default() };
+    assert_eq!(lines_with(&marked, &own, TurnKind::Chat, "SECRETA"), Some(vec!["- memory [secret-a]: SECRETA Libby told me her diagnosis.".to_owned()]));
+}
+
+#[test]
+fn soul_q5b_every_pool_honours_the_mark() {
+    let mut marked = state();
+    let private = json!({ "privacy": "private" });
+    let libby = json!({ "id": "libby", "kind": "person" });
+    marked["thoughtMemory"]["incubation"] = json!([{ "id": "w-secret", "summary": "SECRETB Whether Libby's relapse is why she went quiet.", "createdAt": hours_ago(20), "status": "active", "intensity": 1.0, "extensions": private, "target": libby }]);
+    marked["affect"]["needs"] = json!([{ "id": "need-secret", "label": "SECRETN to keep Libby's relapse quiet", "intensity": 1.0, "status": "active", "extensions": private, "target": libby }]);
+    marked["affect"]["doctrineStances"] = json!([{ "id": "stance-secret", "summary": "SECRETS Libby should not be on call.", "intensity": 1.0, "status": "active", "extensions": private, "target": libby }]);
+    let present = Room { messages: vec![message("#minds:gamecult.org", "@libby:gamecult.org", "Libby", "hi all", 2, false)], here: Some("#minds:gamecult.org".into()), ..Room::default() };
+    let absent = Room { messages: vec![message("#minds:gamecult.org", OPERATOR, "Meta", "hi all", 2, false)], ..present.clone() };
+    for marker in ["SECRETB", "SECRETN", "SECRETS"] {
+        assert_eq!(lines_with(&marked, &present, TurnKind::Chat, marker), None, "{marker} is left out with Libby here");
+        let framed = lines_with(&marked, &absent, TurnKind::Chat, marker).unwrap_or_else(|| panic!("{marker} is selected on some seed"));
+        assert!(framed.iter().all(|line| line.contains(&format!("she knows privately: {marker}"))), "{framed:?}");
+    }
+    let packet = (1..=60).map(|seed| packet_of(TurnKind::Chat, &marked, &absent, &History::default(), seed)).find(|packet| packet.context.contains("SECRETB")).unwrap();
+    assert!(packet.private.iter().any(|words| words.starts_with("SECRETB")), "the Interpreter is shown what is private: {:?}", packet.private);
+}
+
+#[test]
+fn soul_q5c_a_direct_message_with_a_third_person_is_not_a_direct_message_with_her() {
+    let mut marked = state();
+    marked["affect"]["socialBonds"][0]["extensions"] = json!({ "privacy": "private" });
+    let room = "!group-dm:gamecult.org";
+    let group = Room { messages: vec![message(room, "@kiko:gamecult.org", "Kiko", "hey", 3, true), message(room, "@libby:gamecult.org", "Libby", "hey both", 2, true)], here: Some(room.into()), direct: vec![room.into()], ..Room::default() };
+    let packet = packet_of(TurnKind::Chat, &marked, &group, &History::default(), 1);
+    let bond = packet.context.lines().find(|line| line.starts_with("- bond [bond-libby]")).unwrap_or_else(|| panic!("{}", packet.context)).to_owned();
+    assert!(!bond.contains("holds the sounds") && !bond.contains("privately"), "left out before Kiko: {bond}");
+    let alone = Room { messages: vec![message(room, "@libby:gamecult.org", "Libby", "hey", 2, true)], ..group };
+    assert!(packet_of(TurnKind::Chat, &marked, &alone, &History::default(), 1).context.contains("Libby holds the sounds"), "plain with Libby alone");
+}
+
+#[test]
+fn what_she_said_in_a_direct_message_stays_in_it() {
+    let said = |room: &str| super::select::Said { id: "said-dm".into(), room: room.into(), text: "SAIDDM I'm tired of the pipeline.".into(), at: now() - chrono::Duration::minutes(5) };
+    let history = History { said: vec![said(DM_DERU)], ..History::default() };
+    let shown = |room: &Room| (1..=60).any(|seed| packet_of(TurnKind::Chat, &state(), room, &history, seed).context.contains("SAIDDM"));
+    assert!(!shown(&chat_room()), "never in a public packet");
+    let with_deru = Room { messages: vec![message(DM_DERU, DERU, "Deru", "and?", 2, true)], here: Some(DM_DERU.into()), direct: vec![DM_DERU.into()], ..Room::default() };
+    assert!(shown(&with_deru), "in its own direct message");
+    let public = History { said: vec![said("#swarm:gamecult.org")], ..History::default() };
+    assert!((1..=60).any(|seed| packet_of(TurnKind::Chat, &state(), &chat_room(), &public, seed).context.contains("SAIDDM")), "a public line is shared");
+}
+
+#[test]
+fn soul_f6_a_mind_is_one_person_by_her_handle_or_her_full_matrix_id() {
+    let kiko_here = Room { messages: vec![message("#minds:gamecult.org", "@kiko:gamecult.org", "Kiko", "hi all", 2, false)], here: Some("#minds:gamecult.org".into()), ..Room::default() };
+    let kiko_dm = Room { messages: vec![message("!dm-kiko:gamecult.org", "@kiko:gamecult.org", "Kiko", "hey", 2, true)], here: Some("!dm-kiko:gamecult.org".into()), direct: vec!["!dm-kiko:gamecult.org".into()], ..Room::default() };
+    for (spelling, memory) in [
+        ("target, handle", json!({ "target": { "id": "kiko", "kind": "person" }, "tags": ["private"] })),
+        ("target, full id", json!({ "target": { "id": "@kiko:gamecult.org", "kind": "person" }, "tags": ["private"] })),
+        ("about, handle", json!({ "tags": ["private", "about:kiko"] })),
+        ("about, full id", json!({ "tags": ["private", "about:@kiko:gamecult.org"] })),
+    ] {
+        let mut marked = state();
+        let mut item = json!({ "id": "kiko-secret", "summary": "KIKOSECRET she is leaving.", "createdAt": hours_ago(3), "status": "crystallized", "intensity": 1.0 });
+        for (key, value) in memory.as_object().unwrap() {
+            item[key] = value.clone();
+        }
+        marked["thoughtMemory"]["memories"] = json!([item]);
+        assert_eq!(lines_with(&marked, &kiko_here, TurnKind::Chat, "KIKOSECRET"), None, "{spelling}: left out with Kiko here");
+        assert_eq!(lines_with(&marked, &kiko_dm, TurnKind::Chat, "KIKOSECRET"), Some(vec!["- memory [kiko-secret]: KIKOSECRET she is leaving.".to_owned()]), "{spelling}: plain with Kiko alone");
+    }
+    // A bond keyed by her full Matrix id is her bond, and the operator's full id is `operator`.
+    let mut full = state();
+    full["affect"]["socialBonds"][1]["object"]["id"] = "@kiko:gamecult.org".into();
+    full["affect"]["socialBonds"][2]["object"]["id"] = OPERATOR.into();
+    let both = Room { messages: vec![message("#minds:gamecult.org", "@kiko:gamecult.org", "Kiko", "hi", 3, false), message("#minds:gamecult.org", OPERATOR, "Meta", "hi", 2, false)], ..kiko_here };
+    let context = packet_of(TurnKind::Chat, &full, &both, &History::default(), 1).context;
+    assert!(context.contains("- bond [bond-kiko] Kiko") && context.contains("- bond [bond-operator] Meta, the operator"), "{context}");
+}
+
+#[test]
+fn soul_f7_a_value_carrying_a_mark_is_refused_not_rendered() {
+    let mut marked = state();
+    marked["values"] = json!([{ "id": "v-secret", "label": "SECRETVALUE", "priority": 0.9, "summary": "Never tell Kiko.", "extensions": { "privacy": "private" } }, { "id": "coherence", "label": "Coherence", "priority": 0.9, "summary": "Coherence over velocity." }]);
+    let own = Room { messages: vec![message("#eureka:gamecult.org", OPERATOR, "Meta", "morning", 2, false)], here: Some("#eureka:gamecult.org".into()), own: vec!["#eureka:gamecult.org".into()], ..Room::default() };
+    for room in [chat_room(), own] {
+        assert_eq!(lines_with(&marked, &room, TurnKind::Chat, "SECRETVALUE"), None);
+    }
+    assert!(lines_with(&marked, &chat_room(), TurnKind::Chat, "Coherence").is_some(), "an unmarked value still renders");
 }

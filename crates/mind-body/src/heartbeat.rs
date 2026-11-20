@@ -437,8 +437,8 @@ pub(crate) enum WakePolicy {
     /// only while fewer than this many Mind lines in a row came before it across her rooms (`LineFacts::mind_run`): the
     /// backstop.
     HumansPace(usize),
-    /// `Ruled`, with at most this many Mind lines in a row in a room before a human must speak again: a Mind's line past
-    /// the cap wakes no one.
+    /// `Ruled`, with at most this many lines in her current Mind-only run (`LineFacts::mind_run`) before a human must
+    /// speak where it runs: a Mind's line past the cap wakes no one.
     NamesWithCap(usize),
     /// The swarm's old loop, a control: any line in her rooms but her own.
     AllMessages,
@@ -459,8 +459,8 @@ pub(crate) enum WakeCause {
 /// and passes the default; `Live` reads none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LineFacts {
-    /// How many Mind lines in a row came before this one, across every room she sees, since a human last spoke in any of
-    /// them: the backstop counts a Mind-only run per Mind, not per room, so a loop cannot dodge it by changing rooms.
+    /// How many lines her current Mind-only run held before this one: one run across every room she sees, so a loop
+    /// cannot dodge the backstop by changing rooms, and ended only by a human's line in a room the run has lines in.
     pub mind_run: usize,
     /// The line is in a room of hers: a direct message (the delivery says so) or a room configured as hers.
     pub own_room: bool,

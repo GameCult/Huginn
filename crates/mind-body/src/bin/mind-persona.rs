@@ -199,6 +199,7 @@ fn run_project(args: &[String]) -> Result<String> {
         through,
         last_heard: vec![],
         recent: vec![],
+        own_rooms: vec![],
     };
     let report = project(&organs, &request, chrono::Utc::now())?;
     let addressing = &report["addressing"];
