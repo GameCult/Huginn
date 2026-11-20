@@ -1347,11 +1347,15 @@ fn every_person_the_packet_names_from_the_room_has_pronouns_and_an_unknown_one_i
 fn the_projector_is_told_not_to_retell_not_to_offer_options_and_not_to_owe() {
     let packet = packet_of(TurnKind::Chat, &state(), &chat_room(), &History::default(), 1);
     let prompt = narrate::projector_prompt(&packet, &Tuning::default());
-    for rule in ["never retell or summarise it", "Do not weigh options", "never as a debt", "an absence is not part of her moment", "pronouns"] {
+    for absent in ["no task is waiting", "owed", "debt"] {
+        assert!(!prompt.contains(absent), "the guidance names no duty, even to deny one: {absent}");
+    }
+    for rule in ["never retell or summarise it", "Do not weigh options", "an absence is not part of her moment", "pronouns"] {
         assert!(prompt.contains(rule), "{rule}");
     }
     let persona = narrate::persona_prompt(&packet, "The room is warm.", &Tuning::default());
     assert!(persona.contains("Continue her inner stream") && persona.contains("This is not a message to the room") && persona.contains("most moments pass with nothing said"), "{persona}");
+    assert!(!persona.contains("quotation marks") && !persona.contains("@"), "no speech convention: the Interpreter decides what is said");
 }
 
 #[test]
@@ -1368,11 +1372,6 @@ fn the_narration_checks_flag_an_option_menu_and_a_retelling_and_pass_a_reaction(
     assert!(narrate::heard_overlap(reaction, heard) < 0.05);
 }
 
-#[test]
-fn inner_is_her_prose_without_what_she_says_aloud() {
-    assert_eq!(narrate::inner("She grins. \"Winter, still.\" Then she lets it go."), "She grins. \u{2026} Then she lets it go.");
-    assert_eq!(narrate::inner("Only thought here."), "Only thought here.");
-}
 
 #[test]
 fn the_group_state_reads_one_room_and_never_folds_a_direct_message_in() {
@@ -1402,12 +1401,14 @@ fn the_packet_speaks_of_her_in_her_own_pronouns() {
 }
 
 #[test]
-fn a_room_given_by_its_matrix_id_is_read_by_its_alias() {
+fn a_room_is_named_by_the_key_the_tail_carries_and_a_public_rooms_id_is_reported_not_guessed() {
     let dir = tempfile::tempdir().unwrap();
     let stored = Stored(state());
     let chat = mouth();
     let organs = Organs { persona: Some(&stored), chat: Some(&chat), addressing: None, model: None };
-    // The mouth's first delivery is in #swarm, room id !1:gamecult.org; its tail line carries the alias.
-    let report = project(&organs, &Request { room: Some("!1:gamecult.org".into()), ..request(dir.path(), None, None) }, now()).unwrap();
-    assert_eq!((report["room"]["messages"].as_u64(), report["room"]["tail"].as_u64()), (Some(1), Some(1)), "{}", report["room"]);
+    // The mouth's first delivery is in #swarm, room id !1:gamecult.org; the tail names #swarm by its alias.
+    let by_alias = project(&organs, &Request { room: Some("#swarm:gamecult.org".into()), ..request(dir.path(), None, None) }, now()).unwrap();
+    assert_eq!((by_alias["room"]["messages"].as_u64(), by_alias["room"]["tail"].as_u64()), (Some(1), Some(1)), "{}", by_alias["room"]);
+    let by_id = project(&organs, &Request { room: Some("!1:gamecult.org".into()), ..request(dir.path(), None, None) }, now()).unwrap();
+    assert!(by_id["room"]["why"].as_str().unwrap().contains("named by its alias"), "{}", by_id["room"]);
 }

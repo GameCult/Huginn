@@ -20,7 +20,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::harness::{Harness, Line, Message, RETELL_FLAG, cosine, pending_for, state_file, turn_markdown, usage_markdown, usage_total};
+use super::harness::{Harness, Line, Message, OVERLAP_FLAG, cosine, pending_for, state_file, turn_markdown, usage_markdown, usage_total};
 use super::select::Draw;
 use super::tuning;
 use super::{MouthReader, Organs, Request, Through, TurnKind, project};
@@ -49,10 +49,10 @@ struct SimFile {
     beat_s: u32,
     #[serde(default = "two")]
     round_minutes: i64,
-    /// An exchange in a room is its run of lines with no gap longer than this between one and the next; she is in it when
-    /// one of them is hers (`humans_pace`).
-    #[serde(default = "exchange_gap")]
-    exchange_gap_minutes: i64,
+    /// She is in a room's exchange when she has spoken there within this many minutes before the line (`humans_pace`):
+    /// others talking on does not keep her in it.
+    #[serde(default = "exchange_minutes")]
+    exchange_minutes: i64,
     start: DateTime<Utc>,
     rooms: Vec<String>,
     #[serde(default)]
@@ -74,8 +74,8 @@ fn two() -> i64 {
     2
 }
 
-fn exchange_gap() -> i64 {
-    20
+fn exchange_minutes() -> i64 {
+    30
 }
 
 fn ruled() -> WakePolicy {
@@ -152,13 +152,15 @@ fn speaker(line: &Line, member: &Member, operators: &[String], cast: &[String]) 
 }
 
 /// For each line, how many Mind lines in a row came before it in its room since a human last spoke there.
-fn mind_runs(lines: &[Line], cast: &[String]) -> Vec<usize> {
-    let mut run: BTreeMap<&str, usize> = BTreeMap::new();
+fn mind_runs(lines: &[Line], cast: &[String], member: &Member) -> Vec<usize> {
+    let mut run = 0usize;
     lines
         .iter()
         .map(|line| {
-            let before = run.get(line.room.as_str()).copied().unwrap_or(0);
-            run.insert(&line.room, if cast.contains(&line.from) { before + 1 } else { 0 });
+            let before = run;
+            if line.visible_to(&member.entry.id, &member.rooms) {
+                run = if cast.contains(&line.from) { run + 1 } else { 0 };
+            }
             before
         })
         .collect()
@@ -187,19 +189,10 @@ struct Woken {
 
 /// Whether she spoke in the exchange a line continues: walking back through the lines of its room while each is within
 /// `gap` of the one after it.
-fn in_exchange(lines: &[Line], at: usize, her: &str, gap: Duration) -> bool {
-    let room = &lines[at].room;
-    let mut after = lines[at].at_ms;
-    for line in lines[..at].iter().rev().filter(|line| line.room == *room) {
-        if after.saturating_sub(line.at_ms) > u64::try_from(gap.num_milliseconds()).unwrap_or(0) {
-            return false;
-        }
-        if line.from == her {
-            return true;
-        }
-        after = line.at_ms;
-    }
-    false
+fn in_exchange(lines: &[Line], at: usize, her: &str, window: Duration) -> bool {
+    let line = &lines[at];
+    let since = line.at_ms.saturating_sub(u64::try_from(window.num_milliseconds()).unwrap_or(0));
+    lines[..at].iter().any(|earlier| earlier.room == line.room && earlier.from == her && earlier.at_ms >= since)
 }
 
 #[allow(clippy::too_many_arguments, reason = "one wake decision's inputs, each a plan or room fact")]
@@ -235,13 +228,6 @@ fn cause_word(cause: Option<WakeCause>) -> &'static str {
         Some(WakeCause::Mind) => "mind",
         None => "beat",
     }
-}
-
-/// The cast members a said line tags: an `@handle` of theirs in the text. The stand-in for the Interpreter's explicit
-/// addressee (C3b), which will carry a Matrix mention; a name without the `@` tags no one.
-fn explicit_mentions(says: &str, cast: &[String]) -> Vec<String> {
-    let tagged: Vec<String> = says.split(|c: char| !(c.is_alphanumeric() || c == '@' || c == '_' || c == '-' || c == '.')).filter_map(|word| word.strip_prefix('@')).map(|handle| handle.trim_end_matches('.').to_lowercase()).collect();
-    cast.iter().filter(|id| tagged.iter().any(|handle| handle == &localpart(id).to_lowercase() || id.to_lowercase() == format!("@{handle}"))).cloned().collect()
 }
 
 /// A seeded shuffle, so the order of those woken together is drawn, and replays.
@@ -302,6 +288,9 @@ fn cast_of(plan: &SimFile, base: &Path) -> Result<Vec<Member>> {
         if message.dm && message.to.as_ref().is_none_or(|to| !plan.cast.iter().any(|entry| entry.id == *to)) {
             bail!("script message {} is a direct message: name its recipient, a cast member, in `to`", at + 1);
         }
+        if message.dm && plan.rooms.contains(&message.room) {
+            bail!("script message {} is a direct message in {}, one of the plan's rooms: a direct message has its own room", at + 1, message.room);
+        }
     }
     Ok(members)
 }
@@ -333,8 +322,7 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
     for round in 1..=plan.rounds {
         scripted(round, &mut lines, &mut rounds_of, &mut causes)?;
         let round_at = at_round(round);
-        let runs = mind_runs(&lines, &cast);
-        let mut woke: Vec<(usize, Option<Woken>)> = members.iter().enumerate().filter_map(|(at, member)| woken(&lines, &runs, seen[at], member, &plan.operators, &cast, plan.wake, Duration::minutes(plan.exchange_gap_minutes)).map(|why| (at, Some(why)))).collect();
+        let mut woke: Vec<(usize, Option<Woken>)> = members.iter().enumerate().filter_map(|(at, member)| woken(&lines, &mind_runs(&lines, &cast, member), seen[at], member, &plan.operators, &cast, plan.wake, Duration::minutes(plan.exchange_minutes)).map(|why| (at, Some(why)))).collect();
         // The beat, as the heartbeat's: when it has fallen, one more wake for the winner of `tempo::pick` among those
         // not already woken.
         if plan.beat_s > 0 && (round_at - last_beat).num_seconds() >= i64::from(plan.beat_s) {
@@ -378,7 +366,7 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
                 minds: cast.clone(),
                 own_sender: id.clone(),
                 tuning: harness.tuning.clone(),
-                through: Through::Persona,
+                through: Through::Interpreter,
                 last_heard: vec![],
                 recent: recent[at].clone(),
             };
@@ -393,16 +381,24 @@ fn run(harness: &Harness, plan: &SimFile, members: &mut [Member], repeat: usize)
                 recent[at].push(selected.iter().filter_map(Value::as_str).map(str::to_owned).collect());
             }
             // A failed call is a failure, never a silence.
-            let failed = report.get("error").or_else(|| render.get("failed")).or_else(|| render["persona"].get("failed")).map(|fault| fault.as_str().unwrap_or_default().to_owned());
-            let said: Vec<String> = render["persona"]["would_say"].as_array().map(|said| said.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
-            let line = (!said.is_empty()).then(|| said.join(" "));
+            let failed = report.get("error").or_else(|| render.get("failed")).or_else(|| render["persona"].get("failed")).or_else(|| render["interpreter"].get("failed")).map(|fault| fault.as_str().unwrap_or_default().to_owned());
+            // What she says is the Interpreter's decision alone; who it wakes is its structured mentions and reply target.
+            let said: Vec<Value> = if failed.is_some() { vec![] } else { render["interpreter"]["said"].as_array().cloned().unwrap_or_default() };
             let cause = cause_word(why.as_ref().map(|why| why.cause));
-            if let Some(says) = &line {
-                let mentions = explicit_mentions(says, &cast);
-                lines.push(Line { from: id.clone(), name: member.entry.name.clone(), room: here.clone(), at_ms: u64::try_from(now.timestamp_millis()).unwrap_or_default(), says: says.clone(), mentions, dm_to: dm_to.clone(), follow_up: false, reply_to: None, new: false });
+            let mut spoken: Vec<String> = Vec::new();
+            for (offset, decided) in said.iter().enumerate() {
+                let room = decided["room"].as_str().unwrap_or(&here).to_owned();
+                let says = decided["text"].as_str().unwrap_or_default().to_owned();
+                let mentions: Vec<String> = decided["mentions"].as_array().map(|ids| ids.iter().filter_map(Value::as_str).filter(|id| cast.contains(&(*id).to_owned()) || plan.operators.contains(&(*id).to_owned())).map(str::to_owned).collect()).unwrap_or_default();
+                let reply_to = decided["reply_to"].as_str().and_then(|person| lines.iter().rposition(|line| line.from == person && line.room == room));
+                let at_ms = u64::try_from(now.timestamp_millis()).unwrap_or_default() + offset as u64;
+                let to = if room == here { dm_to.clone() } else { None };
+                lines.push(Line { from: id.clone(), name: member.entry.name.clone(), room, at_ms, says: says.clone(), mentions, dm_to: to, follow_up: false, reply_to, new: false });
                 rounds_of.push(round);
                 causes.push(Some(cause));
+                spoken.push(says);
             }
+            let line = (!spoken.is_empty()).then(|| spoken.join(" / "));
             let outcome = if failed.is_some() { "failed" } else if line.is_some() { "spoke" } else { "silent" };
             let (how, by) = why.map_or((None, vec![]), |why| (why.how, why.by));
             let turn = json!({ "round": round, "persona": member.entry.name, "id": id, "woke": cause, "how": how, "addressed_by": by, "kind": kind, "room": here, "outcome": outcome, "failed": failed, "said": line, "report": report });
@@ -526,7 +522,7 @@ fn metrics(members: &[Member], lines: &[Line], rounds_of: &[usize], causes: &[Op
     let overlaps: Vec<f64> = turns.iter().filter_map(|turn| turn["report"]["renders"][0]["heard_overlap"].as_f64()).collect();
     let narration = json!({
         "mean_heard_overlap": if overlaps.is_empty() { Value::Null } else { json!(overlaps.iter().sum::<f64>() / overlaps.len() as f64) },
-        "retelling": overlaps.iter().filter(|overlap| **overlap > RETELL_FLAG).count(),
+        "high_overlap": overlaps.iter().filter(|overlap| **overlap > OVERLAP_FLAG).count(),
         "offers_options": turns.iter().filter(|turn| turn["report"]["renders"][0]["offers_options"] == true).count(),
         "narrations": overlaps.len(),
     });
@@ -586,15 +582,15 @@ fn markdown(plan_path: &Path, plan: &SimFile, members: &[Member], group_state: O
     let mut out = String::new();
     let _ = writeln!(out, "# Swarm simulation\n");
     let _ = writeln!(out, "> **State does not evolve during a run.** The Interpreter (C3b) and the commit (C3c) are not built, so every persona starts each turn from the state the plan gave her. `state_after_turn` in `projection/simulate.rs` is the seam where they will move it between rounds. Freshness carries over: each persona's earlier packets in the run count against repeating an item.\n");
-    let _ = writeln!(out, "> **Explicit addressee, stand-in.** Whom a line is to is the Interpreter's to say (C3b). Until then a said line that holds `@handle` of a cast member counts as a Matrix mention of that member; any other name in it is prose and tags no one.\n");
+    let _ = writeln!(out, "> **Speech is the Interpreter's.** What she says is decided from her prose by the Interpreter's speech step (C3b, one tool-less structured call), held by code to her prose: each line rests on a verbatim span of it, in a room she may speak in, and is never someone else's words. Its structured mentions and reply target are the only explicit addressees; an `@` in the text tags no one.\n");
     let _ = writeln!(out, "- plan: `{}`", plan_path.display());
     let _ = writeln!(out, "- cast: {}", members.iter().map(|member| format!("{} (`{}`, `{}`, names from {})", member.entry.name, member.entry.id, member.entry.state.display(), member.names_from)).collect::<Vec<_>>().join(", "));
-    let _ = writeln!(out, "- rooms: {}; rounds: {}; repeats: {}; seed: {}; minutes a round: {}; an exchange ends at a gap over {} min", plan.rooms.join(", "), plan.rounds, plan.repeats, plan.seed, plan.round_minutes, plan.exchange_gap_minutes);
+    let _ = writeln!(out, "- rooms: {}; rounds: {}; repeats: {}; seed: {}; minutes a round: {}; she is in a room's exchange when she spoke there within {} min", plan.rooms.join(", "), plan.rounds, plan.repeats, plan.seed, plan.round_minutes, plan.exchange_minutes);
     let owners: Vec<String> = members.iter().filter(|member| !member.entry.own_rooms.is_empty()).map(|member| format!("{}: {}", member.entry.name, member.entry.own_rooms.join(", "))).collect();
     let _ = writeln!(out, "- own rooms (from the plan: neither the heartbeat's table nor `persona.env` records room ownership): {}", if owners.is_empty() { "none".to_owned() } else { owners.join("; ") });
     let _ = writeln!(out, "- wake: {}; beat: {}", policy_words(plan.wake), if plan.beat_s == 0 { "off".to_owned() } else { format!("every {} s of simulated time, one Persona by `tempo::pick`", plan.beat_s) });
     let _ = writeln!(out, "- group state in the Projector's packet: {}", match group_state { Some(true) => "on", Some(false) => "off", None => "unknown (the tuning did not load)" });
-    let _ = writeln!(out, "- speech: the double-quoted spans of her prose, joined, posted to the room she woke in; none is silence. A preview of the Interpreter's speech, not its decision");
+    let _ = writeln!(out, "- speech: the Interpreter's lines, each posted to its room; none is silence");
     let _ = writeln!(out, "- wakes are counted per wake, by its strongest cause: addressed by a human, a human line, addressed by a Mind, a Mind's line (control only), the beat. A Mind-addressed wake's evidence is its strongest: a Matrix mention or reply, her id written as text, a name in the text");
     let _ = writeln!(out, "- silence rate is per woken turn that did not fail; a failed call is counted apart. Reply chains are per room: Mind lines spoken in turns another Mind's line woke, in a row");
     let _ = writeln!(out, "- convergence is the mean pairwise cosine of speakers' word counts (lexical, cheap); work-talk share is a lexical heuristic over a fixed word list, not a classifier");
@@ -621,7 +617,7 @@ fn markdown(plan_path: &Path, plan: &SimFile, members: &[Member], group_state: O
         let _ = writeln!(out, "- convergence of prose: all {}, first half {}, second half {}", number(&metrics["convergence_prose"]["all"]), number(&metrics["convergence_prose"]["first_half"]), number(&metrics["convergence_prose"]["second_half"]));
         let _ = writeln!(out, "- work-talk share of Mind lines (heuristic): {}", number(&metrics["work_talk_share"]));
         let narration = &metrics["narration"];
-        let _ = writeln!(out, "- narrations: {}; mean overlap with what she heard {}; retelling (over {RETELL_FLAG}) {}; offering her options {}\n", narration["narrations"], number(&narration["mean_heard_overlap"]), narration["retelling"], narration["offers_options"]);
+        let _ = writeln!(out, "- narrations: {}; mean lexical overlap with what she heard {}; over {OVERLAP_FLAG}: {}; offering her options {}\n", narration["narrations"], number(&narration["mean_heard_overlap"]), narration["high_overlap"], narration["offers_options"]);
         let _ = writeln!(out, "| persona | wakes | messages | failed | silence rate | addressed |\n|---|---|---|---|---|---|");
         if let Some(personas) = metrics["personas"].as_object() {
             for (name, row) in personas {

@@ -14,12 +14,12 @@
 //! to it.
 //!
 //! `mind-persona project --instance <slug> [--endpoint rudp://<ip>:<port>] [--kind chat|beat|reflection] [--in <room>]
-//! [--room <fixture.toml>] [--seed N] [--state <file>] [--select-only | --renders K [--through projector|persona]
+//! [--room <fixture.toml>] [--seed N] [--state <file>] [--select-only | --renders K [--through projector|persona|interpreter]
 //! [--judge <state-file>]]` is the experiment tool over the Projector and the Persona stage
 //! (`mind_body::projection::project`): it prints, as JSON, the packet the Select stage builds from her stored state (or
 //! `--state`, checked as a put checks its content, rules P1 to P3; P4 and P5 compare it with the stored document and are
 //! not checked), and with `--renders` the Projector's narrations of K successive turns;
-//! `--through persona` adds her prose and the quoted lines it would say; `--judge` renders a second state too and asks
+//! `--through persona` adds her prose and `--through interpreter` what the Interpreter decides she says; `--judge` renders a second state too and asks
 //! the model which narration came from which. It writes nothing and reads no brake.
 //!
 //! Live, it reads `MIND_PERSONA_OPERATOR`, `MIND_PERSONA_MINDS` and `MIND_PERSONA_SELF_SENDER` (required), the heartbeat's
@@ -53,7 +53,7 @@ use mind_body::projection::harness::{Fixture, Harness, batch, fixture_request, s
 use mind_body::projection::{HuginnPersonaSource, KitModel, Model, MouthReader, Organs as ProjectOrgans, PersonaSource, Request as ProjectRequest, TUNING_FILE, TUNING_ROOT, Through, TurnKind, connector_key, project};
 
 const USAGE: &str = "usage: mind-persona --instance <slug> [--endpoint rudp://<ip>:<port>] [--rooms a,b] [--operator id[,id]] [--minds id[,id]] [--self-sender id]";
-const PROJECT_USAGE: &str = "usage: mind-persona project --instance <slug> [--endpoint rudp://<ip>:<port>] [--kind chat|beat|reflection] [--in <room>] [--room <fixture.toml>] [--seed N] [--state <file>] [--select-only | --renders K [--through projector|persona] [--judge <state-file>]] | (--batch <plan> | --simulate <plan>) --out <report.md>";
+const PROJECT_USAGE: &str = "usage: mind-persona project --instance <slug> [--endpoint rudp://<ip>:<port>] [--kind chat|beat|reflection] [--in <room>] [--room <fixture.toml>] [--seed N] [--state <file>] [--select-only | --renders K [--through projector|persona|interpreter] [--judge <state-file>]] | (--batch <plan> | --simulate <plan>) --out <report.md>";
 /// How long one call to the mind may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the mouth may take to answer one read.
@@ -118,7 +118,7 @@ fn run_project(args: &[String]) -> Result<String> {
                 through = match value()?.as_str() {
                     "projector" => Through::Projector,
                     "persona" => Through::Persona,
-                    "interpreter" => bail!("--through interpreter is not built yet (map C3b)"),
+                    "interpreter" => Through::Interpreter,
                     _ => bail!("{PROJECT_USAGE}"),
                 }
             }

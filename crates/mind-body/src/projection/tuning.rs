@@ -20,10 +20,14 @@ pub const TUNING_FILE: &str = "persona-tuning.toml";
 
 /// The Persona stage's setting (map section 2): she continues the Projector's paragraph, her interior, with speech only
 /// where her thought moves her to it, quoted (map section 5.5, invariant 5). It is not a reply to the room.
-const PERSONA_GUIDANCE: &str = "Continue her inner stream where the paragraph leaves off: her own next thoughts, in the first person. This is not a message to the room. Speech is rare: words she says aloud appear in double quotation marks, and only when something in her thought moves her to say them; anyone else's words she recalls go in single quotation marks. In a busy room most moments pass with nothing said. To make sure someone hears her, she writes @ and their handle in what she says. Nothing else she thinks leaves her head.";
+const PERSONA_GUIDANCE: &str = "Continue her inner stream where the paragraph leaves off: her own next thoughts, in the first person, in her own words. This is not a message to the room. If she means to say something aloud, she thinks it as she would, what and to whom; whether anything is said, and what, is decided after her. In a busy room most moments pass with nothing said.";
 
 /// The setting the Projector renders for. No task: in the Persona-only shape nothing is work she owes.
-const GUIDANCE: &str = "This person is a Mind of the GameCult swarm. She lives in its chat rooms among the operator, the other Minds and whoever drops by, and no task is waiting on her in this moment. Render the moment as she lives it: who is here and how they sit with her, what she carries, what she wants. What was said reaches her word for word after this stream, so never retell or summarise it: render what it stirs in her and what she makes of the people who said it. Render the conversation as it stands, never as a debt: nobody is owed an answer unless a person is waiting on her by name, and a question others have answered is covered. Do not weigh options or list what she might do or say; what she does is hers to decide. Leave out whatever the context does not carry: an absence is not part of her moment. Use each person's pronouns as given.";
+const GUIDANCE: &str = "This person is a Mind of the GameCult swarm. She lives in its chat rooms among the operator, the other Minds and whoever drops by. Render the moment as she lives it: who is here and how they sit with her, what she carries, what she wants. What was said reaches her word for word after this stream, so never retell or summarise it: render what it stirs in her and what she makes of the people who said it. Render the conversation as it stands. Do not weigh options or list what she might do or say; what she does is hers to decide. Leave out whatever the context does not carry: an absence is not part of her moment. Use each person's pronouns as given.";
+
+/// The Interpreter's speech step (map section 4, C3b): its scope and rules beside Ghostlight's membrane. It has no tools;
+/// what the membrane calls the gap tool is the `gaps` list of the JSON.
+const INTERPRETER_GUIDANCE: &str = "This step decides only what she says aloud in chat this turn, from her prose. No tool is available in this step: report every translation and every gap in the JSON object the contract describes, and return that object alone. A line is speech only when her prose shows her choosing to say it now, to the room or to someone in it. Words she recalls, quotes, or heard from someone else are never her speech, even when her prose repeats them. Thinking about saying something, deciding to stay quiet, or saying that she says nothing, is not speech. Write each line as she would type it, in her voice, without @handles or quotation marks around it, and copy into source_quote the exact words of her prose the line rests on, character for character. Name in mentions, by Matrix id from the people listed, only someone she addresses directly; in reply_to, the Matrix id of the person whose message she answers, when she answers one. The room is one of the rooms listed. An empty say list is the usual answer in a busy room.";
 
 /// The context room the fixed slots need beside the identity: the hour and the mood lines always fit.
 const FIXED_ROOM: usize = 256;
@@ -45,6 +49,7 @@ const GROUP_LINES_MAX: usize = 40;
 pub struct Tuning {
     pub projector: ProjectorTuning,
     pub persona: PersonaTuning,
+    pub interpreter: InterpreterTuning,
     pub select: SelectTuning,
     pub lens: LensWeights,
     /// Each person's pronouns by Matrix id, for everyone the packet names: the persona schema has no pronoun field for
@@ -72,6 +77,7 @@ impl Default for Tuning {
         Self {
             projector: ProjectorTuning::default(),
             persona: PersonaTuning::default(),
+            interpreter: InterpreterTuning::default(),
             select: SelectTuning::default(),
             lens: LensWeights::default(),
             pronouns: PRONOUNS.iter().map(|(id, pronouns)| ((*id).to_owned(), (*pronouns).to_owned())).collect(),
@@ -171,6 +177,20 @@ impl Default for ProjectorTuning {
     }
 }
 
+/// The Interpreter's speech call: its model and its guidance.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InterpreterTuning {
+    pub model: String,
+    pub guidance: String,
+}
+
+impl Default for InterpreterTuning {
+    fn default() -> Self {
+        Self { model: "claude-sonnet-5-5".into(), guidance: INTERPRETER_GUIDANCE.into() }
+    }
+}
+
 impl Default for PersonaTuning {
     fn default() -> Self {
         Self { model: "claude-sonnet-5-5".into(), guidance: PERSONA_GUIDANCE.into(), words: 180 }
@@ -225,6 +245,9 @@ impl Tuning {
         if self.projector.model.trim().is_empty() {
             bail!("projector.model must name a model");
         }
+        if self.interpreter.model.trim().is_empty() {
+            bail!("interpreter.model must name a model");
+        }
         if self.persona.model.trim().is_empty() {
             bail!("persona.model must name a model");
         }
@@ -267,6 +290,7 @@ impl Tuning {
             ("select.group_bytes", select.group_bytes),
             ("projector.guidance", self.projector.guidance.len()),
             ("persona.guidance", self.persona.guidance.len()),
+            ("interpreter.guidance", self.interpreter.guidance.len()),
         ] {
             if bytes > PART_BYTES_MAX {
                 bail!("{name} must be at most {PART_BYTES_MAX} bytes, not {bytes}: the prompt must fit the connector's frame");

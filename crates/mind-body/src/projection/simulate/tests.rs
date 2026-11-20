@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::projection::harness::tests::{Scripted, control};
+use serde_json::json;
 use crate::projection::{Answer, Failed, Model, Spent};
 
 const TOBIAH: &str = "@eureka:gamecult.org";
@@ -238,19 +239,59 @@ fn a_seed_replays_its_order_and_another_seed_changes_it() {
     assert_eq!(turns(&run_plan(&path, &chatty()).1), turns(&run_plan(&path, &chatty()).1));
 }
 
+/// Tobiah says a line that names Libby and holds her id as text; the Interpreter gives it `mentions` or not.
+fn tagging(mention: bool) -> Scripted {
+    let mentions = if mention { json!([LIBBY]) } else { json!([]) };
+    Scripted::new(|prompt| if is_tobiah(prompt) { "\"ask @libby:gamecult.org, and Libby too\"".into() } else { "She lets it be.".into() }).interpreting(move |prompt| {
+        if !prompt.contains("Identity:\nTobiah") {
+            return json!({ "say": [] }).to_string();
+        }
+        json!({ "say": [{ "room": "#minds:gamecult.org", "text": "ask @libby:gamecult.org, and Libby too", "source_quote": "ask @libby:gamecult.org, and Libby too", "mentions": mentions, "reply_to": null }] }).to_string()
+    })
+}
+
 #[test]
-fn an_at_handle_in_a_said_line_is_a_mention_and_its_wakes_are_counted_once() {
+fn only_the_interpreters_structured_mention_is_a_mention_and_an_at_in_the_text_is_not() {
     let dir = tempfile::tempdir().unwrap();
-    let model = Scripted::new(|prompt| if is_tobiah(prompt) { "\"ask @libby:gamecult.org, and Libby too\"".into() } else { "\"Tobiah?\"".into() });
-    assert_eq!(explicit_mentions("ask @libby:gamecult.org, and Libby too", &[TOBIAH.into(), LIBBY.into()]), [LIBBY.to_owned()]);
-    assert_eq!(explicit_mentions("@Libby, tea? Tobiah says hi", &[TOBIAH.into(), LIBBY.into()]), [LIBBY.to_owned()], "an @handle tags, a bare name does not");
-    let (_, run) = run_plan(&plan(dir.path(), "\"ruled\"", 3, ""), &model);
-    let addressed = &run["metrics"]["mind_addressed_wakes"];
-    let libby_mind_wakes = turns(&run).iter().filter(|(_, who, why)| who == "Libby" && why == "addressed_by_mind").count();
-    assert!(libby_mind_wakes >= 1, "{:?}", turns(&run));
-    assert_eq!(addressed["total"].as_u64().unwrap() as usize, turns(&run).iter().filter(|(_, _, why)| why == "addressed_by_mind").count());
-    assert_eq!(addressed["mention_or_reply"].as_u64().unwrap() as usize, libby_mind_wakes, "the stand-in mention is the strongest evidence of each wake, once per wake: {addressed}");
-    assert_eq!(addressed["id_as_text"].as_u64(), Some(0));
+    let (_, plain) = run_plan(&plan(dir.path(), "\"ruled\"", 3, ""), &tagging(false));
+    let addressed = &plain["metrics"]["mind_addressed_wakes"];
+    assert_eq!(addressed["mention_or_reply"].as_u64(), Some(0), "an @id in the words tags no one: {addressed}");
+    let dir = tempfile::tempdir().unwrap();
+    let (_, tagged) = run_plan(&plan(dir.path(), "\"ruled\"", 3, ""), &tagging(true));
+    let addressed = &tagged["metrics"]["mind_addressed_wakes"];
+    let libby_mind_wakes = turns(&tagged).iter().filter(|(_, who, why)| who == "Libby" && why == "addressed_by_mind").count();
+    assert_eq!(addressed["mention_or_reply"].as_u64().unwrap() as usize, libby_mind_wakes, "{addressed}");
+    // Under humans_pace a name or an @ in the words wakes no one; the structured mention does.
+    let dir = tempfile::tempdir().unwrap();
+    let path = plan(dir.path(), "{ humans_pace = 4 }", 3, "");
+    let opening = "says = \"good afternoon, everyone\"\n";
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace(opening, &format!("{opening}mentions = [\"{TOBIAH}\"]\n"))).unwrap();
+    let woken_libby = |model: &Scripted| turns(&run_plan(&path, model).1).iter().any(|(_, who, _)| who == "Libby");
+    assert!(!woken_libby(&tagging(false)));
+    assert!(woken_libby(&tagging(true)));
+}
+
+#[test]
+fn a_direct_message_in_one_of_the_plans_rooms_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = plan(dir.path(), "\"ruled\"", 2, "");
+    let dm = "[[message]]\nround = 1\nfrom = \"@meta:gamecult.org\"\nname = \"Meta\"\nroom = \"#minds:gamecult.org\"\ndm = true\nto = \"@libby:gamecult.org\"\nsays = \"psst\"\n";
+    std::fs::write(&path, format!("{}{dm}", std::fs::read_to_string(&path).unwrap())).unwrap();
+    let model = silent();
+    let harness = Harness { instance: "eureka".into(), persona: None, model: Some(&model), tuning: dir.path().join("persona-tuning.toml") };
+    assert!(format!("{:#}", simulate(&harness, &path).unwrap_err()).contains("has its own room"));
+}
+
+#[test]
+fn the_mind_run_is_counted_across_her_rooms_and_an_uncounted_run_is_at_the_cap() {
+    let her = Member { names_from: "test", addressee: Addressee::new(LIBBY, ["libby"]), entry: CastEntry { id: LIBBY.into(), name: "Libby".into(), state: PathBuf::new(), rooms: vec![], own_rooms: vec![] }, state: Value::Null, rooms: vec!["#a:x".into(), "#b:x".into()] };
+    let cast = vec![TOBIAH.to_owned(), LIBBY.to_owned(), "@kiko:x".to_owned()];
+    let line = |from: &str, room: &str| Line { from: from.into(), name: String::new(), room: room.into(), at_ms: 0, says: "hi".into(), mentions: vec![], dm_to: None, follow_up: false, reply_to: None, new: false };
+    let lines = [line("@meta:x", "#a:x"), line(TOBIAH, "#a:x"), line("@kiko:x", "#b:x"), line(TOBIAH, "#b:x"), line("@meta:x", "#c:x")];
+    assert_eq!(mind_runs(&lines, &cast, &her), vec![0, 0, 1, 2, 3], "one run across #a and #b; a room she is not in does not break it");
+    assert_eq!(LineFacts::default().mind_run, usize::MAX, "fail-safe: an uncounted run is at the cap");
+    let tagged = Line { mentions: vec![LIBBY.into()], ..line(TOBIAH, "#a:x") };
+    assert_eq!(wakes(WakePolicy::HumansPace(4), &her.addressee, &tagged.delivery(0, LIBBY, &[]), Speaker::Mind, LineFacts::default()), None);
 }
 
 #[test]
@@ -259,7 +300,7 @@ fn the_report_names_its_gaps_and_carries_representative_lines_and_usage() {
     let model = chatty();
     let harness = Harness { instance: "eureka".into(), persona: None, model: Some(&model), tuning: dir.path().join("persona-tuning.toml") };
     let report = simulate(&harness, &plan(dir.path(), "\"ruled\"", 3, "")).unwrap();
-    for part in ["# Swarm simulation", "State does not evolve during a run", "Explicit addressee, stand-in", "group state in the Projector's packet: on", "### Representative lines", "**Meta (human)**: good afternoon, everyone", "**Tobiah** _(woke: human)_: what a day", "### Wakes by round", "| 1 | 0 | 2 | 0 | 0 | 0 |", "## Total usage", "| claude-sonnet-5-5 | 4 |"] {
+    for part in ["# Swarm simulation", "State does not evolve during a run", "Speech is the Interpreter's", "group state in the Projector's packet: on", "### Representative lines", "**Meta (human)**: good afternoon, everyone", "**Tobiah** _(woke: human)_: what a day", "### Wakes by round", "| 1 | 0 | 2 | 0 | 0 | 0 |", "## Total usage", "| claude-sonnet-5-5 | 6 |"] {
         assert!(report.contains(part), "{part}\n{report}");
     }
 }

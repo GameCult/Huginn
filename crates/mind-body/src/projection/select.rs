@@ -222,6 +222,10 @@ pub(crate) struct Packet {
     /// Her pronouns, for the words the prompts speak of her in.
     #[serde(skip)]
     pub forms: Forms,
+    /// Whom the Interpreter may mention or reply to: (label, Matrix id).
+    pub people: Vec<(String, String)>,
+    /// Where she may speak this turn: the turn's room, or the rooms the messages to her and around her came from.
+    pub rooms: Vec<String>,
 }
 
 /// What the messages to her cost past the caps: bytes over the stimulus and heard caps, the older messages to her the
@@ -905,16 +909,11 @@ fn recent_lines<'a>(inputs: &'a Inputs) -> Vec<&'a RoomLine> {
     lines
 }
 
-/// How a sender reads in the group-state and pronoun lines: "she" for her; the bond's label; the display name; or, for a
-/// tail line that carries none, the handle in the Matrix id.
+/// How a sender reads in the group-state and pronoun lines: her own pronoun for her; otherwise as every line names a
+/// sender (`name_of`): the bond's label, else the display name with the full Matrix id, else the id. Never a bare handle,
+/// which a stranger could share with a Mind of the swarm.
 fn label_of(line: &RoomLine, inputs: &Inputs) -> String {
-    if line.sender == inputs.people.own_sender {
-        forms(inputs.state).subj.to_owned()
-    } else if line.display.trim().is_empty() && bond_label(inputs, &line.sender).is_none() {
-        localpart(&line.sender).to_owned()
-    } else {
-        name_of(line, inputs)
-    }
+    if line.sender == inputs.people.own_sender { forms(inputs.state).subj.to_owned() } else { name_of(line, inputs) }
 }
 
 /// The group-state slot (`select.group_state`): the conversation as it stands over the room's last `group_lines` lines.
@@ -961,6 +960,12 @@ fn group_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
         }
     }
     let mut parts = Vec::new();
+    // A human waiting on her by name: a line of a human's that names or tags her, after her own last line. First, so
+    // no clip cuts it; said only when true.
+    let her_last = window.iter().rposition(|line| line.sender == own);
+    if let Some(line) = window.iter().enumerate().rev().find(|(at, line)| her_last.is_none_or(|last| *at > last) && !is_mind(inputs, &line.sender) && names_her(line)).map(|(_, line)| line) {
+        parts.push(format!("{} is waiting on {}", label_of(line, inputs), forms(inputs.state).obj));
+    }
     if let Some(asked) = question
         && !answered.is_empty()
     {
@@ -976,30 +981,64 @@ fn group_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
     if minds_in_a_row >= 2 {
         parts.push(format!("the last {minds_in_a_row} lines are the Minds' alone"));
     }
-    // A human waiting on her by name: a line of a human's that names or tags her, after her own last line.
-    let her_last = window.iter().rposition(|line| line.sender == own);
-    if let Some(line) = window.iter().enumerate().rev().find(|(at, line)| her_last.is_none_or(|last| *at > last) && !is_mind(inputs, &line.sender) && names_her(line)).map(|(_, line)| line) {
-        parts.push(format!("{} is waiting on {}", label_of(line, inputs), forms(inputs.state).obj));
-    }
-    (!parts.is_empty()).then(|| clip(&format!("- the conversation: {}", parts.join("; ")), tuning.select.group_bytes))
+    // Each part a sentence of its own: the lists inside a part use semicolons, and a label may hold a comma.
+    let sentences: Vec<String> = parts.iter().map(|part| sentence(part)).collect();
+    (!sentences.is_empty()).then(|| clip(&format!("- the conversation: {}", sentences.join(" ")), tuning.select.group_bytes))
 }
 
 /// The pronouns of everyone the packet names from the room: `tuning.pronouns` by Matrix id (the persona state has no
 /// pronoun field for another person; `presentation.pronouns` is hers alone), and they/them for anyone it does not list.
-fn pronoun_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
-    let mut seen: Vec<&str> = Vec::new();
-    let mut parts: Vec<String> = Vec::new();
+/// Everyone the packet shows from the room, as (label, Matrix id), newest messages first, then the recent room lines:
+/// whom the pronoun line names, and whom the Interpreter may mention.
+fn people_in_view(inputs: &Inputs, tuning: &Tuning) -> Vec<(String, String)> {
+    let mut people: Vec<(String, String)> = Vec::new();
     let messages = inputs.room.messages.iter();
     let shown_tail = recent_lines(inputs).into_iter().rev().take(tuning.select.group_lines.max(tuning.select.beat_tail_lines));
     for line in messages.chain(shown_tail) {
-        if line.sender == inputs.people.own_sender || seen.contains(&line.sender.as_str()) {
+        if line.sender == inputs.people.own_sender || people.iter().any(|(_, id)| *id == line.sender) {
             continue;
         }
-        seen.push(&line.sender);
-        let pronouns = tuning.pronouns.get(&line.sender).map_or(UNKNOWN_PRONOUNS, String::as_str);
-        parts.push(format!("{} \u{2014} {pronouns}", label_of(line, inputs)));
+        people.push((label_of(line, inputs), line.sender.clone()));
     }
+    people
+}
+
+fn pronoun_line(inputs: &Inputs, tuning: &Tuning) -> Option<String> {
+    let parts: Vec<String> = people_in_view(inputs, tuning).iter().map(|(label, id)| format!("{label} \u{2014} {}", tuning.pronouns.get(id).map_or(UNKNOWN_PRONOUNS, String::as_str))).collect();
     (!parts.is_empty()).then(|| clip(&format!("- pronouns: {}", parts.join("; ")), ALSO_HERE_BYTES))
+}
+
+/// A part as a sentence: its first letter upper-cased, a full stop after it.
+fn sentence(part: &str) -> String {
+    let mut chars = part.chars();
+    chars.next().map_or_else(String::new, |first| format!("{}{}.", first.to_uppercase(), chars.as_str()))
+}
+
+/// Whom the Interpreter may address: everyone the packet shows from the room, then the swarm's other Minds, who are in
+/// her rooms whether or not they spoke; a Mind she is bound to goes by the bond's label, any other by the id alone.
+fn addressable(inputs: &Inputs, tuning: &Tuning) -> Vec<(String, String)> {
+    let mut people = people_in_view(inputs, tuning);
+    for mind in inputs.people.minds.iter().filter(|mind| *mind != inputs.people.own_sender) {
+        if !people.iter().any(|(_, id)| id == mind) {
+            people.push((bond_label(inputs, mind).unwrap_or_else(|| mind.clone()), mind.clone()));
+        }
+    }
+    people
+}
+
+fn speaking_rooms(inputs: &Inputs) -> Vec<String> {
+    let mut rooms: Vec<String> = inputs.room.here.iter().cloned().collect();
+    for line in &inputs.room.messages {
+        if !rooms.contains(&line.room) {
+            rooms.push(line.room.clone());
+        }
+    }
+    if rooms.is_empty()
+        && let Some(line) = recent_lines(inputs).last()
+    {
+        rooms.push(line.room.clone());
+    }
+    rooms
 }
 
 /// The pronouns of a person nobody listed.
@@ -1100,5 +1139,5 @@ pub(crate) fn select(inputs: &Inputs, tuning: &Tuning) -> Packet {
     lines.extend(taken.iter().map(|candidate| candidate.line.clone()));
     ids.extend(taken.iter().map(|candidate| candidate.id.clone()));
     let selected = taken.into_iter().map(|candidate| Pick { id: candidate.id, pool: candidate.pool, log_score: candidate.log_score }).collect();
-    Packet { kind: inputs.kind, seed: inputs.seed, lens, identity, context: lines.join("\n"), stimulus, heard, overflow, present: present_names, ids, selected, forms: forms(inputs.state) }
+    Packet { kind: inputs.kind, seed: inputs.seed, lens, identity, context: lines.join("\n"), stimulus, heard, overflow, present: present_names, ids, selected, forms: forms(inputs.state), people: addressable(inputs, tuning), rooms: speaking_rooms(inputs) }
 }
