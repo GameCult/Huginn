@@ -114,6 +114,10 @@ fn a_scripted_interjection_wakes_everyone_in_her_room_and_addressing_is_counted(
     let fourth: Vec<&String> = turns.iter().filter(|(round, _, _)| *round == 4).map(|(_, who, _)| who).collect();
     assert_eq!(fourth.len(), 2, "Deru's line at round 4 wakes both: {turns:?}");
     assert_eq!(run["metrics"]["personas"]["Tobiah"]["addressed"]["Libby"].as_u64().unwrap(), run["metrics"]["personas"]["Tobiah"]["messages"].as_u64().unwrap());
+    let rounds = run["metrics"]["wakes_by_round"].as_array().unwrap();
+    assert_eq!((rounds[0]["human"].as_u64(), rounds[3]["human"].as_u64()), (Some(2), Some(2)), "the opening and Deru wake both: {rounds:?}");
+    let by_minds: u64 = rounds.iter().map(|row| row["mind_addressed"].as_u64().unwrap()).sum();
+    assert_eq!(by_minds as usize, run["metrics"]["mind_addressed"].as_array().unwrap().len(), "one line addressed each Mind-addressed wake");
     assert_eq!(run["metrics"]["personas"]["Libby"]["silence_rate"].as_f64(), Some(1.0));
     // The seam: no state moved.
     assert_eq!(members[0].state, control());
@@ -134,7 +138,7 @@ fn the_report_names_the_state_gap_and_carries_the_transcript_and_usage() {
     let model = chatty();
     let harness = Harness { instance: "eureka".into(), persona: None, model: Some(&model), tuning: dir.path().join("persona-tuning.toml") };
     let report = simulate(&harness, &plan(dir.path(), "humans_in_rooms", 3, "")).unwrap();
-    for part in ["# Swarm simulation", "State does not evolve during a run", "## Repeat 1 (seed 11)", "### Transcript", "**Meta (human)**: good afternoon, everyone", "**Tobiah**: what a day", "<details><summary>round 1, ", "## Total usage", "| claude-sonnet-5-5 | 4 |"] {
+    for part in ["# Swarm simulation", "State does not evolve during a run", "## Repeat 1 (seed 11)", "### Transcript", "**Meta (human)**: good afternoon, everyone", "**Tobiah**: what a day", "<details><summary>round 1, ", "### Wakes by round", "| 1 | 2 | 0 | 0 | 0 |", "## Total usage", "| claude-sonnet-5-5 | 4 |"] {
         assert!(report.contains(part), "{part}\n{report}");
     }
 }
@@ -158,16 +162,22 @@ fn wake_reason_is_the_ruled_set_and_the_control_widens_it_to_minds() {
     let libby = Member { addressee: Addressee::new(LIBBY, ["libby", "Libby"]), entry: CastEntry { id: LIBBY.into(), name: "Libby".into(), state: PathBuf::new(), rooms: vec![], names: vec![] }, state: Value::Null, rooms: vec!["#minds:x".into()] };
     let cast = vec![TOBIAH.to_owned(), LIBBY.to_owned()];
     let line = |from: &str, room: &str, says: &str| Line { from: from.into(), name: String::new(), room: room.into(), at_ms: 0, says: says.into(), mentions: vec![], dm: false, follow_up: false, reply_to: None, new: false };
-    let reason = |lines: &[Line], wake: Wake, beat: bool| wake_reason(lines, 0, &libby, &cast, wake, beat);
+    let reason = |lines: &[Line], wake: Wake, beat: bool| wake_reason(lines, 0, &libby, &cast, wake, beat).map(|(why, _)| why);
     let named = [line(TOBIAH, "#minds:x", "Libby, tea?")];
     let unnamed = [line(TOBIAH, "#minds:x", "what a day")];
     let human = [line("@deru:x", "#minds:x", "kettle news")];
     let elsewhere = [line("@deru:x", "#other:x", "kettle news")];
-    assert_eq!(reason(&named, Wake::HumansInRooms, false), Some("addressed"));
+    assert_eq!(reason(&named, Wake::HumansInRooms, false), Some("addressed by a Mind"));
+    let by_id = [line(TOBIAH, "#minds:x", "ask @libby:gamecult.org about it")];
+    let (why, by) = wake_reason(&by_id, 0, &libby, &cast, Wake::HumansInRooms, false).unwrap();
+    assert_eq!((why, by[0]["how"].as_str()), ("addressed by a Mind", Some("id as text")));
+    assert_eq!(wake_reason(&named, 0, &libby, &cast, Wake::HumansInRooms, false).unwrap().1[0]["how"], "name in text");
+    let both = [line(TOBIAH, "#minds:x", "Libby, tea?"), line("@deru:x", "#minds:x", "Libby, kettle?")];
+    assert_eq!(reason(&both, Wake::HumansInRooms, false), Some("addressed by a human"), "a human's address outranks a Mind's");
     assert_eq!(reason(&unnamed, Wake::HumansInRooms, false), None, "another Mind's unaddressed line wakes no one");
     assert_eq!(reason(&unnamed, Wake::AllMessages, false), Some("a message in her rooms"));
     assert_eq!(reason(&human, Wake::HumansInRooms, false), Some("a human in her rooms"));
     assert_eq!(reason(&elsewhere, Wake::HumansInRooms, false), None, "not her room");
     assert_eq!(reason(&unnamed, Wake::HumansInRooms, true), Some("the beat"));
-    assert_eq!(wake_reason(&named, 1, &libby, &cast, Wake::HumansInRooms, false), None, "a line she has seen is not new");
+    assert!(wake_reason(&named, 1, &libby, &cast, Wake::HumansInRooms, false).is_none(), "a line she has seen is not new");
 }
